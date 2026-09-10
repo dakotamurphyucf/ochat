@@ -324,7 +324,7 @@ let remove ~env ~session t =
   | exn -> Error (Store_error.of_exn ~operation:"remove job result intent" ~path exn)
 ;;
 
-let discard_unreferenced ~env ~scope ~reader ~session t =
+let finish ~env ~reader ~session t ~before_remove =
   let open Result.Let_syntax in
   let%bind () = validate session t in
   let%bind () =
@@ -368,9 +368,7 @@ let discard_unreferenced ~env ~scope ~reader ~session t =
          | true -> Ok (Filename.concat (directory session) name :: paths)
          | false -> corrupt "temporary private intent differs from its preparation"))
   in
-  let%bind () =
-    Blob_store.discard_staged_unreferenced scope ~reader session ~metadata:t.metadata
-  in
+  let%bind () = before_remove () in
   let%bind _ = read_current () in
   let path = path session t in
   try
@@ -387,4 +385,13 @@ let discard_unreferenced ~env ~scope ~reader ~session t =
     Durable_file.sync_directory ~env ~path:(directory session)
   with
   | exn -> Error (Store_error.of_exn ~operation:"finish staged result discard" ~path exn)
+;;
+
+let discard_unreferenced ~env ~scope ~reader ~session t =
+  finish ~env ~reader ~session t ~before_remove:(fun () ->
+    Blob_store.discard_staged_unreferenced scope ~reader session ~metadata:t.metadata)
+;;
+
+let retire_published ~env ~reader ~session t =
+  finish ~env ~reader ~session t ~before_remove:(fun () -> Ok ())
 ;;

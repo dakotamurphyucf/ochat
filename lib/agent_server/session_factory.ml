@@ -19,6 +19,7 @@ type limits =
   ; job_result_max_bytes : int
   ; job_result_recovery_max_count : int
   ; job_result_recovery_max_bytes : int
+  ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   }
 
 type t =
@@ -2086,6 +2087,25 @@ let build_runtime_for_actor t handle actor =
         | Error error -> Error error))
 ;;
 
+let collect_results t handle journal persistence durable_events services runtime actor () =
+  match services.Agent_session.Session_actor.job_results with
+  | None -> Ok None
+  | Some publisher ->
+    Result_retention.collect
+      ~runtime
+      ~actor
+      ~publisher
+      ~handle
+      ~journal
+      ~persistence
+      ~durable_events
+      ~idempotency_store:t.idempotency_store
+      ~limits:t.limits.job_result_collection
+      ~max_frame_bytes:
+        (Int.max t.limits.max_journal_payload t.limits.snapshot_payload_limit)
+      ~max_events:t.limits.event_replay_capacity
+;;
+
 let create_loaded_entry
       t
       handle
@@ -2163,6 +2183,16 @@ let create_loaded_entry
            ; capacity
            ; store_handle = Some handle
            ; expire_permissions = expire_permissions t actor profile
+           ; collect_results =
+               collect_results
+                 t
+                 handle
+                 journal
+                 persistence
+                 durable_events
+                 services
+                 runtime
+                 actor
            ; close =
                (fun () ->
                  close_entry t handle journal persistence runtime writer actor capacity)
@@ -2256,6 +2286,16 @@ let create_unloaded_entry
         ; capacity
         ; store_handle = Some handle
         ; expire_permissions = expire_permissions t actor profile
+        ; collect_results =
+            collect_results
+              t
+              handle
+              journal
+              persistence
+              durable_events
+              services
+              runtime
+              actor
         ; close =
             (fun () ->
               close_entry t handle journal persistence runtime writer actor capacity)

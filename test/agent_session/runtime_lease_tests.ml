@@ -28,6 +28,79 @@ let runtime ?script_tools ~close () : Builder.t =
 ;;
 
 let%expect_test
+    "retention excludes job scopes and keeps runtime ownership until a cancelled \
+     caller's checkpoint finishes"
+  =
+  with_actor (fun _env sw actor _writer _backend ->
+    let job = add_claimed_job actor in
+    with_job actor job (fun ~job:_ ~execute:_ ->
+      assert (
+        Option.is_none
+          (A.with_quiescent_state actor ~f:(fun _ ->
+             failwith "live job scope entered retention")
+           |> protocol_ok));
+      Ok ())
+    |> protocol_ok;
+    let owner =
+      Owner.create ~actor ~initial:None ~build:(fun () ->
+        failwith "maintenance must not load a runtime")
+    in
+    let entered, enter = Eio.Promise.create () in
+    let release, release_u = Eio.Promise.create () in
+    let cancellation, cancellation_u = Eio.Promise.create () in
+    let caller_done, caller_done_u = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect
+        ~finally:(fun () -> Eio.Promise.resolve caller_done_u ())
+        ~f:(fun () ->
+          try
+            Eio.Cancel.sub (fun context ->
+              Eio.Promise.resolve cancellation_u context;
+              Owner.with_unloaded owner (fun () ->
+                A.with_quiescent_state actor ~f:(fun _ ->
+                  Eio.Promise.resolve enter ();
+                  Eio.Promise.await release;
+                  Ok ()))
+              |> protocol_ok
+              |> ignore)
+          with
+          | Eio.Cancel.Cancelled _ -> ()));
+    Eio.Promise.await entered;
+    Eio.Cancel.cancel (Eio.Promise.await cancellation) Exit;
+    let competitor_entered = ref false in
+    let competitor_done, competitor_done_u = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Owner.with_unloaded owner (fun () ->
+        competitor_entered := true;
+        Ok ())
+      |> protocol_ok
+      |> ignore;
+      Eio.Promise.resolve competitor_done_u ());
+    Eio.Fiber.yield ();
+    assert (not !competitor_entered);
+    Eio.Promise.resolve release_u ();
+    Eio.Promise.await caller_done;
+    Eio.Promise.await competitor_done;
+    assert !competitor_entered;
+    assert (
+      Result.is_error
+        (Result.try_with (fun () ->
+           Owner.with_unloaded owner (fun () -> failwith "injected inspection exception"))));
+    assert (Option.is_some (Owner.with_unloaded owner (fun () -> Ok ()) |> protocol_ok));
+    print_endline
+      "live job scope deferred; cancellation did not release an outstanding actor \
+       checkpoint";
+    print_endline
+      "competing maintenance resumed after completion; callback exception did not poison \
+       owner");
+  [%expect
+    {|
+    live job scope deferred; cancellation did not release an outstanding actor checkpoint
+    competing maintenance resumed after completion; callback exception did not poison owner
+    |}]
+;;
+
+let%expect_test
     "independent native jobs retain one runtime without serializing each other"
   =
   with_actor (fun env sw actor _writer backend ->

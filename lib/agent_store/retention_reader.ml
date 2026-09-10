@@ -28,6 +28,14 @@ let create ~env ~root ~max_entries ~max_bytes =
 
 let root t = t.root
 
+let charge_bytes t bytes =
+  match bytes >= 0 && bytes <= t.budget.remaining_bytes with
+  | false -> corrupt "retention scan exceeded its byte budget"
+  | true ->
+    t.budget.remaining_bytes <- t.budget.remaining_bytes - bytes;
+    Ok ()
+;;
+
 let at_root t ~root =
   let root = String.rstrip root ~drop:(Char.equal '/') in
   match Filename.is_absolute root with
@@ -70,6 +78,19 @@ let resolve t relative ~directory =
       walk path rest
   in
   walk t.root parts
+;;
+
+let kind t ~path =
+  let open Result.Let_syntax in
+  try
+    let%bind native_path = resolve t path ~directory:false in
+    let%bind () = charge_entry t in
+    match Eio.Path.kind ~follow:false (eio_path t native_path) with
+    | `Directory -> Ok `Directory
+    | `Regular_file -> Ok `File
+    | _ -> corrupt "retention root is missing, linked or unsupported"
+  with
+  | exn -> Error (Store_error.of_exn ~operation:"inspect retention root" ~path exn)
 ;;
 
 let list t ~directory =

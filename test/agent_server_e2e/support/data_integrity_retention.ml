@@ -189,6 +189,7 @@ let receipt t now name retention expires_at =
 
 let maintenance t ~now ~protected =
   Agent_server.Maintenance.run_once
+    ~registry:None
     ~env:t.env
     ~idempotency_store:t.idempotency
     ~blob_store:t.blobs

@@ -21,6 +21,7 @@ type limits =
   ; job_result_max_bytes : int
   ; job_result_recovery_max_count : int
   ; job_result_recovery_max_bytes : int
+  ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   }
 
 type t

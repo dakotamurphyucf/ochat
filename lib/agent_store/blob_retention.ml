@@ -8,6 +8,8 @@ type t =
   ; roots : Id.t list
   ; edges : (Id.t * Id.t list) list
   ; complete : Id.t list
+  ; published : Id.t list
+  ; temporary : Id.t list
   }
 
 let corrupt message = Error (Store_error.Corrupt message)
@@ -87,6 +89,14 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
     | false -> corrupt "blob retention reader does not match its session or limits"
   in
   let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
+  let%bind reserved_root = Blob_store.retention_reserved_directory scope in
+  let%bind reserved_reader = Retention_reader.at_root reader ~root:reserved_root in
+  let%bind reserved = Retention_reader.list reserved_reader ~directory:"." in
+  let%bind () =
+    match reserved with
+    | [] -> Ok ()
+    | _ -> corrupt "unknown global durable blob consumers prevent retention proof"
+  in
   let owned = Hashtbl.create (module Id) in
   let%bind () =
     List.fold_result intents ~init:() ~f:(fun () intent ->
@@ -105,9 +115,12 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
   let roots = Hash_set.create (module Id) in
   let edges = Hashtbl.create (module Id) in
   let complete = Hash_set.create (module Id) in
+  let published = Hash_set.create (module Id) in
+  let temporary_ids = Hash_set.create (module Id) in
   let scan_directory reader directory ~temporary =
     let%bind groups = files reader directory in
     List.fold_result groups ~init:() ~f:(fun () (id, suffixes) ->
+      if temporary then Hash_set.add temporary_ids id;
       Blob_reference_scan.reset scanner;
       let intent = Hashtbl.find owned id in
       let ignored_id = Option.map intent ~f:(fun _ -> id) in
@@ -213,7 +226,12 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
                          completion
                        |> protocol
                      in
-                     Hash_set.add complete id))))
+                     Hash_set.add complete id;
+                     if
+                       (not temporary)
+                       && String.equal suffix ".blob"
+                       && Set.mem suffixes ".sexp"
+                     then Hash_set.add published id))))
       in
       let found = Blob_reference_scan.references scanner in
       (match intent with
@@ -228,7 +246,13 @@ let scan ~scope ~session ~reader ~intents ~max_file_bytes =
   ; roots = Hash_set.to_list roots
   ; edges = Hashtbl.to_alist edges
   ; complete = Hash_set.to_list complete
+  ; published = Hash_set.to_list published
+  ; temporary = Hash_set.to_list temporary_ids
   }
+;;
+
+let published t id =
+  List.mem t.published id ~equal:Id.equal && not (List.mem t.temporary id ~equal:Id.equal)
 ;;
 
 let references t ~roots =

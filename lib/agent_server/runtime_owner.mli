@@ -14,6 +14,15 @@ val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
+(** Run maintenance only with no installed runtime or background lease, excluding
+    reload until the callback finishes. [None] defers; this does not unload an
+    active runtime. Acquire this owner before the actor checkpoint. Exceptions
+    and cancellation release ownership without poisoning subsequent operations. *)
+val with_unloaded
+  :  t
+  -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a option, Agent_protocol.Error.t) result
+
 (** Retain one loaded runtime for a background worker without holding the owner
     mutex while [f] executes. Independent workers may run concurrently or await
     each other's results. Loading remains serialized; temporary unload and

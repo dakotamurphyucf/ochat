@@ -857,6 +857,7 @@ let%expect_test "daemon maintenance prunes expired idempotency and temporary blo
       Agent_store.Blob_store.finish upload ~expected_digest:None |> store_ok |> ignore;
       let stats =
         Agent_server.Maintenance.run_once
+          ~registry:None
           ~env
           ~idempotency_store
           ~blob_store
@@ -870,7 +871,8 @@ let%expect_test "daemon maintenance prunes expired idempotency and temporary blo
   [%expect
     {|
     ((expired_idempotency_records 1) (expired_temporary_blobs 1)
-     (expired_response_artifacts 0))
+     (expired_response_artifacts 0) (discarded_job_results 0)
+     (retired_job_preparations 0) (deferred_result_collections 0))
     |}]
 ;;
 

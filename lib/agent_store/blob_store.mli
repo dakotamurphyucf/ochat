@@ -45,7 +45,8 @@ type retention
     expiry wait until f returns. Ordinary readers run concurrently without holding
     the mutex across network backpressure. Uploads release their activity on
     finish, abort or switch cleanup; reads release it on every return/cancellation.
-    Acquire actor, response-cache and publisher locks first.
+    Acquire runtime owner, actor, publisher and response-cache locks first, in
+    that order when the host supplies all four.
     The callback must not reenter public store operations, await actors or use the
     token concurrently. Establish all retained roots before deletion. The token
     expires on callback exit, including exceptions; this supplies serialization,
@@ -62,6 +63,10 @@ val retention_directories
   :  retention
   -> Session_store.Handle.t
   -> (string * string, Store_error.t) result
+
+(** The reserved global durable directory. No current writer installs blobs here;
+    nonempty contents must reject retention proof until a consumer is defined. *)
+val retention_reserved_directory : retention -> (string, Store_error.t) result
 
 (** Remove an unreferenced host-owned stage under a live retention scope.
     The caller must first verify its durable private preparation intent and prove

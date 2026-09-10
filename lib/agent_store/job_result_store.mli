@@ -57,6 +57,42 @@ val load
 module Publisher : sig
   type t
 
+  type collection_limits =
+    { max_intents : int
+    ; max_entries : int
+    ; max_bytes : int
+    ; max_file_bytes : int
+    }
+
+  type collection_stats =
+    { discarded : int
+    ; retired : int
+    ; retained : int
+    }
+  [@@deriving sexp]
+
+  (** Collect under an owning actor's quiescent checkpoint. The host callback
+      validates all historical, replay, cache and other roots using the shared
+      reader, then calls [f] while keeping those roots stable. [None] defers the
+      attempt. Lock order is actor, publisher, response cache, blob storage.
+      Pending completion dependencies and exact nonterminal attempts are roots.
+      Only validated private intents grant ownership. All root proofs precede
+      deletion; bounded reads and IO failures retain remaining records for retry.
+      Successfully published final artifacts can retire their private markers. *)
+  val collect
+    :  t
+    -> jobs:Agent_protocol.Job.t list
+    -> generation:int
+    -> limits:collection_limits
+    -> with_roots:
+         (reader:Retention_reader.t
+          -> candidates:Agent_protocol.Id.Blob.t list
+          -> f:
+               (Agent_protocol.Id.Blob.t list
+                -> (collection_stats option, Store_error.t) result)
+          -> (collection_stats option, Store_error.t) result)
+    -> (collection_stats option, Store_error.t) result
+
   val create
     :  env:Eio_unix.Stdenv.base
     -> blobs:Blob_store.t

@@ -9,6 +9,7 @@ type capacity =
 type t
 
 val create : unit -> t
+val is_empty : t -> bool
 
 val stage
   :  t

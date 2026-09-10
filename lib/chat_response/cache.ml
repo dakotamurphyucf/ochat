@@ -115,3 +115,20 @@ let load ~file ~max_size () =
 
 (** [save ~file cache] writes [cache] to disk using {!write_file}. *)
 let save ~file t = write_file ~file t
+
+(** Decode already bounded durable cache bytes for retention inspection without
+    reloading a file or dropping expired entries. No partial root set on failure. *)
+let retained_text contents =
+  Result.try_with (fun () ->
+    let buffer = Bigstring.of_string contents in
+    let form, consumed =
+      Bigstring_unix.read_bin_prot buffer [%bin_reader: persistent_form]
+      |> Or_error.ok_exn
+    in
+    if not (Int.equal consumed (String.length contents))
+    then failwith "trailing retained cache data";
+    if form.max_size < 0 || List.length form.items > form.max_size
+    then failwith "invalid retained cache capacity";
+    List.concat_map form.items ~f:(fun (key, entry) ->
+      [ Key.sexp_of_t key |> Sexp.to_string_mach; entry.LRU.data ]))
+;;

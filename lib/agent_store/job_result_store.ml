@@ -216,6 +216,20 @@ let load store ~sw ~session ~max_bytes reference =
 ;;
 
 module Publisher = struct
+  type collection_limits =
+    { max_intents : int
+    ; max_entries : int
+    ; max_bytes : int
+    ; max_file_bytes : int
+    }
+
+  type collection_stats =
+    { discarded : int
+    ; retired : int
+    ; retained : int
+    }
+  [@@deriving sexp]
+
   type t =
     { blobs : Blob_store.t
     ; env : Eio_unix.Stdenv.base
@@ -473,5 +487,137 @@ module Publisher = struct
         ~message:"The saved job result is unavailable or failed verification."
         ~retryable
         ())
+  ;;
+
+  let collect_locked t ~jobs ~generation ~(limits : collection_limits) ~with_roots =
+    (* The actor already excludes transitions. Take the publisher before the
+       response cache, and storage last; publication callbacks can need the cache. *)
+    let open Result.Let_syntax in
+    let%bind reader =
+      Retention_reader.create
+        ~env:t.env
+        ~root:(Session_store.Handle.directory t.session)
+        ~max_entries:limits.max_entries
+        ~max_bytes:limits.max_bytes
+    in
+    let%bind intents =
+      Job_result_intent.list_with_reader
+        ~reader
+        ~session:t.session
+        ~max_count:limits.max_intents
+    in
+    match intents with
+    | [] -> Ok (Some { discarded = 0; retired = 0; retained = 0 })
+    | _ ->
+      let candidates =
+        List.map intents ~f:(fun intent -> (Job_result_intent.reference intent).blob.id)
+      in
+      let%bind scanner = Blob_reference_scan.create candidates |> protocol in
+      let same_attempt reference (job : P.Job.t) =
+        P.Id.Session.equal reference.Artifact.session_id job.session_id
+        && P.Id.Job.equal reference.job_id job.id
+        && Int.equal reference.generation job.generation
+        && Int.equal reference.attempt job.attempt
+      in
+      let live reference =
+        List.exists jobs ~f:(fun job ->
+          same_attempt reference job
+          && Int.equal job.generation generation
+          &&
+          match job.status with
+          | Queued | Running | Waiting_permission _ | Waiting_completion _ -> true
+          | Succeeded | Failed _ | Cancelled | Interrupted _ -> false)
+      in
+      (* No filesystem discard here: even stale cache entries may have reached
+           durable storage before an acknowledgement failed. *)
+      t.pending <- List.filter t.pending ~f:(fun prepared -> live prepared.reference);
+      let%bind () =
+        List.fold_result t.pending ~init:() ~f:(fun () prepared ->
+          let text = P.Completion.to_json prepared.completion |> Jsonaf.to_string in
+          let%map () = Retention_reader.charge_bytes reader (String.length text) in
+          Blob_reference_scan.begin_root scanner;
+          Blob_reference_scan.feed scanner text)
+      in
+      let owned =
+        List.filter_map intents ~f:(fun intent ->
+          let reference = Job_result_intent.reference intent in
+          match live reference with
+          | true -> Some reference.blob.id
+          | false -> None)
+      in
+      with_roots ~reader ~candidates ~f:(fun roots ->
+        Blob_store.with_retention t.blobs ~f:(fun scope ->
+          let%bind graph =
+            Blob_retention.scan
+              ~scope
+              ~session:t.session
+              ~reader
+              ~intents
+              ~max_file_bytes:limits.max_file_bytes
+          in
+          (* Validate every terminal descriptor before the first mutation. *)
+          let%bind published =
+            List.fold_result jobs ~init:[] ~f:(fun refs job ->
+              let%map stored = P.Job.terminal_result job |> protocol in
+              match stored with
+              | Some (Artifact { reference; _ }) -> reference :: refs
+              | None | Some (Inline _) -> refs)
+          in
+          let%bind retained =
+            Blob_retention.references
+              graph
+              ~roots:
+                (List.map published ~f:(fun reference -> reference.Artifact.blob.id)
+                 @ owned
+                 @ Blob_reference_scan.references scanner
+                 @ roots)
+          in
+          List.fold_result
+            intents
+            ~init:{ discarded = 0; retired = 0; retained = 0 }
+            ~f:(fun stats intent ->
+              let reference = Job_result_intent.reference intent in
+              match List.mem retained reference.blob.id ~equal:P.Id.Blob.equal with
+              | false ->
+                let%map () =
+                  Job_result_intent.discard_unreferenced
+                    ~env:t.env
+                    ~scope
+                    ~reader
+                    ~session:t.session
+                    intent
+                in
+                t.pending
+                <- List.filter t.pending ~f:(fun prepared ->
+                     not (P.Id.Blob.equal prepared.reference.blob.id reference.blob.id));
+                { stats with discarded = stats.discarded + 1 }
+              | true ->
+                let installed =
+                  Blob_retention.published graph reference.blob.id
+                  && List.exists published ~f:(fun other ->
+                    Sexp.equal (Artifact.sexp_of_t other) (Artifact.sexp_of_t reference))
+                in
+                (match installed with
+                 | false -> Ok { stats with retained = stats.retained + 1 }
+                 | true ->
+                   let%map () =
+                     Job_result_intent.retire_published
+                       ~env:t.env
+                       ~reader
+                       ~session:t.session
+                       intent
+                   in
+                   { stats with retired = stats.retired + 1 }))))
+  ;;
+
+  let collect t ~jobs ~generation ~limits ~with_roots =
+    let outcome =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        try Ok (collect_locked t ~jobs ~generation ~limits ~with_roots) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match outcome with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
   ;;
 end

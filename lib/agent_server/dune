@@ -12,6 +12,7 @@
   operator_manifest_grant
   catalog_builder
   runtime_owner
+  result_retention
   session_registry
   connection_context
   authorization

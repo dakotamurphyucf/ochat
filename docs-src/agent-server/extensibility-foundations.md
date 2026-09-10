@@ -1447,8 +1447,8 @@ the script-facing interfaces below are installed on qualified standalone and
 one-off dispatch paths, including nested managed standalone calls, and qualified
 stateful moderator handlers, events and observations. Bounded native progress is
 available through job reads. Artifact publication and verified result reads are
-installed on the qualified daemon; orphan reconciliation, final race qualification
-and automatic notification delivery remain unfinished.
+installed on the qualified daemon; phase-wide asynchronous race/quota qualification
+and automatic notification delivery retain their separate implementation tasks.
 
 ### Qualified script job operations
 
@@ -1578,7 +1578,8 @@ removes blob data and metadata before removing the record, preserving retryabili
 including IDs embedded in historical payloads. It keeps split-ID suffixes within
 one root and distinguishes unrelated roots. The scanner does not validate storage
 or grant deletion authority: a collector must first validate every relevant durable
-root and serialize with the owning actor. That collector is not yet installed.
+root and serialize with the owning actor. The maintenance collector combines those
+checks for stopped sessions whose runtime is unloaded.
 
 `Retention_reader` supplies bounded file reads and incremental directory enumeration
 beneath an owned root. One collection attempt shares entry and byte budgets; each
@@ -1603,9 +1604,8 @@ holds the cache lock so a concurrent response cannot publish a reference during
 cleanup. The owning actor checkpoint must be acquired first; the callback must
 not reenter the cache or wait on the actor.
 
-These reference APIs still need to be combined with historical roots, blob/export
-consumers and active preparations before making a complete deletion decision.
-No automatic artifact deletion is installed.
+The maintenance collector combines these reference APIs with historical roots,
+blob/export consumers and pending result preparations before any deletion.
 
 The daemon now creates one coordinated blob store. HTTP uploads, exports and
 per-session result writers share it; result writers derive their own size policy
@@ -1633,8 +1633,43 @@ the graph refuses proof because its missing content could contain further
 references. This also applies transitively through another candidate.
 Unknown or unowned partials, broken ordinary
 blob pairs, malformed JSON, ownership/digest mismatch and exhausted budgets refuse
-the complete proof. The scanner does not remove files or choose whether an active
-preparation may be discarded; collector integration remains unfinished.
+the complete proof. Nonempty reserved global durable-blob storage also refuses
+proof: that namespace has no current writer/consumer contract. The scanner itself
+does not remove files or choose whether an active preparation may be discarded.
+
+The host collector takes locks in this order: runtime owner, quiescent actor,
+result publisher, idempotency response cache, shared blob coordinator. A loaded
+runtime defers collection because its in-memory agent-response cache is another
+retained root. A foreground operation, job/invocation execution, moderator borrow,
+staged launch, active call, pending idempotency response, upload or blob reader
+also defers. Caller cancellation does not release runtime ownership while the
+actor checkpoint is still running. This maintenance does not force live sessions
+to unload.
+
+Before taking the storage scope, the collector validates current and historical
+state, replay, both idempotency-cache views, the disk agent-response cache, response
+logs, exports, and the session's reserved audit/idempotency directories. JSON and
+S-expression values are decoded to retain escaped identifiers; provider JSON/SSE
+logs must be complete. Unknown formats, corrupt cache bytes, symlinks or excessive
+reads retain the preparation records and report a failed attempt. User workspace
+and prompt trees are inputs, not managed artifact-retention roots. Pending result
+contents protect their referenced candidates even before their own private intent
+exists, and current nonterminal attempts retain their preparations.
+
+Only unreferenced private preparations are discarded. An exact terminal job whose
+final data and metadata are verified can retire its private marker without deleting
+the result. Remaining temporary stage files keep their ownership record. Lost
+publication acknowledgements therefore reconcile without rerunning the tool or
+losing the published result.
+
+Maintenance probes indexed sessions for preparation records and lazily loads stopped
+sessions needing reconciliation; it skips archived sessions, preserving their
+artifacts. A malformed session does not stop attempts for other sessions. Cycle
+statistics include discarded results, retired preparation markers and deferred
+collections. `Session_factory.limits.job_result_collection` defaults to 4,096
+intents, 65,536 reader entries, 256 MiB of scan bytes and 64 MiB per file. Replay
+and idempotency validators retain their separate count/byte ceilings. Budget excess
+never supplies proof of absence; an operator may increase the host's limits.
 
 Private-intent enumeration now uses the bounded reader too. The ordinary entrypoint
 derives finite allowances from its record count; the collector entrypoint shares
@@ -1691,9 +1726,9 @@ the exact terminal record and active owner for script materialization; a job ID
 does not bypass the script's selected tools. Transport clients can read the saved
 blob in bounded chunks using `blob.read`.
 
-Safe orphan reconciliation and final artifact race/failure qualification remain
-outstanding. Stale in-memory preparations may be evicted, but possibly referenced
-blobs are retained. Large invocation audit records can still retain the original
+Safe orphan reconciliation is installed. Phase-wide asynchronous race/quota
+qualification remains in E05.05. Stale in-memory preparations may be evicted, but
+possibly referenced blobs are retained. Large invocation audit records can still retain the original
 outcome; this change removes large payloads from job results, not all historical
 copies. General model-visible availability remains gated on authoring qualification.
 

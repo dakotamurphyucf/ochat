@@ -387,6 +387,9 @@ type _ request =
   | Checkpoint :
       (Session_state.t -> (unit, Agent_protocol.Error.t) result)
       -> unit request
+  | Quiescent_checkpoint :
+      (Session_state.t -> ('a, Agent_protocol.Error.t) result)
+      -> 'a option request
   | Shutdown : unit request
 
 and compaction_outcome =
@@ -6538,6 +6541,22 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Renew_owner (attachment_id, generation) -> renew_owner t attachment_id generation
   | Owner_expired generation -> owner_expired t generation
   | Checkpoint persist -> persist t.state
+  | Quiescent_checkpoint inspect ->
+    (match
+       ( t.state.active_operation
+       , t.active_cancel
+       , t.invocation_executions
+       , t.job_scopes
+       , t.moderator_borrow
+       , t.queued_event_borrow
+       , t.foreground_moderator
+       , t.idle_moderator_borrowed
+       , Staged_jobs.is_empty t.staged_jobs
+       , Active_calls.snapshot t.active_calls )
+     with
+     | None, None, [], [], None, None, None, false, true, ([], []) ->
+       Result.map (inspect t.state) ~f:Option.some
+     | _ -> Ok None)
   | Shutdown ->
     Staged_jobs.abort_all t.staged_jobs;
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
@@ -7040,6 +7059,7 @@ let renew_owner_with_command_audit t ~command_audit ~attachment_id ~lease_genera
 
 let publish_recoverable t event = broadcast_recoverable t event
 let checkpoint t ~persist = call t ~priority:Priority (Checkpoint persist)
+let with_quiescent_state t ~f = call t ~priority:Priority (Quiescent_checkpoint f)
 
 module For_testing = struct
   let deliver_compaction_result t ~operation_id ~history =

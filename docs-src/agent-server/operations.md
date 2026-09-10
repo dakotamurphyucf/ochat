@@ -162,6 +162,18 @@ pruning occurs behind installed snapshots, retaining a validated fallback.
 Stopped inactive actors unload while their sessions remain indexed; running
 intent, owner grace, runnable jobs and schedules can keep/load actors.
 
+Managed job-result preparations have separate cleanup. Maintenance preserves
+referenced artifacts, validates retained session/history/cache/blob consumers, and
+removes only private preparations proved unreferenced. It can load an indexed
+stopped session for this work. Loaded runtimes and active execution, uploads or
+reads defer collection; archived sessions remain preserved. Invalid, incomplete,
+linked or oversized roots report an error and retain the affected evidence.
+Collection statistics distinguish discarded results, retired preparation markers
+and deferred attempts. Library hosts can configure the bounded scan through
+`Session_factory.limits.job_result_collection`; this is not a new CLI setting.
+See [the implementation contract](extensibility-foundations.md) for lock order,
+root coverage and the qualified extensibility host scope.
+
 Monitor persistence errors, recovery failures, loaded actors, descriptors, queue
 pressure, permission waits, subscriber disconnects, job/quota saturation, disk
 usage and provider latency. Temporary workspace cleanup obeys its policy; physical

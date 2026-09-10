@@ -85,3 +85,14 @@ val discard_unreferenced
   -> session:Session_store.Handle.t
   -> t
   -> (unit, Store_error.t) result
+
+(** Remove the exact private marker and matching atomic residue without touching
+    artifact data. Caller must prove the current durable job has this terminal
+    reference and its final data/metadata are verified under storage coordination.
+    Uses the attempt's shared reader and syncs the marker directory. *)
+val retire_published
+  :  env:Eio_unix.Stdenv.base
+  -> reader:Retention_reader.t
+  -> session:Session_store.Handle.t
+  -> t
+  -> (unit, Store_error.t) result

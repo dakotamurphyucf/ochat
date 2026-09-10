@@ -101,6 +101,7 @@ let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
       ; capacity = None
       ; store_handle = None
       ; expire_permissions = (fun ~now:_ -> ())
+      ; collect_results = (fun () -> Ok None)
       ; close = ignore
       }
     in

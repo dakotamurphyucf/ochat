@@ -158,6 +158,25 @@ let unload_locked t =
 
 let unload t = Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> unload_locked t)
 
+let with_unloaded t f =
+  let result =
+    (* An actor request continues after its caller cancels. Keep the owner until
+       its bounded checkpoint actually returns, rather than permitting reload
+       while that actor is still inspecting/deleting cache-dependent artifacts. *)
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      try
+        Ok
+          (match t.closed, t.runtime, t.background_leases with
+           | false, None, [] -> Result.map (f ()) ~f:Option.some
+           | _ -> Ok None)
+      with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match result with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let retire_after_administration t =
   let previous = t.runtime in
   t.runtime <- None;

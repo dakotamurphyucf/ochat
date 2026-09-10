@@ -1001,3 +1001,12 @@ val checkpoint
   -> (unit, Agent_protocol.Error.t) result
 
 val shutdown : t -> unit
+
+(** Invoke [f] with authoritative state only when no foreground operation,
+    invocation/job execution, moderator borrow, staged launch or active call
+    retains process-local execution ownership. Serialized with actor transitions;
+    [None] means defer. The callback must not reenter this actor. *)
+val with_quiescent_state
+  :  t
+  -> f:(Session_state.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a option, Agent_protocol.Error.t) result

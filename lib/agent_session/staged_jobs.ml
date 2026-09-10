@@ -15,6 +15,7 @@ type entry =
 type t = entry list ref
 
 let create () = ref []
+let is_empty t = List.is_empty !t
 let owner entry = Option.map entry.job.launch ~f:(fun launch -> launch.owner)
 
 let owned entry expected =

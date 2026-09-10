@@ -80,6 +80,7 @@ let%expect_test
        in
        let maintenance () =
          Agent_server.Maintenance.run_once
+           ~registry:None
            ~env
            ~idempotency_store
            ~blob_store:storage.blobs

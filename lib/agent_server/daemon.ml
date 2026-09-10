@@ -105,6 +105,12 @@ let default_options =
       ; job_result_max_bytes = 9 * 1024 * 1024
       ; job_result_recovery_max_count = 4096
       ; job_result_recovery_max_bytes = 64 * 1024 * 1024
+      ; job_result_collection =
+          { max_intents = 4096
+          ; max_entries = 65_536
+          ; max_bytes = 256 * 1024 * 1024
+          ; max_file_bytes = 64 * 1024 * 1024
+          }
       }
   ; quota_limits =
       { global_running_sessions = 256

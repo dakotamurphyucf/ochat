@@ -4,6 +4,9 @@ type stats =
   { expired_idempotency_records : int
   ; expired_temporary_blobs : int
   ; expired_response_artifacts : int
+  ; discarded_job_results : int
+  ; retired_job_preparations : int
+  ; deferred_result_collections : int
   }
 [@@deriving sexp]
 
@@ -41,11 +44,84 @@ let retention_cutoff now retention =
   |> Agent_protocol.Timestamp.of_time_ns
 ;;
 
+let has_preparations ~env session_store session_id =
+  let open Result.Let_syntax in
+  let root =
+    Agent_store.Data_root.session_path
+      (Agent_store.Session_store.data_root session_store)
+      session_id
+  in
+  let probe =
+    let%bind reader =
+      Agent_store.Retention_reader.create ~env ~root ~max_entries:128 ~max_bytes:0
+    in
+    let%bind names = Agent_store.Retention_reader.list reader ~directory:"." in
+    match List.mem names "result-preparations" ~equal:String.equal with
+    | false -> Ok false
+    | true ->
+      Result.map
+        (Agent_store.Retention_reader.list reader ~directory:"result-preparations")
+        ~f:(fun names -> not (List.is_empty names))
+  in
+  (* The cheap probe supplies no deletion proof. Excess or unreadable entries
+     must reach the full validated attempt rather than disappear from maintenance. *)
+  match probe with
+  | Ok found -> found
+  | Error _ -> true
+;;
+
+let collect_results ~env ~session_store registry stats =
+  match registry with
+  | None -> Ok stats
+  | Some registry ->
+    let stats, failure =
+      List.fold
+        (Agent_store.Session_store.list_sessions session_store)
+        ~init:(stats, None)
+        ~f:(fun (stats, failure) entry ->
+          match
+            entry.Agent_store.Session_index.Entry.archived
+            || not (has_preparations ~env session_store entry.session.id)
+          with
+          | true -> stats, failure
+          | false ->
+            let result =
+              Result.bind
+                (Session_registry.load registry entry.session.id)
+                ~f:(fun entry -> entry.collect_results ())
+            in
+            (match result with
+             | Error error ->
+               ( stats
+               , Some
+                   (Option.value
+                      failure
+                      ~default:(Agent_store.Store_error.Corrupt error.message)) )
+             | Ok None ->
+               ( { stats with
+                   deferred_result_collections = stats.deferred_result_collections + 1
+                 }
+               , failure )
+             | Ok (Some collected) ->
+               ( { stats with
+                   discarded_job_results =
+                     stats.discarded_job_results + collected.discarded
+                 ; retired_job_preparations =
+                     stats.retired_job_preparations + collected.retired
+                 }
+               , failure )))
+    in
+    (match failure with
+     | None -> Ok stats
+     | Some error -> Error error)
+;;
+
 let run_once
       ~env
       ~idempotency_store
       ~blob_store
       ~session_store
+      ~registry
       ~protected_response_sessions
       ~response_retention
       ~now
@@ -63,13 +139,23 @@ let run_once
            ~env
            ~data_root:(Agent_store.Session_store.data_root session_store))
   in
-  let%map expired_response_artifacts =
+  let%bind expired_response_artifacts =
     Agent_store.Session_store.prune_response_artifacts
       session_store
       ~protected:protected_response_sessions
       ~older_than:(retention_cutoff now response_retention)
   in
-  { expired_idempotency_records; expired_temporary_blobs; expired_response_artifacts }
+  collect_results
+    ~env
+    ~session_store
+    registry
+    { expired_idempotency_records
+    ; expired_temporary_blobs
+    ; expired_response_artifacts
+    ; discarded_job_results = 0
+    ; retired_job_preparations = 0
+    ; deferred_result_collections = 0
+    }
 ;;
 
 let wait t clock every =
@@ -136,6 +222,7 @@ let rec loop
         ~idempotency_store
         ~blob_store
         ~session_store
+        ~registry:(Some registry)
         ~protected_response_sessions:(protected_response_sessions registry)
         ~response_retention
         ~now

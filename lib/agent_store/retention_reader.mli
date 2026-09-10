@@ -15,6 +15,14 @@ val create
 
 val root : t -> string
 
+(** Charge serialized in-memory roots against the same aggregate byte allowance
+    as filesystem reads. Negative sizes and exhausted budgets fail the attempt. *)
+val charge_bytes : t -> int -> (unit, Store_error.t) result
+
+(** Inspect a child without following links; consumes one entry. Only regular
+    files/directories are accepted, and all parent directories are validated. *)
+val kind : t -> path:string -> ([ `Directory | `File ], Store_error.t) result
+
 (** Select another host-owned absolute root while sharing the same remaining
     entry/byte budgets. This does not reset allowances or authorize paths. The
     caller must own and serialize both roots; reads still reject linked paths. *)

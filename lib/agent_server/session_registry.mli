@@ -10,6 +10,11 @@ type entry =
   ; capacity : Session_capacity.t option
   ; store_handle : Agent_store.Session_store.Handle.t option
   ; expire_permissions : now:Agent_protocol.Timestamp.t -> unit
+  ; collect_results :
+      unit
+      -> ( Agent_store.Job_result_store.Publisher.collection_stats option
+           , Agent_protocol.Error.t )
+           result
   ; close : unit -> unit
   }
 

@@ -761,6 +761,12 @@ let retention_directories retention session =
     Ok (Session_store.Handle.directory session, retention.store.temporary_directory)
 ;;
 
+let retention_reserved_directory retention =
+  match retention.active with
+  | false -> Error (Store_error.Corrupt "blob retention scope has ended")
+  | true -> Ok retention.store.durable_directory
+;;
+
 let discard_staged_unreferenced retention ~reader session ~(metadata : Metadata.t) =
   let open Result.Let_syntax in
   let invalid message = Error (Store_error.Corrupt message) in

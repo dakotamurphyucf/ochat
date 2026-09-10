@@ -2,6 +2,11 @@
     This is a reference proof component, not a collector or deletion authority. *)
 type t
 
+(** Whether a candidate has verified final data and installed final metadata with
+    no remaining temporary data/metadata/partial files needing intent ownership.
+    A complete temporary copy or final data alone does not satisfy publication. *)
+val published : t -> Agent_protocol.Id.Blob.t -> bool
+
 (** Scan all session-owned and shared temporary blobs under a live storage scope.
     The reader must start at the exact session root; temporary reads share its
     remaining budgets. Candidates must come from the session's validated durable
