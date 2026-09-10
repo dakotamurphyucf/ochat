@@ -142,5 +142,10 @@ val discard_unreferenced
   -> (unit, Store_error.t) result
 
 (** [cleanup_expired] removes only expired metadata/data pairs below the
-    configured temporary blob directory. *)
-val cleanup_expired : t -> now:Agent_protocol.Timestamp.t -> (int, Store_error.t) result
+    configured temporary blob directory. A protected blob or failed protection
+    check is retained; errors are returned to the maintenance coordinator. *)
+val cleanup_expired
+  :  ?protect:(Metadata.t -> (bool, Store_error.t) result)
+  -> t
+  -> now:Agent_protocol.Timestamp.t
+  -> (int, Store_error.t) result

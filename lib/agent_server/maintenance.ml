@@ -42,6 +42,7 @@ let retention_cutoff now retention =
 ;;
 
 let run_once
+      ~env
       ~idempotency_store
       ~blob_store
       ~session_store
@@ -54,7 +55,13 @@ let run_once
     Agent_store.Idempotency_store.prune_expired idempotency_store ~now
   in
   let%bind expired_temporary_blobs =
-    Agent_store.Blob_store.cleanup_expired blob_store ~now
+    Agent_store.Blob_store.cleanup_expired
+      blob_store
+      ~now
+      ~protect:
+        (Agent_store.Job_result_intent.protects_temporary
+           ~env
+           ~data_root:(Agent_store.Session_store.data_root session_store))
   in
   let%map expired_response_artifacts =
     Agent_store.Session_store.prune_response_artifacts
@@ -109,6 +116,7 @@ let protected_response_sessions registry =
 
 let rec loop
           t
+          env
           clock
           every
           idempotency_store
@@ -124,6 +132,7 @@ let rec loop
     let now = timestamp clock in
     let result =
       run_once
+        ~env
         ~idempotency_store
         ~blob_store
         ~session_store
@@ -140,6 +149,7 @@ let rec loop
        : int);
     loop
       t
+      env
       clock
       every
       idempotency_store
@@ -152,6 +162,7 @@ let rec loop
 
 let start
       ~sw
+      ~env
       ~clock
       ~every
       ~idempotency_store
@@ -173,6 +184,7 @@ let start
   Eio.Fiber.fork ~sw (fun () ->
     loop
       t
+      env
       clock
       every
       idempotency_store

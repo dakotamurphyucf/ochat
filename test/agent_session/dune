@@ -23,6 +23,8 @@
   job_fixtures
   job_dependency_tests
   job_artifact_retry_tests
+  job_artifact_fixtures
+  job_artifact_retention_tests
   job_progress_tests
   job_progress_authority_tests
   managed_nested_tests

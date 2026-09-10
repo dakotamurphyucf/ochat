@@ -20,7 +20,8 @@ type status =
 [@@deriving sexp]
 
 val run_once
-  :  idempotency_store:Agent_store.Idempotency_store.t
+  :  env:Eio_unix.Stdenv.base
+  -> idempotency_store:Agent_store.Idempotency_store.t
   -> blob_store:Agent_store.Blob_store.t
   -> session_store:Agent_store.Session_store.t
   -> protected_response_sessions:Agent_protocol.Id.Session.t list
@@ -30,6 +31,7 @@ val run_once
 
 val start
   :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
   -> clock:_ Eio.Time.clock
   -> every:float
   -> idempotency_store:Agent_store.Idempotency_store.t

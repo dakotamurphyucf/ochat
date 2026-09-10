@@ -671,27 +671,46 @@ let expired ~now metadata =
     Agent_protocol.Timestamp.compare expires_at now <= 0)
 ;;
 
-let cleanup_one store ~now filename =
+let cleanup_one store ~protect ~now filename =
   let metadata_path = Filename.concat store.temporary_directory filename in
   match load_metadata store metadata_path with
   | Error _ -> Ok 0
   | Ok metadata when not (expired ~now metadata) -> Ok 0
   | Ok metadata ->
-    let data_path =
-      Filename.concat store.temporary_directory (blob_name metadata.blob.id ".blob")
+    let open Result.Let_syntax in
+    let%bind _ =
+      Agent_protocol.Blob.Metadata.of_json
+        (Agent_protocol.Blob.Metadata.to_json metadata.blob)
+      |> Result.map_error ~f:(fun failure ->
+        Store_error.Corrupt failure.Agent_protocol.Error.message)
     in
-    (try Eio.Path.unlink (eio_path store data_path) with
-     | _ -> ());
-    (try Eio.Path.unlink (eio_path store metadata_path) with
-     | _ -> ());
-    Ok 1
+    let%bind () =
+      match
+        (not metadata.durable)
+        && String.equal filename (blob_name metadata.blob.id ".sexp")
+      with
+      | true -> Ok ()
+      | false -> Error (Store_error.Corrupt "temporary expiry metadata identity mismatch")
+    in
+    let%bind protected = protect metadata in
+    (match protected with
+     | true -> Ok 0
+     | false ->
+       let data_path =
+         Filename.concat store.temporary_directory (blob_name metadata.blob.id ".blob")
+       in
+       (try Eio.Path.unlink (eio_path store data_path) with
+        | _ -> ());
+       (try Eio.Path.unlink (eio_path store metadata_path) with
+        | _ -> ());
+       Ok 1)
 ;;
 
-let cleanup_expired store ~now =
+let cleanup_expired ?(protect = fun _ -> Ok false) store ~now =
   try
     Eio.Path.read_dir (eio_path store store.temporary_directory)
     |> List.filter ~f:(String.is_suffix ~suffix:".sexp")
-    |> List.map ~f:(cleanup_one store ~now)
+    |> List.map ~f:(cleanup_one store ~protect ~now)
     |> Result.all
     |> Result.map ~f:(List.fold ~init:0 ~f:( + ))
   with

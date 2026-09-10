@@ -6,6 +6,18 @@ type t
 val reference : t -> Agent_protocol.Job_artifact.t
 val metadata : t -> Blob_store.Metadata.t
 
+(** Protect a temporary blob from generic expiry only when its exact metadata
+    matches a validated private intent in the owned data root. Labels alone do not
+    protect uploads. Corrupt records, identity mismatches or linked directories
+    return an error so the caller retains the files. No session lock is acquired:
+    the intent precedes upload and outlives its stage, allowing maintenance to
+    inspect it without reentering an actor or racing the publication lock. *)
+val protects_temporary
+  :  env:Eio_unix.Stdenv.base
+  -> data_root:Data_root.t
+  -> Blob_store.Metadata.t
+  -> (bool, Store_error.t) result
+
 (** Allocate a validated identity without IO, so a caller can retain it before
     the first possibly ambiguous filesystem operation. *)
 val make

@@ -20,7 +20,7 @@ let filename t = P.Id.Blob.to_string t.reference.blob.id ^ ".frame"
 let path session t = Filename.concat (directory session) (filename t)
 let corrupt message = Error (Store_error.Corrupt message)
 
-let validate session t =
+let validate_session session_id t =
   let open Result.Let_syntax in
   let%bind _ =
     P.Job_artifact.of_json (P.Job_artifact.to_json t.reference)
@@ -32,7 +32,7 @@ let validate session t =
   in
   match
     t.version = 1
-    && P.Id.Session.equal t.reference.session_id (Session_store.Handle.session_id session)
+    && P.Id.Session.equal t.reference.session_id session_id
     && Option.exists
          t.metadata.target_session
          ~f:(P.Id.Session.equal t.reference.session_id)
@@ -47,6 +47,8 @@ let validate session t =
   | true -> Ok ()
   | false -> corrupt "invalid job result preparation intent"
 ;;
+
+let validate session t = validate_session (Session_store.Handle.session_id session) t
 
 let ensure_directory ~env session =
   let path = directory session in
@@ -87,7 +89,7 @@ let read_contents file =
     loop ())
 ;;
 
-let read ~env ~session ~filename =
+let read_owned ~env ~session_id ~directory ~filename =
   let open Result.Let_syntax in
   let%bind id =
     match String.chop_suffix filename ~suffix:".frame" with
@@ -97,7 +99,7 @@ let read ~env ~session ~filename =
       |> Result.map_error ~f:(fun _ ->
         Store_error.Corrupt "invalid job result intent filename")
   in
-  let path = Filename.concat (directory session) filename in
+  let path = Filename.concat directory filename in
   try
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
     let%bind () =
@@ -121,13 +123,77 @@ let read ~env ~session ~filename =
         |> Result.map_error ~f:(fun _ ->
           Store_error.Corrupt "invalid job result intent payload")
       in
-      let%bind () = validate session intent in
+      let%bind () = validate_session session_id intent in
       (match P.Id.Blob.equal id intent.reference.blob.id with
        | true -> Ok intent
        | false -> corrupt "job result intent filename differs from its blob")
     | _ -> corrupt "job result intent is incomplete or corrupt"
   with
   | exn -> Error (Store_error.of_exn ~operation:"read job result intent" ~path exn)
+;;
+
+let read ~env ~session ~filename =
+  read_owned
+    ~env
+    ~session_id:(Session_store.Handle.session_id session)
+    ~directory:(directory session)
+    ~filename
+;;
+
+let protects_temporary ~env ~data_root (metadata : Blob_store.Metadata.t) =
+  let open Result.Let_syntax in
+  let%bind _ =
+    P.Blob.Metadata.of_json (P.Blob.Metadata.to_json metadata.blob)
+    |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)
+  in
+  match metadata.target_session with
+  | None -> Ok false
+  | Some session_id ->
+    let%bind session_id =
+      P.Id.Session.of_json (P.Id.Session.to_json session_id)
+      |> Result.map_error ~f:(fun failure -> Store_error.Corrupt failure.P.Error.message)
+    in
+    let session_directory = Data_root.session_path data_root session_id in
+    let directory = Filename.concat session_directory "result-preparations" in
+    let filename = P.Id.Blob.to_string metadata.blob.id ^ ".frame" in
+    let regular_directory path =
+      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
+      | `Not_found -> Ok false
+      | `Directory -> Ok true
+      | _ -> corrupt "job result preparation directory is not a regular directory"
+    in
+    (try
+       let%bind session_exists = regular_directory session_directory in
+       match session_exists with
+       | false -> Ok false
+       | true ->
+         let%bind exists = regular_directory directory in
+         (match exists with
+          | false -> Ok false
+          | true ->
+            (match
+               Eio.Path.kind
+                 ~follow:false
+                 Eio.Path.(Eio.Stdenv.fs env / Filename.concat directory filename)
+             with
+             | `Not_found -> Ok false
+             | _ ->
+               let%bind intent = read_owned ~env ~session_id ~directory ~filename in
+               (match
+                  Sexp.equal
+                    (Blob_store.Metadata.sexp_of_t metadata)
+                    (Blob_store.Metadata.sexp_of_t intent.metadata)
+                with
+                | true -> Ok true
+                | false ->
+                  corrupt "temporary blob differs from its private result preparation")))
+     with
+     | exn ->
+       Error
+         (Store_error.of_exn
+            ~operation:"protect temporary job result"
+            ~path:directory
+            exn))
 ;;
 
 let save ~env ~session t =

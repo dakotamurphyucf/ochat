@@ -1561,6 +1561,14 @@ record establishes managed preparation ownership; an HTTP upload's caller-suppli
 `allowed_use` label does not. Listing records rejects corruption, changed identities,
 symlinks and exceeded read/count limits before returning candidates.
 
+Daemon maintenance also checks this private record before expiring temporary blobs.
+It preserves an exact managed preparation even after the ordinary upload expiry
+time. A caller-supplied label without a matching private record still expires.
+Corrupt or mismatched records and linked preparation directories stop that deletion
+and report a maintenance error. Temporary metadata filenames must match their
+validated blob IDs, preventing an unrelated record from directing expiry at another
+blob. Managed preparations remain until publication or verified orphan cleanup.
+
 An acknowledged publication removes the preparation record. If that removal fails,
 publication still succeeds and the record remains for later reconciliation. A failed
 or ambiguous publication acknowledgement retains it. Proven-unreferenced discard

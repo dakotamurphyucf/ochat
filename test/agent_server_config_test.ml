@@ -857,6 +857,7 @@ let%expect_test "daemon maintenance prunes expired idempotency and temporary blo
       Agent_store.Blob_store.finish upload ~expected_digest:None |> store_ok |> ignore;
       let stats =
         Agent_server.Maintenance.run_once
+          ~env
           ~idempotency_store
           ~blob_store
           ~session_store
