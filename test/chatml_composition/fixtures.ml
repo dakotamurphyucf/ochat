@@ -35,6 +35,7 @@ let call_events calls =
 
 let with_daemon
       ?validation_host
+      ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
       ?settle
       ?after_turn
@@ -94,6 +95,7 @@ let with_daemon
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
+                ; factory_limits
                 ; chatml_runtime_policy = runtime_policy
                 ; authoring_validation_host = validation_host
                 ; model_post_stream = Some post_stream

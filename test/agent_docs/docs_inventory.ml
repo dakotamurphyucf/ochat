@@ -59,6 +59,7 @@ let owner name =
         ; "background_job_event"
         ; "completion_contract"
         ; "completion_projection"
+        ; "job_result_reference"
         ; "standalone_delivery"
         ]
       , "../agent-server/extensibility-foundations.md" )

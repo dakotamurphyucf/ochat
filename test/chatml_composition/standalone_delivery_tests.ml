@@ -149,6 +149,7 @@ let%expect_test
         let prepare state =
           Adapter.prepare
             ~state
+            ~notification_limits:Agent_session.Staged_notifications.default_limits
             ~invocation_id:invocation.context.id
             ~job_id:job.id
             ~completion:result

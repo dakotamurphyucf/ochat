@@ -4155,6 +4155,7 @@ let deliver_standalone_completion_internal t revision expected current_capabilit
   let%bind plan =
     Standalone_delivery.prepare
       ~state:t.state
+      ~notification_limits:t.services.notification_limits
       ~invocation_id:invocation.context.id
       ~job_id:job.id
       ~completion

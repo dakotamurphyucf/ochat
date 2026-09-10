@@ -102,6 +102,7 @@ let%expect_test
   let socket_path = ref "" in
   let model_received = ref false in
   let granted_scopes = ref scopes in
+  let stop_listener = ref (fun () -> ()) in
   let connect ~sw ~env ~root daemon =
     let path = Filename.concat root "ingress.sock" in
     socket_path := path;
@@ -109,8 +110,11 @@ let%expect_test
     let listener =
       Eio.Net.listen ~sw ~reuse_addr:true ~backlog:8 (Eio.Stdenv.net env) (`Unix path)
     in
+    let stop, stopped = Eio.Promise.create () in
+    (stop_listener := fun () -> Eio.Promise.resolve stopped ());
     Eio.Fiber.fork_daemon ~sw (fun () ->
       Eio.Net.run_server
+        ~stop
         ~on_error:raise
         listener
         (Socket.Server.serve
@@ -121,7 +125,8 @@ let%expect_test
            ~max_line_length:(2 * 1024 * 1024)
            ~outgoing_capacity:128
            ~max_attachments:16
-           ~on_protocol_error:(fun error -> raise_s [%sexp (error : P.Error.t)])));
+           ~on_protocol_error:(fun error -> raise_s [%sexp (error : P.Error.t)]));
+      `Stop_daemon);
     Socket.Client.connect
       ~sw
       ~net:(Eio.Stdenv.net env)
@@ -236,7 +241,8 @@ let%expect_test
           (call
              "ingress.submit"
              (P.Ingress.Submit_request.to_json
-                { request with payload = `Object [ "value", `String "different" ] }))))
+                { request with payload = `Object [ "value", `String "different" ] })));
+      !stop_listener ())
     ~settle:(fun env entry ->
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
         let rec wait () =

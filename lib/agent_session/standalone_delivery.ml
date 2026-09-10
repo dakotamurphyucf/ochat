@@ -28,6 +28,7 @@ let prepare
       ~job_id
       ~completion
       ~current_capabilities
+      ~(notification_limits : Staged_notifications.limits)
       ~delivery_id
       ~now
       ~wake
@@ -47,6 +48,15 @@ let prepare
       ~job
       ~completion
       ~current_capabilities
+  in
+  let%bind () = Staged_notifications.validate_limits notification_limits in
+  let%bind projected =
+    Standalone_completion_contract.reference_if_needed
+      ~invocation
+      ~job
+      ~max_bytes:notification_limits.max_payload_bytes
+      ~max_depth:notification_limits.max_payload_depth
+      projected
   in
   let%bind delivery =
     P.Delivery.create

@@ -21,6 +21,7 @@
   job
   job_progress
   job_artifact
+  job_result_reference
   invocation
   completion_contract
   completion_projection

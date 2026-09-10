@@ -185,6 +185,19 @@ let validate t =
     | None -> Ok ()
     | Some projection ->
       let%bind () = Completion_projection.validate projection in
+      let%bind () =
+        match projection.result_reference with
+        | None -> Ok ()
+        | Some reference ->
+          (match c.completion, c.work with
+           | Completion.Succeeded value, Some (Invocation.Job job_id)
+             when Jsonaf.exactly_equal value (Job_result_reference.to_json reference)
+                  && Id.Job.equal job_id reference.job_id
+                  && Id.Session.equal c.session_id reference.session_id
+                  && Int.equal c.generation reference.generation
+                  && Int.equal projection.job_attempt reference.attempt -> Ok ()
+           | _ -> invalid "delivery differs from its explicit result reference")
+      in
       (match c.source, c.ownership, c.invocation_id, c.work, t.disclosure_pins with
        | Job_adapter, None, Some _, Some (Invocation.Job _), Some _ ->
          (match projection.rejected, c.completion with

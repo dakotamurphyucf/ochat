@@ -4,6 +4,12 @@
     inferred property of user-supplied text. Rendering does not mutate the retained
     completion or request another turn. *)
 
+(** Inline data uses envelope1. A checked retained-result projection uses
+    envelope2 with [completion_representation = "retained_result"]. Its completion
+    value is a reference whose [outcome] describes the original work; the outer
+    success means that reference was delivered. Arbitrary business JSON cannot
+    select this representation. *)
+
 val create
   :  id:History_entry.Id.t
   -> Agent_protocol.Delivery.t

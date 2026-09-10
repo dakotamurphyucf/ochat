@@ -13,6 +13,7 @@ val prepare
   -> job_id:Agent_protocol.Id.Job.t
   -> completion:Agent_protocol.Completion.t
   -> current_capabilities:Chat_response.Tool_capability.t
+  -> notification_limits:Staged_notifications.limits
   -> delivery_id:Agent_protocol.Id.Delivery.t
   -> now:Agent_protocol.Timestamp.t
   -> wake:Agent_protocol.Completion.wake

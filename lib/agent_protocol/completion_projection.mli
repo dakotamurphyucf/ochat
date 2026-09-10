@@ -8,6 +8,9 @@ type t =
   ; contract_sha256 : string
   ; result_sha256 : string
   ; rejected : bool
+  ; result_reference : Job_result_reference.t option [@sexp.option]
+    (** Version2: the accepted original result is retained, and the bounded
+        delivery contains its reference. Invalid original results never expose it. *)
   }
 [@@deriving equal, sexp]
 

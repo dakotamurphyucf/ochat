@@ -167,6 +167,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/job.mli` | [contract](../../lib/agent_protocol/job.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/job_artifact.mli` | [contract](../../lib/agent_protocol/job_artifact.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/job_progress.mli` | [contract](../../lib/agent_protocol/job_progress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/job_result_reference.mli` | [contract](../../lib/agent_protocol/job_result_reference.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/json_codec.mli` | [contract](../../lib/agent_protocol/json_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/method_result.mli` | [contract](../../lib/agent_protocol/method_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/moderator_execution.mli` | [contract](../../lib/agent_protocol/moderator_execution.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |

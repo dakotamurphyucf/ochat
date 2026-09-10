@@ -1788,6 +1788,28 @@ Accepted projections additionally satisfy the original schema and output bounds.
 Replay recomputes inline rejections; artifact rejections bind the original storage
 descriptor whose content was verified at admission. Replay does not read files.
 
+If a valid original completion exceeds the notification's byte or depth limit,
+the adapter now delivers a bounded `Job_result_reference`. It retains the exact
+session, job, generation, attempt, terminal outcome, serialized completion size
+and SHA256, plus the existing artifact descriptor when storage uses a blob. Inline
+results use the same job reference without creating a second copy or a new blob.
+The reference grants no read authority: `Job.read_result` and the authenticated
+job/blob APIs still check their normal access rules and retained identity.
+
+Such receipts use `Completion_projection` version2. Their notification uses
+envelope version2 with `completion_representation: "retained_result"`. The completion
+value contains the reference; its `outcome` describes the original work. The outer
+success reports delivery of the reference, not a claim that failed work succeeded.
+Ordinary business JSON that resembles a reference cannot select this host-owned
+representation. Existing inline notifications retain envelope version1.
+
+The full materialized result must pass its original schema and output bounds
+before reference delivery is permitted. A schema-rejected artifact therefore
+produces only the bounded failure, never a pointer around validation. Decoders
+reject reference fields smuggled into older receipt versions, and replay checks
+reference identity against the original job/storage digest. Notification limits
+must still be large enough to represent the bounded reference or failure itself.
+
 The actor's dedicated admission checks the private proposal's revision, ownership,
 acknowledgement and shared notification quotas before saving an intent. A generic
 extension transaction cannot introduce a projected delivery. The intent-only API
@@ -1811,10 +1833,10 @@ Current daemon qualification covers actual shell completion, schema rejection th
 preserves the original successful job, disabled extra turns, exact message/wake
 counts, reload non-replay, and multiple jobs including cancellation before attempt
 one. A raced notification plan defers; a session without a moderator never falls
-through to the legacy moderator event handler. Qualification of artifact loading,
-handling results over the notification payload limit, additional stop/crash boundaries
-and final E06 qualification remain in progress. General feature exposure still waits
-for A01.
+through to the legacy moderator event handler. Large inline and real artifact
+results are also qualified through the actual daemon adapter, bounded model input,
+authorized chunked reads and reload. Additional stop/crash boundaries and final E06
+qualification remain in progress. General feature exposure still waits for A01.
 
 ### Artifact-backed terminal results
 

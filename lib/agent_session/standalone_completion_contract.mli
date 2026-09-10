@@ -47,6 +47,17 @@ val authorize
   -> policy:Chat_response.One_off_request.policy
   -> (unit, Agent_protocol.Error.t) result
 
+(** Fit an already checked completion into the notification bounds. Valid large
+    results become explicit retained-job references; rejected data never gains a
+    reference. Does not change storage, execute work or grant result access. *)
+val reference_if_needed
+  :  invocation:Agent_protocol.Invocation.t
+  -> job:Agent_protocol.Job.t
+  -> max_bytes:int
+  -> max_depth:int
+  -> projection
+  -> (projection, Agent_protocol.Error.t) result
+
 (** Pure replay validation of owner, attempt, contract, original result digest,
     disclosure pins and projected output. Inline rejections are recomputed;
     artifact rejections bind the descriptor verified at admission. This is not a

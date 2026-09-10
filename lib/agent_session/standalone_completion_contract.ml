@@ -140,6 +140,7 @@ let project ~invocation ~job ~completion ~current_capabilities =
       ; contract_sha256 = P.Completion_projection.contract_digest contract
       ; result_sha256 = P.Completion_projection.result_digest stored
       ; rejected
+      ; result_reference = None
       }
   ; completion
   ; disclosure_pins
@@ -157,6 +158,44 @@ let authorize ~invocation ~job ~current_capabilities ~policy =
   let%bind selected = rebind contract ~current_capabilities in
   let%bind request = B.of_json ~policy job.payload in
   B.validate_capabilities request ~capabilities:selected
+;;
+
+let reference_if_needed ~invocation ~job ~max_bytes ~max_depth projection =
+  let open Result.Let_syntax in
+  let%bind () =
+    match max_bytes > 0 && max_depth > 0 with
+    | true -> Ok ()
+    | false -> invalid "invalid completion presentation limits"
+  in
+  let within value =
+    P.Json_codec.validate_limits ~max_bytes ~max_depth (P.Completion.to_json value)
+  in
+  match within projection.completion with
+  | Ok () -> Ok projection
+  | Error _ when projection.receipt.rejected ->
+    invalid "notification bounds cannot represent the completion rejection"
+  | Error _ ->
+    let%bind contract, stored = subject invocation job in
+    let%bind () =
+      match
+        Int.equal projection.receipt.job_attempt job.P.Job.attempt
+        && String.equal
+             projection.receipt.contract_sha256
+             (P.Completion_projection.contract_digest contract)
+        && String.equal
+             projection.receipt.result_sha256
+             (P.Completion_projection.result_digest stored)
+      with
+      | true -> Ok ()
+      | false -> invalid "result reference projection belongs to another completion"
+    in
+    let%bind reference = P.Job_result_reference.of_job job in
+    let completion = P.Completion.Succeeded (P.Job_result_reference.to_json reference) in
+    let%map () = within completion in
+    { projection with
+      completion
+    ; receipt = { projection.receipt with result_reference = Some reference }
+    }
 ;;
 
 let validate_projection ~invocation ~job (delivery : P.Delivery.t) =
@@ -190,15 +229,24 @@ let validate_projection ~invocation ~job (delivery : P.Delivery.t) =
                 contract.capability_pins -> Ok ()
     | _ -> invalid "standalone completion projection differs from its captured evidence"
   in
-  match receipt.rejected with
-  | false ->
+  match receipt.result_reference, receipt.rejected with
+  | Some reference, false ->
+    let%bind () = P.Job_result_reference.validate_job reference job in
+    (match stored with
+     | Artifact _ -> Ok ()
+     | Inline completion ->
+       validate_result contract completion
+       |> Result.map_error ~f:(fun _ ->
+         P.Error.invalid_request "result reference exposes an invalid original completion"))
+  | Some _, true -> invalid "rejected completion cannot disclose a result reference"
+  | None, false ->
     let%bind matches = P.Stored_completion.matches stored delivery.context.completion in
     (match
        matches && Result.is_ok (validate_result contract delivery.context.completion)
      with
      | true -> Ok ()
      | false -> invalid "standalone completion projection contains an invalid result")
-  | true ->
+  | None, true ->
     (* Inline results can be rechecked during replay. An artifact receipt binds the
        exact immutable storage descriptor; admission has materialized and checked
        that descriptor before recording the rejection. Replay never reads files. *)

@@ -14,20 +14,28 @@ let source_name = function
 
 let data (delivery : P.Delivery.t) =
   let c = delivery.context in
+  let reference =
+    Option.bind delivery.completion_projection ~f:(fun projection ->
+      projection.result_reference)
+  in
   `Object
-    [ "type", `String "ochat.runtime_notification"
-    ; "version", `Number "1"
-    ; "delivery_id", P.Id.Delivery.to_json c.id
-    ; "session_id", P.Id.Session.to_json c.session_id
-    ; "generation", `Number (Int.to_string c.generation)
-    ; "created_at", P.Timestamp.to_json c.created_at
-    ; "source", `String (source_name c.source)
-    ; "correlation", `String c.correlation
-    ; ( "invocation_id"
-      , Option.value_map c.invocation_id ~default:`Null ~f:P.Id.Invocation.to_json )
-    ; "work", Option.value_map c.work ~default:`Null ~f:P.Invocation.work_to_json
-    ; "completion", P.Completion.to_json c.completion
-    ]
+    ([ "type", `String "ochat.runtime_notification"
+     ; "version", `Number (if Option.is_some reference then "2" else "1")
+     ; "delivery_id", P.Id.Delivery.to_json c.id
+     ; "session_id", P.Id.Session.to_json c.session_id
+     ; "generation", `Number (Int.to_string c.generation)
+     ; "created_at", P.Timestamp.to_json c.created_at
+     ; "source", `String (source_name c.source)
+     ; "correlation", `String c.correlation
+     ; ( "invocation_id"
+       , Option.value_map c.invocation_id ~default:`Null ~f:P.Id.Invocation.to_json )
+     ; "work", Option.value_map c.work ~default:`Null ~f:P.Invocation.work_to_json
+     ; "completion", P.Completion.to_json c.completion
+     ]
+     @
+     match reference with
+     | None -> []
+     | Some _ -> [ "completion_representation", `String "retained_result" ])
 ;;
 
 let create ~id delivery =
