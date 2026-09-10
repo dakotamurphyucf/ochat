@@ -75,7 +75,10 @@ let run env environment boundary =
     (C.configuration fixture ()
      |> String.substr_replace_all
           ~pattern:"(tool_default deny)"
-          ~with_:"(tool_default allow)");
+          ~with_:
+            (if String.equal boundary "invocation-permission"
+             then "(tool_default ask)"
+             else "(tool_default allow)"));
   let expected_effect =
     if String.equal boundary "invocation-resolved" then "\nexecuted" else ""
   in
@@ -100,6 +103,33 @@ let run env environment boundary =
               ; idempotency_key = F.key "invocation:send"
               })
          : P.Method_result.t);
+      (match boundary with
+       | "invocation-permission" ->
+         let waiting =
+           B.await_snapshot env client session "outer handler approval" (fun snapshot ->
+             List.exists snapshot.permissions ~f:(fun permission ->
+               String.equal permission.tool_name "watch"
+               && P.Permission.equal_state permission.state Pending))
+         in
+         let permission =
+           List.find_exn waiting.permissions ~f:(fun permission ->
+             String.equal permission.tool_name "watch"
+             && P.Permission.equal_state permission.state Pending)
+         in
+         ignore
+           (F.request
+              client
+              (Permission_respond
+                 { session_id = session.summary.id
+                 ; attachment_id = session.attachment_id
+                 ; permission_id = permission.id
+                 ; permission_generation = permission.generation
+                 ; choice = Approve_once
+                 ; reason = Some "Allow handler to reach nested approval"
+                 ; idempotency_key = F.key "invocation:approve-owner"
+                 })
+            : P.Method_result.t)
+       | _ -> ());
       F.await_marker env child ("notification-boundary " ^ boundary);
       F.kill env child;
       let before = state env fixture session in
@@ -107,6 +137,12 @@ let run env environment boundary =
       (match boundary, invocation.status with
        | "invocation-admitted", Admitted -> ()
        | "invocation-resolved", Resolved (Complete (`String "retained outcome")) -> ()
+       | "invocation-permission", Dispatching ->
+         F.require
+           (List.exists before.permissions ~f:(fun permission ->
+              String.equal permission.tool_name "append_to_file"
+              && P.Permission.equal_state permission.state Pending))
+           "nested approval was not durably pending"
        | _ -> F.fail "selected invocation crash boundary was missed");
       F.require
         (List.is_empty (outputs before.conversation.canonical_history))
@@ -131,6 +167,38 @@ let run env environment boundary =
              Option.is_none snapshot.session.active_operation
              && List.length (outputs snapshot.canonical_history.entries) = 1)
       in
+      (match boundary with
+       | "invocation-permission" ->
+         let pending =
+           List.find_exn before.permissions ~f:(fun permission ->
+             String.equal permission.tool_name "append_to_file")
+         in
+         let cancelled =
+           List.find_exn snapshot.permissions ~f:(fun permission ->
+             P.Id.Permission.equal pending.id permission.id)
+         in
+         F.require
+           (P.Permission.equal_state cancelled.state Cancelled)
+           "restart retained a live approval continuation";
+         let attached, _ =
+           B.attach client session.summary (sprintf "late-approval:%d" reopen)
+         in
+         (match
+            Support.Http_driver.request
+              client
+              (Permission_respond
+                 { session_id = session.summary.id
+                 ; attachment_id = attached.attachment_id
+                 ; permission_id = pending.id
+                 ; permission_generation = pending.generation
+                 ; choice = Approve_once
+                 ; reason = None
+                 ; idempotency_key = F.key (sprintf "late-approval:%d" reopen)
+                 })
+          with
+          | Error _ -> ()
+          | Ok _ -> F.fail "late approval revived an interrupted native call")
+       | _ -> ());
       for _ = 1 to 10 do
         Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
         F.require
@@ -153,7 +221,7 @@ let run env environment boundary =
         | _ -> F.fail "recovery did not durably publish the initial response"
       in
       (match boundary, outcome with
-       | "invocation-admitted", Cancelled reason ->
+       | ("invocation-admitted" | "invocation-permission"), Cancelled reason ->
          F.require (not (String.is_empty reason)) "interruption lacks reason"
        | "invocation-resolved", Complete (`String "retained outcome") -> ()
        | _ -> F.fail "recovery changed the stored outcome or invented success");
@@ -188,5 +256,7 @@ let run env environment boundary =
 ;;
 
 let test env environment =
-  List.iter [ "invocation-admitted"; "invocation-resolved" ] ~f:(run env environment)
+  List.iter
+    [ "invocation-admitted"; "invocation-resolved"; "invocation-permission" ]
+    ~f:(run env environment)
 ;;

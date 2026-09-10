@@ -1,5 +1,6 @@
 (** Qualified daemon with a deterministic provider. [boundary] is [terminal], [pending],
-    [committed], [accepted], [invocation-admitted], [invocation-resolved], or
+    [committed], [accepted], [invocation-admitted], [invocation-resolved],
+    [invocation-permission], [job-intent], or
     [recover]. Crash modes pause after the selected actual journal
     sync; recovery mode never requests a tool and records notification inputs. *)
 val run

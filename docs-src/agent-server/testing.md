@@ -96,12 +96,18 @@ These run under `@agent-docs-check`, without provider requests.
 
 The crash matrix includes `invocation.admission-publication-no-replay`: an actual
 compiled standalone ChatML tool is interrupted by SIGKILL immediately after the
-invocation admission journal sync and after its outcome sync, before provider
-publication. Two fresh daemons must preserve the original invocation context and
+invocation admission journal sync, after its outcome sync before provider
+publication, and while a nested native tool awaits approval. Two fresh daemons must preserve the original invocation context and
 publish one stable response. Unstarted handling becomes interrupted; a saved
 successful outcome is published without repeating its real file mutation. Live
 progress is observed through public snapshots; raw checkpoints are inspected only
-after the child has been killed and joined.
+after the child has been killed and joined. The approval case must cancel the old
+wait and reject a late approval submitted through a new valid attachment.
+
+`job.committed-intent-launch-once` kills the daemon after a standalone ChatML
+handler saves its selected native job and Pending outcome, before worker launch.
+Recovery must launch that same job once, publish the original acknowledgement,
+deliver its result and retain identical job/receipt/history on a second reopening.
 
 E2E fixtures use private temporary directories, generated tokens and local
 listeners; they should not touch normal stores. Reports are written under

@@ -5,6 +5,8 @@ module Delta = Agent_session.Session_delta
 
 let rec matches boundary = function
   | Delta.Batch deltas -> List.exists deltas ~f:(matches boundary)
+  | Permission_changed { tool_name = "append_to_file"; state = Pending; _ } ->
+    String.equal boundary "invocation-permission"
   | Invocation_changed invocation
     when P.Invocation.equal_origin invocation.context.origin Model
          && String.equal invocation.context.tool_name "watch" ->
@@ -12,6 +14,8 @@ let rec matches boundary = function
      | Admitted -> String.equal boundary "invocation-admitted"
      | Resolved _ -> String.equal boundary "invocation-resolved"
      | Dispatching | Published _ -> false)
+  | Job_changed { status = Queued; attempt = 0; launch = Some _; _ } ->
+    String.equal boundary "job-intent"
   | Job_changed
       { status = Succeeded | Failed _ | Cancelled | Interrupted _; delivery = Pending; _ }
     -> String.equal boundary "terminal"
