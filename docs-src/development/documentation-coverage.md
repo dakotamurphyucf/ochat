@@ -148,6 +148,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/blob.mli` | [contract](../../lib/agent_protocol/blob.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/command.mli` | [contract](../../lib/agent_protocol/command.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/completion.mli` | [contract](../../lib/agent_protocol/completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/completion_contract.mli` | [contract](../../lib/agent_protocol/completion_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_protocol/completion_projection.mli` | [contract](../../lib/agent_protocol/completion_projection.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/delivery.mli` | [contract](../../lib/agent_protocol/delivery.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/envelope.mli` | [contract](../../lib/agent_protocol/envelope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/error.mli` | [contract](../../lib/agent_protocol/error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -285,6 +287,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/staged_notifications.mli` | [contract](../../lib/agent_session/staged_notifications.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_schedules.mli` | [contract](../../lib/agent_session/staged_schedules.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_subscriptions.mli` | [contract](../../lib/agent_session/staged_subscriptions.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/standalone_completion_contract.mli` | [contract](../../lib/agent_session/standalone_completion_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/standalone_delivery.mli` | [contract](../../lib/agent_session/standalone_delivery.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/standalone_tool_dispatch.mli` | [contract](../../lib/agent_session/standalone_tool_dispatch.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/start_queue.mli` | [contract](../../lib/agent_session/start_queue.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/stream_invocation.mli` | [contract](../../lib/agent_session/stream_invocation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

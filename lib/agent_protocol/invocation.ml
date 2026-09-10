@@ -141,6 +141,7 @@ type t =
   ; observation : observation option [@sexp.option]
   ; parent_event : Id.Moderator_execution.t option [@sexp.option]
   ; handler_intent : handler_intent option [@sexp.option]
+  ; completion_contract : Completion_contract.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -447,12 +448,21 @@ let validate t =
       invalid "unpublished invocation cannot carry an output occurrence"
     | _, _, None -> Ok ()
   in
+  let%bind () =
+    match t.completion_contract with
+    | None -> Ok ()
+    | Some contract ->
+      let%bind () = Completion_contract.validate contract in
+      (match t.context.origin, t.context.call_entry_id with
+       | Model, Some _ when String.equal t.context.tool_name contract.tool_name -> Ok ()
+       | _ -> invalid "completion contract requires its model tool call")
+  in
   match t.status with
   | Admitted | Dispatching -> Ok ()
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
-let create ?routing ?observer ?parent_event context =
+let create ?routing ?observer ?completion_contract ?parent_event context =
   let t =
     { context
     ; status = Admitted
@@ -460,6 +470,7 @@ let create ?routing ?observer ?parent_event context =
     ; routing
     ; parent_event
     ; handler_intent = None
+    ; completion_contract
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -803,6 +814,16 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     let%bind () = validate_observation_transition previous next in
     let%bind () = validate_handler_transition previous next in
+    let%bind () =
+      match
+        Option.equal
+          Completion_contract.equal
+          previous.completion_contract
+          next.completion_contract
+      with
+      | true -> Ok ()
+      | false -> failure Conflict "invocation completion contract is immutable"
+    in
     if not (equal_context previous.context next.context)
     then failure Conflict "invocation context is immutable"
     else if
@@ -1294,7 +1315,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.handler_intent
+           (if Option.is_some t.completion_contract
+            then "11"
+            else if Option.is_some t.handler_intent
             then "10"
             else if Option.is_some t.parent_event
             then "9"
@@ -1330,7 +1353,8 @@ let to_json t =
        `String reason)
      @ optional "observation" t.observation observation_to_json
      @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json
-     @ optional "handler_intent" t.handler_intent handler_intent_to_json)
+     @ optional "handler_intent" t.handler_intent handler_intent_to_json
+     @ optional "completion_contract" t.completion_contract Completion_contract.to_json)
 ;;
 
 let of_json json =
@@ -1345,7 +1369,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1357,7 +1381,8 @@ let of_json json =
        @ (if version >= 4 then [ "publication_discarded" ] else [])
        @ (if version >= 5 then [ "observation" ] else [])
        @ (if version >= 9 then [ "parent_event" ] else [])
-       @ if version >= 10 then [ "handler_intent" ] else [])
+       @ (if version >= 10 then [ "handler_intent" ] else [])
+       @ if version >= 11 then [ "completion_contract" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1398,6 +1423,13 @@ let of_json json =
   let%bind handler_intent =
     Json_codec.optional_as fields "handler_intent" handler_intent_of_json
   in
+  let%bind completion_contract =
+    match version with
+    | 11 ->
+      Json_codec.required_as fields "completion_contract" Completion_contract.of_json
+      |> Result.map ~f:Option.some
+    | _ -> Ok None
+  in
   let t =
     { context
     ; status
@@ -1407,11 +1439,12 @@ let of_json json =
     ; observation
     ; parent_event = None
     ; handler_intent
+    ; completion_contract
     }
   in
   let%bind t =
     match version with
-    | 10 ->
+    | 10 | 11 ->
       Json_codec.optional_as fields "parent_event" Id.Moderator_execution.of_json
       |> Result.map ~f:(fun parent_event -> { t with parent_event })
     | 9 ->

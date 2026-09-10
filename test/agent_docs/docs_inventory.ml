@@ -57,6 +57,9 @@ let owner name =
         ; "background_execution"
         ; "background_delivery"
         ; "background_job_event"
+        ; "completion_contract"
+        ; "completion_projection"
+        ; "standalone_delivery"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"

@@ -230,6 +230,63 @@ val wake_to_json : wake -> Jsonaf.t
 val wake_of_json : Jsonaf.t -> (wake, Error.t) result
 ```
 
+## completion_contract
+
+[JSON codec](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
+
+```ocaml
+open Core
+
+(** Host-captured standalone completion contract. It does not authorize execution
+    or delivery: the runtime must rebind the pinned publisher/tool ceiling and
+    verify the owning invocation's actual Pending acknowledgement. *)
+type t =
+  { tool_name : string
+  ; tool_fingerprint : string
+  ; capability_pins : (string * string) list
+  ; completion_schema : Jsonaf.t option
+  ; max_output_bytes : int
+  ; max_output_depth : int
+  }
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Protocol_error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## completion_projection
+
+[JSON codec](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
+
+```ocaml
+(** Evidence retained by a host-managed standalone completion adapter. The hashes
+    bind the original immutable invocation contract and terminal job storage; a
+    rejected projection never replaces the job's business result. This DTO alone
+    does not authorize publication. Admission must validate the materialized
+    completion against both the stored result and the original contract. *)
+type t =
+  { job_attempt : int
+  ; contract_sha256 : string
+  ; result_sha256 : string
+  ; rejected : bool
+  }
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Hash the exact canonical protocol representation, including an artifact's
+    owner, outcome and content digest when the result is stored externally. *)
+val contract_digest : Completion_contract.t -> string
+
+val result_digest : Stored_completion.t -> string
+
+(** Fixed, bounded public error, without rejected business data. *)
+val rejection : Invocation.tool_error
+```
+
 ## delivery
 
 [JSON codec](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
@@ -296,10 +353,18 @@ type t = private
     (** Envelope4: immutable ordered configuration pins for the publisher's exact
         tool ceiling. None is historical/untracked, not authority to use the whole
         current registry. Some [] is an explicitly empty ceiling. *)
+  ; completion_projection : Completion_projection.t option [@sexp.option]
+    (** Envelope5: immutable original-result evidence for a standalone adapter.
+        The host validates the contract and actual job before admission. *)
   }
 [@@deriving equal, sexp]
 
-val create : ?disclosure_pins:(string * string) list -> context -> (t, Error.t) result
+val create
+  :  ?disclosure_pins:(string * string) list
+  -> ?completion_projection:Completion_projection.t
+  -> context
+  -> (t, Error.t) result
+
 val validate : t -> (unit, Error.t) result
 
 (** New execution services opt into durable wake tracking with [track_wake:true].
@@ -1276,6 +1341,9 @@ type t = private
   ; handler_intent : handler_intent option [@sexp.option]
     (** Codec10. Actions requested by the tool implementation, recorded atomically
         with its original outcome. Independent of post-tool observation intent. *)
+  ; completion_contract : Completion_contract.t option [@sexp.option]
+    (** Schema11. Immutable eventual-result policy captured from a standalone
+        model tool at admission. Presence alone never requests a delivery. *)
   }
 [@@deriving equal, sexp]
 
@@ -1284,6 +1352,7 @@ type t = private
 val create
   :  ?routing:routing
   -> ?observer:observer
+  -> ?completion_contract:Completion_contract.t
   -> ?parent_event:Id.Moderator_execution.t
   -> context
   -> (t, Error.t) result

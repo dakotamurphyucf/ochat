@@ -680,6 +680,14 @@ val deliver_idle_notifications
   -> Notification_delivery.idle
   -> (bool, Agent_protocol.Error.t) result
 
+(** Persist a privately prepared standalone completion intent after checking the
+    current actor snapshot, owned job and shared notification quotas. This does
+    not insert history or wake a model; stop does not erase retained results. *)
+val admit_standalone_delivery
+  :  t
+  -> Standalone_delivery.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Before the first provider call, claim eligible restored wakes for this
     already-started operation and insert ready new data. The worker appends only
     returned new entries to its input snapshot. Actual before-model admission

@@ -160,6 +160,9 @@ type t = private
   ; handler_intent : handler_intent option [@sexp.option]
     (** Codec10. Actions requested by the tool implementation, recorded atomically
         with its original outcome. Independent of post-tool observation intent. *)
+  ; completion_contract : Completion_contract.t option [@sexp.option]
+    (** Schema11. Immutable eventual-result policy captured from a standalone
+        model tool at admission. Presence alone never requests a delivery. *)
   }
 [@@deriving equal, sexp]
 
@@ -168,6 +171,7 @@ type t = private
 val create
   :  ?routing:routing
   -> ?observer:observer
+  -> ?completion_contract:Completion_contract.t
   -> ?parent_event:Id.Moderator_execution.t
   -> context
   -> (t, Error.t) result

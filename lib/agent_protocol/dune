@@ -22,6 +22,8 @@
   job_progress
   job_artifact
   invocation
+  completion_contract
+  completion_projection
   moderator_execution
   extension_codec
   extension_status

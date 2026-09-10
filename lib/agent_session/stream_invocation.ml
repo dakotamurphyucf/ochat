@@ -113,6 +113,7 @@ let parse_input ~kind ~payload =
 ;;
 
 let create
+      ~completion_contract
       ~input
       ~(request : Chat_response.In_memory_stream.Tool_dispatch.request)
       ~implementation_revision
@@ -150,6 +151,7 @@ let create
   in
   I.create
     ~routing
+    ?completion_contract
     { id = Agent_protocol.Id.Invocation.create ()
     ; session_id = input.Operation_worker.Input.session_id
     ; generation = input.session_generation

@@ -74,10 +74,17 @@ let create
               ~retryable:false
               ()));
     Stream_invocation.prepare cache ~capabilities request ~create:(fun request ->
+      let open Result.Let_syntax in
+      let%bind completion_contract =
+        Standalone_completion_contract.capture
+          ~prepared
+          ~current_capabilities:(Script_tool_calls.current_capabilities script_tools)
+      in
       let value =
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
       Stream_invocation.create
+        ~completion_contract:(Some completion_contract)
         ~input
         ~request
         ~implementation_revision:(EC.fingerprint prepared)

@@ -372,6 +372,7 @@ type _ request =
       Agent_protocol.Id.Operation.t * Notification_delivery.t
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Deliver_idle_notifications : Notification_delivery.idle -> bool request
+  | Admit_standalone_delivery : Standalone_delivery.t -> unit request
   | Consume_initial_notifications :
       Agent_protocol.Id.Operation.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
@@ -1184,8 +1185,32 @@ let commit_extensions_internal t generation expected_revision changes =
       List.map changes ~f:(function
         | Extension_change.Invocation value -> Ok (Session_delta.Invocation_changed value)
         | Subscription value -> Ok (Session_delta.Subscription_changed value)
-        | Delivery value -> Ok (Session_delta.Delivery_changed value)
+        | Delivery value ->
+          (match value.completion_projection with
+           | Some _
+             when not
+                    (List.exists t.state.deliveries ~f:(fun old ->
+                       Agent_protocol.Id.Delivery.equal old.context.id value.context.id))
+             ->
+             Error
+               (error
+                  Permission_denied
+                  "standalone delivery requires checked adapter admission")
+           | _ -> Ok (Session_delta.Delivery_changed value))
         | Publish (value, entry) ->
+          let%bind () =
+            match value.completion_projection with
+            | Some _
+              when not
+                     (List.exists t.state.deliveries ~f:(fun old ->
+                        Agent_protocol.Id.Delivery.equal old.context.id value.context.id))
+              ->
+              Error
+                (error
+                   Permission_denied
+                   "standalone delivery requires checked adapter admission")
+            | _ -> Ok ()
+          in
           let%map () = Notification_history.validate ~delivery:value entry in
           Session_delta.Delivery_committed (value, entry)
         | Moderator_state value -> Ok (Session_delta.Moderator_changed value)
@@ -4046,6 +4071,21 @@ let consume_deferred t operation_id =
   let%bind decoded = History_codec.all_of_protocol entries in
   let%map _ = adopt_deferred t in
   decoded
+;;
+
+let admit_standalone_delivery_internal t plan =
+  let open Result.Let_syntax in
+  let%bind () =
+    Standalone_delivery.revalidate
+      ~state:t.state
+      ~staged:(Staged_notifications.values t.staged_notifications)
+      ~limits:t.services.notification_limits
+      plan
+  in
+  let%map _ =
+    transition t ~delta:(Session_delta.Delivery_changed plan.delivery) ~payloads:[]
+  in
+  ()
 ;;
 
 let validate_notification_plan t (plan : Notification_delivery.t) =
@@ -8521,6 +8561,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Consume_notifications (operation_id, plan) ->
     consume_notifications_internal t operation_id plan
   | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
+  | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
   | Consume_initial_notifications (operation_id, proposal) ->
     consume_notifications_internal
       ~wakes:proposal.wakes
@@ -8904,6 +8945,10 @@ let consume_notifications t ~operation_id plan =
 ;;
 
 let deliver_idle_notifications t plan = call t (Deliver_idle_notifications plan)
+
+let admit_standalone_delivery t plan =
+  Eio.Cancel.protect (fun () -> call t (Admit_standalone_delivery plan))
+;;
 
 let consume_initial_notifications t ~operation_id plan =
   call t (Consume_initial_notifications (operation_id, plan))

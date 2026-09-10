@@ -59,10 +59,18 @@ type t = private
     (** Envelope4: immutable ordered configuration pins for the publisher's exact
         tool ceiling. None is historical/untracked, not authority to use the whole
         current registry. Some [] is an explicitly empty ceiling. *)
+  ; completion_projection : Completion_projection.t option [@sexp.option]
+    (** Envelope5: immutable original-result evidence for a standalone adapter.
+        The host validates the contract and actual job before admission. *)
   }
 [@@deriving equal, sexp]
 
-val create : ?disclosure_pins:(string * string) list -> context -> (t, Error.t) result
+val create
+  :  ?disclosure_pins:(string * string) list
+  -> ?completion_projection:Completion_projection.t
+  -> context
+  -> (t, Error.t) result
+
 val validate : t -> (unit, Error.t) result
 
 (** New execution services opt into durable wake tracking with [track_wake:true].

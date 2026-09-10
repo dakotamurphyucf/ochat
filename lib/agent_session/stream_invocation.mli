@@ -37,7 +37,8 @@ val parse_input
   -> (Jsonaf.t, string) result
 
 val create
-  :  input:Operation_worker.Input.t
+  :  completion_contract:Agent_protocol.Completion_contract.t option
+  -> input:Operation_worker.Input.t
   -> request:Chat_response.In_memory_stream.Tool_dispatch.request
   -> implementation_revision:string
   -> capability_fingerprint:string

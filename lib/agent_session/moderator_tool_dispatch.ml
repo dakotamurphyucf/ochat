@@ -65,6 +65,7 @@ let prepare_request
   Stream_invocation.prepare cache ~capabilities request ~create:(fun request ->
     let value = parse_input ~kind:request.kind ~payload:request.payload in
     Stream_invocation.create
+      ~completion_contract:None
       ~input
       ~request
       ~implementation_revision:(EC.fingerprint prepared)

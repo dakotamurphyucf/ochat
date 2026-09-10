@@ -4,7 +4,7 @@ open Fixtures
 let%expect_test "standalone handlers retain owned native calls and canonical outcomes" =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
-  let module EC = Chat_response.Extension_compiler in
+  let module Managed = Chat_response.Managed_tool_registry in
   let module C = Chat_response.Tool_capability in
   List.iter
     [ `Success
@@ -127,14 +127,16 @@ entrypoint="run" input_schema="input.json" output_schema="output.json">|}
           let elements =
             Prompt.Chat_markdown.parse_chat_inputs ~dir ~source_loader:loader source
           in
-          let definition =
-            EC.prepare_definition_in_domain ~env ~capabilities:!registry elements
+          let managed =
+            Managed.prepare ~env ~owner:"fixture" ~capabilities:!registry elements
             |> Result.map_error ~f:(fun errors ->
               String.concat
                 ~sep:"; "
                 (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string))
             |> Result.ok_or_failwith
           in
+          registry := Managed.capabilities managed;
+          let definition = Managed.definition managed in
           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
             let actor = Eio.Promise.await actor_ready in
             let script_tools =

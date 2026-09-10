@@ -50,6 +50,7 @@ type t =
   ; status : status
   ; wake_disposition : wake_disposition option [@sexp.option]
   ; disclosure_pins : (string * string) list option [@sexp.option]
+  ; completion_projection : Completion_projection.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -180,6 +181,22 @@ let validate t =
   let%bind () = Completion.validate c.completion in
   let%bind () = optional_validate t.disclosure_pins validate_pins in
   let%bind () =
+    match t.completion_projection with
+    | None -> Ok ()
+    | Some projection ->
+      let%bind () = Completion_projection.validate projection in
+      (match c.source, c.ownership, c.invocation_id, c.work, t.disclosure_pins with
+       | Job_adapter, None, Some _, Some (Invocation.Job _), Some _ ->
+         (match projection.rejected, c.completion with
+          | false, _ -> Ok ()
+          | true, Completion.Failed error
+            when Invocation.equal_tool_error error Completion_projection.rejection ->
+            Ok ()
+          | true, _ ->
+            invalid "rejected completion projection must retain its bounded error")
+       | _ -> invalid "completion projection requires a pinned standalone job adapter")
+  in
+  let%bind () =
     match c.ownership, c.source with
     | None, _ -> Ok ()
     | Some ownership, Moderator ->
@@ -212,9 +229,15 @@ let validate t =
       else Ok ())
 ;;
 
-let create ?disclosure_pins context =
+let create ?disclosure_pins ?completion_projection context =
   let t =
-    { context; attempt = 1; status = Pending; wake_disposition = None; disclosure_pins }
+    { context
+    ; attempt = 1
+    ; status = Pending
+    ; wake_disposition = None
+    ; disclosure_pins
+    ; completion_projection
+    }
   in
   Result.map (validate t) ~f:(fun () -> t)
 ;;
@@ -293,6 +316,11 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     if
       (not (equal_context previous.context next.context))
+      || (not
+            (Option.equal
+               Completion_projection.equal
+               previous.completion_projection
+               next.completion_projection))
       || not
            (Option.equal
               (List.equal (Tuple2.equal ~eq1:String.equal ~eq2:String.equal))
@@ -396,7 +424,7 @@ let wake_disposition_of_json json =
   | _ -> invalid "unknown notification wake disposition"
 ;;
 
-let to_json t =
+let to_json_body t =
   let c = t.context in
   let body =
     `Object
@@ -440,7 +468,18 @@ let to_json t =
        @ optional "ownership" ownership ownership_to_json)
 ;;
 
-let of_json json =
+let to_json t =
+  match t.completion_projection with
+  | None -> to_json_body t
+  | Some projection ->
+    `Object
+      [ "schema_version", `Number "5"
+      ; "delivery", to_json_body t
+      ; "completion_projection", Completion_projection.to_json projection
+      ]
+;;
+
+let of_json_body json =
   let open Result.Let_syntax in
   let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:136 json in
   let%bind fields = Json_codec.fields json in
@@ -543,7 +582,40 @@ let of_json json =
     ; ownership
     }
   in
-  let t = { context; attempt; status; wake_disposition; disclosure_pins } in
+  let t =
+    { context
+    ; attempt
+    ; status
+    ; wake_disposition
+    ; disclosure_pins
+    ; completion_projection = None
+    }
+  in
   let%map () = validate t in
   t
+;;
+
+let of_json json =
+  let open Result.Let_syntax in
+  let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:138 json in
+  let%bind fields = Json_codec.fields json in
+  let%bind version =
+    Json_codec.required_as
+      fields
+      "schema_version"
+      (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+  in
+  match version with
+  | 5 ->
+    let%bind () =
+      closed fields [ "schema_version"; "delivery"; "completion_projection" ]
+    in
+    let%bind value = Json_codec.required_as fields "delivery" of_json_body in
+    let%bind projection =
+      Json_codec.required_as fields "completion_projection" Completion_projection.of_json
+    in
+    let value = { value with completion_projection = Some projection } in
+    let%map () = validate value in
+    value
+  | _ -> of_json_body json
 ;;

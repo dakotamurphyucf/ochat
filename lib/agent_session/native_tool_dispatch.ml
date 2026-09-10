@@ -58,6 +58,7 @@ let create
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
       Stream_invocation.create
+        ~completion_contract:None
         ~input
         ~request
         ~implementation_revision:reference.C.implementation_revision

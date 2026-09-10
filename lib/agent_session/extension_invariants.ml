@@ -260,7 +260,18 @@ let validate
                 work
             in
             let%bind result = completion_for_work ~jobs ~subscriptions work in
-            let%bind matches = P.Stored_completion.matches result c.completion in
+            let%bind matches =
+              match d.completion_projection, c.invocation_id, work with
+              | Some _, Some id, Job job_id ->
+                let%bind invocation = invocation invocations id in
+                let%bind job = job jobs job_id in
+                let%map () =
+                  Standalone_completion_contract.validate_projection ~invocation ~job d
+                in
+                true
+              | Some _, _, _ -> invalid "standalone completion projection has no owner"
+              | None, _, _ -> P.Stored_completion.matches result c.completion
+            in
             if not matches
             then invalid "delivery result differs from its terminal work"
             else if

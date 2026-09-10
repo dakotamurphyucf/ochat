@@ -1761,6 +1761,40 @@ the original result and one failed-event receipt remain. The failed source is no
 automatically replayed after new input or reload; it requires explicit reconciliation.
 This also prevents repeating shell effects performed before the handler failed.
 
+### Standalone completion contracts and admission
+
+Root standalone tool calls now retain an immutable `Completion_contract` with
+their canonical invocation (invocation schema11). It captures the original
+completion schema, output byte/depth bounds, publisher permission fingerprint,
+and exact selected dependency fingerprints. Native and moderator invocations
+omit this field. Capturing it does not by itself request a notification.
+
+`Standalone_completion_contract` rebinds these stable permission fingerprints
+after runtime reload; it does not rely on the previous process's live capability
+IDs. Removing or changing the publisher or a selected dependency denies rebinding.
+A wider current registry cannot expand the original selection.
+
+The internal `Standalone_delivery.prepare` path requires a real, published
+`Pending(Job id, acknowledgement)` invocation and that invocation's owned terminal
+job. It checks current authority and the exact materialized result before applying
+the original completion policy. A rejected result projects only a fixed
+`background.invalid_completion` error, without the rejected business data. The
+original job result remains unchanged.
+
+Delivery envelope5 records an immutable `Completion_projection`: the job attempt,
+original contract hash, original stored-result hash and rejection verdict. Existing
+unprojected deliveries still require exact agreement with their terminal work.
+Accepted projections additionally satisfy the original schema and output bounds.
+Replay recomputes inline rejections; artifact rejections bind the original storage
+descriptor whose content was verified at admission. Replay does not read files.
+
+The actor's dedicated admission checks the private proposal's revision, ownership,
+acknowledgement and shared notification quotas before saving an intent. A generic
+extension transaction cannot introduce a projected delivery. Admission can retain
+the result while stopped and inserts no history or wake. Automatic source-free
+scheduling, safe-point publication, wake recovery and their end-to-end qualification
+remain under implementation; this internal API does not enable those behaviors.
+
 ### Artifact-backed terminal results
 
 `Agent_store.Job_result_store` stores an already validated completion in a

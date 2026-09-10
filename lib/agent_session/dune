@@ -43,6 +43,8 @@
   moderator_tool_dispatch
   managed_moderator_dispatch
   standalone_tool_dispatch
+  standalone_completion_contract
+  standalone_delivery
   one_off_execution
   background_execution
   run_chatml_tool
