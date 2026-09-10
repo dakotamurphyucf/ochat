@@ -1585,7 +1585,15 @@ beneath an owned root. One collection attempt shares entry and byte budgets; eac
 file has its own ceiling. Linked paths, parent traversal, file growth and exhausted
 budgets fail the attempt. Snapshot, journal-segment and archive decoders can consume
 these already bounded bytes while preserving their existing integrity checks.
-These helpers do not yet establish a complete reference proof or delete artifacts.
+`Retained_history.scan` now combines current state, all retained snapshots and
+journal segments, and archived states. It checks snapshot pointers and fallback
+anchors, journal continuity and the live checkpoint, and archive identities and
+digests. All fallback snapshots must recover the same journal head. It scans decoded
+values as well as raw bytes so equivalent escaped ID spellings remain protected.
+Corruption, incomplete records, missing files or budget exhaustion return an error
+without a partial reference set. Replay buffers, cached command responses and
+blob/export consumers still need to be combined with this historical scan before
+it becomes a complete deletion decision. No automatic artifact deletion is installed.
 
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target

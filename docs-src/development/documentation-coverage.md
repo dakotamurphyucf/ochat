@@ -249,6 +249,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/queued_moderator_event.mli` | [contract](../../lib/agent_session/queued_moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/quota_key.mli` | [contract](../../lib/agent_session/quota_key.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/quota_manager.mli` | [contract](../../lib/agent_session/quota_manager.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/retained_history.mli` | [contract](../../lib/agent_session/retained_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/run_chatml_tool.mli` | [contract](../../lib/agent_session/run_chatml_tool.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_builder.mli` | [contract](../../lib/agent_session/runtime_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_paths.mli` | [contract](../../lib/agent_session/runtime_paths.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

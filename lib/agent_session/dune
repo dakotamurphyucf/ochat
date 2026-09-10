@@ -59,6 +59,7 @@
   session_actor
   memory_backend
   session_persistence
+  retained_history
   quota_key
   quota_manager
   start_queue)

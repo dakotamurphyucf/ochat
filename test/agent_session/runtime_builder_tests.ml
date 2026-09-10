@@ -667,6 +667,40 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     | _ -> None)
                   |> List.sort ~compare:String.compare
                 in
+                let published =
+                  match mode with
+                  | `One_off_end ->
+                    (* Concurrent calls can observe the halt during authorization
+                       or inside ChatML. Require both calls to fail, with at least
+                       one reaching the script that triggers the halt. *)
+                    let roots =
+                      List.filter state.invocations ~f:(fun invocation ->
+                        Agent_protocol.Invocation.equal_origin
+                          invocation.context.origin
+                          Model)
+                    in
+                    [%test_eq: int] 2 (List.length roots);
+                    assert (
+                      List.exists roots ~f:(fun invocation ->
+                        match invocation.status with
+                        | Published (Fail { code = "chatml.execution_failed"; _ }) -> true
+                        | _ -> false));
+                    List.map roots ~f:(fun invocation ->
+                      match invocation.status with
+                      | Published
+                          (Fail
+                             { code =
+                                 ( "chatml.execution_failed"
+                                 | "invocation.permission_denied" )
+                             ; _
+                             }) -> "halted"
+                      | status ->
+                        raise_s
+                          [%sexp
+                            "unexpected concurrent halt outcome"
+                          , (status : Agent_protocol.Invocation.status)])
+                  | _ -> published
+                in
                 let failures =
                   Agent_session.Memory_backend.events_after backend 0L
                   |> protocol_ok
@@ -787,8 +821,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
      (policy_evaluations 0) (state 12) (published (1 1)) (operation_failed false)
      (observed 3))
     ((mode One_off_end) (provider_calls 1) (authorized_native_calls 3)
-     (policy_evaluations 0) (state 10)
-     (published (chatml.execution_failed chatml.execution_failed))
+     (policy_evaluations 0) (state 10) (published (halted halted))
      (operation_failed false) (observed 1))
     ((mode One_off_recursive) (provider_calls 2) (authorized_native_calls 7)
      (policy_evaluations 0) (state 14) (published (1 1)) (operation_failed false)
