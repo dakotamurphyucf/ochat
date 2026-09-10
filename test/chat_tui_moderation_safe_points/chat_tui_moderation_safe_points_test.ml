@@ -897,7 +897,7 @@ let%expect_test "submit while streaming queues a deferred safe-point note" =
     pump_until (fun () -> App_runtime.has_deferred_user_notes runtime);
     print_messages (Chat_tui.Model.messages model);
     let safe_point_input = App_runtime.safe_point_input_source runtime in
-    let entries = safe_point_input.consume_entries () in
+    let entries = (safe_point_input.consume_entries ()).entries in
     List.iter entries ~f:(fun note ->
       print_endline (App_runtime.render_deferred_user_note { entry = note }));
     print_endline

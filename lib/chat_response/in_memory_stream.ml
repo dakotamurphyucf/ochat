@@ -91,8 +91,31 @@ type tool_completion =
   | Custom_done of string
 
 module Safe_point_input = struct
+  type batch =
+    { entries : History_entry.t list
+    ; user_input : bool
+    ; request_turn : bool
+    }
+
+  let empty = { entries = []; user_input = false; request_turn = false }
+
+  let user_entries entries =
+    { entries; user_input = not (List.is_empty entries); request_turn = false }
+  ;;
+
+  let notification_entries ~request_turn entries =
+    { entries; user_input = false; request_turn }
+  ;;
+
+  let append first second =
+    { entries = first.entries @ second.entries
+    ; user_input = first.user_input || second.user_input
+    ; request_turn = first.request_turn || second.request_turn
+    }
+  ;;
+
   type t =
-    { consume_entries : unit -> History_entry.t list
+    { consume_entries : unit -> batch
     ; consume_compatibility_text : unit -> string option
     }
 end
@@ -538,18 +561,18 @@ let append_safe_point_input ~(safe_point : safe_point) ~inputs ~safe_point_input
 ;;
 
 let consume_safe_point_entries ~(safe_point : safe_point) = function
-  | None -> []
+  | None -> Safe_point_input.empty
   | Some (safe_point_input : Safe_point_input.t) ->
-    let entries = safe_point_input.consume_entries () in
-    if not (List.is_empty entries)
+    let batch = safe_point_input.consume_entries () in
+    if not (List.is_empty batch.entries)
     then
       Log.emit
         `Debug
         (Printf.sprintf
            "Consumed %d deferred canonical entries at %s"
-           (List.length entries)
+           (List.length batch.entries)
            (string_of_safe_point safe_point));
-    entries
+    batch
 ;;
 
 let now_ms (env : Eio_unix.Stdenv.base) : int =
@@ -557,16 +580,27 @@ let now_ms (env : Eio_unix.Stdenv.base) : int =
 ;;
 
 let append_deferred_entries (c : ctx) ~(history : History_entry.t list) entries =
-  List.fold entries ~init:history ~f:(fun history entry ->
-    let history = history @ [ entry ] in
-    handle_item_appended_entries
-      ~moderator:c.moderator
-      ~on_runtime_request:c.on_runtime_request
-      ~available_tools:c.tools
-      ~now_ms:(now_ms c.env)
-      ~history
-    |> Result.ok_or_failwith;
-    history)
+  let requests = ref [] in
+  let on_runtime_request request =
+    requests := request :: !requests;
+    c.on_runtime_request request
+  in
+  let history =
+    List.fold entries ~init:history ~f:(fun history entry ->
+      let history = history @ [ entry ] in
+      (match Runtime_semantics.should_end_session !requests with
+       | Some _ -> ()
+       | None ->
+         handle_item_appended_entries
+           ~moderator:c.moderator
+           ~on_runtime_request
+           ~available_tools:c.tools
+           ~now_ms:(now_ms c.env)
+           ~history
+         |> Result.ok_or_failwith);
+      history)
+  in
+  history, List.rev !requests
 ;;
 
 let prepare_turn_request
@@ -1846,17 +1880,29 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       if Option.is_some (Runtime_semantics.should_end_session tool_requests)
       then hist
       else (
-        let deferred_entries =
+        let deferred =
           consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
         in
-        let hist = append_deferred_entries c ~history:hist deferred_entries in
+        let hist, appended_requests =
+          append_deferred_entries c ~history:hist deferred.entries
+        in
         let finish_requests =
-          finish_turn_entries
-            ~moderator:c.moderator
-            ~available_tools:c.tools
-            ~now_ms:(now_ms c.env)
-            ~history:hist
-          |> Result.ok_or_failwith
+          match Runtime_semantics.should_end_session appended_requests with
+          | Some _ -> []
+          | None ->
+            finish_turn_entries
+              ~moderator:c.moderator
+              ~available_tools:c.tools
+              ~now_ms:(now_ms c.env)
+              ~history:hist
+            |> Result.ok_or_failwith
+        in
+        let finish_requests =
+          match
+            deferred.request_turn, Runtime_semantics.should_end_session appended_requests
+          with
+          | true, None -> Runtime_semantics.collapse (Request_turn :: finish_requests)
+          | _ -> finish_requests
         in
         List.iter finish_requests ~f:c.on_runtime_request;
         let policy =
@@ -1867,8 +1913,8 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
         let decision =
           Runtime_semantics.decide_after_turn_end
             ~policy
-            ~tool_followup:(st.run_again || not (List.is_empty deferred_entries))
-            (tool_requests @ finish_requests)
+            ~tool_followup:(st.run_again || deferred.user_input)
+            (tool_requests @ appended_requests @ finish_requests)
         in
         match decision.end_session_reason with
         | Some _ -> hist
@@ -1876,7 +1922,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
           (match decision.continue with
            | `Stop -> hist
            | `Continue ->
-             if st.run_again || not (List.is_empty deferred_entries)
+             if st.run_again || deferred.user_input
              then turn_with_budget c hist ~request_turn_budget:0
              else (
                let next_budget =

@@ -908,7 +908,10 @@ let render_deferred_user_note ({ entry } : deferred_user_note) =
 let safe_point_input_source t =
   Stream_moderator.Safe_point_input.
     { consume_entries =
-        (fun () -> dequeue_deferred_user_notes t |> List.map ~f:(fun note -> note.entry))
+        (fun () ->
+          dequeue_deferred_user_notes t
+          |> List.map ~f:(fun note -> note.entry)
+          |> user_entries)
     ; consume_compatibility_text = (fun () -> None)
     }
 ;;

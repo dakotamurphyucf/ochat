@@ -1,4 +1,5 @@
 open Core
+open Fixtures
 module CM = Prompt.Chat_markdown
 module Builtin_surface = Chatml.Chatml_builtin_surface
 module Lang = Chatml.Chatml_lang
@@ -11,34 +12,6 @@ module Stream = Chat_response.In_memory_stream
 let ok_or_fail = function
   | Ok value -> value
   | Error msg -> failwith msg
-;;
-
-let input_text text = Res.Input_message.Text { text; _type = "input_text" }
-
-let output_text text =
-  { Res.Output_message.annotations = []; text; _type = "output_text" }
-;;
-
-let stream_function_call ~output_index ~item_id ~call_id ~arguments =
-  ( Res.Response_stream.Output_item_added
-      { item =
-          Function_call
-            { name = "echo"
-            ; arguments = ""
-            ; call_id
-            ; _type = "function_call"
-            ; id = Some item_id
-            ; status = Some "in_progress"
-            }
-      ; output_index
-      ; type_ = "response.output_item.added"
-      }
-  , Res.Response_stream.Function_call_arguments_done
-      { arguments
-      ; item_id
-      ; output_index
-      ; type_ = "response.function_call_arguments.done"
-      } )
 ;;
 
 let stream_custom_call ~output_index ~item_id ~call_id ~input =
@@ -81,25 +54,6 @@ let stream_message ~output_index ~item_id text =
   ; Res.Response_stream.Output_item_done
       { item; output_index; type_ = "response.output_item.done" }
   ]
-;;
-
-let input_entry allocator =
-  History_entry.create
-    ~allocator
-    (Res.Item.Input_message
-       { role = User; content = [ input_text "hello" ]; _type = "message" })
-  |> Result.ok_or_failwith
-;;
-
-let entry_kind entry =
-  match History_entry.item entry with
-  | Res.Item.Input_message _ -> "input"
-  | Function_call _ -> "function-call"
-  | Custom_tool_call _ -> "custom-call"
-  | Function_call_output _ -> "function-output"
-  | Custom_tool_call_output _ -> "custom-output"
-  | Output_message _ -> "message"
-  | _ -> "other"
 ;;
 
 let run_entry_stream
@@ -170,7 +124,7 @@ let%expect_test "fork cannot publish child history or consume the root deferred 
             Int.incr consumes;
             let entries = !pending in
             pending := [];
-            entries)
+            Stream.Safe_point_input.user_entries entries)
       ; consume_compatibility_text = (fun () -> None)
       }
     in
@@ -258,29 +212,6 @@ let show_pending_ui_request = function
     "ask_choice " ^ prompt ^ " [" ^ String.concat ~sep:", " (Array.to_list choices) ^ "]"
 ;;
 
-let moderator_of_source
-      ?(surface = Chatml.Chatml_builtin_surface.moderator_surface)
-      ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
-      source
-  =
-  let script =
-    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
-  in
-  let artifact =
-    ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script)
-    |> snd
-  in
-  let capabilities = Chat_response.Moderation.Capabilities.default in
-  let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
-  Stream.
-    { manager
-    ; session_id = "session-1"
-    ; session_meta = `Null
-    ; runtime_policy
-    ; event_handlers = None
-    }
-;;
-
 let moderator () = moderator_of_source moderator_source
 
 let runtime_policy_with_budget budget =
@@ -294,7 +225,7 @@ let print_runtime_requests requests =
 let one_shot_safe_point_input text =
   let remaining = ref (Some text) in
   Stream.Safe_point_input.
-    { consume_entries = (fun () -> [])
+    { consume_entries = (fun () -> empty)
     ; consume_compatibility_text =
         (fun () ->
           let next = !remaining in
@@ -708,7 +639,7 @@ let%expect_test "turn_end leaves deferred safe-point input for the next turn sta
   let remaining = ref [ "later" ] in
   let safe_point_input =
     Stream.Safe_point_input.
-      { consume_entries = (fun () -> [])
+      { consume_entries = (fun () -> empty)
       ; consume_compatibility_text =
           (fun () ->
             match !remaining with
@@ -1432,7 +1363,7 @@ let%expect_test "queued user entry follows tool output in the next request" =
           (fun () ->
             let entries = !pending in
             pending := [];
-            entries)
+            user_entries entries)
       ; consume_compatibility_text = (fun () -> None)
       }
   in

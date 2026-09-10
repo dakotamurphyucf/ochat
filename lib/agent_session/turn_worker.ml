@@ -192,7 +192,9 @@ let safe_point_input capabilities =
   Chat_response.In_memory_stream.Safe_point_input.
     { consume_entries =
         (fun () ->
-          capabilities.Operation_worker.Capabilities.consume_deferred () |> require_ok)
+          capabilities.Operation_worker.Capabilities.consume_deferred ()
+          |> require_ok
+          |> user_entries)
     ; consume_compatibility_text = (fun () -> None)
     }
 ;;

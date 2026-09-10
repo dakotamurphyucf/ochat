@@ -31,8 +31,29 @@ open! Core
     tool progress, but only the completed tool result enters root history. *)
 
 module Safe_point_input : sig
+  (** Inserted data and continuation requests are independent. Only genuine
+      deferred user input follows the user-driven continuation path; notification
+      wake requests must use the normal runtime policy and self-trigger budget. *)
+  type batch = private
+    { entries : History_entry.t list
+    ; user_input : bool
+    ; request_turn : bool
+    }
+
+  val empty : batch
+  val user_entries : History_entry.t list -> batch
+
+  (** The host supplies entries committed at this safe point and owns their
+      disclosure, provenance and deduplication. The driver does not commit them
+      again. True requests a continuation under policy; it is not acceptance of
+      a durable wake receipt. Empty entries can request a wake for data already
+      present in history. Idle scheduling and receipt disposition belong to the host. *)
+  val notification_entries : request_turn:bool -> History_entry.t list -> batch
+
+  val append : batch -> batch -> batch
+
   type t =
-    { consume_entries : unit -> History_entry.t list
+    { consume_entries : unit -> batch
     ; consume_compatibility_text : unit -> string option
     }
 end
@@ -184,8 +205,9 @@ val resume_ui_request
        turn-start boundary has decided the turn may proceed.}}
 
     [consume_entries] is used by the entry-native streaming loop after tool
-    outputs complete; those entries are canonical and are sent on the next
-    provider turn. [consume_compatibility_text] remains a request-only adapter
+    outputs complete; its batch separates canonical entries from user continuation
+    and notification wake requests. Quiet notification data does not itself start
+    another provider turn. [consume_compatibility_text] remains a request-only adapter
     for embedders using this raw helper.
 
     Without a moderator, [history] is forwarded unchanged unless

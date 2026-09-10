@@ -2144,6 +2144,16 @@ or reopening a retained receipt, or using the history-insertion delta to settle 
 wake, is rejected. These records support the remaining automatic delivery and
 budget-aware scheduling integration; that integration is not yet enabled.
 
+The shared turn driver now accepts batches that separate notification data from
+user-driven continuation. Quiet data remains in history without requesting a model
+call; requested notification wakes use the normal honor-request-turn policy and
+consecutive self-trigger budget. Sibling tool outputs finish before the batch is
+consumed. Moderator end-session requests stop continuation while retaining the
+committed data. The existing daemon and local TUI user queues use the user-input
+adapter. Automatic notification production, current disclosure checks, idle/rate
+policy and durable wake settlement still need host integration. See
+[safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
+
 ## Recovery classifications
 
 These classifications define the execution-service recovery work. Record replay
