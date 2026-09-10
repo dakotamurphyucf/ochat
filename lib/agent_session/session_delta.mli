@@ -40,6 +40,7 @@ type t =
   (** Host cancellation of an existing source-owned subscription, including
       historical generations. Cannot admit new work or rewrite terminal results. *)
   | Delivery_changed of Agent_protocol.Delivery.t
+  | Ingress_changed of External_ingress.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
   (** Settle an existing committed wake without reinserting history. Acceptance

@@ -1556,6 +1556,11 @@ let commit_administration t attachment_id expected_revision kind candidate =
                Automatic_turn_budget.equal
                candidate.automatic_turn_budget
                t.state.automatic_turn_budget))
+      || (not
+            (List.equal
+               External_ingress.equal
+               candidate.ingress_registrations
+               t.state.ingress_registrations))
       || Int64.(
            candidate.conversation.next_history_sequence
            < t.state.conversation.next_history_sequence)

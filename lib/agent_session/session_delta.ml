@@ -27,6 +27,7 @@ type t =
   | Subscription_expired of Agent_protocol.Subscription.t
   | Subscription_cancelled of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
+  | Ingress_changed of External_ingress.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Delivery_wake_changed of Agent_protocol.Delivery.t
   | Moderator_changed of Jsonaf.t option
@@ -446,6 +447,40 @@ let rec apply state = function
           subscription
           state.subscriptions
           ~id_of:(fun s -> s.Agent_protocol.Subscription.context.id)
+    }
+  | Ingress_changed registration ->
+    let open Result.Let_syntax in
+    let context = registration.External_ingress.context in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        context.session_id
+        context.generation
+    in
+    let%bind subscription =
+      List.find state.subscriptions ~f:(fun value ->
+        Agent_protocol.Id.Subscription.equal value.context.id context.subscription_id)
+      |> Result.of_option
+           ~error:
+             (Agent_protocol.Error.invalid_request
+                "missing external ingress subscription")
+    in
+    let previous =
+      List.find state.ingress_registrations ~f:(fun value ->
+        Agent_protocol.Id.Capability.equal value.context.id context.id)
+    in
+    let%map () =
+      External_ingress.validate_transition ~subscription ~previous registration
+    in
+    { state with
+      ingress_registrations =
+        replace_by
+          Agent_protocol.Id.Capability.compare
+          context.id
+          registration
+          state.ingress_registrations
+          ~id_of:(fun value -> value.External_ingress.context.id)
     }
   | Delivery_changed delivery ->
     let open Result.Let_syntax in

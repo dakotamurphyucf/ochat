@@ -117,6 +117,10 @@ module Capability = Make (struct
     let prefix = "cap"
   end)
 
+module Ingress_event = Make (struct
+    let prefix = "ige"
+  end)
+
 module Schedule = Make (struct
     let prefix = "sch"
   end)

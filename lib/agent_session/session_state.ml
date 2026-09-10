@@ -102,6 +102,7 @@ type t =
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
+  ; ingress_registrations : External_ingress.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
@@ -117,6 +118,14 @@ let current_schema_version = 8
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if not (List.is_empty t.ingress_registrations)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"external ingress registrations require session schema 8"
+         ~retryable:false
+         ())
   else if
     List.exists t.permissions ~f:(fun permission ->
       match permission.owner with
@@ -195,6 +204,7 @@ let create ~identity ~spec ~initial_history =
   ; moderator_executions = []
   ; subscriptions = []
   ; deliveries = []
+  ; ingress_registrations = []
   ; attachments = []
   ; moderator = None
   ; shell = Session.Shell_state.empty
@@ -331,6 +341,43 @@ let validate t =
         ~events:t.moderator_executions
         ~jobs:t.jobs
         subscription)
+  in
+  let%bind () =
+    let registrations = t.ingress_registrations in
+    let duplicate =
+      List.contains_dup registrations ~compare:(fun a b ->
+        Agent_protocol.Id.Capability.compare a.External_ingress.context.id b.context.id)
+      || List.contains_dup
+           (List.concat_map registrations ~f:(fun value ->
+              value.External_ingress.receipts))
+           ~compare:(fun a b -> Agent_protocol.Id.Ingress_event.compare a.id b.id)
+    in
+    match duplicate with
+    | true ->
+      Error (Agent_protocol.Error.invalid_request "duplicate external ingress identity")
+    | false ->
+      List.fold_result registrations ~init:() ~f:(fun () value ->
+        let%bind () = External_ingress.validate value in
+        let%bind () =
+          match
+            Agent_protocol.Id.Session.equal value.context.session_id t.identity.session_id
+            && value.context.generation <= t.identity.generation
+          with
+          | true -> Ok ()
+          | false ->
+            Error (Agent_protocol.Error.invalid_request "foreign external ingress owner")
+        in
+        let%bind subscription =
+          List.find t.subscriptions ~f:(fun subscription ->
+            Agent_protocol.Id.Subscription.equal
+              subscription.context.id
+              value.context.subscription_id)
+          |> Result.of_option
+               ~error:
+                 (Agent_protocol.Error.invalid_request
+                    "missing external ingress subscription")
+        in
+        External_ingress.validate_owner value subscription)
   in
   let%bind () =
     List.fold_result t.schedules ~init:() ~f:(fun () schedule ->

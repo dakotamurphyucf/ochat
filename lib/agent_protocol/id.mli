@@ -45,6 +45,7 @@ module Moderator_execution : S
 module Subscription : S
 module Delivery : S
 module Capability : S
+module Ingress_event : S
 module Schedule : S
 module Permission : S
 module Grant : S

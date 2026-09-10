@@ -11,8 +11,8 @@ The extensibility-v1 moderator compiler also defines `Subscription.create`,
 injected host transaction. The qualified daemon now binds the script service to
 actor staging for direct/managed moderator tools, ordinary/queued events and
 observation handlers. Host expiry and transactional timer adapters are implemented
-at that qualified scope; notification delivery is still being implemented. One-off and standalone tool surfaces do
-not include this module.
+at that qualified scope, along with notification publication and delivery. One-off
+and standalone tool surfaces do not include this module.
 
 `create(kind, lifetime_ms, wake_policy)` returns a task of subscription ID. The
 lifetime is `None` for the host default or `Some(positive_ms)`; wake policy is
@@ -2220,6 +2220,38 @@ lifecycle recovery and standalone local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 
 ## Recovery classifications
+
+### External data ingress foundation
+
+`Agent_session.External_ingress` defines admission and retained retry receipts for
+external data events. A registration binds a session/generation, moderator source,
+subscription epoch and lifetime, host-approved producer principal, exact
+`external.*` namespace, payload schema and size/rate/receipt limits. The registration
+ID is not a bearer credential. The host must authenticate the producer and supply
+current session/source identity; caller JSON cannot establish that authority.
+
+`prepare` validates bounded data using the non-executing tool-schema subset. A new
+retry key returns an immutable event receipt with an `ige_` ID and canonical payload
+digest. A repeated key and identical canonical data returns the original receipt
+without allocating another ID or consuming capacity. Changing the payload conflicts.
+Object member ordering does not change retry identity. Accepted timestamps retain
+rate history across restoration; clock rollback conservatively counts future
+receipts. Capacity exhaustion is an explicit rejection and does not evict results.
+
+Registrations and receipts have an optional session snapshot field and a closed
+`Ingress_changed` journal delta. The transition guard preserves bindings and prior
+receipts, rechecks admission for each appended event, and forbids unrevocation.
+Subscription epoch changes, terminalization, expiry or explicit revocation prevent
+further submissions. Older generations retain audit data but cannot mutate current
+state. Administrative candidates cannot discard the saved registration list.
+
+This is a storage/admission foundation. Actor registration transactions, atomic
+receipt-plus-queue insertion, authenticated ingress dispatch and the helper workflow
+are not installed yet. No CLI, public protocol method, model tool or listener is
+enabled by these records. An admission receipt does not mean a moderator handled
+the data or that a subscription/model turn completed.
+
+### Execution recovery
 
 These classifications define the execution-service recovery work. Record replay
 and local transaction deduplication are implemented; automatic reconciliation of

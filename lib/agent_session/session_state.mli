@@ -109,6 +109,7 @@ type t =
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
+  ; ingress_registrations : External_ingress.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
