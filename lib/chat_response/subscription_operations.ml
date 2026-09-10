@@ -17,6 +17,12 @@ type handlers =
       -> expected_epoch:int
       -> P.Completion.t
       -> (int * P.Subscription.t, string) result
+  ; arm :
+      id:Id.t
+      -> expected_epoch:int
+      -> timer_id:P.Id.Schedule.t option
+      -> job_id:P.Id.Job.t option
+      -> (int * P.Subscription.t, string) result
   ; rollback : int -> unit
   }
 
@@ -38,6 +44,9 @@ let dynamic_handlers current =
   ; finish =
       (fun ~id ~expected_epoch result ->
         active (fun h -> h.finish ~id ~expected_epoch result))
+  ; arm =
+      (fun ~id ~expected_epoch ~timer_id ~job_id ->
+        active (fun h -> h.arm ~id ~expected_epoch ~timer_id ~job_id))
   ; rollback =
       (fun receipt ->
         match current () with
@@ -63,11 +72,13 @@ let receipt (operation : L.eff) =
   | "Subscription.create", 4
   | ("Subscription.complete" | "Subscription.fail" | "Subscription.cancel"), 4 ->
     extract operation.args
+  | "Subscription.arm", 5 -> extract operation.args
   | ( ( "Subscription.create"
       | "Subscription.complete"
       | "Subscription.fail"
       | "Subscription.cancel" )
     , _ ) -> Error "invalid recorded subscription mutation"
+  | "Subscription.arm", _ -> Error "invalid recorded subscription mutation"
   | _ -> Ok None
 ;;
 
@@ -174,6 +185,23 @@ let install ?control ~handlers (config : R.runtime_config) =
     ; finish "Subscription.cancel" (function
         | L.VString reason -> Ok (P.Completion.Cancelled reason)
         | _ -> Error "Subscription.cancel: expected cancellation reason")
+    ; mutation "Subscription.arm" (function
+        | [ subscription; L.VInt expected_epoch; timer; job ] when expected_epoch >= 0 ->
+          let%bind id = id subscription in
+          let optional_id decode = function
+            | L.VVariant ("None", []) -> Ok None
+            | L.VVariant ("Some", [ L.VString value ]) ->
+              protocol (decode (`String value)) |> Result.map ~f:Option.some
+            | _ -> Error "Subscription.arm: expected optional work identity"
+          in
+          let%bind timer_id = optional_id P.Id.Schedule.of_json timer in
+          let%bind job_id = optional_id P.Id.Job.of_json job in
+          let%map ticket, result = handlers.arm ~id ~expected_epoch ~timer_id ~job_id in
+          ticket, V.import_json ?control (P.Subscription.to_json result)
+        | _ ->
+          Error
+            "Subscription.arm: expected subscription, epoch and optional timer/job \
+             identities")
     ]
   in
   { config with

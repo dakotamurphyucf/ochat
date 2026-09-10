@@ -38,6 +38,7 @@ let with_daemon
       ?settle
       ?after_turn
       ?(expected_requests = 2)
+      ?(expected_schedules = 0)
       ?(expect_moderator = false)
       ~sources
       ~calls
@@ -185,7 +186,7 @@ let with_daemon
               (match settle with
                | None -> assert (List.is_empty final.jobs)
                | Some _ -> ());
-              assert (List.is_empty final.schedules);
+              [%test_eq: int] expected_schedules (List.length final.schedules);
               List.iter final.invocations ~f:(fun invocation ->
                 assert (
                   Agent_protocol.Id.Session.equal invocation.context.session_id session.id);

@@ -279,8 +279,41 @@ let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
     let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     match t.runtime with
     | Some runtime ->
+      let%bind () =
+        match schedule.ownership with
+        | None -> Ok ()
+        | Some ownership ->
+          (match
+             Option.bind
+               runtime.moderator_manager
+               ~f:Chat_response.Moderator_manager.invocation_observer
+           with
+           | Some source
+             when Agent_protocol.Invocation.equal_observer source ownership.source ->
+             Ok ()
+           | _ ->
+             Error
+               (Agent_protocol.Error.create
+                  Permission_denied
+                  ~message:"timer belongs to a different moderator source"
+                  ~retryable:false
+                  ()))
+      in
+      let%bind payload =
+        match schedule.ownership with
+        | None -> Ok schedule.payload
+        | Some _ ->
+          let module V = Chatml.Chatml_value_codec in
+          let value =
+            Chatml.Chatml_lang.VVariant
+              ("Internal_event", [ V.jsonaf_to_value schedule.payload ])
+          in
+          V.Snapshot.of_value value
+          |> Result.map ~f:V.Snapshot.to_jsonaf
+          |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      in
       Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
-        runtime.enqueue_internal_event schedule.payload ~prepare:(fun ~before ~snapshot ->
+        runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
           Agent_session.Session_actor.complete_schedule
             ~expected:before
             ~expected_schedule:schedule

@@ -1150,9 +1150,44 @@ let extension_subscriptions t actor_ref =
             (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
                A.abort_subscription_mutation actor ~owner ~receipt)
              : (unit, Agent_protocol.Error.t) result))
+    ; get_job =
+        (fun owner id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_job actor ~owner ~id))
     }
   in
   Service.create ~now:(fun () -> now t) ~limits:t.limits.subscriptions ~host
+;;
+
+let extension_schedules actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_schedule_service in
+  let host : Service.host =
+    { create =
+        (fun owner source ~delay_ms ~payload ~misfire ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_schedule actor ~owner ~source ~delay_ms ~payload ~misfire))
+    ; stage =
+        (fun owner source ~previous ~next ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.stage_schedule_mutation actor ~owner ~source ~previous ~next))
+    ; get =
+        (fun owner source id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_schedule actor ~owner ~source ~id))
+    ; select =
+        (fun owner source receipts ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_schedule_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_schedule_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
 ;;
 
 let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
@@ -1197,6 +1232,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           Agent_session.Script_tool_calls.with_subscription_service
             tools
             (extension_subscriptions t actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_schedule_service
+            tools
+            (extension_schedules actor_ref)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_progress
             tools

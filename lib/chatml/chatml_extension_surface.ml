@@ -178,6 +178,24 @@ let wake_policy_ty =
   variant [ "Request_turn", S.TUnit; "Next_turn", S.TUnit; "No_wake", S.TUnit ]
 ;;
 
+let project_receipt tag (builtin : S.builtin) =
+  { builtin with
+    impl =
+      (fun args ->
+        match builtin.impl args with
+        | Chatml_lang.VTask task ->
+          let project =
+            Chatml_lang.VBuiltin
+              (function
+                | [ Chatml_lang.VVariant (actual, [ VInt _; value ]) ]
+                  when String.equal actual tag -> value
+                | _ -> failwith "invalid host mutation receipt")
+          in
+          Chatml_lang.VTask (TMap (task, project))
+        | _ -> assert false)
+  }
+;;
+
 let subscription_module : S.builtin_module =
   let operation name parameters result ~mutation =
     let builtin =
@@ -185,22 +203,7 @@ let subscription_module : S.builtin_module =
     in
     match mutation with
     | false -> builtin
-    | true ->
-      { builtin with
-        impl =
-          (fun args ->
-            match builtin.impl args with
-            | Chatml_lang.VTask task ->
-              let project =
-                Chatml_lang.VBuiltin
-                  (function
-                    | [ Chatml_lang.VVariant ("Subscription_receipt", [ VInt _; value ]) ]
-                      -> value
-                    | _ -> failwith "invalid host subscription receipt")
-              in
-              Chatml_lang.VTask (TMap (task, project))
-            | _ -> assert false)
-      }
+    | true -> project_receipt "Subscription_receipt" builtin
   in
   { name = "Subscription"
   ; exports =
@@ -213,6 +216,43 @@ let subscription_module : S.builtin_module =
       ; operation "complete" [ S.TString; S.TInt; S.json_ty ] S.json_ty ~mutation:true
       ; operation "fail" [ S.TString; S.TInt; tool_error_ty ] S.json_ty ~mutation:true
       ; operation "cancel" [ S.TString; S.TInt; S.TString ] S.json_ty ~mutation:true
+      ; operation
+          "arm"
+          [ S.TString; S.TInt; option S.TString; option S.TString ]
+          S.json_ty
+          ~mutation:true
+      ]
+  }
+;;
+
+let schedule_misfire_ty =
+  variant
+    [ "Deliver_once_immediately", S.TUnit; "Skip_if_expired", S.TUnit; "Fail", S.TUnit ]
+;;
+
+let schedule_module : S.builtin_module =
+  let operation name op parameters result ~mutation =
+    let builtin = task_builtin ~name ~op ~parameters ~result ~spawn:false in
+    match mutation with
+    | false -> builtin
+    | true -> project_receipt "Schedule_receipt" builtin
+  in
+  { name = "Schedule"
+  ; exports =
+      [ operation
+          "after_ms"
+          "Schedule.after_ms_json"
+          [ S.TInt; S.json_ty ]
+          S.TString
+          ~mutation:true
+      ; operation
+          "after_ms_with_policy"
+          "Schedule.after_ms_with_policy"
+          [ S.TInt; S.json_ty; schedule_misfire_ty ]
+          S.TString
+          ~mutation:true
+      ; operation "cancel" "Schedule.cancel" [ S.TString ] S.TUnit ~mutation:true
+      ; operation "get" "Schedule.get" [ S.TString ] S.json_ty ~mutation:false
       ]
   }
 ;;
@@ -278,14 +318,6 @@ let moderator_v1 =
                ~parameters:[ S.json_ty ]
                ~result:S.TUnit
                ~spawn:false)
-        | "Schedule" ->
-          Some
-            (task_builtin
-               ~name:"after_ms"
-               ~op:"Schedule.after_ms_json"
-               ~parameters:[ S.TInt; S.json_ty ]
-               ~result:S.TString
-               ~spawn:true)
         | _ -> None
       in
       Option.map replacement ~f:(fun replacement ->
@@ -297,12 +329,14 @@ let moderator_v1 =
   in
   Surface.merge
     { Surface.empty with
-      modules = subscription_module :: job_module :: invocation :: overrides
+      modules =
+        schedule_module :: subscription_module :: job_module :: invocation :: overrides
     ; type_aliases =
         tool_v1.type_aliases
         @ List.map
             [ "tool_invocation", invocation_event_ty
             ; "wake_policy", wake_policy_ty
+            ; "schedule_misfire", schedule_misfire_ty
             ; "completion", completion_ty
             ; "work_completion", work_completion_ty
             ; "moderator_event", moderator_event_ty

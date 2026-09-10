@@ -33,42 +33,56 @@ let drain_with_claim
     | _ ->
       let outcome = ref None in
       let%bind claimed =
-        claim (fun ~observing ~commit ~on_tool_call ~job_scope ~subscription_scope ->
-          let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
-          let subscriptions =
-            Option.map
-              subscription_scope
-              ~f:Script_subscription_service.moderator_transaction
-          in
-          M.handle_observation_entries
-            ?jobs
-            ?subscriptions
-            ?on_tool_call
-            ~retain_follow_up
-            manager
-            ~invocation:observing
-            ~history:(history ())
-            ~available_tools
-            ~session_meta
-            ~now_ms:
-              (P.Timestamp.to_time_ns (now ())
-               |> Time_ns.to_int_ns_since_epoch
-               |> fun n -> n / 1_000_000)
-            ~prepare_observation:(fun ~observed ~outcome:prepared ~snapshot ->
-              Ok
-                { M.persist =
-                    (fun () ->
-                      commit ~resolved:observed ~snapshot
-                      |> Result.map_error ~f:(fun e -> e.P.Error.message))
-                ; install = (fun () -> outcome := Some prepared)
-                })
-          |> Result.map ~f:(fun _ -> ())
-          |> Result.map_error ~f:(fun _ ->
-            P.Error.create
-              Invalid_state
-              ~message:"deferred tool observation failed"
-              ~retryable:false
-              ()))
+        claim
+          (fun
+              ~observing
+               ~commit
+               ~on_tool_call
+               ~job_scope
+               ~subscription_scope
+               ~schedule_scope
+             ->
+             let jobs =
+               Option.map job_scope ~f:Script_job_service.moderator_transaction
+             in
+             let subscriptions =
+               Option.map
+                 subscription_scope
+                 ~f:Script_subscription_service.moderator_transaction
+             in
+             let schedules =
+               Option.map schedule_scope ~f:Script_schedule_service.moderator_transaction
+             in
+             M.handle_observation_entries
+               ?jobs
+               ?subscriptions
+               ?schedules
+               ?on_tool_call
+               ~retain_follow_up
+               manager
+               ~invocation:observing
+               ~history:(history ())
+               ~available_tools
+               ~session_meta
+               ~now_ms:
+                 (P.Timestamp.to_time_ns (now ())
+                  |> Time_ns.to_int_ns_since_epoch
+                  |> fun n -> n / 1_000_000)
+               ~prepare_observation:(fun ~observed ~outcome:prepared ~snapshot ->
+                 Ok
+                   { M.persist =
+                       (fun () ->
+                         commit ~resolved:observed ~snapshot
+                         |> Result.map_error ~f:(fun e -> e.P.Error.message))
+                   ; install = (fun () -> outcome := Some prepared)
+                   })
+             |> Result.map ~f:(fun _ -> ())
+             |> Result.map_error ~f:(fun _ ->
+               P.Error.create
+                 Invalid_state
+                 ~message:"deferred tool observation failed"
+                 ~retryable:false
+                 ()))
       in
       (match claimed, !outcome with
        | false, None -> Ok { outcomes = List.rev outcomes; budget_exhausted = false }
@@ -95,13 +109,25 @@ let drain ?max_observations ?on_tool_call ~capabilities ~observer =
     capabilities.Operation_worker.Capabilities.with_next_moderator_observation
       ~observer
       (fun ~observing ~commit ->
-         handle ~observing ~commit ~on_tool_call ~job_scope:None ~subscription_scope:None))
+         handle
+           ~observing
+           ~commit
+           ~on_tool_call
+           ~job_scope:None
+           ~subscription_scope:None
+           ~schedule_scope:None))
 ;;
 
 let drain_idle ?max_observations ?on_tool_call ~claim =
   drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
     claim (fun ~observing ~commit ->
-      handle ~observing ~commit ~on_tool_call ~job_scope:None ~subscription_scope:None))
+      handle
+        ~observing
+        ~commit
+        ~on_tool_call
+        ~job_scope:None
+        ~subscription_scope:None
+        ~schedule_scope:None))
 ;;
 
 let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
@@ -120,7 +146,8 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
         ~originating:None
         ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
         ~error:failed
-        (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
+        (fun
+            ~jobs:job_scope ~subscriptions:subscription_scope ~schedules:schedule_scope ->
            Script_tool_calls.with_observation
              script_tools
              ~definition
@@ -132,7 +159,8 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
                   ~commit
                   ~on_tool_call:(Some on_tool_call)
                   ~job_scope
-                  ~subscription_scope))))
+                  ~subscription_scope
+                  ~schedule_scope))))
 ;;
 
 let drain_foreground_with_tools
@@ -153,7 +181,11 @@ let drain_foreground_with_tools
            ~originating:None
            ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
            ~error:failed
-           (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
+           (fun
+               ~jobs:job_scope
+                ~subscriptions:subscription_scope
+                ~schedules:schedule_scope
+              ->
               Script_tool_calls.with_observation
                 script_tools
                 ~definition
@@ -165,5 +197,6 @@ let drain_foreground_with_tools
                      ~commit
                      ~on_tool_call:(Some on_tool_call)
                      ~job_scope
-                     ~subscription_scope))))
+                     ~subscription_scope
+                     ~schedule_scope))))
 ;;

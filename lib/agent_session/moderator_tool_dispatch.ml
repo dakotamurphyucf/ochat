@@ -165,12 +165,15 @@ let dispatch
                   "The tool arguments do not satisfy its input schema.");
           Error "invalid tool arguments")
         else (
-          let handle ?on_tool_call ?job_scope ?subscription_scope () =
+          let handle ?on_tool_call ?job_scope ?subscription_scope ?schedule_scope () =
             let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
             let subscriptions =
               Option.map
                 subscription_scope
                 ~f:Script_subscription_service.moderator_transaction
+            in
+            let schedules =
+              Option.map schedule_scope ~f:Script_schedule_service.moderator_transaction
             in
             let validate_work =
               Script_tool_calls.validate_pending_work
@@ -181,6 +184,7 @@ let dispatch
             M.handle_invocation_entries
               ?jobs
               ?subscriptions
+              ?schedules
               ?on_tool_call
               manager
               ~invocation:dispatched
@@ -239,14 +243,21 @@ let dispatch
                 }
               ~originating:(Some (Direct (prepared, dispatched)))
               ~error:Fn.id
-              (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
+              (fun ~jobs:job_scope
+                ~subscriptions:subscription_scope
+                ~schedules:schedule_scope ->
                  Script_tool_calls.with_invocation
                    tools
                    ~prepared
                    ~capabilities
                    ~parent:dispatched
                    (fun on_tool_call ->
-                      handle ~on_tool_call ?job_scope ?subscription_scope ())))
+                      handle
+                        ~on_tool_call
+                        ?job_scope
+                        ?subscription_scope
+                        ?schedule_scope
+                        ())))
       in
       let result =
         try run () with

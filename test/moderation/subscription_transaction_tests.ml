@@ -102,6 +102,9 @@ let%expect_test
                 |> F.protocol
               in
               stage value, value)
+        ; arm =
+            (fun ~id:_ ~expected_epoch:_ ~timer_id:_ ~job_id:_ ->
+              Error "arming not supported by this fixture")
         ; rollback =
             (fun ticket ->
               match !staged with
@@ -289,6 +292,9 @@ let%expect_test
             in
             staged := Some value;
             Ok (0, value))
+      ; arm =
+          (fun ~id:_ ~expected_epoch:_ ~timer_id:_ ~job_id:_ ->
+            Error "arming not supported by this fixture")
       ; rollback = (fun _ -> staged := None)
       }
     in

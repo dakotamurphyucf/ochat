@@ -1246,7 +1246,7 @@ let%test_unit "v1 emit and timers cannot carry forged native event constructors"
      assert (phys_equal value payload)
    | _ -> assert false);
   match (find "Schedule" "after_ms").impl [ L.VInt 1; payload ] with
-  | L.VTask (TSpawn { op = "Schedule.after_ms_json"; args = [ _; value ] }) ->
+  | L.VTask (TMap (TPerform { op = "Schedule.after_ms_json"; args = [ _; value ] }, _)) ->
     assert (phys_equal value payload)
   | _ -> assert false
 ;;

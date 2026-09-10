@@ -5331,6 +5331,22 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
 ;;
 
 let update_jobs ?(subscriptions = []) t jobs =
+  let timer_ids =
+    List.filter_map subscriptions ~f:(fun next ->
+      match
+        next.Agent_protocol.Subscription.result, lookup_subscription t next.context.id
+      with
+      | Some _, Some previous -> previous.timer_id
+      | _ -> None)
+    |> Hash_set.of_list (module Agent_protocol.Id.Schedule)
+  in
+  let cancelled_timers =
+    List.filter_map t.state.schedules ~f:(fun schedule ->
+      match Hash_set.mem timer_ids schedule.id, schedule.status with
+      | true, (Agent_protocol.Schedule.Scheduled | Delivering) ->
+        Some { schedule with status = Agent_protocol.Schedule.Cancelled }
+      | _ -> None)
+  in
   let cancelled =
     List.filter jobs ~f:(fun job ->
       match job.Agent_protocol.Job.status with
@@ -5372,11 +5388,15 @@ let update_jobs ?(subscriptions = []) t jobs =
            (List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
             @ List.map subscriptions ~f:(fun value ->
               Session_delta.Subscription_changed value)
+            @ List.map cancelled_timers ~f:(fun value ->
+              Session_delta.Schedule_changed value)
             @ deltas))
       ~payloads:
         (List.map jobs ~f:(fun job ->
            Agent_protocol.Event.Durable.Payload.Job_state_changed job)
-         @ payloads)
+         @ payloads
+         @ List.map cancelled_timers ~f:(fun schedule ->
+           Agent_protocol.Event.Durable.Payload.Schedule_cancelled schedule))
   in
   cancel_job_scopes t cancelled;
   resolve_cleaned_permission_waiters t permissions;

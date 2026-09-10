@@ -38,6 +38,7 @@ type t =
   ; moderator : (t -> moderator_dispatch) option
   ; jobs : Script_job_service.t option
   ; subscriptions : Script_subscription_service.t option
+  ; schedules : Script_schedule_service.t option
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   }
@@ -65,6 +66,7 @@ let create
   ; moderator = None
   ; jobs = None
   ; subscriptions = None
+  ; schedules = None
   ; progress = None
   ; progress_ceiling = None
   }
@@ -94,6 +96,7 @@ let with_subscription_service t subscriptions =
   { t with subscriptions = Some subscriptions }
 ;;
 
+let with_schedule_service t schedules = { t with schedules = Some schedules }
 let with_progress t ~emit = { t with progress = Some emit }
 let with_progress_ceiling t ~ceiling = { t with progress_ceiling = Some ceiling }
 
@@ -116,16 +119,25 @@ let with_job_scope t ~owner ~selected ~error f =
 
 let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
   with_job_scope t ~owner ~selected ~error (fun jobs ->
-    match t.subscriptions with
-    | None -> f ~jobs ~subscriptions:None
-    | Some service ->
-      Script_subscription_service.with_scope
-        service
-        ~owner
-        ~source
-        ~originating
-        ~error
-        (fun scope -> f ~jobs ~subscriptions:(Some scope)))
+    let with_schedules f =
+      match t.schedules with
+      | None -> f None
+      | Some service ->
+        Script_schedule_service.with_scope service ~owner ~source ~error (fun scope ->
+          f (Some scope))
+    in
+    with_schedules (fun schedules ->
+      match t.subscriptions with
+      | None -> f ~jobs ~subscriptions:None ~schedules
+      | Some service ->
+        Script_subscription_service.with_scope
+          ?schedules
+          service
+          ~owner
+          ~source
+          ~originating
+          ~error
+          (fun scope -> f ~jobs ~subscriptions:(Some scope) ~schedules)))
 ;;
 
 let validate_pending_work ~jobs ~subscriptions ~fallback work =

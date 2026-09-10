@@ -7,11 +7,11 @@ This page describes the available storage and client protocol contracts, not a
 runnable extension tutorial.
 
 The extensibility-v1 moderator compiler also defines `Subscription.create`,
-`get`, `complete`, `fail` and `cancel`. These currently require an explicitly
+`get`, `complete`, `fail`, `cancel` and `arm`. These require an explicitly
 injected host transaction. The qualified daemon now binds the script service to
 actor staging for direct/managed moderator tools, ordinary/queued events and
-observation handlers. Timer-driven expiry and notification delivery are still
-being implemented. One-off and standalone tool surfaces do
+observation handlers. Host expiry and transactional timer adapters are implemented
+at that qualified scope; notification delivery is still being implemented. One-off and standalone tool surfaces do
 not include this module.
 
 `create(kind, lifetime_ms, wake_policy)` returns a task of subscription ID. The
@@ -24,16 +24,41 @@ and first-terminal-winner semantics; defining the compiler surface grants none
 of those permissions. Cancellation of a subscription does not imply cancellation
 of a watched child or external process.
 
+`arm(id, expected_epoch, timer_id, job_id)` accepts optional timer and job IDs,
+advances the subscription epoch, and returns its new JSON status. A new timer must
+be source-owned, still scheduled and not already bound; reusing that timer for a
+different epoch is rejected. Arming cancels the previous outstanding timer and
+stages the new timer binding with the subscription update. Passing `None` removes
+that linkage. Job references use the existing session/generation read checks and
+do not grant access to a child or cancel the referenced job.
+
+The v1 `Schedule` module exposes `after_ms(delay_ms, json)`,
+`after_ms_with_policy(delay_ms, json, misfire)`, `cancel(id)` and `get(id)` as tasks.
+Creation returns an ID and defaults to `Deliver_once_immediately`; explicit policy
+also accepts `Skip_if_expired` or `Fail`. `get` reads provisional or retained JSON
+status, including the owned schedule envelope's due time and policy. `cancel`
+returns unit and preserves a timer that is already terminal. These v1 operations
+require a live schedule transaction and never fall back to immediate legacy host
+callbacks. The legacy moderator surface retains its existing behavior.
+
 The manager stages subscription mutations with the moderator transaction.
 `Task.catch` rollback identifies individual updates, including repeated terminal
 updates that return the same result, using private receipts hidden from the
-script. Surviving job starts and subscription mutations are selected before the
+script. Surviving job starts, subscription mutations and timer mutations are selected before the
 owning save and acknowledged only after it succeeds. An ordinary or queued event
 save failure leaves moderator state and the queue unchanged. The owning host
 must discard all remaining provisional work on whole-handler failure.
 
-The script service constructs subscription IDs, captures the actual creating
-moderator and the original declaration's completion schema, and applies the
+Timer changes made by `Subscription.arm` or completion are retained through that
+subscription operation's receipt. If a caught operation fails, its timer changes
+are also discarded. Finishing a subscription cancels its linked outstanding timer
+in the same checkpoint. Parent job cancellation similarly saves cancellation of
+its active subscription and linked timer together. A completion that wins first
+is preserved. Terminal delivery of notifications remains separate from these
+work-state transitions.
+
+The script service requests actor-owned subscription IDs and creator identity,
+supplies the original declaration's completion schema, and applies the
 host lifetime default or a permitted explicit lifetime. Pending acknowledgements
 must identify a surviving creation from that same invocation. Nested callers
 receive the acknowledgement while the nested moderator retains ownership.
@@ -1506,10 +1531,13 @@ are rejected during aggregate validation.
 The host can configure timer admission through `Session_factory.limits.schedules`:
 defaults allow 256 active timers per session, 64 per moderator source, 4096 retained
 records, a 24-hour delay and a 64 KiB/64-level payload budget. Reservations count
-until their transaction finishes. This staging interface is internal; the compiled
-ChatML timer transaction adapter, script-facing subscription arming and epoch-aware
-event delivery remain separate integration work. General feature advertisement
-remains gated on A01.
+until their transaction finishes. The compiled ChatML adapter and subscription
+arming now use this internal staging interface in the qualified daemon. Owned
+timer payloads are wrapped as internal JSON data, so constructor-like text cannot
+become a native tool event. The loaded moderator source is checked before enqueue.
+Queued timer provenance, epoch-aware queue claim/retirement and notification
+delivery remain separate integration work. General feature advertisement remains
+gated on A01.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

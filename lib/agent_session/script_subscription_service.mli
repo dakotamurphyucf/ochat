@@ -28,6 +28,10 @@ type host =
       -> int list
       -> (unit, Agent_protocol.Error.t) result
   ; abort : Agent_protocol.Job.launch_owner -> int -> unit
+  ; get_job :
+      Agent_protocol.Job.launch_owner
+      -> Agent_protocol.Id.Job.t
+      -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
   }
 
 type t
@@ -52,7 +56,8 @@ val create
     whole-handler failure aborts them newest-first. No late rejection follows
     an acknowledged save. *)
 val with_scope
-  :  t
+  :  ?schedules:Script_schedule_service.scope
+  -> t
   -> owner:Agent_protocol.Job.launch_owner
   -> source:Agent_protocol.Invocation.observer
   -> originating:origin option

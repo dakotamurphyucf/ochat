@@ -17,6 +17,12 @@ type handlers =
       -> expected_epoch:int
       -> Agent_protocol.Completion.t
       -> (int * Agent_protocol.Subscription.t, string) result
+  ; arm :
+      id:Agent_protocol.Id.Subscription.t
+      -> expected_epoch:int
+      -> timer_id:Agent_protocol.Id.Schedule.t option
+      -> job_id:Agent_protocol.Id.Job.t option
+      -> (int * Agent_protocol.Subscription.t, string) result
   ; rollback : int -> unit
   }
 

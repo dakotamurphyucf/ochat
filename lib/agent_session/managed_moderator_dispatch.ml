@@ -107,7 +107,11 @@ let create
                    }
                  ~originating:(Some (Managed admission))
                  ~error:Agent_protocol.Error.invalid_request
-                 (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
+                 (fun
+                     ~jobs:job_scope
+                      ~subscriptions:subscription_scope
+                      ~schedules:schedule_scope
+                    ->
                     let jobs =
                       Option.map job_scope ~f:Script_job_service.moderator_transaction
                     in
@@ -115,6 +119,11 @@ let create
                       Option.map
                         subscription_scope
                         ~f:Script_subscription_service.moderator_transaction
+                    in
+                    let schedules =
+                      Option.map
+                        schedule_scope
+                        ~f:Script_schedule_service.moderator_transaction
                     in
                     let validate_work =
                       Calls.validate_pending_work
@@ -131,6 +140,7 @@ let create
                          M.handle_invocation_entries
                            ?jobs
                            ?subscriptions
+                           ?schedules
                            ~managed:admission
                            ~execution_context:(N.borrowed_execution_context caller)
                            ~on_tool_call

@@ -37,6 +37,7 @@ type host =
   ; select :
       P.Job.launch_owner -> P.Invocation.observer -> int list -> (unit, P.Error.t) result
   ; abort : P.Job.launch_owner -> int -> unit
+  ; get_job : P.Job.launch_owner -> P.Id.Job.t -> (P.Job.t, P.Error.t) result
   }
 
 type t =
@@ -55,9 +56,11 @@ type scope =
   ; owner : P.Job.launch_owner
   ; source : P.Invocation.observer
   ; originating : origin option
+  ; schedules : Script_schedule_service.scope option
   ; active : bool Atomic.t
   ; mutable issued : int list
   ; mutable created : (int * P.Id.Subscription.t) list
+  ; mutable schedule_dependencies : (int * int list) list
   ; mutable commit_state : commit_state
   }
 
@@ -75,6 +78,11 @@ let check scope =
 ;;
 
 let abort scope receipt =
+  Option.iter scope.schedules ~f:(fun schedules ->
+    List.Assoc.find scope.schedule_dependencies receipt ~equal:Int.equal
+    |> Option.iter ~f:(List.iter ~f:(Script_schedule_service.rollback schedules)));
+  scope.schedule_dependencies
+  <- List.Assoc.remove scope.schedule_dependencies receipt ~equal:Int.equal;
   Eio.Cancel.protect (fun () -> scope.service.host.abort scope.owner receipt);
   scope.issued <- List.filter scope.issued ~f:(fun other -> not (Int.equal receipt other));
   scope.created
@@ -107,15 +115,17 @@ let validate_origin scope =
     Error "event cannot own a new subscription acknowledgement"
 ;;
 
-let with_scope service ~owner ~source ~originating ~error f =
+let with_scope ?schedules service ~owner ~source ~originating ~error f =
   let scope =
     { service
     ; owner
     ; source
     ; originating
+    ; schedules
     ; active = Atomic.make true
     ; issued = []
     ; created = []
+    ; schedule_dependencies = []
     ; commit_state = Open
     }
   in
@@ -162,6 +172,30 @@ let get scope id =
   let open Result.Let_syntax in
   let%bind () = check scope in
   scope.service.host.get scope.owner scope.source id |> message
+;;
+
+let with_schedule_mutations scope f =
+  let open Result.Let_syntax in
+  let%bind schedules =
+    Result.of_option
+      scope.schedules
+      ~error:"subscription timer transactions are not installed"
+  in
+  let receipts = ref [] in
+  let record receipt = receipts := receipt :: !receipts in
+  let rollback () = List.iter !receipts ~f:(Script_schedule_service.rollback schedules) in
+  Eio.Cancel.protect (fun () ->
+    match f schedules record with
+    | Ok (receipt, value) ->
+      scope.schedule_dependencies <- (receipt, !receipts) :: scope.schedule_dependencies;
+      Ok (receipt, value)
+    | Error _ as result ->
+      rollback ();
+      result
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      rollback ();
+      Stdlib.Printexc.raise_with_backtrace exn backtrace)
 ;;
 
 let handlers scope : Ops.handlers =
@@ -216,8 +250,72 @@ let handlers scope : Ops.handlers =
           | _ -> completion
         in
         let%bind next, _ = S.finish previous ~expected_epoch ~now completion |> message in
-        let%map receipt = stage scope ~previous:(Some previous) ~next in
-        receipt, next)
+        let save () =
+          let%map receipt = stage scope ~previous:(Some previous) ~next in
+          receipt, next
+        in
+        match previous.timer_id with
+        | None -> save ()
+        | Some timer ->
+          with_schedule_mutations scope (fun schedules record ->
+            let%bind receipt = Script_schedule_service.cancel schedules timer in
+            record receipt;
+            save ()))
+  ; arm =
+      (fun ~id ~expected_epoch ~timer_id ~job_id ->
+        let%bind previous = get scope id in
+        let%bind () =
+          match job_id with
+          | None -> Ok ()
+          | Some id ->
+            scope.service.host.get_job scope.owner id |> message |> Result.map ~f:ignore
+        in
+        let%bind next = S.arm previous ~expected_epoch ~timer_id ~job_id |> message in
+        let save () =
+          let%map receipt = stage scope ~previous:(Some previous) ~next in
+          receipt, next
+        in
+        match previous.timer_id, timer_id with
+        | None, None -> save ()
+        | old_timer, new_timer ->
+          with_schedule_mutations scope (fun schedules record ->
+            let%bind () =
+              match old_timer with
+              | None -> Ok ()
+              | Some id ->
+                let%map receipt = Script_schedule_service.cancel schedules id in
+                record receipt
+            in
+            let%bind () =
+              match new_timer with
+              | None -> Ok ()
+              | Some id ->
+                let%bind timer = Script_schedule_service.get schedules id in
+                let%bind ownership =
+                  match timer.ownership, timer.status with
+                  | Some ({ subscription = None; _ } as ownership), P.Schedule.Scheduled
+                    -> Ok ownership
+                  | _ ->
+                    Error "subscription timer must be scheduled and not already bound"
+                in
+                let bound =
+                  { timer with
+                    ownership =
+                      Some
+                        { ownership with
+                          subscription = Some (next.context.id, next.epoch)
+                        }
+                  }
+                in
+                let%map receipt =
+                  Script_schedule_service.stage
+                    schedules
+                    ~previous:(Some timer)
+                    ~next:bound
+                in
+                record receipt
+            in
+            save ()))
   ; rollback = abort scope
   }
 ;;
@@ -231,12 +329,25 @@ let moderator_transaction scope : Ops.transaction =
         let%bind () =
           scope.service.host.select scope.owner scope.source receipts |> message
         in
+        let%bind () =
+          match scope.schedules with
+          | None -> Ok ()
+          | Some schedules ->
+            let dependencies =
+              List.concat_map receipts ~f:(fun receipt ->
+                Option.value
+                  (List.Assoc.find scope.schedule_dependencies receipt ~equal:Int.equal)
+                  ~default:[])
+            in
+            Script_schedule_service.retain_dependencies schedules dependencies
+        in
         let%map () = check scope in
         scope.commit_state <- Prepared;
         fun () ->
           scope.commit_state <- Committed;
           scope.issued <- [];
-          scope.created <- [])
+          scope.created <- [];
+          scope.schedule_dependencies <- [])
   }
 ;;
 

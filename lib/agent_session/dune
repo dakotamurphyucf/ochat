@@ -26,6 +26,7 @@
   staged_schedules
   script_job_service
   script_subscription_service
+  script_schedule_service
   invocation_history
   invocation_recovery
   moderator_tool_dispatch

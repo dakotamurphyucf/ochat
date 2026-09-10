@@ -750,39 +750,38 @@ let%test_unit "pending work requires owner validation and errors bypass success 
     | _ -> assert false)
 ;;
 
-let%test_unit "emit and schedule JSON become internal data events" =
+let%expect_test
+    "versioned timers require a transaction and never fall back to legacy scheduling"
+  =
   Eio_main.run (fun env ->
-    let scheduled = ref None in
+    let legacy_calls = ref 0 in
     let capabilities =
       { Chat_response.Moderation.Capabilities.default with
         on_schedule_after_ms =
-          (fun ~delay_ms:_ ~payload ->
-            scheduled := Some payload;
-            Ok "timer")
+          (fun ~delay_ms:_ ~payload:_ ->
+            incr legacy_calls;
+            Ok "legacy-timer")
       }
     in
     let manager, _, make =
       setup
         env
         ~capabilities
-        "Task.bind(Runtime.emit(`String(\"Tool_invoked\")), fun ignored -> \
-         Task.bind(Schedule.after_ms(1, `String(\"Job_completed\")), fun ignored -> \
-         Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)), fun \
-         ignored -> Task.pure(state))))"
+        {|let* () = Runtime.emit(`String("Tool_invoked")) in
+          let* timer = Schedule.after_ms(1, `String("Job_completed")) in
+          let* () = Invocation.resolve(p.context.invocation_id, `Complete(`Null)) in
+          Task.pure(state)|}
     in
-    ignore (call manager (make ()) |> ok);
-    let snapshot = M.identity_snapshot manager |> ok in
-    assert (
-      Poly.equal
-        snapshot.queued_internal_events
-        [ Session.Snapshot.Variant
-            ("Internal_event", [ Variant ("String", [ String "Tool_invoked" ]) ])
-        ]);
-    match !scheduled with
-    | Some
-        (L.VVariant
-           ("Internal_event", [ VVariant ("String", [ VString "Job_completed" ]) ])) -> ()
-    | _ -> assert false)
+    (match call manager (make ()) with
+     | Error message -> print_endline message
+     | Ok _ -> failwith "timer scheduled without its transaction");
+    assert (List.is_empty (M.identity_snapshot manager |> ok).queued_internal_events);
+    print_s [%sexp (!legacy_calls : int)]);
+  [%expect
+    {|
+    schedule transaction is not installed
+    0
+    |}]
 ;;
 
 let%test_unit "concurrent calls serialize moderator state" =

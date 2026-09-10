@@ -142,6 +142,7 @@ type t =
   ; invocation_tool_call : tool_call option ref
   ; job_transaction : Background_job_operations.transaction option ref
   ; subscription_transaction : Subscription_operations.transaction option ref
+  ; schedule_transaction : Schedule_operations.transaction option ref
   }
 
 type prepared_commit =
@@ -335,6 +336,7 @@ let create
   let invocation_tool_call = ref None in
   let job_transaction = ref None in
   let subscription_transaction = ref None in
+  let schedule_transaction = ref None in
   let capabilities =
     { capabilities with
       on_tool_call =
@@ -408,6 +410,10 @@ let create
            ~handlers:
              (Subscription_operations.dynamic_handlers (fun () ->
                 !subscription_transaction))
+      |> Schedule_operations.install
+           ?control
+           ~handlers:
+             (Schedule_operations.dynamic_handlers (fun () -> !schedule_transaction))
   in
   let%bind runtime =
     run_controlled execution (fun () ->
@@ -462,6 +468,7 @@ let create
     ; invocation_tool_call
     ; job_transaction
     ; subscription_transaction
+    ; schedule_transaction
     }
 ;;
 
@@ -1115,19 +1122,30 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
     }
 ;;
 
-let with_work_transactions t jobs subscriptions f =
+let with_work_transactions t jobs subscriptions schedules f =
   let previous = !(t.job_transaction) in
   let previous_subscriptions = !(t.subscription_transaction) in
+  let previous_schedules = !(t.schedule_transaction) in
   t.job_transaction := jobs;
   t.subscription_transaction := subscriptions;
+  t.schedule_transaction := schedules;
   Exn.protect
     ~finally:(fun () ->
       t.job_transaction := previous;
-      t.subscription_transaction := previous_subscriptions)
+      t.subscription_transaction := previous_subscriptions;
+      t.schedule_transaction := previous_schedules)
     ~f
 ;;
 
-let persist_prepared ?control jobs ids subscriptions receipts (prepared : prepared_commit)
+let persist_prepared
+      ?control
+      jobs
+      ids
+      subscriptions
+      receipts
+      schedules
+      schedule_receipts
+      (prepared : prepared_commit)
   =
   let open Result.Let_syntax in
   let%bind acknowledge_jobs =
@@ -1142,17 +1160,25 @@ let persist_prepared ?control jobs ids subscriptions receipts (prepared : prepar
     | None, _ :: _ -> Error "subscription mutations require an owning transaction"
     | Some transaction, _ -> transaction.Subscription_operations.prepare receipts
   in
+  let%bind acknowledge_schedules =
+    match schedules, schedule_receipts with
+    | None, [] -> Ok ignore
+    | None, _ :: _ -> Error "schedule mutations require an owning transaction"
+    | Some transaction, _ -> transaction.Schedule_operations.prepare schedule_receipts
+  in
   Option.iter control ~f:(fun control -> control.Chatml.Chatml_lang.checkpoint ());
   let%map () = prepared.persist () in
   fun () ->
     prepared.install ();
     acknowledge_jobs ();
-    acknowledge_subscriptions ()
+    acknowledge_subscriptions ();
+    acknowledge_schedules ()
 ;;
 
 let handle_event_entries_transactional_unlocked
       ?jobs
       ?subscriptions
+      ?schedules
       t
       ~session_id
       ~now_ms
@@ -1209,6 +1235,9 @@ let handle_event_entries_transactional_unlocked
       let%bind mutations, local_effects =
         Subscription_operations.split_mutations local_effects
       in
+      let%bind schedule_mutations, local_effects =
+        Schedule_operations.split_mutations local_effects
+      in
       let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
       let%bind overlay, install_overlay =
@@ -1225,7 +1254,15 @@ let handle_event_entries_transactional_unlocked
       in
       let%bind commit = prepare_event ~outcome:prepared ~snapshot in
       let%map install =
-        persist_prepared ?control jobs starts subscriptions mutations commit
+        persist_prepared
+          ?control
+          jobs
+          starts
+          subscriptions
+          mutations
+          schedules
+          schedule_mutations
+          commit
       in
       fun () ->
         install_overlay ();
@@ -1241,7 +1278,7 @@ let handle_event_entries_transactional_unlocked
       Exn.protect
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
-          with_work_transactions t jobs subscriptions (fun () ->
+          with_work_transactions t jobs subscriptions schedules (fun () ->
             let context = Moderation.Context.to_value ?control context in
             let copy value =
               Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
@@ -1278,6 +1315,7 @@ let handle_event_entries_transactional_unlocked
 let handle_event_entries_transactional
       ?jobs
       ?subscriptions
+      ?schedules
       t
       ~session_id
       ~now_ms
@@ -1293,6 +1331,7 @@ let handle_event_entries_transactional
     handle_event_entries_transactional_unlocked
       ?jobs
       ?subscriptions
+      ?schedules
       t
       ~session_id
       ~now_ms
@@ -1309,6 +1348,7 @@ let handle_event_entries_transactional
 let handle_next_event_entries_transactional
       ?jobs
       ?subscriptions
+      ?schedules
       t
       ~session_id
       ~now_ms
@@ -1328,6 +1368,7 @@ let handle_next_event_entries_transactional
         handle_event_entries_transactional_unlocked
           ?jobs
           ?subscriptions
+          ?schedules
           t
           ~session_id
           ~now_ms
@@ -1348,6 +1389,7 @@ let handle_next_event_entries_transactional
 let handle_invocation_entries
       ?jobs
       ?subscriptions
+      ?schedules
       ?(authorize = fun () -> Ok ())
       ?managed
       ?execution_context
@@ -1432,6 +1474,9 @@ let handle_invocation_entries
         let%bind mutations, local_effects =
           Subscription_operations.split_mutations local_effects
         in
+        let%bind schedule_mutations, local_effects =
+          Schedule_operations.split_mutations local_effects
+        in
         let%bind decoded = Runtime.decode_local_effects local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1451,7 +1496,15 @@ let handle_invocation_entries
         in
         let%bind commit = prepare_resolution ~resolved ~outcome:prepared ~snapshot in
         let%map install_resolution =
-          persist_prepared ?control jobs starts subscriptions mutations commit
+          persist_prepared
+            ?control
+            jobs
+            starts
+            subscriptions
+            mutations
+            schedules
+            schedule_mutations
+            commit
         in
         fun () ->
           install_overlay ();
@@ -1467,7 +1520,7 @@ let handle_invocation_entries
         t.invocation_tool_call := on_tool_call;
         Exn.protect
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions (fun () ->
+            with_work_transactions t jobs subscriptions schedules (fun () ->
               Moderator_invocation.run
                 ?on_failure
                 ?control
@@ -1483,6 +1536,7 @@ let handle_invocation_entries
 let handle_observation_entries
       ?jobs
       ?subscriptions
+      ?schedules
       ?on_tool_call
       ?(retain_follow_up = false)
       t
@@ -1571,6 +1625,9 @@ let handle_observation_entries
         let%bind mutations, local_effects =
           Subscription_operations.split_mutations local_effects
         in
+        let%bind schedule_mutations, local_effects =
+          Schedule_operations.split_mutations local_effects
+        in
         let%bind decoded = decode_effects t local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1612,7 +1669,15 @@ let handle_observation_entries
         in
         let%bind commit = prepare_observation ~observed ~outcome:prepared ~snapshot in
         let%map install =
-          persist_prepared ?control jobs starts subscriptions mutations commit
+          persist_prepared
+            ?control
+            jobs
+            starts
+            subscriptions
+            mutations
+            schedules
+            schedule_mutations
+            commit
         in
         fun () ->
           install_overlay ();
@@ -1628,7 +1693,7 @@ let handle_observation_entries
         Exn.protect
           ~finally:(fun () -> t.invocation_tool_call := previous)
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions (fun () ->
+            with_work_transactions t jobs subscriptions schedules (fun () ->
               Runtime.handle_event
                 t.runtime
                 ~context:(Moderation.Context.to_value ?control context)

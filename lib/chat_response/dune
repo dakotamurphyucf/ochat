@@ -43,6 +43,7 @@
   background_request
   background_job_operations
   subscription_operations
+  schedule_operations
   mcp_discovery_cache
   fork
   compact_history)
