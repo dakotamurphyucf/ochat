@@ -37,6 +37,7 @@ type t =
   ; managed : (t -> Native_tool_invocation.managed_dispatch) option
   ; moderator : (t -> moderator_dispatch) option
   ; jobs : Script_job_service.t option
+  ; subscriptions : Script_subscription_service.t option
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   }
@@ -63,6 +64,7 @@ let create
   ; managed = None
   ; moderator = None
   ; jobs = None
+  ; subscriptions = None
   ; progress = None
   ; progress_ceiling = None
   }
@@ -87,6 +89,11 @@ let with_durable_requests t = { t with durable_requests = true }
 let durable_requests t = t.durable_requests
 let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
 let with_job_service t jobs = { t with jobs = Some jobs }
+
+let with_subscription_service t subscriptions =
+  { t with subscriptions = Some subscriptions }
+;;
+
 let with_progress t ~emit = { t with progress = Some emit }
 let with_progress_ceiling t ~ceiling = { t with progress_ceiling = Some ceiling }
 
@@ -105,6 +112,27 @@ let with_job_scope t ~owner ~selected ~error f =
   | Some service ->
     Script_job_service.with_scope service ~owner ~selected ~error (fun scope ->
       f (Some scope))
+;;
+
+let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
+  with_job_scope t ~owner ~selected ~error (fun jobs ->
+    match t.subscriptions with
+    | None -> f ~jobs ~subscriptions:None
+    | Some service ->
+      Script_subscription_service.with_scope
+        service
+        ~owner
+        ~source
+        ~originating
+        ~error
+        (fun scope -> f ~jobs ~subscriptions:(Some scope)))
+;;
+
+let validate_pending_work ~jobs ~subscriptions ~fallback work =
+  match work, jobs, subscriptions with
+  | I.Job _, Some scope, _ -> Script_job_service.validate_work scope work
+  | I.Subscription id, _, Some scope -> Script_subscription_service.validate_work scope id
+  | _ -> fallback work
 ;;
 
 let validate_definition t definition =

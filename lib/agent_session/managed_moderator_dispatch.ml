@@ -97,19 +97,31 @@ let create
              in
              let%bind caller = N.borrow () |> message in
              N.with_managed_scope admission (fun borrowed ->
-               Calls.with_job_scope
+               Calls.with_moderator_work
                  tools
                  ~owner:(Agent_protocol.Job.Invocation dispatched.context.id)
                  ~selected:(EC.capabilities prepared)
+                 ~source:
+                   { script_id = (EC.script prepared).id
+                   ; source_sha256 = (EC.script prepared).source_sha256
+                   }
+                 ~originating:(Some (Managed admission))
                  ~error:Agent_protocol.Error.invalid_request
-                 (fun job_scope ->
+                 (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
                     let jobs =
                       Option.map job_scope ~f:Script_job_service.moderator_transaction
                     in
-                    let validate_work work =
-                      match job_scope with
-                      | None -> Error "background completion is not installed"
-                      | Some scope -> Script_job_service.validate_work scope work
+                    let subscriptions =
+                      Option.map
+                        subscription_scope
+                        ~f:Script_subscription_service.moderator_transaction
+                    in
+                    let validate_work =
+                      Calls.validate_pending_work
+                        ~jobs:job_scope
+                        ~subscriptions:subscription_scope
+                        ~fallback:(fun _ ->
+                          Error "background completion is not installed")
                     in
                     Calls.with_managed_invocation
                       tools
@@ -118,6 +130,7 @@ let create
                       (fun on_tool_call ->
                          M.handle_invocation_entries
                            ?jobs
+                           ?subscriptions
                            ~managed:admission
                            ~execution_context:(N.borrowed_execution_context caller)
                            ~on_tool_call

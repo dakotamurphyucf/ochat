@@ -33,10 +33,16 @@ let drain_with_claim
     | _ ->
       let outcome = ref None in
       let%bind claimed =
-        claim (fun ~observing ~commit ~on_tool_call ~job_scope ->
+        claim (fun ~observing ~commit ~on_tool_call ~job_scope ~subscription_scope ->
           let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
+          let subscriptions =
+            Option.map
+              subscription_scope
+              ~f:Script_subscription_service.moderator_transaction
+          in
           M.handle_observation_entries
             ?jobs
+            ?subscriptions
             ?on_tool_call
             ~retain_follow_up
             manager
@@ -88,31 +94,45 @@ let drain ?max_observations ?on_tool_call ~capabilities ~observer =
   drain_with_claim ?max_observations ~retain_follow_up:false ~claim:(fun handle ->
     capabilities.Operation_worker.Capabilities.with_next_moderator_observation
       ~observer
-      (fun ~observing ~commit -> handle ~observing ~commit ~on_tool_call ~job_scope:None))
+      (fun ~observing ~commit ->
+         handle ~observing ~commit ~on_tool_call ~job_scope:None ~subscription_scope:None))
 ;;
 
 let drain_idle ?max_observations ?on_tool_call ~claim =
   drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
     claim (fun ~observing ~commit ->
-      handle ~observing ~commit ~on_tool_call ~job_scope:None))
+      handle ~observing ~commit ~on_tool_call ~job_scope:None ~subscription_scope:None))
 ;;
 
 let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
   drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
     claim (fun ~(observing : P.Invocation.t) ~execute ~commit ->
-      Script_tool_calls.with_job_scope
+      let open Result.Let_syntax in
+      let%bind observation =
+        Result.of_option
+          observing.observation
+          ~error:(failed "observation source is missing")
+      in
+      Script_tool_calls.with_moderator_work
         script_tools
         ~owner:(P.Job.Invocation observing.context.id)
+        ~source:observation.observer
+        ~originating:None
         ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
         ~error:failed
-        (fun job_scope ->
+        (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
            Script_tool_calls.with_observation
              script_tools
              ~definition
              ~execute
              ~observing
              (fun on_tool_call ->
-                handle ~observing ~commit ~on_tool_call:(Some on_tool_call) ~job_scope))))
+                handle
+                  ~observing
+                  ~commit
+                  ~on_tool_call:(Some on_tool_call)
+                  ~job_scope
+                  ~subscription_scope))))
 ;;
 
 let drain_foreground_with_tools
@@ -126,17 +146,24 @@ let drain_foreground_with_tools
     capabilities.Operation_worker.Capabilities.with_next_moderator_observation
       ~observer
       (fun ~observing ~commit ->
-         Script_tool_calls.with_job_scope
+         Script_tool_calls.with_moderator_work
            script_tools
            ~owner:(P.Job.Invocation observing.P.Invocation.context.id)
+           ~source:observer
+           ~originating:None
            ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
            ~error:failed
-           (fun job_scope ->
+           (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
               Script_tool_calls.with_observation
                 script_tools
                 ~definition
                 ~execute:capabilities.with_invocation
                 ~observing
                 (fun on_tool_call ->
-                   handle ~observing ~commit ~on_tool_call:(Some on_tool_call) ~job_scope))))
+                   handle
+                     ~observing
+                     ~commit
+                     ~on_tool_call:(Some on_tool_call)
+                     ~job_scope
+                     ~subscription_scope))))
 ;;

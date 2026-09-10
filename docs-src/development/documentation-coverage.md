@@ -255,6 +255,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/runtime_builder.mli` | [contract](../../lib/agent_session/runtime_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_paths.mli` | [contract](../../lib/agent_session/runtime_paths.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/script_job_service.mli` | [contract](../../lib/agent_session/script_job_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_session/script_subscription_service.mli` | [contract](../../lib/agent_session/script_subscription_service.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/script_tool_calls.mli` | [contract](../../lib/agent_session/script_tool_calls.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/security_grant.mli` | [contract](../../lib/agent_session/security_grant.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_session/session_actor.mli` | [contract](../../lib/agent_session/session_actor.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

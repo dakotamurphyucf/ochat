@@ -8,8 +8,10 @@ runnable extension tutorial.
 
 The extensibility-v1 moderator compiler also defines `Subscription.create`,
 `get`, `complete`, `fail` and `cancel`. These currently require an explicitly
-injected host transaction. Actor staging is implemented, while the script-service
-binding, expiry and notification delivery are still being implemented. One-off and standalone tool surfaces do
+injected host transaction. The qualified daemon now binds the script service to
+actor staging for direct/managed moderator tools, ordinary/queued events and
+observation handlers. Timer-driven expiry and notification delivery are still
+being implemented. One-off and standalone tool surfaces do
 not include this module.
 
 `create(kind, lifetime_ms, wake_policy)` returns a task of subscription ID. The
@@ -29,6 +31,19 @@ script. Surviving job starts and subscription mutations are selected before the
 owning save and acknowledged only after it succeeds. An ordinary or queued event
 save failure leaves moderator state and the queue unchanged. The owning host
 must discard all remaining provisional work on whole-handler failure.
+
+The script service constructs subscription IDs, captures the actual creating
+moderator and the original declaration's completion schema, and applies the
+host lifetime default or a permitted explicit lifetime. Pending acknowledgements
+must identify a surviving creation from that same invocation. Nested callers
+receive the acknowledgement while the nested moderator retains ownership.
+Invalid acknowledgements discard every provisional subscription update. Managed
+calls carry their admitted registry execution because their implementation
+revision includes registry authority, rather than just the compiled tool hash.
+
+Completion operations preserve a retained terminal winner. When an active
+subscription is completed after its deadline, the service records expiry using
+the expected epoch. This check is not yet an autonomous expiry scheduler.
 
 The actor's host-only stage/select/read/abort operations require an actual live
 moderator invocation or event borrow with the installed source identity.

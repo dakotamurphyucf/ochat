@@ -22,6 +22,7 @@
   staged_jobs
   staged_subscriptions
   script_job_service
+  script_subscription_service
   invocation_history
   invocation_recovery
   moderator_tool_dispatch

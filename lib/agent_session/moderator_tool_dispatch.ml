@@ -165,15 +165,22 @@ let dispatch
                   "The tool arguments do not satisfy its input schema.");
           Error "invalid tool arguments")
         else (
-          let handle ?on_tool_call ?job_scope () =
+          let handle ?on_tool_call ?job_scope ?subscription_scope () =
             let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
-            let validate_work work =
-              match job_scope with
-              | None -> validate_work work
-              | Some scope -> Script_job_service.validate_work scope work
+            let subscriptions =
+              Option.map
+                subscription_scope
+                ~f:Script_subscription_service.moderator_transaction
+            in
+            let validate_work =
+              Script_tool_calls.validate_pending_work
+                ~jobs:job_scope
+                ~subscriptions:subscription_scope
+                ~fallback:validate_work
             in
             M.handle_invocation_entries
               ?jobs
+              ?subscriptions
               ?on_tool_call
               manager
               ~invocation:dispatched
@@ -222,18 +229,24 @@ let dispatch
           match script_tools with
           | None -> handle ()
           | Some tools ->
-            Script_tool_calls.with_job_scope
+            Script_tool_calls.with_moderator_work
               tools
               ~owner:(P.Job.Invocation dispatched.context.id)
               ~selected:(EC.capabilities prepared)
+              ~source:
+                { script_id = (EC.script prepared).id
+                ; source_sha256 = (EC.script prepared).source_sha256
+                }
+              ~originating:(Some (Direct (prepared, dispatched)))
               ~error:Fn.id
-              (fun job_scope ->
+              (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
                  Script_tool_calls.with_invocation
                    tools
                    ~prepared
                    ~capabilities
                    ~parent:dispatched
-                   (fun on_tool_call -> handle ~on_tool_call ?job_scope ())))
+                   (fun on_tool_call ->
+                      handle ~on_tool_call ?job_scope ?subscription_scope ())))
       in
       let result =
         try run () with

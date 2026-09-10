@@ -28,6 +28,8 @@ val with_durable_requests : t -> t
 (** Qualified host injection; does not change this service's tool ceiling. *)
 val with_job_service : t -> Script_job_service.t -> t
 
+val with_subscription_service : t -> Script_subscription_service.t -> t
+
 (** Host display observer for native descendants, after normal tool admission.
     The host must preserve ownership, disclosure and bounded/nonblocking delivery.
     The callback expires when its actual native runner returns. *)
@@ -52,6 +54,28 @@ val with_job_scope
   -> ('a, 'error) result
 
 val durable_requests : t -> bool
+
+(** Actual moderator handlers/events only. [originating] captures a dispatched
+    tool's compiled declaration; ordinary/observation events pass None. One-off
+    and standalone dispatch keep the separate job-only scope above. *)
+val with_moderator_work
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> selected:Chat_response.Tool_capability.t
+  -> source:Agent_protocol.Invocation.observer
+  -> originating:Script_subscription_service.origin option
+  -> error:(string -> 'error)
+  -> (jobs:Script_job_service.scope option
+      -> subscriptions:Script_subscription_service.scope option
+      -> ('a, 'error) result)
+  -> ('a, 'error) result
+
+val validate_pending_work
+  :  jobs:Script_job_service.scope option
+  -> subscriptions:Script_subscription_service.scope option
+  -> fallback:(Agent_protocol.Invocation.work -> (unit, string) result)
+  -> Agent_protocol.Invocation.work
+  -> (unit, string) result
 
 (** Host dispatch accessors. These expose current binding/policy services, not
     permission to execute implementations outside an owned invocation. *)

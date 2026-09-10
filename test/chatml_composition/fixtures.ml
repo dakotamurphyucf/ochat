@@ -200,6 +200,18 @@ let with_daemon
                     Option.is_some invocation.context.parent_invocation
                     || (Option.is_some settle
                         && Option.is_some invocation.context.parent_job))
+                | Moderator when expect_moderator ->
+                  let observation = Option.value_exn invocation.observation in
+                  let source =
+                    Agent_session.Runtime_builder.moderator_snapshot_observer
+                      final.moderator
+                    |> protocol_ok
+                    |> Option.value_exn
+                  in
+                  assert (I.equal_observer source observation.observer);
+                  assert (
+                    Option.is_some invocation.context.parent_invocation
+                    || Option.is_some invocation.parent_event)
                 | Moderator | Delegated_agent | External_adapter ->
                   failwith "unexpected invocation origin");
               let final =

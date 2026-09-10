@@ -46,21 +46,28 @@ let run
       claim
         ~snapshot:(fun () -> M.identity_snapshot manager |> Result.map_error ~f:failed)
         (fun ~(executing : P.Moderator_execution.t) ~event:selected ~execute ~commit ->
-           let with_jobs f =
+           let with_work f =
              match script_tools with
-             | None -> f None
+             | None -> f ~jobs:None ~subscriptions:None
              | Some tools ->
-               Script_tool_calls.with_job_scope
+               Script_tool_calls.with_moderator_work
                  tools
                  ~owner:(P.Job.Moderator_event executing.context.id)
+                 ~source:executing.context.source
+                 ~originating:None
                  ~selected:
                    (Chat_response.Extension_compiler.definition_capabilities definition)
                  ~error:failed
                  f
            in
-           with_jobs (fun job_scope ->
+           with_work (fun ~jobs:job_scope ~subscriptions:subscription_scope ->
              let jobs =
                Option.map job_scope ~f:Script_job_service.moderator_transaction
+             in
+             let subscriptions =
+               Option.map
+                 subscription_scope
+                 ~f:Script_subscription_service.moderator_transaction
              in
              let with_tools f =
                match script_tools with
@@ -122,6 +129,7 @@ let run
                 | Queued ->
                   M.handle_next_event_entries_transactional
                     ?jobs
+                    ?subscriptions
                     manager
                     ~session_id
                     ~now_ms
@@ -140,6 +148,7 @@ let run
                   in
                   M.handle_event_entries_transactional
                     ?jobs
+                    ?subscriptions
                     manager
                     ~session_id
                     ~now_ms
