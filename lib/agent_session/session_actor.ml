@@ -118,6 +118,7 @@ type _ request =
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
       -> unit request
   | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit request
+  | Admit_notification_turn : Agent_protocol.Id.Operation.t -> unit request
   | Claim_ordinary_event :
       Agent_protocol.Id.Moderator_execution.t
       * Agent_protocol.Id.Operation.t option
@@ -4985,6 +4986,21 @@ let admit_moderator_turn t operation_id =
     transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
 ;;
 
+let admit_notification_turn t operation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    match t.state.lifecycle.desired, t.state.halted, moderator_is_borrowed t with
+    | Running, false, false -> Ok ()
+    | _ -> Error (error Conflict "session cannot admit a provider request")
+  in
+  let%bind deltas = notification_wake_deltas t operation_id ~accept:true in
+  match deltas with
+  | [] -> Ok ()
+  | _ ->
+    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+;;
+
 let foreground_terminal_requests t operation_id outcome =
   let open Result.Let_syntax in
   match t.foreground_moderator with
@@ -5722,6 +5738,7 @@ let worker_capabilities t operation_id id_source buffer =
     ; manage_moderator_follow_up =
         (fun ~observer -> call t (Manage_moderator_follow_up (operation_id, observer)))
     ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
+    ; admit_notification_turn = (fun () -> call t (Admit_notification_turn operation_id))
     ; with_invocation = with_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
@@ -8288,6 +8305,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Manage_moderator_follow_up (operation_id, observer) ->
     manage_moderator_follow_up t operation_id observer
   | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
+  | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
   | Claim_job_event (scope, id, snapshot, event) ->
     claim_job_event t scope id snapshot event
   | Claim_job_moderator (scope, invocation) -> claim_job_moderator t scope invocation

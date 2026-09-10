@@ -11,7 +11,7 @@ let%expect_test
     "notification consumer rejects stale and failed saves, deduplicates input and \
      settles only admitted wakes"
   =
-  List.iter [ `Accepted; `Discarded; `Revoked ] ~f:(fun mode ->
+  List.iter [ `Accepted; `Native; `Discarded; `Revoked ] ~f:(fun mode ->
     let ready, signal_ready = Eio.Promise.create () in
     let finish, signal_finish = Eio.Promise.create () in
     let reject_save = ref false in
@@ -30,6 +30,7 @@ let%expect_test
           Eio.Promise.await finish;
           (match mode with
            | `Accepted -> capabilities.admit_moderator_turn () |> protocol_ok
+           | `Native -> capabilities.admit_notification_turn () |> protocol_ok
            | `Discarded | `Revoked -> ());
           let actor = Eio.Promise.await actor_ready in
           let state = A.state actor |> protocol_ok in
@@ -80,7 +81,7 @@ let%expect_test
          |> ignore;
          let current_capabilities =
            match mode with
-           | `Accepted | `Discarded -> registry
+           | `Accepted | `Native | `Discarded -> registry
            | `Revoked ->
              Chat_response.Tool_capability.select registry ~names:[]
              |> Notification_disclosure_tests.cap
@@ -115,7 +116,7 @@ let%expect_test
          let expected =
            match mode with
            | `Revoked -> 0
-           | `Accepted | `Discarded -> 1
+           | `Accepted | `Native | `Discarded -> 1
          in
          [%test_eq: int] expected (List.length batch.entries);
          [%test_eq: bool] (expected > 0) batch.request_turn;
@@ -126,6 +127,22 @@ let%expect_test
          in
          assert (List.is_empty repeat.entries);
          assert (not repeat.request_turn);
+         (match mode with
+          | `Accepted | `Native ->
+            let before_admission = A.state actor |> protocol_ok in
+            reject_save := true;
+            let admission =
+              match mode with
+              | `Accepted -> capabilities.admit_moderator_turn ()
+              | _ -> capabilities.admit_notification_turn ()
+            in
+            assert (Result.is_error admission);
+            reject_save := false;
+            assert_same_session_snapshot before_admission (A.state actor |> protocol_ok);
+            assert_same_session_snapshot
+              before_admission
+              (Agent_session.Memory_backend.state backend)
+          | `Discarded | `Revoked -> ());
          Eio.Promise.resolve signal_finish ();
          let state = await_idle actor in
          assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
@@ -138,7 +155,7 @@ let%expect_test
          [%test_eq: int] expected (List.length notices);
          let delivery = List.hd_exn state.deliveries in
          (match mode, delivery.status, delivery.wake_disposition with
-          | `Accepted, Committed _, Some (Accepted_wake id) ->
+          | (`Accepted | `Native), Committed _, Some (Accepted_wake id) ->
             assert (P.Id.Operation.equal id input.operation.id)
           | `Discarded, Committed _, Some (Discarded_wake _) -> ()
           | `Revoked, Failed failure, None ->
@@ -154,10 +171,12 @@ let%expect_test
          assert (List.equal P.Delivery.equal state.deliveries restored.deliveries);
          print_s
            [%sexp
-             (mode : [ `Accepted | `Discarded | `Revoked ]), (List.length notices : int)]));
+             (mode : [ `Accepted | `Native | `Discarded | `Revoked ])
+           , (List.length notices : int)]));
   [%expect
     {|
     (Accepted 1)
+    (Native 1)
     (Discarded 1)
     (Revoked 0)
     |}]

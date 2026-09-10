@@ -163,6 +163,10 @@ module Capabilities : sig
       (** Persist acceptance of pending turn-only requests immediately before
           provider dispatch. Requires managed foreground routing and the same
           active operation/source. Failed persistence must prevent dispatch. *)
+    ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
+      (** Every root provider request checks the running operation and atomically
+          accepts its consumed notification wakes, including without a moderator.
+          A failed save prevents provider dispatch. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

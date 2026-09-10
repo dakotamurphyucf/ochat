@@ -84,6 +84,8 @@ let run_child env arguments =
     Crash_side_effect_host.run env ~config_path ~marker
   | [ "notification"; config_path; boundary ] ->
     Crash_notification_host.run env ~config_path ~boundary
+  | [ "standalone-notification"; config_path; boundary ] ->
+    Crash_notification_host.run ~standalone:true env ~config_path ~boundary
   | [ "ingress"; config_path; recover ] ->
     Crash_ingress_host.run env ~config_path ~recover:(Bool.of_string recover)
   | _ -> F.fail "invalid crash child arguments"
@@ -266,6 +268,7 @@ let cases =
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
   ; "notification.wake-no-replay", Crash_notification_wake.test
+  ; "notification.standalone-no-replay", Crash_standalone_notification.test
   ; "ingress.lost-ack-no-replay", Crash_ingress_delivery.test
   ; "idempotency.unknown-outcome", test_unknown_outcome
   ; "sigkill.process-supervision", test_forced_process
@@ -304,6 +307,9 @@ let run env ~case =
       |> Sexp.of_string
       |> [%of_sexp: string list]
     in
+    (* The selected fault is test control, not a change to the host environment
+       delegated to tools. Keep captured authority identical on recovery. *)
+    Core_unix.unsetenv "OCHAT_E2E_CRASH_ARGUMENTS";
     run_child env arguments
   | _ -> run_matrix env case
 ;;

@@ -103,3 +103,74 @@ let%expect_test
     (0 "new frames; one wake; archived data not reinserted")
     |}]
 ;;
+
+let%expect_test
+    "reset retires pending notification data and saved wakes from the old generation"
+  =
+  List.iter [ Setup.Fresh; Recovered ] ~f:(fun mode ->
+    let registry = Notification_disclosure_tests.registry [ "read_file" ] (ref 0) in
+    Job_fixtures.with_actor
+      ~prepare_state:(Setup.initial mode registry)
+      (fun _ _ actor writer backend ->
+         let prepare state =
+           N.prepare_idle_for_runtime
+             ~state
+             ~source:
+               (Agent_session.Runtime_builder.moderator_snapshot_observer
+                  state.State.moderator
+                |> protocol_ok)
+             ~current_capabilities:registry
+             ~policy:Chat_response.One_off_request.default_policy
+             ~max_count:64
+           |> protocol_ok
+         in
+         let original = A.state actor |> protocol_ok in
+         let old_plan = prepare original in
+         assert (N.has_idle_work original);
+         A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
+         let stopped = A.state actor |> protocol_ok in
+         A.reset
+           actor
+           ~attachment_id:writer.id
+           ~expected_revision:stopped.counters.revision
+           { keep_history = false
+           ; keep_tasks = false
+           ; keep_grants = false
+           ; keep_labels = true
+           ; workspace_instance = None
+           }
+         |> protocol_ok
+         |> ignore;
+         let reset = A.state actor |> protocol_ok in
+         [%test_eq: int] (original.identity.generation + 1) reset.identity.generation;
+         assert (List.is_empty reset.deliveries);
+         assert (List.is_empty (frames reset));
+         A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+         (match A.deliver_idle_notifications actor old_plan with
+          | Error { code = Journal_corrupt; message; _ } ->
+            [%test_eq: string]
+              "extension reference crosses session ownership or generation"
+              message
+          | _ -> failwith "reset accepted an old-generation notification proposal");
+         let current = A.state actor |> protocol_ok in
+         assert (not (N.has_idle_work current));
+         assert (not (A.deliver_idle_notifications actor (prepare current) |> protocol_ok));
+         assert_same_session_snapshot current (A.state actor |> protocol_ok);
+         assert_same_session_snapshot current (Agent_session.Memory_backend.state backend);
+         let restored =
+           State.sexp_of_t current
+           |> Sexp.to_string_mach
+           |> Agent_session.Session_persistence.restore_snapshot
+           |> store_ok
+         in
+         assert (not (N.has_idle_work restored));
+         assert (Option.is_none restored.active_operation);
+         print_s
+           [%sexp
+             (List.length (frames original) : int), "old data and wake retired; no replay"]));
+  [%expect
+    {|
+    (0 "old data and wake retired; no replay")
+    (2 "old data and wake retired; no replay")
+    |}]
+;;

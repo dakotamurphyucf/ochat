@@ -1,2 +1,2 @@
-; The static website has its own toolchain and generated content.
-(dirs :standard \ website)
+; Website tooling and scratch research are not part of the OCaml project build.
+(dirs :standard \ website scratch)

@@ -192,6 +192,8 @@ type ctx =
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
   ; moderator : moderator option
+  ; before_model_call : unit -> unit
+  ; runtime_policy : Runtime_semantics.policy option
   ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
   ; parallel_tool_calls : bool
@@ -248,6 +250,8 @@ type args =
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
   ; moderator : moderator option
+  ; before_model_call : unit -> unit
+  ; runtime_policy : Runtime_semantics.policy option
   ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
   ; parallel_tool_calls : bool
@@ -1191,6 +1195,8 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
     ; source = Some (Fork.Invocation_id.to_string invocation_id)
     ; parent_call_id = Some call_id
     ; moderator = None
+    ; before_model_call = (fun () -> ())
+    ; runtime_policy = None
     ; safe_point_input = None
     ; on_runtime_request = (fun _ -> ())
     ; on_history_item_appended = (fun _ -> ())
@@ -1863,6 +1869,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
        | Some { event_handlers = Some handlers; _ } ->
          handlers.before_model_call () |> Result.ok_or_failwith
        | _ -> ());
+      c.before_model_call ();
       log_request c ~inputs;
       c.scope <- History_stream_event.Registry.create_scope c.registry;
       let events =
@@ -1906,9 +1913,10 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
         in
         List.iter finish_requests ~f:c.on_runtime_request;
         let policy =
-          match c.moderator with
-          | None -> Runtime_semantics.default_policy
-          | Some m -> m.runtime_policy
+          Option.value_or_thunk c.runtime_policy ~default:(fun () ->
+            match c.moderator with
+            | None -> Runtime_semantics.default_policy
+            | Some m -> m.runtime_policy)
         in
         let decision =
           Runtime_semantics.decide_after_turn_end
@@ -1951,6 +1959,8 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; max_output_tokens = a.max_output_tokens
     ; reasoning = a.reasoning
     ; moderator = a.moderator
+    ; before_model_call = a.before_model_call
+    ; runtime_policy = a.runtime_policy
     ; on_runtime_request = a.on_runtime_request
     ; history_compaction = a.history_compaction
     ; parallel_tool_calls = a.parallel_tool_calls
@@ -2012,6 +2022,8 @@ let run_completion_stream_in_memory_entries
       ?max_output_tokens
       ?reasoning
       ?moderator
+      ?(before_model_call = fun () -> ())
+      ?runtime_policy
       ?(on_runtime_request = fun _ -> ())
       ?(history_compaction = false)
       ?(parallel_tool_calls = true)
@@ -2052,6 +2064,8 @@ let run_completion_stream_in_memory_entries
     ; max_output_tokens
     ; reasoning
     ; moderator
+    ; before_model_call
+    ; runtime_policy
     ; on_runtime_request
     ; history_compaction
     ; parallel_tool_calls

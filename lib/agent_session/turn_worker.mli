@@ -39,7 +39,8 @@ end
     item-appended callbacks once; restored history is not appended or re-emitted.
     All committed data is retained if a callback ends the session. *)
 val create
-  :  ?dispatch_tool:
+  :  ?runtime_policy:Chat_response.Runtime_semantics.policy
+  -> ?dispatch_tool:
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t
         -> Chat_response.In_memory_stream.Tool_dispatch.t)

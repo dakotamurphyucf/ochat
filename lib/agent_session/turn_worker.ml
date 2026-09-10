@@ -375,6 +375,7 @@ let moderate_submission config input on_runtime_request =
 ;;
 
 let run
+      ?runtime_policy
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -449,6 +450,9 @@ let run
         ?max_output_tokens:config.max_output_tokens
         ?reasoning:config.reasoning
         ?moderator:config.moderator
+        ?runtime_policy
+        ~before_model_call:(fun () ->
+          capabilities.admit_notification_turn () |> require_ok)
         ~on_sourced_event:(fun event ->
           checkpoint_moderator ();
           publish_live ~kind:Sourced_stream ~payload:(sourced_payload event))
@@ -491,6 +495,7 @@ let run
 ;;
 
 let create
+      ?runtime_policy
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -500,6 +505,7 @@ let create
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
     match
       run
+        ?runtime_policy
         ?dispatch_tool
         ?moderator_events
         ?notification_input

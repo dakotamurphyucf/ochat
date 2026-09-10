@@ -1829,14 +1829,31 @@ turns still permits data publication. Committed wake receipts prevent replay aft
 runtime reload. Publisher/dependency permissions are rechecked before publication
 and recovered wake admission; revocation cannot disclose a retained result.
 
+The root stream saves wake acceptance before dispatching the provider request,
+including when the session has no moderator. A failed save prevents that request;
+ending the turn without admission discards the wake while retaining its data.
+The configured continuation policy applies to these sessions too. Nested model
+forks do not accept the root session's notification wakes.
+
+Actual daemon crash tests kill the process immediately after journal sync at the
+intent, history-publication and wake-acceptance boundaries. Two independent
+reopenings retain one real shell effect, the original artifact and one data frame.
+An unaccepted wake may be admitted once on recovery; an accepted operation is not
+automatically replayed, because its external outcome could be unknown. This is
+durable admission and replay suppression, not an exactly-once provider API call.
+
 Current daemon qualification covers actual shell completion, schema rejection that
 preserves the original successful job, disabled extra turns, exact message/wake
 counts, reload non-replay, and multiple jobs including cancellation before attempt
 one. A raced notification plan defers; a session without a moderator never falls
 through to the legacy moderator event handler. Large inline and real artifact
 results are also qualified through the actual daemon adapter, bounded model input,
-authorized chunked reads and reload. Additional stop/crash boundaries and final E06
-qualification remain in progress. General feature exposure still waits for A01.
+authorized chunked reads and process-crash recovery. Native stop/resume tests also
+check actual process reaping, no data publication while stopped, and one retained
+cancellation notification after runtime reload. Standalone cancellation requests
+a turn under host policy; a moderator handler can choose a quieter policy, as X03
+does. This qualification covers the daemon. Additional hosts and the broader
+recovery matrix belong to E07; general feature exposure still waits for A01.
 
 ### Artifact-backed terminal results
 

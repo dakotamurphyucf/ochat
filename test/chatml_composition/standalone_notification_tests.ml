@@ -206,3 +206,79 @@ let%expect_test
     (false false "one data message; original result retained; no replay")
   |}]
 ;;
+
+let%expect_test
+    "native foreground notification honors continuation policy and saves acceptance \
+     before provider dispatch"
+  =
+  List.iter [ true; false ] ~f:(fun wake ->
+    let host = ref None in
+    let requests = if wake then 3 else 2 in
+    with_daemon
+      ~sources:(sources ~reject:false)
+      ~runtime_policy:
+        { Chat_response.Runtime_semantics.default_policy with honor_request_turn = wake }
+      ~connect:(fun ~sw:_ ~env ~root:_ daemon ->
+        host := Some (env, daemon);
+        connection daemon (principal ()))
+      ~calls:[ "begin", "begin_work", `Object [] ]
+      ~expected_requests:requests
+      ~initial_requests:requests
+      ~inspect_request:(fun request inputs ->
+        let env, daemon = Option.value_exn !host in
+        let entry =
+          Agent_server.Session_registry.entries (Agent_server.Daemon.registry daemon)
+          |> List.hd_exn
+        in
+        let state () = A.state entry.actor |> protocol_ok in
+        match request with
+        | 2 ->
+          let workspace = (state ()).spec.workspace_instance.canonical_root.native_path in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / workspace / "fixture-work.release")
+            "finish";
+          Background_shell_tests.wait env (fun () ->
+            match (state ()).deliveries with
+            | [ { status = Pending; _ } ] -> true
+            | _ -> false)
+        | 3 ->
+          let saved = state () in
+          (match saved.deliveries with
+           | [ { status = Committed _
+               ; wake_disposition = Some (Accepted_wake operation_id)
+               ; _
+               }
+             ] ->
+             assert (
+               P.Id.Operation.equal
+                 operation_id
+                 (Option.value_exn saved.active_operation).id)
+           | _ -> failwith "provider called before durable native wake acceptance");
+          [%test_eq: int]
+            1
+            (List.count inputs ~f:(function
+               | Openai.Responses.Item.Input_message
+                   { role = User; content = Text { text; _ } :: _; _ } ->
+                 String.is_prefix text ~prefix:"Ochat runtime notification."
+               | _ -> false))
+        | _ -> ())
+      ~settle:Job_launch_tests.settle
+      (fun state ->
+         assert (Option.is_none state.moderator);
+         [%test_eq: int]
+           1
+           (List.count state.conversation.canonical_history ~f:(fun entry ->
+              match entry.P.History.provenance with
+              | Runtime_notification _ -> true
+              | _ -> false));
+         (match wake, (List.hd_exn state.deliveries).wake_disposition with
+          | true, Some (Accepted_wake _) | false, Some (Discarded_wake _) -> ()
+          | _ -> failwith "foreground continuation ignored configured policy");
+         print_s [%sexp (wake : bool), (requests : int), "one durable data frame"]));
+  [%expect
+    {|
+    (true 3 "one durable data frame")
+    (false 2 "one durable data frame")
+    |}]
+;;

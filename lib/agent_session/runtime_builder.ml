@@ -1196,6 +1196,8 @@ let build_with_services
   in
   let worker =
     Turn_worker.create
+      ?runtime_policy:
+        (Option.map extension_services ~f:(fun services -> services.runtime_policy))
       ?dispatch_tool
       ?moderator_events
       ?notification_input

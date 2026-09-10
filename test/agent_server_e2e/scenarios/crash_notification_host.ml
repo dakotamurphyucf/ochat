@@ -61,7 +61,7 @@ let call =
   ]
 ;;
 
-let run env ~config_path ~boundary =
+let run ?(standalone = false) env ~config_path ~boundary =
   let wrapped =
     Support.Crash_fault_io.wrap
       env
@@ -87,11 +87,29 @@ let run env ~config_path ~boundary =
       (Eio.Stdenv.stdout env);
     match boundary, !requests with
     | "recover", 1 ->
-      F.require (frames = 2) "recovered provider did not receive both notifications";
+      F.require
+        (frames = if standalone then 1 else 2)
+        "recovered provider received the wrong notification count";
       Stdlib.Seq.empty
     | "recover", _ -> F.fail "recovery started an extra provider call"
     | _, 1 -> Stdlib.List.to_seq call
-    | _, 2 -> Stdlib.Seq.empty
+    | _, 2 ->
+      (match standalone with
+       | false -> ()
+       | true ->
+         let release =
+           Filename.concat (Filename.dirname config_path) "provider.release"
+         in
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock wrapped) 15. (fun () ->
+           let rec wait () =
+             match Eio.Path.is_file (F.path wrapped release) with
+             | true -> ()
+             | false ->
+               Eio.Time.sleep (Eio.Stdenv.clock wrapped) 0.01;
+               wait ()
+           in
+           wait ()));
+      Stdlib.Seq.empty
     | _ -> F.fail "provider ran beyond selected crash boundary"
   in
   let options =

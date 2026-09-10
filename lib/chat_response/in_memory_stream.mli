@@ -342,6 +342,8 @@ val run_completion_stream_in_memory_entries
   -> ?max_output_tokens:int
   -> ?reasoning:Openai.Responses.Request.Reasoning.t
   -> ?moderator:moderator
+  -> ?before_model_call:(unit -> unit)
+  -> ?runtime_policy:Runtime_semantics.policy
   -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
   -> ?history_compaction:bool
   -> ?parallel_tool_calls:bool
@@ -361,7 +363,13 @@ val run_completion_stream_in_memory_entries
     adapts [allocator]. Each identity-bearing
     stream callback is emitted only after its ID has been reserved, and the
     same ID appears in the returned history. Tool-call and tool-output entries
-    remain distinct despite sharing a provider [call_id]. *)
+    remain distinct despite sharing a provider [call_id].
+
+    [before_model_call] runs before each root provider request, after moderator
+    admission and outside provider retries. Hosts use it to persist notification
+    wake acceptance; an exception prevents the request. Forks do not inherit it.
+    [runtime_policy] overrides the moderator/default continuation policy for the
+    root stream, including sessions without a moderator. *)
 
 (** [handle_item_appended_entries ...] notifies the moderator about the final
     already-committed entry in [history]. Hosts call it once for a newly
