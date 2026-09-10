@@ -188,10 +188,12 @@ targeted offline runs provide the additional checks below.
 
 ## Implementation issues surfaced, not fixed by this documentation work
 
-1. **Transient standalone local stdio startup:** reproduced RNG initialization
-   failure before protocol initialization. Explicit private `--data-root` passed
-   the same discovery stream; the tutorial now uses this durable, process-bound
-   workaround. See [details](../agent-server/troubleshooting.md#local-stdio-rng-initialization).
+1. **Transient standalone local stdio startup — subsequently fixed:** this audit
+   reproduced RNG initialization failure before protocol initialization. E07 host
+   integration moved RNG initialization before transient-root allocation. The
+   cold-executable `stdio.local-transient-bootstrap` regression now checks startup,
+   process-bound transient metadata and root cleanup on EOF without a data root.
+   See [details](../agent-server/troubleshooting.md#local-stdio-rng-initialization).
 2. **Type-ahead parity — implemented:** all three TUI modes now share the
    coordinator and client-local provider, default off, with explicit model/history
    settings and bounded no-log transport. See [behavior](../guide/chat_tui.md#type-ahead-availability-and-privacy)

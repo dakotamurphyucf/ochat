@@ -346,6 +346,56 @@ let test_local_initialize env environment =
       require (String.is_empty result.stderr.contents) "valid local stdio wrote stderr"))
 ;;
 
+let test_local_transient_bootstrap env environment =
+  let fixture = fixture env environment "stdio-local-transient" in
+  let temporary = (Temporary_environment.roots environment).temporary in
+  let transient_roots () =
+    Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / temporary)
+    |> List.filter ~f:(String.is_prefix ~prefix:"ochat-embedded-")
+    |> List.sort ~compare:String.compare
+  in
+  let before = transient_roots () in
+  Eio.Switch.run (fun sw ->
+    with_stdio
+      ~sw
+      env
+      fixture
+      [ "--local"
+      ; "--prompt"
+      ; Config_fixture.prompt_path fixture
+      ; "--workspace"
+      ; Config_fixture.physical_workspace fixture
+      ]
+      (fun process ->
+         let client = Stdio_client.create ~process ~clock:(Eio.Stdenv.clock env) in
+         let initialized = initialize client in
+         let metadata = Option.value_exn initialized.extensions in
+         require
+           (Agent_protocol.Extension_capabilities.equal_host
+              metadata.host
+              Embedded_transient)
+           "local stdio without data root reported another host";
+         let sessions = list_sessions client in
+         require (List.length sessions = 1) "transient stdio created extra sessions";
+         let spec = (List.hd_exn sessions).spec in
+         require
+           (Agent_protocol.Session.equal_persistence spec.persistence Transient
+            && Agent_protocol.Session.equal_liveness spec.liveness Process_bound)
+           "transient stdio changed its persistence/lifetime";
+         require
+           (List.length (transient_roots ()) = List.length before + 1)
+           "transient stdio did not allocate its private root";
+         let result = finish_process env process in
+         require_exit result (Exited 0) "transient stdio did not exit cleanly on EOF";
+         assert_stdout_pure result.stdout;
+         require
+           (String.is_empty result.stderr.contents)
+           "transient bootstrap wrote stderr";
+         require
+           (List.equal String.equal before (transient_roots ()))
+           "transient stdio retained its temporary data root"))
+;;
+
 let test_local_process_bound_eof env environment =
   let fixture = fixture env environment "stdio-local-eof" in
   Eio.Switch.run (fun sw ->
@@ -572,6 +622,7 @@ let test_stdout_purity env environment =
 
 let cases =
   [ "stdio.local-initialize", test_local_initialize
+  ; "stdio.local-transient-bootstrap", test_local_transient_bootstrap
   ; "stdio.local-process-bound-eof", test_local_process_bound_eof
   ; "stdio.local-malformed-input", test_local_malformed_input
   ; "stdio.local-oversized-input", test_local_oversized_input

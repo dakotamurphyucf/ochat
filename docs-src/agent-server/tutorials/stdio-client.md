@@ -46,12 +46,11 @@ payload, not for a new message. See [protocol synchronization](../protocol.md).
 EOF ends this local host. The explicit `--data-root` preserves durable records;
 it does not keep a process running after the client exits.
 
-Current checkout limitation: standalone local stdio without `--data-root` can
-fail before initialization with “The default generator is not yet initialized.”
-Transient-root allocation requests a random ID before the binary initializes
-the RNG. The command above avoids that path by supplying a private durable root;
-it is deliberately not a transient-session example. See
-[startup troubleshooting](../troubleshooting.md#local-stdio-rng-initialization).
+Omit `--data-root` to use a private transient root that is removed on EOF.
+Embedded startup initializes the RNG before creating that root. The example above
+uses a durable root so records remain available after exit; this does not keep
+the host running. See [startup troubleshooting](../troubleshooting.md#local-stdio-rng-initialization)
+if an older binary reports an uninitialized generator.
 
 ## Gateway to a detached daemon
 
@@ -80,4 +79,4 @@ the shared Unix/HTTP connection lifecycle; the stock gateway owns the stdio loop
 
 ## Checkpoint, troubleshooting, and next step
 
-Initialization and session listing should return matching JSON-RPC response IDs; attaching supplies an attachment ID for mutations. A send-message acknowledgement is not a completed assistant response. For missing initialization, ensure stdin remains open, each envelope ends with a newline, and responses are read before dependent requests. Preserve the explicit data root for the RNG limitation described above. EOF ends a local host or disconnects a gateway; detached daemon sessions remain. Stop all relevant processes before archiving/removing your recorded demo root, including stdio-state. Next, [connect over HTTP](http-client.md).
+Initialization and session listing should return matching JSON-RPC response IDs; attaching supplies an attachment ID for mutations. A send-message acknowledgement is not a completed assistant response. For missing initialization, ensure stdin remains open, each envelope ends with a newline, and responses are read before dependent requests. EOF ends a local host or disconnects a gateway; detached daemon sessions remain. Stop all relevant processes before archiving/removing your recorded demo root, including stdio-state. Next, [connect over HTTP](http-client.md).

@@ -143,3 +143,7 @@ and artifact-privacy limitations are not silently declared fixed by this work.
 The [broader audit](code-documentation-audit.md) and relevant user guides retain
 those boundaries. A passing link/example check or finite regression suite is
 not formal proof of semantic completeness or universal runtime correctness.
+
+Subsequent E07 host integration fixed the transient stdio RNG issue and added a
+cold-executable startup/EOF cleanup test. Its resolution is recorded in the
+[broader audit](code-documentation-audit.md#implementation-issues-surfaced-not-fixed-by-this-documentation-work).

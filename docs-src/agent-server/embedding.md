@@ -32,10 +32,18 @@ optional durable data root, start intent, permission profile, attachment mode an
 event capacity. No data root means a private transient root. `data_root = Some`
 does not change process-bound liveness into detached daemon liveness.
 
-Initialize the cryptographic RNG before calling `Embedded.start`, for example
-with `Mirage_crypto_rng_unix.use_default ()` in an owning Unix executable. The
-transient-root path allocates random IDs before `Daemon.start`'s initialization.
-See the [stock stdio limitation](troubleshooting.md#local-stdio-rng-initialization).
+Trusted embedding applications can also pass `~daemon_options` to install the
+shared daemon's provider adapter, policy, reviewer resolvers and runtime options.
+The default remains `Daemon.default_options`. Embedded startup derives its host
+identity from `data_root` even if those options specify another host, and applies
+the configured attachment limit to each in-memory connection. It starts no network
+listener. The internal ChatML qualification option remains unavailable from the
+CLI/configuration file and does not advertise public extension features.
+
+`Embedded.start` initializes the Unix cryptographic RNG before allocating its
+transient root or any session IDs. Callers do not need to initialize it first.
+Older builds had a [local stdio startup defect](troubleshooting.md#local-stdio-rng-initialization)
+when no data root was supplied.
 
 Use `Embedded.session_id`, `attachment`, `connection`, or `connect` as documented
 in its interface. Close each extra connection and finally `Embedded.close`;
