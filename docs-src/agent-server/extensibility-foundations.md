@@ -1587,11 +1587,26 @@ Monotonic anchors are not persisted. A recovered actor derives a fresh remaining
 duration once from its saved absolute due timestamp and current wall time, then
 uses elapsed time for that process lifetime. Startup misfire policies still decide
 what to do with schedules already overdue at recovery. Legacy unowned schedules
-keep their wall-time due checks. Source-owned subscription lifetime, expiry and
-completion checks still need matching elapsed-time integration; timer anchoring
-alone does not complete that contract. Reset/rebuild/upgrade classification and
-notification delivery also remain separate work. General feature advertisement
-remains gated on A01.
+keep their wall-time due checks.
+
+Source-owned subscriptions use the same elapsed-time anchoring for their relative
+lifetime. Creation captures the duration before saving, and a discarded completion
+does not reset it. The expiry sweep, explicit completion and queued bound-timer
+admission consult that clock. The actor selects completion or expiry and stages the
+result using one sampled clock pair; the script adapter retains the receipt and
+coupled timer cancellation in the moderator transaction. Existing terminal winners
+remain immutable. A failed callback rolls back its staged completion; independent
+expiry still runs, without replaying the failed handler.
+
+Wall timestamps remain useful for recovery and inspection. After a backward clock
+adjustment, terminal timestamps are bounded below by creation, or by the stored
+deadline for expiry. A subscription's recovery deadline is not a substitute for its
+current runtime status. Ownership follows the live invocation and source identity,
+not wall-clock ordering between invocation admission and subscription creation.
+Inherited absolute job deadlines still constrain the parent wait and are never
+extended by a subscription's relative lifetime. Reset/rebuild/upgrade classification
+and automatic notification delivery remain separate work. General feature
+advertisement remains gated on A01.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

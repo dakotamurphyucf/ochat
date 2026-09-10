@@ -339,7 +339,10 @@ let%expect_test
                 ~state:queued
                 ~observer:source
                 ~event:captured
-                ~now:!now
+                ~subscription_expired:(fun subscription ->
+                  Ok
+                    (P.Timestamp.compare !now subscription.P.Subscription.context.deadline
+                     >= 0))
               |> protocol_ok));
          assert (
            Option.equal
@@ -349,7 +352,10 @@ let%expect_test
                 ~state:queued
                 ~observer:{ source with source_sha256 = String.make 64 'f' }
                 ~event:captured
-                ~now:!now
+                ~subscription_expired:(fun subscription ->
+                  Ok
+                    (P.Timestamp.compare !now subscription.P.Subscription.context.deadline
+                     >= 0))
               |> protocol_ok));
          (match mode with
           | `Expire ->
@@ -363,7 +369,12 @@ let%expect_test
                    ~state:queued
                    ~observer:source
                    ~event:captured
-                   ~now:!now
+                   ~subscription_expired:(fun subscription ->
+                     Ok
+                       (P.Timestamp.compare
+                          !now
+                          subscription.P.Subscription.context.deadline
+                        >= 0))
                  |> protocol_ok));
             [%test_eq: int] 1 (A.expire_subscriptions actor |> protocol_ok)
           | `Complete | `Rearm ->

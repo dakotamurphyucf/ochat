@@ -34,6 +34,13 @@ type host =
       -> P.Invocation.observer
       -> P.Id.Subscription.t
       -> (S.t, P.Error.t) result
+  ; finish :
+      P.Job.launch_owner
+      -> P.Invocation.observer
+      -> P.Id.Subscription.t
+      -> expected_epoch:int
+      -> P.Completion.t
+      -> (int * S.t, P.Error.t) result
   ; select :
       P.Job.launch_owner -> P.Invocation.observer -> int list -> (unit, P.Error.t) result
   ; abort : P.Job.launch_owner -> int -> unit
@@ -41,8 +48,7 @@ type host =
   }
 
 type t =
-  { now : unit -> P.Timestamp.t
-  ; limits : Staged_subscriptions.limits
+  { limits : Staged_subscriptions.limits
   ; host : host
   }
 
@@ -66,9 +72,9 @@ type scope =
 
 let message result = Result.map_error result ~f:(fun error -> error.P.Error.message)
 
-let create ~now ~limits ~host =
+let create ~limits ~host =
   Staged_subscriptions.validate_limits limits |> message |> Result.ok_or_failwith;
-  { now; limits; host }
+  { limits; host }
 ;;
 
 let check scope =
@@ -242,17 +248,20 @@ let handlers scope : Ops.handlers =
   ; finish =
       (fun ~id ~expected_epoch completion ->
         let%bind previous = get scope id in
-        let now = scope.service.now () in
-        let completion =
-          match previous.result with
-          | None when P.Timestamp.compare now previous.context.deadline >= 0 ->
-            P.Completion.Expired
-          | _ -> completion
-        in
-        let%bind next, _ = S.finish previous ~expected_epoch ~now completion |> message in
         let save () =
-          let%map receipt = stage scope ~previous:(Some previous) ~next in
-          receipt, next
+          let%bind () = check scope in
+          Eio.Cancel.protect (fun () ->
+            let%map receipt, next =
+              scope.service.host.finish
+                scope.owner
+                scope.source
+                id
+                ~expected_epoch
+                completion
+              |> message
+            in
+            scope.issued <- receipt :: scope.issued;
+            receipt, next)
         in
         match previous.timer_id with
         | None -> save ()

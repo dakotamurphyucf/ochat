@@ -9,12 +9,13 @@ type mode =
   | Cancel_parent
   | Cancel_session
   | Restart
+  | Handler_failure
 [@@deriving sexp_of]
 
 let agent mode =
   let delay =
     match mode with
-    | Immediate | Deferred -> 20
+    | Immediate | Deferred | Handler_failure -> 20
     | Cancel_parent | Cancel_session -> 100000
     | Restart -> 1000
   in
@@ -23,11 +24,26 @@ let agent mode =
     | Immediate -> {|let* finished = Subscription.complete(id, 1, `String("done")) in|}
     | _ -> ""
   in
+  let lifetime =
+    match mode with
+    | Handler_failure -> 1000
+    | _ -> 10000
+  in
+  let event_result =
+    match mode with
+    | Handler_failure -> {|Task.fail("completion handler failed after staging result")|}
+    | _ -> {|Task.pure({ id = state.id; ticks = state.ticks + 1 })|}
+  in
   {|<script id="watcher" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = { id = ""; ticks = 0 }
 let on_event ctx state event = match event with
 | `Tool_invoked(p) ->
-  let* id = Subscription.create("timer", `Some(10000), `No_wake) in
+|}
+  ^ sprintf
+      {|  let* id = Subscription.create("timer", `Some(%d), `No_wake) in
+|}
+      lifetime
+  ^ {|
   let* () = Task.catch(
     (let* discarded = Schedule.after_ms(0, `String("discarded")) in
      let* armed = Subscription.arm(id, 0, `Some(discarded), `None) in
@@ -57,7 +73,9 @@ let on_event ctx state event = match event with
 | `Internal_event(payload) -> (match payload with
   | `String("Tool_invoked") ->
     let* finished = Subscription.complete(state.id, 1, `String("done")) in
-    Task.pure({ id = state.id; ticks = state.ticks + 1 })
+|}
+  ^ event_result
+  ^ {|
   | _ -> Task.fail("discarded timer executed"))
 | _ -> Task.pure(state)
 </script>
@@ -71,16 +89,20 @@ let%expect_test
      cancellation and restart"
   =
   List.iter
-    [ Immediate; Deferred; Cancel_parent; Cancel_session; Restart ]
+    [ Immediate; Deferred; Cancel_parent; Cancel_session; Restart; Handler_failure ]
     ~f:(fun mode ->
       let check = function
         | P.Completion.Succeeded (`String "done")
           when match mode with
-               | Cancel_parent | Cancel_session -> false
+               | Cancel_parent | Cancel_session | Handler_failure -> false
                | _ -> true -> ()
         | Cancelled _
           when match mode with
                | Cancel_parent | Cancel_session -> true
+               | _ -> false -> ()
+        | Expired
+          when match mode with
+               | Handler_failure -> true
                | _ -> false -> ()
         | result -> raise_s [%sexp (result : P.Completion.t)]
       in
@@ -116,8 +138,17 @@ let%expect_test
            | _ -> failwith "timer binding was lost");
           (match mode, timer.status with
            | (Immediate | Cancel_parent | Cancel_session), P.Schedule.Cancelled
-           | (Deferred | Restart), Delivered -> ()
+           | (Deferred | Restart | Handler_failure), Delivered -> ()
            | _ -> failwith "unexpected timer lifecycle");
+          (match mode with
+           | Handler_failure ->
+             [%test_eq: int]
+               1
+               (List.count state.moderator_executions ~f:(fun receipt ->
+                  match receipt.context.phase, receipt.status, receipt.retirement with
+                  | Internal_event, Failed _, None -> true
+                  | _ -> false))
+           | _ -> ());
           print_s
             [%sexp
               (mode : mode), (result : P.Completion.t), (timer.status : P.Schedule.status)])
@@ -162,6 +193,7 @@ let%expect_test
     (Cancel_parent (Cancelled "job cancelled") Cancelled)
     (Cancel_session (Cancelled "session stopped") Cancelled)
     (Restart (Succeeded (String done)) Delivered)
+    (Handler_failure Expired Delivered)
     |}]
 ;;
 

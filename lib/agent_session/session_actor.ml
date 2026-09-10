@@ -175,6 +175,13 @@ type _ request =
       * Agent_protocol.Completion.wake
       * Jsonaf.t option
       -> (int * Agent_protocol.Subscription.t) request
+  | Finish_script_subscription :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Subscription.t
+      * int
+      * Agent_protocol.Completion.t
+      -> (int * Agent_protocol.Subscription.t) request
   | Select_subscription_mutations :
       Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
       -> unit request
@@ -617,9 +624,21 @@ let sync_extension_clock t =
         Some (Extension_clock.Key.Schedule timer.id, timer.next_due_at)
       | _ -> None)
   in
+  let subscriptions =
+    t.state.subscriptions @ Staged_subscriptions.values t.staged_subscriptions
+    |> List.filter_map ~f:(fun subscription ->
+      match
+        subscription.Agent_protocol.Subscription.context.source, subscription.result
+      with
+      | Some _, None ->
+        Some
+          ( Extension_clock.Key.Subscription subscription.context.id
+          , subscription.context.deadline )
+      | _ -> None)
+  in
   Extension_clock.reconcile
     t.extension_clock
-    ~retained:timers
+    ~retained:(timers @ subscriptions)
     ~wall_now:(t.services.now ())
     ~monotonic_now:(t.services.monotonic_now ())
 ;;
@@ -754,6 +773,10 @@ let select_subscription_mutations t ~owner ~source ~receipts =
   call t (Select_subscription_mutations (owner, source, receipts))
 ;;
 
+let finish_script_subscription t ~owner ~source ~id ~expected_epoch completion =
+  call t (Finish_script_subscription (owner, source, id, expected_epoch, completion))
+;;
+
 let abort_subscription_mutation t ~owner ~receipt =
   Eio.Cancel.protect (fun () -> call t (Abort_subscription_mutation (owner, receipt)))
 ;;
@@ -784,13 +807,59 @@ let read_script_schedule t ~owner ~source ~id =
   call t (Read_script_schedule (owner, source, id))
 ;;
 
+let subscription_is_due_at
+      t
+      (subscription : Agent_protocol.Subscription.t)
+      ~now
+      ~monotonic_now
+  =
+  match subscription.context.source with
+  | None -> Ok (Agent_protocol.Timestamp.compare subscription.context.deadline now <= 0)
+  | Some _ ->
+    Extension_clock.is_due
+      t.extension_clock
+      (Subscription subscription.context.id)
+      ~now:monotonic_now
+;;
+
+let subscription_is_due t subscription =
+  subscription_is_due_at
+    t
+    subscription
+    ~now:(t.services.now ())
+    ~monotonic_now:(t.services.monotonic_now ())
+;;
+
+let subscription_terminal_time_at
+      (subscription : Agent_protocol.Subscription.t)
+      completion
+      ~now
+  =
+  let lower_bound =
+    match completion with
+    | Agent_protocol.Completion.Expired -> subscription.context.deadline
+    | _ -> subscription.context.created_at
+  in
+  match Agent_protocol.Timestamp.compare now lower_bound < 0 with
+  | true -> lower_bound
+  | false -> now
+;;
+
+let subscription_terminal_time t subscription completion =
+  subscription_terminal_time_at subscription completion ~now:(t.services.now ())
+;;
+
 let expire_subscriptions_internal t =
   let module P = Agent_protocol in
-  let now = t.services.now () in
-  let due =
+  let open Result.Let_syntax in
+  let%bind due =
     List.filter t.state.subscriptions ~f:(fun subscription ->
-      Option.is_none subscription.result
-      && P.Timestamp.compare subscription.context.deadline now <= 0)
+      Option.is_none subscription.result)
+    |> List.map ~f:(fun subscription ->
+      subscription_is_due t subscription
+      |> Result.map ~f:(fun due -> Option.some_if due subscription))
+    |> Result.all
+    |> Result.map ~f:List.filter_opt
   in
   match due with
   | [] -> Ok 0
@@ -798,7 +867,11 @@ let expire_subscriptions_internal t =
     let open Result.Let_syntax in
     let%bind terminal =
       List.map due ~f:(fun subscription ->
-        P.Subscription.finish subscription ~expected_epoch:subscription.epoch ~now Expired
+        P.Subscription.finish
+          subscription
+          ~expected_epoch:subscription.epoch
+          ~now:(subscription_terminal_time t subscription Expired)
+          Expired
         |> Result.map ~f:fst)
       |> Result.all
     in
@@ -1871,7 +1944,7 @@ let claim_queued_event t id operation_id snapshot =
         ~state:t.state
         ~observer:receipt.context.source
         ~event
-        ~now:(t.services.now ())
+        ~subscription_expired:(subscription_is_due t)
     in
     let%bind () =
       match retirement_reason with
@@ -2199,7 +2272,7 @@ let commit_queued_event t borrow snapshot requests =
           ~state:t.state
           ~observer:borrow.receipt.context.source
           ~event:borrow.event
-          ~now:(t.services.now ())
+          ~subscription_expired:(subscription_is_due t)
       in
       let%bind () =
         match current_reason with
@@ -2773,6 +2846,7 @@ let subscription_parent_job t =
 ;;
 
 let stage_subscription_mutation_internal
+      ?sampled_time
       t
       owner
       source
@@ -2793,7 +2867,11 @@ let stage_subscription_mutation_internal
     | false -> Error (error Conflict "subscription changed before staging")
   in
   let%bind () = Agent_protocol.Subscription.validate_transition ~previous next in
-  let now = t.services.now () in
+  let now, monotonic_now =
+    Option.value_or_thunk sampled_time ~default:(fun () ->
+      let now = t.services.now () in
+      now, t.services.monotonic_now ())
+  in
   let%bind () =
     match previous with
     | Some _ -> Ok ()
@@ -2803,11 +2881,10 @@ let stage_subscription_mutation_internal
         | Some invocation
           when Agent_protocol.Id.Invocation.equal
                  invocation.context.id
-                 next.context.invocation_id
-               && Agent_protocol.Timestamp.compare
-                    next.context.created_at
-                    invocation.context.created_at
-                  >= 0 -> Ok ()
+                 next.context.invocation_id ->
+          (* Origin is established by the live borrowed invocation, not wall
+             timestamp ordering across a possible clock adjustment. *)
+          Ok ()
         | _ ->
           Error
             (error
@@ -2857,16 +2934,30 @@ let stage_subscription_mutation_internal
          Error (error Invalid_request "subscription lifetime exceeds host policy"))
   in
   let%bind () =
-    match previous, next.result with
-    | Some { result = Some _; _ }, _ -> Ok ()
-    | _, _
-      when Option.exists next.completed_at ~f:(fun at ->
-             Agent_protocol.Timestamp.compare at now > 0) ->
-      Error (error Invalid_request "subscription completion is in the future")
-    | _, Some Expired -> Ok ()
-    | _, _ when Agent_protocol.Timestamp.compare now next.context.deadline >= 0 ->
-      Error (error Conflict "subscription deadline has passed; record expiry")
-    | _ -> Ok ()
+    match previous with
+    | None | Some { result = Some _; _ } -> Ok ()
+    | Some previous ->
+      let%bind due = subscription_is_due_at t previous ~now ~monotonic_now in
+      let%bind () =
+        match next.result with
+        | None -> Ok ()
+        | Some completion ->
+          let latest = subscription_terminal_time_at previous completion ~now in
+          (match
+             Option.exists next.completed_at ~f:(fun at ->
+               Agent_protocol.Timestamp.compare at latest > 0)
+           with
+           | true ->
+             Error (error Invalid_request "subscription completion is in the future")
+           | false -> Ok ())
+      in
+      (match due, next.result with
+       | true, Some Expired | false, (None | Some (Succeeded _ | Failed _ | Cancelled _))
+         -> Ok ()
+       | false, Some Expired ->
+         Error (error Conflict "subscription has not reached its elapsed deadline")
+       | true, _ ->
+         Error (error Conflict "subscription deadline has passed; record expiry"))
   in
   let%bind () =
     match next.result, next.context.completion_schema with
@@ -2881,7 +2972,11 @@ let stage_subscription_mutation_internal
         error Invalid_request "subscription completion schema mismatch")
     | _ -> Ok ()
   in
-  Staged_subscriptions.stage t.staged_subscriptions ~owner ~previous ~next
+  let%map receipt =
+    Staged_subscriptions.stage t.staged_subscriptions ~owner ~previous ~next
+  in
+  sync_extension_clock t;
+  receipt
 ;;
 
 let create_script_subscription_internal
@@ -2911,6 +3006,7 @@ let create_script_subscription_internal
     | false -> Error (error Invalid_request "subscription lifetime exceeds host policy")
   in
   let created_at = t.services.now () in
+  let monotonic_created_at = t.services.monotonic_now () in
   let deadline =
     Time_ns.add
       (Agent_protocol.Timestamp.to_time_ns created_at)
@@ -2936,7 +3032,51 @@ let create_script_subscription_internal
   let%map receipt =
     stage_subscription_mutation_internal t owner source None subscription
   in
+  Extension_clock.capture
+    t.extension_clock
+    (Subscription subscription.context.id)
+    ~now:monotonic_created_at
+    ~delay_ms:lifetime_ms;
   receipt, subscription
+;;
+
+let finish_script_subscription_internal t owner source id expected_epoch completion =
+  let open Result.Let_syntax in
+  let%bind _ = subscription_owner_active t owner source in
+  let%bind previous =
+    Result.of_option
+      (provisional_subscription t owner id)
+      ~error:(error Invalid_state "subscription is not retained")
+  in
+  let%bind () = subscription_owned t source previous in
+  let now = t.services.now () in
+  let monotonic_now = t.services.monotonic_now () in
+  let%bind completion =
+    match previous.result with
+    | Some winner -> Ok winner
+    | None ->
+      let%map due = subscription_is_due_at t previous ~now ~monotonic_now in
+      (match due with
+       | true -> Agent_protocol.Completion.Expired
+       | false -> completion)
+  in
+  let%bind next, _ =
+    Agent_protocol.Subscription.finish
+      previous
+      ~expected_epoch
+      ~now:(subscription_terminal_time_at previous completion ~now)
+      completion
+  in
+  let%map receipt =
+    stage_subscription_mutation_internal
+      ~sampled_time:(now, monotonic_now)
+      t
+      owner
+      source
+      (Some previous)
+      next
+  in
+  receipt, next
 ;;
 
 let derive_background_launch t owner =
@@ -5623,7 +5763,11 @@ let cancelled_work_dependencies t (parent : Agent_protocol.Job.t) =
               Agent_protocol.Subscription.finish
                 subscription
                 ~expected_epoch:subscription.epoch
-                ~now:(t.services.now ())
+                ~now:
+                  (subscription_terminal_time
+                     t
+                     subscription
+                     (Cancelled "owning job stopped waiting"))
                 (Cancelled "owning job stopped waiting")
             in
             [], [ terminal ])
@@ -7156,7 +7300,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       ~receipts
       ~lookup:(lookup_subscription t)
   | Abort_subscription_mutation (owner, receipt) ->
-    Staged_subscriptions.abort t.staged_subscriptions ~owner ~receipt
+    let open Result.Let_syntax in
+    let%map () = Staged_subscriptions.abort t.staged_subscriptions ~owner ~receipt in
+    sync_extension_clock t
+  | Finish_script_subscription (owner, source, id, expected_epoch, completion) ->
+    finish_script_subscription_internal t owner source id expected_epoch completion
   | Read_script_subscription (owner, source, id) ->
     let open Result.Let_syntax in
     let%bind _ = subscription_owner_active t owner source in

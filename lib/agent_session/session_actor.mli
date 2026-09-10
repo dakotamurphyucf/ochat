@@ -157,6 +157,18 @@ val select_subscription_mutations
   -> receipts:int list
   -> (unit, Agent_protocol.Error.t) result
 
+(** Actor-owned completion selection. Uses the subscription's elapsed deadline,
+    preserves a retained winner, normalizes terminal wall timestamps, and returns
+    a staged receipt to commit with the moderator checkpoint. *)
+val finish_script_subscription
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Subscription.t
+  -> expected_epoch:int
+  -> Agent_protocol.Completion.t
+  -> (int * Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
+
 val abort_subscription_mutation
   :  t
   -> owner:Agent_protocol.Job.launch_owner

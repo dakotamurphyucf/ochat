@@ -57,7 +57,12 @@ let claimed_timer_ids ~state =
        ~f:(List.filter_map ~f:(Option.map ~f:(fun (timer : P.Schedule.t) -> timer.id)))
 ;;
 
-let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~now =
+let timer_retirement_reason
+      ~state
+      ~(observer : P.Invocation.observer)
+      ~event
+      ~subscription_expired
+  =
   let open Result.Let_syntax in
   let%bind timer = captured_timer event in
   match timer with
@@ -103,7 +108,7 @@ let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~n
            | None -> Ok None
            | Some (id, epoch) ->
              let active =
-               List.exists state.subscriptions ~f:(fun subscription ->
+               List.find state.subscriptions ~f:(fun subscription ->
                  P.Id.Subscription.equal subscription.context.id id
                  && P.Id.Session.equal subscription.context.session_id timer.session_id
                  && subscription.context.generation = timer.generation
@@ -113,12 +118,13 @@ let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~n
                       (Some ownership.source)
                  && subscription.epoch = epoch
                  && Option.equal P.Id.Schedule.equal subscription.timer_id (Some timer.id)
-                 && Option.is_none subscription.result
-                 && P.Timestamp.compare now subscription.context.deadline < 0)
+                 && Option.is_none subscription.result)
              in
              (match active with
-              | true -> Ok None
-              | false -> Ok (Some "timer.stale_subscription")))))
+              | Some subscription ->
+                let%map expired = subscription_expired subscription in
+                Option.some_if expired "timer.stale_subscription"
+              | None -> Ok (Some "timer.stale_subscription")))))
 ;;
 
 let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =

@@ -22,6 +22,13 @@ type host =
       -> Agent_protocol.Invocation.observer
       -> Agent_protocol.Id.Subscription.t
       -> (Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
+  ; finish :
+      Agent_protocol.Job.launch_owner
+      -> Agent_protocol.Invocation.observer
+      -> Agent_protocol.Id.Subscription.t
+      -> expected_epoch:int
+      -> Agent_protocol.Completion.t
+      -> (int * Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
   ; select :
       Agent_protocol.Job.launch_owner
       -> Agent_protocol.Invocation.observer
@@ -43,11 +50,7 @@ type origin =
   | Direct of Chat_response.Extension_compiler.t * Agent_protocol.Invocation.t
   | Managed of Chat_response.Managed_tool_registry.execution
 
-val create
-  :  now:(unit -> Agent_protocol.Timestamp.t)
-  -> limits:Staged_subscriptions.limits
-  -> host:host
-  -> t
+val create : limits:Staged_subscriptions.limits -> host:host -> t
 
 (** Only a dispatched moderator tool supplies [originating]. Its compiled
     declaration supplies the completion schema. Event/observation scopes pass

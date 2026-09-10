@@ -21,7 +21,8 @@ val timer_retirement_reason
   :  state:Session_state.t
   -> observer:Agent_protocol.Invocation.observer
   -> event:Session.Snapshot.t
-  -> now:Agent_protocol.Timestamp.t
+  -> subscription_expired:
+       (Agent_protocol.Subscription.t -> (bool, Agent_protocol.Error.t) result)
   -> (string option, Agent_protocol.Error.t) result
 
 (** Pure admission and completion checks for actor-owned queued moderator events.

@@ -1141,6 +1141,16 @@ let extension_subscriptions t actor_ref =
         (fun owner source id ->
           Result.bind (extension_actor actor_ref) ~f:(fun actor ->
             A.read_script_subscription actor ~owner ~source ~id))
+    ; finish =
+        (fun owner source id ~expected_epoch completion ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.finish_script_subscription
+              actor
+              ~owner
+              ~source
+              ~id
+              ~expected_epoch
+              completion))
     ; select =
         (fun owner source receipts ->
           Result.bind (extension_actor actor_ref) ~f:(fun actor ->
@@ -1157,7 +1167,7 @@ let extension_subscriptions t actor_ref =
             A.read_script_job actor ~owner ~id))
     }
   in
-  Service.create ~now:(fun () -> now t) ~limits:t.limits.subscriptions ~host
+  Service.create ~limits:t.limits.subscriptions ~host
 ;;
 
 let extension_schedules actor_ref =
