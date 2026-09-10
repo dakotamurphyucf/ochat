@@ -26,6 +26,7 @@ type t =
   | Subscription_cancelled of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
+  | Delivery_wake_changed of Agent_protocol.Delivery.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
@@ -496,7 +497,10 @@ let rec apply state = function
         | _ -> false)
     in
     if already_committed
-    then Ok state
+    then (
+      match previous with
+      | Some previous when Agent_protocol.Delivery.equal previous delivery -> Ok state
+      | _ -> invalid "notification wake changes require their own transition")
     else if
       List.exists state.conversation.canonical_history ~f:(fun old ->
         History_entry.Id.equal old.id entry.id)
@@ -516,6 +520,66 @@ let rec apply state = function
               canonical_history = state.conversation.canonical_history @ [ entry ]
             }
         }
+  | Delivery_wake_changed delivery ->
+    let open Result.Let_syntax in
+    let module P = Agent_protocol in
+    let invalid message = Error (P.Error.invalid_request message) in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        delivery.context.session_id
+        delivery.context.generation
+    in
+    let%bind previous =
+      List.find state.deliveries ~f:(fun old ->
+        P.Id.Delivery.equal old.context.id delivery.context.id)
+      |> Result.of_option
+           ~error:
+             (P.Error.invalid_request "notification wake references an unknown delivery")
+    in
+    let%bind () =
+      match previous.status, delivery.status with
+      | Committed _, Committed _ -> Ok ()
+      | _ -> invalid "notification wake cannot insert history"
+    in
+    let%bind () = P.Delivery.validate_transition ~previous:(Some previous) delivery in
+    if P.Delivery.equal previous delivery
+    then Ok state
+    else (
+      let%bind () =
+        match delivery.wake_disposition with
+        | Some (Accepted_wake id) ->
+          (match
+             ( state.active_operation
+             , state.lifecycle.desired
+             , state.lifecycle.observed
+             , state.halted )
+           with
+           | ( Some
+                 { id = active; generation; kind = Turn _; state = Starting | Running; _ }
+             , Running
+             , Running_turn observed
+             , false )
+             when P.Id.Operation.equal id active
+                  && P.Id.Operation.equal id observed
+                  && Int.equal generation delivery.context.generation -> Ok ()
+           | _ ->
+             invalid "notification wake acceptance requires its admitted running turn")
+        | Some (Discarded_wake _) -> Ok ()
+        | None | Some Pending_wake ->
+          invalid "notification wake has no terminal disposition"
+      in
+      Ok
+        { state with
+          deliveries =
+            replace_by
+              P.Id.Delivery.compare
+              delivery.context.id
+              delivery
+              state.deliveries
+              ~id_of:(fun value -> value.P.Delivery.context.id)
+        })
   | (Moderator_execution_changed execution | Moderator_execution_reconciled execution) as
     delta ->
     let open Result.Let_syntax in

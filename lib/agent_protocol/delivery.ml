@@ -27,7 +27,7 @@ type context =
   ; created_at : Timestamp.t
   ; ownership : ownership option [@sexp.option]
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type status =
   | Pending
@@ -36,14 +36,21 @@ type status =
       ; at : Timestamp.t
       }
   | Failed of Invocation.tool_error
-[@@deriving sexp]
+[@@deriving equal, sexp]
+
+type wake_disposition =
+  | Pending_wake
+  | Accepted_wake of Id.Operation.t
+  | Discarded_wake of string
+[@@deriving equal, sexp]
 
 type t =
   { context : context
   ; attempt : int
   ; status : status
+  ; wake_disposition : wake_disposition option [@sexp.option]
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 let failure code message = Error (Error.create code ~message ~retryable:false ())
 
@@ -134,6 +141,18 @@ let validate t =
     | Some _, (Job_adapter | External_ingress) ->
       invalid "moderator-owned delivery has a different source kind"
   in
+  let%bind () =
+    match t.wake_disposition, c.wake, t.status with
+    | None, _, _ -> Ok ()
+    | Some disposition, Completion.Request_turn, Committed _ ->
+      (match disposition with
+       | Pending_wake -> Ok ()
+       | Accepted_wake id -> validate_id Id.Operation.to_json Id.Operation.of_json id
+       | Discarded_wake reason ->
+         text ~name:"notification wake disposition" ~max:1024 reason)
+    | Some _, _, _ ->
+      invalid "wake disposition requires a committed request-turn delivery"
+  in
   if c.generation < 0 || t.attempt < 1 || t.attempt > 64
   then invalid "invalid delivery generation or attempt"
   else (
@@ -148,11 +167,11 @@ let validate t =
 ;;
 
 let create context =
-  let t = { context; attempt = 1; status = Pending } in
+  let t = { context; attempt = 1; status = Pending; wake_disposition = None } in
   Result.map (validate t) ~f:(fun () -> t)
 ;;
 
-let commit t ~history_id ~now =
+let commit ?(track_wake = false) t ~history_id ~now =
   let open Result.Let_syntax in
   let%bind () = validate t in
   match t.status with
@@ -162,10 +181,32 @@ let commit t ~history_id ~now =
     else failure Conflict "delivery is already committed to another history entry"
   | Failed _ -> failure Invalid_state "failed delivery must be explicitly retried"
   | Pending ->
-    let next = { t with status = Committed { history_id; at = now } } in
+    let wake_disposition =
+      match track_wake, t.context.wake with
+      | true, Completion.Request_turn -> Some Pending_wake
+      | _ -> None
+    in
+    let next = { t with status = Committed { history_id; at = now }; wake_disposition } in
     let%map () = validate next in
     next
 ;;
+
+let settle_wake t disposition =
+  let open Result.Let_syntax in
+  let%bind () = validate t in
+  match t.wake_disposition with
+  | Some current when equal_wake_disposition current disposition -> Ok t
+  | Some Pending_wake ->
+    let next = { t with wake_disposition = Some disposition } in
+    let%map () = validate next in
+    next
+  | None -> failure Invalid_state "delivery has no pending wake request"
+  | Some (Accepted_wake _ | Discarded_wake _) ->
+    failure Already_resolved "notification wake already has a disposition"
+;;
+
+let accept_wake t ~operation_id = settle_wake t (Accepted_wake operation_id)
+let discard_wake t ~reason = settle_wake t (Discarded_wake reason)
 
 let fail t error =
   let open Result.Let_syntax in
@@ -202,14 +243,25 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "new delivery must be pending on its first attempt")
   | Some previous ->
     let%bind () = validate previous in
-    if not (Sexp.equal (sexp_of_context previous.context) (sexp_of_context next.context))
+    if not (equal_context previous.context next.context)
     then failure Conflict "delivery context is immutable"
-    else if Sexp.equal (sexp_of_t previous) (sexp_of_t next)
+    else if equal previous next
     then Ok ()
     else (
       match previous.status, next.status with
-      | Pending, (Failed _ | Committed _) when next.attempt = previous.attempt -> Ok ()
+      | Pending, Failed _ when next.attempt = previous.attempt -> Ok ()
+      | Pending, Committed _ when next.attempt = previous.attempt ->
+        (match next.wake_disposition with
+         | None | Some Pending_wake -> Ok ()
+         | Some (Accepted_wake _ | Discarded_wake _) ->
+           failure Invalid_state "new notification wake must start pending")
       | Failed _, Pending when next.attempt = previous.attempt + 1 -> Ok ()
+      | Committed _, Committed _
+        when equal_status previous.status next.status
+             && Int.equal previous.attempt next.attempt ->
+        (match previous.wake_disposition, next.wake_disposition with
+         | Some Pending_wake, Some (Accepted_wake _ | Discarded_wake _) -> Ok ()
+         | _ -> failure Invalid_state "invalid notification wake transition")
       | _ -> failure Invalid_state "invalid delivery transition")
 ;;
 
@@ -263,6 +315,33 @@ let optional name value encode =
   Option.to_list (Option.map value ~f:(fun v -> name, encode v))
 ;;
 
+let wake_disposition_to_json = function
+  | Pending_wake -> `Object [ "type", `String "pending" ]
+  | Accepted_wake id ->
+    `Object [ "type", `String "accepted"; "operation_id", Id.Operation.to_json id ]
+  | Discarded_wake reason ->
+    `Object [ "type", `String "discarded"; "reason", `String reason ]
+;;
+
+let wake_disposition_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind kind = Json_codec.required_as fields "type" Json_codec.string in
+  match kind with
+  | "pending" ->
+    let%map () = closed fields [ "type" ] in
+    Pending_wake
+  | "accepted" ->
+    let%bind () = closed fields [ "type"; "operation_id" ] in
+    let%map id = Json_codec.required_as fields "operation_id" Id.Operation.of_json in
+    Accepted_wake id
+  | "discarded" ->
+    let%bind () = closed fields [ "type"; "reason" ] in
+    let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
+    Discarded_wake reason
+  | _ -> invalid "unknown notification wake disposition"
+;;
+
 let to_json t =
   let c = t.context in
   let body =
@@ -282,14 +361,21 @@ let to_json t =
        @ optional "invocation_id" c.invocation_id Id.Invocation.to_json
        @ optional "work" c.work Invocation.work_to_json)
   in
-  match c.ownership with
-  | None -> body
-  | Some ownership ->
+  match t.wake_disposition, c.ownership with
+  | None, None -> body
+  | None, Some ownership ->
     `Object
       [ "schema_version", `Number "2"
       ; "delivery", body
       ; "ownership", ownership_to_json ownership
       ]
+  | Some disposition, ownership ->
+    `Object
+      ([ "schema_version", `Number "3"
+       ; "delivery", body
+       ; "wake_disposition", wake_disposition_to_json disposition
+       ]
+       @ optional "ownership" ownership ownership_to_json)
 ;;
 
 let of_json json =
@@ -298,14 +384,24 @@ let of_json json =
   let%bind fields = Json_codec.fields json in
   let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
   let%bind version = Json_codec.required_as fields "schema_version" integer in
-  let%bind fields, ownership =
+  let%bind fields, ownership, wake_disposition =
     match version with
-    | 1 -> Ok (fields, None)
+    | 1 -> Ok (fields, None, None)
     | 2 ->
       let%bind () = closed fields [ "schema_version"; "delivery"; "ownership" ] in
       let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
       let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
-      fields, Some ownership
+      fields, Some ownership, None
+    | 3 ->
+      let%bind () =
+        closed fields [ "schema_version"; "delivery"; "ownership"; "wake_disposition" ]
+      in
+      let%bind ownership = Json_codec.optional_as fields "ownership" ownership_of_json in
+      let%bind wake_disposition =
+        Json_codec.required_as fields "wake_disposition" wake_disposition_of_json
+      in
+      let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
+      fields, ownership, Some wake_disposition
     | _ -> failure Incompatible_protocol "unsupported delivery version"
   in
   let%bind () =
@@ -365,7 +461,7 @@ let of_json json =
     ; ownership
     }
   in
-  let t = { context; attempt; status } in
+  let t = { context; attempt; status; wake_disposition } in
   let%map () = validate t in
   t
 ;;

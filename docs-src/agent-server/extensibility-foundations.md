@@ -2127,6 +2127,23 @@ grant result disclosure, establish a provider safe point or request a turn. Actu
 nested daemon publication is idempotent and survives snapshot restoration without
 inventing another tool output; automatic delivery and wake scheduling remain open.
 
+The new execution service can commit a delivery with `track_wake:true` to record
+a separate `Pending_wake` for `Request_turn`. This works for moderator and approved
+host-adapter sources. The host can settle it as `Accepted_wake(operation_id)`
+or `Discarded_wake(reason)`. Acceptance means that the named foreground turn was
+admitted, not that a model request succeeded. Several deliveries can name the same
+operation. The dedicated wake delta requires that operation to be an active turn in the same generation
+in the running lifecycle; repeating an already-recorded disposition remains valid
+after the turn ends. Settlement cannot insert history or replace a terminal result.
+
+Records carrying this state use delivery JSON envelope 3, with source ownership
+when present. Legacy commit callers do not opt into tracking. Existing envelopes 1/2
+and S-expressions without a wake receipt remain readable and do not acquire a new
+wake on restore. `No_wake` and `Next_turn` carry no automatic-turn request. Dropping
+or reopening a retained receipt, or using the history-insertion delta to settle a
+wake, is rejected. These records support the remaining automatic delivery and
+budget-aware scheduling integration; that integration is not yet enabled.
+
 ## Recovery classifications
 
 These classifications define the execution-service recovery work. Record replay

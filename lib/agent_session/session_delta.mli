@@ -36,6 +36,10 @@ type t =
       historical generations. Cannot admit new work or rewrite terminal results. *)
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
+  | Delivery_wake_changed of Agent_protocol.Delivery.t
+  (** Settle an existing committed wake without reinserting history. Acceptance
+      requires the matching active Turn, generation and running lifecycle in this checkpoint.
+      Repeating the same disposition remains valid after that turn has ended. *)
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64

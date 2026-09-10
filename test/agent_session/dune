@@ -31,6 +31,7 @@
   timer_range_tests
   notification_history_tests
   delivery_ownership_tests
+  delivery_wake_tests
   notification_transaction_tests
   notification_access_tests
   notification_readiness_tests
