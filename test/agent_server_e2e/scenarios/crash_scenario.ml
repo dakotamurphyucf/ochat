@@ -288,7 +288,13 @@ let run_matrix env case =
     let selected = select case in
     List.iter selected ~f:(fun (name, test) ->
       try test env environment with
-      | exn -> raise_s [%sexp "crash E2E case failed", (name : string), (exn : Exn.t)]);
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        let message =
+          [%sexp "crash E2E case failed", (name : string), (exn : Exn.t)]
+          |> Sexp.to_string_hum
+        in
+        Exn.raise_with_original_backtrace (Failure message) backtrace);
     Eio.Flow.copy_string
       (Sexp.to_string_hum
          [%sexp

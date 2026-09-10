@@ -155,7 +155,7 @@ let run env environment boundary =
       F.await_marker env child "notification-provider 2 frames=0";
       F.write env (Filename.concat (C.physical_workspace fixture) "work.release") "finish";
       (match boundary with
-       | "pending" -> ()
+       | "terminal" | "pending" -> ()
        | _ ->
          ignore
            (B.await env "standalone intent" (fun () ->
@@ -170,37 +170,40 @@ let run env environment boundary =
       F.kill env child;
       let before = state env fixture session in
       F.require (Option.is_none before.moderator) "standalone session gained a moderator";
-      F.require
-        (List.length before.deliveries = 1)
-        "standalone intent missing or duplicated";
-      let delivery = List.hd_exn before.deliveries in
       let job = List.hd_exn before.jobs in
-      let reference = result_reference delivery in
+      let reference = P.Job_result_reference.of_job job |> F.protocol_ok in
       P.Job_result_reference.validate_job reference job |> F.protocol_ok;
       F.require
         (Option.is_some reference.artifact)
         "crash fixture did not persist an artifact";
-      (match job.delivery with
-       | Delivered _ -> ()
-       | _ -> F.fail "intent and job marker were not atomic");
       F.require_equal
         "single original effect"
         [%sexp_of: string]
         "executed\n"
         (F.read env effect_path);
-      (match boundary, delivery.status, delivery.wake_disposition with
-       | "pending", Pending, None ->
-         F.require (List.is_empty (frames before)) "pending data already inserted"
-       | "committed", Committed _, Some Pending_wake ->
-         F.require (List.length (frames before) = 1) "committed frame missing"
-       | "accepted", Committed _, Some (Accepted_wake id) ->
+      (match boundary, before.deliveries, job.delivery with
+       | "terminal", [], Pending ->
          F.require
-           (P.Id.Operation.equal id (Option.value_exn before.active_operation).id)
-           "wrong accepted operation"
-       | _ -> F.fail "standalone crash boundary was missed");
+           (List.is_empty (frames before))
+           "terminal result already published data"
+       | _, [ delivery ], Delivered _ ->
+         F.require
+           (P.Job_result_reference.equal reference (result_reference delivery))
+           "notification references another result";
+         (match boundary, delivery.status, delivery.wake_disposition with
+          | "pending", Pending, None ->
+            F.require (List.is_empty (frames before)) "pending data already inserted"
+          | "committed", Committed _, Some Pending_wake ->
+            F.require (List.length (frames before) = 1) "committed frame missing"
+          | "accepted", Committed _, Some (Accepted_wake id) ->
+            F.require
+              (P.Id.Operation.equal id (Option.value_exn before.active_operation).id)
+              "wrong accepted operation"
+          | _ -> F.fail "standalone crash boundary was missed")
+       | _ -> F.fail "job delivery marker and notification intent disagree with boundary");
       session, before)
   in
-  let old_delivery = List.hd_exn before.deliveries in
+  let prior_delivery = ref (List.hd before.deliveries) in
   let old_job = List.hd_exn before.jobs in
   let prior_frames = ref (frames before) in
   for reopen = 1 to 2 do
@@ -230,17 +233,24 @@ let run env environment boundary =
         (Option.is_none recovered.failure && Option.is_none recovered.moderator)
         "recovery changed standalone runtime state";
       let delivery = List.hd_exn recovered.deliveries in
-      F.require
-        (P.Id.Delivery.equal old_delivery.context.id delivery.context.id)
-        "delivery identity changed";
-      F.require
-        (P.Delivery.equal_context old_delivery.context delivery.context)
-        "delivery payload changed";
-      F.require_equal
-        "retained business job"
-        P.Job.sexp_of_t
-        old_job
-        (List.hd_exn recovered.jobs);
+      (match !prior_delivery with
+       | None -> prior_delivery := Some delivery
+       | Some old_delivery ->
+         F.require
+           (P.Id.Delivery.equal old_delivery.context.id delivery.context.id)
+           "delivery identity changed";
+         F.require
+           (P.Delivery.equal_context old_delivery.context delivery.context)
+           "delivery payload changed");
+      let recovered_job = List.hd_exn recovered.jobs in
+      let expected_job =
+        match boundary, recovered_job.delivery with
+        | "terminal", Delivered _ -> { old_job with delivery = recovered_job.delivery }
+        | "terminal", _ ->
+          F.fail "recovered terminal result did not settle its delivery marker"
+        | _ -> old_job
+      in
+      F.require_equal "retained business job" P.Job.sexp_of_t expected_job recovered_job;
       let current_frames = frames recovered in
       F.require
         (List.length current_frames = 1)
@@ -254,6 +264,7 @@ let run env environment boundary =
            previous
            current_frames);
       let reference = result_reference delivery in
+      P.Job_result_reference.validate_job reference recovered_job |> F.protocol_ok;
       let completion =
         read_artifact client session ~reopen (Option.value_exn reference.artifact)
       in
@@ -287,5 +298,5 @@ let run env environment boundary =
 ;;
 
 let test env environment =
-  List.iter [ "pending"; "committed"; "accepted" ] ~f:(run env environment)
+  List.iter [ "terminal"; "pending"; "committed"; "accepted" ] ~f:(run env environment)
 ;;

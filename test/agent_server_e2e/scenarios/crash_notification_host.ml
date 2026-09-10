@@ -5,6 +5,9 @@ module Delta = Agent_session.Session_delta
 
 let rec matches boundary = function
   | Delta.Batch deltas -> List.exists deltas ~f:(matches boundary)
+  | Job_changed
+      { status = Succeeded | Failed _ | Cancelled | Interrupted _; delivery = Pending; _ }
+    -> String.equal boundary "terminal"
   | Delivery_changed { status = Pending; _ } -> String.equal boundary "pending"
   | Delivery_committed ({ wake_disposition = Some Pending_wake; _ }, _) ->
     String.equal boundary "committed"

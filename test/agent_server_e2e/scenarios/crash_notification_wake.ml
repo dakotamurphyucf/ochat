@@ -44,7 +44,10 @@ let with_host env environment fixture boundary f =
         F.with_client ~sw env fixture (fun client -> f child client)))
 ;;
 
-let state env fixture session = B.checkpoint env fixture session |> Option.value_exn
+let state env fixture session =
+  B.checkpoint env fixture session
+  |> Option.value_exn ~message:"moderator crash checkpoint missing"
+;;
 
 let frames state =
   List.filter
@@ -125,7 +128,11 @@ let run env environment boundary =
          F.require
            (List.length (frames before) = 2 && no_pending before)
            "accepted boundary was missed";
-         let operation = Option.value_exn before.active_operation in
+         let operation =
+           Option.value_exn
+             before.active_operation
+             ~message:"accepted wake has no active operation"
+         in
          (match operation.kind with
           | Turn User_submit -> ()
           | _ -> F.fail "accepted wake was not associated with the original user turn");
@@ -197,7 +204,10 @@ let run env environment boundary =
         (sprintf "wake accounting (%s, reopen %d)" boundary reopen)
         [%sexp_of: int]
         expected_turns
-        (Option.value_exn current.automatic_turn_budget).followup_turns;
+        (Option.value_exn
+           current.automatic_turn_budget
+           ~message:"recovered moderator automatic budget missing")
+          .followup_turns;
       F.kill env child)
   done
 ;;

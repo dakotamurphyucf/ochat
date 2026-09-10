@@ -1836,7 +1836,8 @@ The configured continuation policy applies to these sessions too. Nested model
 forks do not accept the root session's notification wakes.
 
 Actual daemon crash tests kill the process immediately after journal sync at the
-intent, history-publication and wake-acceptance boundaries. Two independent
+terminal job result (before any notification intent), intent, history-publication
+and wake-acceptance boundaries. Two independent
 reopenings retain one real shell effect, the original artifact and one data frame.
 An unaccepted wake may be admitted once on recovery; an accepted operation is not
 automatically replayed, because its external outcome could be unknown. This is
@@ -1854,6 +1855,23 @@ cancellation notification after runtime reload. Standalone cancellation requests
 a turn under host policy; a moderator handler can choose a quieter policy, as X03
 does. This qualification covers the daemon. Additional hosts and the broader
 recovery matrix belong to E07; general feature exposure still waits for A01.
+
+### Historical results after reset and rebuild
+
+Reset and rebuild advance the session generation and retire its live jobs,
+invocations, subscriptions and deliveries. With `keep_history`, reset preserves
+existing notification entries as historical data; their old IDs do not schedule
+work in the new generation. Clearing history or rebuilding removes those entries
+from current history.
+
+The pre-change archive retains the original job result and delivery receipt.
+Use `session.export` with its retained archive revision to inspect that historical
+snapshot, including inline job results and artifact descriptors. A descriptor
+grants no authority: artifact downloads still require an authorized attachment
+and the blob's principal scopes. Result cleanup scans retained session history and
+archives, so removing the live job table alone does not make its artifact an orphan.
+Reset/rebuild tests verify revision exports and artifact reads across cleanup and
+runtime reload, with no repeated shell effect or automatic continuation.
 
 ### Artifact-backed terminal results
 
