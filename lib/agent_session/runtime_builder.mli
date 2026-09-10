@@ -47,14 +47,18 @@ type extension_services =
     (** Whether the current source/generation has a completed lifecycle receipt.
         An initial prepared checkpoint alone does not mean startup executed. *)
   ; history : unit -> History_entry.t list
+  ; standalone_completion :
+      tools:Script_tool_calls.t
+      -> Agent_protocol.Job.t
+      -> (unit, Agent_protocol.Error.t) result
   ; idle_notifications :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> unit
       -> (bool, Agent_protocol.Error.t) result
     (** Current canonical history, read after an actor claim without entering the manager. *)
   ; notification_input :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
       -> unit
@@ -62,7 +66,7 @@ type extension_services =
            , Agent_protocol.Error.t )
            result
   ; initial_notification_input :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
       -> unit
@@ -110,6 +114,10 @@ type t =
   ; moderator_script_tools : Script_tool_calls.t option
     (** Host policy/disclosure services for v1 moderator native calls. Normal
         construction leaves this absent until v1 admission is installed. *)
+  ; standalone_completion :
+      (Agent_protocol.Job.t -> (unit, Agent_protocol.Error.t) result) option
+    (** Pinned host adapter for a root standalone Pending job. Admission performs
+        checked artifact loading and atomically saves the intent/delivery marker. *)
   ; background_executor : background_executor option
     (** Qualified generic executor. Requires the actor's actual job-attempt native,
         moderator-tool and ordinary-event services. *)

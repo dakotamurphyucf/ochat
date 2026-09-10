@@ -695,6 +695,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; moderator_manager = Some manager
            ; moderator_tools = []
            ; moderator_script_tools = script_tools
+           ; standalone_completion = None
            ; background_executor = None
            ; idle_notifications = None
            ; automatic_turn_policy = None
@@ -1060,6 +1061,7 @@ let%expect_test
                ; moderator_manager = Some manager
                ; moderator_tools = []
                ; moderator_script_tools = script_tools
+               ; standalone_completion = None
                ; background_executor = None
                ; idle_notifications = None
                ; automatic_turn_policy = None

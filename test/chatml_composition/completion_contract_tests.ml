@@ -20,6 +20,8 @@ let%expect_test
      changes and cannot widen on replay"
   =
   with_daemon
+    ~runtime_policy:
+      { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
     ~sources:Standalone_pending_tests.sources
     ~calls:
       [ ( "contract"

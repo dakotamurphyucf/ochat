@@ -16,6 +16,7 @@ let runtime ?script_tools ~close () : Builder.t =
   ; moderator_manager = None
   ; moderator_tools = []
   ; moderator_script_tools = script_tools
+  ; standalone_completion = None
   ; background_executor = None
   ; idle_notifications = None
   ; automatic_turn_policy = None

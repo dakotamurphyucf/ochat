@@ -146,6 +146,19 @@ let project ~invocation ~job ~completion ~current_capabilities =
   }
 ;;
 
+let authorize ~invocation ~job ~current_capabilities ~policy =
+  let open Result.Let_syntax in
+  let%bind contract, _ = subject invocation job in
+  let%bind () =
+    match invocation.publication_discarded with
+    | None -> Ok ()
+    | Some _ -> invalid "standalone acknowledgement was discarded"
+  in
+  let%bind selected = rebind contract ~current_capabilities in
+  let%bind request = B.of_json ~policy job.payload in
+  B.validate_capabilities request ~capabilities:selected
+;;
+
 let validate_projection ~invocation ~job (delivery : P.Delivery.t) =
   let open Result.Let_syntax in
   let%bind () = P.Delivery.validate delivery in

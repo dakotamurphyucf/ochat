@@ -10,7 +10,7 @@ type t =
   { session_id : P.Id.Session.t
   ; generation : int
   ; revision : int64
-  ; source : P.Invocation.observer
+  ; source : P.Invocation.observer option
   ; actions : action list
   }
 
@@ -22,7 +22,14 @@ type idle =
 
 let current_owned (state : Session_state.t) (value : P.Delivery.t) =
   Int.equal value.context.generation state.identity.generation
-  && Option.is_some value.context.ownership
+  && (Option.is_some value.context.ownership || Option.is_some value.completion_projection)
+;;
+
+let source_permitted source (value : P.Delivery.t) =
+  match value.context.ownership, value.completion_projection with
+  | Some owner, _ -> Option.exists source ~f:(P.Invocation.equal_observer owner.source)
+  | None, Some _ -> true
+  | None, None -> false
 ;;
 
 let pending_wake (value : P.Delivery.t) =
@@ -54,6 +61,25 @@ let access ~(state : Session_state.t) ~current_capabilities ~policy (value : P.D
   let%bind selected =
     Script_notification_service.validate_disclosure ~current_capabilities value
   in
+  let%bind () =
+    match value.completion_projection, value.context.invocation_id with
+    | None, _ -> Ok ()
+    | Some _, Some id ->
+      let%bind invocation =
+        List.find state.invocations ~f:(fun value ->
+          P.Id.Invocation.equal value.context.id id)
+        |> Result.of_option
+             ~error:(P.Error.invalid_request "missing standalone publisher")
+      in
+      let%bind contract =
+        Result.of_option
+          invocation.completion_contract
+          ~error:(P.Error.invalid_request "missing standalone completion contract")
+      in
+      Standalone_completion_contract.rebind contract ~current_capabilities
+      |> Result.map ~f:ignore
+    | Some _, None -> Error (P.Error.invalid_request "unbound standalone publisher")
+  in
   match value.context.work with
   | None | Some (P.Invocation.Subscription _) -> Ok ()
   | Some (Job id) ->
@@ -70,7 +96,13 @@ let failure value code message =
   |> Result.map ~f:(fun value -> Some (Fail value))
 ;;
 
-let prepare ~(state : Session_state.t) ~source ~current_capabilities ~policy ~max_count =
+let prepare_for_runtime
+      ~(state : Session_state.t)
+      ~source
+      ~current_capabilities
+      ~policy
+      ~max_count
+  =
   let open Result.Let_syntax in
   let%bind () =
     if max_count > 0
@@ -88,8 +120,7 @@ let prepare ~(state : Session_state.t) ~source ~current_capabilities ~policy ~ma
   in
   let%map actions =
     List.map pending ~f:(fun value ->
-      let owner = Option.value_exn value.context.ownership in
-      match P.Invocation.equal_observer owner.source source with
+      match source_permitted source value with
       | false ->
         failure
           value
@@ -127,9 +158,11 @@ let prepare ~(state : Session_state.t) ~source ~current_capabilities ~policy ~ma
   }
 ;;
 
-let prepare_idle ~state ~source ~current_capabilities ~policy ~max_count =
+let prepare_idle_for_runtime ~state ~source ~current_capabilities ~policy ~max_count =
   let open Result.Let_syntax in
-  let%bind pending = prepare ~state ~source ~current_capabilities ~policy ~max_count in
+  let%bind pending =
+    prepare_for_runtime ~state ~source ~current_capabilities ~policy ~max_count
+  in
   let candidates =
     List.filter state.deliveries ~f:(fun value ->
       current_owned state value && pending_wake value)
@@ -137,9 +170,8 @@ let prepare_idle ~state ~source ~current_capabilities ~policy ~max_count =
   in
   let%map wakes, discarded_wakes =
     List.fold_result candidates ~init:([], []) ~f:(fun (wakes, discarded) value ->
-      let owner = Option.value_exn value.context.ownership in
       let permitted =
-        P.Invocation.equal_observer owner.source source
+        source_permitted source value
         && Result.is_ok (access ~state ~current_capabilities ~policy value)
       in
       match permitted with
@@ -154,4 +186,22 @@ let prepare_idle ~state ~source ~current_capabilities ~policy ~max_count =
         wakes, value :: discarded)
   in
   { pending; wakes = List.rev wakes; discarded_wakes = List.rev discarded_wakes }
+;;
+
+let prepare ~state ~source ~current_capabilities ~policy ~max_count =
+  prepare_for_runtime
+    ~state
+    ~source:(Some source)
+    ~current_capabilities
+    ~policy
+    ~max_count
+;;
+
+let prepare_idle ~state ~source ~current_capabilities ~policy ~max_count =
+  prepare_idle_for_runtime
+    ~state
+    ~source:(Some source)
+    ~current_capabilities
+    ~policy
+    ~max_count
 ;;

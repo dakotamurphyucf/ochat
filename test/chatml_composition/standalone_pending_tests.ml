@@ -17,6 +17,8 @@ let%expect_test
     "X04 asynchronous standalone bundle retains owned jobs, two reads and fresh state"
   =
   with_daemon
+    ~runtime_policy:
+      { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
     ~sources
     ~settle:Job_launch_tests.settle
     ~calls:
@@ -72,10 +74,10 @@ let%expect_test
        print_endline
          "two acknowledgements reference their owned jobs; each performs two reads with \
           fresh state";
-       print_endline "one session, no moderator, no background model request");
+       print_endline "one session, no moderator, automatic turns disabled by policy");
   [%expect
     {|
     two acknowledgements reference their owned jobs; each performs two reads with fresh state
-    one session, no moderator, no background model request
+    one session, no moderator, automatic turns disabled by policy
     |}]
 ;;

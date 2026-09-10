@@ -360,6 +360,8 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     ~defer_observation:(fun _ -> Ok ()))
             ; standalone_execution_limits =
                 Agent_session.Standalone_tool_dispatch.declared_execution_limits
+            ; standalone_completion =
+                (fun ~tools:_ _ -> failwith "unexpected standalone completion")
             ; one_off_policy = Chat_response.One_off_request.default_policy
             ; authoring_validation_host = None
             ; lifecycle_started = (fun _ -> false)

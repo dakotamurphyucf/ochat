@@ -28,7 +28,7 @@ let validate t =
       | _ -> false)
   in
   match
-    t.job_attempt > 0 && valid_digest t.contract_sha256 && valid_digest t.result_sha256
+    t.job_attempt >= 0 && valid_digest t.contract_sha256 && valid_digest t.result_sha256
   with
   | true -> Ok ()
   | false -> Error (Protocol_error.invalid_request "invalid completion projection")
@@ -56,7 +56,7 @@ let of_json json =
   let get name decode = Json_codec.required_as fields name decode in
   let%bind _ = get "version" (Json_codec.bounded_int ~min:1 ~max:1) in
   let%bind job_attempt =
-    get "job_attempt" (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+    get "job_attempt" (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   let%bind contract_sha256 = get "contract_sha256" Json_codec.string in
   let%bind result_sha256 = get "result_sha256" Json_codec.string in

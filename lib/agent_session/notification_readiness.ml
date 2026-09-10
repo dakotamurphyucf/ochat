@@ -99,6 +99,11 @@ let check ~invocations ~jobs ~events (delivery : P.Delivery.t) =
      | None -> Ok ()
      | Some id ->
        let%bind value = find_invocation id in
+       let%bind () =
+         match delivery.completion_projection with
+         | None -> Ok ()
+         | Some _ -> invocation String.Set.empty id
+       in
        (match value.status with
         | P.Invocation.Published outcome -> matching_work outcome
         | Admitted | Dispatching | Resolved _ ->

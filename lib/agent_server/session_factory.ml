@@ -1368,6 +1368,17 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
                 A.publish_job_progress actor ~invocation_id:invocation.context.id progress))
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
+    ; standalone_completion =
+        (fun ~tools job ->
+          let open Result.Let_syntax in
+          let%bind actor, current = notification_snapshot () in
+          A.deliver_standalone_completion
+            actor
+            ~revision:current.counters.revision
+            ~job
+            ~current_capabilities:
+              (Agent_session.Script_tool_calls.current_capabilities tools)
+            ~policy:Chat_response.One_off_request.default_policy)
     ; one_off_policy = Chat_response.One_off_request.default_policy
     ; authoring_validation_host = t.authoring_validation_host
     ; claim_lifecycle =
@@ -1397,7 +1408,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           let open Result.Let_syntax in
           let%bind actor, current = notification_snapshot () in
           let%bind plan =
-            Agent_session.Notification_delivery.prepare
+            Agent_session.Notification_delivery.prepare_for_runtime
               ~state:current
               ~source
               ~current_capabilities:
@@ -1417,7 +1428,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           let open Result.Let_syntax in
           let%bind actor, current = notification_snapshot () in
           let%bind plan =
-            Agent_session.Notification_delivery.prepare_idle
+            Agent_session.Notification_delivery.prepare_idle_for_runtime
               ~state:current
               ~source
               ~current_capabilities:
@@ -1425,14 +1436,19 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               ~policy:Chat_response.One_off_request.default_policy
               ~max_count:t.limits.notifications.max_per_source
           in
-          Eio.Cancel.protect (fun () ->
-            A.consume_initial_notifications actor ~operation_id plan))
+          match
+            Eio.Cancel.protect (fun () ->
+              A.consume_initial_notifications actor ~operation_id plan)
+          with
+          | Error { code = Conflict; _ } ->
+            Ok Chat_response.In_memory_stream.Safe_point_input.empty
+          | result -> result)
     ; idle_notifications =
         (fun ~source ~tools () ->
           let open Result.Let_syntax in
           let%bind actor, current = notification_snapshot () in
           let%bind plan =
-            Agent_session.Notification_delivery.prepare_idle
+            Agent_session.Notification_delivery.prepare_idle_for_runtime
               ~state:current
               ~source
               ~current_capabilities:

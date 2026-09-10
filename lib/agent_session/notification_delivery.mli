@@ -9,7 +9,7 @@ type t = private
   { session_id : Agent_protocol.Id.Session.t
   ; generation : int
   ; revision : int64
-  ; source : Agent_protocol.Invocation.observer
+  ; source : Agent_protocol.Invocation.observer option
   ; actions : action list
   }
 
@@ -38,6 +38,26 @@ val has_idle_work : Session_state.t -> bool
 val prepare_idle
   :  state:Session_state.t
   -> source:Agent_protocol.Invocation.observer
+  -> current_capabilities:Chat_response.Tool_capability.t
+  -> policy:Chat_response.One_off_request.policy
+  -> max_count:int
+  -> (idle, Agent_protocol.Error.t) result
+
+(** Runtime variants also handle checked standalone adapters without a moderator.
+    The source is the actually installed optional moderator, not implicit authority
+    for unowned historical records. Publisher/dependency pins are rechecked for
+    standalone data and recovered wakes. *)
+val prepare_for_runtime
+  :  state:Session_state.t
+  -> source:Agent_protocol.Invocation.observer option
+  -> current_capabilities:Chat_response.Tool_capability.t
+  -> policy:Chat_response.One_off_request.policy
+  -> max_count:int
+  -> (t, Agent_protocol.Error.t) result
+
+val prepare_idle_for_runtime
+  :  state:Session_state.t
+  -> source:Agent_protocol.Invocation.observer option
   -> current_capabilities:Chat_response.Tool_capability.t
   -> policy:Chat_response.One_off_request.policy
   -> max_count:int

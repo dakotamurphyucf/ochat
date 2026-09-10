@@ -1743,8 +1743,8 @@ Jobs started under a live moderator borrow now capture `launch.moderator_source`
 in launch schema2. Historical schema1 records remain readable and omit this field.
 The source cannot change on an existing job, and it must agree with any retained
 creating observer/event. A source-free job never acquires a source simply because
-a different moderator was loaded later. Source-free standalone host-managed
-conversation delivery remains separate implementation work.
+a different moderator was loaded later. Root standalone Pending calls instead use
+the host-managed completion adapter described below.
 
 The host atomically saves the job's delivered marker and its exact private queue
 frame. The actor validates the retained source, generation, attempt, result and
@@ -1790,10 +1790,31 @@ descriptor whose content was verified at admission. Replay does not read files.
 
 The actor's dedicated admission checks the private proposal's revision, ownership,
 acknowledgement and shared notification quotas before saving an intent. A generic
-extension transaction cannot introduce a projected delivery. Admission can retain
-the result while stopped and inserts no history or wake. Automatic source-free
-scheduling, safe-point publication, wake recovery and their end-to-end qualification
-remain under implementation; this internal API does not enable those behaviors.
+extension transaction cannot introduce a projected delivery. The intent-only API
+can retain a result while stopped without inserting history or waking a model.
+
+The daemon scheduler now also installs the full host adapter for root standalone
+Pending calls. Under the pinned runtime, the actor verifies current publisher and
+dependency permissions before loading an artifact. It saves the checked intent and
+the job's delivered marker in one transaction. Native callbacks then publish at the
+current turn's input boundary or an idle safe point; no moderator is required.
+Historical unowned deliveries do not gain this automatic behavior.
+
+The provider receives one supported User-role runtime data message after the original
+tool acknowledgement. A completion can join an existing continuation or request a
+later turn under the existing automatic-turn policy and budgets. Disabling extra
+turns still permits data publication. Committed wake receipts prevent replay after
+runtime reload. Publisher/dependency permissions are rechecked before publication
+and recovered wake admission; revocation cannot disclose a retained result.
+
+Current daemon qualification covers actual shell completion, schema rejection that
+preserves the original successful job, disabled extra turns, exact message/wake
+counts, reload non-replay, and multiple jobs including cancellation before attempt
+one. A raced notification plan defers; a session without a moderator never falls
+through to the legacy moderator event handler. Qualification of artifact loading,
+handling results over the notification payload limit, additional stop/crash boundaries
+and final E06 qualification remain in progress. General feature exposure still waits
+for A01.
 
 ### Artifact-backed terminal results
 
@@ -2106,8 +2127,9 @@ authorized start can build a fresh runtime.
 X04 also has an asynchronous standalone bundle: a wrapper starts the original
 two-read comparison as an owned job and returns its job ID in the acknowledgement.
 Parallel calls retain independent script state, their selected read capability,
-and the declared completion schema. They create no extra session or background
-model request; notifications require the separate delivery adapter.
+and the declared completion schema. They create no extra session. These job-focused
+tests explicitly disable extra automatic turns; the qualified daemon's standalone
+delivery adapter can publish completion data and request a continuation under policy.
 
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response

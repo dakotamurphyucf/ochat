@@ -97,6 +97,18 @@ let settle env (entry : Agent_server.Session_registry.entry) =
     wait ())
 ;;
 
+let wait env condition =
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+    let rec loop () =
+      match condition () with
+      | true -> ()
+      | false ->
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        loop ()
+    in
+    loop ())
+;;
+
 let%expect_test
     "standalone Job operations launch through the qualified daemon and preserve rollback"
   =
@@ -112,8 +124,37 @@ let%expect_test
       ]
   in
   with_daemon
+    ~runtime_policy:
+      { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
     ~sources
-    ~settle
+    ~settle:(fun env entry ->
+      settle env entry;
+      let await () =
+        wait env (fun () ->
+          let state = A.state entry.actor |> protocol_ok in
+          List.length state.deliveries = 5
+          && List.for_all state.deliveries ~f:(fun value ->
+            match value.status, value.wake_disposition with
+            | Committed _, Some (Accepted_wake _ | Discarded_wake _) -> true
+            | _ -> false))
+      in
+      match await () with
+      | () -> ()
+      | exception Eio.Time.Timeout ->
+        let state = A.state entry.actor |> protocol_ok in
+        raise_s
+          [%sexp
+            "standalone deliveries did not settle"
+          , (state.failure : Agent_protocol.Error.t option)
+          , (List.map state.jobs ~f:(fun job ->
+               job.id, job.status, job.delivery, job.attempt)
+             : (Agent_protocol.Id.Job.t * J.status * J.delivery * int) list)
+          , (List.map state.deliveries ~f:(fun value ->
+               value.context.work, value.status, value.wake_disposition)
+             : (Agent_protocol.Invocation.work option
+               * Agent_protocol.Delivery.status
+               * Agent_protocol.Delivery.wake_disposition option)
+                 list)])
     ~calls:
       [ "direct", "direct", read
       ; "alias", "alias", read
@@ -208,6 +249,10 @@ let%expect_test
           ])), fun probe -> Task.pure(`Pending(`Job(probe), `String("accepted")))))|}
       in
       with_daemon
+        ~runtime_policy:
+          { Chat_response.Runtime_semantics.default_policy with
+            honor_request_turn = false
+          }
         ~sources:(with_probe source sources)
         ~settle
         ~calls:[ "probe", "probe", read ]
@@ -261,6 +306,8 @@ let%expect_test "background one-off scripts retain their selected tools and job 
          @ limits)
     in
     with_daemon
+      ~runtime_policy:
+        { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
       ~sources
       ~settle
       ~calls:[ "script", "script", input ]

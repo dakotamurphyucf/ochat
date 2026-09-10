@@ -373,6 +373,12 @@ type _ request =
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Deliver_idle_notifications : Notification_delivery.idle -> bool request
   | Admit_standalone_delivery : Standalone_delivery.t -> unit request
+  | Deliver_standalone_completion :
+      int64
+      * Agent_protocol.Job.t
+      * Chat_response.Tool_capability.t
+      * Chat_response.One_off_request.policy
+      -> unit request
   | Consume_initial_notifications :
       Agent_protocol.Id.Operation.t * Notification_delivery.idle
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
@@ -4088,6 +4094,92 @@ let admit_standalone_delivery_internal t plan =
   ()
 ;;
 
+let deliver_standalone_completion_internal t revision expected current_capabilities policy
+  =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let%bind () =
+    match Int64.equal revision t.state.counters.revision with
+    | true -> Ok ()
+    | false -> Error (error Conflict "standalone completion runtime snapshot changed")
+  in
+  let%bind job =
+    List.find t.state.jobs ~f:(fun value -> P.Id.Job.equal value.id expected.P.Job.id)
+    |> Result.of_option ~error:(error Invalid_request "standalone completion job missing")
+  in
+  let%bind () =
+    match Jsonaf.exactly_equal (P.Job.to_json expected) (P.Job.to_json job) with
+    | true -> Ok ()
+    | false -> Error (error Conflict "standalone completion job changed")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      job.session_id
+      job.generation
+  in
+  let%bind invocation =
+    match job.launch with
+    | Some { owner = Invocation id; _ } ->
+      List.find t.state.invocations ~f:(fun value ->
+        P.Id.Invocation.equal value.context.id id)
+      |> Result.of_option
+           ~error:(error Invalid_request "standalone completion owner missing")
+    | _ -> Error (error Invalid_request "standalone completion has no invocation owner")
+  in
+  let%bind () =
+    Standalone_completion_contract.authorize
+      ~invocation
+      ~job
+      ~current_capabilities
+      ~policy
+  in
+  let%bind () =
+    match job.delivery with
+    | Pending -> Ok ()
+    | Delivered _ | Not_required ->
+      Error (error Already_resolved "standalone job is delivered")
+  in
+  let load_artifact =
+    Option.map t.services.job_results ~f:(fun publisher ->
+      Agent_store.Job_result_store.Publisher.load publisher)
+  in
+  let%bind completion = P.Job.terminal_completion ?load_artifact job in
+  let%bind completion =
+    Result.of_option
+      completion
+      ~error:(error Invalid_state "standalone job has no terminal result")
+  in
+  let now = t.services.now () in
+  let%bind plan =
+    Standalone_delivery.prepare
+      ~state:t.state
+      ~invocation_id:invocation.context.id
+      ~job_id:job.id
+      ~completion
+      ~current_capabilities
+      ~delivery_id:(P.Id.Delivery.create ())
+      ~now
+      ~wake:Request_turn
+  in
+  let%bind () =
+    Standalone_delivery.revalidate
+      ~state:t.state
+      ~staged:(Staged_notifications.values t.staged_notifications)
+      ~limits:t.services.notification_limits
+      plan
+  in
+  let job = { job with delivery = Delivered now } in
+  let%map _ =
+    transition
+      t
+      ~delta:(Session_delta.Batch [ Delivery_changed plan.delivery; Job_changed job ])
+      ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
+  in
+  ()
+;;
+
 let validate_notification_plan t (plan : Notification_delivery.t) =
   let open Result.Let_syntax in
   let%bind () =
@@ -4103,8 +4195,8 @@ let validate_notification_plan t (plan : Notification_delivery.t) =
     , installed
     , moderator_is_borrowed t )
   with
-  | true, Some source, false
-    when Agent_protocol.Invocation.equal_observer source plan.source -> Ok ()
+  | true, source, false
+    when Option.equal Agent_protocol.Invocation.equal_observer source plan.source -> Ok ()
   | _ -> Error (error Conflict "notification snapshot or source changed")
 ;;
 
@@ -7690,7 +7782,7 @@ let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle
        let%bind follow_up =
          Observation_follow_up.plan
            ~state:t.state
-           ~observer:(Some proposal.pending.source)
+           ~observer:proposal.pending.source
            ~halted:false
            ~compaction_operation_id:(Agent_protocol.Id.Operation.create ())
        in
@@ -8562,6 +8654,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     consume_notifications_internal t operation_id plan
   | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
   | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
+  | Deliver_standalone_completion (revision, job, capabilities, policy) ->
+    deliver_standalone_completion_internal t revision job capabilities policy
   | Consume_initial_notifications (operation_id, proposal) ->
     consume_notifications_internal
       ~wakes:proposal.wakes
@@ -8948,6 +9042,11 @@ let deliver_idle_notifications t plan = call t (Deliver_idle_notifications plan)
 
 let admit_standalone_delivery t plan =
   Eio.Cancel.protect (fun () -> call t (Admit_standalone_delivery plan))
+;;
+
+let deliver_standalone_completion t ~revision ~job ~current_capabilities ~policy =
+  Eio.Cancel.protect (fun () ->
+    call t (Deliver_standalone_completion (revision, job, current_capabilities, policy)))
 ;;
 
 let consume_initial_notifications t ~operation_id plan =

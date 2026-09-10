@@ -495,7 +495,8 @@ let drain_loaded_idle_moderator t runtime =
        let%bind more = drain_loaded_queued_events ~max_events t runtime manager in
        let%map applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
        more || applied
-     | _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime))
+     | Some _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime)
+     | None -> Ok false)
 ;;
 
 let pending_observation state observer =
@@ -631,9 +632,7 @@ let snapshot_has_pending_events t =
          state.moderator_executions
          ~f:Agent_session.Observation_follow_up.pending_event
     || ((not halted) && Option.exists observer ~f:(pending_observation state))
-    || ((not halted)
-        && Option.is_some observer
-        && Agent_session.Notification_delivery.has_idle_work state))
+    || ((not halted) && Agent_session.Notification_delivery.has_idle_work state))
   else Ok false
 ;;
 
@@ -879,40 +878,63 @@ let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
       |> Result.map ~f:ignore))
 ;;
 
+let deliver_moderated_background_job_completion
+      t
+      (runtime : Agent_session.Runtime_builder.t)
+      (job : Agent_protocol.Job.t)
+  =
+  let open Result.Let_syntax in
+  let%bind observer =
+    Option.bind
+      runtime.moderator_manager
+      ~f:Chat_response.Moderator_manager.invocation_observer
+    |> Result.of_option
+         ~error:
+           (Agent_protocol.Error.invalid_request
+              "background completion requires a qualified moderator")
+  in
+  Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
+    let%bind state = Agent_session.Session_actor.state t.actor in
+    let%bind frame = Agent_session.Background_job_event.frame ~state ~observer job in
+    let%bind payload =
+      Chat_response.Background_delivery.capture frame
+      |> Chatml.Chatml_value_codec.Snapshot.of_value
+      |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+      Agent_session.Session_actor.deliver_job
+        ~expected:before
+        ~expected_job:job
+        t.actor
+        ~job_id:job.id
+        ~generation:job.generation
+        ~moderator_snapshot:
+          (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+      |> Result.map ~f:ignore)
+    |> Result.map ~f:ignore)
+;;
+
 let deliver_background_job_completion t (job : Agent_protocol.Job.t) =
   with_cancellable_access t (fun () ->
     let open Result.Let_syntax in
     let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     let runtime = Option.value_exn t.runtime in
-    let%bind observer =
-      Option.bind
-        runtime.moderator_manager
-        ~f:Chat_response.Moderator_manager.invocation_observer
-      |> Result.of_option
-           ~error:
-             (Agent_protocol.Error.invalid_request
-                "background completion requires a qualified moderator")
+    let%bind state = Agent_session.Session_actor.state t.actor in
+    let standalone =
+      match job.launch with
+      | Some { owner = Invocation id; _ } ->
+        List.exists state.invocations ~f:(fun invocation ->
+          Agent_protocol.Id.Invocation.equal invocation.context.id id
+          && Option.is_some invocation.completion_contract)
+      | _ -> false
     in
-    Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
-      let%bind state = Agent_session.Session_actor.state t.actor in
-      let%bind frame = Agent_session.Background_job_event.frame ~state ~observer job in
-      let%bind payload =
-        Chat_response.Background_delivery.capture frame
-        |> Chatml.Chatml_value_codec.Snapshot.of_value
-        |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
-        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-      in
-      runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
-        Agent_session.Session_actor.deliver_job
-          ~expected:before
-          ~expected_job:job
-          t.actor
-          ~job_id:job.id
-          ~generation:job.generation
-          ~moderator_snapshot:
-            (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
-        |> Result.map ~f:ignore)
-      |> Result.map ~f:ignore))
+    match standalone, runtime.standalone_completion with
+    | true, Some deliver -> deliver job
+    | true, None ->
+      Error
+        (Agent_protocol.Error.invalid_request "standalone completion adapter unavailable")
+    | false, _ -> deliver_moderated_background_job_completion t runtime job)
 ;;
 
 let close t =

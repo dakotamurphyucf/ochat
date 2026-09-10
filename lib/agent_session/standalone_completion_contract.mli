@@ -38,6 +38,15 @@ val project
   -> current_capabilities:Chat_response.Tool_capability.t
   -> (projection, Agent_protocol.Error.t) result
 
+(** Before loading any artifact, validate the actual published owner, original
+    publisher/dependency pins and job request's current disclosure ceiling. *)
+val authorize
+  :  invocation:Agent_protocol.Invocation.t
+  -> job:Agent_protocol.Job.t
+  -> current_capabilities:Chat_response.Tool_capability.t
+  -> policy:Chat_response.One_off_request.policy
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Pure replay validation of owner, attempt, contract, original result digest,
     disclosure pins and projected output. Inline rejections are recomputed;
     artifact rejections bind the descriptor verified at admission. This is not a

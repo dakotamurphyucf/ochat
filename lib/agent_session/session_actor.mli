@@ -688,6 +688,17 @@ val admit_standalone_delivery
   -> Standalone_delivery.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Host adapter path under a pinned runtime lease. Recheck revision, actual owner,
+    job and current authority before bounded artifact loading. Save the checked
+    intent with its job's delivered marker atomically; publish only at a safe point. *)
+val deliver_standalone_completion
+  :  t
+  -> revision:int64
+  -> job:Agent_protocol.Job.t
+  -> current_capabilities:Chat_response.Tool_capability.t
+  -> policy:Chat_response.One_off_request.policy
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Before the first provider call, claim eligible restored wakes for this
     already-started operation and insert ready new data. The worker appends only
     returned new entries to its input snapshot. Actual before-model admission

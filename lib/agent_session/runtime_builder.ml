@@ -34,13 +34,17 @@ type extension_services =
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
+  ; standalone_completion :
+      tools:Script_tool_calls.t
+      -> Agent_protocol.Job.t
+      -> (unit, Agent_protocol.Error.t) result
   ; idle_notifications :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> unit
       -> (bool, Agent_protocol.Error.t) result
   ; notification_input :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
       -> unit
@@ -48,7 +52,7 @@ type extension_services =
            , Agent_protocol.Error.t )
            result
   ; initial_notification_input :
-      source:Agent_protocol.Invocation.observer
+      source:Agent_protocol.Invocation.observer option
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
       -> unit
@@ -90,6 +94,8 @@ type t =
   ; moderator_tools : Request.Tool.t list
   ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
   ; moderator_script_tools : Script_tool_calls.t option
+  ; standalone_completion :
+      (Agent_protocol.Job.t -> (unit, Agent_protocol.Error.t) result) option
   ; background_executor : background_executor option
   ; moderator_activation : moderator_activation option
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
@@ -1156,33 +1162,36 @@ let build_with_services
         (standalone @ moderator_dispatch @ [ native ]))
   in
   let config, model, reasoning = model_config elements in
+  let notification_source =
+    Option.bind moderator ~f:(fun (moderator, _) ->
+      Manager.invocation_observer moderator.manager)
+  in
   let notification_input =
-    match extension_services, script_tools, moderator with
-    | Some services, Some tools, Some (moderator, _) ->
-      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
-        fun ~input ->
-        services.notification_input
-          ~source
-          ~tools
-          ~operation_id:input.Operation_worker.Input.operation.id)
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some
+        (fun ~input ->
+          services.notification_input
+            ~source:notification_source
+            ~tools
+            ~operation_id:input.Operation_worker.Input.operation.id)
     | _ -> None
   in
   let initial_notification_input =
-    match extension_services, script_tools, moderator with
-    | Some services, Some tools, Some (moderator, _) ->
-      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
-        fun ~input ->
-        services.initial_notification_input
-          ~source
-          ~tools
-          ~operation_id:input.Operation_worker.Input.operation.id)
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some
+        (fun ~input ->
+          services.initial_notification_input
+            ~source:notification_source
+            ~tools
+            ~operation_id:input.Operation_worker.Input.operation.id)
     | _ -> None
   in
   let idle_notifications =
-    match extension_services, script_tools, moderator with
-    | Some services, Some tools, Some (moderator, _) ->
-      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
-        services.idle_notifications ~source ~tools)
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some (services.idle_notifications ~source:notification_source ~tools)
     | _ -> None
   in
   let worker =
@@ -1240,6 +1249,10 @@ let build_with_services
     ; moderator_tools = tools
     ; idle_notifications
     ; moderator_script_tools = script_tools
+    ; standalone_completion =
+        (match extension_services, script_tools with
+         | Some services, Some tools -> Some (services.standalone_completion ~tools)
+         | _ -> None)
     ; automatic_turn_policy =
         (match script_tools, extension_services with
          | Some _, Some services -> Some services.runtime_policy

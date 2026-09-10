@@ -122,6 +122,8 @@ let%expect_test
   =
   List.iter [ false; true ] ~f:(fun reject ->
     with_daemon
+      ~runtime_policy:
+        { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
       ~sources:(sources reject)
       ~calls:
         [ ( "adapter"
@@ -131,6 +133,14 @@ let%expect_test
       ~settle:Job_launch_tests.settle
       ~after_turn:(fun env handle entry ->
         Job_launch_tests.settle env entry;
+        Background_shell_tests.wait env (fun () ->
+          match (A.state entry.actor |> protocol_ok).deliveries with
+          | [ { status = Committed _
+              ; wake_disposition = Some (Accepted_wake _ | Discarded_wake _)
+              ; _
+              }
+            ] -> true
+          | _ -> false);
         let state = A.state entry.actor |> protocol_ok in
         let invocation = model_invocation state "adapter" in
         let job = List.hd_exn state.jobs in
@@ -188,16 +198,22 @@ let%expect_test
         in
         assert (Result.is_error (Contract.validate_projection ~invocation ~job changed));
         let limits = Agent_session.Staged_notifications.default_limits in
+        let admission_state = { state with deliveries = [] } in
+        Adapter.revalidate ~state:admission_state ~staged:[] ~limits plan |> protocol_ok;
         assert (
           Result.is_error
             (Adapter.revalidate
-               ~state
+               ~state:admission_state
                ~staged:[]
                ~limits:{ limits with max_payload_bytes = 1 }
                plan));
         assert (
           Result.is_error
-            (Adapter.revalidate ~state ~staged:[ plan.delivery ] ~limits plan));
+            (Adapter.revalidate
+               ~state:admission_state
+               ~staged:[ plan.delivery ]
+               ~limits
+               plan));
         (* A DTO, even a correctly checked one, cannot bypass the dedicated actor
            admission path through a generic extension transaction. *)
         assert (
@@ -211,8 +227,9 @@ let%expect_test
         assert (Result.is_error (A.admit_standalone_delivery entry.actor plan));
         let stopped = A.state entry.actor |> protocol_ok in
         let plan = prepare stopped in
-        A.admit_standalone_delivery entry.actor plan |> protocol_ok;
+        assert (Result.is_error (A.admit_standalone_delivery entry.actor plan));
         let saved = A.state entry.actor |> protocol_ok in
+        let delivery = List.hd_exn saved.deliveries in
         [%test_eq: int] 1 (List.length saved.deliveries);
         [%test_eq: int]
           (List.length stopped.conversation.canonical_history)
@@ -229,19 +246,23 @@ let%expect_test
           |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
           |> protocol_ok
         in
-        assert (P.Delivery.equal plan.delivery (List.hd_exn restored.deliveries));
+        assert (P.Delivery.equal delivery (List.hd_exn restored.deliveries));
         Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
         H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
         let reloaded = A.state entry.actor |> protocol_ok in
-        assert (P.Delivery.equal plan.delivery (List.hd_exn reloaded.deliveries));
+        assert (P.Delivery.equal delivery (List.hd_exn reloaded.deliveries));
         assert (Option.is_none reloaded.moderator);
         print_s
           [%sexp
-            (reject : bool), "owned result retained; immutable intent only; reload stable"])
+            (reject : bool)
+          , "owned result retained; checked projection; duplicate admission rejected; \
+             reload stable"])
       (fun _ -> ()));
   [%expect
     {|
-    (false "owned result retained; immutable intent only; reload stable")
-    (true "owned result retained; immutable intent only; reload stable")
+    (false
+     "owned result retained; checked projection; duplicate admission rejected; reload stable")
+    (true
+     "owned result retained; checked projection; duplicate admission rejected; reload stable")
     |}]
 ;;
