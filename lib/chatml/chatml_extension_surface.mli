@@ -44,6 +44,10 @@ val moderator_event_ty : Chatml_builtin_spec.ty
     returns JSON status; complete/fail/cancel take identity, expected epoch and
     respectively JSON success, tool_error or cancellation reason, returning the
     retained JSON status. Internal transaction receipts are hidden from scripts.
+    Notification.publish takes a notification_correlation record (key,
+    optional invocation_id and work), a completion and wake_policy, returning a
+    task of delivery ID. Notification.get returns JSON status. Publication stages
+    intent and does not imply immediate provider insertion or execution of a turn.
     Operation availability still requires a qualified host implementation. *)
 val moderator_v1 : Chatml_builtin_surface.surface
 

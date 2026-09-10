@@ -21,6 +21,7 @@
   job_launch
   job_dependency
   schedule_ownership
+  delivery_ownership
   job_progress_buffer
   staged_jobs
   staged_mutations

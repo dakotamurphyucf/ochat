@@ -353,6 +353,14 @@ let validate t =
         job)
   in
   let%bind () =
+    List.fold_result t.deliveries ~init:() ~f:(fun () delivery ->
+      Delivery_ownership.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~subscriptions:t.subscriptions
+        delivery)
+  in
+  let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
       Job_dependency.validate
         ~invocations:t.invocations

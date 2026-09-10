@@ -244,6 +244,7 @@ let extension_fixture workspace_instance =
       ; completion = Succeeded (`String "ready")
       ; wake = Request_turn
       ; created_at = timestamp
+      ; ownership = None
       }
     |> protocol_ok
   in

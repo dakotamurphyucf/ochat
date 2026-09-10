@@ -43,6 +43,7 @@
   background_request
   background_job_operations
   subscription_operations
+  notification_operations
   schedule_operations
   schedule_delivery
   mcp_discovery_cache

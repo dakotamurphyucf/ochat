@@ -36,6 +36,7 @@ let delivery () =
     ; completion = Succeeded (`String "result")
     ; wake = Request_turn
     ; created_at = timestamp
+    ; ownership = None
     }
   |> get
 ;;

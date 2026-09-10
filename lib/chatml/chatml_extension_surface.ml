@@ -266,6 +266,31 @@ let work_completion_ty =
     ]
 ;;
 
+let notification_correlation_ty =
+  record
+    [ "key", S.TString; "invocation_id", option S.TString; "work", option work_ref_ty ]
+;;
+
+let notification_module : S.builtin_module =
+  { name = "Notification"
+  ; exports =
+      [ task_builtin
+          ~name:"publish"
+          ~op:"Notification.publish"
+          ~parameters:[ notification_correlation_ty; completion_ty; wake_policy_ty ]
+          ~result:S.TString
+          ~spawn:false
+        |> project_receipt "Notification_receipt"
+      ; task_builtin
+          ~name:"get"
+          ~op:"Notification.get"
+          ~parameters:[ S.TString ]
+          ~result:S.json_ty
+          ~spawn:false
+      ]
+  }
+;;
+
 let moderator_event_ty =
   variant
     [ "Session_start", S.TUnit
@@ -330,7 +355,12 @@ let moderator_v1 =
   Surface.merge
     { Surface.empty with
       modules =
-        schedule_module :: subscription_module :: job_module :: invocation :: overrides
+        notification_module
+        :: schedule_module
+        :: subscription_module
+        :: job_module
+        :: invocation
+        :: overrides
     ; type_aliases =
         tool_v1.type_aliases
         @ List.map
@@ -339,6 +369,7 @@ let moderator_v1 =
             ; "schedule_misfire", schedule_misfire_ty
             ; "completion", completion_ty
             ; "work_completion", work_completion_ty
+            ; "notification_correlation", notification_correlation_ty
             ; "moderator_event", moderator_event_ty
             ]
             ~f:(fun (name, body) -> Surface.{ name; body })

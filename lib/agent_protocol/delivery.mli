@@ -6,6 +6,14 @@ type source =
   | External_ingress
 [@@deriving compare, equal, sexp]
 
+(** Actual creating moderator source and execution. An absent owner identifies
+    a legacy/host-adapter record, never implicit authority for a current script. *)
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  }
+[@@deriving equal, sexp]
+
 type context =
   { id : Id.Delivery.t
   ; session_id : Id.Session.t
@@ -17,6 +25,7 @@ type context =
   ; completion : Completion.t
   ; wake : Completion.wake
   ; created_at : Timestamp.t
+  ; ownership : ownership option [@sexp.option]
   }
 [@@deriving sexp]
 

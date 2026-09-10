@@ -45,6 +45,7 @@ let%expect_test
           ; completion = Option.value_exn sub.result
           ; wake = No_wake
           ; created_at = P.Timestamp.now ()
+          ; ownership = None
           }
         |> protocol_ok
       in

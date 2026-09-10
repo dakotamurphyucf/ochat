@@ -2064,9 +2064,33 @@ as replacements. JSON exports retain the protocol provenance; ChatMD exports
 include a runtime-delivery annotation. Export annotations do not grant authority
 when imported as a prompt.
 
-These framing and history paths are host-internal foundations. The script-facing
-`Notification.publish` adapter, active-turn safe-point insertion, automatic
-delivery and wake-up coordination remain unfinished execution-service work.
+The extensibility-v1 moderator compiler and manager now provide the typed
+`Notification.publish(reference, completion, wake_policy)` contract. `reference`
+is a `notification_correlation` record with `key : string`,
+`invocation_id : option string` and `work : option work_ref`. The key is correlation
+text, not authority or a substitute for delivery identity. Completion uses
+`Succeeded(json)`, `Failed(tool_error)`, `Cancelled(string)` or `Expired`; wake
+uses `Request_turn`, `Next_turn` or `No_wake`. Publish returns a task of delivery ID,
+and `Notification.get(id)` returns the scoped provisional or retained JSON record.
+These operations are absent from one-off and standalone computation surfaces.
+
+Publication records private mutation receipts. Caught failure rolls them back;
+the manager selects surviving receipts before persistence and acknowledges only
+after the owning save and runtime installation. Invocation, ordinary/queued event
+and observation paths carry a lexical notification transaction. A missing adapter
+fails explicitly rather than publishing outside an owning scope.
+
+New moderator-owned delivery records use a version-2 envelope containing the
+existing version-1 delivery body and immutable ownership metadata: exact script
+ID/source SHA256 and the creating invocation or moderator event. Legacy unowned
+records retain their JSON and S-expression format. Recovery validates the retained
+creator, session/generation and source-bound subscription correlation; a legacy
+record cannot silently gain current moderator authority.
+
+The compiler/manager adapter is qualified with controlled host callbacks. The
+daemon-side scoped admission service, active-turn safe-point insertion, automatic
+delivery and wake-up coordination remain unfinished execution-service work. These
+surfaces do not advertise a generally available notification feature yet.
 
 ## Recovery classifications
 

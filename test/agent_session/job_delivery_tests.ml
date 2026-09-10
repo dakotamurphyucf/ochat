@@ -54,6 +54,7 @@ let delivery (job : J.t) (invocation : I.t) completion =
     ; completion
     ; wake = No_wake
     ; created_at = timestamp
+    ; ownership = None
     }
   |> protocol_ok
 ;;

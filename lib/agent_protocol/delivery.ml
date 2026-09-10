@@ -8,6 +8,12 @@ type source =
   | External_ingress
 [@@deriving compare, equal, sexp]
 
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  }
+[@@deriving equal, sexp]
+
 type context =
   { id : Id.Delivery.t
   ; session_id : Id.Session.t
@@ -19,6 +25,7 @@ type context =
   ; completion : Completion.t
   ; wake : Completion.wake
   ; created_at : Timestamp.t
+  ; ownership : ownership option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -54,6 +61,55 @@ let history_id_of_json json =
 
 let history_id_to_json id = `String (History_entry.Id.to_string id)
 
+let ownership_to_json (ownership : ownership) =
+  let kind, id =
+    match ownership.creator with
+    | Job.Invocation id -> "invocation", Id.Invocation.to_json id
+    | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
+  in
+  `Object
+    [ "script_id", `String ownership.source.script_id
+    ; "source_sha256", `String ownership.source.source_sha256
+    ; "creator_type", `String kind
+    ; "creator_id", id
+    ]
+;;
+
+let ownership_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    closed fields [ "script_id"; "source_sha256"; "creator_type"; "creator_id" ]
+  in
+  let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
+  let%bind source_sha256 =
+    Json_codec.required_as fields "source_sha256" Json_codec.string
+  in
+  let%bind () = text ~name:"delivery script identity" ~max:256 script_id in
+  let%bind () =
+    match
+      String.length source_sha256 = 64
+      && String.for_all source_sha256 ~f:(function
+        | '0' .. '9' | 'a' .. 'f' -> true
+        | _ -> false)
+    with
+    | true -> Ok ()
+    | false -> invalid "delivery source digest must be lowercase SHA256"
+  in
+  let%bind kind = Json_codec.required_as fields "creator_type" Json_codec.string in
+  let%map creator =
+    match kind with
+    | "invocation" ->
+      Json_codec.required_as fields "creator_id" Id.Invocation.of_json
+      |> Result.map ~f:(fun id -> Job.Invocation id)
+    | "moderator_event" ->
+      Json_codec.required_as fields "creator_id" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun id -> Job.Moderator_event id)
+    | _ -> invalid "unknown delivery creator"
+  in
+  { source = { script_id; source_sha256 }; creator }
+;;
+
 let validate t =
   let open Result.Let_syntax in
   let c = t.context in
@@ -70,6 +126,14 @@ let validate t =
   in
   let%bind () = text ~name:"delivery correlation" ~max:256 c.correlation in
   let%bind () = Completion.validate c.completion in
+  let%bind () =
+    match c.ownership, c.source with
+    | None, _ -> Ok ()
+    | Some ownership, Moderator ->
+      ownership_of_json (ownership_to_json ownership) |> Result.map ~f:ignore
+    | Some _, (Job_adapter | External_ingress) ->
+      invalid "moderator-owned delivery has a different source kind"
+  in
   if c.generation < 0 || t.attempt < 1 || t.attempt > 64
   then invalid "invalid delivery generation or attempt"
   else (
@@ -201,27 +265,49 @@ let optional name value encode =
 
 let to_json t =
   let c = t.context in
-  `Object
-    ([ "schema_version", `Number "1"
-     ; "id", Id.Delivery.to_json c.id
-     ; "session_id", Id.Session.to_json c.session_id
-     ; "generation", `Number (Int.to_string c.generation)
-     ; "correlation", `String c.correlation
-     ; "source", source_to_json c.source
-     ; "completion", Completion.to_json c.completion
-     ; "wake", Completion.wake_to_json c.wake
-     ; "created_at", Timestamp.to_json c.created_at
-     ; "attempt", `Number (Int.to_string t.attempt)
-     ; "status", status_to_json t.status
-     ]
-     @ optional "invocation_id" c.invocation_id Id.Invocation.to_json
-     @ optional "work" c.work Invocation.work_to_json)
+  let body =
+    `Object
+      ([ "schema_version", `Number "1"
+       ; "id", Id.Delivery.to_json c.id
+       ; "session_id", Id.Session.to_json c.session_id
+       ; "generation", `Number (Int.to_string c.generation)
+       ; "correlation", `String c.correlation
+       ; "source", source_to_json c.source
+       ; "completion", Completion.to_json c.completion
+       ; "wake", Completion.wake_to_json c.wake
+       ; "created_at", Timestamp.to_json c.created_at
+       ; "attempt", `Number (Int.to_string t.attempt)
+       ; "status", status_to_json t.status
+       ]
+       @ optional "invocation_id" c.invocation_id Id.Invocation.to_json
+       @ optional "work" c.work Invocation.work_to_json)
+  in
+  match c.ownership with
+  | None -> body
+  | Some ownership ->
+    `Object
+      [ "schema_version", `Number "2"
+      ; "delivery", body
+      ; "ownership", ownership_to_json ownership
+      ]
 ;;
 
 let of_json json =
   let open Result.Let_syntax in
   let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:136 json in
   let%bind fields = Json_codec.fields json in
+  let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
+  let%bind version = Json_codec.required_as fields "schema_version" integer in
+  let%bind fields, ownership =
+    match version with
+    | 1 -> Ok (fields, None)
+    | 2 ->
+      let%bind () = closed fields [ "schema_version"; "delivery"; "ownership" ] in
+      let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
+      let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
+      fields, Some ownership
+    | _ -> failure Incompatible_protocol "unsupported delivery version"
+  in
   let%bind () =
     closed
       fields
@@ -240,7 +326,6 @@ let of_json json =
       ; "work"
       ]
   in
-  let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
   let%bind version = Json_codec.required_as fields "schema_version" integer in
   let%bind () =
     if version = 1
@@ -277,6 +362,7 @@ let of_json json =
     ; completion
     ; wake
     ; created_at
+    ; ownership
     }
   in
   let t = { context; attempt; status } in

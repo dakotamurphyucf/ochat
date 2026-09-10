@@ -143,6 +143,7 @@ type t =
   ; job_transaction : Background_job_operations.transaction option ref
   ; subscription_transaction : Subscription_operations.transaction option ref
   ; schedule_transaction : Schedule_operations.transaction option ref
+  ; notification_transaction : Notification_operations.transaction option ref
   }
 
 type prepared_commit =
@@ -337,6 +338,7 @@ let create
   let job_transaction = ref None in
   let subscription_transaction = ref None in
   let schedule_transaction = ref None in
+  let notification_transaction = ref None in
   let capabilities =
     { capabilities with
       on_tool_call =
@@ -414,6 +416,11 @@ let create
            ?control
            ~handlers:
              (Schedule_operations.dynamic_handlers (fun () -> !schedule_transaction))
+      |> Notification_operations.install
+           ?control
+           ~handlers:
+             (Notification_operations.dynamic_handlers (fun () ->
+                !notification_transaction))
   in
   let%bind runtime =
     run_controlled execution (fun () ->
@@ -469,6 +476,7 @@ let create
     ; job_transaction
     ; subscription_transaction
     ; schedule_transaction
+    ; notification_transaction
     }
 ;;
 
@@ -1122,18 +1130,21 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
     }
 ;;
 
-let with_work_transactions t jobs subscriptions schedules f =
+let with_work_transactions t jobs subscriptions schedules notifications f =
   let previous = !(t.job_transaction) in
   let previous_subscriptions = !(t.subscription_transaction) in
   let previous_schedules = !(t.schedule_transaction) in
+  let previous_notifications = !(t.notification_transaction) in
   t.job_transaction := jobs;
   t.subscription_transaction := subscriptions;
   t.schedule_transaction := schedules;
+  t.notification_transaction := notifications;
   Exn.protect
     ~finally:(fun () ->
       t.job_transaction := previous;
       t.subscription_transaction := previous_subscriptions;
-      t.schedule_transaction := previous_schedules)
+      t.schedule_transaction := previous_schedules;
+      t.notification_transaction := previous_notifications)
     ~f
 ;;
 
@@ -1145,6 +1156,8 @@ let persist_prepared
       receipts
       schedules
       schedule_receipts
+      notifications
+      notification_receipts
       (prepared : prepared_commit)
   =
   let open Result.Let_syntax in
@@ -1166,19 +1179,28 @@ let persist_prepared
     | None, _ :: _ -> Error "schedule mutations require an owning transaction"
     | Some transaction, _ -> transaction.Schedule_operations.prepare schedule_receipts
   in
+  let%bind acknowledge_notifications =
+    match notifications, notification_receipts with
+    | None, [] -> Ok ignore
+    | None, _ :: _ -> Error "notification mutations require an owning transaction"
+    | Some transaction, _ ->
+      transaction.Notification_operations.prepare notification_receipts
+  in
   Option.iter control ~f:(fun control -> control.Chatml.Chatml_lang.checkpoint ());
   let%map () = prepared.persist () in
   fun () ->
     prepared.install ();
     acknowledge_jobs ();
     acknowledge_subscriptions ();
-    acknowledge_schedules ()
+    acknowledge_schedules ();
+    acknowledge_notifications ()
 ;;
 
 let handle_event_entries_transactional_unlocked
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       t
       ~session_id
       ~now_ms
@@ -1245,6 +1267,9 @@ let handle_event_entries_transactional_unlocked
       let%bind schedule_mutations, local_effects =
         Schedule_operations.split_mutations local_effects
       in
+      let%bind notification_mutations, local_effects =
+        Notification_operations.split_mutations local_effects
+      in
       let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
       let%bind overlay, install_overlay =
@@ -1269,6 +1294,8 @@ let handle_event_entries_transactional_unlocked
           mutations
           schedules
           schedule_mutations
+          notifications
+          notification_mutations
           commit
       in
       fun () ->
@@ -1285,7 +1312,7 @@ let handle_event_entries_transactional_unlocked
       Exn.protect
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
-          with_work_transactions t jobs subscriptions schedules (fun () ->
+          with_work_transactions t jobs subscriptions schedules notifications (fun () ->
             let context = Moderation.Context.to_value ?control context in
             let copy value =
               Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
@@ -1324,6 +1351,7 @@ let handle_event_entries_transactional
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       t
       ~session_id
       ~now_ms
@@ -1340,6 +1368,7 @@ let handle_event_entries_transactional
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       t
       ~session_id
       ~now_ms
@@ -1357,6 +1386,7 @@ let handle_next_event_entries_transactional
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       t
       ~session_id
       ~now_ms
@@ -1377,6 +1407,7 @@ let handle_next_event_entries_transactional
           ?jobs
           ?subscriptions
           ?schedules
+          ?notifications
           t
           ~session_id
           ~now_ms
@@ -1398,6 +1429,7 @@ let handle_invocation_entries
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       ?(authorize = fun () -> Ok ())
       ?managed
       ?execution_context
@@ -1485,6 +1517,9 @@ let handle_invocation_entries
         let%bind schedule_mutations, local_effects =
           Schedule_operations.split_mutations local_effects
         in
+        let%bind notification_mutations, local_effects =
+          Notification_operations.split_mutations local_effects
+        in
         let%bind decoded = Runtime.decode_local_effects local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1512,6 +1547,8 @@ let handle_invocation_entries
             mutations
             schedules
             schedule_mutations
+            notifications
+            notification_mutations
             commit
         in
         fun () ->
@@ -1528,7 +1565,7 @@ let handle_invocation_entries
         t.invocation_tool_call := on_tool_call;
         Exn.protect
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions schedules (fun () ->
+            with_work_transactions t jobs subscriptions schedules notifications (fun () ->
               Moderator_invocation.run
                 ?on_failure
                 ?control
@@ -1545,6 +1582,7 @@ let handle_observation_entries
       ?jobs
       ?subscriptions
       ?schedules
+      ?notifications
       ?on_tool_call
       ?(retain_follow_up = false)
       t
@@ -1636,6 +1674,9 @@ let handle_observation_entries
         let%bind schedule_mutations, local_effects =
           Schedule_operations.split_mutations local_effects
         in
+        let%bind notification_mutations, local_effects =
+          Notification_operations.split_mutations local_effects
+        in
         let%bind decoded = decode_effects t local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1685,6 +1726,8 @@ let handle_observation_entries
             mutations
             schedules
             schedule_mutations
+            notifications
+            notification_mutations
             commit
         in
         fun () ->
@@ -1701,7 +1744,7 @@ let handle_observation_entries
         Exn.protect
           ~finally:(fun () -> t.invocation_tool_call := previous)
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions schedules (fun () ->
+            with_work_transactions t jobs subscriptions schedules notifications (fun () ->
               Runtime.handle_event
                 t.runtime
                 ~context:(Moderation.Context.to_value ?control context)
