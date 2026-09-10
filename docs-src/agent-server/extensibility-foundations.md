@@ -2656,7 +2656,7 @@ restoration checks the captured import/local-agent closure, using the normal
 declaration semantics without executable preprocessing during that check. Inline
 markup that is ordinary message text is not treated as a top-level declaration.
 Ordinary authored restoration retains its existing preprocessing behavior after
-the version check; generated artifact restoration is a separate, unfinished path.
+the version check; scoped generated artifacts use the separate restoration contract described below.
 
 ## Static script contracts
 
@@ -3534,3 +3534,34 @@ restart, enforce revocation or mediate the parent's stateful tool policies.
 The caller must supply an already-delegable ceiling; the parent's live registry
 alone is not proof of safe delegation. These responsibilities remain with the
 owning delegation service. No new runtime feature is enabled by this admission API.
+
+### Scoped generated artifact capture and restoration
+
+`Agent_session.Generated_definition` adds immutable artifact preparation,
+installation and restoration around that static admission API. It accepts actual
+live parent capability references, resolves them against the host-supplied
+delegable registry, and checks that the selection is still current after
+compilation. The prepared result includes only the final effective binding pins;
+unused parent tools are not inherited.
+
+The artifact captures the supplied bounded source bundle, including imported
+ChatMD and lifecycle script files. It has no global catalog definition or live
+source path. Parser contract 4 and generated runtime contract 2 distinguish it
+from ordinary prompt artifacts; the ordinary prompt loader rejects this contract.
+Model/reasoning configuration remains in the captured definition, but its actual
+host availability must still be authorized by session admission.
+
+Installation is atomic through the existing prompt artifact store. Retrying an
+installed revision succeeds only when its verified manifest is identical; changed
+contents cannot overwrite the revision. Restoration verifies the admission record's
+expected manifest digest as well as the complete tree,
+rebinds saved configuration pins against the parent's current authorized registry,
+recompiles without initialization, and requires the same effective selection.
+Same-named tools with changed configuration and stale live references are rejected.
+
+The creation coordinator must reserve/protect the artifact before installation and
+persist the capability pins in its host-owned delegation record. The artifact is
+not an execution grant. Parent identity/generation, live policy and revocation,
+stateful moderator mediation, child lifetime and staged session creation are
+separate E08 integration responsibilities. This API does not yet create a child
+session or enable a model-visible creation tool.

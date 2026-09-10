@@ -233,6 +233,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/extension_invariants.mli` | [contract](../../lib/agent_session/extension_invariants.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/extension_stop.mli` | [contract](../../lib/agent_session/extension_stop.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/external_ingress.mli` | [contract](../../lib/agent_session/external_ingress.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/generated_definition.mli` | [contract](../../lib/agent_session/generated_definition.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/history_codec.mli` | [contract](../../lib/agent_session/history_codec.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/history_id_source.mli` | [contract](../../lib/agent_session/history_id_source.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/ingress_submission.mli` | [contract](../../lib/agent_session/ingress_submission.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -357,7 +358,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/extension_compiler.mli` | [contract](../../lib/chat_response/extension_compiler.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fetch.mli` | [contract](../../lib/chat_response/fetch.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fork.mli` | [contract](../../lib/chat_response/fork.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
-| `lib/chat_response/generated_admission.mli` | [contract](../../lib/chat_response/generated_admission.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/generated_admission.mli` | [contract](../../lib/chat_response/generated_admission.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/history_stream_event.mli` | [contract](../../lib/chat_response/history_stream_event.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chat_response/in_memory_stream.mli` | [contract](../../lib/chat_response/in_memory_stream.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/ingress_delivery.mli` | [contract](../../lib/chat_response/ingress_delivery.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

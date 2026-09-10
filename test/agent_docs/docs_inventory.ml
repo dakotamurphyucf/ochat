@@ -62,6 +62,8 @@ let owner name =
         ; "job_result_reference"
         ; "standalone_delivery"
         ; "authoring"
+        ; "generated_admission"
+        ; "generated_definition"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"

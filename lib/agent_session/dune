@@ -12,6 +12,7 @@
   prompt_definition
   prompt_revision
   prompt_revision_builder
+  generated_definition
   prompt_catalog
   security_grant
   session_state
