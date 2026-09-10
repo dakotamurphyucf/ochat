@@ -384,6 +384,20 @@ let%expect_test "administrative candidates cannot discard ingress retry receipts
             ~expected_revision:before.counters.revision
             ~kind:Upgrade
             { before with ingress_registrations = [] });
+       List.iter
+         [ Agent_session.Session_state.Compaction_archive.Reset; Rebuild ]
+         ~f:(fun kind ->
+           match
+             A.commit_administration
+               actor
+               ~command_audit:None
+               ~attachment_id:writer.id
+               ~expected_revision:before.counters.revision
+               ~kind
+               { before with ingress_registrations = [] }
+           with
+           | Error { code = Conflict; _ } -> ()
+           | _ -> failwith "receipt removal without generation change was accepted");
        assert_same_session_snapshot before (A.state actor |> protocol_ok);
        assert_same_session_snapshot before (Agent_session.Memory_backend.state backend));
   [%expect {| ("administrative receipt removal" Conflict false) |}]

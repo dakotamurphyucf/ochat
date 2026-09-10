@@ -52,6 +52,7 @@ let reset_state (state : Session_state.t) options =
   ; schedules = []
   ; invocations = []
   ; subscriptions = []
+  ; ingress_registrations = []
   ; deliveries = []
   ; moderator = None
   ; shell = (if options.keep_grants then state.shell else Session.Shell_state.empty)

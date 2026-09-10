@@ -1711,6 +1711,20 @@ let validate_administrative_state t attachment_id expected_revision =
 let commit_administration t attachment_id expected_revision kind candidate =
   let open Result.Let_syntax in
   let%bind () = validate_administrative_state t attachment_id expected_revision in
+  let ingress_matches =
+    match kind with
+    | Session_state.Compaction_archive.Reset | Rebuild ->
+      t.state.identity.generation < Int.max_value
+      && Int.equal
+           candidate.Session_state.identity.generation
+           (t.state.identity.generation + 1)
+      && List.is_empty candidate.ingress_registrations
+    | Upgrade | Compaction ->
+      List.equal
+        External_ingress.equal
+        candidate.ingress_registrations
+        t.state.ingress_registrations
+  in
   let%bind () =
     if
       Agent_protocol.Id.Session.compare
@@ -1723,11 +1737,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
                Automatic_turn_budget.equal
                candidate.automatic_turn_budget
                t.state.automatic_turn_budget))
-      || (not
-            (List.equal
-               External_ingress.equal
-               candidate.ingress_registrations
-               t.state.ingress_registrations))
+      || (not ingress_matches)
       || Int64.(
            candidate.conversation.next_history_sequence
            < t.state.conversation.next_history_sequence)

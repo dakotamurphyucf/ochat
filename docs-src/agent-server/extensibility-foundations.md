@@ -1763,6 +1763,17 @@ leave the original pending record intact. This uses the same durable retirement
 record as standalone completion delivery; it does not migrate old handler state
 into the replacement script.
 
+Graceful stop preserves subscriptions and timers. If an approved prompt upgrade
+replaces or removes their moderator before a timer is enqueued, the timer scheduler
+records a permission failure when it becomes due. If it was already enqueued while
+stopped, the upgrade archive retains that old queue; the replacement starts with
+its newly initialized state and does not run the archived callback. The timer's
+historical Delivered marker means its event was enqueued, not that the handler ran.
+Old external-event registrations cannot submit to the replacement source.
+Subscriptions expire at their original deadlines and retain their terminal state
+through runtime reload; upgrading does not renew them or grant the replacement
+their authority.
+
 The [X03 shell bundle](../../test/chatml_extensibility_fixtures/x03-background-shell/README.md)
 publishes a correlated notification after its initial Pending acknowledgement.
 Success requests one model turn; failure/cancellation data uses No_wake. Completion

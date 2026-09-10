@@ -94,6 +94,39 @@ let get client session_id =
   | _ -> fail "session.get returned wrong result"
 ;;
 
+let await_notifications env child client session ~provider_prefix ~calls ~count =
+  let observed_calls () =
+    String.split_lines (Process_manager.stdout child).contents
+    |> List.count ~f:(String.is_prefix ~prefix:provider_prefix)
+  in
+  let settled (snapshot : Agent_protocol.Snapshot.t) =
+    let deliveries =
+      List.filter snapshot.extension_status ~f:(fun status ->
+        Agent_protocol.Extension_status.equal_kind status.kind Delivery)
+    in
+    Option.is_none snapshot.session.active_operation
+    && List.length deliveries = count
+    && List.for_all deliveries ~f:(fun status -> String.equal status.state "committed")
+  in
+  ignore
+    (Support.Background_fixture.await_snapshot
+       env
+       client
+       session
+       "notification recovery settlement"
+       (fun snapshot -> settled snapshot && observed_calls () >= calls)
+     : Agent_protocol.Snapshot.t);
+  for _ = 1 to 10 do
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
+    require (observed_calls () = calls) "saved wake was lost or repeated after restart"
+  done;
+  let snapshot = get client session.summary.id in
+  require
+    (settled snapshot && Option.is_none snapshot.failure)
+    "notification recovery did not remain settled";
+  snapshot
+;;
+
 let require_equal label sexp_of expected actual =
   if not (Sexp.equal (sexp_of expected) (sexp_of actual))
   then

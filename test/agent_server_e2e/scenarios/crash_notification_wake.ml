@@ -3,7 +3,6 @@ module F = Crash_recovery_fixture
 module P = Agent_protocol
 module B = Support.Background_fixture
 module C = Support.Config_fixture
-module Process = Support.Process_manager
 
 let source =
   {|
@@ -151,13 +150,24 @@ let run env environment boundary =
   let previous_frames = ref (frames before) in
   for reopen = 1 to 2 do
     with_host env environment fixture "recover" (fun child client ->
-      let recovered =
-        B.await env "notification recovery settlement" (fun () ->
-          let current = state env fixture session in
-          Option.some_if
-            (no_pending current && Option.is_none current.active_operation)
-            current)
+      let expected_calls =
+        if (not (String.equal boundary "accepted")) && reopen = 1 then 1 else 0
       in
+      ignore
+        (F.await_notifications
+           env
+           child
+           client
+           session
+           ~provider_prefix:"notification-provider "
+           ~calls:expected_calls
+           ~count:2
+         : P.Snapshot.t);
+      F.kill env child;
+      let recovered = state env fixture session in
+      F.require
+        (Option.is_none recovered.active_operation)
+        "recovered turn did not finish";
       let seen_frames = frames recovered in
       F.require
         (List.length seen_frames = 2)
@@ -176,22 +186,7 @@ let run env environment boundary =
            [%sexp_of: P.History.entry list]
            previous
            seen_frames);
-      let expected_calls =
-        if (not (String.equal boundary "accepted")) && reopen = 1 then 1 else 0
-      in
-      for _ = 1 to 10 do
-        Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
-        let lines = String.split_lines (Process.stdout child).contents in
-        let calls =
-          List.count lines ~f:(String.is_prefix ~prefix:"notification-provider ")
-        in
-        F.require (calls = expected_calls) "saved wake was lost or repeated after restart"
-      done;
-      let snapshot = F.get client session.summary.id in
-      F.require
-        (Option.is_none snapshot.session.active_operation)
-        "recovery has an unexpected active turn";
-      let current = state env fixture session in
+      let current = recovered in
       F.require
         (Option.is_none current.failure && no_pending current)
         "recovery left a failure or pending wake";
@@ -207,8 +202,7 @@ let run env environment boundary =
         (Option.value_exn
            current.automatic_turn_budget
            ~message:"recovered moderator automatic budget missing")
-          .followup_turns;
-      F.kill env child)
+          .followup_turns)
   done
 ;;
 

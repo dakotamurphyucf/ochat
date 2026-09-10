@@ -3,7 +3,6 @@ module F = Crash_recovery_fixture
 module P = Agent_protocol
 module B = Support.Background_fixture
 module C = Support.Config_fixture
-module Process = Support.Process_manager
 
 let source =
   {|<developer>Call watch once.</developer>
@@ -159,8 +158,12 @@ let run env environment boundary =
        | _ ->
          ignore
            (B.await env "standalone intent" (fun () ->
-              let state = state env fixture session in
-              Option.some_if (List.length state.deliveries = 1) ())
+              let snapshot = F.get client session.summary.id in
+              Option.some_if
+                (List.count snapshot.extension_status ~f:(fun status ->
+                   P.Extension_status.equal_kind status.kind Delivery)
+                 = 1)
+                ())
             : unit);
          F.write
            env
@@ -208,27 +211,28 @@ let run env environment boundary =
   let prior_frames = ref (frames before) in
   for reopen = 1 to 2 do
     with_host env environment fixture "recover" (fun child client ->
-      let recovered =
-        try
-          B.await env "standalone notification recovery" (fun () ->
-            let current = state env fixture session in
-            Option.some_if (settled current) current)
-        with
-        | exn ->
-          let current = state env fixture session in
-          raise_s
-            [%sexp
-              "native recovery did not settle"
-            , (boundary : string)
-            , (reopen : int)
-            , (exn : Exn.t)
-            , (current.lifecycle : Agent_session.Session_state.Lifecycle.t)
-            , (current.failure : P.Error.t option)
-            , (List.map current.deliveries ~f:(fun value ->
-                 value.status, value.wake_disposition)
-               : (P.Delivery.status * P.Delivery.wake_disposition option) list)
-            , ((Process.stdout child).contents : string)]
+      let expected_calls =
+        if (not (String.equal boundary "accepted")) && reopen = 1 then 1 else 0
       in
+      let snapshot =
+        F.await_notifications
+          env
+          child
+          client
+          session
+          ~provider_prefix:"notification-provider "
+          ~calls:expected_calls
+          ~count:1
+      in
+      let public_reference =
+        P.Job_result_reference.of_job (List.hd_exn snapshot.jobs) |> F.protocol_ok
+      in
+      let completion =
+        read_artifact client session ~reopen (Option.value_exn public_reference.artifact)
+      in
+      F.kill env child;
+      let recovered = state env fixture session in
+      F.require (settled recovered) "persisted native recovery did not settle";
       F.require
         (Option.is_none recovered.failure && Option.is_none recovered.moderator)
         "recovery changed standalone runtime state";
@@ -265,24 +269,13 @@ let run env environment boundary =
            current_frames);
       let reference = result_reference delivery in
       P.Job_result_reference.validate_job reference recovered_job |> F.protocol_ok;
-      let completion =
-        read_artifact client session ~reopen (Option.value_exn reference.artifact)
-      in
+      F.require
+        (P.Job_result_reference.equal public_reference reference)
+        "public artifact reference differs from the retained delivery";
       let stored = P.Job.terminal_result old_job |> F.protocol_ok |> Option.value_exn in
       F.require
         (P.Stored_completion.matches stored completion |> F.protocol_ok)
         "artifact result changed on recovery";
-      let expected_calls =
-        if (not (String.equal boundary "accepted")) && reopen = 1 then 1 else 0
-      in
-      for _ = 1 to 10 do
-        Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
-        let calls =
-          String.split_lines (Process.stdout child).contents
-          |> List.count ~f:(String.is_prefix ~prefix:"notification-provider ")
-        in
-        F.require (calls = expected_calls) "standalone wake was lost or replayed"
-      done;
       F.require_equal
         "no repeated external work"
         [%sexp_of: string]
@@ -292,8 +285,7 @@ let run env environment boundary =
         "native recovery wake accounting"
         [%sexp_of: int]
         (if String.equal boundary "accepted" then 0 else 1)
-        (Option.value_exn recovered.automatic_turn_budget).followup_turns;
-      F.kill env child)
+        (Option.value_exn recovered.automatic_turn_budget).followup_turns)
   done
 ;;
 

@@ -3,7 +3,6 @@ module F = Crash_recovery_fixture
 module P = Agent_protocol
 module B = Support.Background_fixture
 module C = Support.Config_fixture
-module Process = Support.Process_manager
 module Http = Support.Http_driver
 
 let sources =
@@ -124,13 +123,17 @@ let test env environment =
               })
          : P.Method_result.t);
       ignore
-        (B.await env "ingress registration acknowledged" (fun () ->
-           let current = state env fixture session in
-           Option.some_if
-             (Option.is_none current.active_operation
-              && not (List.is_empty current.ingress_registrations))
-             current)
-         : Agent_session.Session_state.t);
+        (B.await_snapshot
+           env
+           client
+           session
+           "ingress registration acknowledged"
+           (fun snapshot ->
+              Option.is_none snapshot.session.active_operation
+              && List.exists snapshot.extension_status ~f:(fun status ->
+                P.Extension_status.equal_kind status.kind Invocation
+                && String.equal status.state "published.pending"))
+         : P.Snapshot.t);
       let request : P.Ingress.Submit_request.t =
         { session_id = session.summary.id
         ; registration_id = registration (F.get client session.summary.id)
@@ -175,43 +178,40 @@ let test env environment =
            (P.Ingress.Acknowledgement.equal expected acknowledgement)
            "retry changed the durable acknowledgement"
        | _ -> F.fail "retry returned the wrong result");
-      let recovered =
-        B.await env "ingress recovery notification" (fun () ->
-          let current = state env fixture session in
-          Option.some_if
-            (handlers current = 1
-             && List.length (frames current) = 1
-             && Option.is_none current.active_operation
-             && List.for_all current.deliveries ~f:(fun delivery ->
-               match delivery.wake_disposition with
-               | Some (Accepted_wake _) -> true
-               | _ -> false))
-            current)
-      in
+      ignore
+        (F.await_notifications
+           env
+           child
+           client
+           session
+           ~provider_prefix:"ingress-provider "
+           ~calls:(if reopen = 1 then 1 else 0)
+           ~count:1
+         : P.Snapshot.t);
+      F.kill env child;
+      let recovered = state env fixture session in
+      F.require
+        (handlers recovered = 1
+         && List.length (frames recovered) = 1
+         && Option.is_none recovered.active_operation
+         && List.for_all recovered.deliveries ~f:(fun delivery ->
+           match delivery.wake_disposition with
+           | Some (Accepted_wake _) -> true
+           | _ -> false))
+        "persisted ingress recovery did not settle";
       F.require
         (List.length (List.hd_exn recovered.ingress_registrations).receipts = 1)
         "retry duplicated ingress receipt";
       F.require
         (List.is_empty recovered.permissions && Option.is_none recovered.failure)
         "ingress recovery failed or changed permissions";
-      (match !previous_frames with
-       | None -> previous_frames := Some (frames recovered)
-       | Some previous ->
-         F.require_equal
-           "stable ingress notification"
-           [%sexp_of: P.History.entry list]
-           previous
-           (frames recovered));
-      for _ = 1 to 10 do
-        Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
-        let calls =
-          String.split_lines (Process.stdout child).contents
-          |> List.count ~f:(String.is_prefix ~prefix:"ingress-provider ")
-        in
-        F.require
-          (calls = if reopen = 1 then 1 else 0)
-          "ingress recovery lost or repeated its model continuation"
-      done;
-      F.kill env child)
+      match !previous_frames with
+      | None -> previous_frames := Some (frames recovered)
+      | Some previous ->
+        F.require_equal
+          "stable ingress notification"
+          [%sexp_of: P.History.entry list]
+          previous
+          (frames recovered))
   done
 ;;

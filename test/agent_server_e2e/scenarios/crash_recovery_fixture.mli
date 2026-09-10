@@ -36,6 +36,19 @@ val get
   -> Agent_protocol.Id.Session.t
   -> Agent_protocol.Snapshot.t
 
+(** Observe recovery through actor-owned public snapshots while the daemon is
+    alive. Read raw checkpoints only after killing/joining the child: snapshots
+    and journal segments can be replaced or retired during live recovery. *)
+val await_notifications
+  :  Eio_unix.Stdenv.base
+  -> Support.Process_manager.t
+  -> Support.Http_driver.t
+  -> Support.Background_fixture.session
+  -> provider_prefix:string
+  -> calls:int
+  -> count:int
+  -> Agent_protocol.Snapshot.t
+
 val require_equal : string -> ('a -> Sexp.t) -> 'a -> 'a -> unit
 
 (** [assert_snapshot expected actual] compares every projected field, including
