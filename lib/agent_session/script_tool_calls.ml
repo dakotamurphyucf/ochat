@@ -39,6 +39,7 @@ type t =
   ; jobs : Script_job_service.t option
   ; subscriptions : Script_subscription_service.t option
   ; schedules : Script_schedule_service.t option
+  ; notifications : Script_notification_service.t option
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   }
@@ -67,6 +68,7 @@ let create
   ; jobs = None
   ; subscriptions = None
   ; schedules = None
+  ; notifications = None
   ; progress = None
   ; progress_ceiling = None
   }
@@ -97,6 +99,11 @@ let with_subscription_service t subscriptions =
 ;;
 
 let with_schedule_service t schedules = { t with schedules = Some schedules }
+
+let with_notification_service t notifications =
+  { t with notifications = Some notifications }
+;;
+
 let with_progress t ~emit = { t with progress = Some emit }
 let with_progress_ceiling t ~ceiling = { t with progress_ceiling = Some ceiling }
 
@@ -127,8 +134,20 @@ let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
           f (Some scope))
     in
     with_schedules (fun schedules ->
+      let with_notifications subscriptions =
+        match t.notifications with
+        | None -> f ~jobs ~subscriptions ~schedules ~notifications:None
+        | Some service ->
+          Script_notification_service.with_scope
+            service
+            ~owner
+            ~source
+            ~jobs
+            ~error
+            (fun scope -> f ~jobs ~subscriptions ~schedules ~notifications:(Some scope))
+      in
       match t.subscriptions with
-      | None -> f ~jobs ~subscriptions:None ~schedules
+      | None -> with_notifications None
       | Some service ->
         Script_subscription_service.with_scope
           ?schedules
@@ -137,7 +156,7 @@ let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
           ~source
           ~originating
           ~error
-          (fun scope -> f ~jobs ~subscriptions:(Some scope) ~schedules)))
+          (fun scope -> with_notifications (Some scope))))
 ;;
 
 let validate_pending_work ~jobs ~subscriptions ~fallback work =

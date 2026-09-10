@@ -87,6 +87,7 @@ let actor ~sw ~env state =
       ; job_results = None
       ; monotonic_now = (fun () -> Mtime.min_stamp)
       ; schedule_limits = Agent_session.Staged_schedules.default_limits
+      ; notification_limits = Agent_session.Staged_notifications.default_limits
       ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
       ; state_committed = (fun _ _ -> ())
       }

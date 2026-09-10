@@ -375,6 +375,7 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
             ; job_results = None
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -740,6 +741,7 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
         ; job_results = None
         ; monotonic_now = (fun () -> Mtime.min_stamp)
         ; schedule_limits = Agent_session.Staged_schedules.default_limits
+        ; notification_limits = Agent_session.Staged_notifications.default_limits
         ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
         ; state_committed = (fun _ _ -> ())
         }

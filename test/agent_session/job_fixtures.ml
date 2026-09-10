@@ -80,6 +80,7 @@ let with_actor
       ?(make_job_results = fun _ _ _ -> None)
       ?(subscription_limits = Agent_session.Staged_subscriptions.default_limits)
       ?(schedule_limits = Agent_session.Staged_schedules.default_limits)
+      ?(notification_limits = Agent_session.Staged_notifications.default_limits)
       f
   =
   with_actor_workspace (fun env workspace_instance ->
@@ -120,6 +121,7 @@ let with_actor
             ; create_reclaim_token = (fun () -> "background-fixture")
             ; job_results
             ; schedule_limits
+            ; notification_limits
             ; subscription_limits
             ; state_committed = (fun _ _ -> ())
             }

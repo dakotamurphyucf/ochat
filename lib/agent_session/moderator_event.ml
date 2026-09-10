@@ -73,7 +73,8 @@ let run
            | None ->
              let with_work f =
                match script_tools with
-               | None -> f ~jobs:None ~subscriptions:None ~schedules:None
+               | None ->
+                 f ~jobs:None ~subscriptions:None ~schedules:None ~notifications:None
                | Some tools ->
                  Script_tool_calls.with_moderator_work
                    tools
@@ -90,6 +91,7 @@ let run
                    ~jobs:job_scope
                     ~subscriptions:subscription_scope
                     ~schedules:schedule_scope
+                    ~notifications:notification_scope
                   ->
                   let jobs =
                     Option.map job_scope ~f:Script_job_service.moderator_transaction
@@ -103,6 +105,11 @@ let run
                     Option.map
                       schedule_scope
                       ~f:Script_schedule_service.moderator_transaction
+                  in
+                  let notifications =
+                    Option.map
+                      notification_scope
+                      ~f:Script_notification_service.moderator_transaction
                   in
                   let with_tools f =
                     match script_tools with
@@ -168,6 +175,7 @@ let run
                          ?jobs
                          ?subscriptions
                          ?schedules
+                         ?notifications
                          manager
                          ~session_id
                          ~now_ms
@@ -188,6 +196,7 @@ let run
                          ?jobs
                          ?subscriptions
                          ?schedules
+                         ?notifications
                          manager
                          ~session_id
                          ~now_ms

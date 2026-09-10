@@ -260,6 +260,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/runtime_paths.mli` | [contract](../../lib/agent_session/runtime_paths.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/schedule_ownership.mli` | [contract](../../lib/agent_session/schedule_ownership.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/script_job_service.mli` | [contract](../../lib/agent_session/script_job_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_session/script_notification_service.mli` | [contract](../../lib/agent_session/script_notification_service.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/script_schedule_service.mli` | [contract](../../lib/agent_session/script_schedule_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/script_subscription_service.mli` | [contract](../../lib/agent_session/script_subscription_service.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/script_tool_calls.mli` | [contract](../../lib/agent_session/script_tool_calls.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -271,6 +272,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/session_transition.mli` | [contract](../../lib/agent_session/session_transition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_jobs.mli` | [contract](../../lib/agent_session/staged_jobs.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_mutations.mli` | [contract](../../lib/agent_session/staged_mutations.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/staged_notifications.mli` | [contract](../../lib/agent_session/staged_notifications.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_schedules.mli` | [contract](../../lib/agent_session/staged_schedules.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/staged_subscriptions.mli` | [contract](../../lib/agent_session/staged_subscriptions.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/standalone_tool_dispatch.mli` | [contract](../../lib/agent_session/standalone_tool_dispatch.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

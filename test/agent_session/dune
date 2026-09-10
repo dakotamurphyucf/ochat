@@ -31,6 +31,8 @@
   timer_range_tests
   notification_history_tests
   delivery_ownership_tests
+  notification_transaction_tests
+  notification_access_tests
   subscription_clock_tests
   job_artifact_retry_tests
   job_artifact_fixtures

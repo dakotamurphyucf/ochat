@@ -157,6 +157,7 @@ let%expect_test "permission requests persist before wait and resolve by generati
             ; job_results = None
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -243,6 +244,7 @@ let%expect_test "session approval creates a durable invocation grant" =
             ; job_results = None
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -329,6 +331,7 @@ let%expect_test "permission timeout applies configured unattended fallback" =
             ; job_results = None
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }

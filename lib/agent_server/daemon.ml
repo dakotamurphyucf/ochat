@@ -107,6 +107,7 @@ let default_options =
       ; job_result_recovery_max_bytes = 64 * 1024 * 1024
       ; subscriptions = Agent_session.Staged_subscriptions.default_limits
       ; schedules = Agent_session.Staged_schedules.default_limits
+      ; notifications = Agent_session.Staged_notifications.default_limits
       ; job_result_collection =
           { max_intents = 4096
           ; max_entries = 65_536

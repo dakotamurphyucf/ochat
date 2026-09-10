@@ -68,6 +68,14 @@ val install
     control rather than storing it beyond its lexical lifetime here. *)
 val moderator_transaction : scope -> Chat_response.Background_job_operations.transaction
 
+(** Read-only job selection check for a coupled notification transaction. Remains
+    available during preparation, rechecking current capabilities and actor-owned
+    generation. It cannot stage work or reopen an execution scope. *)
+val validate_notification_access
+  :  scope
+  -> Agent_protocol.Id.Job.t
+  -> (unit, string) result
+
 (** Validate/select exact surviving starts after all output/disclosure checks.
     Returns ordinary effects for the moderator's normal transactional decoder. *)
 val select

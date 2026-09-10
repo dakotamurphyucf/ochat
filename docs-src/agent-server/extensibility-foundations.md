@@ -2087,10 +2087,28 @@ records retain their JSON and S-expression format. Recovery validates the retain
 creator, session/generation and source-bound subscription correlation; a legacy
 record cannot silently gain current moderator authority.
 
-The compiler/manager adapter is qualified with controlled host callbacks. The
-daemon-side scoped admission service, active-turn safe-point insertion, automatic
-delivery and wake-up coordination remain unfinished execution-service work. These
-surfaces do not advertise a generally available notification feature yet.
+The daemon now installs a scoped admission service under the existing internal
+qualification switch. The actor validates its live moderator/source, current
+generation, explicit references and exact terminal work result before reserving
+an intent. It accepts provisional subscription completion from the same handler;
+the selected subscription and notification changes must still pass aggregate
+validation in one checkpoint. Discarded, unselected, abandoned or rejected saves
+leave no notification. A terminal job/subscription cannot acquire two delivery
+owners. Notification reads require the same moderator source; legacy unowned
+records cannot be claimed by a script.
+
+Job-backed publication and reads also recheck the caller's selected job
+capabilities, including during preparation. This read-only preparation check
+does not reopen job execution or mutation. The host configures notification limits
+through `Session_factory.limits.notifications`: defaults allow 256 pending per
+session, 64 per source, 4096 retained and a 64 KiB/64-level completion payload.
+Staged reservations count toward capacity; admission never evicts retained work.
+
+Actual ChatML/daemon tests cover immediate, queued, observation, end-of-turn and
+nested publication, including invalid acknowledgement rollback. The result is a
+durable pending intent. Active-turn safe-point insertion, automatic delivery and
+wake-up coordination remain unfinished execution-service work. These surfaces do
+not advertise a generally available notification feature yet.
 
 ## Recovery classifications
 

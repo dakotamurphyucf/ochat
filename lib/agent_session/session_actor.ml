@@ -17,6 +17,7 @@ type services =
   ; job_results : Agent_store.Job_result_store.Publisher.t option
   ; subscription_limits : Staged_subscriptions.limits
   ; schedule_limits : Staged_schedules.limits
+  ; notification_limits : Staged_notifications.limits
   }
 
 type submission =
@@ -217,6 +218,22 @@ type _ request =
   | Select_background_jobs :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t list
       -> unit request
+  | Create_script_notification :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Chat_response.Notification_operations.correlation
+      * Agent_protocol.Completion.t
+      * Agent_protocol.Completion.wake
+      -> (int * Agent_protocol.Delivery.t) request
+  | Read_script_notification :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Delivery.t
+      -> Agent_protocol.Delivery.t request
+  | Select_notification_mutations :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
+      -> unit request
+  | Abort_notification_mutation : Agent_protocol.Job.launch_owner * int -> unit request
   | Abort_background_job :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
       -> unit request
@@ -494,6 +511,7 @@ type t =
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
   ; staged_schedules : Staged_schedules.t
+  ; staged_notifications : Staged_notifications.t
   ; extension_clock : Extension_clock.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
@@ -680,6 +698,7 @@ let abort_staged_work t ~owner =
   Staged_jobs.abort_owner t.staged_jobs ~owner;
   Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
   Staged_schedules.release_owner t.staged_schedules ~owner;
+  Staged_notifications.release_owner t.staged_notifications ~owner;
   sync_extension_clock t
 ;;
 
@@ -687,6 +706,7 @@ let abort_all_staged_work t =
   Staged_jobs.abort_all t.staged_jobs;
   Staged_subscriptions.abort_all t.staged_subscriptions;
   Staged_schedules.abort_all t.staged_schedules;
+  Staged_notifications.abort_all t.staged_notifications;
   sync_extension_clock t
 ;;
 
@@ -696,6 +716,7 @@ let with_staged_transaction t owner f =
     Staged_jobs.commit t.staged_jobs ~owner;
     Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
     Staged_schedules.release_owner t.staged_schedules ~owner;
+    Staged_notifications.release_owner t.staged_notifications ~owner;
     sync_extension_clock t;
     result
   | Error _ as result ->
@@ -712,6 +733,11 @@ let lookup_subscription t id =
     Agent_protocol.Id.Subscription.equal subscription.context.id id)
 ;;
 
+let lookup_notification t id =
+  List.find t.state.deliveries ~f:(fun value ->
+    Agent_protocol.Id.Delivery.equal value.context.id id)
+;;
+
 let staged_work_changes t owner =
   let open Result.Let_syntax in
   let%bind subscriptions =
@@ -720,16 +746,23 @@ let staged_work_changes t owner =
       ~owner
       ~lookup:(lookup_subscription t)
   in
-  let%map schedules =
+  let%bind schedules =
     Staged_schedules.selected t.staged_schedules ~owner ~lookup:(fun id ->
       List.find t.state.schedules ~f:(fun value ->
         Agent_protocol.Id.Schedule.equal value.id id))
+  in
+  let%map notifications =
+    Staged_notifications.selected
+      t.staged_notifications
+      ~owner
+      ~lookup:(lookup_notification t)
   in
   let jobs = Staged_jobs.selected t.staged_jobs ~owner in
   ( List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
     @ List.map subscriptions ~f:(fun subscription ->
       Session_delta.Subscription_changed subscription)
     @ List.map schedules ~f:(fun schedule -> Session_delta.Schedule_changed schedule)
+    @ List.map notifications ~f:(fun delivery -> Session_delta.Delivery_changed delivery)
   , List.map jobs ~f:(fun job ->
       Agent_protocol.Event.Durable.Payload.Job_state_changed job)
     @ List.map schedules ~f:(fun schedule ->
@@ -738,6 +771,22 @@ let staged_work_changes t owner =
 
 let prepare_background_job_launch t ~owner request =
   call t (Prepare_background_job (owner, request))
+;;
+
+let create_script_notification t ~owner ~source ~correlation ~completion ~wake =
+  call t (Create_script_notification (owner, source, correlation, completion, wake))
+;;
+
+let read_script_notification t ~owner ~source ~id =
+  call t (Read_script_notification (owner, source, id))
+;;
+
+let select_notification_mutations t ~owner ~source ~receipts =
+  call t (Select_notification_mutations (owner, source, receipts))
+;;
+
+let abort_notification_mutation t ~owner ~receipt =
+  call t (Abort_notification_mutation (owner, receipt))
 ;;
 
 let stage_background_job t ~job ~capacity =
@@ -3028,6 +3077,170 @@ let create_script_subscription_internal
     ~created_at
     ~due_at:deadline;
   receipt, subscription
+;;
+
+let notification_owned t source (delivery : Agent_protocol.Delivery.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      delivery.context.session_id
+      delivery.context.generation
+  in
+  match delivery.context.ownership with
+  | Some ownership when Agent_protocol.Invocation.equal_observer ownership.source source
+    -> Ok ()
+  | _ ->
+    Error
+      (error
+         Permission_denied
+         "notification belongs to a different or unbound moderator source")
+;;
+
+let provisional_notification t owner id =
+  match Staged_notifications.find t.staged_notifications ~owner ~id with
+  | Some value -> Some value
+  | None -> lookup_notification t id
+;;
+
+let create_script_notification_internal
+      t
+      owner
+      source
+      (correlation : Chat_response.Notification_operations.correlation)
+      completion
+      wake
+  =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let%bind _ = subscription_owner_active t owner source in
+  let limits = t.services.notification_limits in
+  let%bind () = P.Completion.validate completion in
+  let%bind () =
+    P.Json_codec.validate_limits
+      ~max_bytes:limits.max_payload_bytes
+      ~max_depth:limits.max_payload_depth
+      (P.Completion.to_json completion)
+  in
+  let same_session session_id generation =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      session_id
+      generation
+  in
+  let%bind () =
+    match correlation.invocation_id with
+    | None -> Ok ()
+    | Some id ->
+      let%bind invocation =
+        Result.of_option
+          (List.find t.state.invocations ~f:(fun invocation ->
+             P.Id.Invocation.equal invocation.context.id id))
+          ~error:(error Invalid_request "notification invocation is not retained")
+      in
+      same_session invocation.context.session_id invocation.context.generation
+  in
+  let%bind () =
+    match correlation.work with
+    | None -> Ok ()
+    | Some (P.Invocation.Subscription id) ->
+      let%bind subscription =
+        Result.of_option
+          (provisional_subscription t owner id)
+          ~error:(error Invalid_request "notification subscription is not retained")
+      in
+      let%bind () = subscription_owned t source subscription in
+      let%bind () =
+        match correlation.invocation_id with
+        | Some id when P.Id.Invocation.equal id subscription.context.invocation_id ->
+          Ok ()
+        | _ ->
+          Error
+            (error
+               Permission_denied
+               "notification must retain its subscription's invocation")
+      in
+      (match subscription.result with
+       | Some actual when P.Completion.equal actual completion -> Ok ()
+       | _ ->
+         Error
+           (error
+              Invalid_request
+              "notification differs from its terminal subscription result"))
+    | Some (Job id) ->
+      let%bind job =
+        Result.of_option
+          (List.find t.state.jobs ~f:(fun job -> P.Id.Job.equal job.id id))
+          ~error:(error Invalid_request "notification job is not retained")
+      in
+      let%bind () = same_session job.session_id job.generation in
+      let%bind result = P.Job.terminal_result job in
+      let%bind result =
+        Result.of_option
+          result
+          ~error:(error Invalid_request "notification job is not terminal")
+      in
+      let%bind matches = P.Stored_completion.matches result completion in
+      (match matches with
+       | true -> Ok ()
+       | false ->
+         Error (error Invalid_request "notification differs from its terminal job result"))
+  in
+  let retained =
+    t.state.deliveries @ Staged_notifications.values t.staged_notifications
+  in
+  let%bind () =
+    match correlation.work with
+    | None -> Ok ()
+    | Some work ->
+      (match
+         List.exists retained ~f:(fun delivery ->
+           Option.exists delivery.context.work ~f:(fun actual ->
+             P.Invocation.compare_work actual work = 0))
+       with
+       | true -> Error (error Conflict "terminal work already has a delivery owner")
+       | false -> Ok ())
+  in
+  let pending delivery =
+    match delivery.P.Delivery.status with
+    | Pending -> true
+    | Committed _ | Failed _ -> false
+  in
+  let same_source delivery =
+    Option.exists delivery.P.Delivery.context.ownership ~f:(fun ownership ->
+      P.Invocation.equal_observer ownership.source source)
+  in
+  let%bind () =
+    match
+      List.count retained ~f:pending < limits.max_pending
+      && List.count retained ~f:(fun delivery -> pending delivery && same_source delivery)
+         < limits.max_per_source
+      && List.length retained < limits.max_retained
+    with
+    | true -> Ok ()
+    | false -> Error (error Resource_limit "notification admission capacity exhausted")
+  in
+  let%bind delivery =
+    P.Delivery.create
+      { id = P.Id.Delivery.create ()
+      ; session_id = t.state.identity.session_id
+      ; generation = t.state.identity.generation
+      ; invocation_id = correlation.invocation_id
+      ; work = correlation.work
+      ; correlation = correlation.key
+      ; source = Moderator
+      ; completion
+      ; wake
+      ; created_at = t.services.now ()
+      ; ownership = Some { source; creator = owner }
+      }
+  in
+  let%map receipt =
+    Staged_notifications.stage t.staged_notifications ~owner ~previous:None ~next:delivery
+  in
+  receipt, delivery
 ;;
 
 let finish_script_subscription_internal t owner source id expected_epoch completion =
@@ -7312,6 +7525,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let%map () = subscription_owned t source subscription in
     subscription
   | Expire_subscriptions -> expire_subscriptions_internal t
+  | Create_script_notification (owner, source, correlation, completion, wake) ->
+    create_script_notification_internal t owner source correlation completion wake
+  | Read_script_notification (owner, source, id) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    let%bind value =
+      Result.of_option
+        (provisional_notification t owner id)
+        ~error:(error Invalid_state "notification is not retained")
+    in
+    let%map () = notification_owned t source value in
+    value
+  | Select_notification_mutations (owner, source, receipts) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    Staged_notifications.select
+      t.staged_notifications
+      ~owner
+      ~receipts
+      ~lookup:(lookup_notification t)
+  | Abort_notification_mutation (owner, receipt) ->
+    Staged_notifications.abort t.staged_notifications ~owner ~receipt
   | Stage_schedule_mutation (owner, source, previous, next) ->
     stage_schedule_mutation_internal t owner source previous next
   | Create_script_schedule (owner, source, delay_ms, payload, misfire) ->
@@ -7516,6 +7751,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        , Staged_jobs.is_empty t.staged_jobs
          && Staged_subscriptions.is_empty t.staged_subscriptions
          && Staged_schedules.is_empty t.staged_schedules
+         && Staged_notifications.is_empty t.staged_notifications
        , Active_calls.snapshot t.active_calls )
      with
      | None, None, [], [], None, None, None, false, true, ([], []) ->
@@ -7599,6 +7835,9 @@ let create_with_owner_lease_duration
   (match Staged_schedules.validate_limits services.schedule_limits with
    | Ok () -> ()
    | Error error -> invalid_arg error.message);
+  (match Staged_notifications.validate_limits services.notification_limits with
+   | Ok () -> ()
+   | Error error -> invalid_arg error.message);
   let t =
     { sw
     ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
@@ -7626,6 +7865,7 @@ let create_with_owner_lease_duration
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
     ; staged_schedules = Staged_schedules.create ()
+    ; staged_notifications = Staged_notifications.create ()
     ; extension_clock = Extension_clock.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence

@@ -22,6 +22,7 @@ type limits =
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
+  ; notifications : Agent_session.Staged_notifications.limits
   }
 
 type t =
@@ -1162,6 +1163,39 @@ let extension_subscriptions t actor_ref =
   Service.create ~limits:t.limits.subscriptions ~host
 ;;
 
+let extension_notifications actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_notification_service in
+  let host : Service.host =
+    { create =
+        (fun owner source ~correlation ~completion ~wake ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_notification
+              actor
+              ~owner
+              ~source
+              ~correlation
+              ~completion
+              ~wake))
+    ; get =
+        (fun owner source id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_notification actor ~owner ~source ~id))
+    ; select =
+        (fun owner source receipts ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_notification_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_notification_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
+;;
+
 let extension_schedules actor_ref =
   let module A = Agent_session.Session_actor in
   let module Service = Agent_session.Script_schedule_service in
@@ -1239,6 +1273,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           Agent_session.Script_tool_calls.with_schedule_service
             tools
             (extension_schedules actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_notification_service
+            tools
+            (extension_notifications actor_ref)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_progress
             tools
@@ -1893,6 +1931,7 @@ let actor_services
     ; job_results = Some job_results
     ; subscription_limits = t.limits.subscriptions
     ; schedule_limits = t.limits.schedules
+    ; notification_limits = t.limits.notifications
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->

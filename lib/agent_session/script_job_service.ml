@@ -69,10 +69,10 @@ let view (job : P.Job.t) =
     ]
 ;;
 
-let check scope =
+let check_selection scope =
   match Atomic.get scope.active, scope.commit_state with
-  | false, _ | true, (Prepared | Committed) -> Error "background script scope has ended"
-  | true, Open ->
+  | false, _ | true, Committed -> Error "background script scope has ended"
+  | true, (Open | Prepared) ->
     let open Result.Let_syntax in
     let names =
       List.map (C.references scope.selected) ~f:(fun reference -> reference.C.name)
@@ -84,6 +84,12 @@ let check scope =
     (match String.equal (C.fingerprint current) (C.fingerprint scope.selected) with
      | true -> Ok ()
      | false -> Error "background tool selection changed")
+;;
+
+let check scope =
+  match scope.commit_state with
+  | Open -> check_selection scope
+  | Prepared | Committed -> Error "background script scope has ended"
 ;;
 
 let abort scope id =
@@ -146,23 +152,28 @@ let stage scope request =
     job.id)
 ;;
 
+let accessible_job ~check_scope scope id =
+  let open Result.Let_syntax in
+  let%bind () = check_scope scope in
+  let%bind job = scope.service.host.get scope.owner id |> message in
+  let%bind () = check_scope scope in
+  let%bind () =
+    match job.kind with
+    | P.Job.Async_tool -> Ok ()
+    | _ -> Error "job is not owned generic script work"
+  in
+  let%bind request = B.of_json ~policy:scope.service.policy job.payload |> message in
+  let%map () = B.validate_capabilities request ~capabilities:scope.selected |> message in
+  job
+;;
+
+let validate_notification_access scope id =
+  accessible_job ~check_scope:check_selection scope id |> Result.map ~f:ignore
+;;
+
 let handlers scope =
   let open Result.Let_syntax in
-  let accessible_job id =
-    let%bind () = check scope in
-    let%bind job = scope.service.host.get scope.owner id |> message in
-    let%bind () = check scope in
-    let%bind () =
-      match job.kind with
-      | P.Job.Async_tool -> Ok ()
-      | _ -> Error "job is not owned generic script work"
-    in
-    let%bind request = B.of_json ~policy:scope.service.policy job.payload |> message in
-    let%map () =
-      B.validate_capabilities request ~capabilities:scope.selected |> message
-    in
-    job
-  in
+  let accessible_job id = accessible_job ~check_scope:check scope id in
   let handlers : Ops.handlers =
     { start_tool =
         (fun ~name ~input ->

@@ -165,6 +165,7 @@ let reopen ~env ~sw ~initial ~wall_now ~elapsed f =
         ; job_results = None
         ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
         ; schedule_limits = Agent_session.Staged_schedules.default_limits
+        ; notification_limits = Agent_session.Staged_notifications.default_limits
         }
   in
   Exn.protect ~finally:(fun () -> A.shutdown actor) ~f:(fun () -> f actor)

@@ -125,6 +125,7 @@ let%expect_test
             ; create_reclaim_token = (fun () -> "notification")
             ; job_results = None
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
+            ; notification_limits = Agent_session.Staged_notifications.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }

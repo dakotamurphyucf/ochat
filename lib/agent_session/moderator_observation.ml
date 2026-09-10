@@ -41,6 +41,7 @@ let drain_with_claim
                ~job_scope
                ~subscription_scope
                ~schedule_scope
+               ~notification_scope
              ->
              let jobs =
                Option.map job_scope ~f:Script_job_service.moderator_transaction
@@ -53,10 +54,16 @@ let drain_with_claim
              let schedules =
                Option.map schedule_scope ~f:Script_schedule_service.moderator_transaction
              in
+             let notifications =
+               Option.map
+                 notification_scope
+                 ~f:Script_notification_service.moderator_transaction
+             in
              M.handle_observation_entries
                ?jobs
                ?subscriptions
                ?schedules
+               ?notifications
                ?on_tool_call
                ~retain_follow_up
                manager
@@ -115,7 +122,8 @@ let drain ?max_observations ?on_tool_call ~capabilities ~observer =
            ~on_tool_call
            ~job_scope:None
            ~subscription_scope:None
-           ~schedule_scope:None))
+           ~schedule_scope:None
+           ~notification_scope:None))
 ;;
 
 let drain_idle ?max_observations ?on_tool_call ~claim =
@@ -127,7 +135,8 @@ let drain_idle ?max_observations ?on_tool_call ~claim =
         ~on_tool_call
         ~job_scope:None
         ~subscription_scope:None
-        ~schedule_scope:None))
+        ~schedule_scope:None
+        ~notification_scope:None))
 ;;
 
 let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
@@ -147,7 +156,11 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
         ~selected:(Chat_response.Extension_compiler.definition_capabilities definition)
         ~error:failed
         (fun
-            ~jobs:job_scope ~subscriptions:subscription_scope ~schedules:schedule_scope ->
+            ~jobs:job_scope
+             ~subscriptions:subscription_scope
+             ~schedules:schedule_scope
+             ~notifications:notification_scope
+           ->
            Script_tool_calls.with_observation
              script_tools
              ~definition
@@ -160,7 +173,8 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
                   ~on_tool_call:(Some on_tool_call)
                   ~job_scope
                   ~subscription_scope
-                  ~schedule_scope))))
+                  ~schedule_scope
+                  ~notification_scope))))
 ;;
 
 let drain_foreground_with_tools
@@ -185,6 +199,7 @@ let drain_foreground_with_tools
                ~jobs:job_scope
                 ~subscriptions:subscription_scope
                 ~schedules:schedule_scope
+                ~notifications:notification_scope
               ->
               Script_tool_calls.with_observation
                 script_tools
@@ -198,5 +213,6 @@ let drain_foreground_with_tools
                      ~on_tool_call:(Some on_tool_call)
                      ~job_scope
                      ~subscription_scope
-                     ~schedule_scope))))
+                     ~schedule_scope
+                     ~notification_scope))))
 ;;

@@ -111,6 +111,7 @@ let create
                      ~jobs:job_scope
                       ~subscriptions:subscription_scope
                       ~schedules:schedule_scope
+                      ~notifications:notification_scope
                     ->
                     let jobs =
                       Option.map job_scope ~f:Script_job_service.moderator_transaction
@@ -124,6 +125,11 @@ let create
                       Option.map
                         schedule_scope
                         ~f:Script_schedule_service.moderator_transaction
+                    in
+                    let notifications =
+                      Option.map
+                        notification_scope
+                        ~f:Script_notification_service.moderator_transaction
                     in
                     let validate_work =
                       Calls.validate_pending_work
@@ -141,6 +147,7 @@ let create
                            ?jobs
                            ?subscriptions
                            ?schedules
+                           ?notifications
                            ~managed:admission
                            ~execution_context:(N.borrowed_execution_context caller)
                            ~on_tool_call

@@ -21,6 +21,7 @@ type services =
         publication and fails explicitly when an existing artifact needs loading. *)
   ; subscription_limits : Staged_subscriptions.limits
   ; schedule_limits : Staged_schedules.limits
+  ; notification_limits : Staged_notifications.limits
   }
 
 type submission =
@@ -272,6 +273,40 @@ val read_script_job_result
   -> owner:Agent_protocol.Job.launch_owner
   -> expected:Agent_protocol.Job.t
   -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
+
+(** Stage an owned pending delivery without publishing history or waking a turn.
+    The actor validates the live moderator borrow, source, references, terminal
+    work result and shared capacity. Selected intents commit with the handler;
+    discarded or failed handlers leave no notification. Host service disclosure
+    checks must precede calls involving job results. *)
+val create_script_notification
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> correlation:Chat_response.Notification_operations.correlation
+  -> completion:Agent_protocol.Completion.t
+  -> wake:Agent_protocol.Completion.wake
+  -> (int * Agent_protocol.Delivery.t, Agent_protocol.Error.t) result
+
+val read_script_notification
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Delivery.t
+  -> (Agent_protocol.Delivery.t, Agent_protocol.Error.t) result
+
+val select_notification_mutations
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> receipts:int list
+  -> (unit, Agent_protocol.Error.t) result
+
+val abort_notification_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> receipt:int
+  -> (unit, Agent_protocol.Error.t) result
 
 module Extension_change : sig
   type t =
