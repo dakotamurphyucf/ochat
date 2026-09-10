@@ -56,6 +56,7 @@ type t =
   ; server_id : Agent_protocol.Id.Server.t
   ; daemon_lock : Lock.t
   ; index : Session_index.t
+  ; delegations : Delegation_store.t
   ; mutable index_was_rebuilt : bool
   ; mutable closed : bool
   }
@@ -64,6 +65,7 @@ let current_schema_version = 1
 let data_root t = t.root
 let server_id t = t.server_id
 let session_index t = t.index
+let delegations t = t.delegations
 let index_was_rebuilt t = t.index_was_rebuilt
 let is_closed t = t.closed
 let eio_path t path = Eio.Path.(Eio.Stdenv.fs t.env / path)
@@ -366,7 +368,15 @@ let open_index ~env root =
 ;;
 
 let make ~env ~root ~server_id ~daemon_lock (index, index_was_rebuilt) =
-  { env; root; server_id; daemon_lock; index; index_was_rebuilt; closed = false }
+  { env
+  ; root
+  ; server_id
+  ; daemon_lock
+  ; index
+  ; index_was_rebuilt
+  ; closed = false
+  ; delegations = Delegation_store.create ~env ~data_root:root
+  }
 ;;
 
 let release_on_error ~env lock result =

@@ -31,6 +31,19 @@ val install
   -> t
   -> (unit, Chatmd_shell_spec.Diagnostic.t list) result
 
+(** Install using a durable reservation from the same owned data root. Checks the
+    current immutable admission, revocation, exact manifest and effective pins
+    before writing; advances Artifact_installed only after complete verification.
+    A concurrent revocation prevents advancement and leaves any installed bytes
+    protected for recovery. Replays use the reservation's original transaction.
+    Parent policy admission and child creation remain the coordinator's duty. *)
+val install_reserved
+  :  delegations:Agent_store.Delegation_store.t
+  -> reservation:Agent_store.Delegation_store.record
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> t
+  -> (Agent_store.Delegation_store.record, Chatmd_shell_spec.Diagnostic.t list) result
+
 (** Requires the parent's currently authorized delegable registry and pins from
     the host-owned delegation record. Names alone do not restore a grant. Checks
     every pin, the admission record's expected manifest digest, generated-only

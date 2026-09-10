@@ -105,6 +105,8 @@ let default_options =
       ; job_result_inline_bytes = 64 * 1024
       ; job_result_max_bytes = 9 * 1024 * 1024
       ; job_result_recovery_max_count = 4096
+      ; delegation_recovery_max_count = 4096
+      ; delegation_recovery_max_bytes = 67108864
       ; job_result_recovery_max_bytes = 64 * 1024 * 1024
       ; subscriptions = Agent_session.Staged_subscriptions.default_limits
       ; schedules = Agent_session.Staged_schedules.default_limits
@@ -782,9 +784,18 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       entry.Agent_store.Session_index.Entry.session.prompt_revision)
   in
   ignore
-    (Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-       prompts
-       ~additional:pinned_revisions
+    (Agent_store.Delegation_store.with_records
+       (Agent_store.Session_store.delegations store)
+       ~max_records:factory_limits.delegation_recovery_max_count
+       ~max_bytes:factory_limits.delegation_recovery_max_bytes
+       ~f:(fun records ->
+         let generated_revisions =
+           List.map records ~f:(fun record ->
+             record.Agent_store.Delegation_store.admission.revision_id)
+         in
+         Agent_session.Prompt_catalog.prune_unreferenced_artifacts
+           prompts
+           ~additional:(generated_revisions @ pinned_revisions))
      : (int, Agent_store.Store_error.t) result);
   let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
   let startup_time = timestamp env in

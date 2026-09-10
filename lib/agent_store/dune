@@ -11,6 +11,7 @@
   journal
   snapshot
   session_index
+  delegation_store
   session_store
   blob_store
   blob_reference_scan

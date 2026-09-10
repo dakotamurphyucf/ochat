@@ -139,6 +139,50 @@ let install ~artifact_store ~transaction_id t =
         | false -> store_result (Error failure)))
 ;;
 
+let install_reserved ~delegations ~reservation ~artifact_store t =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind current = D.find delegations reservation.D.key |> store_result in
+  let%bind current =
+    match current with
+    | Some current
+      when D.Admission.equal current.admission reservation.admission
+           && String.equal current.request_sha256 reservation.request_sha256 -> Ok current
+    | _ ->
+      error
+        "delegation.reservation"
+        "generated artifact has no matching durable reservation"
+  in
+  let%bind () =
+    match current.revocation with
+    | None -> Ok ()
+    | Some _ ->
+      error "delegation.revoked" "generated artifact reservation has been revoked"
+  in
+  let%bind () =
+    match
+      Agent_protocol.Id.Prompt_revision.equal
+        current.admission.revision_id
+        t.artifact.revision_id
+      && String.equal current.admission.manifest_sha256 t.artifact.manifest_sha256
+      && List.equal
+           (fun (left_name, left_pin) (right_name, right_pin) ->
+              String.equal left_name right_name && String.equal left_pin right_pin)
+           current.admission.capability_pins
+           t.capability_pins
+    with
+    | true -> Ok ()
+    | false ->
+      error
+        "delegation.reservation"
+        "generated artifact differs from its reserved definition or capabilities"
+  in
+  let%bind () =
+    install ~artifact_store ~transaction_id:current.admission.transaction_id t
+  in
+  D.advance delegations current Artifact_installed |> store_result
+;;
+
 let restore
       ?limits
       ?source_limits

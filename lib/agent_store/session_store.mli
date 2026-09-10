@@ -39,6 +39,9 @@ val data_root : t -> Data_root.t
 val server_id : t -> Agent_protocol.Id.Server.t
 val session_index : t -> Session_index.t
 
+(** Shared private child-creation ledger under this store's exclusive ownership. *)
+val delegations : t -> Delegation_store.t
+
 (** [index_was_rebuilt t] reports that a missing index was reconstructed and
     eager recovery remains required. Scheduling hints are unknown: the daemon
     must load every non-archived entry and recover its journal before scheduling

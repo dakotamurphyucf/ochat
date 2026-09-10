@@ -71,6 +71,111 @@ let bundle ?(instructions = "Child instructions") () =
   |> Result.ok_or_failwith
 ;;
 
+let%expect_test "generated installation requires its exact durable unrevoked reservation" =
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let module P = Agent_protocol in
+  with_temp_directory (fun env temporary ->
+    Eio.Switch.run (fun sw ->
+      let store =
+        S.create
+          ~env
+          ~sw
+          ~root:(Filename.concat temporary "data")
+          ~server_id:(P.Id.Server.create ())
+          ~process_start_identity:None
+          ~lock_nonce:"generated-reservation"
+        |> store_ok
+      in
+      let delegations = S.delegations store in
+      let artifact_store =
+        Store.create
+          ~env
+          ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root store))
+        |> store_ok
+      in
+      let calls = ref 0 in
+      let parent = registry calls in
+      let revision_id = P.Id.Prompt_revision.create () in
+      let created_at = P.Timestamp.now () in
+      let references = C.references parent in
+      let prepare bundle =
+        G.prepare
+          ~env
+          ~dir:Eio.Path.(Eio.Stdenv.fs env / temporary)
+          ~revision_id
+          ~created_at
+          ~current_capabilities:(fun () -> parent)
+          ~references
+          bundle
+        |> get
+      in
+      let prepared = prepare (bundle ()) in
+      let key =
+        D.Key.
+          { parent_session_id = session_id
+          ; parent_generation = 0
+          ; principal_id = P.Id.Principal.create ()
+          ; idempotency_key = P.Idempotency_key.of_string "captured-child" |> protocol_ok
+          }
+      in
+      let admission =
+        D.Admission.
+          { child_session_id = P.Id.Session.create ()
+          ; revision_id
+          ; transaction_id = P.Id.Transaction.create ()
+          ; manifest_sha256 = (G.artifact prepared).manifest_sha256
+          ; parent_revision_id = P.Id.Prompt_revision.create ()
+          ; authority_sha256 = digest "host admission"
+          ; capability_pins = G.capability_pins prepared
+          ; lifetime = Owned
+          ; created_at
+          }
+      in
+      let reservation =
+        match
+          D.reserve
+            delegations
+            ~key
+            ~request_sha256:(digest "creation")
+            ~admission
+            ~max_records:8
+            ~max_bytes:1048576
+          |> store_ok
+        with
+        | New record -> record
+        | _ -> failwith "expected new reservation"
+      in
+      let altered = prepare (bundle ~instructions:"different child" ()) in
+      G.install_reserved ~delegations ~reservation ~artifact_store altered
+      |> expect "delegation.reservation";
+      assert (not (Store.exists artifact_store revision_id));
+      let installed =
+        G.install_reserved ~delegations ~reservation ~artifact_store prepared |> get
+      in
+      assert (D.equal_stage installed.stage Artifact_installed);
+      assert (
+        D.equal_record
+          installed
+          (G.install_reserved ~delegations ~reservation ~artifact_store prepared |> get));
+      let _ = D.revoke delegations reservation Parent_stopped |> store_ok in
+      G.install_reserved ~delegations ~reservation ~artifact_store prepared
+      |> expect "delegation.revoked";
+      let _ = Store.load artifact_store revision_id |> store_ok in
+      print_s
+        [%sexp
+          { stage = (installed.stage : D.stage)
+          ; initializer_or_tool_calls = (!calls : int)
+          ; original_artifact_retained = (Store.exists artifact_store revision_id : bool)
+          }];
+      S.close store |> store_ok));
+  [%expect
+    {|
+    ((stage Artifact_installed) (initializer_or_tool_calls 0)
+     (original_artifact_retained true))
+    |}]
+;;
+
 let%expect_test
     "generated artifact roundtrip pins bytes and current inherited configuration without \
      initialization"

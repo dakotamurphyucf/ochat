@@ -64,6 +64,7 @@ let owner name =
         ; "authoring"
         ; "generated_admission"
         ; "generated_definition"
+        ; "delegation_store"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"

@@ -3565,3 +3565,44 @@ not an execution grant. Parent identity/generation, live policy and revocation,
 stateful moderator mediation, child lifetime and staged session creation are
 separate E08 integration responsibilities. This API does not yet create a child
 session or enable a model-visible creation tool.
+
+### Durable creation reservations
+
+`Agent_store.Delegation_store` stores private, checksummed creation intents under
+the exclusively owned data root. `Session_store.delegations` provides the shared
+instance. A key is scoped to parent session, parent generation and principal.
+The request digest must include all selected creation inputs; a conflicting digest
+cannot replace an existing request. Concurrent matching retries retain the first
+reserved child, artifact and transaction IDs, even across store reopening.
+
+The admission records the parent revision, host authority digest, exact artifact
+manifest digest, effective capability configuration pins and selected lifetime.
+Independent lifetime requires a recorded authorization digest; this field records
+the host's admission decision and does not itself authorize independence. These
+records contain configuration identities, not serialized functions or credentials.
+
+The persisted stages are `Reserved`, `Artifact_installed`, `Child_installed` and
+`Linked`. Advancing a stage requires the coordinator to have verified the actual
+store effect. Repeating an attained stage preserves the newer stage. Revocation
+is terminal and retains both the admission and last recorded stage; a retry cannot
+reactivate it. Failed write acknowledgements are reconciled by rereading the
+durable record, and successful retries reestablish file and directory durability.
+
+`Generated_definition.install_reserved` checks the current reservation, revocation,
+manifest and capability pins before installing captured bytes. It advances the
+artifact stage only after verifying the complete installed artifact. If revocation
+races with installation, advancement fails and the captured bytes remain retained
+for reconciliation.
+
+Daemon startup artifact pruning now includes every validated reservation, including
+incomplete and revoked records. The ledger mutex covers the scan and pruning;
+corrupt records, links, unknown files or exhausted scan budgets prevent deletion.
+The host can configure `delegation_recovery_max_count` and
+`delegation_recovery_max_bytes` in its factory limits. Ordinary command-receipt
+expiration does not remove creation records. Explicit abandoned-admission cleanup
+is not implemented yet, so revoked reservations conservatively retain artifacts.
+
+This is the durable storage and artifact-installation part of child creation.
+Actual child-session initialization, parent-management linking, policy enforcement,
+stop coordination and restart reconciliation remain under implementation. Neither
+a stored record nor possession of a child ID grants execution or management access.

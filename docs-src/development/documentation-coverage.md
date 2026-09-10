@@ -309,6 +309,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/blob_store.mli` | [contract](../../lib/agent_store/blob_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/commit_writer.mli` | [contract](../../lib/agent_store/commit_writer.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/data_root.mli` | [contract](../../lib/agent_store/data_root.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/delegation_store.mli` | [contract](../../lib/agent_store/delegation_store.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_store/durable_file.mli` | [contract](../../lib/agent_store/durable_file.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/frame.mli` | [contract](../../lib/agent_store/frame.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/idempotency_store.mli` | [contract](../../lib/agent_store/idempotency_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
