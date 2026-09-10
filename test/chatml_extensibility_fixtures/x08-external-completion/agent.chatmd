@@ -1,0 +1,51 @@
+<script id="receiver" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = { subscription = ""; registration = ""; invocation = "" }
+let rec find_field fields name index =
+  if index == Array.length(fields) then `None else
+  let entry = fields[index] in
+  if entry.key == name then `Some(entry.value) else find_field(fields, name, index + 1)
+let field json name = match json with
+| `Object(fields) -> find_field(fields, name, 0)
+| _ -> `None
+let completion registration payload = match field(payload, "registration_id") with
+| `Some(`String(actual)) ->
+  if actual == registration then
+    (match field(payload, "data") with
+    | `Some(data) -> field(data, "value")
+    | _ -> `None)
+  else `None
+| _ -> `None
+let schema = `Object([
+  { key = "type"; value = `String("object") },
+  { key = "properties"; value = `Object([
+    { key = "value"; value = `Object([{ key = "type"; value = `String("string") }]) }
+  ]) },
+  { key = "required"; value = `Array([`String("value")]) }
+])
+let on_event ctx state event = match event with
+| `Tool_invoked(p) ->
+  let* subscription = Subscription.create("external-result", `Some(30000), `No_wake) in
+  let* registration = Ingress.register(subscription, 0, "external.report", schema) in
+  let acknowledgement = `Object([
+    { key = "registration_id"; value = `String(registration) },
+    { key = "namespace"; value = `String("external.report") }
+  ]) in
+  let* () = Invocation.resolve(p.context.invocation_id,
+    `Pending(`Subscription(subscription), acknowledgement)) in
+  Task.pure({ subscription = subscription; registration = registration; invocation = p.context.invocation_id })
+| `Internal_event(payload) ->
+  (match completion(state.registration, payload) with
+  | `Some(`String(value)) ->
+        let* completed = Subscription.complete(state.subscription, 0, `String(value)) in
+        let correlation = {
+          key = "external-result";
+          invocation_id = `Some(state.invocation);
+          work = `Some(`Subscription(state.subscription))
+        } in
+        let* delivery = Notification.publish(correlation, `Succeeded(`String(value)), `Request_turn) in
+        Task.pure(state)
+  | _ -> Task.fail("expected a string completion for this registration"))
+| _ -> Task.pure(state)
+</script>
+<tool name="watch" type="moderator" moderator="receiver" input_schema="any.json"
+ output_schema="any.json" completion_schema="string.json"/>

@@ -2317,11 +2317,21 @@ observations, ordinary events and queued events. Actual daemon composition tests
 exercise compiled registration and caught registration/revocation rollback,
 runtime unload/reload, host submission and subscription completion with no extra
 model request. The runtime-owner submission adapter currently accepts a producer
-identity only from a trusted host caller. Authenticated helper dispatch and the
-helper workflow remain uninstalled. No CLI, public
-protocol method, model tool or listener is enabled by these records. An admission
+identity only from a trusted host caller. Protocol 1.1 now supplies the narrow
+[`ingress.submit` adapter](protocol.md#registered-external-data), deriving that
+identity from the authenticated connection and requiring its dedicated scope.
+The existing `ochat-agent-stdio --connect` gateway can serve as an external helper.
+No new listener or model tool is added by this route. An admission
 receipt does not mean a moderator handled the data or that a subscription/model
 turn completed.
+
+The [X08 source bundle](../../test/chatml_extensibility_fixtures/x08-external-completion/README.md)
+demonstrates schema-checked external completion, public acknowledgement discovery,
+and a later notification requesting one model turn. Its offline composition uses
+real Unix peer authentication, submission-only helper scopes and two separate
+gateway processes. Reconnected retries retain one receipt, one queued handler
+and one conversation notification. This qualification does not yet cover ingress
+process-crash interruption or authenticated HTTP.
 
 ### Execution recovery
 

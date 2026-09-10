@@ -274,6 +274,9 @@ let protected session_id key =
 ;;
 
 let idempotency = function
+  (* Ingress owns durable per-registration receipts and rechecks current
+     authority on every retry. The generic response cache must not bypass it. *)
+  | Agent_protocol.Command.Ingress_submit _ -> None
   | Agent_protocol.Command.Session_create request ->
     standard None request.Agent_protocol.Session.Create_request.idempotency_key
   | Session_attach request -> standard (Some request.session_id) request.idempotency_key
@@ -1926,6 +1929,36 @@ let handle_schedule_cancel t context command_audit request =
            { schedule; mutation = mutation session })
 ;;
 
+let handle_ingress_submit t context (request : Agent_protocol.Ingress.Submit_request.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match Connection_context.protocol_version context with
+    | Some version
+      when Agent_protocol.Version.compare version Agent_protocol.Version.ingress_minimum
+           >= 0 -> Ok ()
+    | _ -> Error (error Incompatible_protocol "ingress.submit requires protocol 1.1")
+  in
+  let%bind entry, _ = find_visible_entry t context request.session_id in
+  let producer = (Connection_context.principal context).Agent_protocol.Principal.id in
+  let%map receipt =
+    Runtime_owner.submit_ingress
+      entry.runtime
+      ~producer
+      ~registration_id:request.registration_id
+      ~namespace:request.namespace
+      ~key:request.idempotency_key
+      ~payload:request.payload
+  in
+  Agent_protocol.Method_result.Ingress_submit
+    { session_id = request.session_id
+    ; registration_id = request.registration_id
+    ; event_id = receipt.id
+    ; idempotency_key = receipt.key
+    ; payload_sha256 = receipt.payload_sha256
+    ; accepted_at = receipt.accepted_at
+    }
+;;
+
 let mutation_attachment = function
   | Agent_protocol.Command.Session_start r -> Some (r.session_id, r.attachment_id)
   | Session_stop r -> Some (r.session_id, r.attachment_id)
@@ -1957,7 +1990,7 @@ let dispatch_authorized t ~context ~command_audit = function
     Result.map
       (t.initialize ~principal:(Connection_context.principal context) request)
       ~f:(fun response ->
-        Connection_context.mark_initialized context;
+        Connection_context.mark_initialized ~version:response.selected_version context;
         Agent_protocol.Method_result.Protocol_initialize response)
   | Protocol_ping request ->
     Ok (Agent_protocol.Method_result.Protocol_ping (t.ping request))
@@ -2010,6 +2043,7 @@ let dispatch_authorized t ~context ~command_audit = function
   | Schedule_get request -> handle_schedule_get t context request
   | Schedule_create request -> handle_schedule_create t context command_audit request
   | Schedule_cancel request -> handle_schedule_cancel t context command_audit request
+  | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
 let handle_authorized t ~context ~command_audit command =
@@ -2058,6 +2092,7 @@ let command_session_id = function
   | Schedule_get request -> Some request.session_id
   | Schedule_create request -> Some request.session_id
   | Schedule_cancel request -> Some request.session_id
+  | Ingress_submit request -> Some request.session_id
 ;;
 
 let audit_outcome

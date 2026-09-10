@@ -35,6 +35,7 @@ let all_scopes =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
 ;;
 

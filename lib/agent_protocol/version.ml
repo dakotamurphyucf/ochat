@@ -7,6 +7,8 @@ type t =
 [@@deriving compare, equal, sexp]
 
 let initial = { major = 1; minor = 0 }
+let ingress_minimum = { major = 1; minor = 1 }
+let current = ingress_minimum
 
 let create ~major ~minor =
   if major < 0 || minor < 0

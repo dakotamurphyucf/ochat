@@ -168,6 +168,7 @@ let all_scopes =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
 ;;
 
@@ -209,7 +210,7 @@ let initialize connection =
     Agent_protocol.Initialize.Request.create
       ~implementation
       ~protocol_min:Agent_protocol.Version.initial
-      ~protocol_max:Agent_protocol.Version.initial
+      ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)

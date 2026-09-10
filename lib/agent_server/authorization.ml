@@ -27,6 +27,7 @@ let required_scope = function
   | Permission_respond _ -> Some Answer_approvals
   | Grant_list _ | Grant_revoke _ -> Some Manage_grants
   | Audit_read _ -> Some Read_audit
+  | Ingress_submit _ -> Some Submit_ingress
   | Job_list _
   | Job_get _
   | Job_cancel _

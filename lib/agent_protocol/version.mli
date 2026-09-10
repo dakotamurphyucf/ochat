@@ -9,6 +9,13 @@ type t =
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
 
+(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
+    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+val current : t
+
+(** Minimum negotiated version for ingress submission and its scope vocabulary. *)
+val ingress_minimum : t
+
 (** [create ~major ~minor] creates a non-negative protocol version. *)
 val create : major:int -> minor:int -> (t, Error.t) result
 

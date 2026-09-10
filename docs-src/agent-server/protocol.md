@@ -1,4 +1,4 @@
-# Ochat agent protocol 1.0
+# Ochat agent protocol 1.1
 
 Use the same method/envelope contract over [Unix](transports/unix.md),
 [stdio](transports/stdio.md), or [HTTP](transports/http.md). Transport framing and
@@ -9,12 +9,18 @@ The [ChatML extension foundations](extensibility-foundations.md) describe additi
 status and host-capability metadata, storage guarantees and the current execution
 feature availability.
 
+Protocol 1.1 adds `ingress.submit` and its dedicated permission scope. Servers also
+negotiate 1.0 for existing clients; those initialization responses omit the new
+scope, preserving the older closed permission vocabulary. Ingress submission
+requires negotiation of at least 1.1. A supported protocol method does not enable
+ChatML features on a host where their qualified runtime service is unavailable.
+
 ## Initialize and correlate
 
 Send this complete request before other work:
 
 ```json
-{"jsonrpc":"2.0","id":"initialize","method":"protocol.initialize","params":{"implementation":{"name":"tutorial","version":"1"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}
+{"jsonrpc":"2.0","id":"initialize","method":"protocol.initialize","params":{"implementation":{"name":"tutorial","version":"1"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":1},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}
 ```
 
 The response identifies the negotiated protocol, server/features/limits. Reject an
@@ -78,12 +84,39 @@ actor state and authorization, not merely passing JSON validation.
 | `schedule.get` | `Schedule.Get_request` | `session.message.send` | Schedule state. |
 | `schedule.create` | `Schedule.Create_request` | `session.message.send` | Writable attachment; persist timer/delivery intent. |
 | `schedule.cancel` | `Schedule.Cancel_request` | `session.message.send` | Writable attachment; cancel schedule. |
+| `ingress.submit` | `Ingress.Submit_request` | `ingress.submit` | Protocol 1.1; exact producer-bound registration; durable data acceptance acknowledgement. |
 
-Read-only attachments cannot mutate or answer permissions even with a powerful
-credential. Read scopes are not stripped by read-only mode. Additional session,
+Read-only attachments cannot authorize writer operations or permission answers.
+Ingress has separate authority: it needs its dedicated scope and matching
+registration, without an attachment or transcript permission. Read scopes are
+not stripped by read-only mode. Additional session,
 blob, owner-lease and revision checks still apply beyond this minimum-scope table.
 
 ## Requests and results
+
+### Registered external data
+
+`ingress.submit` uses a closed version-1 request containing `session_id`,
+`registration_id`, `namespace`, `idempotency_key` and `payload`. The authenticated
+connection supplies producer identity; a caller-supplied `producer` field is rejected.
+The principal needs `ingress.submit`, session visibility and the exact registration's
+producer identity. Administrative visibility alone does not authorize another
+producer's registration. No writer attachment or transcript access is required.
+
+The host validates namespace/schema, bounded payload, rate/storage limits, current
+source/generation and registration lifetime/revocation. Accepted data is saved with
+its queue frame before acknowledgement. The version-1 result has `status: "accepted"`,
+session/registration/event IDs, idempotency key, payload digest and acceptance time.
+It does not claim handler execution, subscription completion or a model response.
+
+Retry the same key and payload to recover the same acknowledgement after reconnect.
+Changing its payload conflicts. Every retry rechecks current authority, including
+explicit revocation; the general command response cache is not used for this method.
+Already accepted data can remain runnable after producer revocation; cancelling or
+advancing the subscription invalidates queued delivery. See the
+[ingress execution contract](extensibility-foundations.md#external-data-ingress-foundation).
+
+### Sessions and messages
 
 Obtain catalog IDs from `prompt.list`/`workspace.list`, not by converting friendly
 configuration names yourself. `Session.Spec` chooses host, prompt reference,
@@ -173,7 +206,7 @@ Client synchronization:
 3. Track stable history and operation IDs; preserve local drafts separately.
 4. Redacted/hidden durable events still advance sequence. Do not infer missing
    protected data by treating hidden payloads as deserialization failures.
-5. Protocol 1.0 does not expose replay of recoverable deltas. They are live-only
+5. Protocol 1.0/1.1 does not expose replay of recoverable deltas. They are live-only
    notifications; their operation sequence is not an accepted reconnect cursor.
    Recover through durable replay or a replacement snapshot, then resume live
    notifications. Finalized canonical state remains authoritative.

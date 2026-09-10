@@ -15,6 +15,7 @@ type t =
   ; max_attachments : int
   ; mutex : Eio.Mutex.t
   ; mutable initialized : bool
+  ; mutable protocol_version : Agent_protocol.Version.t option
   ; mutable reserved_attachments : int
   ; mutable attachments :
       (Agent_protocol.Id.Attachment.t, Agent_protocol.Session.Attachment.t) Map.Poly.t
@@ -29,6 +30,7 @@ let create ~connection_id ~principal ~transport ~publish_notification ~max_attac
   ; max_attachments
   ; mutex = Eio.Mutex.create ()
   ; initialized = false
+  ; protocol_version = None
   ; reserved_attachments = 0
   ; attachments = Map.Poly.empty
   }
@@ -36,9 +38,12 @@ let create ~connection_id ~principal ~transport ~publish_notification ~max_attac
 
 let principal t = t.principal
 let initialized t = Eio.Mutex.use_ro t.mutex (fun () -> t.initialized)
+let protocol_version t = Eio.Mutex.use_ro t.mutex (fun () -> t.protocol_version)
 
-let mark_initialized t =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.initialized <- true)
+let mark_initialized ?(version = Agent_protocol.Version.initial) t =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    t.protocol_version <- Some version;
+    t.initialized <- true)
 ;;
 
 let attachment_limit_error () =

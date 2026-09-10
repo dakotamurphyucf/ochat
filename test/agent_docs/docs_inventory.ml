@@ -168,7 +168,7 @@ let coverage env root =
      32–34 embedding, security and operations; 35 testing. This is documentation\n\
      coverage, not a fresh assertion that every historical acceptance gate ran here.\n\n\
      ## Contract inventories\n\n\
-     All 38 methods, scopes, events and typed payloads are indexed in the\n\
+     All supported methods, scopes, events and typed payloads are indexed in the\n\
      [protocol](../agent-server/protocol.md) and generated \
      [types](../agent-server/protocol-types.md).\n\
      All eight routes are in [HTTP](../agent-server/transports/http.md).\n\

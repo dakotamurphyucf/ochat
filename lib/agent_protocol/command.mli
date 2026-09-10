@@ -39,6 +39,7 @@ type t =
   | Schedule_get of Schedule.Get_request.t
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
+  | Ingress_submit of Ingress.Submit_request.t
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)

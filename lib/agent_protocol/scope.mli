@@ -15,6 +15,7 @@ type t =
   | Delete_sessions
   | Administer_configuration
   | Diagnostics
+  | Submit_ingress
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

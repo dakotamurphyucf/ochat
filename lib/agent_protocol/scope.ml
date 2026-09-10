@@ -16,6 +16,7 @@ module T = struct
     | Delete_sessions
     | Administer_configuration
     | Diagnostics
+    | Submit_ingress
   [@@deriving compare, equal, sexp]
 end
 
@@ -37,6 +38,7 @@ let to_string = function
   | Delete_sessions -> "session.delete"
   | Administer_configuration -> "configuration.admin"
   | Diagnostics -> "diagnostics.read"
+  | Submit_ingress -> "ingress.submit"
 ;;
 
 let of_string = function
@@ -54,6 +56,7 @@ let of_string = function
   | "session.delete" -> Ok Delete_sessions
   | "configuration.admin" -> Ok Administer_configuration
   | "diagnostics.read" -> Ok Diagnostics
+  | "ingress.submit" -> Ok Submit_ingress
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 

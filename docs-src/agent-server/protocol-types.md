@@ -188,6 +188,7 @@ type t =
   | Schedule_get of Schedule.Get_request.t
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
+  | Ingress_submit of Ingress.Submit_request.t
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)
@@ -943,6 +944,45 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 (** [to_json t] encodes a JSON string key. *)
 val to_json : t -> Jsonaf.t
+```
+
+## ingress
+
+[JSON codec](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
+
+```ocaml
+(** Scoped external DATA admission. A registration ID is not a credential.
+    The server authenticates the producer separately; callers cannot supply it. *)
+module Submit_request : sig
+  type t =
+    { session_id : Id.Session.t
+    ; registration_id : Id.Capability.t
+    ; namespace : string
+    ; idempotency_key : Idempotency_key.t
+    ; payload : Jsonaf.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+(** Durable acceptance acknowledgement, not handler execution or model completion.
+    Matching retries return the same event identity, digest and acceptance time. *)
+module Acknowledgement : sig
+  type t =
+    { session_id : Id.Session.t
+    ; registration_id : Id.Capability.t
+    ; event_id : Id.Ingress_event.t
+    ; idempotency_key : Idempotency_key.t
+    ; payload_sha256 : string
+    ; accepted_at : Timestamp.t
+    }
+  [@@deriving equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## initialize
@@ -1799,6 +1839,7 @@ type t =
   | Schedule_get of Schedule.t
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
+  | Ingress_submit of Ingress.Acknowledgement.t
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)
@@ -2502,6 +2543,7 @@ type t =
   | Delete_sessions
   | Administer_configuration
   | Diagnostics
+  | Submit_ingress
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t
@@ -3150,6 +3192,13 @@ type t =
 
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
+
+(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
+    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+val current : t
+
+(** Minimum negotiated version for ingress submission and its scope vocabulary. *)
+val ingress_minimum : t
 
 (** [create ~major ~minor] creates a non-negative protocol version. *)
 val create : major:int -> minor:int -> (t, Error.t) result

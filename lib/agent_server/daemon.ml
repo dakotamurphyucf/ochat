@@ -221,6 +221,7 @@ let all_scopes =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
 ;;
 
@@ -350,7 +351,7 @@ let initialize
     Agent_protocol.Version.negotiate
       ~client_min:request.Agent_protocol.Initialize.Request.protocol_min
       ~client_max:request.protocol_max
-      ~supported:[ Agent_protocol.Version.initial ]
+      ~supported:[ Agent_protocol.Version.initial; Agent_protocol.Version.current ]
   in
   if Poly.equal !status_ref Draining || Poly.equal !status_ref Stopped
   then
@@ -360,7 +361,21 @@ let initialize
          ~message:"server is not accepting new connections"
          ~retryable:true
          ())
-  else
+  else (
+    let principal =
+      match
+        Agent_protocol.Version.compare
+          selected_version
+          Agent_protocol.Version.ingress_minimum
+        < 0
+      with
+      | false -> principal
+      | true ->
+        { principal with
+          Agent_protocol.Principal.scopes =
+            Set.remove principal.Agent_protocol.Principal.scopes Submit_ingress
+        }
+    in
     Agent_protocol.Initialize.Response.create
       ~protocol_name:"ochat.agent"
       ~selected_version
@@ -376,7 +391,7 @@ let initialize
         ; oldest_replayable_sequence = None
         }
       ~timing:options.timing
-      ~server_time:(timestamp env)
+      ~server_time:(timestamp env))
 ;;
 
 let ready = function
@@ -407,7 +422,7 @@ let server_info (options : options) implementation (config : Config.t) store =
   Agent_protocol.Method_result.Server_info.
     { server_id = Agent_store.Session_store.server_id store
     ; implementation
-    ; protocol_version = Agent_protocol.Version.initial
+    ; protocol_version = Agent_protocol.Version.current
     ; features =
         Agent_protocol.Extension_capabilities.filter_available
           (extension_capabilities options config)

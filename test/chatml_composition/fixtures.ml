@@ -38,6 +38,8 @@ let with_daemon
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
       ?settle
       ?after_turn
+      ?after_turn_with_daemon
+      ?(connect = fun ~sw:_ ~env:_ ~root:_ daemon -> connection daemon (principal ()))
       ?(inspect_request = fun _ _ -> ())
       ?(expected_requests = 2)
       ?(initial_requests = 2)
@@ -114,7 +116,7 @@ let with_daemon
                       [%sexp
                         (diagnostics
                          : Agent_session.Prompt_revision_builder.Diagnostic.t list)]);
-              let client = connection daemon (principal ()) in
+              let client = connect ~sw ~env ~root daemon in
               initialize client;
               let session, _ = create_session ~start_immediately:true client in
               let handle =
@@ -222,6 +224,8 @@ let with_daemon
                   failwith "unexpected invocation origin");
               let final =
                 Option.iter after_turn ~f:(fun after_turn -> after_turn env handle entry);
+                Option.iter after_turn_with_daemon ~f:(fun after_turn ->
+                  after_turn env daemon entry);
                 match settle with
                 | None -> final
                 | Some settle ->
