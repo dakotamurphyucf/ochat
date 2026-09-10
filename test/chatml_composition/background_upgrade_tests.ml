@@ -36,44 +36,16 @@ let%expect_test
       let root, daemon, client = Option.value_exn !host in
       let source_path = Eio.Path.(Eio.Stdenv.fs env / root / "begin.chatml") in
       let source = Eio.Path.load source_path in
-      Eio.Path.save
-        ~create:(`Or_truncate 0o600)
-        source_path
-        (source ^ "\nlet replacement_revision = 2\n");
-      let catalog = Agent_server.Daemon.prompts daemon in
-      let definitions =
-        Agent_session.Prompt_catalog.entries catalog
-        |> List.map ~f:(fun entry -> entry.definition)
-      in
-      let prepared =
-        Agent_session.Prompt_catalog.prepare
-          catalog
-          ~transaction_id:(fun _ -> P.Id.Transaction.create ())
-          ~created_at:(P.Timestamp.now ())
-          definitions
-      in
-      Agent_session.Prompt_catalog.install catalog prepared;
-      let target =
-        match
-          (List.hd_exn (Agent_session.Prompt_catalog.entries catalog)).availability
-        with
-        | Ready revision -> Agent_session.Prompt_revision.id revision
-        | _ -> failwith "changed publisher did not compile"
-      in
-      assert (not (P.Id.Prompt_revision.equal before.spec.prompt_revision_id target));
-      Agent_client.Connection.request
-        client
-        (Session_upgrade_prompt
-           { session_id = before.identity.session_id
-           ; attachment_id = (H.attachment handle).id
-           ; expected_revision = (state ()).counters.revision
-           ; target_revision = target
-           ; allow_migration = false
-           ; idempotency_key =
-               P.Idempotency_key.of_string "upgrade-publisher" |> protocol_ok
-           })
-      |> protocol_ok
-      |> ignore;
+      Prompt_upgrade_fixtures.replace
+        env
+        ~root
+        ~daemon
+        ~client
+        ~handle
+        ~entry
+        ~filename:"begin.chatml"
+        ~source:(source ^ "\nlet replacement_revision = 2\n")
+        ~allow_migration:false;
       let upgraded = state () in
       assert (List.is_empty upgraded.deliveries);
       (match

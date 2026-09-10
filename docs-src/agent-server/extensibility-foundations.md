@@ -1753,6 +1753,16 @@ checked before projecting the result: queued data cannot bypass a revoked read
 permission. A changed or forged attempt is retired without consuming a valid
 delivery's identity. Failed saves change neither the marker nor the queue.
 
+Before queueing a completion, the actor compares its captured moderator source
+with the installed snapshot under the host's moderator gate. Replacing or removing
+the moderator retires a pending terminal delivery as `discarded` with reason
+`authority_changed`. The original job result remains available for authorized
+inspection; no event is sent to the replacement moderator. Unchanged sources
+continue through normal delivery, and stale requests or failed retirement saves
+leave the original pending record intact. This uses the same durable retirement
+record as standalone completion delivery; it does not migrate old handler state
+into the replacement script.
+
 The [X03 shell bundle](../../test/chatml_extensibility_fixtures/x03-background-shell/README.md)
 publishes a correlated notification after its initial Pending acknowledgement.
 Success requests one model turn; failure/cancellation data uses No_wake. Completion

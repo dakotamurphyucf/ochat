@@ -688,6 +688,17 @@ val admit_standalone_delivery
   -> Standalone_delivery.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Under the host's moderator gate, recheck the exact pending terminal job and
+    current state revision. Retire delivery if its captured moderator source was
+    replaced or removed; return [true] after durable retirement. [false] leaves the
+    matching source eligible for normal event delivery. Missing provenance, stale
+    requests and save failures do not retire work. No result artifact is loaded. *)
+val retire_obsolete_moderator_delivery
+  :  t
+  -> revision:int64
+  -> job:Agent_protocol.Job.t
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Host adapter path under a pinned runtime lease. Recheck revision, actual owner,
     job and current authority before bounded artifact loading. Save the checked
     intent with its job's delivered marker atomically; publish only at a safe point.

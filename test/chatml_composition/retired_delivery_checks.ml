@@ -80,6 +80,47 @@ let check_storage before (job : P.Job.t) =
 
 (* Use a captured real compiled-session state with an isolated persistence fault.
    No worker is installed, so these checks cannot run a provider or shell. *)
+let with_actor env initial f =
+  Eio.Switch.run (fun sw ->
+    let backend =
+      Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
+    in
+    let persistence = Agent_session.Memory_backend.persistence backend in
+    let reject_save = ref false in
+    let actor =
+      A.create
+        ~sw
+        ~clock:(Eio.Stdenv.clock env)
+        ~mailbox_capacity:32
+        ~compaction_env:None
+        ~initial_state:initial
+        ~operation_worker:None
+        ~persistence:
+          { commit =
+              (fun ~command_audit ~previous next ->
+                match !reject_save with
+                | true ->
+                  Error (P.Error.invalid_request "injected retirement save failure")
+                | false -> persistence.commit ~command_audit ~previous next)
+          }
+        ~services:
+          { now = P.Timestamp.now
+          ; monotonic_now = (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock env))
+          ; create_attachment_id = P.Id.Attachment.create
+          ; create_reclaim_token = (fun () -> "retirement-fixture")
+          ; job_results = None
+          ; schedule_limits = Agent_session.Staged_schedules.default_limits
+          ; notification_limits = Agent_session.Staged_notifications.default_limits
+          ; ingress_limits = Agent_session.Staged_ingress.default_limits
+          ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+          ; state_committed = (fun _ _ -> ())
+          }
+    in
+    Exn.protect
+      ~finally:(fun () -> A.shutdown actor)
+      ~f:(fun () -> f actor backend reject_save))
+;;
+
 let check_actor_case env initial current_capabilities =
   let job = List.hd_exn initial.State.jobs in
   let owner =
@@ -104,79 +145,42 @@ let check_actor_case env initial current_capabilities =
       |> Result.map_error ~f:(fun error -> error.C.message)
       |> Result.ok_or_failwith
     in
-    Eio.Switch.run (fun sw ->
-      let backend =
-        Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
+    with_actor env initial (fun actor backend reject_save ->
+      let deliver ?(capabilities = selected) revision job =
+        A.deliver_standalone_completion
+          actor
+          ~revision
+          ~job
+          ~current_capabilities:capabilities
+          ~policy:Chat_response.One_off_request.default_policy
       in
-      let persistence = Agent_session.Memory_backend.persistence backend in
-      let reject_save = ref false in
-      let actor =
-        A.create
-          ~sw
-          ~clock:(Eio.Stdenv.clock env)
-          ~mailbox_capacity:32
-          ~compaction_env:None
-          ~initial_state:initial
-          ~operation_worker:None
-          ~persistence:
-            { commit =
-                (fun ~command_audit ~previous next ->
-                  match !reject_save with
-                  | true ->
-                    Error (P.Error.invalid_request "injected retirement save failure")
-                  | false -> persistence.commit ~command_audit ~previous next)
-            }
-          ~services:
-            { now = P.Timestamp.now
-            ; monotonic_now = (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock env))
-            ; create_attachment_id = P.Id.Attachment.create
-            ; create_reclaim_token = (fun () -> "retirement-fixture")
-            ; job_results = None
-            ; schedule_limits = Agent_session.Staged_schedules.default_limits
-            ; notification_limits = Agent_session.Staged_notifications.default_limits
-            ; ingress_limits = Agent_session.Staged_ingress.default_limits
-            ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
-            ; state_committed = (fun _ _ -> ())
-            }
-      in
-      Exn.protect
-        ~finally:(fun () -> A.shutdown actor)
-        ~f:(fun () ->
-          let deliver ?(capabilities = selected) revision job =
-            A.deliver_standalone_completion
-              actor
-              ~revision
-              ~job
-              ~current_capabilities:capabilities
-              ~policy:Chat_response.One_off_request.default_policy
-          in
-          let revision = initial.counters.revision in
-          rejected (deliver (Int64.pred revision) job);
-          rejected (deliver revision { job with attempt = job.attempt + 1 });
-          reject_save := true;
-          (* A storage/admission error under unchanged authority is retryable too.
+      let revision = initial.counters.revision in
+      rejected (deliver (Int64.pred revision) job);
+      rejected (deliver revision { job with attempt = job.attempt + 1 });
+      reject_save := true;
+      (* A storage/admission error under unchanged authority is retryable too.
              For the artifact case the absent loader fails before persistence. *)
-          rejected (deliver ~capabilities:current_capabilities revision job);
-          same initial (A.state actor |> protocol_ok);
-          rejected (deliver revision job);
-          same initial (A.state actor |> protocol_ok);
-          same initial (Agent_session.Memory_backend.state backend);
-          reject_save := false;
-          deliver revision job |> protocol_ok;
-          let state = A.state actor |> protocol_ok in
-          let retained = List.hd_exn state.jobs in
-          (match retained.delivery with
-           | Discarded { reason = Authority_changed; _ } -> ()
-           | _ -> failwith "authority failure not retired");
-          assert (
-            Jsonaf.exactly_equal
-              (P.Job.to_json { job with delivery = retained.delivery })
-              (P.Job.to_json retained));
-          assert (List.is_empty state.deliveries);
-          same state (Agent_session.Memory_backend.state backend);
-          rejected (deliver state.counters.revision retained);
-          A.cancel_job_internal actor ~job_id:retained.id |> protocol_ok |> ignore;
-          same state (A.state actor |> protocol_ok))))
+      rejected (deliver ~capabilities:current_capabilities revision job);
+      same initial (A.state actor |> protocol_ok);
+      rejected (deliver revision job);
+      same initial (A.state actor |> protocol_ok);
+      same initial (Agent_session.Memory_backend.state backend);
+      reject_save := false;
+      deliver revision job |> protocol_ok;
+      let state = A.state actor |> protocol_ok in
+      let retained = List.hd_exn state.jobs in
+      (match retained.delivery with
+       | Discarded { reason = Authority_changed; _ } -> ()
+       | _ -> failwith "authority failure not retired");
+      assert (
+        Jsonaf.exactly_equal
+          (P.Job.to_json { job with delivery = retained.delivery })
+          (P.Job.to_json retained));
+      assert (List.is_empty state.deliveries);
+      same state (Agent_session.Memory_backend.state backend);
+      rejected (deliver state.counters.revision retained);
+      A.cancel_job_internal actor ~job_id:retained.id |> protocol_ok |> ignore;
+      same state (A.state actor |> protocol_ok)))
 ;;
 
 let check_actor env initial current_capabilities =

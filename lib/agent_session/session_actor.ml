@@ -374,6 +374,7 @@ type _ request =
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Deliver_idle_notifications : Notification_delivery.idle -> bool request
   | Admit_standalone_delivery : Standalone_delivery.t -> unit request
+  | Retire_obsolete_moderator_delivery : int64 * Agent_protocol.Job.t -> bool request
   | Deliver_standalone_completion :
       int64
       * Agent_protocol.Job.t
@@ -4095,23 +4096,22 @@ let admit_standalone_delivery_internal t plan =
   ()
 ;;
 
-let deliver_standalone_completion_internal t revision expected current_capabilities policy
-  =
+let checked_pending_job_delivery t revision expected =
   let open Result.Let_syntax in
   let module P = Agent_protocol in
   let%bind () =
     match Int64.equal revision t.state.counters.revision with
     | true -> Ok ()
-    | false -> Error (error Conflict "standalone completion runtime snapshot changed")
+    | false -> Error (error Conflict "background delivery runtime snapshot changed")
   in
   let%bind job =
     List.find t.state.jobs ~f:(fun value -> P.Id.Job.equal value.id expected.P.Job.id)
-    |> Result.of_option ~error:(error Invalid_request "standalone completion job missing")
+    |> Result.of_option ~error:(error Invalid_request "background delivery job missing")
   in
   let%bind () =
     match Jsonaf.exactly_equal (P.Job.to_json expected) (P.Job.to_json job) with
     | true -> Ok ()
-    | false -> Error (error Conflict "standalone completion job changed")
+    | false -> Error (error Conflict "background delivery job changed")
   in
   let%bind () =
     Extension_invariants.owner
@@ -4120,6 +4120,64 @@ let deliver_standalone_completion_internal t revision expected current_capabilit
       job.session_id
       job.generation
   in
+  let%bind () =
+    match job.delivery with
+    | Pending -> Ok ()
+    | Delivered _ | Not_required | Discarded _ ->
+      Error (error Already_resolved "background job delivery is resolved")
+  in
+  let%bind () =
+    match job.status with
+    | Succeeded | Failed _ | Cancelled | Interrupted _ -> Ok ()
+    | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+      Error (error Conflict "background job is not terminal")
+  in
+  let%map () = P.Job.validate_result job in
+  job
+;;
+
+let retire_job_delivery t (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let now = t.services.now () in
+  let at =
+    match job.completed_at with
+    | Some completed when P.Timestamp.compare completed now > 0 -> completed
+    | _ -> now
+  in
+  let job = { job with delivery = Discarded { at; reason = Authority_changed } } in
+  let%map _ =
+    transition
+      t
+      ~delta:(Session_delta.Job_changed job)
+      ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
+  in
+  ()
+;;
+
+let retire_obsolete_moderator_delivery_internal t revision expected =
+  let open Result.Let_syntax in
+  let%bind job = checked_pending_job_delivery t revision expected in
+  let%bind source = Background_job_event.source ~state:t.state job in
+  let%bind source =
+    Result.of_option
+      source
+      ~error:
+        (error Invalid_request "background delivery has no captured moderator source")
+  in
+  let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  match Option.equal Agent_protocol.Invocation.equal_observer (Some source) installed with
+  | true -> Ok false
+  | false ->
+    let%map () = retire_job_delivery t job in
+    true
+;;
+
+let deliver_standalone_completion_internal t revision expected current_capabilities policy
+  =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let%bind job = checked_pending_job_delivery t revision expected in
   let%bind invocation =
     match job.launch with
     | Some { owner = Invocation id; _ } ->
@@ -4129,12 +4187,6 @@ let deliver_standalone_completion_internal t revision expected current_capabilit
            ~error:(error Invalid_request "standalone completion owner missing")
     | _ -> Error (error Invalid_request "standalone completion has no invocation owner")
   in
-  let%bind () =
-    match job.delivery with
-    | Pending -> Ok ()
-    | Delivered _ | Not_required | Discarded _ ->
-      Error (error Already_resolved "standalone job delivery is resolved")
-  in
   match
     Standalone_completion_contract.authorize
       ~invocation
@@ -4142,21 +4194,7 @@ let deliver_standalone_completion_internal t revision expected current_capabilit
       ~current_capabilities
       ~policy
   with
-  | Error { code = Permission_denied; _ } ->
-    let now = t.services.now () in
-    let at =
-      match job.completed_at with
-      | Some completed when P.Timestamp.compare completed now > 0 -> completed
-      | _ -> now
-    in
-    let job = { job with delivery = Discarded { at; reason = Authority_changed } } in
-    let%map _ =
-      transition
-        t
-        ~delta:(Session_delta.Job_changed job)
-        ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
-    in
-    ()
+  | Error { code = Permission_denied; _ } -> retire_job_delivery t job
   | Error error -> Error error
   | Ok () ->
     let load_artifact =
@@ -8689,6 +8727,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     consume_notifications_internal t operation_id plan
   | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
   | Admit_standalone_delivery plan -> admit_standalone_delivery_internal t plan
+  | Retire_obsolete_moderator_delivery (revision, job) ->
+    retire_obsolete_moderator_delivery_internal t revision job
   | Deliver_standalone_completion (revision, job, capabilities, policy) ->
     deliver_standalone_completion_internal t revision job capabilities policy
   | Consume_initial_notifications (operation_id, proposal) ->
@@ -9077,6 +9117,11 @@ let deliver_idle_notifications t plan = call t (Deliver_idle_notifications plan)
 
 let admit_standalone_delivery t plan =
   Eio.Cancel.protect (fun () -> call t (Admit_standalone_delivery plan))
+;;
+
+let retire_obsolete_moderator_delivery t ~revision ~job =
+  Eio.Cancel.protect (fun () ->
+    call t (Retire_obsolete_moderator_delivery (revision, job)))
 ;;
 
 let deliver_standalone_completion t ~revision ~job ~current_capabilities ~policy =

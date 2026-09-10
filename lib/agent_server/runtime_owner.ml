@@ -884,35 +884,44 @@ let deliver_moderated_background_job_completion
       (job : Agent_protocol.Job.t)
   =
   let open Result.Let_syntax in
-  let%bind observer =
-    Option.bind
-      runtime.moderator_manager
-      ~f:Chat_response.Moderator_manager.invocation_observer
-    |> Result.of_option
-         ~error:
-           (Agent_protocol.Error.invalid_request
-              "background completion requires a qualified moderator")
-  in
   Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
     let%bind state = Agent_session.Session_actor.state t.actor in
-    let%bind frame = Agent_session.Background_job_event.frame ~state ~observer job in
-    let%bind payload =
-      Chat_response.Background_delivery.capture frame
-      |> Chatml.Chatml_value_codec.Snapshot.of_value
-      |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
-      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-    in
-    runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
-      Agent_session.Session_actor.deliver_job
-        ~expected:before
-        ~expected_job:job
+    let%bind retired =
+      Agent_session.Session_actor.retire_obsolete_moderator_delivery
         t.actor
-        ~job_id:job.id
-        ~generation:job.generation
-        ~moderator_snapshot:
-          (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+        ~revision:state.counters.revision
+        ~job
+    in
+    match retired with
+    | true -> Ok ()
+    | false ->
+      let%bind observer =
+        Option.bind
+          runtime.moderator_manager
+          ~f:Chat_response.Moderator_manager.invocation_observer
+        |> Result.of_option
+             ~error:
+               (Agent_protocol.Error.invalid_request
+                  "background completion requires a qualified moderator")
+      in
+      let%bind frame = Agent_session.Background_job_event.frame ~state ~observer job in
+      let%bind payload =
+        Chat_response.Background_delivery.capture frame
+        |> Chatml.Chatml_value_codec.Snapshot.of_value
+        |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      in
+      runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+        Agent_session.Session_actor.deliver_job
+          ~expected:before
+          ~expected_job:job
+          t.actor
+          ~job_id:job.id
+          ~generation:job.generation
+          ~moderator_snapshot:
+            (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+        |> Result.map ~f:ignore)
       |> Result.map ~f:ignore)
-    |> Result.map ~f:ignore)
 ;;
 
 let deliver_background_job_completion t (job : Agent_protocol.Job.t) =
