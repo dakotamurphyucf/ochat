@@ -16,7 +16,7 @@ val reconcile_recovered
 
 (** Each pass also sweeps subscription deadlines through the actor, independently
     of any earlier callback holding this entry's runtime. *)
-val start : sw:Eio.Switch.t -> clock:_ Eio.Time.clock -> registry:Session_registry.t -> t
+val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 
 val close : t -> unit
 val is_running : t -> bool

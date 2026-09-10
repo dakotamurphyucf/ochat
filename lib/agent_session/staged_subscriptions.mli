@@ -67,4 +67,5 @@ val abort
 (** Remove all receipts after either a successful save or whole-owner abort. *)
 val release_owner : t -> owner:Agent_protocol.Job.launch_owner -> unit
 
+val values : t -> Agent_protocol.Subscription.t list
 val abort_all : t -> unit

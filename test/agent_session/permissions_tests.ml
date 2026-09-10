@@ -155,6 +155,7 @@ let%expect_test "permission requests persist before wait and resolve by generati
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -240,6 +241,7 @@ let%expect_test "session approval creates a durable invocation grant" =
                   Agent_protocol.Id.Attachment.of_string "att_actor_grant" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -325,6 +327,7 @@ let%expect_test "permission timeout applies configured unattended fallback" =
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())

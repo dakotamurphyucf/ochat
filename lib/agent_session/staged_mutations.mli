@@ -53,5 +53,6 @@ module Make (Value : Value) : sig
     -> (unit, Agent_protocol.Error.t) result
 
   val release_owner : t -> owner:Agent_protocol.Job.launch_owner -> unit
+  val values : t -> Value.t list
   val abort_all : t -> unit
 end

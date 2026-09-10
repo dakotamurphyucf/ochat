@@ -565,13 +565,23 @@ let on_event = fun ctx state event -> match event with
                 Eio.Promise.resolve released_u ());
               Eio.Promise.await held;
               let started, started_u = Eio.Promise.create () in
+              (* Reach the held checkpoint gate with a structurally valid claimed
+                 delivery. A completed timer may fail validation before cancellation
+                 gets scheduled and does not exercise the gate wait. The actor still
+                 rejects this stale claim if it ever reaches commit. *)
+              let claimed =
+                { (List.hd_exn final.schedules) with
+                  status = Agent_protocol.Schedule.Delivering
+                ; delivery_count = 0
+                ; last_delivery_at = None
+                ; delivery_cancellation = None
+                }
+              in
               let cancelled =
                 Eio.Fiber.first
                   (fun () ->
                      Eio.Promise.resolve started_u ();
-                     Agent_server.Runtime_owner.deliver_schedule
-                       entry.runtime
-                       (List.hd_exn final.schedules)
+                     Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed
                      |> protocol_ok;
                      false)
                   (fun () ->

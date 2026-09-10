@@ -17,6 +17,7 @@
   session_state
   extension_invariants
   extension_stop
+  extension_clock
   job_launch
   job_dependency
   schedule_ownership

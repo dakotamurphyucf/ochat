@@ -145,5 +145,6 @@ module Make (Value : Value) = struct
     t.entries <- List.filter t.entries ~f:(fun entry -> not (owned entry owner))
   ;;
 
+  let values t = List.map t.entries ~f:(fun entry -> entry.next)
   let abort_all t = t.entries <- []
 end

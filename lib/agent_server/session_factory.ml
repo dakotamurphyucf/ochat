@@ -1886,6 +1886,7 @@ let actor_services
   in
   Agent_session.Session_actor.
     { now = (fun () -> now t)
+    ; monotonic_now = (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock t.env))
     ; job_results = Some job_results
     ; subscription_limits = t.limits.subscriptions
     ; schedule_limits = t.limits.schedules

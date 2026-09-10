@@ -12,11 +12,6 @@ let is_overdue schedule timestamp =
   <= 0
 ;;
 
-let is_scheduled = function
-  | Agent_protocol.Schedule.Scheduled -> true
-  | Delivering | Delivered | Cancelled | Failed _ -> false
-;;
-
 let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedule.t) =
   match schedule.status with
   | Agent_protocol.Schedule.Delivering ->
@@ -118,36 +113,26 @@ let claim entry observed (schedule : Agent_protocol.Schedule.t) =
   | Ok None | Error _ -> ()
 ;;
 
-let process_entry now entry =
-  match Agent_session.Session_actor.state entry.Session_registry.actor with
+let process_entry entry =
+  match Agent_session.Session_actor.due_schedules entry.Session_registry.actor with
   | Error _ -> ()
-  | Ok state ->
-    List.iter state.schedules ~f:(fun (schedule : Agent_protocol.Schedule.t) ->
-      if is_scheduled schedule.status && is_overdue schedule now
-      then claim entry state.lifecycle.observed schedule);
+  | Ok (observed, schedules) ->
+    List.iter schedules ~f:(claim entry observed);
     drain_idle_moderator entry
 ;;
 
-let timestamp clock =
-  Eio.Time.now clock
-  |> Time_ns.Span.of_sec
-  |> Time_ns.of_span_since_epoch
-  |> Agent_protocol.Timestamp.of_time_ns
-;;
-
-let dispatch_entry t sw now entry =
+let dispatch_entry t sw entry =
   if not (List.mem t.busy entry ~equal:phys_equal)
   then (
     t.busy <- entry :: t.busy;
     Eio.Fiber.fork ~sw (fun () ->
       Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry now entry)
+        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry entry)
         ~finally:(fun () ->
           t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry)))))
 ;;
 
-let process t sw clock registry =
-  let now = timestamp clock in
+let process t sw registry =
   Session_registry.entries registry
   |> List.iter ~f:(fun entry ->
     (* Expiry must keep running while an earlier timer callback owns the runtime.
@@ -156,14 +141,14 @@ let process t sw clock registry =
     ignore
       (Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
        : (int, Agent_protocol.Error.t) result);
-    dispatch_entry t sw now entry)
+    dispatch_entry t sw entry)
 ;;
 
 let rec run t sw clock registry =
   if not (Atomic.get t.closed)
   then (
-    process t sw clock registry;
-    Eio.Time.sleep clock 0.05;
+    process t sw registry;
+    Eio.Time.Mono.sleep clock 0.05;
     run t sw clock registry)
 ;;
 

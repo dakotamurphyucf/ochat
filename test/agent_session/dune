@@ -27,6 +27,7 @@
   schedule_transaction_tests
   timer_delivery_tests
   extension_stop_tests
+  extension_clock_tests
   job_artifact_retry_tests
   job_artifact_fixtures
   job_artifact_retention_tests

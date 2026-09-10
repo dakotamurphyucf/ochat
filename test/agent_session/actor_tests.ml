@@ -59,6 +59,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -185,6 +186,7 @@ let%expect_test "session actor enforces its configured attachment limit" =
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -229,6 +231,7 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
                   Agent_protocol.Id.Attachment.of_string "att_actor_owner" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -280,6 +283,7 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -360,6 +364,7 @@ let%expect_test "read-only attachments cannot mutate actor state" =
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -408,6 +413,7 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
                   Agent_protocol.Id.Attachment.of_string "att_actor_unused" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -467,6 +473,7 @@ let%expect_test "durable history source adapts the response engine contract" =
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -538,6 +545,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
             ; create_attachment_id = (fun () -> attachment_id)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -665,6 +673,7 @@ let%expect_test
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "test-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -734,6 +743,7 @@ let%expect_test
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "lease-test")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())

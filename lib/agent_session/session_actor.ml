@@ -10,6 +10,7 @@ type persistence =
 
 type services =
   { now : unit -> Agent_protocol.Timestamp.t
+  ; monotonic_now : unit -> Mtime.t
   ; create_attachment_id : unit -> Agent_protocol.Id.Attachment.t
   ; create_reclaim_token : unit -> string
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
@@ -394,6 +395,8 @@ type _ request =
   | Claim_schedule :
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t option request
+  | Due_schedules :
+      (Agent_protocol.Session.observed_state * Agent_protocol.Schedule.t list) request
   | Retry_schedule :
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t request
@@ -484,6 +487,7 @@ type t =
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
   ; staged_schedules : Staged_schedules.t
+  ; extension_clock : Extension_clock.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -604,6 +608,22 @@ let broadcast_recoverable t event =
       Subscriber.publish_recoverable subscriber event))
 ;;
 
+let sync_extension_clock t =
+  let timers =
+    t.state.schedules @ Staged_schedules.values t.staged_schedules
+    |> List.filter_map ~f:(fun timer ->
+      match timer.Agent_protocol.Schedule.ownership, timer.status with
+      | Some _, (Scheduled | Delivering) ->
+        Some (Extension_clock.Key.Schedule timer.id, timer.next_due_at)
+      | _ -> None)
+  in
+  Extension_clock.reconcile
+    t.extension_clock
+    ~retained:timers
+    ~wall_now:(t.services.now ())
+    ~monotonic_now:(t.services.monotonic_now ())
+;;
+
 let install t transition =
   let previous = t.state in
   let command_audit = t.command_audit in
@@ -612,6 +632,7 @@ let install t transition =
   | Ok () ->
     t.command_audit <- None;
     t.state <- transition.state;
+    sync_extension_clock t;
     Atomic.set t.event_sequence t.state.counters.event_sequence;
     publish_durable t transition.events;
     t.services.state_committed t.state transition.events;
@@ -639,13 +660,15 @@ let transition t ~delta ~payloads =
 let abort_staged_work t ~owner =
   Staged_jobs.abort_owner t.staged_jobs ~owner;
   Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
-  Staged_schedules.release_owner t.staged_schedules ~owner
+  Staged_schedules.release_owner t.staged_schedules ~owner;
+  sync_extension_clock t
 ;;
 
 let abort_all_staged_work t =
   Staged_jobs.abort_all t.staged_jobs;
   Staged_subscriptions.abort_all t.staged_subscriptions;
-  Staged_schedules.abort_all t.staged_schedules
+  Staged_schedules.abort_all t.staged_schedules;
+  sync_extension_clock t
 ;;
 
 let with_staged_transaction t owner f =
@@ -654,6 +677,7 @@ let with_staged_transaction t owner f =
     Staged_jobs.commit t.staged_jobs ~owner;
     Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
     Staged_schedules.release_owner t.staged_schedules ~owner;
+    sync_extension_clock t;
     result
   | Error _ as result ->
     abort_staged_work t ~owner;
@@ -2672,7 +2696,9 @@ let stage_schedule_mutation_internal
         ~max_depth:limits.max_payload_depth
         next.payload
   in
-  Staged_schedules.stage t.staged_schedules ~owner ~previous ~next
+  let%map receipt = Staged_schedules.stage t.staged_schedules ~owner ~previous ~next in
+  sync_extension_clock t;
+  receipt
 ;;
 
 let create_script_schedule_internal t owner source delay_ms payload misfire =
@@ -2684,6 +2710,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     | false -> Error (error Invalid_request "schedule delay exceeds host policy")
   in
   let created_at = t.services.now () in
+  let monotonic_created_at = t.services.monotonic_now () in
   let%bind span = schedule_span delay_ms in
   let%bind next_due_at =
     Result.try_with (fun () ->
@@ -2708,6 +2735,11 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     }
   in
   let%map receipt = stage_schedule_mutation_internal t owner source None schedule in
+  Extension_clock.capture
+    t.extension_clock
+    (Schedule schedule.id)
+    ~now:monotonic_created_at
+    ~delay_ms;
   receipt, schedule
 ;;
 
@@ -6230,17 +6262,46 @@ let update_schedule t schedule =
     ~payloads:[ Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule ]
 ;;
 
+let schedule_is_due t (schedule : Agent_protocol.Schedule.t) =
+  match schedule.ownership with
+  | None ->
+    Ok (Agent_protocol.Timestamp.compare schedule.next_due_at (t.services.now ()) <= 0)
+  | Some _ ->
+    Extension_clock.is_due
+      t.extension_clock
+      (Schedule schedule.id)
+      ~now:(t.services.monotonic_now ())
+;;
+
+let due_schedules t =
+  let open Result.Let_syntax in
+  let%map schedules =
+    List.filter_map t.state.schedules ~f:(fun schedule ->
+      match schedule.Agent_protocol.Schedule.status with
+      | Scheduled when Int.equal schedule.generation t.state.identity.generation ->
+        Some
+          (schedule_is_due t schedule
+           |> Result.map ~f:(fun due -> Option.some_if due schedule))
+      | _ -> None)
+    |> Result.all
+    |> Result.map ~f:List.filter_opt
+  in
+  t.state.lifecycle.observed, schedules
+;;
+
 let claim_schedule t schedule_id generation =
   let open Result.Let_syntax in
   let%bind schedule = find_schedule t schedule_id in
   let%bind () = validate_schedule_generation t schedule generation in
   match schedule.status with
-  | Agent_protocol.Schedule.Scheduled
-    when Agent_protocol.Timestamp.compare schedule.next_due_at (t.services.now ()) <= 0 ->
-    let schedule = { schedule with status = Delivering } in
-    let%map _ = update_schedule t schedule in
-    Some schedule
-  | Scheduled -> Ok None
+  | Agent_protocol.Schedule.Scheduled ->
+    let%bind due = schedule_is_due t schedule in
+    (match due with
+     | false -> Ok None
+     | true ->
+       let schedule = { schedule with status = Delivering } in
+       let%map _ = update_schedule t schedule in
+       Some schedule)
   | Delivering | Delivered | Cancelled | Failed _ -> Ok None
 ;;
 
@@ -6324,7 +6385,15 @@ let complete_schedule
         { schedule with
           status = Delivered
         ; delivery_count = schedule.delivery_count + 1
-        ; last_delivery_at = Some (t.services.now ())
+        ; last_delivery_at =
+            Some
+              (match schedule.ownership with
+               | None -> t.services.now ()
+               | Some _ ->
+                 let now = t.services.now () in
+                 (match Agent_protocol.Timestamp.compare now schedule.created_at < 0 with
+                  | true -> schedule.created_at
+                  | false -> now))
         }
       in
       let%map _ =
@@ -7059,6 +7128,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state
+  | Due_schedules -> due_schedules t
   | Read_job id -> Result.map (find_job t id) ~f:(job_with_progress t)
   | Publish_job_progress (id, progress) ->
     publish_job_progress_internal t id progress;
@@ -7109,7 +7179,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       List.find t.state.schedules ~f:(fun value ->
         Agent_protocol.Id.Schedule.equal value.id id))
   | Abort_schedule_mutation (owner, receipt) ->
-    Staged_schedules.abort t.staged_schedules ~owner ~receipt
+    let open Result.Let_syntax in
+    let%map () = Staged_schedules.abort t.staged_schedules ~owner ~receipt in
+    sync_extension_clock t
   | Read_script_schedule (owner, source, id) ->
     let open Result.Let_syntax in
     let%bind _ = subscription_owner_active t owner source in
@@ -7410,6 +7482,7 @@ let create_with_owner_lease_duration
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
     ; staged_schedules = Staged_schedules.create ()
+    ; extension_clock = Extension_clock.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
@@ -7417,6 +7490,7 @@ let create_with_owner_lease_duration
     ; command_audit = None
     }
   in
+  sync_extension_clock t;
   Eio.Fiber.fork ~sw (fun () -> run t);
   Option.iter (owner_attachment t) ~f:(fun attachment ->
     Option.iter attachment.owner_lease ~f:(schedule_owner_lease t));
@@ -7450,6 +7524,7 @@ let create
 
 let snapshot t = call t Snapshot
 let state t = call t State
+let due_schedules t = call t Due_schedules
 
 let commit_extensions t ~generation ~expected_revision changes =
   call t (Commit_extensions (generation, expected_revision, changes))

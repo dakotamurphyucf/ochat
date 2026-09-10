@@ -76,6 +76,7 @@ let reject label result =
 let with_actor
       ?(reject_save = fun _ -> false)
       ?(now = fun () -> timestamp)
+      ?monotonic_now
       ?(make_job_results = fun _ _ _ -> None)
       ?(subscription_limits = Agent_session.Staged_subscriptions.default_limits)
       ?(schedule_limits = Agent_session.Staged_schedules.default_limits)
@@ -108,6 +109,13 @@ let with_actor
             }
           ~services:
             { now
+            ; monotonic_now =
+                Option.value monotonic_now ~default:(fun () ->
+                  now ()
+                  |> Agent_protocol.Timestamp.to_time_ns
+                  |> Time_ns.to_int_ns_since_epoch
+                  |> Int64.of_int
+                  |> Mtime.of_uint64_ns)
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "background-fixture")
             ; job_results

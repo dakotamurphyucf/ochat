@@ -51,4 +51,5 @@ val abort
   -> (unit, Agent_protocol.Error.t) result
 
 val release_owner : t -> owner:Agent_protocol.Job.launch_owner -> unit
+val values : t -> Agent_protocol.Schedule.t list
 val abort_all : t -> unit

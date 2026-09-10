@@ -22,6 +22,7 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -132,6 +133,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
                   Agent_protocol.Id.Attachment.of_string "att_job_test" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
@@ -236,6 +238,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
                   Agent_protocol.Id.Attachment.of_string "att_retry_test" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())

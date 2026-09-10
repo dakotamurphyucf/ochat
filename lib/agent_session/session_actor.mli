@@ -12,6 +12,7 @@ type persistence =
 
 type services =
   { now : unit -> Agent_protocol.Timestamp.t
+  ; monotonic_now : unit -> Mtime.t
   ; create_attachment_id : unit -> Agent_protocol.Id.Attachment.t
   ; create_reclaim_token : unit -> string
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
@@ -799,6 +800,12 @@ val cancel_schedule_internal
 
 (** Scheduler-only compare-and-set transitions. They reject stale session
     generations and never require a client attachment. *)
+val due_schedules
+  :  t
+  -> ( Agent_protocol.Session.observed_state * Agent_protocol.Schedule.t list
+       , Agent_protocol.Error.t )
+       result
+
 val claim_schedule
   :  t
   -> schedule_id:Agent_protocol.Id.Schedule.t

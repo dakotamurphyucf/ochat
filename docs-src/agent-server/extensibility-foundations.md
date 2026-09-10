@@ -1573,9 +1573,25 @@ explicit failure retirement. Completed callbacks are not relabelled as cancelled
 Host subscription cancellation can terminalize retained older generations through
 a dedicated delta, without admitting new work, changing source identity or forging
 success. Explicit cancellation cannot be blocked by a wall-clock rollback: its
-subscription completion timestamp is bounded below by creation time. Active timer
-elapsed-time handling, reset/rebuild/upgrade classification and notification
-delivery remain separate work. General feature advertisement remains gated on A01.
+subscription completion timestamp is bounded below by creation time.
+
+Owned relative timers now capture an actor-local monotonic anchor at creation,
+before their handler can wait or save. Staging, binding and checkpoint commits
+preserve that anchor; discarding one reservation does not reset another timer.
+The daemon uses Eio's monotonic clock for polling, and the actor checks both due
+selection and the actual claim against elapsed time. Moving the wall clock forward
+does not fire a timer early; moving it backward does not extend its delay. An owned
+delivery recorded after wall rollback uses a timestamp no earlier than creation.
+
+Monotonic anchors are not persisted. A recovered actor derives a fresh remaining
+duration once from its saved absolute due timestamp and current wall time, then
+uses elapsed time for that process lifetime. Startup misfire policies still decide
+what to do with schedules already overdue at recovery. Legacy unowned schedules
+keep their wall-time due checks. Source-owned subscription lifetime, expiry and
+completion checks still need matching elapsed-time integration; timer anchoring
+alone does not complete that contract. Reset/rebuild/upgrade classification and
+notification delivery also remain separate work. General feature advertisement
+remains gated on A01.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

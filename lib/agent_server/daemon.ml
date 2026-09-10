@@ -786,7 +786,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     Permission_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
   in
   let schedule_scheduler =
-    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
+    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.mono_clock env) ~registry
   in
   let maintenance =
     Maintenance.start
