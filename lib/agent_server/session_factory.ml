@@ -2250,28 +2250,29 @@ let release_stopped_capacity capacity events =
 ;;
 
 let unload_stopped_runtime t runtime_owner state events =
+  let stop_requested =
+    List.exists events ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
+      match
+        Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+      with
+      | Ok (Session_state_changed { desired_state = Stopped; _ }) -> true
+      | Ok _ | Error _ -> false)
+  in
   match
-    ( state.Agent_session.Session_state.lifecycle.observed
-    , List.exists events ~f:event_stops_session
-    , !runtime_owner )
+    state.Agent_session.Session_state.lifecycle.desired, stop_requested, !runtime_owner
   with
-  | Agent_protocol.Session.Stopped, true, Some runtime ->
+  | Stopped, true, Some runtime ->
+    (* Never enter another owner synchronously from the actor's commit callback.
+       A parent's foreground cleanup must not delay cancellation of descendants,
+       but its runtime must remain alive until that foreground operation ends. *)
+    let cleanup =
+      match state.lifecycle.observed with
+      | Stopped -> Runtime_owner.unload_and_wait
+      | _ -> Runtime_owner.prepare_dependency_stop
+    in
     Eio.Fiber.fork ~sw:t.sw (fun () ->
-      ignore
-        (Runtime_owner.unload_and_wait runtime : (unit, Agent_protocol.Error.t) result))
-  | ( ( Queued_for_slot
-      | Starting
-      | Recovering
-      | Idle
-      | Running_turn _
-      | Compacting _
-      | Waiting_for_permission _
-      | Stopping
-      | Failed _ )
-    , _
-    , _ )
-  | Stopped, false, _
-  | Stopped, true, None -> ()
+      ignore (cleanup runtime : (unit, Agent_protocol.Error.t) result))
+  | Running, _, _ | Stopped, false, _ | Stopped, true, None -> ()
 ;;
 
 let prune_snapshot t handle journal _installed =

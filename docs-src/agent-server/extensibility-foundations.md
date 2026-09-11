@@ -3840,11 +3840,23 @@ retry. The existing actor-only parent-cancellation callback remains separate;
 calling the same child's runtime owner from that callback would still deadlock.
 Ordinary close and daemon shutdown retain their separate behavior.
 
+Dependency cancellation begins after the durable stop request, even while the
+parent's foreground operation is still unwinding. The factory schedules this work
+outside the actor's commit callback; it does not acquire another owner from that
+callback or retire the active parent. Terminal retirement joins the dependency
+barrier again, using the persisted child stop acknowledgements and shared unload
+completions. A stop response can therefore report stopped intent with an operation
+still in progress; that response does not claim cleanup is complete.
+
 An offline factory test keeps two grandchild provider cleanups behind a barrier.
 Both must receive cancellation before either is released, while the root runtime
 remains loaded and its stop request remains pending. After release, root stop
 returns only after all four runtimes have retired. This test originally exposed
 an early root-stop response and now guards the corrected behavior.
+An active-parent variant also blocks the parent's own provider cleanup. Descendants
+must receive cancellation before that cleanup is released. Releasing only the
+parent's cleanup leaves its runtime loaded until both grandchildren finish; then
+all four runtimes retire automatically. Provider calls in both variants are fakes.
 
 Construction failure and cancellation do not publish a usable runtime. Cancellation
 before publication returns `Interrupted`. Closed runtimes reject later execution;

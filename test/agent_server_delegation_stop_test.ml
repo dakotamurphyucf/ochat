@@ -56,9 +56,7 @@ let create_child ?(key = "child") env root daemon parent =
   |> protocol_ok
 ;;
 
-let%expect_test
-    "root stop cancels sibling grandchildren before joining their blocked cleanup"
-  =
+let run ~active_parent =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -75,12 +73,23 @@ let%expect_test
         let sibling_entered, sibling_entered_u = Eio.Promise.create () in
         let cleaning, cleaning_u = Eio.Promise.create () in
         let sibling_cleaning, sibling_cleaning_u = Eio.Promise.create () in
+        let parent_entered, parent_entered_u = Eio.Promise.create () in
+        let parent_cleaning, parent_cleaning_u = Eio.Promise.create () in
+        let parent_release, parent_release_u = Eio.Promise.create () in
+        let parent_released = ref false in
         let release, release_u = Eio.Promise.create () in
         let never, _ = Eio.Promise.create () in
         let released = ref false
         and cleaned = ref 0
         and requests = ref 0 in
+        let release_parent_cleanup () =
+          if not !parent_released
+          then (
+            parent_released := true;
+            Eio.Promise.resolve parent_release_u ())
+        in
         let release_cleanup () =
+          release_parent_cleanup ();
           if not !released
           then (
             released := true;
@@ -102,21 +111,24 @@ let%expect_test
                     Some
                       (fun ~sw:_ ~inputs:_ ->
                         Int.incr requests;
-                        let cleanup =
+                        let cleanup, completion =
                           match !requests with
                           | 1 ->
                             Eio.Promise.resolve entered_u ();
-                            cleaning_u
+                            cleaning_u, release
                           | 2 ->
                             Eio.Promise.resolve sibling_entered_u ();
-                            sibling_cleaning_u
+                            sibling_cleaning_u, release
+                          | 3 when active_parent ->
+                            Eio.Promise.resolve parent_entered_u ();
+                            parent_cleaning_u, parent_release
                           | _ -> failwith "unexpected provider request"
                         in
                         Exn.protect
                           ~finally:(fun () ->
                             Eio.Cancel.protect (fun () ->
                               Eio.Promise.resolve cleanup ();
-                              Eio.Promise.await release;
+                              Eio.Promise.await completion;
                               Int.incr cleaned))
                           ~f:(fun () ->
                             Eio.Promise.await never;
@@ -177,33 +189,92 @@ let%expect_test
                     |> protocol_ok
                     |> ignore;
                     Eio.Promise.await sibling_entered;
+                    if active_parent
+                    then (
+                      H.send_message
+                        parent_handle
+                        { kind = Plain_text; text = "Parent work."; attachments = [] }
+                      |> protocol_ok
+                      |> ignore;
+                      Eio.Promise.await parent_entered);
                     let stopped =
                       Eio.Fiber.fork_promise ~sw (fun () ->
                         H.stop parent_handle ~mode:Cancel)
                     in
-                    Eio.Promise.await cleaning;
-                    Eio.Promise.await sibling_cleaning;
+                    if active_parent then Eio.Promise.await parent_cleaning;
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      Eio.Promise.await cleaning;
+                      Eio.Promise.await sibling_cleaning);
                     Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
                     [%test_eq: int] 0 !cleaned;
-                    assert (Option.is_none (Eio.Promise.peek stopped));
+                    if active_parent
+                    then (
+                      let progress = Eio.Promise.await_exn stopped |> protocol_ok in
+                      assert (P.Session.equal_desired_state progress.desired_state Stopped);
+                      match progress.observed_state with
+                      | Running_turn _ -> ()
+                      | _ -> failwith "parent stop hid pending cleanup")
+                    else assert (Option.is_none (Eio.Promise.peek stopped));
                     assert (Owner.is_loaded parent_entry.runtime);
+                    if active_parent
+                    then (
+                      release_parent_cleanup ();
+                      let rec idle () =
+                        match
+                          (A.state parent_entry.actor |> protocol_ok).active_operation
+                        with
+                        | None -> ()
+                        | Some _ ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                          idle ()
+                      in
+                      idle ();
+                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+                      [%test_eq: int] 1 !cleaned;
+                      assert (Owner.is_loaded parent_entry.runtime));
                     release_cleanup ();
                     let result = Eio.Promise.await_exn stopped |> protocol_ok in
                     assert (P.Session.equal_desired_state result.desired_state Stopped);
-                    [%test_eq: int] 2 !cleaned;
-                    List.iter [ parent_entry; middle; leaf; sibling ] ~f:(fun entry ->
+                    let entries = [ parent_entry; middle; leaf; sibling ] in
+                    let rec retired () =
+                      match
+                        List.exists entries ~f:(fun entry ->
+                          Owner.is_loaded entry.runtime)
+                      with
+                      | false -> ()
+                      | true ->
+                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                        retired ()
+                    in
+                    retired ();
+                    [%test_eq: int] (if active_parent then 3 else 2) !cleaned;
+                    List.iter entries ~f:(fun entry ->
                       let state = A.state entry.actor |> protocol_ok in
                       assert (
                         P.Session.equal_desired_state state.lifecycle.desired Stopped);
                       assert (Option.is_none state.active_operation);
                       assert (not (Owner.is_loaded entry.runtime)));
-                    [%test_eq: int] 2 !requests;
+                    [%test_eq: int] (if active_parent then 3 else 2) !requests;
                     H.detach sibling_handle |> protocol_ok;
                     H.detach leaf_handle |> protocol_ok;
                     H.detach parent_handle |> protocol_ok;
                     print_endline
                       "both grandchildren cancelled before either cleanup finished; root \
-                       stop joined all runtimes"))))));
+                       stop joined all runtimes"))))))
+;;
+
+let%expect_test
+    "root stop cancels sibling grandchildren before joining their blocked cleanup"
+  =
+  run ~active_parent:false;
+  [%expect
+    {| both grandchildren cancelled before either cleanup finished; root stop joined all runtimes |}]
+;;
+
+let%expect_test
+    "active parent cancellation reaches descendants before parent cleanup finishes"
+  =
+  run ~active_parent:true;
   [%expect
     {| both grandchildren cancelled before either cleanup finished; root stop joined all runtimes |}]
 ;;

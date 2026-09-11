@@ -27,6 +27,13 @@ val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
+(** Begin and join dependency cancellation after a durable stop request, even
+    while this owner's foreground operation is still cleaning up. Does not retire
+    this runtime or acquire its mutex. Call outside actor commit callbacks and
+    owner locks. The host barrier must tolerate repeated/concurrent calls;
+    [unload_and_wait] rechecks it before retirement. *)
+val prepare_dependency_stop : t -> (unit, Agent_protocol.Error.t) result
+
 (** After committing a session stop, exclude new runtime admission, cancel and
     join existing background leases, then unload before workspace cleanup. Waits
     outside the owner mutex so worker finalizers can finish. Keep the actor alive

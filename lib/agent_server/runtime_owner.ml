@@ -206,6 +206,8 @@ let unload t =
     | None -> unload_locked t)
 ;;
 
+let prepare_dependency_stop t = t.before_unload ()
+
 let unload_and_wait t =
   (* A committed stop must join cleanup before closing runtime/workspace resources.
      Waiting with the mutex held would prevent the lease finalizers from releasing. *)
@@ -228,7 +230,7 @@ let unload_and_wait t =
         let outcome =
           try
             let result =
-              let%bind () = t.before_unload () in
+              let%bind () = prepare_dependency_stop t in
               List.iter leases ~f:(fun lease -> lease.cancel ());
               List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
               with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
