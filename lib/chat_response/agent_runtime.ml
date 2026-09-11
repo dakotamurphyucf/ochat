@@ -443,13 +443,30 @@ let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell_regist
   |> List.map ~f:(fun declaration ->
     let supplied =
       match declaration with
-      | CM.Builtin name ->
+      | CM.Builtin name | Persistent_agent ({ name; _ }, _) ->
         List.find native_registrations ~f:(fun registration ->
           String.equal name (function_name registration.implementation))
       | _ -> None
     in
     match supplied with
-    | Some registration -> Ok [ registration ]
+    | Some registration ->
+      (match declaration with
+       | Persistent_agent (_, policy)
+         when not
+                (String.equal registration.implementation.info.type_ "function"
+                 && (not registration.implementation.info.function_.strict)
+                 && Jsonaf.exactly_equal
+                      registration.implementation.info.function_.parameters
+                      (Agent_tool_contract.parameters policy)
+                 && Tool_capability.equal_result_contract
+                      registration.result_contract
+                      Invocation_v1) ->
+         Error
+           (diagnostic
+              "agent.persistence_contract"
+              "authored registration does not match its declaration's persistence \
+               contract")
+       | _ -> Ok [ registration ])
     | None ->
       functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
       |> Result.map ~f:(fun functions ->

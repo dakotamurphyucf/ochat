@@ -101,16 +101,14 @@ let response ~session_id ~expected_receipt page =
         ])
 ;;
 
-let run
-      ?(wait_timeout_ms = 10000)
+let run_call
+      ~wait_timeout_ms
       ~host
       ~(sessions : Managed_session_service.t)
       ~borrowed
-      ~policy
-      json
+      (call : Contract.call)
   =
   let open Result.Let_syntax in
-  let%bind call = Contract.decode policy json |> Result.map_error ~f:invalid in
   let%bind () =
     match wait_timeout_ms >= 0 && wait_timeout_ms <= 30000 with
     | true -> Ok ()
@@ -160,4 +158,63 @@ let run
        and cursor rather than guessing completion from output presence. *)
     let%bind () = validate () in
     response ~session_id ~expected_receipt:receipt_id page |> contract
+;;
+
+let run ?(wait_timeout_ms = 10000) ~host ~sessions ~borrowed ~policy json =
+  let open Result.Let_syntax in
+  let%bind call = Contract.decode policy json |> Result.map_error ~f:invalid in
+  run_call ~wait_timeout_ms ~host ~sessions ~borrowed call
+;;
+
+let registration ?(wait_timeout_ms = 10000) ~source ~capabilities ~services () =
+  let open Result.Let_syntax in
+  let%bind () =
+    match wait_timeout_ms >= 0 && wait_timeout_ms <= 30000 with
+    | true -> Ok ()
+    | false -> Error (P.Error.invalid_request "authored wait timeout must be 0--30000ms")
+  in
+  let%map implementation_revision =
+    Authored_agent_binding.implementation_revision ~source ~capabilities
+  in
+  let policy = (Authored_agent_source.identity source).policy in
+  let agent = Authored_agent_source.declaration source in
+  let module Definition = struct
+    type input = Jsonaf.t
+
+    let name = agent.name
+    let type_ = "function"
+    let description = Some (Contract.description agent policy)
+    let parameters = Contract.parameters policy
+    let input_of_string = Jsonaf.of_string
+  end
+  in
+  let implementation =
+    Ochat_function.create_function
+      (module Definition)
+      ~strict:false
+      (fun json ->
+         let result =
+           let%bind call = Contract.decode policy json |> Result.map_error ~f:invalid in
+           let%bind borrowed =
+             N.borrow ()
+             |> Result.map_error ~f:(fun _ ->
+               failure "agent.authored.denied" "No active authored agent invocation.")
+           in
+           let%bind host, sessions = services borrowed in
+           run_call ~wait_timeout_ms ~host ~sessions ~borrowed call
+         in
+         let outcome =
+           match result with
+           | Ok value -> P.Invocation.Complete value
+           | Error error -> Fail error
+         in
+         Openai.Responses.Tool_output.Output.Text
+           (P.Invocation.outcome_to_json outcome |> Jsonaf.to_string))
+  in
+  Chat_response.Agent_runtime.
+    { implementation
+    ; implementation_revision
+    ; result_contract = Invocation_v1
+    ; authoring_metadata = None
+    }
 ;;

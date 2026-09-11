@@ -143,8 +143,11 @@ val inherit_native
   -> unit
   -> (t, diagnostic list) result
 
-(** Trusted host implementations selected only by an explicit Builtin declaration
-    of the same name. Unselected registrations are never exposed. Revision and
+(** Trusted host implementations selected only by an explicit Builtin or
+    persistence-enabled agent declaration of the same name. Authored agent
+    registrations must bind that exact captured declaration and its admitted
+    private resources; ordinary one-off Agent declarations retain the legacy path.
+    Unselected registrations are never exposed. Revision and
     result contract participate in capability identity; duplicate supplied names
     are rejected. This does not grant invocation or authoring authority. *)
 type native_registration =

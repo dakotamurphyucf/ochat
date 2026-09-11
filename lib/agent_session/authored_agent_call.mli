@@ -53,3 +53,20 @@ val run
   -> policy:Prompt.Chat_markdown.agent_persistence
   -> Jsonaf.t
   -> (Jsonaf.t, Agent_protocol.Invocation.tool_error) result
+
+(** Construct the source/resource-bound native wrapper for a qualified host.
+    Its schema and appended description follow the authored persistence policy.
+    Services are resolved from the actual actor-dispatched borrow on each call,
+    after semantic argument validation. No ambient parent/driver fallback exists.
+    [services] must admit this exact source/private closure and caller before
+    returning callbacks, retaining their resources through the call. This function
+    does not install the registration or enable the public feature. *)
+val registration
+  :  ?wait_timeout_ms:int
+  -> source:Authored_agent_source.t
+  -> capabilities:Chat_response.Tool_capability.t
+  -> services:
+       (Native_tool_invocation.borrowed
+        -> (host * Managed_session_service.t, Agent_protocol.Invocation.tool_error) result)
+  -> unit
+  -> (Chat_response.Agent_runtime.native_registration, Agent_protocol.Error.t) result

@@ -51,3 +51,32 @@ val artifact
   -> revision_id:Agent_protocol.Id.Prompt_revision.t
   -> created_at:Agent_protocol.Timestamp.t
   -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_store.Store_error.t) result
+
+(** Install only the captured source bound to a live durable authored reservation.
+    Rebuilds artifact identity from the original reservation for uncertain retries;
+    checks the source/declaration, manifest and exact private pins
+    before writing. Concurrent replay accepts only the same verified tree. Advances
+    [Artifact_installed] only after verification and a fresh revocation check.
+
+    The host must admit the supplied private resource pins and reserve before
+    calling. Source identity retains the original defining revision, even when
+    another session inherits the wrapper; admission of that caller's own revision
+    belongs to the common delegation authority service. This function neither
+    constructs resources nor authorizes execution,
+    initializes scripts, creates a session or publishes a child. *)
+val install_reserved
+  :  delegations:Agent_store.Delegation_store.t
+  -> reservation:Agent_store.Delegation_store.record
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> capability_pins:(string * string) list
+  -> t
+  -> (Agent_store.Delegation_store.record, Agent_protocol.Error.t) result
+
+(** Verify the admitted manifest, complete materialized tree and ordinary authored
+    parser/runtime contract. [reservation] must come from the host-owned ledger.
+    Generated-origin records reject. Allows retained inspection after revocation;
+    does not re-admit execution or require the parent to be available. *)
+val load_artifact
+  :  artifact_store:Agent_store.Prompt_artifact_store.t
+  -> reservation:Agent_store.Delegation_store.record
+  -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_protocol.Error.t) result

@@ -1,6 +1,6 @@
 open Core
 
-(** Current authority for a generated runtime. The host supplies authoritative
+(** Current authority for a delegated runtime. The host supplies authoritative
     parent state, the private ledger and live delegable bindings. These callbacks
     must not use child-supplied identities or a broader administrative credential.
     This check does not replace coordinated stop/cancellation or resource leases. *)
@@ -45,7 +45,19 @@ val fingerprint
     bindings and revocation remain checked. Missing ancestors still deny. Existing
     parent-moderation requirements are unchanged; resource retention alone cannot
     authorize an unavailable policy handler. This does not install factory lifetime
-    selection, stopped-ancestor resources or workspace retention. *)
+    selection, stopped-ancestor resources or workspace retention.
+
+    [authored_capabilities] resolves an authored reservation's exact private tool
+    closure. It is a trusted host adapter, unavailable by default. It must verify
+    the recorded authored name/source against the parent's current, source-bound
+    tool registration in [public], then return only that implementation's approved
+    private resources, under its retained resource lease and actual caller policy.
+    It must not resolve arbitrary files/names or return an administrative registry.
+    The durable pins narrow this closure and must match the prepared child's live
+    selection. The adapter is rechecked after ancestor lookups; it grants no tool
+    execution or approvals. Each ancestor's public registry stays separate from
+    the closure selected for its authored child. Missing adapters reject authored
+    edges, including authored ancestors of otherwise generated children. *)
 val create
   :  ?max_depth:int
   -> ?parent_stop_epoch:int64
@@ -54,6 +66,10 @@ val create
         -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result)
   -> ?authorize_independent:
        (Agent_store.Delegation_store.record -> (unit, Agent_protocol.Error.t) result)
+  -> ?authored_capabilities:
+       (Agent_store.Delegation_store.record
+        -> public:Chat_response.Tool_capability.t
+        -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
   -> host:host
   -> reference:Agent_store.Delegation_store.Reference.t
   -> capabilities:Chat_response.Tool_capability.t

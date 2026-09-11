@@ -117,3 +117,86 @@ let artifact t ~revision_id ~created_at =
     ~created_at
     ()
 ;;
+
+let store_result result =
+  Result.map_error result ~f:Agent_store.Store_error.to_protocol_error
+;;
+
+let load_artifact ~artifact_store ~(reservation : Agent_store.Delegation_store.record) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match reservation.admission.authored_tool with
+    | Some _ -> Ok ()
+    | None -> denied "authored artifact requires an authored reservation"
+  in
+  let%bind stored =
+    Store.load artifact_store reservation.admission.revision_id |> store_result
+  in
+  match
+    ( String.equal stored.manifest_sha256 reservation.admission.manifest_sha256
+    , stored.parser_schema_version
+    , stored.runtime_schema_version
+    , stored.prompt_definition_id
+    , stored.canonical_source
+    , stored.shell_manifest_sha256 )
+  with
+  | true, 5, 1, None, None, None -> Ok stored
+  | _ -> denied "authored artifact differs from its reserved source contract"
+;;
+
+let install_reserved ~delegations ~reservation ~artifact_store ~capability_pins t =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind current = D.resolve delegations (D.reference reservation) |> store_result in
+  let%bind () =
+    match current.revocation, current.admission.authored_tool with
+    | None, Some origin
+      when String.equal origin.name t.identity.tool_name
+           && String.equal origin.source_sha256 (fingerprint t)
+           && List.equal
+                (fun (name, pin) (other_name, other_pin) ->
+                   String.equal name other_name && String.equal pin other_pin)
+                current.admission.capability_pins
+                capability_pins -> Ok ()
+    | _ -> denied "authored source or private bindings differ from the live reservation"
+  in
+  (* The source's defining revision is covered by its fingerprint. The actual
+     caller may inherit this wrapper and have a different revision; admission of
+     that caller belongs to the common delegation authority service. *)
+  let%bind expected =
+    artifact
+      t
+      ~revision_id:current.admission.revision_id
+      ~created_at:current.admission.created_at
+    |> store_result
+  in
+  let%bind () =
+    match String.equal expected.manifest_sha256 current.admission.manifest_sha256 with
+    | true -> Ok ()
+    | false -> denied "authored source differs from its reserved manifest"
+  in
+  let verify () =
+    load_artifact ~artifact_store ~reservation:current |> Result.map ~f:ignore
+  in
+  let%bind () =
+    match Store.exists artifact_store expected.revision_id with
+    | true -> verify ()
+    | false ->
+      (match
+         Store.install
+           artifact_store
+           ~transaction_id:current.admission.transaction_id
+           expected
+       with
+       | Ok () -> verify ()
+       | Error failure ->
+         (* Concurrent replays may finish the same installation while IO yields.
+            Only the exact reserved, verified tree permits acknowledgement. *)
+         (match Store.exists artifact_store expected.revision_id with
+          | true -> verify ()
+          | false -> store_result (Error failure)))
+  in
+  (* Advancing rechecks the current record and revocation after all yielding IO.
+     A revoked installation stays reserved for recovery, never published here. *)
+  D.advance delegations current Artifact_installed |> store_result
+;;

@@ -4637,6 +4637,15 @@ authored session adapter is installed. Internal foundations now include:
   their directory relationships across live-file edits and store relocation. The
   entire captured parent closure is retained conservatively. Uncaptured absolute
   or remote specialist sources reject; source capture does not authorize tools.
+  Its reserved installer verifies the current ledger origin,
+  source identity, manifest and admitted private pins before writing. Concurrent
+  or uncertain retries retain the original artifact identity, and stage advancement
+  rechecks revocation. The verified loader distinguishes ordinary authored artifacts
+  from generated-only definitions and permits retained inspection after revocation.
+  Factory source restoration selects that loader by the private ledger origin;
+  executable runtime restoration still needs the authored resource adapter.
+  An inherited wrapper keeps its original defining source. The shared authority
+  service separately checks the actual calling parent's revision and permissions.
 - Delegation ledger v4 can retain the authored tool name and source fingerprint
   in its immutable admission/reference. Changed names or source identities conflict
   on a retry, including attempts to relabel a generated reservation. Older generated
@@ -4647,14 +4656,31 @@ authored session adapter is installed. Internal foundations now include:
   retain retry identity. Results contain session ID, receipt and a bounded output
   page with its continuation cursor; pending and failed submissions remain explicit.
   The freshest read determines status, so output presence never implies completion.
+- `Authored_agent_binding` ties the captured source to an exact native wrapper
+  and approved private resource registry. Wrapper revisions include private
+  permission/resource pins. Same-name replacements and changed live resources need
+  fresh admission. Private tools never merge into the parent's public selection.
+  The common delegation authority service can resolve this private registry for
+  an authored edge, while checking each ancestor against its own public registry.
+  The host adapter is required and is rechecked after yielding ancestor lookups.
+- Qualified extension hosts can construct the native wrapper with
+  `Authored_agent_call.registration` and supply it to `Agent_runtime.prepare_extensions`.
+  An explicit persistence-enabled declaration selects it; absent declarations do
+  not expose it. The declared policy must match the wrapper schema/result contract.
+  Each invocation resolves services through its actual actor borrow, after semantic
+  argument validation. This constructor does not supply a durable factory adapter.
 
-These components are not yet a usable persisted authored-agent runtime. Private
-resource/approval binding, durable factory admission and source-bound restoration,
-native registration and end-to-end interoperability still require integration.
+These components are not yet a usable persisted authored-agent runtime. Actual
+private resource construction/approval routing, durable factory admission and
+source-bound restoration, factory-installed registration and end-to-end
+interoperability still require integration.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. They do not
 prove complete authored child-session execution. Generated definitions still
 require inherited tool references and cannot introduce fresh authored bindings.
+Mixed-ancestry tests use real capability registrations and ledger records with
+fixture parent states. They check private-tool isolation, quiet grant revocation,
+resource replacement, parent stop and ancestor revocation without executing tools.
 
 ### Durable initial activation
 

@@ -388,15 +388,21 @@ let restore_state_source t (state : Agent_session.Session_state.t) =
       |> Result.map_error ~f:protocol_of_store
     in
     let%map artifact =
-      Agent_session.Generated_definition.load_artifact
-        ~artifact_store
-        ~revision_id
-        ~manifest_sha256:record.admission.manifest_sha256
-      |> Result.map_error ~f:(fun diagnostics ->
-        unavailable
-          Prompt_unavailable
-          (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
-           |> String.concat ~sep:"\n"))
+      match record.admission.authored_tool with
+      | Some _ ->
+        Agent_session.Authored_agent_source.load_artifact
+          ~artifact_store
+          ~reservation:record
+      | None ->
+        Agent_session.Generated_definition.load_artifact
+          ~artifact_store
+          ~revision_id
+          ~manifest_sha256:record.admission.manifest_sha256
+        |> Result.map_error ~f:(fun diagnostics ->
+          unavailable
+            Prompt_unavailable
+            (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+             |> String.concat ~sep:"\n"))
     in
     Generated_artifact
       { artifact

@@ -17,6 +17,7 @@ type t =
   ; parent_stop_epoch : int64 option
   ; moderation : P.Id.Session.t -> (P.Invocation.observer option, P.Error.t) result
   ; authorize_independent : (D.record -> (unit, P.Error.t) result) option
+  ; authored_capabilities : (D.record -> public:C.t -> (C.t, P.Error.t) result) option
   }
 
 let create
@@ -24,6 +25,7 @@ let create
       ?parent_stop_epoch
       ?(moderation = fun _ -> Ok None)
       ?authorize_independent
+      ?authored_capabilities
       ~host
       ~reference
       ~capabilities
@@ -36,6 +38,7 @@ let create
   ; parent_stop_epoch
   ; moderation
   ; authorize_independent
+  ; authored_capabilities
   }
 ;;
 
@@ -115,6 +118,26 @@ let independent_authorized t (record : D.record) =
       "delegation.lifetime_unavailable: independent resource ownership is not installed"
 ;;
 
+let selected_bindings t record ~public ~expected =
+  let open Result.Let_syntax in
+  let%bind ceiling =
+    match record.D.admission.authored_tool, t.authored_capabilities with
+    | None, _ -> Ok public
+    | Some _, Some resolve -> resolve record ~public
+    | Some _, None ->
+      denied
+        "delegation.authored_unavailable: authored private resources are not admitted"
+  in
+  let%bind selected =
+    Chat_response.Background_request.rebind_capabilities
+      ~pins:record.admission.capability_pins
+      ~capabilities:ceiling
+  in
+  match String.equal (C.fingerprint selected) (C.fingerprint expected) with
+  | true -> Ok ()
+  | false -> denied "delegation.bindings_changed: inherited runtime needs fresh admission"
+;;
+
 let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
   let open Result.Let_syntax in
   let%bind () =
@@ -180,17 +203,7 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
          changed"
   in
   let%bind current = t.host.capabilities parent.identity.session_id in
-  let%bind selected =
-    Chat_response.Background_request.rebind_capabilities
-      ~pins:record.admission.capability_pins
-      ~capabilities:current
-  in
-  let%bind () =
-    match String.equal (C.fingerprint selected) (C.fingerprint expected) with
-    | true -> Ok ()
-    | false ->
-      denied "delegation.bindings_changed: inherited runtime needs fresh admission"
-  in
+  let%bind () = selected_bindings t record ~public:current ~expected in
   let%bind () =
     match parent.spec.delegation with
     | None -> Ok ()
@@ -226,6 +239,16 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
      actor-backed checks before returning; lifecycle coordination owns the lease
      through actual execution and is responsible for cancellation after this point. *)
   let%bind () = independent_authorized t record in
+  let%bind () =
+    match record.admission.authored_tool with
+    | None -> Ok ()
+    | Some _ ->
+      (* The private closure is scoped to this edge. Never pass it as the public
+         selection when walking the parent's own ancestry. Recheck its source-bound
+         grant after yielding ancestor lookups, before final durable/state checks. *)
+      let%bind current = t.host.capabilities parent.identity.session_id in
+      selected_bindings t record ~public:current ~expected
+  in
   let%bind latest = t.host.state parent.identity.session_id in
   let%bind () = check_active latest in
   let%bind latest_moderator = t.moderation latest.identity.session_id in

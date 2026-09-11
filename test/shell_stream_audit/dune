@@ -1,6 +1,6 @@
 (test
  (name shell_stream_audit)
  (modules shell_stream_audit fixture filter_cases executor_cases tool_cases)
- (libraries core eio eio_main eio.unix eio_posix cstruct jsonaf_ext chatmd chat_response
+ (libraries core eio eio.mock eio_main eio.unix eio_posix cstruct jsonaf_ext chatmd chat_response
   ochat.shell_access ochat.shell_runtime ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))
