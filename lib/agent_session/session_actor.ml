@@ -9447,7 +9447,11 @@ let create_with_owner_lease_duration
     }
   in
   sync_extension_clock t;
-  Eio.Fiber.fork ~sw (fun () -> run t);
+  (* A persisted actor outlives the tool/script that created it. Its future
+     operations acquire their own budgets and delegated authority; inheriting
+     this caller's lexical ChatML frame would poison them after creation ends. *)
+  Chatml_execution.without_ambient_context (fun () ->
+    Eio.Fiber.fork ~sw (fun () -> run t));
   Option.iter (owner_attachment t) ~f:(fun attachment ->
     Option.iter attachment.owner_lease ~f:(schedule_owner_lease t));
   t

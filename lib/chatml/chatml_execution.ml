@@ -51,6 +51,7 @@ type frame =
   }
 
 let frame_key = Eio.Fiber.create_key ()
+let without_ambient_context f = Eio.Fiber.without_binding frame_key f
 
 type context = frame list
 

@@ -67,6 +67,12 @@ must be intentional; select timeout/fallback/reviewer policy before leaving an
 agent disconnected. Cancellation/stop must propagate to owned work rather than
 only hiding a loading indicator.
 
+A persisted session created from a ChatML call has its own execution lifetime.
+Its actor event loop does not retain the creator's temporary lexical execution
+budget after that call returns. Later turns and moderator events enter their own
+configured scopes; inherited tool, file, shell and parent-moderation authority
+still applies. Ordinary nested script/tool calls retain the caller's budget.
+
 Try the [offline timer tutorial](tutorials/background-agent.md). For a model-spawn
 example, the [background E2E scenario](../../test/agent_server_e2e/scenarios/background_scenario.ml)
 shows the complete `agent_prompt_v1` recipe payload and completion events against

@@ -43,6 +43,14 @@ type context
 
 val capture_context : ?inherited:context -> unit -> context
 
+(** Host lifetime boundary for independently owned session actors. Fork their
+    event loop inside this callback so subsequent turns do not inherit the
+    creating script's expiring lexical budget. Each execution must still enter
+    its own configured scope and acquire current tool/delegation authority.
+    This does not clear explicit [context] values or extend existing controls.
+    Never use this for nested script/tool calls within the caller's execution. *)
+val without_ambient_context : (unit -> 'a) -> 'a
+
 (** A persistent environment keeps this runner's control proxy while each
     initialization/event receives a fresh lexical budget. The proxy consults
     the current fiber's binding; use outside [run_scoped] fails. Nested runs

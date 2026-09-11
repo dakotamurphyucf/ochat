@@ -929,13 +929,15 @@
  (name agent_server_helper_test)
  (modules agent_server_helper_test)
  (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (preprocessor_deps
+  (glob_files chatml_extensibility_fixtures/x07-helper-session/*))
  (action
   (run
    %{test}
    %{exe:../bin/ochat_agent_helper.exe}
    %{exe:../bin/ochat_shell_resource_runner.exe}))
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane ppx_blob)))
 
 (library
  (name agent_server_creator_test)

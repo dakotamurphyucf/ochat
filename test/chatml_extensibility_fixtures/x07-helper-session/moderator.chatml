@@ -1,0 +1,43 @@
+type request = { job : string; invocation : string; notified : bool }
+let initial_state : request array = []
+let field json name = match Json.get_field(json, name) with
+| `Some(value) -> value
+| `None -> `Null
+let string json = match json with | `String(value) -> value | _ -> ""
+let completion result = match field(result, "type") with
+| `String("succeeded") -> Task.pure(`Succeeded(field(result, "value")))
+| `String("cancelled") -> Task.pure(`Cancelled(string(field(result, "reason"))))
+| `String("expired") -> Task.pure(`Expired)
+| `String("failed") ->
+  let retryable = match field(result, "retryable") with | `Bool(value) -> value | _ -> false in
+  Task.pure(`Failed({ code = string(field(result, "code")); message = string(field(result, "message"));
+    retryable = retryable; details = field(result, "details") }))
+| _ -> Task.fail("Expected terminal helper job result.")
+
+let on_event ctx state event =
+let state : request array = state in
+match event with
+| `Tool_invoked(p) ->
+  (match p.context.tool_name with
+  | "manage_agent" ->
+    let* job = Job.start_tool("session_request", p.input) in
+    let* () = Invocation.resolve(p.context.invocation_id,
+      `Pending(`Job(job), `Object([{ key = "job_id"; value = `String(job) }]))) in
+    Task.pure(Array.append(state, [{ job = job; invocation = p.context.invocation_id; notified = false }]))
+  | _ -> Task.pure(state))
+| `Internal_event(payload) ->
+  (match field(payload, "kind") with
+  | `String("background_job_completed") ->
+    let job = string(field(payload, "job_id")) in
+    (match Array.find(state, fun entry -> let entry : request = entry in entry.job == job) with
+    | `None -> Task.pure(state)
+    | `Some(entry) ->
+      if entry.notified then Task.pure(state) else
+      let* result = Job.read_result(job) in
+      let* terminal = completion(result) in
+      let correlation = { key = "agent-helper-result"; invocation_id = `Some(entry.invocation); work = `Some(`Job(job)) } in
+      let* delivery = Notification.publish(correlation, terminal, `Request_turn) in
+      Task.pure(Array.map(state, fun current -> let current : request = current in
+        if current.job == job then { job = current.job; invocation = current.invocation; notified = true } else current)))
+  | _ -> Task.pure(state))
+| _ -> Task.pure(state)

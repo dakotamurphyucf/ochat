@@ -10,6 +10,17 @@ module Res = Openai.Responses
 let field = Jsonaf.member_exn
 let text json name = field name json |> Jsonaf.string_exn
 
+let helper_request =
+  [%blob "chatml_extensibility_fixtures/x07-helper-session/request.chatml"]
+;;
+
+let helper_moderator =
+  [%blob "chatml_extensibility_fixtures/x07-helper-session/moderator.chatml"]
+;;
+
+let helper_tools = [%blob "chatml_extensibility_fixtures/x07-helper-session/tools.chatmd"]
+let helper_schema = [%blob "chatml_extensibility_fixtures/x07-helper-session/any.json"]
+
 let state daemon id =
   let entry = R.load (D.registry daemon) id |> protocol_ok in
   A.state entry.actor |> protocol_ok
@@ -59,11 +70,21 @@ let run env helper runner =
             (path target)
             (Eio.Path.load (path source)));
       Caml_unix.putenv "OCHAT_SHELL_RESOURCE_RUNNER" runner_path;
+      List.iter
+        [ "helper-request.chatml", helper_request
+        ; "helper-moderator.chatml", helper_moderator
+        ; "helper-any.json", helper_schema
+        ]
+        ~f:(fun (name, contents) ->
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            (path (Filename.concat root name))
+            contents);
       let prompt = Filename.concat root "parent.chatmd" in
       Eio.Path.save
         ~create:(`Exclusive 0o600)
         (path prompt)
-        {|<developer>HELPER_PARENT</developer>
+        ({|<developer>HELPER_PARENT</developer>
 <tool name="run_chatml"/>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
 <shell_access id="helper" cwd="${workspace}">
@@ -74,7 +95,8 @@ let run env helper runner =
   <audit format="none"/>
 </shell_access>
 <tool name="session_bridge" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
-<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>|};
+<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>|}
+         ^ helper_tools);
       let configuration = config root public prompt in
       let configuration =
         { configuration with
@@ -219,7 +241,7 @@ let run env helper runner =
                     initialize client;
                     f sw daemon client))))
       in
-      let invoke sw daemon client parent name arguments =
+      let invoke_status sw daemon client parent name arguments =
         let before = state daemon parent in
         let handle =
           H.attach
@@ -249,7 +271,10 @@ let run env helper runner =
                  (List.exists before.invocations ~f:(fun old ->
                     P.Id.Invocation.equal old.context.id invocation.context.id)))
         in
-        match invocation.status with
+        invocation.status
+      in
+      let invoke sw daemon client parent name arguments =
+        match invoke_status sw daemon client parent name arguments with
         | Published (Complete (`String source)) -> source
         | status ->
           raise_s [%sexp "helper invocation failed", (status : P.Invocation.status)]
@@ -281,6 +306,29 @@ let run env helper runner =
           raise_s [%sexp "bridge application failed", (outcome : P.Invocation.outcome)]
       in
       let id value = text value "session_id" |> P.Id.Session.of_string |> protocol_ok in
+      let check_notification daemon parent child =
+        let current = state daemon parent in
+        let delivery =
+          match current.deliveries with
+          | [ delivery ] -> delivery
+          | deliveries ->
+            raise_s
+              [%sexp "expected one helper notification", (deliveries : P.Delivery.t list)]
+        in
+        (match delivery.context.completion with
+         | Succeeded value -> assert (P.Id.Session.equal child (id value))
+         | completion ->
+           raise_s [%sexp "unexpected helper completion", (completion : P.Completion.t)]);
+        let notifications =
+          List.filter current.conversation.canonical_history ~f:(fun entry ->
+            match entry.P.History.provenance with
+            | Runtime_notification _ -> true
+            | _ -> false)
+        in
+        [%test_eq: int] 1 (List.length notifications);
+        Agent_session.Notification_history.validate ~delivery (List.hd_exn notifications)
+        |> protocol_ok
+      in
       let child_request =
         `Object
           [ "version", `Number "1"
@@ -334,6 +382,40 @@ let run env helper runner =
               ]
           in
           let created =
+            let job_id =
+              match
+                invoke_status sw daemon client parent.id "manage_agent" create_envelope
+              with
+              | Published (Pending (Job job, _)) -> job
+              | status ->
+                raise_s
+                  [%sexp "expected asynchronous helper", (status : P.Invocation.status)]
+            in
+            await (fun () ->
+              let current = state daemon parent.id in
+              List.iter current.jobs ~f:(fun job ->
+                match job.status with
+                | Failed _ | Cancelled | Interrupted _ ->
+                  raise_s [%sexp "asynchronous helper failed", (job : P.Job.t)]
+                | _ -> ());
+              Option.is_none current.active_operation
+              && List.exists current.deliveries ~f:(fun delivery ->
+                match
+                  delivery.context.work, delivery.status, delivery.wake_disposition
+                with
+                | Some (Job id), Committed _, Some (Accepted_wake _) ->
+                  P.Id.Job.equal id job_id
+                | _ -> false));
+            let job =
+              List.find_exn (state daemon parent.id).jobs ~f:(fun job ->
+                P.Id.Job.equal job.id job_id)
+            in
+            match P.Job.terminal_completion job |> protocol_ok with
+            | Some (Succeeded value) -> value
+            | completion ->
+              raise_s [%sexp "helper job failed", (completion : P.Completion.t option)]
+          in
+          let one_off_replay =
             invoke
               sw
               daemon
@@ -359,6 +441,7 @@ let run env helper runner =
             |> complete
           in
           let child = id created in
+          assert (P.Id.Session.equal child (id one_off_replay));
           [%test_eq: string]
             (text created "session_id")
             (bridge sw daemon client parent.id "create" child_request
@@ -430,9 +513,17 @@ let run env helper runner =
                 Some (Jsonaf.to_string value)
               | _ -> None)
           in
-          assert (
-            List.exists child_results ~f:(fun value ->
-              String.is_substring value ~substring:"outside the configured read roots"));
+          (match
+             List.exists child_results ~f:(fun value ->
+               String.is_substring value ~substring:"outside the configured read roots")
+           with
+           | true -> ()
+           | false ->
+             raise_s
+               [%sexp
+                 "missing inherited file denial"
+               , (child_results : string list)
+               , ((state daemon child).invocations : P.Invocation.t list)]);
           assert (
             List.for_all child_results ~f:(fun value ->
               not (String.is_substring value ~substring:"HELPER_PRIVATE_FIXTURE_CONTENT")));
@@ -462,6 +553,7 @@ let run env helper runner =
                       ; "idempotency_key", `String "helper-stop"
                       ]))
              |> complete);
+          check_notification daemon parent.id child;
           parent.id, child, receipt)
       in
       with_daemon (fun sw daemon client ->
@@ -495,6 +587,7 @@ let run env helper runner =
           |> Jsonaf.to_string
         in
         assert (String.is_substring output ~substring:"persisted helper answer");
+        check_notification daemon parent_id child_id;
         let child_handle =
           H.attach
             ~sw
