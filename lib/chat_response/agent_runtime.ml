@@ -137,7 +137,8 @@ let declaration_sources declarations =
   @ List.filter_map declarations.tools ~f:(function
     | CM.Read_file specification -> Some specification.source
     | Extension specification -> Some specification.source_ref
-    | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ | Inherited _ -> None)
+    | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ | Inherited _ | Persistent_agent _
+      -> None)
 ;;
 
 let add_source_dir ~env (source_dirs, errors) source =

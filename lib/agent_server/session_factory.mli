@@ -26,6 +26,8 @@ type limits =
   ; delegation_artifact_max_entries : int
   ; delegation_artifact_max_bytes : int
   ; delegation_max_depth : int
+  ; managed_submission_max_count : int option
+  ; managed_message_max_bytes : int option
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits

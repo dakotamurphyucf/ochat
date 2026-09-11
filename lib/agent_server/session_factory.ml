@@ -29,6 +29,8 @@ type limits =
   ; delegation_artifact_max_entries : int
   ; delegation_artifact_max_bytes : int
   ; delegation_max_depth : int
+  ; managed_submission_max_count : int option
+  ; managed_message_max_bytes : int option
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
@@ -5842,6 +5844,103 @@ let managed_status t borrowed child_id =
       })
 ;;
 
+let managed_send t borrowed child_id ~key ~message =
+  let module P = Agent_protocol in
+  let module M = Agent_session.Managed_submission in
+  let module D = Agent_store.Delegation_store in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let protocol result =
+    Result.map_error result ~f:(fun error ->
+      P.Invocation.
+        { code = "agent.send." ^ P.Error.code_to_string error.P.Error.code
+        ; message =
+            "The message could not be admitted. Reuse its original key for any retry."
+        ; retryable = error.retryable
+        ; details = `Null
+        })
+  in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, initial = authorize () in
+  let%bind reference =
+    initial.spec.delegation
+    |> Result.of_option
+         ~error:(unavailable Permission_denied "missing child relationship")
+    |> protocol
+  in
+  let request_sha256 =
+    [%sexp ("ochat.managed-send.plain.v1" : string), (message : string)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+  in
+  let%bind receipt =
+    match
+      List.find initial.managed_submissions ~f:(fun receipt ->
+        D.Reference.equal receipt.M.reference reference
+        && P.Idempotency_key.equal receipt.key key)
+    with
+    | Some receipt ->
+      (match String.equal request_sha256 receipt.request_sha256 with
+       | true -> Ok receipt
+       | false -> Error (unavailable Conflict "managed send input changed") |> protocol)
+    | None ->
+      let%bind () =
+        match
+          String.is_empty (String.strip message), t.limits.managed_message_max_bytes
+        with
+        | true, _ -> Error (unavailable Invalid_request "message is empty") |> protocol
+        | false, Some maximum when maximum < 1 || String.length message > maximum ->
+          Error (unavailable Invalid_request "message exceeds host limit") |> protocol
+        | false, _ -> Ok ()
+      in
+      let%bind () =
+        match initial.lifecycle.desired with
+        | Running -> Ok ()
+        | Stopped -> Error (unavailable Invalid_state "child is stopped") |> protocol
+      in
+      let%bind id =
+        Agent_session.History_id_source.allocate child.history_ids |> protocol
+      in
+      let%bind entry =
+        Runtime_owner.parse_user_content
+          child.runtime
+          ~id
+          { kind = Plain_text; text = message; attachments = [] }
+        |> protocol
+      in
+      let%bind _, current = authorize () in
+      let%bind () =
+        match
+          Int.equal initial.identity.generation current.identity.generation
+          && Option.exists current.spec.delegation ~f:(D.Reference.equal reference)
+        with
+        | true -> Ok ()
+        | false ->
+          Error (unavailable Conflict "child generation changed during send") |> protocol
+      in
+      A.submit_managed_message
+        child.actor
+        ~reference
+        ~key
+        ~request_sha256
+        ~generation:current.identity.generation
+        ~max_receipts:t.limits.managed_submission_max_count
+        (Agent_session.History_codec.to_protocol entry)
+      |> protocol
+  in
+  let%map _ = authorize () in
+  M.to_json receipt
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -6034,7 +6133,11 @@ let create
         ; create = (fun borrowed request -> create_from_native t borrowed request)
         }
     ; managed_sessions =
-        { status = (fun borrowed child_id -> managed_status t borrowed child_id) }
+        { status = (fun borrowed child_id -> managed_status t borrowed child_id)
+        ; send =
+            (fun borrowed child_id ~key ~message ->
+              managed_send t borrowed child_id ~key ~message)
+        }
     }
   in
   t

@@ -7,6 +7,12 @@ type t =
       Native_tool_invocation.borrowed
       -> Agent_protocol.Id.Session.t
       -> (Jsonaf.t, Agent_protocol.Invocation.tool_error) result
+  ; send :
+      Native_tool_invocation.borrowed
+      -> Agent_protocol.Id.Session.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> message:string
+      -> (Jsonaf.t, Agent_protocol.Invocation.tool_error) result
   }
 
 (** Bounded metadata only, excluding transcript, tool arguments, permission

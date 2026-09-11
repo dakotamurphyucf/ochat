@@ -32,6 +32,7 @@
   shell_tool
   agent_runtime
   tool
+  agent_tool_contract
   tool_capability
   authoring_policy
   authoring_presence

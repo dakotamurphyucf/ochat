@@ -140,6 +140,13 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  (** Persistence-enabled agent declarations keep the legacy [Agent] representation
+      for the default/explicit [one_off] case, preserving its serialized identity. *)
+  type agent_persistence =
+    | Persistent
+    | Optional
+  [@@deriving jsonaf, sexp, hash, bin_io, compare, equal]
+
   type tool =
     | Builtin of string
     | Read_file of Chatmd_read_file_spec.t
@@ -149,6 +156,7 @@ module Chat_markdown : sig
     | Mcp of mcp_tool
     | Extension of Chatmd_shell_spec.Extension_spec.tool
     | Inherited of string
+    | Persistent_agent of agent_tool * agent_persistence
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =

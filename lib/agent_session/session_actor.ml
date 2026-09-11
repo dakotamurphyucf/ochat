@@ -6034,7 +6034,12 @@ let with_idle_moderator_observation_tools t ~observer f =
 
 let worker_capabilities t operation_id id_source buffer =
   Operation_worker.Capabilities.
-    { id_source = History_id_source.as_history_entry_source id_source
+    { id_source =
+        History_id_source.as_history_entry_source
+          ~committed_through:(fun () ->
+            Result.map (call t State) ~f:(fun state ->
+              state.conversation.reserved_history_through))
+          id_source
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
     ; commit_invocation_call =
         (fun ~invocation entry ->

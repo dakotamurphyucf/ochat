@@ -2681,12 +2681,13 @@ build, more than 256 total source files, or an aggregate larger than 8 MiB. This
 source boundary does not replace execution capability checks or artifact symlink
 verification.
 
-New prompt artifacts use parser schema version 4 and a distinct revision identity.
-Existing parser-version-1, version-2 and version-3 artifacts still restore within their grammar
+New authored prompt artifacts use parser schema version 5 and a distinct revision identity.
+Existing parser-version-1 through version-4 artifacts still restore within their grammar
 contracts; unknown parser/runtime versions fail. Existing moderator binary record
 layouts are retained by additive declaration variants. Extension declarations
 require version 2; inherited tool references require version 3; authoring-help
-declarations require version 4. Old-version
+declarations require version 4; persistence-enabled authored agent tools require
+version 5. Old-version
 restoration checks the captured import/local-agent closure, using the normal
 declaration semantics without executable preprocessing during that check. Inline
 markup that is ordinary message text is not treated as a top-level declaration.
@@ -4384,8 +4385,8 @@ Status reports lifecycle, current operation ID/kind/state and the count of pendi
 permissions. It omits transcript, tool arguments, failure text and permission
 details. Inspection does not resolve approvals or start a stopped child. An idle
 session does not establish completion of a particular submitted message. This is
-the initial qualified management service; correlated send/read/wait/stop tools
-and the public helper bridge are still being implemented.
+part of the qualified management service. Read/wait/stop tools and the public
+helper bridge are still being implemented.
 
 ### Managed submission receipt foundation
 
@@ -4413,9 +4414,47 @@ Reset retains terminal receipt identities and invalidates unresolved old-generat
 receipts. Reusing a pre-reset key cannot silently submit the message again. Explicit
 input removal invalidates unresolved correlation; compaction preserves adopted
 correlation. Older state without receipts migrates with an empty list, while old
-schema tags carrying the new records reject. These are internal actor foundations;
-native send/read/wait tools, receipt projection and full daemon restart qualification
-remain separate work.
+schema tags carrying the new records reject.
+
+Internally qualified durable hosts can declare `<tool name="agent_send"/>`.
+Its request contains `session_id`, plaintext `message`, and `idempotency_key`.
+It uses the same caller-scoped service for direct model calls and nested ChatML
+`Tool.call`. The generated session's existing input boundary forbids implicit
+ChatMD resource loading and attachments. The response includes a stable
+`receipt_id`, target ID/generation, status, terminal flag, operation ID when known,
+output count and timestamps. It excludes transcript and private delegation data.
+
+Default host limits admit at most 4,096 retained receipts per child and 256 KiB
+per message; host options can configure either limit or explicitly use `None`
+for trusted unrestricted admission. Replays of retained keys work at capacity
+and when the child is stopped, without restarting it. New sends to a stopped child
+reject. Receipts are not automatically expired into repeatable operations.
+Tests cover native/script retries, conflicts, busy/deferred admission, foreign
+targets, configured bounds and terminal receipt replay across daemon restart.
+
+### Authored agent-tool persistence contract (implementation in progress)
+
+The parser now accepts author-controlled policies:
+
+```xml
+<tool name="reviewer" agent="agents/reviewer.chatmd" local persistence="optional"/>
+```
+
+Omitting `persistence`, or specifying `one_off`, preserves the ordinary agent tool
+and its `input: string` schema. `persistent` selects a fixed persistent policy;
+`optional` adds model-selected `mode`, defaulting to `one_off`. Persistence-enabled
+contracts include optional `session_id`: omit it for a new persistent instance,
+or supply it to continue an authorized instance of that authored tool. One-off
+calls reject session IDs; fixed persistent contracts reject mode overrides.
+Descriptions preserve authored text and add create/continue, receipt, timeout and
+shared lifecycle-tool guidance. IDs identify sessions and do not confer authority.
+
+This is currently parser and model-contract infrastructure. The legacy runner
+explicitly rejects persistence-enabled declarations until the shared authored
+session adapter is installed; it does not silently downgrade them to one-off
+calls. Pinned private bindings, durable instance admission and the named
+call-and-answer wrapper remain implementation work. Generated definitions still
+require inherited tool references and cannot introduce fresh authored bindings.
 
 ### Durable initial activation
 

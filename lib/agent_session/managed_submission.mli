@@ -44,6 +44,10 @@ val same_key : t -> t -> bool
 val validate : t -> (unit, Agent_protocol.Error.t) result
 val validate_transition : previous:t -> t -> (unit, Agent_protocol.Error.t) result
 
+(** Receipt metadata without private delegation fields or output content. A
+    terminal status identifies the processing outcome, not an automatic retry. *)
+val to_json : t -> Jsonaf.t
+
 (** Pure reconciliation from actual accepted history and typed operation terminal
     events. Never infers completion from Idle or assistant text. The actor persists
     returned changes in the same transaction as adoption/termination. *)

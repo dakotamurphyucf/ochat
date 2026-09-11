@@ -251,6 +251,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/mailbox.mli` | [contract](../../lib/agent_session/mailbox.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_moderator_dispatch.mli` | [contract](../../lib/agent_session/managed_moderator_dispatch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_session/managed_send_tool.mli` | [contract](../../lib/agent_session/managed_send_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_session_service.mli` | [contract](../../lib/agent_session/managed_session_service.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_session_tool.mli` | [contract](../../lib/agent_session/managed_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_submission.mli` | [contract](../../lib/agent_session/managed_submission.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -352,6 +353,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_transport_stdio/server.mli` | [contract](../../lib/agent_transport_stdio/server.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_response_loop.mli` | [contract](../../lib/chat_response/agent_response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_runtime.mli` | [contract](../../lib/chat_response/agent_runtime.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/agent_tool_contract.mli` | [contract](../../lib/chat_response/agent_tool_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_presence.mli` | [contract](../../lib/chat_response/authoring_presence.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

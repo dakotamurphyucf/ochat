@@ -6,6 +6,12 @@ type t =
       Native_tool_invocation.borrowed
       -> P.Id.Session.t
       -> (Jsonaf.t, P.Invocation.tool_error) result
+  ; send :
+      Native_tool_invocation.borrowed
+      -> P.Id.Session.t
+      -> key:P.Idempotency_key.t
+      -> message:string
+      -> (Jsonaf.t, P.Invocation.tool_error) result
   }
 
 let status_json (state : Session_state.t) =

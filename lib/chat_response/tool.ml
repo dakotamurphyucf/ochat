@@ -48,6 +48,7 @@ module CM = Prompt.Chat_markdown
 let agent_page_classification (decl : CM.tool) =
   match decl with
   | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
+  | CM.Persistent_agent ({ name; _ }, _) -> Some (name, Tool_execution_event.Subagent)
   | CM.Builtin "fork" -> Some ("fork", Tool_execution_event.Subagent)
   | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
@@ -346,6 +347,10 @@ let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl :
   : Ochat_function.t list
   =
   match decl with
+  | CM.Persistent_agent _ ->
+    failwith
+      "agent.persistence_unavailable: authored persistent tools require an admitted \
+       session adapter"
   | CM.Inherited _ ->
     failwith
       "capability.inheritance_required: inherited tool references require an admitted \

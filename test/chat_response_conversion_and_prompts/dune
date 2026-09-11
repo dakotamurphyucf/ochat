@@ -14,6 +14,13 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_tool_persistence_test)
+ (modules agent_tool_persistence_test)
+ (libraries core chat_response chatmd eio eio_main)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name chat_response_agent_prompt_test)
  (modules chat_response_agent_prompt_test)
  (libraries

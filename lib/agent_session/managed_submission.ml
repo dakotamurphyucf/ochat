@@ -35,6 +35,38 @@ let same_key left right =
   && P.Idempotency_key.equal left.key right.key
 ;;
 
+let to_json t =
+  let status, operation, terminal =
+    match t.status with
+    | Deferred -> "deferred", None, false
+    | Ready -> "ready", None, false
+    | Assigned id -> "assigned", Some id, false
+    | Terminal (operation, outcome) ->
+      ( (match outcome with
+         | Completed -> "completed"
+         | Failed -> "failed"
+         | Cancelled -> "cancelled"
+         | Interrupted -> "interrupted"
+         | Invalidated -> "invalidated")
+      , operation
+      , true )
+  in
+  `Object
+    [ "version", `Number "1"
+    ; "receipt_id", `String (P.History.Id.to_string t.history_id)
+    ; "session_id", `String (P.Id.Session.to_string t.reference.child_session_id)
+    ; "generation", `Number (Int.to_string t.generation)
+    ; "status", `String status
+    ; ("terminal", if terminal then `True else `False)
+    ; ( "operation_id"
+      , Option.value_map operation ~default:`Null ~f:(fun id ->
+          `String (P.Id.Operation.to_string id)) )
+    ; "output_count", `Number (Int.to_string (List.length t.output_ids))
+    ; "accepted_at", P.Timestamp.to_json t.created_at
+    ; "updated_at", P.Timestamp.to_json t.updated_at
+    ]
+;;
+
 let validate t =
   let open Result.Let_syntax in
   let%bind () =

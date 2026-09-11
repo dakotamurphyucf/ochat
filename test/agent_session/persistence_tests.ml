@@ -306,7 +306,7 @@ let%expect_test
         tool.input_schema.source_ref.source_dir
         (Filename.concat materialized "parts"));
     let artifact = Agent_session.Prompt_revision.artifact restored in
-    assert (artifact.parser_schema_version = 4);
+    assert (artifact.parser_schema_version = 5);
     assert (List.length artifact.sources = 3);
     let restore_fixture ~suffix ~version ~root ~sources =
       let id =
@@ -374,6 +374,37 @@ let%expect_test
     assert (
       Result.is_ok
         (restore_fixture ~suffix:"help_v4" ~version:4 ~root:authored_help ~sources:[]));
+    let persistent =
+      {|<tool name="review" agent="review.chatmd" persistence="optional"/>|}
+    in
+    let require_persistence_floor result =
+      match result with
+      | Ok _ -> failwith "old artifact accepted persistent agents"
+      | Error errors ->
+        assert (
+          List.exists errors ~f:(fun diagnostic ->
+            String.is_substring
+              diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message
+              ~substring:
+                "persistent agent declarations require prompt parser schema version 5"))
+    in
+    restore_fixture ~suffix:"persistent_v4" ~version:4 ~root:persistent ~sources:[]
+    |> require_persistence_floor;
+    let persistent_source =
+      Agent_store.Prompt_artifact_store.Source.create
+        ~relative_path:"nested.chatmd"
+        ~contents:persistent
+      |> store_ok
+    in
+    restore_fixture
+      ~suffix:"nested_persistent_v4"
+      ~version:4
+      ~root:{|<tool name="nested" agent="nested.chatmd" local/>|}
+      ~sources:[ persistent_source ]
+    |> require_persistence_floor;
+    assert (
+      Result.is_ok
+        (restore_fixture ~suffix:"persistent_v5" ~version:5 ~root:persistent ~sources:[]));
     List.iter [ 1; 2 ] ~f:(fun version ->
       let assert_floor result =
         match result with

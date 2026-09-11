@@ -119,6 +119,11 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type agent_persistence =
+    | Persistent
+    | Optional
+  [@@deriving jsonaf, sexp, hash, bin_io, compare, equal]
+
   type tool =
     | Builtin of string
     | Read_file of Chatmd_read_file_spec.t
@@ -129,6 +134,7 @@ module Chat_content = struct
     | Mcp of mcp_tool
     | Extension of Chatmd_shell_spec.Extension_spec.tool
     | Inherited of string
+    | Persistent_agent of agent_tool * agent_persistence
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   and mcp_tool =
@@ -459,18 +465,27 @@ module Chat_markdown = struct
          in
          Printf.sprintf "<tool name=\"%s\"%s command=\"%s\" />" name desc_attr command
        | Shell tool -> Chatmd_shell_serialization.tool tool
-       | Agent { name; description; agent; is_local } ->
+       | ( Agent { name; description; agent; is_local }
+         | Persistent_agent ({ name; description; agent; is_local }, _) ) as declaration
+         ->
          let desc_attr =
            Option.value_map description ~default:"" ~f:(fun d ->
              Printf.sprintf " description=\"%s\"" d)
          in
          let local_attr = if is_local then " local" else "" in
+         let persistence_attr =
+           match declaration with
+           | Persistent_agent (_, Persistent) -> " persistence=\"persistent\""
+           | Persistent_agent (_, Optional) -> " persistence=\"optional\""
+           | _ -> ""
+         in
          Printf.sprintf
-           "<tool name=\"%s\"%s agent=\"%s\"%s />"
+           "<tool name=\"%s\"%s agent=\"%s\"%s%s />"
            name
            desc_attr
            agent
            local_attr
+           persistence_attr
        | Mcp { names; description; mcp_server; strict; _ } ->
          let strict_attr = if strict then " strict" else "" in
          (* If the description is present, add it as an attribute. *)
@@ -762,6 +777,29 @@ module Chat_markdown = struct
         let mcp_server = Hashtbl.find tbl "mcp_server" in
         let description = Hashtbl.find tbl "description" in
         let is_local = Hashtbl.mem tbl "local" in
+        let persistence =
+          match
+            List.filter attrs ~f:(fun (name, _) -> String.equal name "persistence")
+          with
+          | [] -> None
+          | [ (_, Some "one_off") ] -> Some None
+          | [ (_, Some "persistent") ] -> Some (Some Persistent)
+          | [ (_, Some "optional") ] -> Some (Some Optional)
+          | _ ->
+            failwith
+              "Tool persistence must be one_off, persistent or optional, specified once."
+        in
+        (match
+           ( persistence
+           , agent
+           , command
+           , mcp_server
+           , Hashtbl.find tbl "type"
+           , Hashtbl.find tbl "runtime" )
+         with
+         | None, _, _, _, _, _ -> ()
+         | Some _, Some _, None, None, None, None -> ()
+         | _ -> failwith "Tool persistence is only supported on agent declarations.");
         let is_shell =
           Option.value_map
             (Hashtbl.find tbl "type")
@@ -851,7 +889,10 @@ module Chat_markdown = struct
                 |> Result.ok_or_failwith
               else agent_url
             in
-            Tool (Agent { name; description; agent; is_local })
+            let specification = { name; description; agent; is_local } in
+            (match Option.join persistence with
+             | None -> Tool (Agent specification)
+             | Some policy -> Tool (Persistent_agent (specification, policy)))
           | None, None, Some mcp_uri ->
             let mcp_uri = String.strip mcp_uri in
             if String.is_empty mcp_uri
@@ -1081,6 +1122,7 @@ module Chat_markdown = struct
           | Tool (Custom tool) -> [ tool.name ]
           | Tool (Shell tool) -> [ tool.name ]
           | Tool (Agent tool) -> [ tool.name ]
+          | Tool (Persistent_agent (tool, _)) -> [ tool.name ]
           | Tool (Mcp tool) -> Option.value tool.names ~default:[]
           | Tool (Extension tool) -> [ tool.name ]
           | Tool (Inherited name) -> [ name ]

@@ -518,6 +518,34 @@ let%expect_test "durable history source adapts the response engine contract" =
       in
       let invalid = History_entry.create_with_id ~id:invalid_id item in
       let invalid_validation = History_entry.Id_source.validate adapted [ invalid ] in
+      (* Another allocator in the same actor may validate existing input before
+         allocating its own block. It must use committed actor state, while
+         still rejecting speculative IDs beyond the shared high-water mark. *)
+      let worker_source =
+        Agent_session.History_id_source.create
+          ~namespace:"durable-source"
+          ~block_size:2
+          ~reserve:(fun ~count ->
+            Agent_session.Session_actor.reserve_history_block actor ~count)
+        |> protocol_ok
+      in
+      let worker_adapted =
+        Agent_session.History_id_source.as_history_entry_source
+          ~committed_through:(fun () ->
+            Result.map (Agent_session.Session_actor.state actor) ~f:(fun state ->
+              state.conversation.reserved_history_through))
+          worker_source
+      in
+      let shared_validation = History_entry.Id_source.validate worker_adapted [ entry ] in
+      let speculative_validation =
+        History_entry.Id_source.validate worker_adapted [ invalid ]
+      in
+      let worker_id =
+        History_entry.Id_source.allocate worker_adapted |> Result.ok_or_failwith
+      in
+      let caller_id = History_entry.Id_source.allocate adapted |> Result.ok_or_failwith in
+      [%test_eq: int] 2 (History_entry.Id.sequence worker_id);
+      [%test_eq: int] 1 (History_entry.Id.sequence caller_id);
       Agent_session.Session_actor.shutdown actor;
       print_s
         [%sexp
@@ -525,11 +553,15 @@ let%expect_test "durable history source adapts the response engine contract" =
           ; first_sequence = (History_entry.Id.sequence id : int)
           ; valid = (Result.is_ok validation : bool)
           ; outside_reservation_rejected = (Result.is_error invalid_validation : bool)
+          ; shared_committed_input_valid = (Result.is_ok shared_validation : bool)
+          ; shared_speculative_id_rejected =
+              (Result.is_error speculative_validation : bool)
           }]));
   [%expect
     {|
     ((namespace durable-source) (first_sequence 0) (valid true)
-     (outside_reservation_rejected true))
+     (outside_reservation_rejected true) (shared_committed_input_valid true)
+     (shared_speculative_id_rejected true))
     |}]
 ;;
 
