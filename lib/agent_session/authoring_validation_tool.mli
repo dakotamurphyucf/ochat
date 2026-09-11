@@ -1,6 +1,7 @@
-(** Explicit, readonly native helper registration. The supplied host fixes the
-    target runtime/surfaces and compiler ceilings. Invocation borrows supply the
-    actual capability ceiling; the model cannot provide either identity. This
+(** Explicit, readonly native helper registration. The supplied host identifies
+    the registered implementation. Execution uses the actual caller's host from
+    its expiring Script_tool_calls services, including a child's delegated surface.
+    Invocation borrows supply the actual capability ceiling; the model cannot provide either identity. This
     installs no corpus, context guidance or general feature flag by itself. *)
 val name : string
 

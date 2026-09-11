@@ -10,6 +10,7 @@ type target =
   | One_off_script
   | Standalone_tool
   | Moderator
+  | Generated_chatmd
 [@@deriving sexp, equal]
 
 type moderator_surface =
@@ -22,6 +23,8 @@ type host =
   ; targets : target list
   ; moderator_surface : moderator_surface
   ; compilation : Compiler.limits
+  ; bundle_limits : Chatmd_source_bundle.limits
+  ; catalog : Authoring_policy.catalog option
   }
 
 let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
@@ -36,19 +39,46 @@ let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
     || not (Stdlib.String.is_valid_utf_8 runtime_identity)
   with
   | true -> Error "runtime identity must contain between 1 and 256 bytes of valid UTF-8"
-  | false -> Ok { runtime_identity; targets; moderator_surface; compilation }
+  | false ->
+    Ok
+      { runtime_identity
+      ; targets
+      ; moderator_surface
+      ; compilation
+      ; bundle_limits = Chatmd_source_bundle.default_limits
+      ; catalog = None
+      }
+;;
+
+let for_delegated host = { host with moderator_surface = Delegated }
+let compilation_limits host = host.compilation
+let bundle_limits host = host.bundle_limits
+let catalog host = host.catalog
+
+let configure_generated host ~limits ~catalog =
+  let open Result.Let_syntax in
+  let%map _ =
+    Chatmd_source_bundle.create
+      ~limits
+      ~root_file:"root.chatmd"
+      ~sources:[ "root.chatmd", "" ]
+      ()
+  in
+  { host with bundle_limits = limits; catalog }
 ;;
 
 let target_id = function
   | One_off_script -> "one_off_script"
   | Standalone_tool -> "standalone_tool"
   | Moderator -> "moderator"
+  | Generated_chatmd -> "generated_chatmd"
 ;;
 
 let entrypoint_topic = function
   | One_off_script -> "runtime.invocations.one-off"
   | Standalone_tool -> "runtime.invocations.standalone"
   | Moderator -> "runtime.invocations.moderator"
+  | Generated_chatmd -> "runtime.delegation.generated"
 ;;
 
 let topics =
@@ -61,6 +91,7 @@ let topics =
   ; "runtime.invocations.moderator", "agent-server/extensibility-foundations.md"
   ; "runtime.invocations.validation", "agent-server/extensibility-foundations.md"
   ; "runtime.authority.tool-selection", "agent-server/extensibility-foundations.md"
+  ; "runtime.delegation.generated", "agent-server/extensibility-foundations.md"
   ]
 ;;
 
@@ -70,6 +101,7 @@ let help target =
     | One_off_script -> Metadata.One_off_script
     | Standalone_tool -> Metadata.Standalone_tool
     | Moderator -> Metadata.Moderator_tool
+    | Generated_chatmd -> Metadata.Child_agent
   in
   Metadata.
     { version = 1
@@ -85,7 +117,7 @@ let help target =
          ]
          @
          match target with
-         | Standalone_tool -> [ "chatmd.declarations.schemas" ]
+         | Standalone_tool | Generated_chatmd -> [ "chatmd.declarations.schemas" ]
          | _ -> [])
         (* These execution contracts do not call a helper. Auto/preload policy adds
        reference and validation tools; manual policy leaves their exposure to the
@@ -126,7 +158,11 @@ let optional f = function
 let to_json report =
   `Object
     [ "version", `Number "1"
-    ; "scope", `String "inline_script"
+    ; ( "scope"
+      , `String
+          (match report.target with
+           | Some Generated_chatmd -> "generated_bundle"
+           | _ -> "inline_script") )
     ; ("valid", if valid report then `True else `False)
     ; "target", optional (fun t -> `String (target_id t)) report.target
     ; "source", optional Source_ref.jsonaf_of_t report.source
@@ -147,7 +183,7 @@ let to_json report =
     ]
 ;;
 
-let parameters =
+let inline_parameters =
   `Object
     [ "type", `String "object"
     ; ( "properties"
@@ -175,7 +211,7 @@ let parameters =
 ;;
 
 let request_schema =
-  match Schema.compile parameters with
+  match Schema.compile inline_parameters with
   | Ok schema -> schema
   | Error _ -> failwith "invalid authoring validation request schema"
 ;;
@@ -273,6 +309,7 @@ let compiler_target host = function
     (match host.moderator_surface with
      | Ordinary -> Compiler.Moderator_v1
      | Delegated -> Compiler.Delegated_moderator_v1)
+  | Generated_chatmd -> Compiler.Delegated_moderator_v1
 ;;
 
 let host_fingerprint (host : host) =
@@ -282,6 +319,10 @@ let host_fingerprint (host : host) =
   , (host.moderator_surface : moderator_surface)
   , (host.compilation.max_source_bytes : int)
   , (host.compilation.wall_seconds : float)
+  , (host.bundle_limits.max_source_bytes : int)
+  , (host.bundle_limits.max_bundle_bytes : int)
+  , (host.bundle_limits.max_files : int)
+  , (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint : string option)
   , (List.map host.targets ~f:(fun target ->
        target, Compiler.contract (compiler_target host target))
      : (target * Sexp.t) list)]
@@ -341,7 +382,7 @@ let compile_diagnostic target source (error : Compiler.error) =
   issue ~source ~path:[ "source" ] ~topics:topic_ids code message
 ;;
 
-let validate ~env ~(host : host) ~capabilities json =
+let validate_inline ~env ~(host : host) ~capabilities json =
   let report =
     ref
       { target = None
@@ -471,4 +512,229 @@ let validate ~env ~(host : host) ~capabilities json =
   match run () with
   | Ok () -> !report
   | Error diagnostics -> { !report with diagnostics }
+;;
+
+let generated_parameters =
+  `Object
+    [ "type", `String "object"
+    ; ( "properties"
+      , `Object
+          [ "version", `Object [ "const", `Number "1" ]
+          ; "target", `Object [ "const", `String "generated_chatmd" ]
+          ; "root_file", `Object [ "type", `String "string"; "maxLength", `Number "1024" ]
+          ; ( "sources"
+            , `Object
+                [ "type", `String "array"
+                ; "maxItems", `Number "256"
+                ; ( "items"
+                  , `Object
+                      [ "type", `String "object"
+                      ; ( "properties"
+                        , `Object
+                            [ ( "path"
+                              , `Object
+                                  [ "type", `String "string"
+                                  ; "maxLength", `Number "1024"
+                                  ] )
+                            ; "text", `Object [ "type", `String "string" ]
+                            ] )
+                      ; "required", strings [ "path"; "text" ]
+                      ; "additionalProperties", `False
+                      ] )
+                ] )
+          ; ( "tools"
+            , Jsonaf.member_exn "tools" (Jsonaf.member_exn "properties" inline_parameters)
+            )
+          ] )
+    ; "required", strings [ "version"; "target"; "root_file"; "sources"; "tools" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+(* Keep an object-shaped tool schema; target-specific required/forbidden fields
+   are validated again by the service, including duplicate keys. *)
+let parameters =
+  let fields schema = Jsonaf.member_exn "properties" schema |> Jsonaf.assoc_list_exn in
+  let common = fields inline_parameters in
+  let generated =
+    List.filter (fields generated_parameters) ~f:(fun (key, _) ->
+      not (List.Assoc.mem common key ~equal:String.equal))
+  in
+  `Object
+    [ "type", `String "object"
+    ; "properties", `Object (common @ generated)
+    ; "required", strings [ "version"; "target"; "tools" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+let generated_schema =
+  Schema.compile generated_parameters
+  |> Result.map_error ~f:(fun _ -> "invalid generated validation schema")
+  |> Result.ok_or_failwith
+;;
+
+let validate_generated ~env ~(host : host) ~capabilities json =
+  let report =
+    ref
+      { target = Some Generated_chatmd
+      ; source = None
+      ; validation_id = None
+      ; compiler_contract = None
+      ; capability_fingerprint = None
+      ; runtime_identity = host.runtime_identity
+      ; diagnostics = []
+      ; checked = []
+      ; deferred = []
+      }
+  in
+  let check name = report := { !report with checked = !report.checked @ [ name ] } in
+  let diagnostic ?source ?(path = []) code message =
+    issue
+      ?source
+      ~path
+      ~topics:[ "runtime.delegation.generated"; "runtime.authority.tool-selection" ]
+      code
+      message
+  in
+  let run () =
+    let open Result.Let_syntax in
+    let%bind () =
+      Schema.validate generated_schema json
+      |> Result.map_error ~f:(fun errors ->
+        List.take errors 16
+        |> List.map ~f:(fun error ->
+          diagnostic ~path:error.Schema.path "authoring.invalid_request" error.message))
+    in
+    check "request";
+    let%bind () =
+      match List.mem host.targets Generated_chatmd ~equal:equal_target with
+      | true -> Ok ()
+      | false ->
+        Error
+          [ diagnostic
+              "authoring.unavailable_target"
+              "generated bundle validation is unavailable on this host"
+          ]
+    in
+    let tools =
+      Jsonaf.member_exn "tools" json |> Jsonaf.list_exn |> List.map ~f:Jsonaf.string_exn
+    in
+    let%bind () =
+      match List.find_a_dup tools ~compare:String.compare with
+      | None -> Ok ()
+      | Some _ -> invalid ~path:[ "tools" ] "selected tool names must be unique"
+    in
+    let root_file = Jsonaf.member_exn "root_file" json |> Jsonaf.string_exn in
+    let sources =
+      Jsonaf.member_exn "sources" json
+      |> Jsonaf.list_exn
+      |> List.map ~f:(fun item ->
+        ( Jsonaf.member_exn "path" item |> Jsonaf.string_exn
+        , Jsonaf.member_exn "text" item |> Jsonaf.string_exn ))
+    in
+    let%bind bundle =
+      Chatmd_source_bundle.create ~limits:host.bundle_limits ~root_file ~sources ()
+      |> Result.map_error ~f:(fun message ->
+        [ diagnostic "delegation.invalid_source" message ])
+    in
+    check "bounded_source_bundle";
+    let source =
+      { (source_ref (List.Assoc.find_exn sources root_file ~equal:String.equal)) with
+        Source_ref.file = root_file
+      }
+    in
+    report := { !report with source = Some source };
+    let%bind selected =
+      C.select capabilities ~names:tools
+      |> Result.map_error ~f:(fun e ->
+        [ diagnostic ~path:[ "tools" ] e.C.code e.message ])
+    in
+    check "selected_capabilities";
+    let contract =
+      [%sexp
+        ("ochat.generated-validation.v1" : string)
+      , (Compiler.contract Compiler.Delegated_moderator_v1 : Sexp.t)]
+      |> Sexp.to_string
+      |> Source_ref.digest
+    in
+    let selection = C.fingerprint selected in
+    let identity =
+      [%sexp
+        ("ochat.authoring.generated-validation.v1" : string)
+      , (Chatmd_source_bundle.fingerprint bundle : string)
+      , (selection : string)
+      , (contract : string)
+      , (host_fingerprint host : string)]
+      |> Sexp.to_string
+      |> Source_ref.digest
+    in
+    report
+    := { !report with
+         validation_id = Some identity
+       ; compiler_contract = Some contract
+       ; capability_fingerprint = Some selection
+       };
+    let%map admission =
+      Generated_admission.prepare
+        ~limits:host.compilation
+        ?catalog:host.catalog
+        ~env
+        ~dir:(Eio.Stdenv.cwd env)
+        ~ceiling:selected
+        ~requested_names:tools
+        bundle
+      |> Result.map_error ~f:(fun errors ->
+        List.take errors 16
+        |> List.map ~f:(fun error ->
+          issue
+            ?source:error.D.source
+            ~path:error.path
+            ~topics:
+              [ "runtime.delegation.generated"
+              ; "chatmd.declarations.schemas"
+              ; "chatml.syntax.calls"
+              ; "chatml.types"
+              ; "runtime.authority.tool-selection"
+              ]
+            error.code
+            error.message))
+    in
+    List.iter
+      [ "captured_source_closure"
+      ; "chatmd_declarations"
+      ; "inherited_bindings"
+      ; "authoring_policy"
+      ; "delegated_surface"
+      ; "syntax"
+      ; "types"
+      ; "entrypoints"
+      ]
+      ~f:check;
+    let fingerprint = C.fingerprint (Generated_admission.capabilities admission) in
+    report
+    := { !report with
+         capability_fingerprint = Some fingerprint
+       ; deferred =
+           [ "initializer_evaluation"
+           ; "state_serialization"
+           ; "runtime_tool_calls"
+           ; "current_permissions"
+           ; "external_effects"
+           ; "runtime_input_output"
+           ; "session_creation"
+           ; "parent_moderation"
+           ; "lifetime_and_revocation"
+           ]
+       }
+  in
+  match run () with
+  | Ok () -> !report
+  | Error diagnostics -> { !report with diagnostics }
+;;
+
+let validate ~env ~host ~capabilities json =
+  match Jsonaf.member "target" json with
+  | Some (`String "generated_chatmd") -> validate_generated ~env ~host ~capabilities json
+  | _ -> validate_inline ~env ~host ~capabilities json
 ;;

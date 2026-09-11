@@ -19,6 +19,15 @@ type t
     ceiling: native borrows still supply the exact permitted selection. *)
 val current_native_services : unit -> (t, string) result
 
+(** The actual caller's validation contract, inherited with the expiring native
+    services scope. This does not add helper tools or widen selected capabilities. *)
+val with_authoring_validation_host
+  :  t
+  -> Chat_response.Authoring_validation.host option
+  -> t
+
+val authoring_validation_host : t -> Chat_response.Authoring_validation.host option
+
 (** Bind inherited shell approvals to this host's actual session. Native dispatch
     adds the final live authorization guard, including inherited parent checks,
     so waits and delayed effects cannot bypass revocation. *)

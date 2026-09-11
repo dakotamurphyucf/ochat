@@ -293,11 +293,12 @@ generic completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the
 owning actor and current policy, moderation, approval and output-disclosure checks.
 
-## Readonly inline-script validation
+## Readonly script and generated-bundle validation
 
 `Authoring_validation` checks candidates without constructing a ChatML runtime.
 It uses the bounded Eio-domain compiler and static entrypoint contracts for
-`one_off_script`, `standalone_tool`, and `moderator`. The host supplies the exact
+`one_off_script`, `standalone_tool`, and `moderator`. The `generated_chatmd` target
+uses the captured-source parser and generated-definition admission pipeline. The host supplies the exact
 runtime identity, supported targets, ordinary/delegated moderator surface and
 compiler limits. The request cannot replace that context.
 
@@ -322,9 +323,29 @@ For example, the readonly helper accepts:
 
 Standalone candidates also require `input_schema` and `output_schema` using
 the supported Ochat schema subset. Schemas are not accepted on the other inline
-targets. Generated ChatMD files, imports and bundles are outside this service's
-`inline_script` scope; their validation remains part of generated admission and
-the later authoring integration.
+targets. Generated ChatMD uses `root_file` and a `sources` array of `{path, text}`
+objects instead of `source` or schemas. Its report has `scope: "generated_bundle"`;
+inline reports retain `scope: "inline_script"`.
+
+```json tool=ochat_validate
+{
+  "version": 1,
+  "target": "generated_chatmd",
+  "root_file": "child.chatmd",
+  "sources": [
+    {"path": "child.chatmd", "text": "<import src=\"instructions.chatmd\"/>"},
+    {"path": "instructions.chatmd", "text": "<developer>Review the supplied report.</developer>"}
+  ],
+  "tools": []
+}
+```
+
+All imports and script sources must be present in the bounded bundle. Validation
+never fills in a missing file from disk or fetches a URL. Generated declarations
+can select inherited bindings; they cannot configure new file roots, shell tools,
+MCP servers or implicit agent definitions. Moderators compile against the delegated
+surface, which excludes direct `Model` and `Process` access. Initializers are not
+evaluated and no generated artifact or session is created.
 
 The report contains `valid`, the candidate source hash and source reference, a
 validation identity, compiler/capability fingerprints, runtime identity,
@@ -340,18 +361,31 @@ initializers or prove that the workflow will succeed. All actual tool calls,
 current permissions, input/output values, external effects and moderator state
 serialization still require execution-time checks. For example, a closure can
 be a well-typed moderator state while failing the runtime's serialization rule.
-ChatMD declaration checks are also listed as deferred because no ChatMD bundle
-was submitted here.
+Inline reports defer ChatMD declaration checks. Generated reports check the captured
+closure, ChatMD declarations, inherited bindings and authoring policy, while deferring
+session creation, live parent moderation, lifetime/revocation and execution checks.
 
 Validation identities bind source, target, schema content, exact selected live
-bindings, the host's runtime/target contracts and compiler policy. The helper's
+bindings, the host's runtime/target contracts and compiler policy. Generated identities
+also bind every captured source file, bundle limits and the installed catalog
+fingerprint; the source reference identifies the root file. The helper's
 native implementation identity also includes this host context. A receipt grants
 no authority: execution services still compile/admit the supplied source and
 recheck current capabilities. Caller cancellation propagates through joined
 compiler cleanup, and the existing cooperative timing limitations apply.
 
 The helper uses the normal native invocation borrow to obtain the caller's
-capability ceiling. Its ordinary tool call/output bookkeeping still occurs;
+capability ceiling and an expiring service scope to obtain its actual host context.
+A generated child inheriting the helper validates inline moderators against its own
+delegated surface, even if the registration originated in an ordinary parent.
+Its requested tools remain inside its own selection. Restart preserves this behavior;
+validation cannot use a parent-only reader or grant a new helper dependency.
+`configure_generated` supplies host-owned bundle limits and installed catalog
+metadata. Factory restoration uses the same configuration. Auto/preload authoring
+packages may select only authentic helper bindings already inside the permitted
+subset; missing helpers or catalog metadata reject. A01 still supplies the complete
+corpus, retrieval, prepared examples and context insertion before general exposure.
+The helper's ordinary tool call/output bookkeeping still occurs;
 validation creates no Script invocation, child session, model request or tool
 effect from the candidate. Offline daemon tests verify this with initializers
 that would fail if evaluated and source that declares a real file-tool call.

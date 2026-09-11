@@ -3,11 +3,13 @@ open Core
 (** Readonly validation of inline script candidates. This service only selects
     existing capability bindings and invokes the bounded static compiler. It does
     not construct/evaluate a runtime, read source files, invoke tools, or create
-    sessions. Generated ChatMD bundles use a separate later admission path. *)
+    sessions. Generated ChatMD bundles use the same captured-source admission as
+    creation, without materializing an artifact or instantiating a runtime. *)
 type target =
   | One_off_script
   | Standalone_tool
   | Moderator
+  | Generated_chatmd
 [@@deriving sexp, equal]
 
 type moderator_surface =
@@ -32,6 +34,26 @@ val create_host
     the installed runtime identity and compiler policy. Changes require a fresh
     native capability binding as well as fresh validation. *)
 val host_fingerprint : host -> string
+
+(** Narrow moderator validation to the generated execution surface, preserving
+    the host's targets, runtime identity, limits and installed catalog. *)
+val for_delegated : host -> host
+
+(** Configure host-owned source limits and compatible catalog metadata. These are
+    never read from candidate JSON. Omitted configuration uses default bundle
+    limits and no catalog; authoring auto/preload still requires authentic helpers. *)
+val configure_generated
+  :  host
+  -> limits:Chatmd_source_bundle.limits
+  -> catalog:Authoring_policy.catalog option
+  -> (host, string) result
+
+(** Shared admission policy for execution hosts. Creation/restoration still run
+    their own validators and authority checks; a report does not grant admission. *)
+val compilation_limits : host -> Chatml_compilation.limits
+
+val bundle_limits : host -> Chatmd_source_bundle.limits
+val catalog : host -> Authoring_policy.catalog option
 
 type diagnostic =
   { diagnostic : Chatmd_shell_spec.Diagnostic.t
@@ -60,6 +82,13 @@ val parameters : Jsonaf.t
     schemas fail before compilation. Every compile includes static entrypoint
     checks. Successful validation explicitly defers initializer, dynamic tool,
     state and runtime schema/permission checks.
+
+    Generated_chatmd instead accepts root_file and sources (path/text objects).
+    It checks bounded captured imports, inherited declarations, authoring policy
+    and delegated moderator compilation. It defers session creation, live parent
+    moderation and lifecycle/revocation. Its identity covers all captured sources,
+    bundle limits and the installed catalog. The source reference describes the
+    root file. No artifact is materialized; all source loading is bundle-only.
 
     [capabilities] must be the caller/target's actual effective ceiling. A report
     and its identity grant no authority, even after successful validation. Run

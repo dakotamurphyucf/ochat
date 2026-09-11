@@ -13,6 +13,8 @@ type error =
     corpus builder, retrieval service or token-budget validator. *)
 type catalog
 
+val catalog_fingerprint : catalog -> string
+
 val catalog
   :  identity:string
   -> packages:Metadata.help list

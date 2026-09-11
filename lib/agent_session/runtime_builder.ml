@@ -808,6 +808,23 @@ let build_with_services
       Some (guarded_services authority services)
     | _, services -> services
   in
+  let extension_services =
+    Option.map extension_services ~f:(fun services ->
+      let host =
+        Option.map services.authoring_validation_host ~f:(fun host ->
+          match source with
+          | Authored _ -> host
+          | Generated _ -> Chat_response.Authoring_validation.for_delegated host)
+      in
+      { services with
+        authoring_validation_host = host
+      ; script_tools =
+          (fun native ->
+            Script_tool_calls.with_authoring_validation_host
+              (services.script_tools native)
+              host)
+      })
+  in
   let elements, artifact, materialized_tree, delegated =
     match source with
     | Authored revision ->

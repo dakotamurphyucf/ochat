@@ -2017,6 +2017,18 @@ let prepare_runtime_at_paths
           in
           let%bind definition =
             Agent_session.Generated_definition.restore
+              ?limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.compilation_limits)
+              ?source_limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.bundle_limits)
+              ?catalog:
+                (Option.bind
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.catalog)
               ~env:t.env
               ~artifact_store
               ~revision_id:artifact.revision_id
@@ -4997,7 +5009,7 @@ let reconcile_generated_creations t =
             , false
             , None ) -> Ok ()
           | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None ->
-            let%bind fingerprint = Authority.fingerprint before in
+            let%bind fingerprint = parent_authority_fingerprint t before in
             if not (String.equal fingerprint record.admission.authority_sha256)
             then revoke record Authority_changed
             else
@@ -5106,6 +5118,20 @@ let reconcile_generated_creations t =
                             let%bind () = verify state in
                             let%bind _ =
                               G.restore
+                                ?limits:
+                                  (Option.map
+                                     t.authoring_validation_host
+                                     ~f:
+                                       Chat_response.Authoring_validation
+                                       .compilation_limits)
+                                ?source_limits:
+                                  (Option.map
+                                     t.authoring_validation_host
+                                     ~f:Chat_response.Authoring_validation.bundle_limits)
+                                ?catalog:
+                                  (Option.bind
+                                     t.authoring_validation_host
+                                     ~f:Chat_response.Authoring_validation.catalog)
                                 ~env:t.env
                                 ~artifact_store:artifacts
                                 ~revision_id:record.admission.revision_id
@@ -5118,6 +5144,7 @@ let reconcile_generated_creations t =
                             let authority =
                               Authority.create
                                 ~max_depth:t.limits.delegation_max_depth
+                                ~moderation:(parent_moderation_source t)
                                 ~host
                                 ~reference
                                 ~capabilities:selected
@@ -5151,7 +5178,7 @@ let reconcile_generated_creations t =
                             let%bind () =
                               A.checkpoint parent.actor ~persist:(fun latest ->
                                 let%bind latest_fingerprint =
-                                  Authority.fingerprint latest
+                                  parent_authority_fingerprint t latest
                                 in
                                 match
                                   latest.lifecycle.desired, latest.halted, latest.failure

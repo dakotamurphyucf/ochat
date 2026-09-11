@@ -64,6 +64,11 @@ let create_child ?(start_immediately = false) env root daemon parent_id =
 ;;
 
 let run_child env ~root ~boundary ~recover =
+  let boundary =
+    if String.is_prefix boundary ~prefix:"moderated-"
+    then String.drop_prefix boundary 10
+    else boundary
+  in
   let start_immediately = String.is_prefix boundary ~prefix:"auto-" in
   let boundary = if start_immediately then String.drop_prefix boundary 5 else boundary in
   let armed = ref false in
@@ -560,6 +565,8 @@ let test env environment =
     ; "parent-stopped"
     ; "parent-restarted"
     ; "parent-missing"
+    ; "moderated-child-record"
+    ; "moderated-auto-child"
     ]
     ~f:(fun boundary ->
       let root =
@@ -571,7 +578,15 @@ let test env environment =
       F.write
         env
         (Filename.concat root "parent.chatmd")
-        {|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|};
+        ({|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|}
+         ^
+         if String.is_prefix boundary ~prefix:"moderated-"
+         then
+           {|<script id="parent-policy" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+         else "");
       Eio.Switch.run (fun sw ->
         let child =
           F.child

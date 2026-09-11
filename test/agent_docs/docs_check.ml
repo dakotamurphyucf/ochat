@@ -183,7 +183,7 @@ let check_json env root documents =
   let host =
     V.create_host
       ~runtime_identity:"documentation-validation-target"
-      ~targets:[ One_off_script; Standalone_tool; Moderator ]
+      ~targets:[ One_off_script; Standalone_tool; Moderator; Generated_chatmd ]
       ~moderator_surface:Ordinary
       ~compilation:Chatml_compilation.default_limits
     |> Result.ok_or_failwith

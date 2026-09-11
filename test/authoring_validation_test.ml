@@ -64,6 +64,186 @@ let with_registry f =
     [%test_eq: int] 0 !calls)
 ;;
 
+let bundle_request ?(tools = [ "read_file" ]) ?(root_file = "child.chatmd") sources =
+  `Object
+    [ "version", `Number "1"
+    ; "target", `String "generated_chatmd"
+    ; "root_file", `String root_file
+    ; ( "sources"
+      , `Array
+          (List.map sources ~f:(fun (path, text) ->
+             `Object [ "path", `String path; "text", `String text ])) )
+    ; "tools", `Array (List.map tools ~f:(fun name -> `String name))
+    ]
+;;
+
+let%expect_test
+    "generated validation checks captured imports without evaluating initializers"
+  =
+  with_registry (fun env capabilities ->
+    let host = host ~targets:[ V.Generated_chatmd ] () in
+    let sources =
+      [ ( "child.chatmd"
+        , {|<developer>Child.</developer><import src="tools.chatmd"/>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = fail("INITIALIZER-MUST-NOT-RUN")
+let on_event ctx state event = Task.pure(state)
+</script>|}
+        )
+      ; "tools.chatmd", {|<tool type="inherited" name="read_file"/>|}
+      ]
+    in
+    let validate ?(host = host) request = V.validate ~env ~host ~capabilities request in
+    let good = validate (bundle_request sources) in
+    assert (V.valid good);
+    assert (Option.is_some good.validation_id);
+    assert (List.mem good.checked "captured_source_closure" ~equal:String.equal);
+    assert (List.mem good.deferred "session_creation" ~equal:String.equal);
+    assert (List.mem good.deferred "initializer_evaluation" ~equal:String.equal);
+    assert (
+      not
+        (String.is_substring
+           (V.to_json good |> Jsonaf.to_string)
+           ~substring:"INITIALIZER-MUST-NOT-RUN"));
+    let identity report =
+      assert (V.valid report);
+      Option.value_exn report.V.validation_id
+    in
+    [%test_eq: string]
+      (identity good)
+      (identity (validate (bundle_request (List.rev sources))));
+    let changed = List.map sources ~f:(fun (path, text) -> path, text ^ "\n") in
+    assert (
+      not (String.equal (identity good) (identity (validate (bundle_request changed)))));
+    let limits = { Chatmd_source_bundle.default_limits with max_files = 12 } in
+    let configured =
+      V.configure_generated host ~limits ~catalog:None |> Result.ok_or_failwith
+    in
+    assert (
+      not
+        (String.equal
+           (identity good)
+           (identity (validate ~host:configured (bundle_request sources)))));
+    let failures =
+      [ "missing captured import", bundle_request [ List.hd_exn sources ]
+      ; ( "ambient file import"
+        , bundle_request [ "child.chatmd", {|<import src="Readme.md"/>|} ] )
+      ; ( "outside path"
+        , bundle_request [ "child.chatmd", {|<import src="../Readme.md"/>|} ] )
+      ; ( "native reconfiguration"
+        , bundle_request [ "child.chatmd", {|<tool name="read_file"/>|} ] )
+      ; ( "unknown inherited helper"
+        , bundle_request
+            [ "child.chatmd", {|<tool type="inherited" name="ochat_validate"/>|} ] )
+      ; ( "delegated model surface"
+        , bundle_request
+            [ ( "child.chatmd"
+              , {|<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = let* result = Model.call("worker", `Null) in Task.pure(state)
+</script>|}
+              )
+            ] )
+      ; "duplicate source", bundle_request (List.hd_exn sources :: sources)
+      ; "removed authority", bundle_request ~tools:[] sources
+      ]
+    in
+    List.iter failures ~f:(fun (label, request) ->
+      let report = validate request in
+      assert (not (V.valid report));
+      assert (not (List.is_empty report.diagnostics));
+      List.iter report.diagnostics ~f:(fun d ->
+        List.iter d.topic_ids ~f:(fun topic ->
+          assert (List.Assoc.mem V.topics topic ~equal:String.equal)));
+      print_endline (label ^ ": rejected"));
+    print_endline
+      "captured bundle checked; no initializers or native tools; identities bind closure \
+       and host limits");
+  [%expect
+    {|
+    missing captured import: rejected
+    ambient file import: rejected
+    outside path: rejected
+    native reconfiguration: rejected
+    unknown inherited helper: rejected
+    delegated model surface: rejected
+    duplicate source: rejected
+    removed authority: rejected
+    captured bundle checked; no initializers or native tools; identities bind closure and host limits |}]
+;;
+
+let%expect_test
+    "generated authoring packages and helper selection stay inside delegated authority"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let module M = Chatmd_shell_spec.Authoring_metadata in
+    let help = V.help Generated_chatmd in
+    let make name =
+      let module Definition = struct
+        type input = string
+
+        let name = name
+        let description = None
+        let type_ = "function"
+        let parameters = `True
+        let input_of_string text = text
+      end
+      in
+      Ochat_function.create_function
+        (module Definition)
+        (fun _ -> failwith "validation ran helper")
+    in
+    let names = [ "author"; M.helper_name Reference; M.helper_name Validation ] in
+    let capabilities =
+      C.create
+        ~owner:"generated-help"
+        ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "roots")
+        ~metadata:
+          [ ("author", M.{ authoring = Some help; helper = None })
+          ; (M.helper_name Reference, M.{ authoring = None; helper = Some Reference })
+          ; M.helper_name Validation, V.helper_metadata
+          ]
+        (List.map names ~f:(fun name ->
+           Chatmd_shell_spec.Source_ref.digest name, make name))
+      |> Result.map_error ~f:(fun e -> e.C.message)
+      |> Result.ok_or_failwith
+    in
+    let catalog marker =
+      Chat_response.Authoring_policy.catalog
+        ~identity:(Chatmd_shell_spec.Source_ref.digest marker)
+        ~packages:[ help ]
+        ~topics:(List.map help.topics ~f:(fun id -> id, [ M.Child_agent ]))
+      |> Result.map_error ~f:(fun e -> e.Chat_response.Authoring_policy.message)
+      |> Result.ok_or_failwith
+    in
+    let make_host marker =
+      V.configure_generated
+        (host ~targets:[ V.Generated_chatmd ] ())
+        ~limits:Chatmd_source_bundle.default_limits
+        ~catalog:(Some (catalog marker))
+      |> Result.ok_or_failwith
+    in
+    let request tools =
+      bundle_request ~tools [ "child.chatmd", {|<tool type="inherited" name="author"/>|} ]
+    in
+    let validate host tools = V.validate ~env ~host ~capabilities (request tools) in
+    let first = validate (make_host "corpus-1") names in
+    assert (V.valid first);
+    let second = validate (make_host "corpus-2") names in
+    assert (V.valid second);
+    assert (not (Option.equal String.equal first.validation_id second.validation_id));
+    List.iter
+      [ [ "author" ]; [ "author"; M.helper_name Validation ] ]
+      ~f:(fun tools -> assert (not (V.valid (validate (make_host "corpus-1") tools))));
+    assert (not (V.valid (validate (host ~targets:[ V.Generated_chatmd ] ()) names)));
+    print_endline
+      "installed child package selects existing helpers only; absent helpers/catalog \
+       reject; corpus changes invalidate report identity");
+  [%expect
+    {| installed child package selects existing helpers only; absent helpers/catalog reject; corpus changes invalidate report identity |}]
+;;
+
 let%expect_test "all inline targets validate without initializer or tool effects" =
   with_registry (fun env capabilities ->
     let poison = "let poison = fail(\"PRIVATE-CANDIDATE-SENTINEL\")\n" in

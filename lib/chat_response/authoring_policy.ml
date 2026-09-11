@@ -25,6 +25,8 @@ type catalog =
   ; fingerprint : string
   }
 
+let catalog_fingerprint catalog = catalog.fingerprint
+
 let catalog ~identity ~packages ~topics =
   let valid_tasks tasks =
     (not (List.is_empty tasks))

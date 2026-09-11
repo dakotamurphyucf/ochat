@@ -63,6 +63,7 @@ type t =
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
   }
 
 type native_services =
@@ -170,10 +171,13 @@ let create
   ; progress = None
   ; progress_ceiling = None
   ; shell_context = None
+  ; authoring_validation_host = None
   }
 ;;
 
 let with_shell_context t services = { t with shell_context = Some services }
+let with_authoring_validation_host t host = { t with authoring_validation_host = host }
+let authoring_validation_host t = t.authoring_validation_host
 
 let with_preparation t ~prepare =
   match t.preparation with
