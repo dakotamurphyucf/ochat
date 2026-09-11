@@ -45,6 +45,33 @@ type t =
   ; progress_ceiling : C.t option
   }
 
+type native_services =
+  { tools : t
+  ; session_id : Agent_protocol.Id.Session.t
+  ; generation : int
+  ; active : bool Atomic.t
+  }
+
+let native_services_key = Eio.Fiber.create_key ()
+
+let with_native_services tools ~session_id ~generation f =
+  let context = { tools; session_id; generation; active = Atomic.make true } in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set context.active false)
+    ~f:(fun () -> Eio.Fiber.with_binding native_services_key context f)
+;;
+
+let current_native_services () =
+  match Eio.Fiber.get native_services_key, Native_tool_invocation.current_scope () with
+  | Some context, Active invocation
+    when Atomic.get context.active
+         && Agent_protocol.Id.Session.equal
+              context.session_id
+              invocation.context.session_id
+         && Int.equal context.generation invocation.context.generation -> Ok context.tools
+  | _ -> Error "native tool services do not belong to an active invoking session"
+;;
+
 let create
       ~registry
       ~moderator_names
@@ -77,15 +104,26 @@ let create
 ;;
 
 let native_dispatch t ~declared ~input ~capabilities =
-  Native_tool_dispatch.create
-    ~input
-    ~capabilities
-    ~declared
-    ~registry:t.registry
-    ~now:t.now
-    ~is_halted:t.is_halted
-    ~admit:t.authorize
-    ~prepare_output:t.prepare_output
+  let dispatch =
+    Native_tool_dispatch.create
+      ~input
+      ~capabilities
+      ~declared
+      ~registry:t.registry
+      ~now:t.now
+      ~is_halted:t.is_halted
+      ~admit:t.authorize
+      ~prepare_output:t.prepare_output
+  in
+  { dispatch with
+    run =
+      (fun request ~authorize ->
+        with_native_services
+          t
+          ~session_id:input.session_id
+          ~generation:input.session_generation
+          (fun () -> dispatch.run request ~authorize))
+  }
 ;;
 
 let is_halted t = t.is_halted ()
@@ -349,11 +387,16 @@ let with_scope_results
           in
           let moderation = Native_tool_moderation.capture () in
           let execute ~invocation f =
-            execute ~invocation (fun ~dispatched ->
+            execute ~invocation (fun ~(dispatched : I.t) ->
               (* A borrowed executor restores its lending context. This call's
                  actual host pre-hook scope may have been installed afterwards;
                  retain it for descendants without extending its lifetime. *)
-              Native_tool_moderation.with_context moderation (fun () -> f ~dispatched))
+              Native_tool_moderation.with_context moderation (fun () ->
+                with_native_services
+                  t
+                  ~session_id:dispatched.context.session_id
+                  ~generation:dispatched.context.generation
+                  (fun () -> f ~dispatched)))
           in
           let%bind resolved =
             checked `Admission (fun () ->

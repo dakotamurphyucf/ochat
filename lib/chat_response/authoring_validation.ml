@@ -87,7 +87,10 @@ let help target =
          match target with
          | Standalone_tool -> [ "chatmd.declarations.schemas" ]
          | _ -> [])
-    ; required_helpers = [ Reference; Validation ]
+        (* These execution contracts do not call a helper. Auto/preload policy adds
+       reference and validation tools; manual policy leaves their exposure to the
+       author. Custom tools may still declare genuine required dependencies. *)
+    ; required_helpers = []
     }
 ;;
 

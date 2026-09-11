@@ -3433,6 +3433,12 @@ constructs or reconnects tools and does not consult an ambient global registry.
 | Preload | Apply automatic behavior and validate the author's unique, compatible topic list in its declared order. |
 | Auto/manual without authoring tools | Add no guidance or tools. Preload without authoring tools is a configuration error. |
 
+The builtin script execution contracts do not themselves require a reference or
+validation helper call. In manual mode, authors can select either helper or neither;
+execution still performs its own mandatory validation. Auto/preload retain the
+compatible-corpus and authentic-helper requirements. A custom tool's explicitly
+declared `required_helpers` remain mandatory in every policy.
+
 If a parent removes helpers, child auto/preload admission fails explicitly; it
 does not restore them from the host's broader inventory. Manual mode remains
 available without optional helpers. Missing installed catalogs, incompatible
@@ -3844,3 +3850,22 @@ restarts with fresh inherited bindings; the leaf also reloads on demand and runs
 a fake-provider turn. A configured depth below the stored chain length rejects.
 The seeded setup does not qualify the still-pending public creation transaction,
 creation crash recovery, independent lifetime or the remaining policy adapters.
+
+### Contextual native tools in descendants
+
+An inherited `run_chatml` keeps its original capability identity, native environment
+and execution policy, while retrieving script services from the actual invoking
+session. `Script_tool_calls` binds these services during model native dispatch and
+inside nested actor-executor callbacks. The binding must match the active native
+invocation's session and generation, and expires when that dispatch returns.
+Borrowed executors cannot restore the parent's actor/job services over this binding.
+The native borrow still supplies the exact selected tool ceiling, and normal
+permission, moderation, output and authority checks remain in force.
+
+The offline active-tree fixture now executes recursive `run_chatml` calls from a
+grandchild after each of two restarts and on-demand reload. It reads through the
+inherited file capability, rejects a tool removed from the parent's selection,
+and requires all five invocation records to belong to the grandchild. Neither
+ancestor receives invocation/job records. The fixture explicitly uses manual
+authoring policy; it does not qualify automatic corpus injection or the remaining
+validation-helper, shell and managed-tool delegation adapters.

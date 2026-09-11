@@ -677,7 +677,42 @@ let%expect_test
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt_file)
-          {|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|};
+          {|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool><tool name="run_chatml"/><tool name="append_to_file"/>|};
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "delegated.txt")
+          "grandchild-owned-read";
+        let request source input tools =
+          `Object
+            [ "source", `String source
+            ; "input", input
+            ; "tools", `Array (List.map tools ~f:(fun name -> `String name))
+            ]
+        in
+        let nested_request =
+          request
+            {|let main input =
+  let* result = Tool.call("run_chatml", input) in
+  match result with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(code) -> Task.fail(code)|}
+            (request
+               {|let main input =
+  let* result = Tool.call("read_file", input) in
+  let* denied = Tool.call("append_to_file", input) in
+  match result with
+  | `Error(code) -> Task.fail(code)
+  | `Ok(value) ->
+    match denied with
+    | `Ok(_) -> Task.fail("unselected tool ran")
+    | `Error(code) -> Task.pure(`Object([
+        {key = "read"; value = value},
+        {key = "blocked"; value = `String(code)}]))|}
+               (`Object [ "root", `String "data"; "file", `String "delegated.txt" ])
+               [ "read_file" ])
+            [ "run_chatml"; "read_file" ]
+          |> Jsonaf.to_string
+        in
         let config = config root root prompt_file in
         let requests = ref 0 in
         let start sw depth =
@@ -692,7 +727,31 @@ let%expect_test
                 Some
                   (fun ~sw:_ ~inputs:_ ->
                     Int.incr requests;
-                    Stdlib.Seq.empty)
+                    match !requests % 2 with
+                    | 0 -> Stdlib.Seq.empty
+                    | _ ->
+                      let open Openai.Responses.Response_stream in
+                      [ Output_item_added
+                          { item =
+                              Function_call
+                                { name = "run_chatml"
+                                ; arguments = ""
+                                ; call_id = sprintf "nested-%d" !requests
+                                ; _type = "function_call"
+                                ; id = Some "nested-item"
+                                ; status = None
+                                }
+                          ; output_index = 0
+                          ; type_ = "response.output_item.added"
+                          }
+                      ; Function_call_arguments_done
+                          { arguments = nested_request
+                          ; item_id = "nested-item"
+                          ; output_index = 0
+                          ; type_ = "response.function_call_arguments.done"
+                          }
+                      ]
+                      |> Stdlib.List.to_seq)
             }
           in
           Daemon.start
@@ -736,7 +795,13 @@ let%expect_test
                               error.Chat_response.Tool_capability.message)
                             |> Result.ok_or_failwith
                           in
-                          Chat_response.Background_request.capability_pins capabilities)
+                          Chat_response.Tool_capability.select
+                            capabilities
+                            ~names:[ "read_file"; "run_chatml" ]
+                          |> Result.map_error ~f:(fun error ->
+                            error.Chat_response.Tool_capability.message)
+                          |> Result.ok_or_failwith
+                          |> Chat_response.Background_request.capability_pins)
                         |> protocol_ok
                       in
                       let id, _ =
@@ -747,7 +812,7 @@ let%expect_test
                           ~parent:(A.state entry.actor |> protocol_ok)
                           ~mode:`Valid
                           ~source:
-                            {|<developer>Generated descendant.</developer><tool type="inherited" name="read_file"/>|}
+                            {|<authoring_context policy="manual"/><developer>Generated descendant.</developer><tool type="inherited" name="read_file"/><tool type="inherited" name="run_chatml"/>|}
                           ~capability_pins:pins
                           ~revoke:false
                       in
@@ -851,7 +916,35 @@ let%expect_test
                           done_ ()
                       in
                       done_ ());
-                    [%test_eq: int] restart !requests;
+                    [%test_eq: int] (restart * 2) !requests;
+                    let state = A.state entry.actor |> protocol_ok in
+                    [%test_eq: int] (restart * 5) (List.length state.invocations);
+                    assert (Option.is_none state.failure);
+                    List.iter state.invocations ~f:(fun invocation ->
+                      assert (P.Id.Session.equal invocation.context.session_id leaf_id);
+                      match invocation.status with
+                      | Resolved (Complete _) | Published (Complete _) -> ()
+                      | _ -> raise_s [%sexp (invocation : P.Invocation.t)]);
+                    let outputs =
+                      List.filter_map state.invocations ~f:(fun invocation ->
+                        match invocation.status with
+                        | Published (Complete value) -> Some (Jsonaf.to_string value)
+                        | _ -> None)
+                    in
+                    [%test_pred: string list]
+                      (List.exists ~f:(fun text ->
+                         String.is_substring text ~substring:"grandchild-owned-read"
+                         && String.is_substring
+                              text
+                              ~substring:"invocation.unselected_tool"))
+                      outputs;
+                    List.iter [ root_id; child_id ] ~f:(fun id ->
+                      let ancestor =
+                        Agent_server.Session_registry.find registry id |> Option.value_exn
+                      in
+                      let state = A.state ancestor.actor |> protocol_ok in
+                      assert (List.is_empty state.invocations);
+                      assert (List.is_empty state.jobs));
                     H.detach handle |> protocol_ok;
                     print_s
                       [%sexp

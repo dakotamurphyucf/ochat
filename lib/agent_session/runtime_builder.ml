@@ -870,7 +870,6 @@ let build_with_services
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
-  let one_off_services = ref None in
   let declares_one_off =
     List.exists elements ~f:(function
       | Prompt.Chat_markdown.Tool (Builtin name) -> String.equal name Run_chatml_tool.name
@@ -889,11 +888,7 @@ let build_with_services
           ~env
           ~policy:services.one_off_policy
           ~services:(fun () ->
-            let%bind script_tools =
-              Result.of_option
-                !one_off_services
-                ~error:"one-off services are not installed"
-            in
+            let%bind script_tools = Script_tool_calls.current_native_services () in
             let%map moderation = Native_tool_moderation.current () in
             Run_chatml_tool.
               { script_tools
@@ -1086,7 +1081,6 @@ let build_with_services
     | None, Some services -> Some (services.script_tools agent_runtime)
     | _, None -> None
   in
-  one_off_services := script_tools;
   let lifecycle =
     match definition, moderator, extension_services with
     | Some _, Some (moderator, _), Some services

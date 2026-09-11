@@ -12,6 +12,13 @@ open Core
     it in their acknowledgement schema. Fail/cancellation retain Error codes. *)
 type t
 
+(** Services belonging to the actual invoking session's native dispatcher. The
+    binding expires with dispatch and must match the active invocation's session
+    and generation. Inherited contextual tools use this instead of retaining
+    their registration owner's actor/job services. This does not grant a tool
+    ceiling: native borrows still supply the exact permitted selection. *)
+val current_native_services : unit -> (t, string) result
+
 (** Read the owning host's current lifecycle policy. *)
 val is_halted : t -> bool
 
