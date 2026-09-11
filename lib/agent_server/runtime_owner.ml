@@ -354,6 +354,12 @@ let prepare_dependency_stop t =
   | Some prepare -> prepare ~closing:false
 ;;
 
+let prepare_dependency_close t =
+  match t.before_unload with
+  | None -> Ok ()
+  | Some prepare -> prepare ~closing:true
+;;
+
 let unload_and_wait t =
   (* A committed stop must join cleanup before closing runtime/workspace resources.
      Waiting with the mutex held would prevent the lease finalizers from releasing. *)
@@ -420,6 +426,15 @@ let with_unloaded t f =
   match result with
   | Ok result -> result
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let reserve_inactive_close t =
+  with_owner_lock t ~protect:true (fun () ->
+    match t.closed, t.unloading, t.runtime, t.background_leases with
+    | false, None, None, [] ->
+      t.closed <- true;
+      true
+    | _ -> false)
 ;;
 
 let retire_after_administration t =

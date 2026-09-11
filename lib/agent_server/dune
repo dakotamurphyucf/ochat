@@ -13,6 +13,7 @@
   catalog_builder
   runtime_owner
   delegated_runtime
+  independent_resources
   result_retention
   session_registry
   delegation_lifecycle

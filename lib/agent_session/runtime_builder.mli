@@ -177,6 +177,14 @@ type t =
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
     (** Generated authority gate for owner-managed work, including idle callbacks.
         This does not authorize disclosure of retained history or replace leases. *)
+  ; ancestor_capabilities :
+      (Agent_protocol.Id.Session.t
+       -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+        option
+    (** Internal factory lookup of the retained original ancestor bindings. Allows
+        descendants below an independent lifetime to validate against reconstructed
+        resources without activating stopped ancestors. Use only under this runtime's
+        lease; the lookup supplies resources, not permission to execute them. *)
   ; activity : Runtime_activity.t option
     (** Generated execution belongs to the runtime's construction switch even
         when invoked by a foreground/scheduler fiber from another switch. The

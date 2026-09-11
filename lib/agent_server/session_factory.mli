@@ -35,6 +35,11 @@ type limits =
 
 type t
 
+type generated_lifetime =
+  | Owned
+  | Independent
+[@@deriving equal, sexp_of]
+
 val create
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
@@ -52,6 +57,7 @@ val create
   -> home:string
   -> model_post_stream:Agent_session.Runtime_builder.model_post_stream option
   -> qualify_chatml_extensions:bool
+  -> independent_lifetime_policy:string option
   -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
   -> durability:Agent_store.Journal_segment.durability
@@ -121,9 +127,15 @@ val reconcile_generated_creations : t -> (unit, Agent_protocol.Error.t) result
     turn or grant caller access.
     External adapters must authenticate their invoking parent before calling.
     Uses the parent's durable principal, workspace and permission profile.
+    [lifetime] defaults to [Owned]. [Independent] requires the configured trusted
+    [independent_lifetime_policy]; its digest is recorded and checked on every
+    restoration/invocation. Independent resource ancestry currently rejects
+    stateful parent moderation rather than omitting that parent's rules. Creation
+    itself still needs an active parent through the durable link checkpoint.
     Failed/ambiguous installs retain their private reservation for reconciliation. *)
 val create_generated_session
   :  ?start_immediately:bool
+  -> ?lifetime:generated_lifetime
   -> t
   -> parent_session_id:Agent_protocol.Id.Session.t
   -> idempotency_key:Agent_protocol.Idempotency_key.t

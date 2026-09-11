@@ -39,6 +39,13 @@ val unload : t -> (unit, Agent_protocol.Error.t) result
     [unload_and_wait] rechecks it before retirement. *)
 val prepare_dependency_stop : t -> (unit, Agent_protocol.Error.t) result
 
+(** Join descendant cleanup before an externally owned resource scope closes.
+    Does not enter this owner's mutex or close its runtime. The host barrier sees
+    [closing=true], preserving running intent during shutdown while joining owned
+    descendants. Suitable for a delegated scope's revocation callback, which must
+    never recursively close its own runtime. *)
+val prepare_dependency_close : t -> (unit, Agent_protocol.Error.t) result
+
 (** After committing a session stop, exclude new runtime admission, cancel and
     join existing execution leases, then detach the worker. Delegation resource
     borrows survive ordinary stop; workspace cleanup must still check references.
@@ -61,6 +68,13 @@ val with_unloaded
   :  t
   -> (unit -> ('a, Agent_protocol.Error.t) result)
   -> ('a option, Agent_protocol.Error.t) result
+
+(** Atomically reserve eviction of an already inactive actor only when its owner
+    has no runtime, lease or unload in progress. On success admission is permanently
+    closed; the caller must finish normal entry closure outside the owner mutex.
+    A failed reservation leaves the owner unchanged. Actor inactivity must be
+    established separately by the registry. *)
+val reserve_inactive_close : t -> bool
 
 (** Retain one loaded runtime for a background worker without holding the owner
     mutex while [f] executes. Independent workers may run concurrently or await

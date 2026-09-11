@@ -18,7 +18,7 @@ type entry =
 
 type t =
   { mutex : Eio.Mutex.t
-  ; mutable closing : bool
+  ; closing : bool Atomic.t
   ; sessions : (Agent_protocol.Id.Session.t, entry) Map.Poly.t Atomic.t
   ; mutable indexed :
       (Agent_protocol.Id.Session.t, Agent_store.Session_index.Entry.t) Map.Poly.t
@@ -34,7 +34,7 @@ type stats =
 
 let create () =
   { mutex = Eio.Mutex.create ()
-  ; closing = false
+  ; closing = Atomic.make false
   ; sessions = Atomic.make Map.Poly.empty
   ; indexed = Map.Poly.empty
   ; loader = None
@@ -43,7 +43,7 @@ let create () =
 
 let install_loader t loader =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    match t.closing with
+    match Atomic.get t.closing with
     | true -> ()
     | false -> t.loader <- Some loader)
 ;;
@@ -51,7 +51,7 @@ let install_loader t loader =
 let index t entry =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let session_id = entry.Agent_store.Session_index.Entry.session.id in
-    if t.closing || Map.mem (Atomic.get t.sessions) session_id
+    if Atomic.get t.closing || Map.mem (Atomic.get t.sessions) session_id
     then ()
     else t.indexed <- Map.set t.indexed ~key:session_id ~data:entry)
 ;;
@@ -68,7 +68,7 @@ let shutting_down () =
 
 let add t ~session_id entry =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    if t.closing
+    if Atomic.get t.closing
     then Error (shutting_down ())
     else if Map.mem (Atomic.get t.sessions) session_id
     then
@@ -85,10 +85,11 @@ let add t ~session_id entry =
 ;;
 
 let find t session_id = Map.find (Atomic.get t.sessions) session_id
+let is_closing t = Atomic.get t.closing
 
 let load t session_id =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    match t.closing, Map.find (Atomic.get t.sessions) session_id with
+    match Atomic.get t.closing, Map.find (Atomic.get t.sessions) session_id with
     | true, _ -> Error (shutting_down ())
     | false, Some entry -> Ok entry
     | false, None ->
@@ -198,7 +199,8 @@ let unload_inactive t ~index_entries =
       match
         Agent_session.Session_actor.state entry.actor, Map.find indexes session_id
       with
-      | Ok state, Some indexed when inactive state ->
+      | Ok state, Some indexed
+        when inactive state && Runtime_owner.reserve_inactive_close entry.runtime ->
         entry.close ();
         Atomic.set t.sessions (Map.remove (Atomic.get t.sessions) session_id);
         t.indexed <- Map.set t.indexed ~key:session_id ~data:indexed;
@@ -211,7 +213,7 @@ let shutdown t =
     let entries =
       Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
         let entries = Map.data (Atomic.get t.sessions) in
-        t.closing <- true;
+        Atomic.set t.closing true;
         t.indexed <- Map.Poly.empty;
         t.loader <- None;
         entries)

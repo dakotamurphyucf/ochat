@@ -51,6 +51,9 @@ val add
     runtime lease. Mutations and indexed loads remain serialized. *)
 val find : t -> Agent_protocol.Id.Session.t -> entry option
 
+(** Lock-free shutdown observation for dependency cleanup callbacks. *)
+val is_closing : t -> bool
+
 (** Returns a loaded entry or reconstructs an indexed stopped session on
     demand from its durable store. *)
 val load : t -> Agent_protocol.Id.Session.t -> (entry, Agent_protocol.Error.t) result
@@ -61,8 +64,9 @@ val load_all : t -> (entry list, Agent_protocol.Error.t) result
 val remove : t -> Agent_protocol.Id.Session.t -> entry option
 val summaries : t -> Agent_protocol.Session.t list
 
-(** Closes actors for stopped sessions with no attachments, runnable work, or
-    active schedules, retaining their durable index entries for lazy reload. *)
+(** Closes actors for stopped sessions with no attachments, runnable work, active
+    schedules, runtime or resource borrows, retaining their durable index entries
+    for lazy reload. Eviction excludes new runtime/resource admission atomically. *)
 val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list -> int
 
 (** Reject new registration/loading, join all runtime dependency cleanup while

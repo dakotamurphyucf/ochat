@@ -106,6 +106,10 @@ type t =
   ; moderator_activation : moderator_activation option
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
+  ; ancestor_capabilities :
+      (Agent_protocol.Id.Session.t
+       -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+        option
   ; activity : Runtime_activity.t option
   ; native_runtime : Agent_runtime.t option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
@@ -1646,6 +1650,7 @@ let build_with_services
          | _ -> None)
     ; moderator_activation
     ; check_execution
+    ; ancestor_capabilities = None
     ; activity
     ; native_runtime =
         (match extension_services with

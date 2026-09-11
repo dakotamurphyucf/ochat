@@ -3854,9 +3854,12 @@ Parent moderation still requires the original owner-aware enforcement path. An
 independent lifetime grant cannot replace an unavailable policy handler or make
 obsolete runtime resources authoritative. A child's own moderator may narrow its
 behavior further. These checks complement resource leases and stop/cancellation.
-The factory still admits only owned children: independent lifetime selection,
-stopped-ancestor resource reconstruction and inherited temporary-workspace
-retention are not installed. General model-facing creation remains separate work.
+The qualified factory accepts explicit `Independent` lifetime with a trusted
+`independent_lifetime_policy` revision configured by its host. It records a digest
+of that grant and checks the current grant on restore and invocation. The default
+remains `Owned`; absent authorization rejects independent creation. Creation needs
+an active parent through the durable linking checkpoint. General model-facing
+creation remains separate work.
 
 The independent-authority tests use real private ledger records with trusted host
 states. They cover stopped ancestry, owned peers/descendants, grant changes during
@@ -3865,7 +3868,8 @@ generated actor/runtime matrix also uses real inherited file reads, its own
 moderator and fake provider requests: explicit authorization permits execution
 after parent stop; host grant revocation during tool admission prevents disclosure
 and further provider requests. These qualify the guard and runtime integration,
-not persisted independent factory creation or daemon recovery.
+not the entire persisted lifetime test matrix. Separate factory tests exercise
+persisted independent creation and daemon recovery as described below.
 
 ### Owned-child cancellation and resource cleanup
 
@@ -3938,13 +3942,21 @@ administration still exclude retained resources. Permanent close cancels and joi
 all borrowers, including when it overlaps an ordinary unload. Deferred close
 failures are reported to the last borrower without poisoning the owner mutex.
 
-These are internal lifetime primitives. The generated-session factory does not
-yet admit independent children. Explicit host authorization, stopped-ancestor
-resource reconstruction, current inherited-policy checks and persisted lifetime
-integration remain required. Retaining old resources does not retain permission
-to execute under obsolete policy or run the parent's worker/moderator. Offline
-tests qualify resource sharing, reload, cleanup faults and actual child activity
-switches across unload/close; they do not claim persisted independent recovery.
+These are internal lifetime primitives. The qualified independent factory uses a
+dedicated resource scope per child, reconstructing the private ancestor chain
+without loading stopped execution runtimes. Each ancestor remains retained against
+eviction, reset and workspace cleanup until the child releases its resources.
+Owned descendants below the independent edge share its ancestor binding lookup;
+they still stop with their immediate parent. Permanent ancestor deletion joins
+child cleanup before removing the workspace. Shutdown preserves running intent.
+Retaining resources never grants permission to execute under obsolete policy.
+
+An ancestor with stateful moderation is currently rejected for independent
+delegation, because a separately available original policy owner is required.
+The factory does not clone moderator state or silently omit its restrictions.
+Offline daemon tests cover temporary-root retention, actual inherited file reads,
+owned descendants, stop/restart, lazy ancestor loading and deletion. Expanded
+native-adapter and race qualification remains part of E08.
 
 `Runtime_builder.prepare_resources` supplies the construction part of stopped
 ancestor restoration. It verifies an authored revision's captured source tree and
@@ -3969,8 +3981,9 @@ for a stopped ancestor without loading its execution runtime. Stop preserves the
 borrow; permanent close cancels/joins it, and reset/maintenance remain excluded.
 `Delegated_runtime.prepare_resources` connects externally owned resource bundles to
 the common child construction/activity scope. Hosts must still validate delegation
-before resource setup and retain every ancestor scope. These pieces do not yet
-install factory ancestry traversal, lifetime admission or workspace retention.
+before resource setup and retain every ancestor scope. The qualified factory's
+`Independent_resources` traversal supplies those checks and borrows, with a
+configured maximum ancestry depth and repeated validation after native setup.
 
 `Agent_server.Delegated_runtime.prepare` holds a parent runtime lease around the
 child's construction switch. Closing the child cancels and joins its activities,

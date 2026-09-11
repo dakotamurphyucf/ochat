@@ -27,6 +27,11 @@ type options =
   ; qualify_chatml_extensions : bool
     (** Internal integration qualification only. Defaults to false, has no CLI or
         configuration-file flag, and does not advertise public extension features. *)
+  ; independent_lifetime_policy : string option
+    (** Explicit trusted host policy revision authorizing independent lifetime.
+        None denies it. The revision is hashed into private admissions; changing
+        it invalidates earlier grants. This is not a model-supplied bearer token
+        and does not enable unqualified extension hosts or public creator tools. *)
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
     (** Initial policy for newly qualified runtimes. Existing sessions retain
         their recorded policy across reload/restart. No CLI/configuration flag. *)

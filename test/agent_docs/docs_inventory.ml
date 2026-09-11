@@ -69,6 +69,7 @@ let owner name =
         ; "delegation_lifecycle"
         ; "runtime_activity"
         ; "delegated_runtime"
+        ; "independent_resources"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"

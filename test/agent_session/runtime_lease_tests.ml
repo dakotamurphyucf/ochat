@@ -21,6 +21,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; idle_notifications = None
   ; automatic_turn_policy = None
   ; check_execution
+  ; ancestor_capabilities = None
   ; activity
   ; native_runtime = None
   ; moderator_activation = None

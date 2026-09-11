@@ -168,9 +168,9 @@ let has_active_workspace_lease entry ~conflict_domain:_ =
 
 let cleanup_temporary t entry state ~event =
   let instance = state.Agent_session.Session_state.spec.workspace_instance in
-  match instance.source_kind with
-  | Physical | Current -> Ok instance
-  | Temporary _ ->
+  match state.spec.delegation, instance.source_kind with
+  | Some _, _ | None, (Physical | Current) -> Ok instance
+  | None, Temporary _ ->
     let open Result.Let_syntax in
     let%bind _handle, protected_roots, expected_path = cleanup_context t entry instance in
     Agent_session.Workspace_cleanup.cleanup
@@ -251,16 +251,28 @@ let replacement_temporary t entry state =
 
 let cleanup_stopped_workspace t entry =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
-  let original = state.spec.workspace_instance in
   let%bind cleaned =
-    cleanup_temporary t entry state ~event:Agent_session.Workspace_cleanup.Session_stop
+    Runtime_owner.with_unloaded entry.Session_registry.runtime (fun () ->
+      let%bind state = Agent_session.Session_actor.state entry.actor in
+      let original = state.spec.workspace_instance in
+      let%bind cleaned =
+        cleanup_temporary
+          t
+          entry
+          state
+          ~event:Agent_session.Workspace_cleanup.Session_stop
+      in
+      match cleaned.cleanup_completion with
+      | None -> Ok (Agent_session.Session_state.summary state)
+      | Some _ ->
+        let%bind replacement = resolve_replacement t entry original in
+        install_replacement entry replacement)
   in
-  if Option.is_none cleaned.cleanup_completion
-  then Ok (Agent_session.Session_state.summary state)
-  else (
-    let%bind replacement = resolve_replacement t entry original in
-    install_replacement entry replacement)
+  match cleaned with
+  | Some session -> Ok session
+  | None ->
+    Agent_session.Session_actor.state entry.actor
+    |> Result.map ~f:Agent_session.Session_state.summary
 ;;
 
 type idempotency =
@@ -1366,6 +1378,9 @@ let handle_session_delete t context request =
   in
   let%bind entry, state = find_visible_entry t context request.session_id in
   let%bind () = validate_delete_state request state in
+  (* Permanent deletion joins independent resource users before removing their
+     roots. Keep the actor registered while their cleanup acknowledges closure. *)
+  Runtime_owner.close_and_wait entry.runtime;
   let%bind (_ : Agent_session.Workspace_instance.t) =
     cleanup_temporary t entry state ~event:Agent_session.Workspace_cleanup.Session_delete
   in
@@ -1431,9 +1446,15 @@ let replacement_workspace t entry state keep_workspace =
   if keep_workspace
   then Ok None
   else (
-    match state.Agent_session.Session_state.spec.workspace_instance.source_kind with
-    | Temporary _ -> Result.map (replacement_temporary t entry state) ~f:Option.some
-    | Physical | Current -> Ok None)
+    match
+      ( state.Agent_session.Session_state.spec.delegation
+      , state.spec.workspace_instance.source_kind )
+    with
+    | Some _, Temporary _ ->
+      Error
+        (error Invalid_state "a generated child cannot replace its inherited workspace")
+    | None, Temporary _ -> Result.map (replacement_temporary t entry state) ~f:Option.some
+    | _, (Physical | Current) -> Ok None)
 ;;
 
 let handle_session_reset t context command_audit request =
@@ -1447,43 +1468,47 @@ let handle_session_reset t context command_audit request =
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () = validate_stopped_revision state request.expected_revision in
        let%bind () = Runtime_owner.unload entry.runtime in
-       let%bind workspace_instance =
-         replacement_workspace t entry state request.keep_workspace
-       in
-       let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
-       let options =
-         Agent_session.Session_actor.
-           { keep_history = request.keep_history
-           ; keep_tasks = request.keep_tasks
-           ; keep_grants = request.keep_grants
-           ; keep_labels = request.keep_labels
-           ; workspace_instance
-           }
-       in
-       let%bind _ =
-         actor_command
-           command_audit
-           ~plain:(fun () ->
-             Agent_session.Session_actor.reset
-               entry.actor
-               ~attachment_id:request.attachment_id
-               ~expected_revision:request.expected_revision
-               options)
-           ~audited:(fun command_audit ->
-             Agent_session.Session_actor.reset_with_command_audit
-               entry.actor
-               ~command_audit
-               ~attachment_id:request.attachment_id
-               ~expected_revision:request.expected_revision
-               options)
-       in
-       let%bind () =
-         Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
-           update_workspace_capacity entry instance)
-       in
-       let%map state = Agent_session.Session_actor.state entry.actor in
-       Agent_protocol.Method_result.Session_reset
-         (session_mutation (Agent_session.Session_state.summary state)))
+       Eio.Cancel.protect (fun () ->
+         Runtime_owner.with_administration entry.runtime (fun () ->
+           let%bind state = Agent_session.Session_actor.state entry.actor in
+           let%bind () = validate_stopped_revision state request.expected_revision in
+           let%bind workspace_instance =
+             replacement_workspace t entry state request.keep_workspace
+           in
+           let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
+           let options =
+             Agent_session.Session_actor.
+               { keep_history = request.keep_history
+               ; keep_tasks = request.keep_tasks
+               ; keep_grants = request.keep_grants
+               ; keep_labels = request.keep_labels
+               ; workspace_instance
+               }
+           in
+           let%bind _ =
+             actor_command
+               command_audit
+               ~plain:(fun () ->
+                 Agent_session.Session_actor.reset
+                   entry.actor
+                   ~attachment_id:request.attachment_id
+                   ~expected_revision:request.expected_revision
+                   options)
+               ~audited:(fun command_audit ->
+                 Agent_session.Session_actor.reset_with_command_audit
+                   entry.actor
+                   ~command_audit
+                   ~attachment_id:request.attachment_id
+                   ~expected_revision:request.expected_revision
+                   options)
+           in
+           let%bind () =
+             Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
+               update_workspace_capacity entry instance)
+           in
+           let%map state = Agent_session.Session_actor.state entry.actor in
+           Agent_protocol.Method_result.Session_reset
+             (session_mutation (Agent_session.Session_state.summary state)))))
 ;;
 
 let current_prompt_revision t state =

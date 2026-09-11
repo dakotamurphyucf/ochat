@@ -700,6 +700,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; idle_notifications = None
            ; automatic_turn_policy = None
            ; check_execution = None
+           ; ancestor_capabilities = None
            ; activity = None
            ; native_runtime = None
            ; moderator_activation = None
@@ -1069,6 +1070,7 @@ let%expect_test
                ; idle_notifications = None
                ; automatic_turn_policy = None
                ; check_execution = None
+               ; ancestor_capabilities = None
                ; activity = None
                ; native_runtime = None
                ; moderator_activation = None
