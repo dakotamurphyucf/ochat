@@ -170,6 +170,24 @@ let check_json env root documents =
              (file ^ ": " ^ Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)))
       | Ok _ -> ()
       | Error error -> failwith (file ^ ": " ^ error.message)));
+  let management_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json session-management-envelope\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all management_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      match
+        Agent_session.Session_management.decode_request
+          (Re.Group.get block 1 |> Jsonaf.of_string)
+      with
+      | Ok _ -> ()
+      | Error error -> failwith (file ^ ": " ^ error.Agent_protocol.Invocation.message)));
   let validation_pattern =
     Re.(
       compile

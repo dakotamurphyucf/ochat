@@ -67,6 +67,7 @@ let owner name =
         ; "generated_session_request"
         ; "generated_session_tool"
         ; "managed_session_service"
+        ; "session_management"
         ; "managed_session_tool"
         ; "managed_send_tool"
         ; "managed_read_tool"

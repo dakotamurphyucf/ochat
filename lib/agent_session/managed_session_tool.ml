@@ -34,50 +34,7 @@ let status_registration () =
       (module Definition)
       ~strict:true
       (fun json ->
-         let unavailable message =
-           P.Invocation.
-             { code = "agent.management.denied"
-             ; message
-             ; retryable = false
-             ; details = `Null
-             }
-         in
-         let outcome =
-           let open Result.Let_syntax in
-           let%bind id =
-             match json with
-             | `Object [ ("session_id", `String id) ] ->
-               P.Id.Session.of_string id
-               |> Result.map_error ~f:(fun _ -> unavailable "Invalid session ID.")
-             | _ -> Error (unavailable "Expected a session_id object.")
-           in
-           let%bind borrowed =
-             Native_tool_invocation.borrow ()
-             |> Result.map_error ~f:(fun _ ->
-               unavailable "No active management invocation.")
-           in
-           let%bind services =
-             Script_tool_calls.current_native_services ()
-             |> Result.map_error ~f:(fun _ -> unavailable "No active management service.")
-           in
-           let%bind service =
-             Script_tool_calls.managed_session_service services
-             |> Result.of_option
-                  ~error:
-                    P.Invocation.
-                      { code = "capability_unavailable"
-                      ; message = "Session management requires a durable Ochat host."
-                      ; retryable = false
-                      ; details = `Null
-                      }
-           in
-           service.status borrowed id
-         in
-         let outcome =
-           match outcome with
-           | Ok value -> P.Invocation.Complete value
-           | Error error -> Fail error
-         in
+         let outcome = Session_management_native.run Status json in
          Openai.Responses.Tool_output.Output.Text
            (P.Invocation.outcome_to_json outcome |> Jsonaf.to_string))
   in

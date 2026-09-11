@@ -40,75 +40,7 @@ let registration () =
       (module Definition)
       ~strict:true
       (fun json ->
-         let fail message =
-           P.Invocation.
-             { code = "agent.send.invalid_request"
-             ; message
-             ; retryable = false
-             ; details = `Null
-             }
-         in
-         let outcome =
-           let open Result.Let_syntax in
-           let%bind fields =
-             P.Json_codec.fields json
-             |> Result.map_error ~f:(fun _ -> fail "Expected unique message fields.")
-           in
-           let%bind () =
-             match
-               List.find (P.Json_codec.to_alist fields) ~f:(fun (name, _) ->
-                 not
-                   (List.mem
-                      [ "session_id"; "message"; "idempotency_key" ]
-                      name
-                      ~equal:String.equal))
-             with
-             | None -> Ok ()
-             | Some _ -> Error (fail "Unexpected message field.")
-           in
-           let text name =
-             P.Json_codec.required_as fields name P.Json_codec.string
-             |> Result.map_error ~f:(fun _ -> fail ("Expected field: " ^ name))
-           in
-           let%bind id =
-             text "session_id"
-             |> Result.bind ~f:(fun id ->
-               P.Id.Session.of_string id
-               |> Result.map_error ~f:(fun _ -> fail "Invalid session ID."))
-           in
-           let%bind key =
-             text "idempotency_key"
-             |> Result.bind ~f:(fun key ->
-               P.Idempotency_key.of_string key
-               |> Result.map_error ~f:(fun _ -> fail "Invalid idempotency key."))
-           in
-           let%bind message = text "message" in
-           let%bind borrowed =
-             Native_tool_invocation.borrow ()
-             |> Result.map_error ~f:(fun _ -> fail "No active invocation.")
-           in
-           let%bind services =
-             Script_tool_calls.current_native_services ()
-             |> Result.map_error ~f:(fun _ -> fail "No active session service.")
-           in
-           let%bind service =
-             Script_tool_calls.managed_session_service services
-             |> Result.of_option
-                  ~error:
-                    P.Invocation.
-                      { code = "capability_unavailable"
-                      ; message = "Session management requires a durable Ochat host."
-                      ; retryable = false
-                      ; details = `Null
-                      }
-           in
-           service.send borrowed id ~key ~message
-         in
-         let outcome =
-           match outcome with
-           | Ok value -> P.Invocation.Complete value
-           | Error error -> Fail error
-         in
+         let outcome = Session_management_native.run Send json in
          Openai.Responses.Tool_output.Output.Text
            (P.Invocation.outcome_to_json outcome |> Jsonaf.to_string))
   in

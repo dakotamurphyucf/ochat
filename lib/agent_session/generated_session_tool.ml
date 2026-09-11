@@ -30,31 +30,7 @@ let registration () =
       (module Definition)
       ~strict:false
       (fun json ->
-         let borrowed =
-           Native_tool_invocation.borrow ()
-           |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-           |> Result.ok_or_failwith
-         in
-         let tools =
-           Script_tool_calls.current_native_services () |> Result.ok_or_failwith
-         in
-         let outcome =
-           match Script_tool_calls.generated_creation_service tools with
-           | None ->
-             I.Fail
-               { code = "capability_unavailable"
-               ; message = "Persisted child creation requires a durable Ochat host."
-               ; retryable = false
-               ; details = `Null
-               }
-           | Some service ->
-             (match
-                Q.decode ~limits:service.limits json
-                |> Result.bind ~f:(service.create borrowed)
-              with
-              | Error failure -> I.Fail failure
-              | Ok created -> I.Complete (Q.to_json created))
-         in
+         let outcome = Session_management_native.run Create json in
          Openai.Responses.Tool_output.Output.Text
            (I.outcome_to_json outcome |> Jsonaf.to_string))
   in

@@ -4549,6 +4549,39 @@ notifications remain stored for later explicit resume. An admitted response can
 finish without failing merely because desired state changed to stopped. Cancellation
 continues to reject finishing work through the existing operation-state guards.
 
+### Shared session-management request adapter
+
+`Agent_session.Session_management` is the transport-independent adapter used by
+all six native lifecycle tools. A trusted host supplies an admitted, expiring
+`Native_tool_invocation.borrowed`, the permitted operation list and the existing
+creation/management services. The adapter uses no native registration lookup or
+ambient CLI credentials. Operation permission is distinct from the exact tool
+subset a generated child can inherit.
+
+The version-1 adapter envelope (distinct from a transport's JSON-RPC envelope) is:
+
+```json session-management-envelope
+{
+  "version": 1,
+  "operation": "read",
+  "arguments": { "session_id": "ses_example" }
+}
+```
+
+Operations are `create`, `send`, `read`, `status`, `wait` and `stop`. Their arguments
+use the same decoder as the corresponding native tool. Responses use the existing
+invocation outcome envelope. Unsupported versions, unknown/duplicate fields and
+unknown operations reject. The envelope cannot choose a caller identity or expand
+the allowed operation list. Disallowed operations and expired borrows fail before
+calling a service; the services still enforce current relationship/target authority.
+
+This is a host API foundation, not a transport credential or an active public
+protocol method. Hosts must authenticate and admit each caller before constructing
+an adapter. The scoped external CLI transport, process isolation and end-to-end
+helper qualification remain E09/E10 work; ordinary same-user Unix CLI access is
+not a substitute for a constrained helper identity. General exposure remains
+gated until A01.
+
 ### Authored agent-tool persistence contract (implementation in progress)
 
 The parser now accepts author-controlled policies:
