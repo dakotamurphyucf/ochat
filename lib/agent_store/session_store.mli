@@ -121,6 +121,10 @@ val open_session
 val write_metadata : t -> Handle.t -> Metadata.t -> (unit, Store_error.t) result
 val close_session : t -> Handle.t -> (unit, Store_error.t) result
 
+(** Read the durable identity-bearing archive marker of an opened session,
+    independently of the reconstructable index. *)
+val is_archived : t -> Handle.t -> (bool, Store_error.t) result
+
 (** [archive_session] hides a closed session from normal recovery while
     retaining its complete durable directory. Persist an identity-bearing
     [ARCHIVED] marker before updating the reconstructable index, so subsequent

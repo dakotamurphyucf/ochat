@@ -101,6 +101,22 @@ val import_legacy
     inspection does not require loading a deleted/revoked parent. *)
 val recover_sessions : t -> (Session_registry.entry list, Agent_protocol.Error.t) result
 
+(** Qualified internal host creation of an initially stopped generated child.
+    Revalidates the prepared definition against the loaded parent's exact native
+    bindings, persists a protected retry mapping and complete initial journal/
+    snapshot before publication, then links under the parent's actor checkpoint.
+    Does not initialize scripts, start a model turn or grant caller access.
+    External adapters must authenticate their invoking parent before calling.
+    Uses the parent's durable principal, workspace and permission profile.
+    Failed/ambiguous installs retain their private reservation for reconciliation. *)
+val create_generated_session
+  :  t
+  -> parent_session_id:Agent_protocol.Id.Session.t
+  -> idempotency_key:Agent_protocol.Idempotency_key.t
+  -> display_name:string option
+  -> Agent_session.Generated_definition.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata
     and accurate scheduling hints before clearing the durable rebuild marker.
     Call with the entire successful [recover_sessions] result, only after job

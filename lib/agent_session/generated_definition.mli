@@ -21,6 +21,21 @@ val artifact : t -> Agent_store.Prompt_artifact_store.Artifact.t
 val admission : t -> Chat_response.Generated_admission.t
 val capability_pins : t -> (string * string) list
 
+(** Retain the validated source, compiled definition and capability selection,
+    rebuilding only artifact identity for a durable creation reservation/retry. *)
+val with_identity
+  :  t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> created_at:Agent_protocol.Timestamp.t
+  -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+(** Allocate the admitted plain initial messages without initializing scripts,
+    loading resources or copying parent history. Returns the next history ID. *)
+val initial_history
+  :  t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> (History_entry.t list * int, Agent_protocol.Error.t) result
+
 (** The creation coordinator must durably reserve the artifact ID/protect it from
     collection before calling this, and recheck parent/delegation authority before
     exposing a child. Repeating installation accepts only an identical verified

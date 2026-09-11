@@ -55,6 +55,10 @@ val status : t -> status
 val dispatcher : t -> Dispatcher.t
 val registry : t -> Session_registry.t
 val store : t -> Agent_store.Session_store.t
+
+(** Internal qualified host services; access is not caller authorization. *)
+val factory : t -> Session_factory.t
+
 val blob_store : t -> Agent_store.Blob_store.t
 val prompts : t -> Agent_session.Prompt_catalog.t
 val workspaces : t -> Agent_session.Workspace_catalog.t

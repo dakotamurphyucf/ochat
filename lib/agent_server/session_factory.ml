@@ -34,6 +34,7 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
   ; registry : Session_registry.t
+  ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
@@ -113,6 +114,7 @@ let create
   ; env
   ; store
   ; registry
+  ; generated_creation_mutex = Eio.Mutex.create ()
   ; idempotency_store
   ; blob_store
   ; prompts
@@ -3915,4 +3917,362 @@ let recover_sessions t =
          failure)
   in
   loop [] (List.rev !ordered)
+;;
+
+let initialize_generated_layout t state ~staging_directory =
+  let module Store = Agent_store in
+  let open Result.Let_syntax in
+  let%bind journal =
+    Store.Journal.create
+      ~env:t.env
+      ~directory:(Filename.concat staging_directory "journal")
+      ~max_payload_length:t.limits.max_journal_payload
+      ~max_segment_bytes:t.limits.max_segment_bytes
+      ~max_segment_frames:t.limits.max_segment_frames
+  in
+  let%bind writer =
+    Store.Commit_writer.create
+      ~sw:t.sw
+      ~journal
+      ~session_id:state.Agent_session.Session_state.identity.session_id
+      ~next_transaction_sequence:1L
+      ~previous_transaction_hash:None
+      ~queue_capacity:t.limits.commit_queue_capacity
+  in
+  Exn.protect
+    ~finally:(fun () -> Store.Commit_writer.close writer)
+    ~f:(fun () ->
+      let persistence =
+        Agent_session.Session_persistence.create
+          ~archive:(fun _ _ -> Error (corrupt "creation cannot archive history"))
+          ~command_accepted:(fun _ _ -> ())
+          ~writer
+          ~durability:Flush
+          ~previous_transaction_hash:None
+      in
+      let%bind transition =
+        commit_creation t persistence state ~command_audit:None
+        |> Result.map_error ~f:(fun error -> Store.Store_error.Corrupt error.message)
+      in
+      let state = transition.Agent_session.Session_transition.state in
+      let%bind _ =
+        Agent_session.Session_persistence.install_snapshot_at
+          ~env:t.env
+          ~directory:(Filename.concat staging_directory "snapshot")
+          ~max_payload_length:t.limits.snapshot_payload_limit
+          ~transaction_hash:
+            (Agent_session.Session_persistence.transaction_hash persistence)
+          state
+      in
+      let%map () = Store.Durable_file.sync_directory ~env:t.env ~path:staging_directory in
+      metadata state)
+;;
+
+let create_generated_session
+      t
+      ~parent_session_id
+      ~idempotency_key
+      ~display_name
+      definition
+  =
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let module State = Agent_session.Session_state in
+  let module G = Agent_session.Generated_definition in
+  let module C = Chat_response.Tool_capability in
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let run () =
+    let%bind parent =
+      match
+        t.qualify_chatml_extensions, Session_registry.find t.registry parent_session_id
+      with
+      | true, Some parent -> Ok parent
+      | _ ->
+        Error (unavailable Invalid_state "generated creation requires a qualified parent")
+    in
+    Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+      let%bind before = A.state parent.actor in
+      let%bind authority_sha256 = Agent_session.Delegation_authority.fingerprint before in
+      let check_parent current =
+        let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+        match current.State.lifecycle.desired, current.halted, current.failure with
+        | Running, false, None when String.equal fingerprint authority_sha256 -> Ok ()
+        | _ ->
+          Error
+            (unavailable Permission_denied "parent no longer permits generated creation")
+      in
+      let%bind () = check_parent before in
+      let%bind principal_id =
+        Result.of_option
+          before.identity.creating_principal
+          ~error:
+            (unavailable Permission_denied "generated creation needs a durable principal")
+      in
+      let%bind native =
+        Result.of_option
+          runtime.Agent_session.Runtime_builder.native_runtime
+          ~error:(unavailable Invalid_state "parent native resources are unavailable")
+      in
+      let%bind capabilities =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.C.message)
+      in
+      let%bind () =
+        C.references
+          (Chat_response.Generated_admission.capabilities (G.admission definition))
+        |> List.fold_result ~init:() ~f:(fun () reference ->
+          C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map ~f:ignore
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.C.message))
+      in
+      let artifact = G.artifact definition in
+      let%bind protocol =
+        P.Session.Spec.create
+          ~execution_host:Daemon
+          ~prompt:(Generated artifact.revision_id)
+          ~workspace:before.spec.protocol.workspace
+          ~liveness:Detached
+          ~persistence:Durable
+          ~permission_profile:before.spec.permission_profile
+          ~start_immediately:false
+          ?display_name
+          ~labels:[]
+          ()
+      in
+      let key : D.Key.t =
+        { parent_session_id
+        ; parent_generation = before.identity.generation
+        ; principal_id
+        ; idempotency_key
+        }
+      in
+      let request_sha256 =
+        [%sexp
+          ("ochat.generated-create.stopped.v1" : string)
+        , (Chat_response.Generated_admission.source_fingerprint (G.admission definition)
+           : string)
+        , (G.capability_pins definition : (string * string) list)
+        , (display_name : string option)]
+        |> Sexp.to_string_mach
+        |> Chatmd_shell_spec.Source_ref.digest
+      in
+      let ledger = S.delegations t.store in
+      let candidate : D.Admission.t =
+        { child_session_id = P.Id.Session.create ()
+        ; revision_id = artifact.revision_id
+        ; transaction_id = P.Id.Transaction.create ()
+        ; manifest_sha256 = artifact.manifest_sha256
+        ; parent_revision_id = before.spec.prompt_revision_id
+        ; authority_sha256
+        ; capability_pins = G.capability_pins definition
+        ; lifetime = Owned
+        ; created_at = artifact.created_at
+        }
+      in
+      Eio.Cancel.protect (fun () ->
+        let%bind reservation =
+          D.reserve
+            ledger
+            ~key
+            ~request_sha256
+            ~admission:candidate
+            ~max_records:t.limits.delegation_recovery_max_count
+            ~max_bytes:t.limits.delegation_recovery_max_bytes
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind record =
+          match reservation with
+          | (New record | Replay record) when Option.is_none record.revocation ->
+            Ok record
+          | New _ | Replay _ ->
+            Error (unavailable Permission_denied "generated admission was revoked")
+          | Conflict _ ->
+            Error (unavailable Conflict "generated creation key has different inputs")
+        in
+        let%bind () =
+          match
+            ( record.admission.lifetime
+            , String.equal record.admission.authority_sha256 authority_sha256 )
+          with
+          | Owned, true -> Ok ()
+          | _ ->
+            Error (unavailable Permission_denied "reserved parent authority has changed")
+        in
+        let diagnostics errors =
+          unavailable
+            Prompt_unavailable
+            (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+             |> String.concat ~sep:"\n")
+        in
+        let%bind definition =
+          G.with_identity
+            definition
+            ~revision_id:record.admission.revision_id
+            ~created_at:record.admission.created_at
+          |> Result.map_error ~f:diagnostics
+        in
+        let%bind artifacts =
+          Agent_store.Prompt_artifact_store.create
+            ~env:t.env
+            ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind record =
+          G.install_reserved
+            ~delegations:ledger
+            ~reservation:record
+            ~artifact_store:artifacts
+            definition
+          |> Result.map_error ~f:diagnostics
+        in
+        let reference = D.reference record in
+        let child_id = record.admission.child_session_id in
+        let verify state =
+          match state.State.spec.delegation with
+          | Some actual when D.Reference.equal reference actual -> Ok ()
+          | _ -> Error (corrupt "generated child does not match its creation reservation")
+        in
+        let%bind entry, fresh =
+          match Session_registry.find t.registry child_id with
+          | Some entry ->
+            let%map () = A.state entry.actor |> Result.bind ~f:verify in
+            entry, false
+          | None ->
+            let actor_lock_nonce =
+              P.Id.Transaction.create () |> P.Id.Transaction.to_string
+            in
+            let%bind handle =
+              match S.open_session t.store ~sw:t.sw ~actor_lock_nonce child_id with
+              | Ok handle -> Ok handle
+              | Error (Missing _)
+                when D.equal_stage record.stage Child_installed
+                     || D.equal_stage record.stage Linked ->
+                Error
+                  (unavailable
+                     Session_not_found
+                     "retained generated child is no longer available")
+              | Error (Missing _) ->
+                let%bind history, next =
+                  G.initial_history definition ~session_id:child_id
+                in
+                let initial =
+                  State.create
+                    ~identity:
+                      { session_id = child_id
+                      ; display_name
+                      ; creating_principal = Some principal_id
+                      ; created_at = record.admission.created_at
+                      ; updated_at = record.admission.created_at
+                      ; labels = []
+                      ; generation = 0
+                      }
+                    ~spec:
+                      { before.spec with
+                        protocol =
+                          { protocol with
+                            prompt = Generated record.admission.revision_id
+                          }
+                      ; prompt_definition_id = None
+                      ; prompt_revision_id = record.admission.revision_id
+                      ; delegation = Some reference
+                      ; quota_key = None
+                      }
+                    ~initial_history:
+                      (List.map history ~f:Agent_session.History_codec.to_protocol)
+                in
+                let initial =
+                  { initial with
+                    conversation =
+                      { initial.conversation with
+                        next_history_sequence = Int64.of_int next
+                      ; reserved_history_through = Int64.of_int next
+                      }
+                  }
+                in
+                let%bind () = State.validate initial in
+                S.create_session_initialized
+                  t.store
+                  ~sw:t.sw
+                  ~transaction_id:record.admission.transaction_id
+                  ~actor_lock_nonce
+                  ~initialize:(initialize_generated_layout t initial)
+                |> Result.map_error ~f:protocol_of_store
+              | Error error -> Error (protocol_of_store error)
+            in
+            (match
+               let%bind archived =
+                 S.is_archived t.store handle |> Result.map_error ~f:protocol_of_store
+               in
+               let%bind () =
+                 match archived with
+                 | false -> Ok ()
+                 | true ->
+                   Error
+                     (unavailable
+                        Session_not_found
+                        "retained generated child is archived")
+               in
+               let%bind initial = initial_recovery_state t handle in
+               let%bind () = verify initial in
+               let%map entry = recover_open_handle t handle in
+               entry, true
+             with
+             | Ok _ as success -> success
+             | Error _ as failure ->
+               close_recovery_handle t handle;
+               failure)
+        in
+        let publication () =
+          let%bind () =
+            Agent_store.Durable_file.sync_directory
+              ~env:t.env
+              ~path:(Agent_store.Data_root.sessions_path (S.data_root t.store))
+            |> Result.map_error ~f:protocol_of_store
+          in
+          let%bind record =
+            D.advance ledger record Child_installed
+            |> Result.map_error ~f:protocol_of_store
+          in
+          A.checkpoint parent.actor ~persist:(fun current ->
+            match check_parent current with
+            | Ok () ->
+              D.advance ledger record Linked
+              |> Result.map ~f:ignore
+              |> Result.map_error ~f:protocol_of_store
+            | Error error ->
+              let reason =
+                match current.lifecycle.desired with
+                | Stopped -> D.Parent_stopped
+                | Running -> Authority_changed
+              in
+              let%bind _ =
+                D.revoke ledger record reason |> Result.map_error ~f:protocol_of_store
+              in
+              Error error)
+        in
+        let owned = ref fresh in
+        Exn.protect
+          ~finally:(fun () -> if !owned then entry.close ())
+          ~f:(fun () ->
+            let%bind () = publication () in
+            let%map () =
+              match fresh with
+              | false -> Ok ()
+              | true -> Session_registry.add t.registry ~session_id:child_id entry
+            in
+            owned := false;
+            entry)))
+  in
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
+      try Ok (run ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;

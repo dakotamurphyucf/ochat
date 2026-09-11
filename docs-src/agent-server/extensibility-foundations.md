@@ -3842,13 +3842,13 @@ can inspect an already-loaded parent while an on-demand child loader holds the
 registry mutation lock. This snapshot does not load parents, retain resources or
 grant authority: the factory still obtains actual actor state and a runtime lease.
 
-Offline daemon tests seed real artifacts and private child records, then exercise
+Some offline daemon tests seed real artifacts and private child records, then exercise
 public attach/start/send/stop operations. They cover inherited scoped file reads,
 initializer failure, child stop/restart, and parent stop waiting on deliberately
 blocked provider cleanup. An active root/child/grandchild tree survives two daemon
 restarts with fresh inherited bindings; the leaf also reloads on demand and runs
 a fake-provider turn. A configured depth below the stored chain length rejects.
-The seeded setup does not qualify the still-pending public creation transaction,
+Those seeded cases do not qualify the still-pending public creation transaction,
 creation crash recovery, independent lifetime or the remaining policy adapters.
 
 ### Contextual native tools in descendants
@@ -3869,3 +3869,44 @@ and requires all five invocation records to belong to the grandchild. Neither
 ancestor receives invocation/job records. The fixture explicitly uses manual
 authoring policy; it does not qualify automatic corpus injection or the remaining
 validation-helper, shell and managed-tool delegation adapters.
+
+### Qualified persisted child creation
+
+`Session_factory.create_generated_session` is an internal host service for creating
+an initially stopped generated child. It accepts an already admitted definition,
+parent session ID, idempotency key and optional display name. External adapters
+must authenticate their invoking parent; this API does not make a session ID an
+access grant or expose a model tool.
+
+The factory retains the loaded parent's runtime, checks its current policy and
+exact selected capabilities, and derives the durable principal, workspace and
+permission profile from that parent. The request digest covers source, effective
+capability pins and display name. Repeated requests use the reserved child/revision
+IDs even when preparation allocated new candidate artifact IDs. Changed inputs
+under the same scoped key conflict; changed admitted parent authority rejects.
+An archived child or an installed child whose storage has been removed returns
+`Session_not_found`. Retry never recreates that child. Archive checks use the
+durable identity-bearing marker before recovery can update the index.
+
+Artifact installation remains protected by the private ledger. The factory writes
+a normal `Created` journal transaction and initial snapshot inside the private
+session staging directory before atomic installation. Initial history contains
+the child's admitted plain messages, without parent transcript copying, resource
+loads, moderator initialization or provider calls. Journal creation uses `Flush`;
+snapshot and directory publication use the existing durable store operations.
+
+After normal stopped recovery verifies the child, the factory records
+`Child_installed` and performs the final parent-policy check and `Linked` advance
+inside a parent actor checkpoint. It never builds a runtime or reenters the parent
+actor from that callback. A changed parent revokes the pending admission; failure
+retains the child and private intent. Fresh unregistered actor resources close on
+both returned errors and exceptions. Registration follows linking.
+
+The active-tree fixture now uses this creation service instead of seeding child
+storage. It checks identical retries, conflicts, separate initial instructions and
+the same child IDs after two daemon restarts, then starts/sends through the public
+session APIs and executes inherited recursive scripts. These tests qualify normal
+creation and retained retry behavior, including rejection after archive/removal.
+Automatic start intent, model-facing creation,
+incomplete-stage startup reconciliation, fault injection at every cross-store
+boundary and safe abandoned cleanup remain required work.

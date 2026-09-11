@@ -582,6 +582,10 @@ let write_metadata t handle metadata =
 
 let close_session t handle = Lock.release ~env:t.env handle.Handle.actor_lock
 
+let is_archived t handle =
+  read_archive_marker ~env:t.env (Handle.directory handle) (Handle.session_id handle)
+;;
+
 let archive_session t session_id =
   Session_index.find t.index session_id
   |> Result.of_option

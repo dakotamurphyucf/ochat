@@ -93,7 +93,7 @@ let actor_persistence t =
 
 let transaction_hash t = t.previous_transaction_hash
 
-let install_snapshot ~env ~handle ~max_payload_length ~transaction_hash state =
+let install_snapshot_at ~env ~directory ~max_payload_length ~transaction_hash state =
   let snapshot =
     Agent_store.Snapshot.
       { schema_version = Session_state.current_schema_version
@@ -107,11 +107,13 @@ let install_snapshot ~env ~handle ~max_payload_length ~transaction_hash state =
       ; payload = Sexp.to_string_mach ([%sexp_of: Session_state.t] state)
       }
   in
-  Agent_store.Snapshot.install
+  Agent_store.Snapshot.install ~env ~directory ~max_payload_length snapshot
+;;
+
+let install_snapshot ~env ~handle =
+  install_snapshot_at
     ~env
     ~directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
-    ~max_payload_length
-    snapshot
 ;;
 
 let restore_snapshot payload =

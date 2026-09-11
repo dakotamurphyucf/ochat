@@ -764,6 +764,89 @@ let%expect_test
             ~options
             ()
         in
+        let child_creation daemon parent_id =
+          let module G = Agent_session.Generated_definition in
+          let module C = Chat_response.Tool_capability in
+          let entry =
+            Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
+            |> Option.value_exn
+          in
+          let prepare () =
+            Owner.with_background_runtime entry.runtime (fun runtime ->
+              let native =
+                Option.value_exn runtime.Agent_session.Runtime_builder.native_runtime
+              in
+              let capabilities =
+                Lazy.force native.capabilities
+                |> Result.map_error ~f:(fun error -> error.C.message)
+                |> Result.ok_or_failwith
+              in
+              let selected =
+                C.select capabilities ~names:[ "read_file"; "run_chatml" ]
+                |> Result.map_error ~f:(fun error -> error.C.message)
+                |> Result.ok_or_failwith
+              in
+              let source =
+                {|<authoring_context policy="manual"/><developer>Generated descendant.</developer><tool type="inherited" name="read_file"/><tool type="inherited" name="run_chatml"/>|}
+              in
+              let bundle =
+                Chatmd_source_bundle.create
+                  ~root_file:"child.chatmd"
+                  ~sources:[ "child.chatmd", source ]
+                  ()
+                |> Result.ok_or_failwith
+              in
+              G.prepare
+                ~env
+                ~dir:Eio.Path.(Eio.Stdenv.fs env / root)
+                ~revision_id:(P.Id.Prompt_revision.create ())
+                ~created_at:(P.Timestamp.now ())
+                ~current_capabilities:(fun () -> capabilities)
+                ~references:(C.references selected)
+                bundle
+              |> Result.map_error ~f:(fun errors ->
+                P.Error.invalid_request
+                  (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                   |> String.concat ~sep:"\n")))
+            |> protocol_ok
+          in
+          let create ~display_name definition =
+            Agent_server.Session_factory.create_generated_session
+              (Daemon.factory daemon)
+              ~parent_session_id:parent_id
+              ~idempotency_key:
+                (P.Idempotency_key.of_string (P.Id.Session.to_string parent_id)
+                 |> protocol_ok)
+              ~display_name
+              definition
+          in
+          create, prepare
+        in
+        let create_child daemon parent_id =
+          let create, prepare = child_creation daemon parent_id in
+          let created = create ~display_name:None (prepare ()) |> protocol_ok in
+          let state = A.state created.actor |> protocol_ok in
+          let repeated = create ~display_name:None (prepare ()) |> protocol_ok in
+          assert (
+            P.Id.Session.equal
+              state.identity.session_id
+              (A.state repeated.actor |> protocol_ok).identity.session_id);
+          (match create ~display_name:(Some "different request") (prepare ()) with
+           | Error { code = Conflict; _ } -> ()
+           | _ -> failwith "changed creation payload did not conflict");
+          assert (
+            List.exists state.conversation.canonical_history ~f:(fun entry ->
+              String.is_substring
+                (Jsonaf.to_string entry.P.History.payload)
+                ~substring:"Generated descendant."));
+          assert (
+            not
+              (List.exists state.conversation.canonical_history ~f:(fun entry ->
+                 String.is_substring
+                   (Jsonaf.to_string entry.P.History.payload)
+                   ~substring:"Root.")));
+          state.identity.session_id
+        in
         let root_id, child_id, leaf_id =
           Eio.Switch.run (fun sw ->
             let daemon = start sw 2 |> protocol_ok in
@@ -777,45 +860,7 @@ let%expect_test
                     initialize client;
                     let parent, _ = create_session ~start_immediately:true client in
                     let make_child parent_id =
-                      let entry =
-                        Agent_server.Session_registry.find
-                          (Daemon.registry daemon)
-                          parent_id
-                        |> Option.value_exn
-                      in
-                      let pins =
-                        Owner.with_background_runtime entry.runtime (fun runtime ->
-                          let native =
-                            Option.value_exn
-                              runtime.Agent_session.Runtime_builder.native_runtime
-                          in
-                          let capabilities =
-                            Lazy.force native.capabilities
-                            |> Result.map_error ~f:(fun error ->
-                              error.Chat_response.Tool_capability.message)
-                            |> Result.ok_or_failwith
-                          in
-                          Chat_response.Tool_capability.select
-                            capabilities
-                            ~names:[ "read_file"; "run_chatml" ]
-                          |> Result.map_error ~f:(fun error ->
-                            error.Chat_response.Tool_capability.message)
-                          |> Result.ok_or_failwith
-                          |> Chat_response.Background_request.capability_pins)
-                        |> protocol_ok
-                      in
-                      let id, _ =
-                        install_child
-                          ~env
-                          ~sw
-                          ~daemon
-                          ~parent:(A.state entry.actor |> protocol_ok)
-                          ~mode:`Valid
-                          ~source:
-                            {|<authoring_context policy="manual"/><developer>Generated descendant.</developer><tool type="inherited" name="read_file"/><tool type="inherited" name="run_chatml"/>|}
-                          ~capability_pins:pins
-                          ~revoke:false
-                      in
+                      let id = create_child daemon parent_id in
                       let handle =
                         H.attach
                           ~sw
@@ -850,6 +895,8 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
+                assert (P.Id.Session.equal child_id (create_child daemon root_id));
+                assert (P.Id.Session.equal leaf_id (create_child daemon child_id));
                 List.iter [ root_id; child_id; leaf_id ] ~f:(fun id ->
                   let entry =
                     Agent_server.Session_registry.find (Daemon.registry daemon) id
@@ -945,7 +992,26 @@ let%expect_test
                       let state = A.state ancestor.actor |> protocol_ok in
                       assert (List.is_empty state.invocations);
                       assert (List.is_empty state.jobs));
-                    H.detach handle |> protocol_ok;
+                    (match restart with
+                     | 2 ->
+                       H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+                       H.detach handle |> protocol_ok;
+                       entry.close ();
+                       ignore
+                         (Agent_server.Session_registry.remove registry leaf_id
+                          : Agent_server.Session_registry.entry option);
+                       let create, prepare = child_creation daemon child_id in
+                       let unavailable () =
+                         match create ~display_name:None (prepare ()) with
+                         | Error { code = Session_not_found; _ } -> ()
+                         | _ -> failwith "creation retry resurrected a retained child"
+                       in
+                       S.archive_session (Daemon.store daemon) leaf_id |> store_ok;
+                       unavailable ();
+                       S.remove_session (Daemon.store daemon) leaf_id |> store_ok;
+                       unavailable ();
+                       assert (List.length (S.list_sessions (Daemon.store daemon)) = 2)
+                     | _ -> H.detach handle |> protocol_ok);
                     print_s
                       [%sexp
                         (restart : int)
