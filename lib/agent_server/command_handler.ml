@@ -770,7 +770,7 @@ let session_matches request (summary : Agent_protocol.Session.t) =
   && Option.value_map request.prompt_id ~default:true ~f:(fun prompt_id ->
     match summary.spec.prompt with
     | Catalog actual -> Agent_protocol.Id.Prompt_definition.compare prompt_id actual = 0
-    | Local_path _ -> false)
+    | Local_path _ | Generated _ -> false)
   && Option.value_map request.workspace_id ~default:true ~f:(fun workspace_id ->
     match summary.spec.workspace with
     | Configured actual ->

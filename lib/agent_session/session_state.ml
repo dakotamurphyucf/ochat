@@ -18,6 +18,7 @@ module Spec = struct
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
     ; permission_profile_digest : string
@@ -113,11 +114,27 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 10
+let current_schema_version = 11
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    t.schema_version < current_schema_version
+    && (Option.is_some t.spec.delegation
+        ||
+        match t.spec.protocol.prompt with
+        | Generated _ -> true
+        | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"generated delegation references require session schema 11"
+         ~retryable:false
+         ())
+  else if t.schema_version = 10
+  then Ok { t with schema_version = current_schema_version }
   else if
     t.schema_version < current_schema_version
     && List.exists
@@ -263,8 +280,39 @@ let nonnegative name value =
          ())
 ;;
 
+let validate_delegation t =
+  let module D = Agent_store.Delegation_store in
+  let invalid () =
+    Error
+      (Agent_protocol.Error.create
+         Journal_corrupt
+         ~message:"generated session identity or delegation reference is inconsistent"
+         ~retryable:false
+         ())
+  in
+  match t.spec.protocol.prompt, t.spec.delegation with
+  | (Catalog _ | Local_path _), None -> Ok ()
+  | Generated revision, Some reference ->
+    let open Result.Let_syntax in
+    let%bind () =
+      D.validate_reference reference
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    (match
+       Option.is_none t.spec.prompt_definition_id
+       && Agent_protocol.Session.equal_persistence t.spec.protocol.persistence Durable
+       && Agent_protocol.Id.Prompt_revision.equal revision t.spec.prompt_revision_id
+       && Agent_protocol.Id.Prompt_revision.equal revision reference.revision_id
+       && Agent_protocol.Id.Session.equal t.identity.session_id reference.child_session_id
+     with
+     | true -> Ok ()
+     | false -> invalid ())
+  | _ -> invalid ()
+;;
+
 let validate t =
   let open Result.Let_syntax in
+  let%bind () = validate_delegation t in
   let%bind () =
     List.fold_result
       (t.conversation.canonical_history @ t.conversation.deferred_user_entries)

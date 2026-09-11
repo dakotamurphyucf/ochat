@@ -81,6 +81,37 @@ let%test_unit "new runtime rejects a changed tree even when the revision is cach
     | Ok _ -> failwith "cached revision accepted an altered materialized tree")
 ;;
 
+let%expect_test
+    "ordinary session create cannot turn a known revision into a generated child"
+  =
+  with_host (fun env root host ->
+    let connection = Agent_server.Embedded.connection host in
+    let initial = snapshot connection (Agent_server.Embedded.session_id host) in
+    let revision = Option.value_exn initial.session.prompt_revision in
+    let sessions = Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "store/sessions") in
+    let before = Eio.Path.read_dir sessions |> List.sort ~compare:String.compare in
+    let result =
+      request
+        connection
+        (Session_create
+           { spec = { initial.session.spec with prompt = Generated revision }
+           ; requested_mode = None
+           ; subscribe = false
+           ; idempotency_key = key "reject-generated-bypass"
+           })
+    in
+    (match result with
+     | Error { code = Permission_denied; _ } -> ()
+     | Error error ->
+       raise_s [%sexp "unexpected creation rejection", (error : Agent_protocol.Error.t)]
+     | Ok _ -> failwith "ordinary create bypassed delegation admission");
+    [%test_eq: string list]
+      before
+      (Eio.Path.read_dir sessions |> List.sort ~compare:String.compare);
+    print_endline "known revision rejected; no child directory created");
+  [%expect {| known revision rejected; no child directory created |}]
+;;
+
 let attach_reader host session_id =
   let reader = Agent_server.Embedded.connect host in
   ignore

@@ -206,12 +206,18 @@ module Prompt_ref = struct
   type t =
     | Catalog of Id.Prompt_definition.t
     | Local_path of string
+    | Generated of Id.Prompt_revision.t
   [@@deriving sexp]
 
   let to_json = function
     | Catalog id ->
       `Object [ "type", `String "catalog"; "prompt_id", Id.Prompt_definition.to_json id ]
     | Local_path path -> `Object [ "type", `String "local_path"; "path", `String path ]
+    | Generated revision ->
+      `Object
+        [ "type", `String "generated"
+        ; "revision_id", Id.Prompt_revision.to_json revision
+        ]
   ;;
 
   let of_json json =
@@ -226,6 +232,10 @@ module Prompt_ref = struct
     | "local_path" ->
       let%bind path = Json_codec.required_as fields "path" Json_codec.string in
       Result.map (validate_path "prompt" path) ~f:(fun path -> Local_path path)
+    | "generated" ->
+      Result.map
+        (Json_codec.required_as fields "revision_id" Id.Prompt_revision.of_json)
+        ~f:(fun revision -> Generated revision)
     | _ -> Error (Protocol_error.invalid_request "unknown prompt reference")
   ;;
 end
@@ -334,6 +344,14 @@ module Spec = struct
     =
     let open Result.Let_syntax in
     let%bind () = validate_policy execution_host liveness persistence in
+    let%bind () =
+      match prompt, persistence with
+      | Prompt_ref.Generated _, Transient ->
+        Error
+          (Protocol_error.invalid_request
+             "generated sessions require durable delegation admission")
+      | _ -> Ok ()
+    in
     let%bind permission_profile =
       validate_optional_text "permission profile" permission_profile
     in

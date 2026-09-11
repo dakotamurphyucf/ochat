@@ -38,6 +38,17 @@ type stage =
   | Linked
 [@@deriving equal, sexp]
 
+module Reference = struct
+  type t =
+    { key : Key.t
+    ; child_session_id : P.Id.Session.t
+    ; revision_id : P.Id.Prompt_revision.t
+    ; request_sha256 : string
+    ; admission_sha256 : string
+    }
+  [@@deriving equal, sexp]
+end
+
 type revocation =
   | Parent_stopped
   | Parent_deleted
@@ -161,6 +172,37 @@ let validate (record : record) =
   | false -> corrupt "invalid delegated creation identity or capability pins"
 ;;
 
+let reference (record : record) =
+  Reference.
+    { key = record.key
+    ; child_session_id = record.admission.child_session_id
+    ; revision_id = record.admission.revision_id
+    ; request_sha256 = record.request_sha256
+    ; admission_sha256 =
+        Admission.sexp_of_t record.admission |> Sexp.to_string_mach |> digest
+    }
+;;
+
+let validate_reference (reference : Reference.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_key reference.key in
+  let%bind _ =
+    protocol (P.Id.Session.of_string (P.Id.Session.to_string reference.child_session_id))
+  in
+  let%bind _ =
+    protocol
+      (P.Id.Prompt_revision.of_string
+         (P.Id.Prompt_revision.to_string reference.revision_id))
+  in
+  match
+    sha256 reference.request_sha256
+    && sha256 reference.admission_sha256
+    && not (P.Id.Session.equal reference.key.parent_session_id reference.child_session_id)
+  with
+  | true -> Ok ()
+  | false -> corrupt "invalid delegated session reference"
+;;
+
 let encode record =
   let open Result.Let_syntax in
   let%bind () = validate record in
@@ -254,6 +296,17 @@ let find_locked t key =
 ;;
 
 let find t key = locked t (fun () -> find_locked t key)
+
+let resolve t expected =
+  locked t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = validate_reference expected in
+    let%bind found = find_locked t expected.Reference.key in
+    match found with
+    | Some record when Reference.equal (reference record) expected -> Ok record
+    | Some _ -> corrupt "delegated session reference differs from its creation record"
+    | None -> Error (Store_error.Missing "delegated session creation record"))
+;;
 
 let records_locked t ~max_records ~max_bytes =
   let open Result.Let_syntax in

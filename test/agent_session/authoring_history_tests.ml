@@ -211,6 +211,9 @@ let%expect_test "guidance requires schema 10 and rejects forged codec identities
       }
     in
     State.validate state |> protocol_ok;
+    assert_same_session_snapshot
+      state
+      (State.upgrade_schema { state with schema_version = 10 } |> protocol_ok);
     let restored = restore state in
     assert (
       P.History.equal_entry value (List.hd_exn restored.conversation.canonical_history));

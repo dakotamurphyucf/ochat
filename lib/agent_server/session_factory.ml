@@ -161,6 +161,11 @@ let unavailable code message =
 ;;
 
 let resolve_prompt t = function
+  | Agent_protocol.Session.Prompt_ref.Generated _ ->
+    Error
+      (unavailable
+         Permission_denied
+         "generated sessions require scoped delegation admission")
   | Agent_protocol.Session.Prompt_ref.Local_path _ ->
     Error (unavailable Prompt_unavailable "daemon sessions require a catalog prompt")
   | Catalog prompt_id ->
@@ -242,6 +247,7 @@ let session_spec request definition revision instance profile =
   Agent_session.Session_state.Spec.
     { protocol = request.Agent_protocol.Session.Create_request.spec
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
+    ; delegation = None
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
     ; workspace_instance = instance
     ; permission_profile = profile.Agent_session.Permission_policy.id

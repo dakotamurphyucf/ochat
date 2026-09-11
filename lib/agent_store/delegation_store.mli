@@ -59,6 +59,23 @@ type record = private
   }
 [@@deriving equal, sexp_of]
 
+(** Immutable locator embedded in a child's checkpoint. Binds the scoped request
+    and full admitted configuration, independently of later stage/revocation.
+    Decoding alone does not validate or grant authority. *)
+module Reference : sig
+  type t = private
+    { key : Key.t
+    ; child_session_id : Agent_protocol.Id.Session.t
+    ; revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; request_sha256 : string
+    ; admission_sha256 : string
+    }
+  [@@deriving equal, sexp]
+end
+
+val reference : record -> Reference.t
+val validate_reference : Reference.t -> (unit, Store_error.t) result
+
 type reservation =
   | New of record
   | Replay of record
@@ -71,6 +88,11 @@ type t
 val create : env:Eio_unix.Stdenv.base -> data_root:Data_root.t -> t
 
 val find : t -> Key.t -> (record option, Store_error.t) result
+
+(** Resolve all pinned identities against the current durable record. Returns
+    revoked records too, for recovery/inspection; callers must check disposition,
+    current host authority and session ownership before effects or disclosure. *)
+val resolve : t -> Reference.t -> (record, Store_error.t) result
 
 (** The request digest must cover all user-selected creation inputs. Admission
     comes from trusted validation and may contain fresh candidate IDs on retry;

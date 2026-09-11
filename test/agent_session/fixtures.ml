@@ -136,6 +136,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
     Agent_session.Session_state.Spec.
       { protocol
       ; prompt_definition_id = None
+      ; delegation = None
       ; prompt_revision_id
       ; workspace_instance
       ; permission_profile = "interactive"

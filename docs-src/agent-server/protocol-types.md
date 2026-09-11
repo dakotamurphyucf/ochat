@@ -2810,6 +2810,10 @@ module Prompt_ref : sig
   type t =
     | Catalog of Id.Prompt_definition.t
     | Local_path of string
+    | Generated of Id.Prompt_revision.t
+    (** Pinned generated definition, identified in session summaries. This is not
+        an execution grant; ordinary session.create cannot admit this reference.
+        Generated creation requires the scoped delegation service. *)
   [@@deriving sexp]
 
   val to_json : t -> Jsonaf.t

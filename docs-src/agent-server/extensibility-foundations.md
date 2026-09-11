@@ -1853,7 +1853,7 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 introduced this disposition; current schema 10 safely upgrades schema 8/9
+Session-state schema 9 introduced this disposition; current schema 11 safely upgrades schema 8/9/10
 snapshots. Older snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
 back to a binary that cannot read the current schema; do not edit stored version numbers to
@@ -3655,3 +3655,37 @@ The owning coordinator must still authorize model availability, mediate current
 parent restrictions, keep inherited resources alive, persist the management link,
 and coordinate creation, stop and recovery. General model-visible exposure remains
 gated on authoring-support qualification.
+
+### Generated session identity and checkpoint references
+
+Session summaries can identify a generated definition with a `generated` prompt
+reference and its `revision_id`. This identifies captured source; it is not a
+catalog entry or a creation grant. Ordinary `session.create` rejects this reference,
+including when the caller supplies a valid existing revision. Generated creation
+must use the scoped delegation service. The protocol rejects transient generated
+session specifications.
+
+Session-state schema 11 adds an optional private delegation reference. A generated
+checkpoint requires that reference, a matching child session and revision, durable
+persistence and no catalog prompt identity. Ordinary checkpoints cannot carry a
+delegation reference. Existing ordinary schema-10 states migrate, including their
+authoring provenance; older schemas cannot carry the new generated tag/reference.
+
+`Delegation_store.reference` binds the scoped parent request, child and revision
+IDs, request digest and a digest of the full immutable admission. The checkpoint
+does not copy mutable creation stages or revocation into that identity. After
+loading, `Delegation_store.resolve` verifies the reference against the current
+private ledger. It returns revoked records too so recovery can inspect them;
+resolution alone does not permit execution. The host must check the returned
+disposition and current authority before effects or disclosure.
+
+Structural checkpoint validation and private-ledger verification are separate:
+a well-formed reference containing a substituted admission digest still fails
+ledger resolution. Missing/mismatched references, child identities, revisions,
+catalog substitutions and transient generated checkpoints reject during restore.
+The offline storage fixture installs an actual artifact, child directory and
+snapshot, reopens the store and checks this relationship through revocation.
+
+This supplies the typed identity and storage checks for the upcoming generated
+session factory. The public creation coordinator, parent-policy mediator and
+automatic generated runtime recovery are still under implementation.
