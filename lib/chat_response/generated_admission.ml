@@ -175,6 +175,13 @@ let prepare
     |> Result.map_error ~f:(fun e -> [ D.error ~code:e.code e.message ])
   in
   let capabilities = Authoring_policy.capabilities authoring in
+  let%bind () =
+    List.fold_result (C.references capabilities) ~init:() ~f:(fun () reference ->
+      Result.bind
+        (C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint)
+        ~f:C.check_delegation)
+    |> Result.map_error ~f:(fun e -> [ D.error ~code:e.code e.message ])
+  in
   let%bind definition =
     Extension_compiler.prepare_delegated_definition_in_domain
       ~limits

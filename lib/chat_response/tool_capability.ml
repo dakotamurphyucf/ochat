@@ -44,6 +44,7 @@ type binding =
   ; metadata : Metadata.t
   ; permission_fingerprint : string
   ; result_contract : result_contract
+  ; delegation_restriction : string option
   }
 
 type t = binding String.Map.t
@@ -52,6 +53,12 @@ let error code message = Error { code; message }
 let reference binding = binding.reference
 let implementation binding = binding.implementation
 let descriptor binding = binding.descriptor
+
+let check_delegation binding =
+  match binding.delegation_restriction with
+  | None -> Ok ()
+  | Some message -> error "delegation.native_context_unavailable" message
+;;
 
 let native_implementation binding =
   match binding.implementation with
@@ -85,6 +92,7 @@ let bind
       ~descriptor
       ~metadata
       ~result_contract
+      ~delegation_restriction
   =
   let info = descriptor.Openai.Completions.function_ in
   let name = info.name in
@@ -119,6 +127,16 @@ let bind
         ("ochat.managed-tool.v1" : string)
       , (target : Chatmd_shell_spec.Extension_spec.implementation)
       , (interface : string)]
+      |> Sexp.to_string
+  in
+  let interface =
+    match delegation_restriction with
+    | None -> interface
+    | Some reason ->
+      [%sexp
+        ("ochat.delegation-restriction.v1" : string)
+      , (interface : string)
+      , (reason : string)]
       |> Sexp.to_string
   in
   let fingerprint =
@@ -161,12 +179,14 @@ let bind
     ; metadata
     ; permission_fingerprint
     ; result_contract
+    ; delegation_restriction
     }
 ;;
 
 let create
       ?(metadata = [])
       ?(result_contracts = [])
+      ?(delegation_restrictions = [])
       ~owner
       ~resource_fingerprint
       registrations
@@ -180,6 +200,7 @@ let create
     List.length registrations > 4096
     || List.length metadata > 4096
     || List.length result_contracts > 4096
+    || List.length delegation_restrictions > 4096
   then error "capability.resource_limit" "too many registered tool capabilities"
   else (
     let names =
@@ -198,7 +219,22 @@ let create
       && List.for_all result_contracts ~f:(fun (name, _) ->
         List.mem names name ~equal:String.equal)
     in
-    if not contracts_valid
+    let delegation_valid =
+      Option.is_none
+        (List.find_a_dup
+           (List.map delegation_restrictions ~f:fst)
+           ~compare:String.compare)
+      && List.for_all delegation_restrictions ~f:(fun (name, reason) ->
+        List.mem names name ~equal:String.equal
+        && (not (String.is_empty (String.strip reason)))
+        && String.length reason <= 1024)
+    in
+    if not delegation_valid
+    then
+      error
+        "capability.invalid_delegation_restriction"
+        "duplicate, unbound or invalid delegation restriction"
+    else if not contracts_valid
     then
       error
         "capability.invalid_result_contract"
@@ -234,6 +270,8 @@ let create
                 ~descriptor:implementation.info
                 ~metadata
                 ~result_contract
+                ~delegation_restriction:
+                  (List.Assoc.find delegation_restrictions ~equal:String.equal name)
             in
             Map.set registry ~key:name ~data:binding)))
 ;;
@@ -296,6 +334,7 @@ let extend_managed t ~owner ~resource_fingerprint registrations =
           ~descriptor:registration.descriptor
           ~metadata:registration.metadata
           ~result_contract:Invocation_v1
+          ~delegation_restriction:None
       in
       Map.set registry ~key:name ~data:binding)
 ;;

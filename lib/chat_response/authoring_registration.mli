@@ -10,10 +10,13 @@ type t
     Source provenance participates in identity. This performs no tool effects or
     context injection; the owning host must resolve authoring policy before
     exposing the manifest. Do not apply to an inherited registry: inherit its
-    existing bindings and metadata through selection instead. *)
+    existing bindings and metadata through selection instead. Host-supplied
+    [delegation_restrictions] are retained in capability identity independently
+    of authored help; their reasons must be safe public diagnostics. *)
 val create
   :  ?host_metadata:(string * Metadata.t) list
   -> ?result_contracts:(string * Tool_capability.result_contract) list
+  -> ?delegation_restrictions:(string * string) list
   -> declarations:Spec.authoring_help list
   -> owner:string
   -> resource_fingerprint:string
@@ -31,6 +34,7 @@ val sources : t -> (string * Chatmd_shell_spec.Source_ref.t) list
 val resolve
   :  ?host_metadata:(string * Metadata.t) list
   -> ?result_contracts:(string * Tool_capability.result_contract) list
+  -> ?delegation_restrictions:(string * string) list
   -> ?context:Spec.authoring_context
   -> ?catalog:Authoring_policy.catalog
   -> declarations:Spec.authoring_help list

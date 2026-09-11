@@ -585,6 +585,26 @@ let create_native
                        |> Chatmd_shell_spec.Source_ref.digest
                      in
                      Authoring_registration.create
+                       ~delegation_restrictions:
+                         (List.filter_map declarations.tools ~f:(function
+                            | CM.Agent { name; _ } ->
+                              Some
+                                ( name
+                                , "legacy agent tools lack delegated actor policy and \
+                                   approval services" )
+                            | CM.Builtin "fork"
+                              when not
+                                     (List.exists
+                                        native_registrations
+                                        ~f:(fun registration ->
+                                          String.equal
+                                            (function_name registration.implementation)
+                                            "fork")) ->
+                              Some
+                                ( "fork"
+                                , "legacy fork requires its owning driver; use a \
+                                   delegated session service" )
+                            | _ -> None))
                        ~host_metadata:
                          (List.filter_map registrations ~f:(fun value ->
                             Option.map value.authoring_metadata ~f:(fun metadata ->
@@ -739,6 +759,7 @@ let inherit_native ?managed ~(parent : t) ~capabilities () =
           ~fingerprint:reference.fingerprint
         |> binding_result
       in
+      let%bind () = C.check_delegation binding |> binding_result in
       match C.implementation binding with
       | Native fn -> Ok (fn :: functions)
       | Managed _ when Option.is_some managed ->

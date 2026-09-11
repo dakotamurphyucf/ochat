@@ -67,7 +67,9 @@ let () =
             Eio.Path.(root / "secret.txt")
             "private outside marker";
           let parent_source =
-            {|<tool name="read_file"><read id="source" path="lib"/></tool>|}
+            {|<tool name="read_file"><read id="source" path="lib"/></tool>
+<tool name="legacy_agent" agent="unused.chatmd"/>
+<tool name="fork"/>|}
           in
           let prompt_elements =
             CM.parse_chat_inputs ~source:"parent.chatmd" ~dir:root parent_source
@@ -139,6 +141,23 @@ let () =
           in
           assert (List.length (G.moderators admitted) = 1);
           let original = C.find ceiling ~name:"read_file" |> caps in
+          List.iter [ "legacy_agent"; "fork" ] ~f:(fun name ->
+            expect
+              "delegation.native_context_unavailable"
+              (prepare
+                 ~requested_names:[ name ]
+                 (sprintf {|<tool type="inherited" name="%s"/>|} name));
+            match
+              A.inherit_native
+                ~parent
+                ~capabilities:(C.select ceiling ~names:[ name ] |> caps)
+                ()
+            with
+            | Error errors ->
+              assert (
+                List.exists errors ~f:(fun error ->
+                  String.equal error.A.code "delegation.native_context_unavailable"))
+            | Ok _ -> failwith "native inheritance bypassed generated admission");
           let selected = C.find (G.capabilities admitted) ~name:"read_file" |> caps in
           assert (phys_equal original selected);
           assert (

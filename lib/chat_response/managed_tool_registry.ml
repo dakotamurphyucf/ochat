@@ -312,6 +312,7 @@ let delegate_standalone t ~selected =
       let%bind binding =
         C.resolve t.capabilities ~id:reference.C.id ~fingerprint:reference.fingerprint
       in
+      let%bind () = C.check_delegation binding in
       (match Set.mem visited reference.name with
        | true -> closure pending visited managed_names
        | false ->

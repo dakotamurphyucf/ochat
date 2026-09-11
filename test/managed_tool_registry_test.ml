@@ -81,6 +81,32 @@ let on_event ctx state event = Task.pure(state)
     in
     let build base elements = R.prepare ~env ~owner:"owner" ~capabilities:base elements in
     let first = build original elements |> prepared in
+    let restricted =
+      C.create
+        ~owner:"owner"
+        ~resource_fingerprint:(digest "restricted")
+        ~delegation_restrictions:[ "native", "requires its original actor services" ]
+        [ digest "native-v1", native ]
+      |> capability
+    in
+    let restricted_managed = build restricted elements |> prepared in
+    let selected_restricted =
+      C.select (R.capabilities restricted_managed) ~names:[ "root" ] |> capability
+    in
+    (match R.delegate_standalone restricted_managed ~selected:selected_restricted with
+     | Error error ->
+       [%test_eq: string] "delegation.native_context_unavailable" error.code
+     | Ok _ -> failwith "private dependency bypassed native delegation restriction");
+    let pins =
+      Chat_response.Background_request.capability_pins original
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      |> Result.ok_or_failwith
+    in
+    assert (
+      Result.is_error
+        (Chat_response.Background_request.rebind_capabilities
+           ~pins
+           ~capabilities:restricted));
     let registry = R.capabilities first in
     let find name = C.find registry ~name |> capability in
     assert (phys_equal (find "native") (C.find original ~name:"native" |> capability));

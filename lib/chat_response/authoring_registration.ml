@@ -15,6 +15,7 @@ let error code message = Error C.{ code; message }
 let create
       ?(host_metadata = [])
       ?result_contracts
+      ?delegation_restrictions
       ~declarations
       ~owner
       ~resource_fingerprint
@@ -95,7 +96,13 @@ let create
         revision, implementation)
   in
   let%map capabilities =
-    C.create ~metadata ?result_contracts ~owner ~resource_fingerprint registrations
+    C.create
+      ~metadata
+      ?result_contracts
+      ?delegation_restrictions
+      ~owner
+      ~resource_fingerprint
+      registrations
   in
   { capabilities
   ; sources =
@@ -107,6 +114,7 @@ let create
 let resolve
       ?host_metadata
       ?result_contracts
+      ?delegation_restrictions
       ?context
       ?catalog
       ~declarations
@@ -121,6 +129,7 @@ let resolve
     create
       ?host_metadata
       ?result_contracts
+      ?delegation_restrictions
       ~declarations
       ~owner
       ~resource_fingerprint

@@ -51,6 +51,7 @@ type managed_registration =
 val create
   :  ?metadata:(string * Chatmd_shell_spec.Authoring_metadata.t) list
   -> ?result_contracts:(string * result_contract) list
+  -> ?delegation_restrictions:(string * string) list
   -> owner:string
   -> resource_fingerprint:string
   -> (string * Ochat_function.t) list
@@ -70,6 +71,13 @@ val implementation : binding -> implementation
 val descriptor : binding -> Openai.Completions.tool
 
 val native_implementation : binding -> Ochat_function.t option
+
+(** Check host-supplied restrictions on transferring an implementation to a
+    generated session. Restrictions bind the actual registration and participate
+    in live/permission identity; authored help or a name cannot remove them.
+    Absence is the trusted host's declaration of support, not an execution grant.
+    Managed implementations also require checking their captured dependencies. *)
+val check_delegation : binding -> (unit, error) result
 
 (** Trusted admission of captured managed definitions alongside existing native
     bindings. The host must validate sources/schemas/dependencies first, bind

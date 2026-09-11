@@ -3680,6 +3680,17 @@ state. Stateful moderator-handled tools, including private transitive dependenci
 of standalone tools, still reject with `delegation.owner_dispatch_unavailable`.
 Their original-owner dispatch remains required before they can be delegated.
 
+Native registrations may also carry a host-owned delegation restriction. It
+participates in live and saved permission identity and survives selection;
+authored help cannot remove it. Generated admission and native inheritance check
+the selected bindings, and standalone delegation checks every private dependency.
+Legacy `<tool agent="…">` declarations lack the generated caller's policy and
+approval services, and the legacy `fork` placeholder requires its owning driver.
+Both reject with `delegation.native_context_unavailable` when inherited. A host
+may supply a compatible implementation through an actual native registration;
+sharing a tool name does not confer that support. The persisted-session API has
+its own service and qualification requirements.
+
 Inherited MCP tools retain the parent's connected client and catalog identity;
 creating children does not reconnect to the server or expose its other tools.
 Observed schema changes or removal reject before the remote call, and saved
