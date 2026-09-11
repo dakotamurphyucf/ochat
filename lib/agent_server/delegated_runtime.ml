@@ -6,7 +6,7 @@ exception Cleanup_failed of P.Error.t
 
 let interrupted message = P.Error.create Interrupted ~message ~retryable:false ()
 
-let prepare ~sw ~parent ~on_revoked ~build =
+let prepare_with_lease ~with_parent ~sw ~parent ~on_revoked ~build =
   let ready, ready_u = Eio.Promise.create () in
   let finished, finished_u = Eio.Promise.create () in
   let stop, stop_u = Eio.Promise.create () in
@@ -35,7 +35,7 @@ let prepare ~sw ~parent ~on_revoked ~build =
       try
         let result =
           try
-            Runtime_owner.with_background_runtime parent (fun parent_runtime ->
+            with_parent parent (fun parent_runtime ->
               let created = ref None in
               Exn.protect
                 ~finally:(fun () ->
@@ -134,4 +134,10 @@ let prepare ~sw ~parent ~on_revoked ~build =
       signal_stop ();
       ignore (Eio.Promise.await finished));
     Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let prepare = prepare_with_lease ~with_parent:Runtime_owner.with_background_runtime
+
+let prepare_independent =
+  prepare_with_lease ~with_parent:Runtime_owner.with_delegation_resources
 ;;

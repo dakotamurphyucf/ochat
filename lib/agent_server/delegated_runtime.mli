@@ -20,3 +20,20 @@ val prepare
         -> Agent_session.Runtime_builder.t
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+
+(** Retain the exact parent resources across ordinary parent unload. The child
+    activity switch has its own lifetime; closing the child or permanently closing
+    the parent cancels and joins it before releasing those resources. Admission
+    still requires a usable parent runtime. The host must separately authorize
+    independent lifetime and install current delegation/revocation checks.
+    This constructor does not implement stopped-ancestor restoration or widen
+    supported inherited policy adapters. Same callback/cleanup rules as [prepare]. *)
+val prepare_independent
+  :  sw:Eio.Switch.t
+  -> parent:Runtime_owner.t
+  -> on_revoked:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> build:
+       (sw:Eio.Switch.t
+        -> Agent_session.Runtime_builder.t
+        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result

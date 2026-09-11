@@ -40,7 +40,9 @@ val unload : t -> (unit, Agent_protocol.Error.t) result
 val prepare_dependency_stop : t -> (unit, Agent_protocol.Error.t) result
 
 (** After committing a session stop, exclude new runtime admission, cancel and
-    join existing background leases, then unload before workspace cleanup. Waits
+    join existing execution leases, then detach the worker. Delegation resource
+    borrows survive ordinary stop; workspace cleanup must still check references.
+    The non-waiting [unload] used before reset rejects every retained borrow. Waits
     outside the owner mutex so worker finalizers can finish. Keep the actor alive
     through this call, and call from outside a retained background callback.
     Accepted-stop cleanup survives caller cancellation; the
@@ -74,6 +76,27 @@ val with_unloaded
     the final callback to unwind, so cleanup cannot close resources still in use.
     This is lifetime ownership, not generic scheduler dispatch or job admission. *)
 val with_background_runtime
+  :  t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Retain native/compiled resources for an independently owned descendant.
+    Admission uses the same current loaded-runtime check as a background borrow.
+    Ordinary [unload_and_wait] detaches the parent's worker and permits a fresh runtime to
+    load, but keeps these exact resources alive until the final resource borrower
+    returns. Permanent [close_and_wait] cancels and joins all such borrowers,
+    including resources detached by an earlier or concurrent ordinary unload.
+    [with_unloaded] maintenance and administration defer/reject while borrowed.
+
+    This is a trusted host lifetime primitive, not independent execution authority.
+    The host must separately authorize the lifetime and revalidate current source,
+    policy, linkage and revocation before child effects. Do not run the parent's
+    worker or moderator through this borrow or treat its historical services as
+    current authority. Use only properly inherited resource bindings, and join all
+    child work before returning. Last-borrower cleanup reports any deferred close
+    failure to that borrower. Factory integration and stopped-parent restoration
+    remain separate requirements. *)
+val with_delegation_resources
   :  t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result

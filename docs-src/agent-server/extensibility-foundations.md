@@ -3909,6 +3909,24 @@ with real inherited file tools and fake provider turns.
 
 ### Executable generated factory loads and recovery
 
+The host also has a resource-only construction path:
+`Runtime_owner.with_delegation_resources` and
+`Delegated_runtime.prepare_independent`. An ordinary parent unload cancels its
+execution borrows and detaches its worker, while retaining the exact native and
+compiled resources used by resource borrowers. The parent can load a fresh runtime;
+the last old-resource borrower closes only the retired runtime. Maintenance and
+administration still exclude retained resources. Permanent close cancels and joins
+all borrowers, including when it overlaps an ordinary unload. Deferred close
+failures are reported to the last borrower without poisoning the owner mutex.
+
+These are internal lifetime primitives. The generated-session factory does not
+yet admit independent children. Explicit host authorization, stopped-ancestor
+resource reconstruction, current inherited-policy checks and persisted lifetime
+integration remain required. Retaining old resources does not retain permission
+to execute under obsolete policy or run the parent's worker/moderator. Offline
+tests qualify resource sharing, reload, cleanup faults and actual child activity
+switches across unload/close; they do not claim persisted independent recovery.
+
 `Agent_server.Delegated_runtime.prepare` holds a parent runtime lease around the
 child's construction switch. Closing the child cancels and joins its activities,
 closes its native runtime, then releases the lease. Parent cancellation also joins
