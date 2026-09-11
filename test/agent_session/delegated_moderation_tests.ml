@@ -37,8 +37,9 @@ let%expect_test
   =
   let module A = Agent_session.Session_actor in
   let module M = Chat_response.Moderator_manager in
-  List.iter [ `Reject; `Save_fail; `End ] ~f:(fun mode ->
+  List.iter [ `Reject; `Save_fail; `End; `Revoke_after_commit ] ~f:(fun mode ->
     let failed = ref false in
+    let revoked = ref false in
     Job_fixtures.with_actor
       ~reject_save:(fun next ->
         match mode, !failed with
@@ -47,11 +48,17 @@ let%expect_test
                  Option.is_some event.E.decision) ->
           failed := true;
           true
+        | `Revoke_after_commit, _
+          when List.exists next.state.moderator_executions ~f:(fun event ->
+                 Option.is_some event.E.decision) ->
+          revoked := true;
+          false
         | _ -> false)
       (fun env _sw actor _writer backend ->
          let action =
            match mode with
-           | `Reject | `Save_fail -> {|Tool.reject("denied by parent")|}
+           | `Reject | `Save_fail | `Revoke_after_commit ->
+             {|Tool.reject("denied by parent")|}
            | `End -> {|Runtime.end_session("policy stopped")|}
          in
          let manager, _, _ =
@@ -82,7 +89,16 @@ let%expect_test
                   actor
                   ~delegation:delegated
                   ~event
-                  ~authorize:(fun () -> Ok ()))
+                  ~authorize:(fun () ->
+                    match !revoked with
+                    | false -> Ok ()
+                    | true ->
+                      Error
+                        (P.Error.create
+                           Permission_denied
+                           ~message:"test delegation revoked after decision commit"
+                           ~retryable:false
+                           ())))
              ~manager
              ~history:(fun () -> [])
              ~available_tools:[]
@@ -98,6 +114,25 @@ let%expect_test
              saved.moderator
              ~f:(Jsonaf.exactly_equal (B.encode_moderator_snapshot live)));
          (match mode, result with
+          | `Revoke_after_commit, Error { code = Permission_denied; _ } ->
+            assert (
+              not
+                (Sexp.equal
+                   (Session.Moderator_state.Identity_snapshot.sexp_of_t before)
+                   (Session.Moderator_state.Identity_snapshot.sexp_of_t live)));
+            let receipt = List.hd_exn saved.moderator_executions in
+            assert (
+              Option.equal
+                E.Decision.equal
+                receipt.decision
+                (Some (Reject "denied by parent")));
+            revoked := false;
+            let replay = run () |> protocol_ok |> Option.value_exn in
+            assert (Option.is_none replay.outcome);
+            assert (E.equal receipt replay.receipt);
+            [%test_eq: Sexp.t]
+              (Session.Moderator_state.Identity_snapshot.sexp_of_t live)
+              (Session.Moderator_state.Identity_snapshot.sexp_of_t (snapshot ()))
           | `Save_fail, Error _ ->
             [%test_eq: Sexp.t]
               (Session.Moderator_state.Identity_snapshot.sexp_of_t before)
@@ -109,7 +144,7 @@ let%expect_test
               match mode with
               | `Reject -> E.Decision.Reject "denied by parent"
               | `End -> E.Decision.Reject "parent moderator ended session"
-              | `Save_fail -> assert false
+              | `Save_fail | `Revoke_after_commit -> assert false
             in
             assert (Option.equal E.Decision.equal result.receipt.decision (Some decision));
             (match mode with
@@ -125,16 +160,18 @@ let%expect_test
                assert (
                  Option.exists result.receipt.requests ~f:(fun requests ->
                    Option.equal String.equal requests.end_session (Some "policy stopped")))
-             | `Save_fail -> assert false)
+             | `Save_fail | `Revoke_after_commit -> assert false)
           | _ -> failwith "unexpected manager policy result");
          print_s
            [%sexp
-             (mode : [ `Reject | `Save_fail | `End ]), "parent state and decision agree"]));
+             (mode : [ `Reject | `Save_fail | `End | `Revoke_after_commit ])
+           , "parent state and decision agree"]));
   [%expect
     {|
     (Reject "parent state and decision agree")
     (Save_fail "parent state and decision agree")
-    (End "parent state and decision agree") |}]
+    (End "parent state and decision agree")
+    (Revoke_after_commit "parent state and decision agree") |}]
 ;;
 
 let%expect_test
@@ -238,10 +275,312 @@ let%expect_test
 ;;
 
 let%expect_test
+    "delegated authority is rechecked after admission and effect waits without losing \
+     outcomes"
+  =
+  let module A = Agent_session.Session_actor in
+  List.iter
+    [ `Before_handler
+    ; `Before_effect
+    ; `Effect_admitted
+    ; `Effect_return
+    ; `Before_commit
+    ; `Decision_saved
+    ]
+    ~f:(fun boundary ->
+      let revoked = ref false in
+      Job_fixtures.with_actor
+        ~reject_save:(fun next ->
+          (match boundary with
+           | `Effect_admitted
+             when List.exists next.state.invocations ~f:(fun invocation ->
+                    match invocation.P.Invocation.status with
+                    | Dispatching -> true
+                    | _ -> false) -> revoked := true
+           | `Decision_saved
+             when List.exists next.state.moderator_executions ~f:(fun receipt ->
+                    Option.is_some receipt.E.decision) -> revoked := true
+           | _ -> ());
+          false)
+        (fun env sw actor _writer backend ->
+           let before =
+             { (handoff_snapshot 0) with script_source_hash = String.make 64 'a' }
+           in
+           let after = { before with current_state = Session.Snapshot.Int 1 } in
+           let live = ref before in
+           A.change_moderator actor (Some (B.encode_moderator_snapshot before))
+           |> protocol_ok
+           |> ignore;
+           let delegated = delegation () in
+           let handlers = ref 0 in
+           let effects = ref 0 in
+           let revoke_snapshot = ref false in
+           let effect_entered, effect_entered_u = Eio.Promise.create () in
+           let release_effect, release_effect_u = Eio.Promise.create () in
+           let run () =
+             A.with_delegated_moderator_event
+               actor
+               ~delegation:delegated
+               ~event:(policy_event delegated)
+               ~authorize:(fun () ->
+                 match !revoked with
+                 | false -> Ok ()
+                 | true ->
+                   Error
+                     (P.Error.create
+                        Permission_denied
+                        ~message:"test delegation revoked"
+                        ~retryable:false
+                        ()))
+               ~snapshot:(fun () ->
+                 (match boundary, !revoke_snapshot with
+                  | `Before_handler, _ | _, true -> revoked := true
+                  | _ -> ());
+                 Ok !live)
+               (fun ~executing ~event:_ ~execute ~commit ->
+                  let open Result.Let_syntax in
+                  Int.incr handlers;
+                  (match boundary with
+                   | `Before_effect -> revoked := true
+                   | _ -> ());
+                  let invocation =
+                    P.Invocation.create
+                      ~observer:executing.context.source
+                      ~parent_event:executing.context.id
+                      { (invocation_fixture ()).context with
+                        id = P.Id.Invocation.create ()
+                      ; origin = Moderator
+                      ; parent_invocation = None
+                      ; parent_job = None
+                      ; provider_call_id = None
+                      ; call_entry_id = None
+                      }
+                    |> protocol_ok
+                  in
+                  let%bind _ =
+                    execute ~invocation (fun ~dispatched:_ ->
+                      Int.incr effects;
+                      (match boundary with
+                       | `Effect_return ->
+                         Eio.Promise.resolve effect_entered_u ();
+                         Eio.Promise.await release_effect
+                       | _ -> ());
+                      Ok (P.Invocation.Complete (`String "retained parent result")))
+                  in
+                  (match boundary with
+                   | `Before_commit -> revoked := true
+                   | _ -> ());
+                  let%map () = commit ~decision:Approve ~snapshot:after ~requests in
+                  live := after)
+           in
+           let result =
+             match boundary with
+             | `Effect_return ->
+               Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                 let pending = Eio.Fiber.fork_promise ~sw run in
+                 Eio.Promise.await effect_entered;
+                 revoked := true;
+                 Eio.Promise.resolve release_effect_u ();
+                 Eio.Promise.await_exn pending)
+             | _ -> run ()
+           in
+           (match result with
+            | Error { code = Permission_denied; _ } -> ()
+            | _ -> failwith "revoked policy handoff disclosed a result");
+           let saved = Agent_session.Memory_backend.state backend in
+           let receipt = List.hd_exn saved.moderator_executions in
+           let committed =
+             match boundary with
+             | `Decision_saved -> true
+             | _ -> false
+           in
+           [%test_eq: bool] committed (Option.is_some receipt.decision);
+           assert (
+             Option.exists saved.moderator ~f:(fun snapshot ->
+               Jsonaf.exactly_equal snapshot (B.encode_moderator_snapshot !live)));
+           (match boundary, saved.invocations with
+            | (`Before_handler | `Before_effect), [] -> [%test_eq: int] 0 !effects
+            | `Effect_admitted, [ { status = Resolved (Fail _); _ } ] ->
+              [%test_eq: int] 0 !effects
+            | ( (`Effect_return | `Before_commit | `Decision_saved)
+              , [ { status = Resolved (Complete (`String "retained parent result")); _ } ]
+              ) -> [%test_eq: int] 1 !effects
+            | _ -> failwith "incorrect retained native outcome");
+           let calls = !handlers in
+           revoked := false;
+           (match boundary, run () with
+            | `Decision_saved, Ok (Some replay) -> assert (E.equal replay receipt)
+            | `Decision_saved, _ -> failwith "saved decision did not replay"
+            | _, Error _ -> ()
+            | _ -> failwith "failed policy effects were replayed");
+           [%test_eq: int] calls !handlers;
+           (match boundary with
+            | `Decision_saved ->
+              revoke_snapshot := true;
+              (match run () with
+               | Error { code = Permission_denied; _ } -> ()
+               | _ ->
+                 failwith "replayed decision bypassed revocation during snapshot read");
+              assert (
+                E.equal
+                  receipt
+                  (List.hd_exn
+                     (Agent_session.Memory_backend.state backend).moderator_executions));
+              [%test_eq: int] calls !handlers
+            | _ -> ());
+           print_s
+             [%sexp
+               (boundary
+                : [ `Before_handler
+                  | `Before_effect
+                  | `Effect_admitted
+                  | `Effect_return
+                  | `Before_commit
+                  | `Decision_saved
+                  ])
+             , (!effects : int)
+             , (committed : bool)]));
+  [%expect
+    {|
+    (Before_handler 0 false)
+    (Before_effect 0 false)
+    (Effect_admitted 0 false)
+    (Effect_return 1 false)
+    (Before_commit 1 false)
+    (Decision_saved 1 true) |}]
+;;
+
+let%expect_test
+    "foreground completion preserves unrelated delegated policy work and its checkpoint"
+  =
+  let module A = Agent_session.Session_actor in
+  List.iter [ `Before_native; `During_native; `After_policy ] ~f:(fun boundary ->
+    Job_fixtures.with_actor (fun env sw actor writer backend ->
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+        let before =
+          { (handoff_snapshot 0) with script_source_hash = String.make 64 'a' }
+        in
+        let after = { before with current_state = Session.Snapshot.Int 1 } in
+        let initial_snapshot = Some (B.encode_moderator_snapshot before) in
+        A.change_moderator actor initial_snapshot |> protocol_ok |> ignore;
+        let worker_entered, worker_entered_u = Eio.Promise.create () in
+        let finish_worker, finish_worker_u = Eio.Promise.create () in
+        let worker =
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+            capabilities.manage_moderator_follow_up
+              ~observer:
+                { script_id = before.script_id
+                ; source_sha256 = before.script_source_hash
+                }
+            |> protocol_ok;
+            Eio.Promise.resolve worker_entered_u ();
+            Eio.Promise.await finish_worker;
+            Completed
+              { final_history = input.history
+              ; runtime_requests = []
+              ; moderator_snapshot = initial_snapshot
+              })
+        in
+        A.set_operation_worker actor (Some worker) |> protocol_ok;
+        let entry =
+          Agent_session.History_codec.user_text ~id:history_id "parent work"
+          |> Agent_session.History_codec.to_protocol
+        in
+        A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+        Eio.Promise.await worker_entered;
+        let delegated = delegation () in
+        let entered, entered_u = Eio.Promise.create () in
+        let resume, resume_u = Eio.Promise.create () in
+        let pause () =
+          Eio.Promise.resolve entered_u ();
+          Eio.Promise.await resume
+        in
+        let policy =
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            A.with_delegated_moderator_event
+              actor
+              ~delegation:delegated
+              ~event:(policy_event delegated)
+              ~authorize:(fun () -> Ok ())
+              ~snapshot:(fun () -> Ok before)
+              (fun ~executing ~event:_ ~execute ~commit ->
+                 let open Result.Let_syntax in
+                 (match boundary with
+                  | `Before_native -> pause ()
+                  | _ -> ());
+                 let invocation =
+                   P.Invocation.create
+                     ~observer:executing.context.source
+                     ~parent_event:executing.context.id
+                     { (invocation_fixture ()).context with
+                       id = P.Id.Invocation.create ()
+                     ; origin = Moderator
+                     ; parent_invocation = None
+                     ; parent_job = None
+                     ; provider_call_id = None
+                     ; call_entry_id = None
+                     }
+                   |> protocol_ok
+                 in
+                 let%bind _ =
+                   execute ~invocation (fun ~dispatched:_ ->
+                     (match boundary with
+                      | `During_native -> pause ()
+                      | _ -> ());
+                     Ok (P.Invocation.Complete (`String "parent policy result")))
+                 in
+                 commit ~decision:Approve ~snapshot:after ~requests))
+        in
+        (match boundary with
+         | `After_policy ->
+           Eio.Promise.await_exn policy |> protocol_ok |> Option.value_exn |> ignore;
+           Eio.Promise.resolve finish_worker_u ();
+           await_idle actor |> ignore
+         | `Before_native | `During_native ->
+           Eio.Promise.await entered;
+           Eio.Promise.resolve finish_worker_u ();
+           await_idle actor |> ignore;
+           Eio.Promise.resolve resume_u ();
+           Eio.Promise.await_exn policy |> protocol_ok |> Option.value_exn |> ignore);
+        let saved = Agent_session.Memory_backend.state backend in
+        let receipt = List.hd_exn saved.moderator_executions in
+        assert (Option.equal E.Decision.equal receipt.decision (Some Approve));
+        (match receipt.intent with
+         | Some Pending -> ()
+         | _ -> failwith "foreground completion consumed an independent policy request");
+        assert (
+          Option.exists
+            saved.moderator
+            ~f:(Jsonaf.exactly_equal (B.encode_moderator_snapshot after)));
+        (match saved.invocations with
+         | [ { status = Resolved (Complete (`String "parent policy result")); _ } ] -> ()
+         | _ -> failwith "foreground completion lost the policy native result");
+        let terminal =
+          Agent_session.Memory_backend.events_after backend 0L
+          |> protocol_ok
+          |> List.filter_map ~f:(fun event ->
+            match event.P.Event.Durable.kind with
+            | (Operation_completed | Operation_failed | Operation_cancelled) as kind ->
+              Some kind
+            | _ -> None)
+        in
+        [%test_eq: P.Event.Durable.kind list] [ Operation_completed ] terminal;
+        print_s
+          [%sexp
+            (boundary : [ `Before_native | `During_native | `After_policy ])
+          , "parent completed; delegated result and checkpoint preserved"])));
+  [%expect
+    {|
+    (Before_native "parent completed; delegated result and checkpoint preserved")
+    (During_native "parent completed; delegated result and checkpoint preserved")
+    (After_policy "parent completed; delegated result and checkpoint preserved") |}]
+;;
+
+let%expect_test
     "parent stop interrupts delegated policy with and without a foreground operation"
   =
   let module A = Agent_session.Session_actor in
-  List.iter [ false; true ] ~f:(fun foreground ->
+  List.iter [ `Idle; `Foreground; `Foreground_end ] ~f:(fun mode ->
     Job_fixtures.with_actor (fun env sw actor writer backend ->
       let before =
         { (handoff_snapshot 0) with script_source_hash = String.make 64 'a' }
@@ -250,20 +589,30 @@ let%expect_test
       |> protocol_ok
       |> ignore;
       let worker_entered, worker_entered_u = Eio.Promise.create () in
-      if foreground
-      then (
-        let worker =
-          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
-            Eio.Promise.resolve worker_entered_u ();
-            Eio.Fiber.await_cancel ())
-        in
-        A.set_operation_worker actor (Some worker) |> protocol_ok;
-        let entry =
-          Agent_session.History_codec.user_text ~id:history_id "parent work"
-          |> Agent_session.History_codec.to_protocol
-        in
-        A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
-        Eio.Promise.await worker_entered);
+      let finish_worker, finish_worker_u = Eio.Promise.create () in
+      (match mode with
+       | `Idle -> ()
+       | `Foreground | `Foreground_end ->
+         let worker =
+           Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+             Eio.Promise.resolve worker_entered_u ();
+             match mode with
+             | `Foreground_end ->
+               Eio.Promise.await finish_worker;
+               Completed
+                 { final_history = input.history
+                 ; runtime_requests = [ End_session "parent ended" ]
+                 ; moderator_snapshot = Some (B.encode_moderator_snapshot before)
+                 }
+             | `Idle | `Foreground -> Eio.Fiber.await_cancel ())
+         in
+         A.set_operation_worker actor (Some worker) |> protocol_ok;
+         let entry =
+           Agent_session.History_codec.user_text ~id:history_id "parent work"
+           |> Agent_session.History_codec.to_protocol
+         in
+         A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok |> ignore;
+         Eio.Promise.await worker_entered);
       let entered, entered_u = Eio.Promise.create () in
       let delegated = delegation () in
       let escaped = ref None in
@@ -284,7 +633,10 @@ let%expect_test
       in
       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
         Eio.Promise.await entered;
-        A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
+        (match mode with
+         | `Foreground_end -> Eio.Promise.resolve finish_worker_u ()
+         | `Idle | `Foreground ->
+           A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore);
         match Eio.Promise.await_exn running with
         | Error (Eio.Cancel.Cancelled _) -> ()
         | _ -> failwith "parent stop did not cancel policy execution");
@@ -299,11 +651,15 @@ let%expect_test
         Option.exists
           saved.moderator
           ~f:(Jsonaf.exactly_equal (B.encode_moderator_snapshot before)));
-      print_s [%sexp (foreground : bool), "policy cancelled; no late decision"]));
+      print_s
+        [%sexp
+          (mode : [ `Idle | `Foreground | `Foreground_end ])
+        , "policy cancelled; no late decision"]));
   [%expect
     {|
-    (false "policy cancelled; no late decision")
-    (true "policy cancelled; no late decision") |}]
+    (Idle "policy cancelled; no late decision")
+    (Foreground "policy cancelled; no late decision")
+    (Foreground_end "policy cancelled; no late decision") |}]
 ;;
 
 let%expect_test

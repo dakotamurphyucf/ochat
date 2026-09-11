@@ -1584,6 +1584,21 @@ let cancel_event_for_operation t operation_id =
       Option.iter borrow.cancel ~f:(fun cancel -> cancel ())))
 ;;
 
+let cancel_independent_moderator t =
+  Option.iter t.moderator_borrow ~f:(fun borrow ->
+    match borrow.operation_id with
+    | Some _ -> ()
+    | None ->
+      borrow.cancel_requested <- true;
+      Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
+  Option.iter t.queued_event_borrow ~f:(fun borrow ->
+    match borrow.receipt.context.operation_id with
+    | Some _ -> ()
+    | None ->
+      borrow.cancel_requested <- true;
+      Option.iter borrow.cancel ~f:(fun cancel -> cancel ()))
+;;
+
 let stop_internal ?parent_stop_epoch t mode =
   let open Result.Let_syntax in
   let%bind extension_work =
@@ -1615,18 +1630,10 @@ let stop_internal ?parent_stop_epoch t mode =
           []
           []
     in
-    (match mode, t.moderator_borrow with
-     | Cancel, Some ({ operation_id = None; _ } as borrow) ->
-       borrow.cancel_requested <- true;
-       Option.iter borrow.cancel ~f:(fun f -> f ())
-     | _ -> ());
-    (match mode, t.queued_event_borrow with
-     | Cancel, Some borrow ->
-       borrow.cancel_requested <- true;
-       Option.iter borrow.cancel ~f:(fun cancel -> cancel ())
-     | _ -> ());
     (match mode with
-     | Cancel -> abort_all_staged_work t
+     | Cancel ->
+       cancel_independent_moderator t;
+       abort_all_staged_work t
      | Graceful -> ());
     session
   | Some operation ->
@@ -1657,12 +1664,7 @@ let stop_internal ?parent_stop_epoch t mode =
     then (
       abort_all_staged_work t;
       cancel_event_for_operation t operation.id;
-      Option.iter t.queued_event_borrow ~f:(fun borrow ->
-        match borrow.receipt.delegation with
-        | None -> ()
-        | Some _ ->
-          borrow.cancel_requested <- true;
-          Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
+      cancel_independent_moderator t;
       Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
 ;;
@@ -4618,13 +4620,18 @@ let completed_delta t operation summary =
     let missing = List.drop final_protocol (List.length committed) in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
     let lifecycle = completed_lifecycle t summary.runtime_requests in
+    let moderator_snapshot =
+      match t.foreground_moderator, moderator_is_borrowed t with
+      | Some _, _ | _, true -> t.state.moderator
+      | None, false -> summary.moderator_snapshot
+    in
     let deltas =
       [ Option.some_if
           (not (List.is_empty missing))
           (Session_delta.Canonical_entries_appended missing)
       ; Some (Session_delta.Active_operation_changed None)
       ; Some (Session_delta.Lifecycle_changed lifecycle)
-      ; Some (Session_delta.Moderator_changed summary.moderator_snapshot)
+      ; Some (Session_delta.Moderator_changed moderator_snapshot)
       ]
       |> List.filter_opt
       |> fun values -> values @ runtime_request_deltas summary
@@ -5199,7 +5206,12 @@ let foreground_terminal_requests t operation_id outcome =
     in
     let%map plan =
       match end_reason with
-      | None -> Observation_follow_up.finish_foreground ~state:t.state ~observer ~failed
+      | None ->
+        Observation_follow_up.finish_foreground
+          ~state:t.state
+          ~observer
+          ~operation_id
+          ~failed
       | Some _ ->
         Observation_follow_up.plan
           ~state:t.state
@@ -5217,13 +5229,23 @@ let worker_terminal t operation_id outcome =
     -> Ok ()
   | Some operation ->
     let open Result.Let_syntax in
-    let borrow = t.moderator_borrow in
-    let event_borrow = t.queued_event_borrow in
-    let foreground, background =
+    let belongs operation =
+      Option.exists operation ~f:(Agent_protocol.Id.Operation.equal operation_id)
+    in
+    let borrow =
+      Option.filter t.moderator_borrow ~f:(fun borrow -> belongs borrow.operation_id)
+    in
+    let event_borrow =
+      Option.filter t.queued_event_borrow ~f:(fun borrow ->
+        belongs borrow.receipt.context.operation_id)
+    in
+    let foreground, independent =
       List.partition_tf t.invocation_executions ~f:(fun execution ->
         match execution.owner with
-        | Background_job _ -> false
-        | _ -> true)
+        | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+        | Invocation_moderator borrow -> belongs borrow.operation_id
+        | Event_moderator borrow -> belongs borrow.receipt.context.operation_id
+        | Background_job _ -> false)
     in
     let%bind unfinished =
       List.map foreground ~f:(fun execution ->
@@ -5287,16 +5309,19 @@ let worker_terminal t operation_id outcome =
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
     in
     resolve_cleaned_permission_waiters t permissions;
-    t.moderator_borrow <- None;
+    Option.iter borrow ~f:(fun _ -> t.moderator_borrow <- None);
     Option.iter event_borrow ~f:(fun borrow ->
       borrow.callback_active <- false;
       borrow.cancel <- None);
-    t.queued_event_borrow <- None;
+    Option.iter event_borrow ~f:(fun _ -> t.queued_event_borrow <- None);
     t.foreground_moderator <- None;
     t.notification_inputs <- None;
-    t.idle_moderator_borrowed <- false;
-    t.invocation_executions <- background;
+    t.idle_moderator_borrowed <- moderator_is_borrowed t;
+    t.invocation_executions <- independent;
     t.active_cancel <- None;
+    (match t.state.lifecycle.desired, t.state.halted with
+     | Stopped, _ | _, true -> cancel_independent_moderator t
+     | Running, false -> ());
     let%bind () =
       match reconcile_foreground_invocations t with
       | Ok () -> Ok ()
@@ -5701,32 +5726,50 @@ let with_delegated_moderator_event t ~delegation ~event ~authorize ~snapshot f =
     in
     match claimed with
     | Delegated_unavailable -> Ok None
-    | Delegated_replay previous -> Ok (Some previous)
+    | Delegated_replay previous ->
+      let%map () = authorize () in
+      Some previous
     | Delegated_borrow borrow ->
       let%bind _ =
         run_queued_event_borrow t borrow (fun ~borrow ~event ~commit ->
           let active = Atomic.make true in
-          let execute ~invocation callback =
+          let check () =
+            let%bind () = authorize () in
             match Atomic.get active with
             | false ->
               Error (error Conflict "delegated policy invocation scope has ended")
-            | true ->
+            | true -> Ok ()
+          in
+          let execute ~invocation callback =
+            let%bind () = check () in
+            let%bind result =
               with_invocation_claim
                 t
                 (Claim_event_invocation (borrow, invocation))
-                callback
+                (fun ~dispatched ->
+                   let%bind () = check () in
+                   callback ~dispatched)
+            in
+            (* Keep the native outcome even if the delegated caller loses access
+               while it runs. Rechecking inside the callback after the effect
+               would discard known results before the actor could persist them. *)
+            let%map () = check () in
+            result
           in
           Exn.protect
             ~finally:(fun () -> Atomic.set active false)
             ~f:(fun () ->
+              let%bind () = check () in
               f
                 ~executing:borrow.receipt
                 ~event
                 ~execute
                 ~commit:(fun ~decision ~snapshot ~requests ->
+                  let%bind () = check () in
                   commit ~decision:(Some decision) ~snapshot ~requests)))
       in
       let%bind state = call t State in
+      let%bind () = authorize () in
       List.find state.moderator_executions ~f:(fun receipt ->
         Agent_protocol.Id.Moderator_execution.equal
           receipt.context.id

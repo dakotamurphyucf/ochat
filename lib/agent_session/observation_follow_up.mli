@@ -68,10 +68,13 @@ val admit_turn
     rejection and disabled follow-up policy. Successful completion preserves
     compaction intent for the idle scheduler; failed/cancelled workers discard
     their unscheduled continuation work. End-session intent is settled separately
-    with the actual halt. Save these changes with the worker's terminal state. *)
+    with the actual halt. Save these changes with the worker's terminal state.
+    Requests belonging to independent events/jobs and their native descendants
+    remain available for their actual owner's scheduler. *)
 val finish_foreground
   :  state:Session_state.t
   -> observer:Agent_protocol.Invocation.observer
+  -> operation_id:Agent_protocol.Id.Operation.t
   -> failed:bool
   -> (t, Agent_protocol.Error.t) result
 

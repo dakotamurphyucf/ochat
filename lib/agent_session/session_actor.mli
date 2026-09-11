@@ -1166,7 +1166,12 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 
 (** Trusted host handoff for a parent's live delegated policy check. [authorize]
     must validate the private relation and admitted child invocation after entering
-    the parent gate. Revalidate before handler effects and before using the reply.
+    the parent gate. The handoff rechecks before entering [f], before and after
+    native admission, before decision commit and before disclosing native outcomes
+    or saved decisions. A denied disclosure retains the already committed outcome
+    and checkpoint. [authorize] must be repeatable and must not run the policy
+    handler itself. Native implementations must still check after their own
+    internal approval waits; this wrapper cannot intercept arbitrary host code.
     The actor persists claim before executing [f]; [commit] saves parent snapshot,
     runtime intent and decision atomically and retains ownership through callback
     return. Native calls are parent event-owned and must use the normal scoped
@@ -1175,6 +1180,8 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
     An identical completed retry returns its receipt without calling [f]. Failed
     or interrupted handlers never replay. Stop-cancel interrupts active callbacks;
     late commits and escaped executors reject. None means parent unavailable.
+    An unrelated foreground completion preserves this borrow and its requests;
+    a foreground end-session outcome cancels it.
     This does not install factory mediation or admit moderated generated parents. *)
 val with_delegated_moderator_event
   :  t

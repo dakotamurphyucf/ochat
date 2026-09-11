@@ -3976,6 +3976,20 @@ parent operation. Native policy calls belong to the parent's event, and the pare
 checkpoint, decision and runtime intent commit together. Stop-cancel interrupts
 policy work even when the parent also has an unrelated foreground operation.
 Escaped executors and late decision commits cannot reuse the completed borrow.
+Ordinary foreground completion retains independently owned policy callbacks,
+native calls and pending runtime requests. A managed foreground summary cannot
+overwrite a newer actor-committed moderator checkpoint. A foreground end-session
+request cancels independent policy work, as explicit stop-cancel does.
+
+The host authorizer is repeatable and checks the private relation; it does not run
+the policy script. The handoff calls it again before entering the handler, around
+native admission, before decision commit and before returning results or saved
+decisions. Revocation during a native call withholds its result from the handler
+while retaining the native outcome in the parent's durable record. Revocation
+after a successful decision commit withholds that reply without rolling back the
+parent's installed moderator state. A later authorized retry can reuse the saved
+decision. Native implementations retain responsibility for checks after their own
+internal permission waits and before physical effects.
 
 `Moderator_event.run_delegated` uses the normal transactional event engine and
 parent services. A fresh result includes the parent's outcome for host handling;

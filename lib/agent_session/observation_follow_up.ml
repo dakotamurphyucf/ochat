@@ -244,8 +244,41 @@ let admit_turn ~state ~observer =
   |> Result.bind ~f:(result Turn)
 ;;
 
-let finish_foreground ~state ~observer ~failed =
+let foreground_owned ~(state : Session_state.t) ~operation_id entry =
+  let event_owned (event : E.t) =
+    Option.exists event.context.operation_id ~f:(P.Id.Operation.equal operation_id)
+  in
+  let rec invocation_owned seen (invocation : I.t) =
+    let key = P.Id.Invocation.to_string invocation.context.id in
+    match Set.mem seen key with
+    | true -> false
+    | false ->
+      let seen = Set.add seen key in
+      (match
+         ( invocation.context.parent_job
+         , invocation.parent_event
+         , invocation.context.parent_invocation )
+       with
+       | Some _, _, _ -> false
+       | None, Some id, _ ->
+         List.find state.moderator_executions ~f:(fun event ->
+           P.Id.Moderator_execution.equal event.context.id id)
+         |> Option.exists ~f:event_owned
+       | None, None, Some id ->
+         List.find state.invocations ~f:(fun parent ->
+           P.Id.Invocation.equal parent.context.id id)
+         |> Option.exists ~f:(invocation_owned seen)
+       | None, None, None -> true)
+  in
+  match entry with
+  | Event event -> event_owned event
+  | Observation invocation | Handler invocation ->
+    invocation_owned String.Set.empty invocation
+;;
+
+let finish_foreground ~state ~observer ~operation_id ~failed =
   current_entries ~state ~observer
+  |> List.filter ~f:(foreground_owned ~state ~operation_id)
   |> List.filter ~f:(fun entry ->
     turn_only entry
     || (failed
