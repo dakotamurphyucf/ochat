@@ -19,6 +19,7 @@
   managed_session_tool
   managed_send_tool
   managed_read_tool
+  managed_wait_tool
   managed_submission
   managed_submission_tracking
   prompt_catalog

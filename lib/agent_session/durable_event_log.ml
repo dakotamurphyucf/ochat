@@ -8,6 +8,7 @@ type t =
   { capacity : int
   ; mutex : Eio.Mutex.t
   ; mutable events : Agent_protocol.Event.Durable.t list
+  ; mutable changed : unit Eio.Promise.t * unit Eio.Promise.u
   }
 
 let error message = Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
@@ -34,15 +35,26 @@ let create ~capacity events =
   then Error (error "durable event replay capacity must be positive")
   else if not (is_contiguous events)
   then Error (error "initial durable events are not contiguous")
-  else Ok { capacity; mutex = Eio.Mutex.create (); events = retain capacity events }
+  else
+    Ok
+      { capacity
+      ; mutex = Eio.Mutex.create ()
+      ; events = retain capacity events
+      ; changed = Eio.Promise.create ()
+      }
 ;;
 
 let append t appended =
   if not (List.is_empty appended)
   then
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      t.events <- retain t.capacity (t.events @ appended))
+      t.events <- retain t.capacity (t.events @ appended);
+      let _, notify = t.changed in
+      t.changed <- Eio.Promise.create ();
+      Eio.Promise.resolve notify ())
 ;;
+
+let changed t = Eio.Mutex.use_ro t.mutex (fun () -> fst t.changed)
 
 let oldest events =
   List.hd events

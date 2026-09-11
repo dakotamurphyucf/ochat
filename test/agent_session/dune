@@ -5,6 +5,7 @@
   actor_tests
   managed_output_cursor_tests
   managed_output_page_tests
+  durable_event_wait_tests
   borrowed_execution_tests
   background_execution_tests
   background_admission_tests

@@ -15,6 +15,13 @@ val create
 
 val append : t -> Agent_protocol.Event.Durable.t list -> unit
 
+(** Capture before reading the actor snapshot, then await outside the actor and
+    this log's mutex. Resolves on the next nonempty committed append, including
+    appends made before the caller begins awaiting. Broadcast, not consumption;
+    cancelled waiters require no registration cleanup. A wakeup is a reason to
+    recheck state and authority, never proof of a particular completion predicate. *)
+val changed : t -> unit Eio.Promise.t
+
 (** [replay t ~after_sequence ~through_sequence] returns retained events in
     [(after_sequence, through_sequence]]. It requests a snapshot when the
     first required sequence predates the retained window. *)

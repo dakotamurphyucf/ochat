@@ -1,6 +1,13 @@
 open Core
 module P = Agent_protocol
 
+type wait_target =
+  | Receipt of P.History.Id.t
+  | Output of
+      { cursor : P.Page.Cursor.t
+      ; receipt_id : P.History.Id.t option
+      }
+
 type t =
   { status :
       Native_tool_invocation.borrowed
@@ -18,6 +25,12 @@ type t =
       -> receipt_id:P.History.Id.t option
       -> cursor:P.Page.Cursor.t option
       -> limit:int
+      -> (Jsonaf.t, P.Invocation.tool_error) result
+  ; wait :
+      Native_tool_invocation.borrowed
+      -> P.Id.Session.t
+      -> target:wait_target
+      -> timeout_ms:int
       -> (Jsonaf.t, P.Invocation.tool_error) result
   }
 

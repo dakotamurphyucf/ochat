@@ -6000,6 +6000,118 @@ let managed_read t borrowed child_id ~receipt_id ~cursor ~limit =
       })
 ;;
 
+let managed_wait t borrowed child_id ~target ~timeout_ms =
+  let module P = Agent_protocol in
+  let module M = Agent_session.Managed_submission in
+  let module S = Agent_session.Managed_session_service in
+  let open Result.Let_syntax in
+  let fail code message details =
+    P.Invocation.{ code; message; retryable = false; details }
+  in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      fail
+        "agent.management.denied"
+        "The child session is unavailable to this caller."
+        `Null)
+  in
+  let%bind child, initial = authorize () in
+  let%bind () =
+    match timeout_ms >= 0 && timeout_ms <= 30000 with
+    | true -> Ok ()
+    | false ->
+      Error
+        (fail
+           "agent.wait.invalid_request"
+           "timeout_ms must be between 0 and 30000."
+           `Null)
+  in
+  let clock = Eio.Stdenv.mono_clock t.env in
+  let started = Eio.Time.Mono.now clock in
+  let remaining () =
+    (Float.of_int timeout_ms /. 1000.)
+    -. ((Mtime.span started (Eio.Time.Mono.now clock) |> Mtime.Span.to_float_ns) /. 1e9)
+  in
+  let same_generation state =
+    match
+      Int.equal
+        initial.identity.generation
+        state.Agent_session.Session_state.identity.generation
+    with
+    | true -> Ok ()
+    | false ->
+      Error
+        (fail
+           "agent.wait.snapshot_required"
+           "The child generation changed while waiting; request a fresh snapshot."
+           (`Object [ "snapshot_required", `True ]))
+  in
+  let receipt state id =
+    List.find state.Agent_session.Session_state.managed_submissions ~f:(fun receipt ->
+      P.History.Id.equal receipt.M.history_id id)
+    |> Result.of_option
+         ~error:
+           (fail "agent.wait.not_found" "The submission receipt is unavailable." `Null)
+  in
+  let rec loop () =
+    (* Capture before the snapshot. A commit between the read and await resolves
+       this same promise, avoiding a lost wakeup without retaining actor locks. *)
+    let changed = Agent_session.Durable_event_log.changed child.durable_events in
+    let%bind _, state = authorize () in
+    let%bind () = same_generation state in
+    let%bind ready, selected_receipt, cursor =
+      match target with
+      | S.Receipt id ->
+        let%map receipt = receipt state id in
+        let ready =
+          match receipt.status with
+          | Terminal _ -> Some "receipt_terminal"
+          | Deferred | Ready | Assigned _ -> None
+        in
+        ready, M.to_json receipt, `Null
+      | S.Output { cursor; receipt_id } ->
+        let%map page =
+          managed_read t borrowed child_id ~receipt_id ~cursor:(Some cursor) ~limit:1
+          |> Result.map_error ~f:(fun error ->
+            match String.chop_prefix error.P.Invocation.code ~prefix:"agent.read." with
+            | None -> error
+            | Some code -> { error with code = "agent.wait." ^ code })
+        in
+        let available =
+          match Jsonaf.member_exn "items" page with
+          | `Array (_ :: _) -> Some "output_available"
+          | _ -> None
+        in
+        available, Jsonaf.member_exn "receipt" page, P.Page.Cursor.to_json cursor
+    in
+    let%bind _, current = authorize () in
+    let%bind () = same_generation current in
+    let left = remaining () in
+    match ready, Float.(left <= 0.) with
+    | Some _, _ | None, true ->
+      let reason = Option.value ready ~default:"timeout" in
+      Ok
+        (`Object
+            [ "version", `Number "1"
+            ; "session_id", P.Id.Session.to_json child_id
+            ; "reason", `String reason
+            ; "receipt", selected_receipt
+            ; "cursor", cursor
+            ; "status", S.status_json current
+            ])
+    | None, false ->
+      (* Child commits wake immediately. A bounded heartbeat revalidates parent
+         authority/revocation even when the child emits no events. Neither branch
+         runs on the actor; cancellation propagates and never stops the child. *)
+      Eio.Fiber.first
+        (fun () -> Eio.Promise.await changed)
+        (fun () -> Eio.Time.Mono.sleep clock (Float.min left 0.25));
+      loop ()
+  in
+  loop ()
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -6200,6 +6312,9 @@ let create
         ; read =
             (fun borrowed child_id ~receipt_id ~cursor ~limit ->
               managed_read t borrowed child_id ~receipt_id ~cursor ~limit)
+        ; wait =
+            (fun borrowed child_id ~target ~timeout_ms ->
+              managed_wait t borrowed child_id ~target ~timeout_ms)
         }
     }
   in

@@ -4470,6 +4470,43 @@ This preserves large responses without truncation. A ceiling too small to fit
 metadata or make fragment progress returns an error. Caught-up status describes
 this snapshot and does not imply that the child or selected operation has ended.
 
+### Managed child waits (implementation in qualification)
+
+On internally qualified durable hosts, `<tool name="agent_wait"/>` uses the same
+management authority as read/send. Supply `session_id` and a specific target:
+
+- `receipt_id` alone waits for that submission's terminal outcome. Deferred and
+  coalesced submissions retain their own receipt IDs; assistant text or an idle
+  observation does not establish completion.
+- `cursor` waits for assistant output after that position. Include the same
+  `receipt_id` used to obtain the cursor when the read selected a receipt. A
+  terminal receipt does not satisfy this output predicate when no unread output
+  remains. Obtain an initial position through `agent_read`.
+
+`timeout_ms` defaults to 10000 and accepts 0–30000; zero performs an immediate
+check. The result includes `reason` (`receipt_terminal`, `output_available` or
+`timeout`), bounded `receipt` metadata, the original `cursor` for output waits,
+and scoped `status`. It does not consume or return output pages. Continue using
+`agent_read` with the original cursor. A completed receipt can represent failure,
+cancellation or interruption as well as successful completion; inspect its status.
+
+The worker waits on committed-event broadcasts outside the actor, using a
+monotonic timeout. Capturing the broadcast before reading state avoids losing a
+commit between the check and sleep. Quiet waits recheck caller authority using a
+250ms heartbeat, and all disclosure rechecks the management relationship. Cancelling
+the wait cancels only that invocation; timeout never stops or resumes the child
+and never resolves an approval. Longer asynchronous workflows can invoke this
+same tool through the existing background/subscription framework and retry their
+specific predicate. The native call itself keeps a bounded synchronous contract.
+
+Missing receipt targets return `agent.wait.not_found`; output queries retain the
+read service's validation errors under the `agent.wait` prefix. Cursor expiry and
+retention gaps retain explicit `agent.wait.cursor_expired` or
+`agent.wait.snapshot_required` errors with `snapshot_required: true`; a changed
+child generation during a wait also requires a new snapshot. After host restart,
+durable receipts remain queryable while process-bound cursors must be refreshed.
+This path remains internally gated pending the complete authoring-guidance phase.
+
 ### Authored agent-tool persistence contract (implementation in progress)
 
 The parser now accepts author-controlled policies:

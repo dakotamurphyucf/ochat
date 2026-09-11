@@ -57,13 +57,14 @@ let%expect_test
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt)
-          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/><tool name="run_chatml"/>|};
+          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/><tool name="agent_wait"/><tool name="run_chatml"/>|};
         let configuration = config root root prompt in
         let queued = ref None in
         let child_calls = ref 0 in
         let child_inputs = Queue.create () in
         let answer = String.concat (List.init 2500 ~f:(fun _ -> "📚\"\\\n")) in
         let child_gate = ref None in
+        let terminal_gate = ref None in
         let phase = ref "startup" in
         let provider ~sw:_ ~inputs =
           (* Match developer input only: the parent's tool result/request contains
@@ -111,7 +112,11 @@ let%expect_test
                ; Output_item_done
                    { item; output_index = 0; type_ = "response.output_item.done" }
                ]
-               |> Stdlib.List.to_seq)
+               |> Stdlib.List.to_seq
+               |> fun events ->
+               Stdlib.Seq.append events (fun () ->
+                 Option.iter !terminal_gate ~f:Eio.Promise.await;
+                 Stdlib.Seq.Nil))
           | false ->
             (match !queued with
              | None -> Stdlib.Seq.empty
@@ -208,6 +213,13 @@ let%expect_test
           | P.Invocation.Published (Complete value) -> value
           | status -> raise_s [%sexp "tool failed", (status : P.Invocation.status)]
         in
+        let wait_dispatched daemon caller =
+          await (fun () ->
+            List.exists (state daemon caller).invocations ~f:(fun call ->
+              match call.P.Invocation.status with
+              | Dispatching -> String.equal call.context.tool_name "agent_wait"
+              | _ -> false))
+        in
         let denied code = function
           | P.Invocation.Published (Fail error) ->
             [%test_eq: string] code error.code;
@@ -241,6 +253,12 @@ let%expect_test
           `Object
             ([ "session_id", P.Id.Session.to_json child; "receipt_id", `String receipt ]
              @ Option.to_list (Option.map cursor ~f:(fun value -> "cursor", value)))
+        in
+        let wait_request child receipt cursor timeout_ms =
+          match read_request child receipt cursor with
+          | `Object fields ->
+            `Object (fields @ [ "timeout_ms", `Number (Int.to_string timeout_ms) ])
+          | _ -> assert false
         in
         let parent_id, child_id, receipt_id, output_cursor =
           with_daemon (fun sw daemon client ->
@@ -300,6 +318,19 @@ let%expect_test
               daemon
               client
               parent.id
+              "agent_wait"
+              (wait_request
+                 foreign
+                 (P.History.Id.to_string
+                    (List.hd_exn initial.conversation.canonical_history).id)
+                 None
+                 0)
+            |> denied "agent.management.denied";
+            invoke
+              sw
+              daemon
+              client
+              parent.id
               "agent_read"
               (`Object [ "session_id", P.Id.Session.to_json foreign ])
             |> denied "agent.management.denied";
@@ -353,6 +384,46 @@ let%expect_test
               Jsonaf.exactly_equal (field (field pending "receipt") "terminal") `False);
             assert (List.is_empty (field pending "items" |> Jsonaf.list_exn));
             let pending_output_cursor = field pending "next_cursor" in
+            let before_wait = state daemon child_id in
+            let timed_out =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_wait"
+                (wait_request child_id (text receipt "receipt_id") None 20)
+              |> complete
+            in
+            [%test_eq: string] "timeout" (text timed_out "reason");
+            assert (
+              Jsonaf.exactly_equal (field (field timed_out "receipt") "terminal") `False);
+            [%test_eq: Sexp.t]
+              (Agent_session.Session_state.sexp_of_t before_wait)
+              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+            Eio.Fiber.fork ~sw (fun () ->
+              wait_dispatched daemon parent.id;
+              let handle = attach sw client parent.id in
+              let operation =
+                Option.value_exn (state daemon parent.id).active_operation
+              in
+              H.cancel_operation handle operation.id |> protocol_ok |> ignore;
+              H.close handle);
+            (match
+               invoke
+                 sw
+                 daemon
+                 client
+                 parent.id
+                 "agent_wait"
+                 (wait_request child_id (text receipt "receipt_id") None 30000)
+             with
+             | Published (Cancelled _) | Resolved (Cancelled _) -> ()
+             | status ->
+               raise_s [%sexp "wait cancellation failed", (status : P.Invocation.status)]);
+            [%test_eq: Sexp.t]
+              (Agent_session.Session_state.sexp_of_t before_wait)
+              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
             let replay =
               invoke
                 sw
@@ -400,8 +471,59 @@ let%expect_test
             [%test_eq: Sexp.t]
               (Agent_session.Session_state.sexp_of_t at_capacity)
               (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            child_gate := None;
-            Eio.Promise.resolve release ();
+            let terminal, release_terminal = Eio.Promise.create () in
+            terminal_gate := Some terminal;
+            Eio.Fiber.fork ~sw (fun () ->
+              wait_dispatched daemon parent.id;
+              child_gate := None;
+              Eio.Promise.resolve release ());
+            let available =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_wait"
+                (wait_request
+                   child_id
+                   (text receipt "receipt_id")
+                   (Some pending_output_cursor)
+                   5000)
+              |> complete
+            in
+            [%test_eq: string] "output_available" (text available "reason");
+            assert (Jsonaf.exactly_equal (field available "cursor") pending_output_cursor);
+            assert (
+              Jsonaf.exactly_equal (field (field available "receipt") "terminal") `False);
+            let still_pending =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "run_chatml"
+                (script
+                   ~tool:"agent_wait"
+                   (wait_request child_id (text deferred "receipt_id") None 0))
+              |> complete
+            in
+            [%test_eq: string] "timeout" (text still_pending "reason");
+            Eio.Fiber.fork ~sw (fun () ->
+              wait_dispatched daemon parent.id;
+              terminal_gate := None;
+              Eio.Promise.resolve release_terminal ());
+            let finished =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_wait"
+                (wait_request child_id (text deferred "receipt_id") None 5000)
+              |> complete
+            in
+            [%test_eq: string] "receipt_terminal" (text finished "reason");
+            [%test_eq: string] "completed" (text (field finished "receipt") "status");
             phase := "child receipts complete";
             await (fun () ->
               let current = state daemon child_id in
@@ -509,6 +631,18 @@ let%expect_test
               |> complete
             in
             assert (List.is_empty (field caught_up "items" |> Jsonaf.list_exn));
+            let waiting_at_tail =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_wait"
+                (wait_request child_id (text receipt "receipt_id") (Some output_cursor) 0)
+              |> complete
+            in
+            [%test_eq: string] "timeout" (text waiting_at_tail "reason");
+            [%test_eq: string] "stopped" (text (field waiting_at_tail "status") "state");
             let replay =
               invoke
                 sw
@@ -537,6 +671,30 @@ let%expect_test
         in
         with_daemon ~page_bytes:65536 (fun sw daemon client ->
           let before = state daemon child_id in
+          let retained =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "agent_wait"
+              (wait_request child_id receipt_id None 0)
+            |> complete
+          in
+          [%test_eq: string] "receipt_terminal" (text retained "reason");
+          (match
+             invoke
+               sw
+               daemon
+               client
+               parent_id
+               "agent_wait"
+               (wait_request child_id receipt_id (Some output_cursor) 0)
+           with
+           | Published (Fail error) ->
+             [%test_eq: string] "agent.wait.cursor_expired" error.code;
+             assert (Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
+           | _ -> failwith "wait accepted a previous-process cursor");
           (match
              invoke
                sw
@@ -629,11 +787,48 @@ let%expect_test
           let refreshed = read_all None |> complete in
           [%test_eq: int] 1 (field refreshed "items" |> Jsonaf.list_exn |> List.length);
           H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
-          H.close handle);
+          H.close handle;
+          let quiet = state daemon child_id in
+          let ledger = Agent_store.Session_store.delegations (D.store daemon) in
+          let record =
+            Agent_store.Delegation_store.resolve
+              ledger
+              (Option.value_exn quiet.spec.delegation)
+            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+            |> protocol_ok
+          in
+          Eio.Fiber.fork ~sw (fun () ->
+            wait_dispatched daemon parent_id;
+            Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+            Agent_store.Delegation_store.revoke ledger record Authority_changed
+            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+            |> protocol_ok
+            |> ignore);
+          invoke
+            sw
+            daemon
+            client
+            parent_id
+            "agent_wait"
+            (`Object
+                [ "session_id", P.Id.Session.to_json child_id
+                ; "cursor", field refreshed "next_cursor"
+                ; "timeout_ms", `Number "30000"
+                ])
+          |> denied "agent.management.denied";
+          [%test_eq: Sexp.t]
+            (Agent_session.Session_state.sexp_of_t quiet)
+            (Agent_session.Session_state.sexp_of_t (state daemon child_id)));
+        print_endline
+          "waits distinguish output from terminal receipts; timeout/cancellation \
+           preserve children; quiet revocation denies disclosure";
         print_endline
           "native/script retry shares one receipt; busy sends defer; conflicts and \
            foreign IDs do not mutate children; stopped/restarted receipt replay never \
            runs a child"));
   [%expect
-    {| native/script retry shares one receipt; busy sends defer; conflicts and foreign IDs do not mutate children; stopped/restarted receipt replay never runs a child |}]
+    {|
+    waits distinguish output from terminal receipts; timeout/cancellation preserve children; quiet revocation denies disclosure
+    native/script retry shares one receipt; busy sends defer; conflicts and foreign IDs do not mutate children; stopped/restarted receipt replay never runs a child
+    |}]
 ;;

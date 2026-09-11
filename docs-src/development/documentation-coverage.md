@@ -259,6 +259,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/managed_session_tool.mli` | [contract](../../lib/agent_session/managed_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_submission.mli` | [contract](../../lib/agent_session/managed_submission.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_submission_tracking.mli` | [contract](../../lib/agent_session/managed_submission_tracking.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/managed_wait_tool.mli` | [contract](../../lib/agent_session/managed_wait_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/memory_backend.mli` | [contract](../../lib/agent_session/memory_backend.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_checkpoint.mli` | [contract](../../lib/agent_session/moderator_checkpoint.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_event.mli` | [contract](../../lib/agent_session/moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

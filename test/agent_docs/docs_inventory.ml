@@ -70,6 +70,7 @@ let owner name =
         ; "managed_session_tool"
         ; "managed_send_tool"
         ; "managed_read_tool"
+        ; "managed_wait_tool"
         ; "managed_output_cursor"
         ; "managed_output_page"
         ; "managed_submission"
