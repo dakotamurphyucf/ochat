@@ -37,74 +37,162 @@ let%expect_test
     "concurrent retirement callers share dependency failures and preserve resources for \
      retry"
   =
-  List.iter [ false; true ] ~f:(fun raises ->
+  List.iter
+    (List.cartesian_product [ false; true ] [ false; true ])
+    ~f:(fun (raises, closing) ->
+      with_actor (fun _env sw actor _writer _backend ->
+        let entered, entered_u = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let fail = ref true
+        and calls = ref 0
+        and closes = ref 0 in
+        let failure =
+          Agent_protocol.Error.create
+            Persistence_error
+            ~message:"descendant stop could not be saved"
+            ~retryable:true
+            ()
+        in
+        let owner =
+          Owner.create_with_unload
+            ~actor
+            ~initial:(Some (runtime ~close:(fun () -> Int.incr closes) ()))
+            ~build:(fun () -> failwith "unexpected rebuild")
+            ~before_unload:(fun ~closing:_ ->
+              Int.incr calls;
+              match !fail with
+              | false -> Ok ()
+              | true ->
+                if !calls = 1 then Eio.Promise.resolve entered_u ();
+                Eio.Promise.await release;
+                if raises then failwith "descendant cleanup exception" else Error failure)
+        in
+        let stop ~closing () =
+          try
+            Ok
+              (if closing
+               then (
+                 Owner.close_and_wait owner;
+                 Ok ())
+               else Owner.unload_and_wait owner)
+          with
+          | Owner.Cleanup_failed error -> Ok (Error error)
+          | exn -> Error exn
+        in
+        let first = Eio.Fiber.fork_promise ~sw (stop ~closing:false) in
+        Eio.Promise.await entered;
+        let second = Eio.Fiber.fork_promise ~sw (stop ~closing) in
+        Eio.Fiber.yield ();
+        assert (Owner.is_loaded owner);
+        [%test_eq: int] 0 !closes;
+        (match closing, Owner.ensure_loaded owner with
+         | false, Error { code = Conflict; _ }
+         | true, Error { code = Server_shutting_down; _ } -> ()
+         | _ -> failwith "dependency barrier admitted new runtime work");
+        Eio.Promise.resolve release_u ();
+        List.iter [ first; second ] ~f:(fun pending ->
+          match raises, Eio.Promise.await_exn pending with
+          | false, Ok (Error actual) ->
+            [%test_eq: Sexp.t]
+              (Agent_protocol.Error.sexp_of_t failure)
+              (Agent_protocol.Error.sexp_of_t actual)
+          | true, Error (Failure message) ->
+            [%test_eq: string] "descendant cleanup exception" message
+          | _ -> failwith "retirement failure changed between waiters");
+        [%test_eq: int] 1 !calls;
+        [%test_eq: int] 0 !closes;
+        assert (Owner.is_loaded owner);
+        fail := false;
+        (match closing with
+         | false -> Owner.unload_and_wait owner |> protocol_ok
+         | true -> Owner.close_and_wait owner);
+        [%test_eq: int] 2 !calls;
+        [%test_eq: int] 1 !closes;
+        assert (not (Owner.is_loaded owner));
+        Owner.close_and_wait owner;
+        print_s
+          [%sexp
+            { exception_path = (raises : bool)
+            ; closing : bool
+            ; shared_failure = true
+            ; retry_closed_once = true
+            }]));
+  [%expect
+    {|
+    ((exception_path false) (closing false) (shared_failure true)
+     (retry_closed_once true))
+    ((exception_path false) (closing true) (shared_failure true)
+     (retry_closed_once true))
+    ((exception_path true) (closing false) (shared_failure true)
+     (retry_closed_once true))
+    ((exception_path true) (closing true) (shared_failure true)
+     (retry_closed_once true))
+    |}]
+;;
+
+let%expect_test "external close joins an accepted stop before retiring its dependencies" =
+  List.iter [ false; true ] ~f:(fun background ->
     with_actor (fun _env sw actor _writer _backend ->
       let entered, entered_u = Eio.Promise.create () in
       let release, release_u = Eio.Promise.create () in
-      let fail = ref true
-      and calls = ref 0
-      and closes = ref 0 in
-      let failure =
-        Agent_protocol.Error.create
-          Persistence_error
-          ~message:"descendant stop could not be saved"
-          ~retryable:true
-          ()
+      let worker_entered, worker_entered_u = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let released = ref false in
+      let release_cleanup () =
+        if not !released
+        then (
+          released := true;
+          Eio.Promise.resolve release_u ())
       in
+      let closes = ref 0 in
       let owner =
         Owner.create_with_unload
           ~actor
           ~initial:(Some (runtime ~close:(fun () -> Int.incr closes) ()))
           ~build:(fun () -> failwith "unexpected rebuild")
-          ~before_unload:(fun () ->
-            Int.incr calls;
-            match !fail with
-            | false -> Ok ()
-            | true ->
-              if !calls = 1 then Eio.Promise.resolve entered_u ();
-              Eio.Promise.await release;
-              if raises then failwith "descendant cleanup exception" else Error failure)
+          ~before_unload:(fun ~closing:_ ->
+            Eio.Promise.resolve entered_u ();
+            Eio.Promise.await release;
+            Ok ())
       in
-      let stop () = Result.try_with (fun () -> Owner.unload_and_wait owner) in
-      let first = Eio.Fiber.fork_promise ~sw stop in
-      Eio.Promise.await entered;
-      let second = Eio.Fiber.fork_promise ~sw stop in
-      Eio.Fiber.yield ();
-      assert (Owner.is_loaded owner);
-      [%test_eq: int] 0 !closes;
-      (match Owner.ensure_loaded owner with
-       | Error { code = Conflict; _ } -> ()
-       | _ -> failwith "dependency barrier admitted new runtime work");
-      Eio.Promise.resolve release_u ();
-      List.iter [ first; second ] ~f:(fun pending ->
-        match raises, Eio.Promise.await_exn pending with
-        | false, Ok (Error actual) ->
-          [%test_eq: Sexp.t]
-            (Agent_protocol.Error.sexp_of_t failure)
-            (Agent_protocol.Error.sexp_of_t actual)
-        | true, Error (Failure message) ->
-          [%test_eq: string] "descendant cleanup exception" message
-        | _ -> failwith "retirement failure changed between waiters");
-      [%test_eq: int] 1 !calls;
-      [%test_eq: int] 0 !closes;
-      assert (Owner.is_loaded owner);
-      fail := false;
-      Owner.unload_and_wait owner |> protocol_ok;
-      [%test_eq: int] 2 !calls;
-      [%test_eq: int] 1 !closes;
-      assert (not (Owner.is_loaded owner));
-      Owner.close_and_wait owner;
-      print_s
-        [%sexp
-          { exception_path = (raises : bool)
-          ; shared_failure = true
-          ; retry_closed_once = true
-          }]));
+      Exn.protect ~finally:release_cleanup ~f:(fun () ->
+        let worker =
+          match background with
+          | false -> None
+          | true ->
+            Some
+              (Eio.Fiber.fork_promise ~sw (fun () ->
+                 Result.try_with (fun () ->
+                   Owner.with_background_runtime owner (fun _ ->
+                     Eio.Promise.resolve worker_entered_u ();
+                     Eio.Promise.await never;
+                     Ok ()))))
+        in
+        if background then Eio.Promise.await worker_entered;
+        let stopping =
+          Eio.Fiber.fork_promise ~sw (fun () -> Owner.unload_and_wait owner)
+        in
+        Eio.Promise.await entered;
+        let closing = Eio.Fiber.fork_promise ~sw (fun () -> Owner.close_and_wait owner) in
+        Eio.Fiber.yield ();
+        Eio.Fiber.yield ();
+        [%test_eq: int] 0 !closes;
+        assert (Owner.is_loaded owner);
+        assert (Option.is_none (Eio.Promise.peek closing));
+        release_cleanup ();
+        Eio.Promise.await_exn stopping |> protocol_ok;
+        Eio.Promise.await_exn closing;
+        Option.iter worker ~f:(fun worker ->
+          match Eio.Promise.await_exn worker with
+          | Error (Eio.Cancel.Cancelled _) -> ()
+          | _ -> failwith "background lease was not cancelled");
+        [%test_eq: int] 1 !closes;
+        assert (not (Owner.is_loaded owner));
+        print_s [%sexp (background : bool), "stop barrier joined before close"])));
   [%expect
     {|
-    ((exception_path false) (shared_failure true) (retry_closed_once true))
-    ((exception_path true) (shared_failure true) (retry_closed_once true))
-    |}]
+    (false "stop barrier joined before close")
+    (true "stop barrier joined before close") |}]
 ;;
 
 let%expect_test "failed authority lookup preserves owner cleanup and rechecks every lease"

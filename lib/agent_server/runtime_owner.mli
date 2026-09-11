@@ -4,6 +4,8 @@ open! Core
 
 type t
 
+exception Cleanup_failed of Agent_protocol.Error.t
+
 val create
   :  actor:Agent_session.Session_actor.t
   -> initial:Agent_session.Runtime_builder.t option
@@ -14,10 +16,13 @@ val create
     dependency barrier. The callback runs outside the owner mutex after new
     admissions are excluded, before cancelling/releasing existing leases. A
     returned error retains resources and is shared by concurrent unload callers.
-    The callback must not unload this same owner. Ordinary [close] retains its
-    separate shutdown behavior. *)
+    The callback must not unload this same owner. For these owners [close] only
+    excludes new admissions; [close_and_wait] joins the dependency barrier before
+    cancelling leases or retiring resources. [closing=true] distinguishes permanent
+    owner closure from reusable unload/early stop preparation. The barrier must
+    handle shutdown and explicit stop without confusing their durable intent. *)
 val create_with_unload
-  :  before_unload:(unit -> (unit, Agent_protocol.Error.t) result)
+  :  before_unload:(closing:bool -> (unit, Agent_protocol.Error.t) result)
   -> actor:Agent_session.Session_actor.t
   -> initial:Agent_session.Runtime_builder.t option
   -> build:(unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
@@ -41,7 +46,9 @@ val prepare_dependency_stop : t -> (unit, Agent_protocol.Error.t) result
     Accepted-stop cleanup survives caller cancellation; the
     owner remains reusable for a later authorized session start. Concurrent stop
     cleanup requests join the same retirement and observe its success or failure;
-    they do not race into a spurious Conflict or close the runtime twice. *)
+    they do not race into a spurious Conflict or close the runtime twice. Cleanup
+    remains callable after [close], including retry after a dependency failure;
+    this never reopens runtime admission. *)
 val unload_and_wait : t -> (unit, Agent_protocol.Error.t) result
 
 (** Run maintenance only with no installed runtime or background lease, excluding
@@ -175,16 +182,19 @@ val deliver_background_job_completion
   -> Agent_protocol.Job.t
   -> (unit, Agent_protocol.Error.t) result
 
-(** [close] permanently prevents runtime reload and cancels background callbacks.
-    With no background owners, detaches the operation worker and closes the loaded
-    runtime immediately. Otherwise the final callback release retires it; [close]
-    does not wait for callbacks and is safe to request from inside one. The actor
-    must remain running through callback cleanup. *)
+(** [close] permanently prevents runtime reload and is safe to request from a
+    background callback. For owners with a host dependency barrier, it defers
+    cancellation and retirement to [close_and_wait]. For ordinary owners it
+    cancels background callbacks and retires after their cleanup, or immediately
+    if no callback owns the runtime. An in-progress unload always retains control
+    of retirement. The actor must remain running through cleanup. *)
 val close : t -> unit
 
-(** Close and await background callback cleanup before shutting down the actor or
-    its persistence writer. Call from the external session lifecycle, never from a
-    retained background callback (which would await itself). *)
+(** Close and join dependency/background cleanup before shutting down the actor or
+    its persistence writer. Concurrent accepted-stop cleanup is joined. A typed
+    dependency failure raises [Cleanup_failed], retaining resources for retry;
+    other exceptions retain their original backtrace. Call from the external
+    session lifecycle, never a retained callback (which would await itself). *)
 val close_and_wait : t -> unit
 
 module For_testing : sig

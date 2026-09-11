@@ -65,4 +65,9 @@ val summaries : t -> Agent_protocol.Session.t list
     active schedules, retaining their durable index entries for lazy reload. *)
 val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list -> int
 
+(** Reject new registration/loading, join all runtime dependency cleanup while
+    keeping loaded lookups and actors alive, then close actors and their stores.
+    A failed runtime cleanup retains the loaded graph for a shutdown retry.
+    Once begun, cancellation cannot skip actor/writer closure after runtime
+    cleanup; protected cleanup can exceed the host's grace deadline. *)
 val shutdown : t -> unit

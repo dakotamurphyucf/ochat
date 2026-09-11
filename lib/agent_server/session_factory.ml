@@ -2704,15 +2704,15 @@ let collect_results t handle journal persistence durable_events services runtime
       ~max_events:t.limits.event_replay_capacity
 ;;
 
-let stop_owned_children t actor =
+let retire_owned_children t actor ~closing =
   let module A = Agent_session.Session_actor in
   let module D = Agent_store.Delegation_store in
   let module P = Agent_protocol in
   let open Result.Let_syntax in
   let%bind parent = A.state actor in
-  match parent.lifecycle.desired with
-  | Running -> Ok ()
-  | Stopped ->
+  match closing, parent.lifecycle.desired with
+  | false, Running -> Ok ()
+  | true, Running | _, Stopped ->
     let ledger = Agent_store.Session_store.delegations t.store in
     let%bind records =
       D.with_records
@@ -2745,15 +2745,23 @@ let stop_owned_children t actor =
          match Session_registry.find t.registry record.admission.child_session_id with
          | None -> Ok ()
          | Some child ->
-           Delegation_lifecycle.stop_owned
-             ~parent_stop_epoch:parent.stop_epoch
-             ~clock:(Eio.Stdenv.clock t.env)
-             ~delegations:ledger
-             ~reference:(D.reference record)
-             ~actor:child.actor
-             ~runtime:child.runtime
-             ()
-           |> Result.map ~f:ignore)
+           (match parent.lifecycle.desired with
+            | Running ->
+              (try
+                 Runtime_owner.close_and_wait child.runtime;
+                 Ok ()
+               with
+               | Runtime_owner.Cleanup_failed error -> Error error)
+            | Stopped ->
+              Delegation_lifecycle.stop_owned
+                ~parent_stop_epoch:parent.stop_epoch
+                ~clock:(Eio.Stdenv.clock t.env)
+                ~delegations:ledger
+                ~reference:(D.reference record)
+                ~actor:child.actor
+                ~runtime:child.runtime
+                ()
+              |> Result.map ~f:ignore))
       (children parent.identity.session_id)
     |> Result.all_unit
 ;;
@@ -2827,7 +2835,7 @@ let create_loaded_entry
   | Ok () ->
     let runtime =
       Runtime_owner.create_with_unload
-        ~before_unload:(fun () -> stop_owned_children t actor)
+        ~before_unload:(retire_owned_children t actor)
         ~actor
         ~initial:(Some runtime)
         ~build:(fun () -> build_runtime_for_actor t handle actor)
@@ -2929,7 +2937,7 @@ let create_unloaded_entry
   in
   let runtime =
     Runtime_owner.create_with_unload
-      ~before_unload:(fun () -> stop_owned_children t actor)
+      ~before_unload:(retire_owned_children t actor)
       ~actor
       ~initial:None
       ~build:(fun () -> build_runtime_for_actor t handle actor)

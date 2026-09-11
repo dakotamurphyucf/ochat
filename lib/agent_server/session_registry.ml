@@ -18,6 +18,7 @@ type entry =
 
 type t =
   { mutex : Eio.Mutex.t
+  ; mutable closing : bool
   ; sessions : (Agent_protocol.Id.Session.t, entry) Map.Poly.t Atomic.t
   ; mutable indexed :
       (Agent_protocol.Id.Session.t, Agent_store.Session_index.Entry.t) Map.Poly.t
@@ -33,6 +34,7 @@ type stats =
 
 let create () =
   { mutex = Eio.Mutex.create ()
+  ; closing = false
   ; sessions = Atomic.make Map.Poly.empty
   ; indexed = Map.Poly.empty
   ; loader = None
@@ -40,22 +42,35 @@ let create () =
 ;;
 
 let install_loader t loader =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.loader <- Some loader)
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    match t.closing with
+    | true -> ()
+    | false -> t.loader <- Some loader)
 ;;
 
 let index t entry =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let session_id = entry.Agent_store.Session_index.Entry.session.id in
-    if Map.mem (Atomic.get t.sessions) session_id
+    if t.closing || Map.mem (Atomic.get t.sessions) session_id
     then ()
     else t.indexed <- Map.set t.indexed ~key:session_id ~data:entry)
 ;;
 
 let index_all t entries = List.iter entries ~f:(index t)
 
+let shutting_down () =
+  Agent_protocol.Error.create
+    Server_shutting_down
+    ~message:"session registry is shutting down"
+    ~retryable:true
+    ()
+;;
+
 let add t ~session_id entry =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    if Map.mem (Atomic.get t.sessions) session_id
+    if t.closing
+    then Error (shutting_down ())
+    else if Map.mem (Atomic.get t.sessions) session_id
     then
       Error
         (Agent_protocol.Error.create
@@ -73,9 +88,10 @@ let find t session_id = Map.find (Atomic.get t.sessions) session_id
 
 let load t session_id =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    match Map.find (Atomic.get t.sessions) session_id with
-    | Some entry -> Ok entry
-    | None ->
+    match t.closing, Map.find (Atomic.get t.sessions) session_id with
+    | true, _ -> Error (shutting_down ())
+    | false, Some entry -> Ok entry
+    | false, None ->
       (match Map.find t.indexed session_id, t.loader with
        | None, _ ->
          Error
@@ -191,13 +207,21 @@ let unload_inactive t ~index_entries =
 ;;
 
 let shutdown t =
-  let entries =
+  Eio.Cancel.protect (fun () ->
+    let entries =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        let entries = Map.data (Atomic.get t.sessions) in
+        t.closing <- true;
+        t.indexed <- Map.Poly.empty;
+        t.loader <- None;
+        entries)
+    in
+    (* Dependency cleanup can still need another actor's durable stop acknowledgement.
+     Keep the complete loaded graph and all actors alive until every runtime has
+     joined cleanup. No registry mutex is held while entering a runtime owner. *)
+    List.map entries ~f:(fun entry () -> Runtime_owner.close_and_wait entry.runtime)
+    |> Eio.Fiber.all;
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      let entries = Map.data (Atomic.get t.sessions) in
-      Atomic.set t.sessions Map.Poly.empty;
-      t.indexed <- Map.Poly.empty;
-      t.loader <- None;
-      entries)
-  in
-  List.map entries ~f:(fun entry () -> entry.close ()) |> Eio.Fiber.all
+      Atomic.set t.sessions Map.Poly.empty);
+    List.map entries ~f:(fun entry () -> entry.close ()) |> Eio.Fiber.all)
 ;;

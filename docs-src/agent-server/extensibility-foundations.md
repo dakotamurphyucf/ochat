@@ -3838,7 +3838,22 @@ excluding new runtime admissions. Concurrent unload callers share its completion
 including typed errors or exceptions. Failure retains the parent's resources for
 retry. The existing actor-only parent-cancellation callback remains separate;
 calling the same child's runtime owner from that callback would still deadlock.
-Ordinary close and daemon shutdown retain their separate behavior.
+Permanent close also joins the dependency barrier. For an owner with inherited
+dependencies, `close` excludes new admissions; `close_and_wait` performs or joins
+cleanup before cancelling leases and retiring resources. A background callback can
+request close without waiting on itself. Typed cleanup failures remain observable
+and retain resources for retry, even after admission has permanently closed.
+
+During daemon shutdown, a running parent's barrier closes owned child runtimes
+without requesting durable session stop. A stopped parent still applies its
+durable stop epoch to descendants. The registry rejects new registrations and
+loads, but retains the loaded relationship graph and all actors until runtime
+cleanup completes. Only then does it close actor mailboxes and persistence writers.
+This prevents a parent's stop acknowledgement from racing a child's mailbox closure.
+Failed runtime cleanup leaves the loaded graph available for a shutdown retry.
+Once registry shutdown begins, cancellation or the grace deadline cannot skip
+actor and writer closure after runtime cleanup. Protected cleanup can therefore
+finish after that deadline; shutdown does not return with live actor mailboxes.
 
 Dependency cancellation begins after the durable stop request, even while the
 parent's foreground operation is still unwinding. The factory schedules this work
@@ -3857,6 +3872,11 @@ An active-parent variant also blocks the parent's own provider cleanup. Descenda
 must receive cancellation before that cleanup is released. Releasing only the
 parent's cleanup leaves its runtime loaded until both grandchildren finish; then
 all four runtimes retire automatically. Provider calls in both variants are fakes.
+Two shutdown variants hold the same descendant cleanup barriers while checking
+that parent resources remain loaded. After shutdown and restart, the accepted-stop
+variant restores all four sessions stopped; ordinary shutdown restores their
+running intent. Runtime-owner tests also combine permanent close with concurrent
+stop, typed/exception cleanup failures and successful retry.
 
 Construction failure and cancellation do not publish a usable runtime. Cancellation
 before publication returns `Interrupted`. Closed runtimes reject later execution;

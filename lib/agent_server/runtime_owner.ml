@@ -11,31 +11,39 @@ type cleanup_outcome = (unit, exn * Stdlib.Printexc.raw_backtrace) result
 type unload_outcome =
   ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
 
+exception Cleanup_failed of Agent_protocol.Error.t
+
 type t =
   { actor : Agent_session.Session_actor.t
   ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
-  ; before_unload : unit -> (unit, Agent_protocol.Error.t) result
+  ; before_unload : (closing:bool -> (unit, Agent_protocol.Error.t) result) option
   ; mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
+  ; mutable close_finished : bool
   ; mutable unloading : unload_outcome Eio.Promise.t option
   ; mutable background_leases : background_lease list
   }
 
-let create_with_unload ~before_unload ~actor ~initial ~build =
+let create_internal ~before_unload ~actor ~initial ~build =
   { actor
   ; build
   ; before_unload
   ; mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; closed = false
+  ; close_finished = false
   ; unloading = None
   ; background_leases = []
   }
 ;;
 
+let create_with_unload ~before_unload ~actor ~initial ~build =
+  create_internal ~before_unload:(Some before_unload) ~actor ~initial ~build
+;;
+
 let create ~actor ~initial ~build =
-  create_with_unload ~before_unload:(fun () -> Ok ()) ~actor ~initial ~build
+  create_internal ~before_unload:None ~actor ~initial ~build
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
@@ -177,8 +185,8 @@ let with_background_runtime t f =
                   t.background_leases
                   <- List.filter t.background_leases ~f:(fun current ->
                        not (phys_equal current lease));
-                  match t.closed, t.background_leases with
-                  | true, [] -> retire_runtime_locked t
+                  match t.closed, t.background_leases, t.before_unload, t.unloading with
+                  | true, [], None, None -> retire_runtime_locked t
                   | _ -> Ok ())
                 |> raise_cleanup)))
         ~f:(fun () ->
@@ -206,7 +214,11 @@ let unload t =
     | None -> unload_locked t)
 ;;
 
-let prepare_dependency_stop t = t.before_unload ()
+let prepare_dependency_stop t =
+  match t.before_unload with
+  | None -> Ok ()
+  | Some prepare -> prepare ~closing:false
+;;
 
 let unload_and_wait t =
   (* A committed stop must join cleanup before closing runtime/workspace resources.
@@ -215,22 +227,25 @@ let unload_and_wait t =
     let open Result.Let_syntax in
     let%bind disposition =
       with_owner_lock t ~protect:true (fun () ->
-        match t.closed, t.unloading with
-        | true, _ -> Error (closed_error ())
-        | false, Some finished -> Ok (`Join finished)
-        | false, None ->
+        match t.unloading with
+        | Some finished -> Ok (`Join finished)
+        | None ->
           let finished, finish = Eio.Promise.create () in
           t.unloading <- Some finished;
-          Ok (`Retire (t.background_leases, finish)))
+          Ok (`Retire (t.background_leases, t.closed, finish)))
     in
     let outcome =
       match disposition with
       | `Join finished -> Eio.Promise.await finished
-      | `Retire (leases, finish) ->
+      | `Retire (leases, closing, finish) ->
         let outcome =
           try
             let result =
-              let%bind () = prepare_dependency_stop t in
+              let%bind () =
+                match t.before_unload with
+                | None -> Ok ()
+                | Some prepare -> prepare ~closing
+              in
               List.iter leases ~f:(fun lease -> lease.cancel ());
               List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
               with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
@@ -1022,19 +1037,23 @@ let close t =
   let leases, retired =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       t.closed <- true;
-      match t.background_leases with
-      | [] -> [], retire_runtime_locked t
-      | leases -> leases, Ok ())
+      match t.before_unload, t.unloading, t.background_leases with
+      | Some _, _, _ -> [], Ok ()
+      | None, None, [] -> [], retire_runtime_locked t
+      | None, _, leases -> leases, Ok ())
   in
   List.iter leases ~f:(fun lease -> lease.cancel ());
   raise_cleanup retired
 ;;
 
 let close_and_wait t =
-  close t;
-  let pending =
-    Eio.Mutex.use_ro t.mutex (fun () ->
-      List.map t.background_leases ~f:(fun lease -> lease.finished))
-  in
-  List.iter pending ~f:Eio.Promise.await
+  Eio.Cancel.protect (fun () ->
+    close t;
+    match Eio.Mutex.use_ro t.mutex (fun () -> t.close_finished) with
+    | true -> ()
+    | false ->
+      (match unload_and_wait t with
+       | Ok () ->
+         Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.close_finished <- true)
+       | Error error -> raise (Cleanup_failed error)))
 ;;

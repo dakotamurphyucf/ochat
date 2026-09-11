@@ -56,7 +56,7 @@ let create_child ?(key = "child") env root daemon parent =
   |> protocol_ok
 ;;
 
-let run ~active_parent =
+let run ?(shutdown = false) ?(stop = true) ~active_parent () =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -96,11 +96,18 @@ let run ~active_parent =
             Eio.Promise.resolve release_u ())
         in
         Eio.Switch.run (fun sw ->
-          let daemon =
+          let start () =
+            let config = config root root prompt_file in
+            let config =
+              match shutdown with
+              | false -> config
+              | true ->
+                { config with server = { config.server with shutdown_grace_ms = 10 } }
+            in
             Daemon.start
               ~sw
               ~env
-              ~config:(config root root prompt_file)
+              ~config
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
@@ -137,10 +144,14 @@ let run ~active_parent =
               ()
             |> protocol_ok
           in
+          let daemon = start () in
+          let shutting_down = ref None in
           Exn.protect
             ~finally:(fun () ->
               release_cleanup ();
-              Daemon.shutdown daemon |> protocol_ok)
+              match !shutting_down with
+              | None -> Daemon.shutdown daemon |> protocol_ok
+              | Some pending -> Eio.Promise.await_exn pending |> protocol_ok)
             ~f:(fun () ->
               Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
                 let client = connection daemon (principal ()) in
@@ -155,6 +166,11 @@ let run ~active_parent =
                     let middle = create_child env root daemon parent_entry in
                     let leaf = create_child env root daemon middle in
                     let sibling = create_child ~key:"sibling" env root daemon middle in
+                    let entries = [ parent_entry; middle; leaf; sibling ] in
+                    let ids =
+                      List.map entries ~f:(fun entry ->
+                        (A.state entry.actor |> protocol_ok).identity.session_id)
+                    in
                     let leaf_id =
                       (A.state leaf.actor |> protocol_ok).identity.session_id
                     in
@@ -197,9 +213,23 @@ let run ~active_parent =
                       |> protocol_ok
                       |> ignore;
                       Eio.Promise.await parent_entered);
+                    let begin_shutdown () =
+                      let pending =
+                        Eio.Fiber.fork_promise ~sw (fun () -> Daemon.shutdown daemon)
+                      in
+                      shutting_down := Some pending;
+                      pending
+                    in
                     let stopped =
-                      Eio.Fiber.fork_promise ~sw (fun () ->
-                        H.stop parent_handle ~mode:Cancel)
+                      match stop with
+                      | true ->
+                        Some
+                          (Eio.Fiber.fork_promise ~sw (fun () ->
+                             H.stop parent_handle ~mode:Cancel))
+                      | false ->
+                        assert shutdown;
+                        ignore (begin_shutdown ());
+                        None
                     in
                     if active_parent then Eio.Promise.await parent_cleaning;
                     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
@@ -209,13 +239,23 @@ let run ~active_parent =
                     [%test_eq: int] 0 !cleaned;
                     if active_parent
                     then (
-                      let progress = Eio.Promise.await_exn stopped |> protocol_ok in
+                      let progress =
+                        Eio.Promise.await_exn (Option.value_exn stopped) |> protocol_ok
+                      in
                       assert (P.Session.equal_desired_state progress.desired_state Stopped);
                       match progress.observed_state with
                       | Running_turn _ -> ()
                       | _ -> failwith "parent stop hid pending cleanup")
-                    else assert (Option.is_none (Eio.Promise.peek stopped));
+                    else
+                      Option.iter stopped ~f:(fun stopped ->
+                        assert (Option.is_none (Eio.Promise.peek stopped)));
                     assert (Owner.is_loaded parent_entry.runtime);
+                    if shutdown && stop
+                    then (
+                      let pending = begin_shutdown () in
+                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+                      assert (Option.is_none (Eio.Promise.peek pending));
+                      assert (Owner.is_loaded parent_entry.runtime));
                     if active_parent
                     then (
                       release_parent_cleanup ();
@@ -233,9 +273,9 @@ let run ~active_parent =
                       [%test_eq: int] 1 !cleaned;
                       assert (Owner.is_loaded parent_entry.runtime));
                     release_cleanup ();
-                    let result = Eio.Promise.await_exn stopped |> protocol_ok in
-                    assert (P.Session.equal_desired_state result.desired_state Stopped);
-                    let entries = [ parent_entry; middle; leaf; sibling ] in
+                    Option.iter stopped ~f:(fun stopped ->
+                      let result = Eio.Promise.await_exn stopped |> protocol_ok in
+                      assert (P.Session.equal_desired_state result.desired_state Stopped));
                     let rec retired () =
                       match
                         List.exists entries ~f:(fun entry ->
@@ -248,25 +288,49 @@ let run ~active_parent =
                     in
                     retired ();
                     [%test_eq: int] (if active_parent then 3 else 2) !cleaned;
-                    List.iter entries ~f:(fun entry ->
+                    let check (entry : Registry.entry) =
                       let state = A.state entry.actor |> protocol_ok in
                       assert (
-                        P.Session.equal_desired_state state.lifecycle.desired Stopped);
+                        P.Session.equal_desired_state
+                          state.lifecycle.desired
+                          (if stop then Stopped else Running));
                       assert (Option.is_none state.active_operation);
-                      assert (not (Owner.is_loaded entry.runtime)));
+                      [%test_eq: bool] (not stop) (Owner.is_loaded entry.runtime)
+                    in
+                    (match !shutting_down with
+                     | None -> List.iter entries ~f:check
+                     | Some pending ->
+                       Eio.Promise.await_exn pending |> protocol_ok;
+                       List.iter entries ~f:(fun entry ->
+                         match A.state entry.actor with
+                         | Error { code = Server_shutting_down; _ } -> ()
+                         | _ -> failwith "shutdown returned with a live actor mailbox");
+                       let recovered = start () in
+                       Exn.protect
+                         ~finally:(fun () -> Daemon.shutdown recovered |> protocol_ok)
+                         ~f:(fun () ->
+                           List.iter ids ~f:(fun id ->
+                             Registry.load (Daemon.registry recovered) id
+                             |> protocol_ok
+                             |> check)));
                     [%test_eq: int] (if active_parent then 3 else 2) !requests;
-                    H.detach sibling_handle |> protocol_ok;
-                    H.detach leaf_handle |> protocol_ok;
-                    H.detach parent_handle |> protocol_ok;
+                    if not shutdown
+                    then (
+                      H.detach sibling_handle |> protocol_ok;
+                      H.detach leaf_handle |> protocol_ok;
+                      H.detach parent_handle |> protocol_ok);
                     print_endline
-                      "both grandchildren cancelled before either cleanup finished; root \
-                       stop joined all runtimes"))))))
+                      (if stop
+                       then
+                         "both grandchildren cancelled before either cleanup finished; \
+                          root stop joined all runtimes"
+                       else "shutdown joined descendants; running intent restored")))))))
 ;;
 
 let%expect_test
     "root stop cancels sibling grandchildren before joining their blocked cleanup"
   =
-  run ~active_parent:false;
+  run ~active_parent:false ();
   [%expect
     {| both grandchildren cancelled before either cleanup finished; root stop joined all runtimes |}]
 ;;
@@ -274,7 +338,18 @@ let%expect_test
 let%expect_test
     "active parent cancellation reaches descendants before parent cleanup finishes"
   =
-  run ~active_parent:true;
+  run ~active_parent:true ();
   [%expect
     {| both grandchildren cancelled before either cleanup finished; root stop joined all runtimes |}]
+;;
+
+let%expect_test "daemon shutdown joins accepted owned stop before closing actors" =
+  run ~shutdown:true ~active_parent:false ();
+  [%expect
+    {| both grandchildren cancelled before either cleanup finished; root stop joined all runtimes |}]
+;;
+
+let%expect_test "ordinary shutdown joins descendants and preserves running intent" =
+  run ~shutdown:true ~stop:false ~active_parent:false ();
+  [%expect {| shutdown joined descendants; running intent restored |}]
 ;;
