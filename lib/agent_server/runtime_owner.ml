@@ -301,7 +301,36 @@ let parse_user_content t ~id content =
            ()))
 ;;
 
-let with_cancellable_access t f = with_owner_lock t ~protect:false f
+let with_activity (runtime : Agent_session.Runtime_builder.t) f =
+  match runtime.activity with
+  | None -> f ()
+  | Some activity ->
+    (try Agent_session.Runtime_activity.run activity f with
+     | Agent_session.Runtime_activity.Closed ->
+       Error
+         (Agent_protocol.Error.create
+            Interrupted
+            ~message:"generated runtime execution scope is closed"
+            ~retryable:false
+            ())
+     | Eio.Cancel.Cancelled _ as exn ->
+       (match Eio.Fiber.is_cancelled () with
+        | true -> raise exn
+        | false ->
+          Error
+            (Agent_protocol.Error.create
+               Interrupted
+               ~message:"generated runtime execution scope was cancelled"
+               ~retryable:false
+               ())))
+;;
+
+let with_cancellable_access t f =
+  with_owner_lock t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
+    with_activity (Option.value_exn t.runtime) f)
+;;
 
 let submit_ingress t ~producer ~registration_id ~namespace ~key ~payload =
   with_cancellable_access t (fun () ->
@@ -669,32 +698,33 @@ let drain_idle_moderator_locked t =
     let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     match t.runtime with
     | Some runtime ->
-      let%bind notifications = drain_loaded_notifications runtime in
-      let%bind applied =
-        match notifications with
-        | true -> Ok true
-        | false -> Agent_session.Session_actor.apply_moderator_follow_up t.actor
-      in
-      if applied
-      then Ok true
-      else (
-        let%bind activated =
-          match runtime.moderator_activation with
-          | None -> Ok false
-          | Some activation -> activation.run ()
+      with_activity runtime (fun () ->
+        let%bind notifications = drain_loaded_notifications runtime in
+        let%bind applied =
+          match notifications with
+          | true -> Ok true
+          | false -> Agent_session.Session_actor.apply_moderator_follow_up t.actor
         in
-        if activated
+        if applied
         then Ok true
         else (
-          let%bind more_observations = drain_loaded_observations t runtime in
-          let%bind applied =
-            Agent_session.Session_actor.apply_moderator_follow_up t.actor
+          let%bind activated =
+            match runtime.moderator_activation with
+            | None -> Ok false
+            | Some activation -> activation.run ()
           in
-          if applied
+          if activated
           then Ok true
           else (
-            let%map more_events = drain_loaded_idle_moderator t runtime in
-            more_observations || more_events)))
+            let%bind more_observations = drain_loaded_observations t runtime in
+            let%bind applied =
+              Agent_session.Session_actor.apply_moderator_follow_up t.actor
+            in
+            if applied
+            then Ok true
+            else (
+              let%map more_events = drain_loaded_idle_moderator t runtime in
+              more_observations || more_events))))
     | None ->
       Error
         (Agent_protocol.Error.create

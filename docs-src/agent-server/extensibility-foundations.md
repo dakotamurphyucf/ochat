@@ -3781,3 +3781,29 @@ still needs to install the parent dependency, exclude concurrent child start and
 reload, propagate stops through its recorded descendants, and reconcile creation
 across restart. The service alone does not enable public child creation or imply
 that those relationships are already installed by the factory.
+
+### Generated execution lifetime
+
+`Runtime_activity` registers generated execution under the runtime's construction
+switch while retaining the invoking fiber's context bindings. The foreground
+worker receives its own nested switch for provider/helper fibers; background
+execution and runtime-owner moderator/event callbacks use the same runtime scope.
+This lets a host cancel and join executable work before releasing inherited
+resources, even when callers belong to other switches.
+
+Caller cancellation interrupts and joins only that caller's activity. Runtime
+switch cancellation interrupts all of its activities and waits for their cleanup.
+New work cannot enter a closed runtime. Callback failures preserve their original
+exception and do not cancel siblings. This scope provides lifetime ownership;
+private admission, invocation permissions and disclosure checks remain required.
+
+Runtime-owner requests translate a closed or locally cancelled generated scope
+into `Interrupted` while preserving cancellation of their actual caller. A local
+child cancellation must not fail the shared daemon scheduler. Authored runtimes
+retain their existing execution path without this optional scope.
+
+Offline tests hold nested cleanup behind barriers, cancel individual callers or
+the whole runtime, verify context bindings and sibling isolation, and check late
+requests and owner cleanup. Generated runtime/actor tests also exercise the scope
+with real inherited file tools and fake provider turns. Installing the automatic
+parent-runtime dependency and executable generated factory host is still pending.

@@ -129,6 +129,10 @@ type t =
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
     (** Generated authority gate for owner-managed work, including idle callbacks.
         This does not authorize disclosure of retained history or replace leases. *)
+  ; activity : Runtime_activity.t option
+    (** Generated execution belongs to the runtime's construction switch even
+        when invoked by a foreground/scheduler fiber from another switch. The
+        owner must run direct moderator/event work through this scope too. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue

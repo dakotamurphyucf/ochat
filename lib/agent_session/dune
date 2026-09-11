@@ -76,6 +76,7 @@
   operation_worker
   turn_worker
   runtime_builder
+  runtime_activity
   queued_moderator_event
   permission_reviewer
   permission_policy

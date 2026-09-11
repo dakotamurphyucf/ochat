@@ -4,7 +4,7 @@ open Job_fixtures
 module Owner = Agent_server.Runtime_owner
 module Builder = Agent_session.Runtime_builder
 
-let runtime ?script_tools ?check_execution ~close () : Builder.t =
+let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   { worker =
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
         failwith "unexpected model operation")
@@ -21,6 +21,7 @@ let runtime ?script_tools ?check_execution ~close () : Builder.t =
   ; idle_notifications = None
   ; automatic_turn_policy = None
   ; check_execution
+  ; activity
   ; moderator_activation = None
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")

@@ -100,6 +100,7 @@ type t =
   ; moderator_activation : moderator_activation option
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
+  ; activity : Runtime_activity.t option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -1358,6 +1359,24 @@ let build_with_services
         | Error error -> Operation_worker.Failed error
         | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
   in
+  let activity =
+    match source with
+    | Authored _ -> None
+    | Generated _ -> Some (Runtime_activity.create ~sw)
+  in
+  let with_activity f =
+    match activity with
+    | None -> f ()
+    | Some activity -> Runtime_activity.run activity f
+  in
+  let worker =
+    match activity with
+    | None -> worker
+    | Some activity ->
+      Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+        Runtime_activity.with_switch activity (fun ~sw ->
+          Operation_worker.run worker ~sw ~input capabilities))
+  in
   let parse_user_content =
     match delegated with
     | false ->
@@ -1410,82 +1429,85 @@ let build_with_services
                    ~claim_event
                    ~is_halted
                    ~request ->
-                   let%bind () =
-                     match check_execution with
-                     | None -> Ok ()
-                     | Some check -> check ()
-                   in
-                   let script_tools =
-                     Script_tool_calls.with_lifecycle script_tools ~is_halted
-                     |> Script_tool_calls.with_durable_requests
-                   in
-                   let observer =
-                     Option.bind moderator ~f:(fun (moderator, _) ->
-                       Manager.invocation_observer
-                         moderator.Chat_response.In_memory_stream.manager)
-                   in
-                   let moderate_tool _ call =
-                     match moderator with
-                     | None -> Ok None
-                     | Some (moderator, _) ->
-                       let open Result.Let_syntax in
-                       let event = Moderation.Event.Pre_tool_call call in
-                       let%bind outcome =
-                         Moderator_event.run_ordinary
-                           ~event
-                           ~claim:(claim_event ~event)
-                           ~script_tools
-                           ~manager:moderator.manager
-                           ~history:services.history
-                           ~available_tools:tools
-                           ~session_meta:`Null
-                           ~now
-                           ()
-                       in
-                       (match outcome with
-                        | None ->
-                          Error (failure "background moderator event was not admitted")
-                        | Some outcome ->
-                          let tool_moderation =
-                            match
-                              Chat_response.Runtime_semantics.should_end_session
-                                outcome.runtime_requests
-                            with
-                            | Some _ ->
-                              Some
-                                (Moderation.Tool_moderation.Reject
-                                   "The session has ended.")
-                            | None -> outcome.tool_moderation
-                          in
-                          (* The event checkpoint owns these durable requests. Its
+                   with_activity (fun () ->
+                     let%bind () =
+                       match check_execution with
+                       | None -> Ok ()
+                       | Some check -> check ()
+                     in
+                     let script_tools =
+                       Script_tool_calls.with_lifecycle script_tools ~is_halted
+                       |> Script_tool_calls.with_durable_requests
+                     in
+                     let observer =
+                       Option.bind moderator ~f:(fun (moderator, _) ->
+                         Manager.invocation_observer
+                           moderator.Chat_response.In_memory_stream.manager)
+                     in
+                     let moderate_tool _ call =
+                       match moderator with
+                       | None -> Ok None
+                       | Some (moderator, _) ->
+                         let open Result.Let_syntax in
+                         let event = Moderation.Event.Pre_tool_call call in
+                         let%bind outcome =
+                           Moderator_event.run_ordinary
+                             ~event
+                             ~claim:(claim_event ~event)
+                             ~script_tools
+                             ~manager:moderator.manager
+                             ~history:services.history
+                             ~available_tools:tools
+                             ~session_meta:`Null
+                             ~now
+                             ()
+                         in
+                         (match outcome with
+                          | None ->
+                            Error (failure "background moderator event was not admitted")
+                          | Some outcome ->
+                            let tool_moderation =
+                              match
+                                Chat_response.Runtime_semantics.should_end_session
+                                  outcome.runtime_requests
+                              with
+                              | Some _ ->
+                                Some
+                                  (Moderation.Tool_moderation.Reject
+                                     "The session has ended.")
+                              | None -> outcome.tool_moderation
+                            in
+                            (* The event checkpoint owns these durable requests. Its
                              follow-up scheduler consumes them exactly once. *)
-                          Ok
-                            (Some { outcome with tool_moderation; runtime_requests = [] }))
-                   in
-                   Background_execution.run
-                     ?observer
-                     ~moderator_execute
-                     ~env
-                     ~job
-                     ~deadline
-                     ~execute
-                     ~request
-                     ~policy:services.one_off_policy
-                     ~script_tools
-                     ~now
-                     ~moderate_tool:(fun invocation call ->
-                       moderate_tool invocation call
-                       |> Result.map_error ~f:(fun error ->
-                         error.Agent_protocol.Error.message))
-                     ~prepare_outcome:(fun outcome ->
-                       Agent_protocol.Invocation.validate_outcome outcome
-                       |> Result.map_error ~f:(fun error ->
-                         error.Agent_protocol.Error.message))
-                     ())
+                            Ok
+                              (Some
+                                 { outcome with tool_moderation; runtime_requests = [] }))
+                     in
+                     Background_execution.run
+                       ?observer
+                       ~moderator_execute
+                       ~env
+                       ~job
+                       ~deadline
+                       ~execute
+                       ~request
+                       ~policy:services.one_off_policy
+                       ~script_tools
+                       ~now
+                       ~moderate_tool:(fun invocation call ->
+                         moderate_tool invocation call
+                         |> Result.map_error ~f:(fun error ->
+                           error.Agent_protocol.Error.message))
+                       ~prepare_outcome:(fun outcome ->
+                         Agent_protocol.Invocation.validate_outcome outcome
+                         |> Result.map_error ~f:(fun error ->
+                           error.Agent_protocol.Error.message))
+                       ()))
              }
          | _ -> None)
     ; moderator_activation
     ; check_execution
+    ; activity
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in
