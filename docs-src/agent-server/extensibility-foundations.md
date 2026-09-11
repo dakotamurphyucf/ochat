@@ -3821,7 +3821,8 @@ child ID, revision, manifest and inherited permission profile. Execution require
 the durable `Linked` stage and an unrevoked admission.
 
 Every ancestor must still have the admitted generation, source, permission profile,
-workspace and runtime policy, and be running without a terminal failure. The
+workspace and runtime policy. By default, each must also be running without a
+terminal failure. The
 checker follows private parent references, validates each narrowing against its
 parent's current bindings, and requires linked ancestor admissions. The ancestry
 depth limit is configurable (default 32); cycles and excess depth reject. An
@@ -3840,13 +3841,31 @@ children and ancestor revocation. They assert no unauthorized file disclosure or
 subsequent provider request. Separate ancestry tests check narrowing across two
 delegation edges and fresh live rebinding without invoking a tool.
 
-These are current-state checks, not a substitute for coordinated resource leases
-or stop/cancellation. The current guard explicitly rejects parent moderators until
-owner-aware policy mediation is installed, and rejects independent lifetime until
-its resource ownership is implemented. A child's own moderator is supported.
-Those temporary limits, public generated creation, contextual native/shell/managed
-adapters and creation-race coordination remain E08 work; general model-visible
-child creation is not yet enabled.
+Trusted hosts can supply `authorize_independent` to validate an independent
+admission's exact authorization digest against current host policy and resource
+ownership. Omission rejects independent lifetime. The callback is repeated after
+yielding ancestry/binding lookups. Authorization removes execution-liveness and
+stop-counter dependence above that independent edge, including upstream owned
+edges. An owned child below it still requires its immediate parent to run and
+cannot miss a stop/restart. No ancestor identity, policy, linkage, binding or
+revocation check is skipped; deleting an ancestor still denies access.
+
+Parent moderation still requires the original owner-aware enforcement path. An
+independent lifetime grant cannot replace an unavailable policy handler or make
+obsolete runtime resources authoritative. A child's own moderator may narrow its
+behavior further. These checks complement resource leases and stop/cancellation.
+The factory still admits only owned children: independent lifetime selection,
+stopped-ancestor resource reconstruction and inherited temporary-workspace
+retention are not installed. General model-facing creation remains separate work.
+
+The independent-authority tests use real private ledger records with trusted host
+states. They cover stopped ancestry, owned peers/descendants, grant changes during
+lookup, changed stopped-parent policy, deletion and transitive revocation. The
+generated actor/runtime matrix also uses real inherited file reads, its own
+moderator and fake provider requests: explicit authorization permits execution
+after parent stop; host grant revocation during tool admission prevents disclosure
+and further provider requests. These qualify the guard and runtime integration,
+not persisted independent factory creation or daemon recovery.
 
 ### Owned-child cancellation and resource cleanup
 
@@ -4228,7 +4247,15 @@ snapshot and directory publication use the existing durable store operations.
 After normal stopped recovery verifies the child, the factory records
 `Child_installed` and performs the final parent-policy check and `Linked` advance
 inside a parent actor checkpoint. It never builds a runtime or reenters the parent
-actor from that callback. A changed parent revokes the pending admission; failure
+actor or runtime owner from that callback. Creation and startup reconciliation
+capture the installed immutable moderator identity before the checkpoint, then
+compute the fingerprint from current actor state with that captured identity.
+This avoids a lock inversion with idle polling, which may hold the runtime owner
+while asking the actor for state. Source, halt, policy and stop-epoch changes still
+reject. A deterministic fixture holds the actual parent runtime owner at the
+`Child_installed` boundary and verifies publication reaches `Linked` before that
+owner is released, for both moderated and unmoderated parents.
+A changed parent revokes the pending admission; failure
 retains the child and private intent. Fresh unregistered actor resources close on
 both returned errors and exceptions. Registration follows linking.
 

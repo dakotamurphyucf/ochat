@@ -16,18 +16,27 @@ type t =
   ; max_depth : int
   ; parent_stop_epoch : int64 option
   ; moderation : P.Id.Session.t -> (P.Invocation.observer option, P.Error.t) result
+  ; authorize_independent : (D.record -> (unit, P.Error.t) result) option
   }
 
 let create
       ?(max_depth = 32)
       ?parent_stop_epoch
       ?(moderation = fun _ -> Ok None)
+      ?authorize_independent
       ~host
       ~reference
       ~capabilities
       ()
   =
-  { host; reference; capabilities; max_depth; parent_stop_epoch; moderation }
+  { host
+  ; reference
+  ; capabilities
+  ; max_depth
+  ; parent_stop_epoch
+  ; moderation
+  ; authorize_independent
+  }
 ;;
 
 let reference t = t.reference
@@ -97,7 +106,16 @@ let active (parent : Session_state.t) =
   | _ -> denied "delegation.parent_inactive: parent execution authority is unavailable"
 ;;
 
-let rec read_chain t ~visited ~depth ~expected reference =
+let independent_authorized t (record : D.record) =
+  match record.admission.lifetime, t.authorize_independent with
+  | Owned, _ -> Ok ()
+  | Independent _, Some authorize -> authorize record
+  | Independent _, None ->
+    unavailable
+      "delegation.lifetime_unavailable: independent resource ownership is not installed"
+;;
+
+let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
   let open Result.Let_syntax in
   let%bind () =
     match
@@ -122,20 +140,25 @@ let rec read_chain t ~visited ~depth ~expected reference =
     | false, _, _ ->
       denied "delegation.identity_changed: private admission does not match"
     | _, Some _, _ -> denied "delegation.revoked: child execution authority was revoked"
-    | true, None, Independent _ ->
-      unavailable
-        "delegation.lifetime_unavailable: independent resource ownership is not installed"
-    | true, None, Owned -> Ok ()
+    | true, None, (Owned | Independent _) -> independent_authorized t record
+  in
+  let require_execution =
+    match record.admission.lifetime with
+    | Owned -> require_execution
+    | Independent _ -> false
   in
   let%bind parent = t.host.state record.key.parent_session_id in
-  let%bind () = active parent in
+  let check_active parent = if require_execution then active parent else Ok () in
+  let%bind () = check_active parent in
   let%bind () =
     let expected =
       Option.value
         t.parent_stop_epoch
         ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
     in
-    match depth = 0 && not (Int64.equal parent.stop_epoch expected) with
+    match
+      require_execution && depth = 0 && not (Int64.equal parent.stop_epoch expected)
+    with
     | false -> Ok ()
     | true -> denied "delegation.parent_stopped: parent stopped since runtime admission"
   in
@@ -184,7 +207,13 @@ let rec read_chain t ~visited ~depth ~expected reference =
           denied "delegation.ancestry_changed: parent has a foreign delegation reference"
       in
       let%bind ancestor_record, _ =
-        read_chain t ~visited ~depth:(depth + 1) ~expected:current ancestor
+        read_chain
+          t
+          ~visited
+          ~depth:(depth + 1)
+          ~expected:current
+          ~require_execution
+          ancestor
       in
       (match ancestor_record.D.stage with
        | Linked -> Ok ()
@@ -196,21 +225,30 @@ let rec read_chain t ~visited ~depth ~expected reference =
   (* Parent reads and live resource lookup may yield. Repeat both durable and
      actor-backed checks before returning; lifecycle coordination owns the lease
      through actual execution and is responsible for cancellation after this point. *)
+  let%bind () = independent_authorized t record in
   let%bind latest = t.host.state parent.identity.session_id in
-  let%bind () = active latest in
+  let%bind () = check_active latest in
   let%bind latest_moderator = t.moderation latest.identity.session_id in
   let%bind latest_fingerprint = fingerprint ?moderator:latest_moderator latest in
   let%bind retained = t.host.resolve reference in
   match
     String.equal latest_fingerprint current_fingerprint
     && D.equal_record record retained
-    && Int64.equal latest.stop_epoch parent.stop_epoch
+    && ((not require_execution) || Int64.equal latest.stop_epoch parent.stop_epoch)
   with
   | true -> Ok (retained, latest)
   | false -> denied "delegation.authority_changed: admission changed during validation"
 ;;
 
-let read t = read_chain t ~visited:[] ~depth:0 ~expected:t.capabilities t.reference
+let read t =
+  read_chain
+    t
+    ~visited:[]
+    ~depth:0
+    ~expected:t.capabilities
+    ~require_execution:true
+    t.reference
+;;
 
 let check_preparation t ~session_id ~revision_id ~manifest_sha256 ~permission_profile =
   let open Result.Let_syntax in

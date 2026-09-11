@@ -4739,9 +4739,17 @@ let create_generated_session
     in
     Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
       let%bind before = A.state parent.actor in
-      let%bind authority_sha256 = parent_authority_fingerprint t before in
+      let%bind moderator = parent_moderation_source t parent_session_id in
+      let%bind authority_sha256 =
+        Agent_session.Delegation_authority.fingerprint ?moderator before
+      in
       let check_parent current =
-        let%bind fingerprint = parent_authority_fingerprint t current in
+        (* Publication calls this from the actor checkpoint. The runtime lease
+           retains the captured immutable policy source; never reacquire its owner
+           here, since the idle scheduler may hold it while waiting for this actor. *)
+        let%bind fingerprint =
+          Agent_session.Delegation_authority.fingerprint ?moderator current
+        in
         match current.State.lifecycle.desired, current.halted, current.failure with
         | Running, false, None
           when String.equal fingerprint authority_sha256
@@ -5135,7 +5143,8 @@ let reconcile_generated_creations t =
             , false
             , None ) -> Ok ()
           | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None ->
-            let%bind fingerprint = parent_authority_fingerprint t before in
+            let%bind moderator = parent_moderation_source t before.identity.session_id in
+            let%bind fingerprint = Authority.fingerprint ?moderator before in
             if not (String.equal fingerprint record.admission.authority_sha256)
             then revoke record Authority_changed
             else
@@ -5304,7 +5313,7 @@ let reconcile_generated_creations t =
                             let%bind () =
                               A.checkpoint parent.actor ~persist:(fun latest ->
                                 let%bind latest_fingerprint =
-                                  parent_authority_fingerprint t latest
+                                  Authority.fingerprint ?moderator latest
                                 in
                                 match
                                   latest.lifecycle.desired, latest.halted, latest.failure

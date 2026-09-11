@@ -107,6 +107,8 @@ let%expect_test
   =
   List.iter
     [ `Allowed
+    ; `Independent_parent_stopped
+    ; `Independent_host_revoked
     ; `Plain
     ; `Denied
     ; `Revoked
@@ -205,6 +207,10 @@ let%expect_test
               ; lifecycle = { desired = Running; observed = Idle }
               }
           in
+          let lifetime_digest =
+            Chatmd_shell_spec.Source_ref.digest "operator-lifetime-v1"
+          in
+          let independent_authorized = ref true in
           let admission =
             D.Admission.
               { child_session_id = session_id
@@ -215,7 +221,11 @@ let%expect_test
               ; parent_stop_epoch = Some !parent_state.stop_epoch
               ; authority_sha256 = Authority.fingerprint !parent_state |> protocol_ok
               ; capability_pins = G.capability_pins definition
-              ; lifetime = Owned
+              ; lifetime =
+                  (match mode with
+                   | `Independent_parent_stopped | `Independent_host_revoked ->
+                     Independent { authorization_sha256 = lifetime_digest }
+                   | _ -> Owned)
               ; created_at = timestamp
               }
           in
@@ -253,6 +263,18 @@ let%expect_test
           let parent_runtime_ref = ref parent in
           let authority_for definition =
             Authority.create
+              ~authorize_independent:(fun record ->
+                match record.D.admission.lifetime with
+                | Independent { authorization_sha256 }
+                  when !independent_authorized
+                       && String.equal authorization_sha256 lifetime_digest -> Ok ()
+                | _ ->
+                  Error
+                    (P.Error.create
+                       Permission_denied
+                       ~message:"delegation.lifetime_denied: host revoked independent use"
+                       ~retryable:false
+                       ()))
               ~host:
                 { state =
                     (fun id ->
@@ -307,11 +329,14 @@ let%expect_test
                       | `Not_linked
                       | `Disclosure_revoked
                       | `Input_revoked -> Ok ()
-                      | `Parent_stopped ->
+                      | `Parent_stopped | `Independent_parent_stopped ->
                         parent_state
                         := { !parent_state with
                              lifecycle = { desired = Stopped; observed = Stopped }
                            };
+                        Ok ()
+                      | `Independent_host_revoked ->
+                        independent_authorized := false;
                         Ok ()
                       | `Parent_policy_changed ->
                         parent_state
@@ -647,13 +672,14 @@ let%expect_test
                    assert (String.is_substring rendered ~substring:"original-parent-root");
                    [%test_eq: int] 1 successes;
                    [%test_eq: int] 0 count
-                 | `Allowed ->
+                 | `Allowed | `Independent_parent_stopped ->
                    assert (String.is_substring rendered ~substring:"original-parent-root");
                    [%test_eq: int] 2 successes;
                    [%test_eq: int] 1 count
                  | `Denied
                  | `Revoked
                  | `Parent_stopped
+                 | `Independent_host_revoked
                  | `Parent_policy_changed
                  | `Admission_revoked
                  | `Disclosure_revoked
@@ -667,6 +693,7 @@ let%expect_test
                 let expects_blocked_model =
                   match mode with
                   | `Parent_stopped
+                  | `Independent_host_revoked
                   | `Parent_policy_changed
                   | `Admission_revoked
                   | `Disclosure_revoked
@@ -693,7 +720,7 @@ let%expect_test
                    in
                    assert failure);
                 (match mode with
-                 | `Allowed ->
+                 | `Allowed | `Independent_parent_stopped ->
                    let saved = runtime.start_moderator () |> protocol_ok in
                    let fresh_parent =
                      parent_runtime ~env ~sw ~root:Eio.Path.(root / "parent")
@@ -740,6 +767,7 @@ let%expect_test
                  | `Denied
                  | `Revoked
                  | `Parent_stopped
+                 | `Independent_host_revoked
                  | `Parent_policy_changed
                  | `Admission_revoked
                  | `Disclosure_revoked
@@ -749,6 +777,8 @@ let%expect_test
                 print_s
                   [%sexp
                     { mode : [ `Allowed
+                             | `Independent_parent_stopped
+                             | `Independent_host_revoked
                              | `Plain
                              | `Denied
                              | `Revoked
@@ -767,6 +797,10 @@ let%expect_test
   [%expect
     {|
     ((mode Allowed) (successes 2) (moderator_state 1) (fake_provider_requests 2))
+    ((mode Independent_parent_stopped) (successes 2) (moderator_state 1)
+     (fake_provider_requests 2))
+    ((mode Independent_host_revoked) (successes 0) (moderator_state 0)
+     (fake_provider_requests 0))
     ((mode Plain) (successes 1) (moderator_state 0) (fake_provider_requests 2))
     ((mode Denied) (successes 0) (moderator_state 0) (fake_provider_requests 2))
     ((mode Revoked) (successes 0) (moderator_state 0) (fake_provider_requests 2))

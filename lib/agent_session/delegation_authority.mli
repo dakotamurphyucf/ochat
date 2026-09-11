@@ -33,13 +33,27 @@ val fingerprint
     initialization and [check_execution] before every effectful runtime boundary.
     [parent_stop_epoch] pins the current loaded parent lifetime; omission uses the
     creation admission's epoch (legacy zero). A stop/restart invalidates that live
-    guard even when the parent is running again. *)
+    owned guard even when the parent is running again.
+
+    [authorize_independent] is a trusted host callback, omitted by default. It must
+    validate the record's exact independent authorization digest against current
+    host policy and independently owned resources. It is repeated after yielding
+    ancestor/binding checks. Successful authorization removes execution-liveness
+    and stop-counter dependence above that edge, including older Owned edges;
+    Owned descendants below it still depend on their immediate running parent.
+    Every ancestor's private identity, linkage, source, policy, workspace, selected
+    bindings and revocation remain checked. Missing ancestors still deny. Existing
+    parent-moderation requirements are unchanged; resource retention alone cannot
+    authorize an unavailable policy handler. This does not install factory lifetime
+    selection, stopped-ancestor resources or workspace retention. *)
 val create
   :  ?max_depth:int
   -> ?parent_stop_epoch:int64
   -> ?moderation:
        (Agent_protocol.Id.Session.t
         -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result)
+  -> ?authorize_independent:
+       (Agent_store.Delegation_store.record -> (unit, Agent_protocol.Error.t) result)
   -> host:host
   -> reference:Agent_store.Delegation_store.Reference.t
   -> capabilities:Chat_response.Tool_capability.t
@@ -61,7 +75,8 @@ val check_preparation
 
 (** Execution requires Linked, unrevoked admission and a running, unchanged parent
     with the exact current binding selection. Generation/source/policy/workspace
-    changes or a missing/stopped ancestor deny. Walks only private parent references,
+    changes or a missing/stopped ancestor deny, except execution liveness above a
+    host-authorized Independent edge as described above. Walks only private parent references,
     rejecting cycles and depth excess (configurable, default32). Checks do not consume approval grants;
     the child's actual invocation/permission service still performs authorization. *)
 val check_execution : t -> (unit, Agent_protocol.Error.t) result
