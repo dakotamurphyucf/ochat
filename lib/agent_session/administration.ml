@@ -44,6 +44,7 @@ let reset_state (state : Session_state.t) options =
       }
   ; spec = spec state options
   ; lifecycle = { desired = Stopped; observed = Stopped }
+  ; pending_initial_start = false
   ; conversation = conversation state options
   ; active_operation = None
   ; permissions = []

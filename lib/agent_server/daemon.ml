@@ -796,7 +796,13 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     Session_factory.complete_index_recovery factory (Session_registry.entries registry)
   in
   let start_scheduler =
-    Start_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~queue:start_queue
+    Start_scheduler.start
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~queue:start_queue
+      ~resume_initial_starts:(fun () ->
+        Session_factory.resume_generated_initial_starts factory)
   in
   let job_scheduler =
     Job_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~capacity:job_capacity

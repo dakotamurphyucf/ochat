@@ -208,6 +208,7 @@ let index_entry metadata =
     ; deliverable_job_count = 0
     ; earliest_schedule_due = None
     ; owner_grace_deadline = None
+    ; pending_initial_start = false
     ; archived = false
     }
 ;;

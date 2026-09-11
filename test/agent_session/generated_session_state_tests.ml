@@ -102,6 +102,38 @@ let%expect_test
         }
       in
       State.validate state |> protocol_ok;
+      let pending =
+        { state with
+          pending_initial_start = true
+        ; spec =
+            { state.spec with
+              protocol = { state.spec.protocol with start_immediately = true }
+            }
+        }
+      in
+      State.validate pending |> protocol_ok;
+      assert_same_session_snapshot
+        pending
+        (Persistence.restore_snapshot (encoded pending) |> store_ok);
+      (* Old generated sessions retain their original requested start setting after
+         a later stop. Migration must not synthesize a new start from that setting. *)
+      let legacy = { pending with schema_version = 11; pending_initial_start = false } in
+      let legacy_payload =
+        match State.sexp_of_t legacy with
+        | Sexp.List fields ->
+          Sexp.List
+            (List.filter fields ~f:(function
+               | Sexp.List (Atom "pending_initial_start" :: _) -> false
+               | _ -> true))
+          |> Sexp.to_string_mach
+        | _ -> assert false
+      in
+      let migrated = Persistence.restore_snapshot legacy_payload |> store_ok in
+      assert migrated.spec.protocol.start_immediately;
+      assert (not migrated.pending_initial_start);
+      assert (
+        Result.is_error
+          (Persistence.restore_snapshot (encoded { pending with schema_version = 11 })));
       let wire =
         P.Session.to_json (State.summary state) |> P.Session.of_json |> protocol_ok
       in
@@ -241,7 +273,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 11) (stage Child_installed)
+    ((checkpoint_schema 12) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

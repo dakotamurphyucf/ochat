@@ -10,7 +10,7 @@ module G = Agent_session.Generated_definition
 module C = Chat_response.Tool_capability
 module Owner = Agent_server.Runtime_owner
 
-let create_child_result env root daemon parent_id =
+let create_child_result ?(start_immediately = false) env root daemon parent_id =
   let parent =
     Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
     |> Option.value_exn
@@ -51,6 +51,7 @@ let create_child_result env root daemon parent_id =
     |> F.protocol_ok
   in
   Agent_server.Session_factory.create_generated_session
+    ~start_immediately
     (Daemon.factory daemon)
     ~parent_session_id:parent_id
     ~idempotency_key:(F.key "generated-crash-create")
@@ -58,11 +59,13 @@ let create_child_result env root daemon parent_id =
     definition
 ;;
 
-let create_child env root daemon parent_id =
-  create_child_result env root daemon parent_id |> F.protocol_ok
+let create_child ?(start_immediately = false) env root daemon parent_id =
+  create_child_result ~start_immediately env root daemon parent_id |> F.protocol_ok
 ;;
 
 let run_child env ~root ~boundary ~recover =
+  let start_immediately = String.is_prefix boundary ~prefix:"auto-" in
+  let boundary = if start_immediately then String.drop_prefix boundary 5 else boundary in
   let armed = ref false in
   let ledger_prefix = ref ""
   and artifact_prefix = ref ""
@@ -82,6 +85,7 @@ let run_child env ~root ~boundary ~recover =
           !armed
           &&
           match boundary with
+          | "started" -> false
           | "artifact-partial" ->
             String.is_prefix path ~prefix:!artifact_prefix
             && String.is_suffix path ~suffix:".chatmd"
@@ -166,7 +170,14 @@ let run_child env ~root ~boundary ~recover =
                   armed := true;
                   (match boundary with
                    | "preflight" | "parent-stopped" | "parent-missing" ->
-                     (match create_child_result wrapped root daemon parent.id with
+                     (match
+                        create_child_result
+                          ~start_immediately
+                          wrapped
+                          root
+                          daemon
+                          parent.id
+                      with
                       | Error { code = Persistence_error; _ } when !writes = 3 -> ()
                       | _ -> F.fail "injected child-stage acknowledgement did not fail");
                      let records =
@@ -223,6 +234,18 @@ let run_child env ~root ~boundary ~recover =
                        before
                        (A.state entry.actor |> F.protocol_ok);
                      F.require (!requests = 0) "unlinked child called a provider";
+                     if start_immediately
+                     then (
+                       F.require
+                         before.pending_initial_start
+                         "creation did not retain initial intent";
+                       Agent_client.Session_handle.stop handle ~mode:Cancel
+                       |> F.protocol_ok
+                       |> ignore;
+                       F.require
+                         (not
+                            (A.state entry.actor |> F.protocol_ok).pending_initial_start)
+                         "stop failed to cancel unpublished initial intent");
                      Agent_client.Session_handle.detach handle |> F.protocol_ok;
                      (match boundary with
                       | "parent-stopped" | "parent-missing" ->
@@ -263,8 +286,15 @@ let run_child env ~root ~boundary ~recover =
                        (Eio.Stdenv.stdout env)
                    | _ ->
                      ignore
-                       (create_child wrapped root daemon parent.id
+                       (create_child ~start_immediately wrapped root daemon parent.id
                         : Agent_server.Session_registry.entry);
+                     (match boundary with
+                      | "started" ->
+                        Eio.Flow.copy_string
+                          "generated-creation-boundary\n"
+                          (Eio.Stdenv.stdout env);
+                        Eio.Fiber.await_cancel ()
+                      | _ -> ());
                      F.fail "creation did not hit its crash boundary")
                 | true
                   when String.equal boundary "parent-stopped"
@@ -374,10 +404,49 @@ let run_child env ~root ~boundary ~recover =
                   F.require
                     (Int.equal !requests (restart - 1))
                     "startup or creation called a provider";
+                  if
+                    start_immediately
+                    && restart = 1
+                    && not (String.equal boundary "preflight")
+                  then
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      let rec await_start () =
+                        let entry =
+                          Agent_server.Session_registry.find
+                            (Daemon.registry daemon)
+                            record.admission.child_session_id
+                          |> Option.value_exn
+                        in
+                        let state = A.state entry.actor |> F.protocol_ok in
+                        match state.lifecycle.observed, state.pending_initial_start with
+                        | Idle, false -> ()
+                        | Failed error, _ -> raise_s [%sexp (error : P.Error.t)]
+                        | _ ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                          await_start ()
+                      in
+                      await_start ());
                   let child =
-                    create_child wrapped root daemon record.key.parent_session_id
+                    create_child
+                      ~start_immediately
+                      wrapped
+                      root
+                      daemon
+                      record.key.parent_session_id
                   in
                   let state = A.state child.actor |> F.protocol_ok in
+                  if start_immediately
+                  then (
+                    F.require
+                      (not state.pending_initial_start)
+                      "initial intent was not consumed";
+                    F.require
+                      (P.Session.equal_desired_state
+                         state.lifecycle.desired
+                         (if restart = 1 && not (String.equal boundary "preflight")
+                          then Running
+                          else Stopped))
+                      "creation retry or restart ignored explicit stop");
                   F.require
                     (P.Id.Session.equal
                        state.identity.session_id
@@ -425,6 +494,24 @@ let run_child env ~root ~boundary ~recover =
                   F.require
                     (Int.equal !requests restart)
                     "recovered child did not execute exactly one turn";
+                  if start_immediately
+                  then (
+                    Agent_client.Session_handle.stop handle ~mode:Cancel
+                    |> F.protocol_ok
+                    |> ignore;
+                    let repeated =
+                      create_child
+                        ~start_immediately
+                        wrapped
+                        root
+                        daemon
+                        record.key.parent_session_id
+                    in
+                    F.require
+                      (P.Session.equal_desired_state
+                         (A.state repeated.actor |> F.protocol_ok).lifecycle.desired
+                         Stopped)
+                      "retry restarted explicitly stopped child");
                   Agent_client.Session_handle.detach handle |> F.protocol_ok))));
   Eio.Flow.copy_string "generated-creation-recovered\n" (Eio.Stdenv.stdout env)
 ;;
@@ -439,6 +526,10 @@ let test env environment =
     ; "child"
     ; "child-record"
     ; "linked"
+    ; "auto-child"
+    ; "auto-linked"
+    ; "auto-started"
+    ; "auto-preflight"
     ; "preflight"
     ; "parent-stopped"
     ; "parent-missing"
@@ -467,7 +558,7 @@ let test env environment =
           ~finally:(fun () -> F.terminate env child)
           ~f:(fun () ->
             match boundary with
-            | "preflight" | "parent-stopped" | "parent-missing" ->
+            | "preflight" | "auto-preflight" | "parent-stopped" | "parent-missing" ->
               let result =
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   Support.Process_manager.await child)

@@ -97,6 +97,9 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; pending_initial_start : bool
+    (** New generated creation's durable, unconsumed start intent. Older sessions
+        never infer this from their original start_immediately configuration. *)
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]

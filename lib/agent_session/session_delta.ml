@@ -4,6 +4,7 @@ type t =
   | Batch of t list
   | Created of Session_state.t
   | Lifecycle_changed of Session_state.Lifecycle.t
+  | Initial_start_consumed
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
@@ -76,6 +77,7 @@ let rec apply state = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
   | Created created -> Session_state.upgrade_schema created
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
+  | Initial_start_consumed -> Ok { state with pending_initial_start = false }
   | Workspace_changed workspace_instance ->
     let quota_key =
       Option.map state.spec.quota_key ~f:(fun quota_key ->
@@ -761,5 +763,10 @@ let rec apply state = function
            ~message:"session generation did not advance"
            ~retryable:false
            ())
-    else Ok { state with identity = { state.identity with generation } }
+    else
+      Ok
+        { state with
+          identity = { state.identity with generation }
+        ; pending_initial_start = false
+        }
 ;;

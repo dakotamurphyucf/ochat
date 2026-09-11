@@ -1853,7 +1853,7 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 introduced this disposition; current schema 11 safely upgrades schema 8/9/10
+Session-state schema 9 introduced this disposition; current schema 12 safely upgrades schema 8/9/10/11
 snapshots. Older snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
 back to a binary that cannot read the current schema; do not edit stored version numbers to
@@ -3873,15 +3873,16 @@ validation-helper, shell and managed-tool delegation adapters.
 ### Qualified persisted child creation
 
 `Session_factory.create_generated_session` is an internal host service for creating
-an initially stopped generated child. It accepts an already admitted definition,
-parent session ID, idempotency key and optional display name. External adapters
+a generated child, stopped by default. It accepts an already admitted definition,
+parent session ID, idempotency key, optional display name and `start_immediately`.
+External adapters
 must authenticate their invoking parent; this API does not make a session ID an
 access grant or expose a model tool.
 
 The factory retains the loaded parent's runtime, checks its current policy and
 exact selected capabilities, and derives the durable principal, workspace and
 permission profile from that parent. The request digest covers source, effective
-capability pins and display name. Repeated requests use the reserved child/revision
+capability pins, display name and initial start request. Repeated requests use the reserved child/revision
 IDs even when preparation allocated new candidate artifact IDs. Changed inputs
 under the same scoped key conflict; changed admitted parent authority rejects.
 An archived child or an installed child whose storage has been removed returns
@@ -3907,8 +3908,34 @@ storage. It checks identical retries, conflicts, separate initial instructions a
 the same child IDs after two daemon restarts, then starts/sends through the public
 session APIs and executes inherited recursive scripts. These tests qualify normal
 creation and retained retry behavior, including rejection after archive/removal.
-Automatic start intent, model-facing creation, concurrent lifecycle races and
+Model-facing creation, remaining concurrent lifecycle races and
 cleanup of abandoned installed artifacts/relationships remain required work.
+
+### Durable initial activation
+
+Automatic creation starts the child only after its management relationship is
+linked. Session-state schema 12 persists a separate `pending_initial_start` bit
+while the newborn child remains stopped. The first actual start, explicit stop,
+reset or permanent activation failure consumes it in the actor transaction.
+The original `Spec.start_immediately` flag remains part of the creation request;
+it is never used to resurrect a subsequently stopped child. Schema 11 checkpoints
+migrate with no pending intent, including older generated sessions whose original
+request flag remains true.
+
+The session index carries a rebuildable pending-start hint. Daemon startup hydrates
+these children, and the start scheduler resumes their activation after creation
+reconciliation. Temporarily queued, starting or compacting ancestors leave the
+intent pending. The runtime still checks the complete current delegated authority
+before initialization and execution. Permanent activation failure is saved as a
+failed, stopped child with its original ID and transcript; a keyed retry returns
+that child. Retryable errors leave the intent available for another attempt.
+
+Automatic activation loads the runtime and makes the session ready; it does not
+submit a user message or start a model turn. Process-death coverage additionally
+kills creation at child installation, linking and completed initial activation,
+then verifies scheduler-driven recovery and stop-preserving retries across two
+restarts. The active descendant fixture uses automatic creation, and a failing
+generated moderator initializer is checked through the real factory API.
 
 ### Interrupted generated creation
 

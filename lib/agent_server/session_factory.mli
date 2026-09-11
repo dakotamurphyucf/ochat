@@ -108,21 +108,31 @@ val recover_sessions : t -> (Session_registry.entry list, Agent_protocol.Error.t
     or model call runs here. Corrupt installed data fails closed. *)
 val reconcile_generated_creations : t -> (unit, Agent_protocol.Error.t) result
 
-(** Qualified internal host creation of an initially stopped generated child.
+(** Qualified internal host creation of a generated child.
     Revalidates the prepared definition against the loaded parent's exact native
     bindings, persists a protected retry mapping and complete initial journal/
     snapshot before publication, then links under the parent's actor checkpoint.
-    Does not initialize scripts, start a model turn or grant caller access.
+    Defaults to stopped. [start_immediately] persists an initial activation intent
+    before linking, then loads and starts the child. Retries and startup recovery
+    resume this intent, but never restart a subsequently stopped child. Permanent
+    activation failure is retained on the inspectable child. Does not start a model
+    turn or grant caller access.
     External adapters must authenticate their invoking parent before calling.
     Uses the parent's durable principal, workspace and permission profile.
     Failed/ambiguous installs retain their private reservation for reconciliation. *)
 val create_generated_session
-  :  t
+  :  ?start_immediately:bool
+  -> t
   -> parent_session_id:Agent_protocol.Id.Session.t
   -> idempotency_key:Agent_protocol.Idempotency_key.t
   -> display_name:string option
   -> Agent_session.Generated_definition.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+(** Resume indexed pending generated starts under the daemon scheduler. Temporary
+    ancestor unavailability leaves the intent pending; terminal activation errors
+    are committed to the child. Persistence failures remain pending for retry. *)
+val resume_generated_initial_starts : t -> unit
 
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata
     and accurate scheduling hints before clearing the durable rebuild marker.

@@ -339,6 +339,12 @@ type _ request =
       * Session_state.t
       -> Agent_protocol.Session.t request
   | Start : Agent_protocol.Id.Attachment.t -> Agent_protocol.Session.t request
+  | Start_initial_delegated :
+      Agent_store.Delegation_store.Reference.t
+      -> Agent_protocol.Session.t request
+  | Fail_initial_delegated :
+      Agent_store.Delegation_store.Reference.t * Agent_protocol.Error.t
+      -> Agent_protocol.Session.t request
   | Queue_start : Agent_protocol.Id.Attachment.t -> Agent_protocol.Session.t request
   | Activate_queued_start : Agent_protocol.Session.t request
   | Stop :
@@ -1329,7 +1335,18 @@ let change_workspace t workspace =
 let lifecycle t ~desired ~observed =
   let open Result.Let_syntax in
   let%bind transition =
-    Session_transition.lifecycle ~now:(t.services.now ()) t.state ~desired ~observed
+    let delta = Session_delta.Lifecycle_changed { desired; observed } in
+    Session_transition.apply
+      ~now:(t.services.now ())
+      t.state
+      ~delta:
+        (if t.state.pending_initial_start
+         then Batch [ Initial_start_consumed; delta ]
+         else delta)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = desired; observed_state = observed }
+        ]
   in
   let%map () = install t transition in
   Session_state.summary t.state
@@ -1507,7 +1524,10 @@ let stop_transition t mode ~extension_work lifecycle deltas payloads =
       t
       ~delta:
         (Session_delta.Batch
-           ((Session_delta.Lifecycle_changed lifecycle :: deltas)
+           ((if t.state.pending_initial_start
+             then [ Session_delta.Initial_start_consumed ]
+             else [])
+            @ (Session_delta.Lifecycle_changed lifecycle :: deltas)
             @ List.map discarded ~f:Observation_follow_up.delta
             @ List.map events ~f:Observation_follow_up.event_delta
             @ List.map permissions ~f:(fun permission ->
@@ -1551,7 +1571,8 @@ let stop_internal t mode =
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
-        when List.is_empty (stopped_jobs t mode)
+        when (not t.state.pending_initial_start)
+             && List.is_empty (stopped_jobs t mode)
              && Extension_stop.is_empty extension_work
              && not
                   (List.exists t.state.invocations ~f:Observation_follow_up.pending
@@ -8716,6 +8737,48 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Commit_administration (attachment_id, expected_revision, kind, state) ->
     commit_administration t attachment_id expected_revision kind state
   | Start attachment_id -> with_writer t attachment_id (fun () -> start_internal t)
+  | Start_initial_delegated reference ->
+    (match t.state.spec.delegation with
+     | Some current
+       when Agent_store.Delegation_store.Reference.equal current reference
+            && Agent_protocol.Id.Session.equal
+                 reference.child_session_id
+                 t.state.identity.session_id ->
+       (match t.state.pending_initial_start with
+        | true -> start_internal t
+        | false -> Ok (Session_state.summary t.state))
+     | _ ->
+       Error
+         (error Permission_denied "delegation.start: child relationship does not match"))
+  | Fail_initial_delegated (reference, failure) ->
+    (match t.state.spec.delegation with
+     | Some current
+       when Agent_store.Delegation_store.Reference.equal current reference
+            && Agent_protocol.Id.Session.equal
+                 reference.child_session_id
+                 t.state.identity.session_id ->
+       (match t.state.pending_initial_start with
+        | false -> Ok (Session_state.summary t.state)
+        | true ->
+          let open Result.Let_syntax in
+          let%map _ =
+            transition
+              t
+              ~delta:
+                (Batch
+                   [ Initial_start_consumed
+                   ; Lifecycle_changed { desired = Stopped; observed = Failed failure }
+                   ; Failure_changed (Some failure)
+                   ])
+              ~payloads:
+                [ Session_state_changed
+                    { desired_state = Stopped; observed_state = Failed failure }
+                ]
+          in
+          Session_state.summary t.state)
+     | _ ->
+       Error
+         (error Permission_denied "delegation.start: child relationship does not match"))
   | Queue_start attachment_id ->
     with_writer t attachment_id (fun () -> queue_start_internal t)
   | Activate_queued_start -> activate_queued_start t
@@ -9079,6 +9142,12 @@ let upgrade_prompt_with_command_audit
 ;;
 
 let start t ~attachment_id = call t (Start attachment_id)
+let start_initial_delegated t ~reference = call t (Start_initial_delegated reference)
+
+let fail_initial_delegated t ~reference failure =
+  call t ~priority:Priority (Fail_initial_delegated (reference, failure))
+;;
+
 let replace_workspace t workspace = call t ~priority:Priority (Change_workspace workspace)
 let queue_start t ~attachment_id = call t (Queue_start attachment_id)
 

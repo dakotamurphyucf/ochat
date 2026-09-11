@@ -544,6 +544,22 @@ val start
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Consume an admitted generated child's initial start intent, if still pending.
+    The trusted host must load and authorize its runtime first. Retries after a
+    completed start or explicit stop preserve the current lifecycle. *)
+val start_initial_delegated
+  :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Persist a failed initial activation without deleting the child. A competing
+    start or stop that already consumed the intent takes precedence. *)
+val fail_initial_delegated
+  :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> Agent_protocol.Error.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 (** [replace_workspace t workspace] durably installs a verified replacement
     workspace while the caller holds the session's administrative boundary. *)
 val replace_workspace

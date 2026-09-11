@@ -503,21 +503,78 @@ let%expect_test
                         |> protocol_ok
                       in
                       let parent_state = A.state parent_entry.actor |> protocol_ok in
-                      let bad_id, _ =
-                        install_child
-                          ~env
-                          ~sw
-                          ~daemon
-                          ~parent:parent_state
-                          ~mode:`Valid
-                          ~source:
-                            {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
+                      let bad_definition =
+                        Owner.with_background_runtime parent_entry.runtime (fun runtime ->
+                          let native =
+                            Option.value_exn
+                              runtime.Agent_session.Runtime_builder.native_runtime
+                          in
+                          let capabilities =
+                            Lazy.force native.capabilities
+                            |> Result.map_error ~f:(fun error ->
+                              error.Chat_response.Tool_capability.message)
+                            |> Result.ok_or_failwith
+                          in
+                          let bundle =
+                            Chatmd_source_bundle.create
+                              ~root_file:"bad.chatmd"
+                              ~sources:
+                                [ ( "bad.chatmd"
+                                  , {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = if true then fail("fixture initialization failure") else 0
 let on_event ctx state event = Task.pure(state)
 </script>|}
-                          ~capability_pins:[]
-                          ~revoke:false
+                                  )
+                                ]
+                              ()
+                            |> Result.ok_or_failwith
+                          in
+                          Agent_session.Generated_definition.prepare
+                            ~env
+                            ~dir:Eio.Path.(Eio.Stdenv.fs env / root)
+                            ~revision_id:(P.Id.Prompt_revision.create ())
+                            ~created_at:(P.Timestamp.now ())
+                            ~current_capabilities:(fun () -> capabilities)
+                            ~references:[]
+                            bundle
+                          |> Result.map_error ~f:(fun errors ->
+                            P.Error.invalid_request
+                              (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                               |> String.concat ~sep:"\n")))
+                        |> protocol_ok
                       in
+                      let create_bad () =
+                        Agent_server.Session_factory.create_generated_session
+                          ~start_immediately:true
+                          (Daemon.factory daemon)
+                          ~parent_session_id:parent.id
+                          ~idempotency_key:
+                            (P.Idempotency_key.of_string "bad-initial-start"
+                             |> protocol_ok)
+                          ~display_name:None
+                          bad_definition
+                        |> protocol_ok
+                      in
+                      let failed = create_bad () in
+                      let failed_state = A.state failed.actor |> protocol_ok in
+                      let bad_id = failed_state.identity.session_id in
+                      assert (not failed_state.pending_initial_start);
+                      (match failed_state.lifecycle.observed, failed_state.failure with
+                       | Failed error, Some stored ->
+                         [%test_eq: Sexp.t]
+                           (P.Error.sexp_of_t error)
+                           (P.Error.sexp_of_t stored);
+                         assert (
+                           String.is_substring
+                             error.message
+                             ~substring:"fixture initialization failure")
+                       | _ ->
+                         failwith "automatic initialization failure was not persisted");
+                      let repeated = create_bad () in
+                      [%test_eq: Sexp.t]
+                        (State.sexp_of_t failed_state)
+                        (A.state repeated.actor |> protocol_ok |> State.sexp_of_t);
+                      assert (not (Owner.is_loaded failed.runtime));
                       let bad =
                         H.attach
                           ~sw
@@ -810,8 +867,9 @@ let%expect_test
                    |> String.concat ~sep:"\n")))
             |> protocol_ok
           in
-          let create ~display_name definition =
+          let create ?(start_immediately = true) ~display_name definition =
             Agent_server.Session_factory.create_generated_session
+              ~start_immediately
               (Daemon.factory daemon)
               ~parent_session_id:parent_id
               ~idempotency_key:
@@ -826,6 +884,8 @@ let%expect_test
           let create, prepare = child_creation daemon parent_id in
           let created = create ~display_name:None (prepare ()) |> protocol_ok in
           let state = A.state created.actor |> protocol_ok in
+          assert (P.Session.equal_desired_state state.lifecycle.desired Running);
+          assert (not state.pending_initial_start);
           let repeated = create ~display_name:None (prepare ()) |> protocol_ok in
           assert (
             P.Id.Session.equal
@@ -834,6 +894,9 @@ let%expect_test
           (match create ~display_name:(Some "different request") (prepare ()) with
            | Error { code = Conflict; _ } -> ()
            | _ -> failwith "changed creation payload did not conflict");
+          (match create ~start_immediately:false ~display_name:None (prepare ()) with
+           | Error { code = Conflict; _ } -> ()
+           | _ -> failwith "changed automatic start input did not conflict");
           assert (
             List.exists state.conversation.canonical_history ~f:(fun entry ->
               String.is_substring
@@ -872,6 +935,23 @@ let%expect_test
                           ()
                         |> protocol_ok
                       in
+                      (* A create retry must preserve an explicit stop even though
+                         the original request asked for automatic activation. *)
+                      H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+                      let create, prepare = child_creation daemon parent_id in
+                      let retried =
+                        create ~display_name:None (prepare ()) |> protocol_ok
+                      in
+                      let stopped = A.state retried.actor |> protocol_ok in
+                      assert (not stopped.pending_initial_start);
+                      assert (
+                        P.Session.equal_desired_state stopped.lifecycle.desired Stopped);
+                      Agent_server.Session_factory.resume_generated_initial_starts
+                        (Daemon.factory daemon);
+                      assert (
+                        P.Session.equal_desired_state
+                          (A.state retried.actor |> protocol_ok).lifecycle.desired
+                          Stopped);
                       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
                       H.detach handle |> protocol_ok;
                       id

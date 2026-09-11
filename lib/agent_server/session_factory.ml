@@ -2057,6 +2057,7 @@ let index_entry state =
     ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
     ; earliest_schedule_due
     ; owner_grace_deadline = owner_grace_deadline state
+    ; pending_initial_start = state.pending_initial_start
     ; archived = false
     }
 ;;
@@ -3831,6 +3832,7 @@ let index_requires_load entry =
   || entry.deliverable_job_count > 0
   || Option.is_some entry.earliest_schedule_due
   || Option.is_some entry.owner_grace_deadline
+  || entry.pending_initial_start
 ;;
 
 let recover_sessions t =
@@ -3977,7 +3979,118 @@ let initialize_generated_layout t state ~staging_directory =
       metadata state)
 ;;
 
+let with_generated_creation_lock t f =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
+      try Ok (f ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let resume_generated_initial_start t entry =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind state = A.state entry.Session_registry.actor in
+  match state.pending_initial_start, state.spec.delegation with
+  | false, _ -> Ok ()
+  | true, None -> Error (corrupt "generated initial start has no delegation")
+  | true, Some reference ->
+    (* A temporarily queued or compacting ancestor must not turn a durable start
+       request into a permanent failure. Terminal loss of authority is different. *)
+    let rec ready depth reference =
+      let%bind () =
+        match depth < t.limits.delegation_max_depth with
+        | true -> Ok ()
+        | false ->
+          Error
+            (unavailable
+               Permission_denied
+               "initial start exceeds delegation ancestry limit")
+      in
+      let%bind record =
+        D.resolve (Agent_store.Session_store.delegations t.store) reference
+        |> Result.map_error ~f:protocol_of_store
+      in
+      match record.stage, record.revocation with
+      | _, Some _ ->
+        Error (unavailable Permission_denied "initial start delegation was revoked")
+      | (Reserved | Artifact_installed | Child_installed), None -> Ok false
+      | Linked, None ->
+        let%bind parent =
+          Session_registry.find t.registry record.key.parent_session_id
+          |> Result.of_option
+               ~error:
+                 (unavailable Permission_denied "initial start parent is unavailable")
+        in
+        let%bind current = A.state parent.actor in
+        let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+        (match
+           ( current.lifecycle.desired
+           , current.halted
+           , current.failure
+           , String.equal fingerprint record.admission.authority_sha256 )
+         with
+         | Running, false, None, true ->
+           (match current.lifecycle.observed with
+            | Idle | Running_turn _ | Waiting_for_permission _ ->
+              (match current.spec.delegation with
+               | None -> Ok true
+               | Some ancestor -> ready (depth + 1) ancestor)
+            | Stopped
+            | Queued_for_slot
+            | Starting
+            | Recovering
+            | Compacting _
+            | Stopping
+            | Failed _ -> Ok false)
+         | _ ->
+           Error (unavailable Permission_denied "initial start parent authority ended"))
+    in
+    let attempt () =
+      let%bind ready = ready 0 reference in
+      match ready with
+      | false -> Ok ()
+      | true ->
+        let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+        A.start_initial_delegated entry.actor ~reference |> Result.map ~f:ignore
+    in
+    (match attempt () with
+     | Ok () -> Ok ()
+     | Error failure
+       when failure.retryable
+            ||
+            match failure.code with
+            | Persistence_error | Journal_corrupt | Interrupted | Server_shutting_down ->
+              true
+            | _ -> false -> Error failure
+     | Error failure ->
+       (* Authority may have become temporarily unavailable while runtime loading
+          yielded. Leave that intent pending instead of recording a terminal error. *)
+       (match ready 0 reference with
+        | Ok false -> Ok ()
+        | Ok true | Error _ ->
+          A.fail_initial_delegated entry.actor ~reference failure |> Result.map ~f:ignore))
+;;
+
+let resume_generated_initial_starts t =
+  with_generated_creation_lock t (fun () ->
+    Agent_store.Session_store.list_sessions t.store
+    |> List.filter ~f:(fun entry ->
+      entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
+    |> List.iter ~f:(fun indexed ->
+      match Session_registry.find t.registry indexed.session.id with
+      | None -> ()
+      | Some entry ->
+        ignore
+          (resume_generated_initial_start t entry : (unit, Agent_protocol.Error.t) result)))
+;;
+
 let create_generated_session
+      ?(start_immediately = false)
       t
       ~parent_session_id
       ~idempotency_key
@@ -4047,7 +4160,7 @@ let create_generated_session
           ~liveness:Detached
           ~persistence:Durable
           ~permission_profile:before.spec.permission_profile
-          ~start_immediately:false
+          ~start_immediately
           ?display_name
           ~labels:[]
           ()
@@ -4061,7 +4174,10 @@ let create_generated_session
       in
       let request_sha256 =
         [%sexp
-          ("ochat.generated-create.stopped.v1" : string)
+          (if start_immediately
+           then "ochat.generated-create.running.v1"
+           else "ochat.generated-create.stopped.v1"
+           : string)
         , (Chat_response.Generated_admission.source_fingerprint (G.admission definition)
            : string)
         , (G.capability_pins definition : (string * string) list)
@@ -4195,7 +4311,9 @@ let create_generated_session
                 in
                 let initial =
                   { initial with
-                    conversation =
+                    lifecycle = { desired = Stopped; observed = Stopped }
+                  ; pending_initial_start = start_immediately
+                  ; conversation =
                       { initial.conversation with
                         next_history_sequence = Int64.of_int next
                       ; reserved_history_through = Int64.of_int next
@@ -4268,22 +4386,16 @@ let create_generated_session
           ~finally:(fun () -> if !owned then entry.close ())
           ~f:(fun () ->
             let%bind () = publication () in
-            let%map () =
+            let%bind () =
               match fresh with
               | false -> Ok ()
               | true -> Session_registry.add t.registry ~session_id:child_id entry
             in
             owned := false;
+            let%map () = resume_generated_initial_start t entry in
             entry)))
   in
-  let outcome =
-    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
-      try Ok (run ()) with
-      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  match outcome with
-  | Ok result -> result
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  with_generated_creation_lock t run
 ;;
 
 let reconcile_generated_creations t =

@@ -92,6 +92,7 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; pending_initial_start : bool [@sexp.default false]
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
@@ -114,11 +115,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 11
+let current_schema_version = 12
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if t.pending_initial_start
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"generated initial start intent requires session schema 12"
+         ~retryable:false
+         ())
+  else if t.schema_version = 11
+  then Ok { t with schema_version = current_schema_version }
   else if
     t.schema_version < current_schema_version
     && (Option.is_some t.spec.delegation
@@ -231,6 +242,7 @@ let create ~identity ~spec ~initial_history =
   ; identity
   ; spec
   ; lifecycle = { desired; observed = Stopped }
+  ; pending_initial_start = false
   ; conversation =
       { canonical_history = initial_history
       ; deferred_user_entries = []
@@ -538,6 +550,19 @@ let validate t =
                 ())))
   in
   let%bind () = nonnegative "revision" t.counters.revision in
+  let%bind () =
+    match
+      ( t.pending_initial_start
+      , t.spec.delegation
+      , t.spec.protocol.start_immediately
+      , t.lifecycle.desired
+      , t.active_operation )
+    with
+    | false, _, _, _, _ | true, Some _, true, Stopped, None -> Ok ()
+    | _ ->
+      Error
+        (Agent_protocol.Error.invalid_request "invalid generated initial start intent")
+  in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in
   let%bind () = nonnegative "transaction sequence" t.counters.transaction_sequence in
   let%bind () =
