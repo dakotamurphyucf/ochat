@@ -10,6 +10,19 @@ val create
   -> build:(unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> t
 
+(** Construct an owner whose accepted stop retirement must first complete a host
+    dependency barrier. The callback runs outside the owner mutex after new
+    admissions are excluded, before cancelling/releasing existing leases. A
+    returned error retains resources and is shared by concurrent unload callers.
+    The callback must not unload this same owner. Ordinary [close] retains its
+    separate shutdown behavior. *)
+val create_with_unload
+  :  before_unload:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> actor:Agent_session.Session_actor.t
+  -> initial:Agent_session.Runtime_builder.t option
+  -> build:(unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> t
+
 val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result

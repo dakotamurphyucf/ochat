@@ -3825,6 +3825,27 @@ activity cleanup. Daemon shutdown preserves running intent for later recovery.
 This callback uses the actor only: acquiring the child's runtime-owner mutex here
 could deadlock against a close already waiting for the same scope to finish.
 
+Accepted stop retirement uses an additional dependency barrier. Factory runtime
+owners stop and join their loaded owned children before releasing parent leases;
+each child owner applies the same rule to its descendants. Siblings receive
+cancellation concurrently, so one blocked cleanup cannot delay another sibling's
+cancellation. The barrier validates the bounded private relationship graph and
+rejects cycles before entering descendant owners. Execution depth limits do not
+prevent cleanup of an already installed failed or inactive child.
+
+`Runtime_owner.create_with_unload` runs this barrier outside its mutex after
+excluding new runtime admissions. Concurrent unload callers share its completion,
+including typed errors or exceptions. Failure retains the parent's resources for
+retry. The existing actor-only parent-cancellation callback remains separate;
+calling the same child's runtime owner from that callback would still deadlock.
+Ordinary close and daemon shutdown retain their separate behavior.
+
+An offline factory test keeps two grandchild provider cleanups behind a barrier.
+Both must receive cancellation before either is released, while the root runtime
+remains loaded and its stop request remains pending. After release, root stop
+returns only after all four runtimes have retired. This test originally exposed
+an early root-stop response and now guards the corrected behavior.
+
 Construction failure and cancellation do not publish a usable runtime. Cancellation
 before publication returns `Interrupted`. Closed runtimes reject later execution;
 cleanup failures remain observable to close callers. Stopping and restarting a

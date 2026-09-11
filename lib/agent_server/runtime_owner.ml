@@ -8,25 +8,34 @@ type background_lease =
 
 type cleanup_outcome = (unit, exn * Stdlib.Printexc.raw_backtrace) result
 
+type unload_outcome =
+  ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
+
 type t =
   { actor : Agent_session.Session_actor.t
   ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+  ; before_unload : unit -> (unit, Agent_protocol.Error.t) result
   ; mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
-  ; mutable unloading : cleanup_outcome Eio.Promise.t option
+  ; mutable unloading : unload_outcome Eio.Promise.t option
   ; mutable background_leases : background_lease list
   }
 
-let create ~actor ~initial ~build =
+let create_with_unload ~before_unload ~actor ~initial ~build =
   { actor
   ; build
+  ; before_unload
   ; mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; closed = false
   ; unloading = None
   ; background_leases = []
   }
+;;
+
+let create ~actor ~initial ~build =
+  create_with_unload ~before_unload:(fun () -> Ok ()) ~actor ~initial ~build
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
@@ -218,9 +227,15 @@ let unload_and_wait t =
       | `Retire (leases, finish) ->
         let outcome =
           try
-            List.iter leases ~f:(fun lease -> lease.cancel ());
-            List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
-            with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
+            let result =
+              let%bind () = t.before_unload () in
+              List.iter leases ~f:(fun lease -> lease.cancel ());
+              List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
+              with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
+              |> raise_cleanup;
+              Ok ()
+            in
+            Ok result
           with
           | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
         in
@@ -229,8 +244,9 @@ let unload_and_wait t =
           Eio.Promise.resolve finish outcome);
         outcome
     in
-    raise_cleanup outcome;
-    Ok ())
+    match outcome with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let with_unloaded t f =

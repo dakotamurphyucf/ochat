@@ -2703,6 +2703,60 @@ let collect_results t handle journal persistence durable_events services runtime
       ~max_events:t.limits.event_replay_capacity
 ;;
 
+let stop_owned_children t actor =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind parent = A.state actor in
+  match parent.lifecycle.desired with
+  | Running -> Ok ()
+  | Stopped ->
+    let ledger = Agent_store.Session_store.delegations t.store in
+    let%bind records =
+      D.with_records
+        ledger
+        ~max_records:t.limits.delegation_recovery_max_count
+        ~max_bytes:t.limits.delegation_recovery_max_bytes
+        ~f:(fun records -> Ok records)
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let children id =
+      List.filter records ~f:(fun record ->
+        P.Id.Session.equal record.D.key.parent_session_id id
+        &&
+        match record.admission.lifetime with
+        | Owned -> true
+        | Independent _ -> false)
+    in
+    (* Validate the complete dependency graph before entering other owners. A
+       malformed cycle must fail rather than join this owner's own retirement. *)
+    let rec validate trail id =
+      match List.mem trail id ~equal:P.Id.Session.equal with
+      | true -> Error (unavailable Permission_denied "owned stop ancestry is cyclic")
+      | false ->
+        List.fold_result (children id) ~init:() ~f:(fun () record ->
+          validate (id :: trail) record.admission.child_session_id)
+    in
+    let%bind () = validate [] parent.identity.session_id in
+    Eio.Fiber.List.map
+      (fun (record : D.record) ->
+         match Session_registry.find t.registry record.admission.child_session_id with
+         | None -> Ok ()
+         | Some child ->
+           Delegation_lifecycle.stop_owned
+             ~parent_stop_epoch:parent.stop_epoch
+             ~clock:(Eio.Stdenv.clock t.env)
+             ~delegations:ledger
+             ~reference:(D.reference record)
+             ~actor:child.actor
+             ~runtime:child.runtime
+             ()
+           |> Result.map ~f:ignore)
+      (children parent.identity.session_id)
+    |> Result.all_unit
+;;
+
 let create_loaded_entry
       t
       handle
@@ -2771,8 +2825,11 @@ let create_loaded_entry
     failure
   | Ok () ->
     let runtime =
-      Runtime_owner.create ~actor ~initial:(Some runtime) ~build:(fun () ->
-        build_runtime_for_actor t handle actor)
+      Runtime_owner.create_with_unload
+        ~before_unload:(fun () -> stop_owned_children t actor)
+        ~actor
+        ~initial:(Some runtime)
+        ~build:(fun () -> build_runtime_for_actor t handle actor)
     in
     runtime_owner := Some runtime;
     (match history_source t actor state.identity.session_id with
@@ -2870,8 +2927,11 @@ let create_unloaded_entry
       ~services
   in
   let runtime =
-    Runtime_owner.create ~actor ~initial:None ~build:(fun () ->
-      build_runtime_for_actor t handle actor)
+    Runtime_owner.create_with_unload
+      ~before_unload:(fun () -> stop_owned_children t actor)
+      ~actor
+      ~initial:None
+      ~build:(fun () -> build_runtime_for_actor t handle actor)
   in
   runtime_owner := Some runtime;
   match history_source t actor state.identity.session_id with
