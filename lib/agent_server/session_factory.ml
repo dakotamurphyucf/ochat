@@ -411,6 +411,22 @@ let source_prompt_directory = function
       (Filename.dirname artifact.root_relative_path)
 ;;
 
+let parent_moderation_source t session_id =
+  match Session_registry.find t.registry session_id with
+  | Some parent -> Runtime_owner.moderation_source parent.runtime
+  | None ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.parent_missing: parent runtime is unavailable")
+;;
+
+let parent_authority_fingerprint t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind moderator = parent_moderation_source t state.identity.session_id in
+  Agent_session.Delegation_authority.fingerprint ?moderator state
+;;
+
 let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let missing_host () =
@@ -441,7 +457,7 @@ let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session
      | None -> missing_host ()
      | Some parent ->
        let%bind current = Agent_session.Session_actor.state parent.actor in
-       let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+       let%bind fingerprint = parent_authority_fingerprint t current in
        (match
           ( current.lifecycle.desired
           , current.lifecycle.observed
@@ -2025,6 +2041,7 @@ let prepare_runtime_at_paths
           let authority =
             Agent_session.Delegation_authority.create
               ~max_depth:t.limits.delegation_max_depth
+              ~moderation:(parent_moderation_source t)
               ~parent_stop_epoch
               ~reference
               ~capabilities:
@@ -2051,10 +2068,206 @@ let prepare_runtime_at_paths
                 }
               ()
           in
+          let services = extension_services t profile actor_ref ~state in
+          let prepare (request : Agent_session.Script_tool_calls.preparation) =
+            let module P = Agent_protocol in
+            let module D = Agent_store.Delegation_store in
+            let module C = Chat_response.Tool_capability in
+            let reject message = Error (unavailable Permission_denied message) in
+            let check () =
+              let%bind () =
+                Agent_session.Delegation_authority.check_execution authority
+              in
+              let%bind actor = extension_actor actor_ref in
+              let%bind child = Agent_session.Session_actor.state actor in
+              let%bind () =
+                match child.lifecycle.desired, child.halted, child.failure with
+                | Running, false, None
+                  when P.Id.Session.equal request.session_id child.identity.session_id
+                       && Int.equal request.generation child.identity.generation
+                       && Option.equal
+                            D.Reference.equal
+                            child.spec.delegation
+                            (Some reference) -> Ok ()
+                | _ -> reject "delegation.candidate_inactive: child owner is unavailable"
+              in
+              let%bind () =
+                match request.owner with
+                | Model_call (operation_id, call_id) ->
+                  (match child.active_operation with
+                   | Some operation when P.Id.Operation.equal operation.id operation_id ->
+                     (match operation.state with
+                      | Starting | Running ->
+                        let input : Agent_session.Operation_worker.Input.t =
+                          { session_id = child.identity.session_id
+                          ; session_generation = child.identity.generation
+                          ; operation
+                          ; history = []
+                          }
+                        in
+                        if
+                          String.equal
+                            (History_entry.Id.namespace call_id)
+                            (P.Id.Session.to_string request.session_id)
+                          && Int64.(
+                               of_int (History_entry.Id.sequence call_id)
+                               < child.conversation.reserved_history_through)
+                          && P.Id.Invocation.equal
+                               request.invocation_id
+                               (Agent_session.Stream_invocation.id_for_call
+                                  ~input
+                                  ~call_id)
+                        then Ok ()
+                        else
+                          reject
+                            "delegation.candidate_identity: foreign model reservation"
+                      | _ -> reject "delegation.candidate_inactive: model operation ended")
+                   | _ -> reject "delegation.candidate_inactive: model owner changed")
+                | Native_call id ->
+                  (match
+                     List.find child.invocations ~f:(fun i ->
+                       P.Id.Invocation.equal i.context.id id)
+                   with
+                   | Some { status = Dispatching; context; _ }
+                     when P.Id.Session.equal context.session_id request.session_id
+                          && Int.equal context.generation request.generation -> Ok ()
+                   | _ -> reject "delegation.candidate_inactive: native owner ended")
+                | Moderator_event id ->
+                  (match
+                     List.find child.moderator_executions ~f:(fun e ->
+                       P.Id.Moderator_execution.equal e.context.id id)
+                   with
+                   | Some { status = Running; context; _ }
+                     when P.Id.Session.equal context.session_id request.session_id
+                          && Int.equal context.generation request.generation -> Ok ()
+                   | _ -> reject "delegation.candidate_inactive: moderator owner ended")
+              in
+              let%bind selected =
+                C.select
+                  (Chat_response.Generated_admission.capabilities
+                     (Agent_session.Generated_definition.admission definition))
+                  ~names:(List.map (C.references request.selected) ~f:(fun r -> r.name))
+                |> Result.map_error ~f:(fun e ->
+                  unavailable Permission_denied e.C.message)
+              in
+              if String.equal (C.fingerprint selected) (C.fingerprint request.selected)
+              then Ok ()
+              else reject "delegation.candidate_tools: selected ceiling changed"
+            in
+            let%bind () = check () in
+            let rec evaluate visited depth (edge : D.Reference.t) call =
+              let%bind () =
+                if
+                  depth >= t.limits.delegation_max_depth
+                  || List.mem visited edge.child_session_id ~equal:P.Id.Session.equal
+                then
+                  reject
+                    "delegation.ancestry_limit: policy ancestry is cyclic or excessive"
+                else Ok ()
+              in
+              let%bind record =
+                D.resolve (Agent_store.Session_store.delegations t.store) edge
+                |> Result.map_error ~f:protocol_of_store
+              in
+              let%bind parent = lookup record.key.parent_session_id in
+              let%bind source = Runtime_owner.moderation_source parent.runtime in
+              let%bind decision =
+                match source with
+                | None -> Ok P.Moderator_execution.Decision.Approve
+                | Some _ ->
+                  Runtime_owner.prepare_delegated_tool
+                    parent.runtime
+                    ~delegation:
+                      { child_session_id = request.session_id
+                      ; child_generation = request.generation
+                      ; child_invocation_id = request.invocation_id
+                      ; admission_sha256 = reference.admission_sha256
+                      }
+                    ~event:(Pre_tool_call call)
+                    ~authorize:check
+              in
+              let%bind () = check () in
+              match decision with
+              | Reject _ ->
+                Ok
+                  (Some
+                     (Chat_response.Moderation.Tool_moderation.Reject
+                        "Parent policy rejected the call."))
+              | Approve | Rewrite_args _ | Redirect _ ->
+                let name, args =
+                  match decision with
+                  | Approve -> call.Chat_response.Moderation.Tool_call.name, call.args
+                  | Rewrite_args args -> call.name, args
+                  | Redirect (name, args) -> name, args
+                  | Reject _ -> assert false
+                in
+                let%bind binding =
+                  C.find request.selected ~name
+                  |> Result.map_error ~f:(fun e ->
+                    unavailable Permission_denied e.C.message)
+                in
+                let kind =
+                  if String.equal (C.descriptor binding).type_ "custom"
+                  then Chat_response.Moderation.Tool_call.Custom
+                  else Function
+                in
+                let%bind () =
+                  match request.owner, request.call.kind, kind with
+                  | Model_call _, Function, Custom | Model_call _, Custom, Function ->
+                    reject "delegation.candidate_kind: model tool kind cannot change"
+                  | _ -> Ok ()
+                in
+                let%bind schema =
+                  Chatmd_shell_spec.Tool_schema.compile (C.reference binding).input_schema
+                  |> Result.map_error ~f:(fun _ ->
+                    unavailable Permission_denied "invalid delegated target schema")
+                in
+                let%bind () =
+                  Chatmd_shell_spec.Tool_schema.validate schema args
+                  |> Result.map_error ~f:(fun _ ->
+                    unavailable Permission_denied "invalid delegated target arguments")
+                in
+                let payload_text =
+                  match kind, args with
+                  | Custom, `String text -> text
+                  | _ -> Jsonaf.to_string args
+                in
+                let call = { call with name; args; kind; payload_text } in
+                let%bind parent_state = Agent_session.Session_actor.state parent.actor in
+                (match parent_state.spec.delegation with
+                 | Some ancestor ->
+                   evaluate (edge.child_session_id :: visited) (depth + 1) ancestor call
+                 | None ->
+                   if not (String.equal call.name request.call.name)
+                   then
+                     Ok
+                       (Some
+                          (Chat_response.Moderation.Tool_moderation.Redirect
+                             (call.name, call.args)))
+                   else if Jsonaf.exactly_equal call.args request.call.args
+                   then Ok None
+                   else
+                     Ok
+                       (Some
+                          (Chat_response.Moderation.Tool_moderation.Rewrite_args call.args)))
+            in
+            let%bind result = evaluate [] 0 reference request.call in
+            let%map () = check () in
+            result
+          in
+          let services =
+            { services with
+              script_tools =
+                (fun native ->
+                  Agent_session.Script_tool_calls.with_preparation
+                    (services.script_tools native)
+                    ~prepare)
+            }
+          in
           construct
             sw
             (Agent_session.Runtime_builder.build_generated
-               ~services:(extension_services t profile actor_ref ~state)
+               ~services
                ~definition
                ~artifact_store
                ~parent_runtime:native
@@ -4291,7 +4504,7 @@ let resume_generated_initial_start t entry =
                  Permission_denied
                  "initial start parent stopped after admission")
         in
-        let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+        let%bind fingerprint = parent_authority_fingerprint t current in
         (match
            ( current.lifecycle.desired
            , current.halted
@@ -4388,9 +4601,9 @@ let create_generated_session
     in
     Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
       let%bind before = A.state parent.actor in
-      let%bind authority_sha256 = Agent_session.Delegation_authority.fingerprint before in
+      let%bind authority_sha256 = parent_authority_fingerprint t before in
       let check_parent current =
-        let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+        let%bind fingerprint = parent_authority_fingerprint t current in
         match current.State.lifecycle.desired, current.halted, current.failure with
         | Running, false, None
           when String.equal fingerprint authority_sha256

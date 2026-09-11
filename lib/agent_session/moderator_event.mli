@@ -69,8 +69,10 @@ val run_ordinary
   -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
 
 type delegated_claim =
-  snapshot:
-    (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+  notifications:(unit -> string list)
+  -> snapshot:
+       (unit
+        -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -92,8 +94,9 @@ type delegated_result =
     decision and parent runtime intent commit together. Completed retry returns
     the saved receipt with outcome=None and does not replay parent handler effects.
     End_session produces a rejecting decision while retaining the parent's intent.
-    The caller must consume fresh UI outcomes and durable runtime requests on the
-    parent, enforce the decision on the child, and recheck current authority. *)
+    The claim commits UI notifications on the parent with the decision. The caller
+    must apply durable runtime requests on the parent, enforce the decision on the
+    child, and recheck current authority. *)
 val run_delegated
   :  event:Chat_response.Moderation.Event.t
   -> claim:delegated_claim

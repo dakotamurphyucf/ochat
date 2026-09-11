@@ -250,7 +250,8 @@ let run_queued_idle = run ~prepare_decision:ignore ~event:Queued
 let run_ordinary ~event = run ~prepare_decision:ignore ~event:(Ordinary event)
 
 type delegated_claim =
-  snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
+  notifications:(unit -> string list)
+  -> snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
   -> (executing:P.Moderator_execution.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -280,8 +281,10 @@ let run_delegated
   =
   let open Result.Let_syntax in
   let decision = ref None in
+  let notifications = ref [] in
   let receipt = ref None in
   let prepare_decision (outcome : Chat_response.Moderation.Outcome.t) =
+    notifications := outcome.ui_notifications;
     let value : P.Moderator_execution.Decision.t =
       match
         Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests
@@ -299,17 +302,20 @@ let run_delegated
   let ordinary_claim ~snapshot f =
     let ran = ref false in
     let%map result =
-      claim ~snapshot (fun ~executing ~event ~execute ~commit ->
-        ran := true;
-        f
-          ~executing
-          ~retirement_reason:None
-          ~event
-          ~execute
-          ~commit:(fun ~snapshot ~requests ->
-            match !decision with
-            | None -> Error (failed "delegated policy decision was not prepared")
-            | Some decision -> commit ~decision ~snapshot ~requests))
+      claim
+        ~notifications:(fun () -> !notifications)
+        ~snapshot
+        (fun ~executing ~event ~execute ~commit ->
+           ran := true;
+           f
+             ~executing
+             ~retirement_reason:None
+             ~event
+             ~execute
+             ~commit:(fun ~snapshot ~requests ->
+               match !decision with
+               | None -> Error (failed "delegated policy decision was not prepared")
+               | Some decision -> commit ~decision ~snapshot ~requests))
     in
     receipt := result;
     !ran

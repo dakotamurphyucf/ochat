@@ -84,21 +84,22 @@ let%expect_test
          let run () =
            Agent_session.Moderator_event.run_delegated
              ~event
-             ~claim:
-               (A.with_delegated_moderator_event
-                  actor
-                  ~delegation:delegated
-                  ~event
-                  ~authorize:(fun () ->
-                    match !revoked with
-                    | false -> Ok ()
-                    | true ->
-                      Error
-                        (P.Error.create
-                           Permission_denied
-                           ~message:"test delegation revoked after decision commit"
-                           ~retryable:false
-                           ())))
+             ~claim:(fun ~notifications ->
+               A.with_delegated_moderator_event
+                 ~notifications
+                 actor
+                 ~delegation:delegated
+                 ~event
+                 ~authorize:(fun () ->
+                   match !revoked with
+                   | false -> Ok ()
+                   | true ->
+                     Error
+                       (P.Error.create
+                          Permission_denied
+                          ~message:"test delegation revoked after decision commit"
+                          ~retryable:false
+                          ())))
              ~manager
              ~history:(fun () -> [])
              ~available_tools:[]
@@ -206,6 +207,7 @@ let%expect_test
          let escaped = ref None in
          let run () =
            A.with_delegated_moderator_event
+             ~notifications:(fun () -> [ "parent policy notice" ])
              actor
              ~delegation:delegated
              ~event:(policy_event delegated)
@@ -258,6 +260,25 @@ let%expect_test
              saved.moderator
              ~f:(Jsonaf.exactly_equal (B.encode_moderator_snapshot expected)));
          let receipt = List.hd_exn saved.moderator_executions in
+         let notices =
+           Agent_session.Memory_backend.events_after backend 0L
+           |> protocol_ok
+           |> List.filter ~f:(fun event ->
+             P.Event.Durable.equal_kind event.kind Moderator_notification)
+         in
+         (match fail_commit, notices with
+          | true, [] -> ()
+          | false, [ notice ] ->
+            assert (P.Id.Session.equal notice.session_id session_id);
+            assert (
+              Jsonaf.exactly_equal
+                notice.payload
+                (`Object
+                    [ "message", `String "parent policy notice"
+                    ; ( "moderator_execution_id"
+                      , P.Id.Moderator_execution.to_json receipt.context.id )
+                    ]))
+          | _ -> failwith "parent notice escaped failed commit or duplicated on retry");
          [%test_eq: int] 1 (List.length saved.invocations);
          assert (Option.is_some (List.hd_exn saved.invocations).parent_event);
          assert (

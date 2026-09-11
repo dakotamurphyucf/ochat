@@ -15,10 +15,19 @@ type t =
   ; capabilities : C.t
   ; max_depth : int
   ; parent_stop_epoch : int64 option
+  ; moderation : P.Id.Session.t -> (P.Invocation.observer option, P.Error.t) result
   }
 
-let create ?(max_depth = 32) ?parent_stop_epoch ~host ~reference ~capabilities () =
-  { host; reference; capabilities; max_depth; parent_stop_epoch }
+let create
+      ?(max_depth = 32)
+      ?parent_stop_epoch
+      ?(moderation = fun _ -> Ok None)
+      ~host
+      ~reference
+      ~capabilities
+      ()
+  =
+  { host; reference; capabilities; max_depth; parent_stop_epoch; moderation }
 ;;
 
 let reference t = t.reference
@@ -28,31 +37,56 @@ let unavailable message =
   Error (P.Error.create Invalid_state ~message ~retryable:false ())
 ;;
 
-let fingerprint (parent : Session_state.t) =
+let fingerprint ?moderator (parent : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match parent.moderator, moderator with
+    | None, None -> Ok ()
+    | Some _, Some expected ->
+      let%bind actual = Moderator_checkpoint.observer parent.moderator in
+      let%bind halted = Moderator_checkpoint.is_halted parent.moderator in
+      (match Option.equal P.Invocation.equal_observer actual (Some expected), halted with
+       | true, false -> Ok ()
+       | _ ->
+         unavailable
+           "delegation.owner_mediation_unavailable: parent moderator identity or state \
+            changed")
+    | _ ->
+      unavailable
+        "delegation.owner_mediation_unavailable: parent moderator restrictions require \
+         owner-aware enforcement"
+  in
   match parent.spec.protocol.persistence, parent.moderator with
   | Transient, _ ->
     unavailable "delegation.unavailable: a durable parent host is required"
-  | _, Some _ ->
-    unavailable
-      "delegation.owner_mediation_unavailable: parent moderator restrictions require \
-       owner-aware enforcement"
-  | Durable, None ->
+  | Durable, _ ->
+    let base =
+      [%sexp
+        ("ochat.delegation-authority.v1" : string)
+      , (parent.identity.session_id : P.Id.Session.t)
+      , (parent.identity.generation : int)
+      , (parent.spec.prompt_revision_id : P.Id.Prompt_revision.t)
+      , (parent.spec.permission_profile : string)
+      , (parent.spec.permission_profile_digest : string)
+      , (parent.spec.workspace_instance : Workspace_instance.t)
+      , (parent.spec.runtime_policy : string option)
+      , (parent.spec.delegation : D.Reference.t option)
+      , (Option.map parent.automatic_turn_budget ~f:(fun budget ->
+           budget.Automatic_turn_budget.policy)
+         : Chat_response.Runtime_semantics.policy option)]
+      |> Sexp.to_string_mach
+      |> Chatmd_shell_spec.Source_ref.digest
+    in
     Ok
-      ([%sexp
-         ("ochat.delegation-authority.v1" : string)
-       , (parent.identity.session_id : P.Id.Session.t)
-       , (parent.identity.generation : int)
-       , (parent.spec.prompt_revision_id : P.Id.Prompt_revision.t)
-       , (parent.spec.permission_profile : string)
-       , (parent.spec.permission_profile_digest : string)
-       , (parent.spec.workspace_instance : Workspace_instance.t)
-       , (parent.spec.runtime_policy : string option)
-       , (parent.spec.delegation : D.Reference.t option)
-       , (Option.map parent.automatic_turn_budget ~f:(fun budget ->
-            budget.Automatic_turn_budget.policy)
-          : Chat_response.Runtime_semantics.policy option)]
-       |> Sexp.to_string_mach
-       |> Chatmd_shell_spec.Source_ref.digest)
+      (match moderator with
+       | None -> base
+       | Some source ->
+         [%sexp
+           ("ochat.delegation-moderated-authority.v1" : string)
+         , (base : string)
+         , (source : P.Invocation.observer)]
+         |> Sexp.to_string_mach
+         |> Chatmd_shell_spec.Source_ref.digest)
 ;;
 
 let active (parent : Session_state.t) =
@@ -105,7 +139,8 @@ let rec read_chain t ~visited ~depth ~expected reference =
     | false -> Ok ()
     | true -> denied "delegation.parent_stopped: parent stopped since runtime admission"
   in
-  let%bind current_fingerprint = fingerprint parent in
+  let%bind moderator = t.moderation parent.identity.session_id in
+  let%bind current_fingerprint = fingerprint ?moderator parent in
   let%bind () =
     match
       P.Id.Session.equal parent.identity.session_id record.key.parent_session_id
@@ -163,7 +198,8 @@ let rec read_chain t ~visited ~depth ~expected reference =
      through actual execution and is responsible for cancellation after this point. *)
   let%bind latest = t.host.state parent.identity.session_id in
   let%bind () = active latest in
-  let%bind latest_fingerprint = fingerprint latest in
+  let%bind latest_moderator = t.moderation latest.identity.session_id in
+  let%bind latest_fingerprint = fingerprint ?moderator:latest_moderator latest in
   let%bind retained = t.host.resolve reference in
   match
     String.equal latest_fingerprint current_fingerprint

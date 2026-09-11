@@ -509,22 +509,7 @@ let moderator_snapshot = function
     |> Result.map ~f:(fun snapshot -> Some (encode_moderator_snapshot snapshot))
 ;;
 
-let decode_moderator_snapshot = function
-  | None -> Ok None
-  | Some (`Object fields) ->
-    (match List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal with
-     | Some (`String encoded) ->
-       (try
-          Ok
-            (Some
-               ([%of_sexp: Session.Moderator_state.Identity_snapshot.t]
-                  (Sexp.of_string encoded)))
-        with
-        | exn ->
-          Error (failure ("moderator snapshot decode failed: " ^ Exn.to_string exn)))
-     | _ -> Error (failure "moderator snapshot is missing identity state"))
-  | Some _ -> Error (failure "moderator snapshot must be an object")
-;;
+let decode_moderator_snapshot = Moderator_checkpoint.decode
 
 let moderator_snapshot_has_queued_events snapshot =
   let open Result.Let_syntax in
@@ -535,22 +520,8 @@ let moderator_snapshot_has_queued_events snapshot =
          snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events))
 ;;
 
-let moderator_snapshot_is_halted snapshot =
-  let open Result.Let_syntax in
-  let%map snapshot = decode_moderator_snapshot snapshot in
-  Option.value_map snapshot ~default:false ~f:(fun snapshot ->
-    snapshot.Session.Moderator_state.Identity_snapshot.halted)
-;;
-
-let moderator_snapshot_observer snapshot =
-  let open Result.Let_syntax in
-  let%map snapshot = decode_moderator_snapshot snapshot in
-  Option.map snapshot ~f:(fun snapshot ->
-    Agent_protocol.Invocation.
-      { script_id = snapshot.Session.Moderator_state.Identity_snapshot.script_id
-      ; source_sha256 = snapshot.script_source_hash
-      })
-;;
+let moderator_snapshot_is_halted = Moderator_checkpoint.is_halted
+let moderator_snapshot_observer = Moderator_checkpoint.observer
 
 let enqueue_internal_value ?prepare moderator value =
   match moderator with

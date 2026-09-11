@@ -19,10 +19,14 @@ type t
 
 (** Fingerprint the inherited policy/workspace/source context, excluding ordinary
     conversation changes and execution counters. The parent must be durable.
-    Stateful moderator enforcement and independent lifetime still require their
-    owner-aware host integration; this initial guard rejects those configurations
-    explicitly rather than treating a captured registry as permission. *)
-val fingerprint : Session_state.t -> (string, Agent_protocol.Error.t) result
+    A moderated parent requires the host's installed source identity in [moderator];
+    it must match the persisted, non-halted checkpoint. Omission rejects moderated
+    parents. Mutable moderator state is excluded from the fingerprint. This source
+    proof does not replace owner-aware execution of the parent's policy. *)
+val fingerprint
+  :  ?moderator:Agent_protocol.Invocation.observer
+  -> Session_state.t
+  -> (string, Agent_protocol.Error.t) result
 
 (** Bind a verified prepared child's exact live selection to its durable pointer.
     Does not grant permission or perform IO; [check_preparation] is mandatory before
@@ -33,6 +37,9 @@ val fingerprint : Session_state.t -> (string, Agent_protocol.Error.t) result
 val create
   :  ?max_depth:int
   -> ?parent_stop_epoch:int64
+  -> ?moderation:
+       (Agent_protocol.Id.Session.t
+        -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result)
   -> host:host
   -> reference:Agent_store.Delegation_store.Reference.t
   -> capabilities:Chat_response.Tool_capability.t

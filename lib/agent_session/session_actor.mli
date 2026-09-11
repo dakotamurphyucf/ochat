@@ -1165,7 +1165,7 @@ val with_current_moderator_event
 val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 
 (** Trusted host handoff for a parent's live delegated policy check. [authorize]
-    must validate the private relation and admitted child invocation after entering
+    must validate the private relation and owned child invocation candidate after entering
     the parent gate. The handoff rechecks before entering [f], before and after
     native admission, before decision commit and before disclosing native outcomes
     or saved decisions. A denied disclosure retains the already committed outcome
@@ -1173,7 +1173,7 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
     handler itself. Native implementations must still check after their own
     internal approval waits; this wrapper cannot intercept arbitrary host code.
     The actor persists claim before executing [f]; [commit] saves parent snapshot,
-    runtime intent and decision atomically and retains ownership through callback
+    runtime intent, decision and [notifications] atomically and retains ownership through callback
     return. Native calls are parent event-owned and must use the normal scoped
     capability/policy dispatcher. No child invocation is fabricated in this actor.
 
@@ -1182,9 +1182,11 @@ val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
     late commits and escaped executors reject. None means parent unavailable.
     An unrelated foreground completion preserves this borrow and its requests;
     a foreground end-session outcome cancels it.
-    This does not install factory mediation or admit moderated generated parents. *)
+    Factory mediation remains responsible for validating and enforcing the child's
+    decision. Completed retries do not publish notifications again. *)
 val with_delegated_moderator_event
-  :  t
+  :  ?notifications:(unit -> string list)
+  -> t
   -> delegation:Agent_protocol.Moderator_execution.delegation
   -> event:Chat_response.Moderation.Event.t
   -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)

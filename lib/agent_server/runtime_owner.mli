@@ -78,6 +78,27 @@ val with_background_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Read the installed immutable source while retaining its runtime. Legacy
+    moderators reject. Check persisted halt state in the authority guard; querying
+    the manager's mutable state here would reenter its execution lock during native
+    policy effects. This only identifies availability; it does not approve a
+    child call. Actual policy execution must use the actor-owned event handoff. *)
+val moderation_source
+  :  t
+  -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result
+
+(** Evaluate an owned child candidate using this parent's live manager, actor
+    event/native services and history. The host authorizer must validate private
+    delegation and the still-active child owner, repeatedly after waits. The parent
+    actor commits decision, checkpoint and UI notices together; runtime requests
+    stay with the parent. Replays do not rerun policy effects or notices. *)
+val prepare_delegated_tool
+  :  t
+  -> delegation:Agent_protocol.Moderator_execution.delegation
+  -> event:Chat_response.Moderation.Event.t
+  -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Moderator_execution.Decision.t, Agent_protocol.Error.t) result
+
 (** [with_administration t f] excludes concurrent runtime loading while [f]
     prepares and commits stopped state. Preserve the previous runtime on failure;
     retire it after success without turning an accepted commit into a failed

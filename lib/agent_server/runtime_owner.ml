@@ -196,6 +196,83 @@ let with_background_runtime t f =
           result))
 ;;
 
+let moderation_source t =
+  with_background_runtime t (fun runtime ->
+    let module M = Chat_response.Moderator_manager in
+    match runtime.Agent_session.Runtime_builder.moderator_manager with
+    | None -> Ok None
+    | Some manager ->
+      (match M.extension_definition manager with
+       | Some _ -> Ok (M.invocation_observer manager)
+       | _ ->
+         Error
+           (Agent_protocol.Error.create
+              Invalid_state
+              ~message:
+                "delegation.owner_mediation_unavailable: parent requires an \
+                 extensibility moderator"
+              ~retryable:false
+              ())))
+;;
+
+let prepare_delegated_tool t ~delegation ~event ~authorize =
+  with_background_runtime t (fun runtime ->
+    let module A = Agent_session.Session_actor in
+    let module M = Chat_response.Moderator_manager in
+    let open Result.Let_syntax in
+    let unavailable () =
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:
+             "delegation.owner_mediation_unavailable: parent policy runtime is \
+              unavailable"
+           ~retryable:false
+           ())
+    in
+    match runtime.Agent_session.Runtime_builder.moderator_manager with
+    | None -> unavailable ()
+    | Some manager when Option.is_none (M.extension_definition manager) -> unavailable ()
+    | Some manager ->
+      let history = ref [] in
+      let claim ~notifications ~snapshot handle =
+        A.with_delegated_moderator_event
+          ~notifications
+          t.actor
+          ~delegation
+          ~event
+          ~authorize
+          ~snapshot
+          (fun ~executing ~event ~execute ~commit ->
+             let%bind state = A.state t.actor in
+             let%bind entries =
+               Agent_session.History_codec.all_of_protocol
+                 state.conversation.canonical_history
+             in
+             history := entries;
+             handle ~executing ~event ~execute ~commit)
+      in
+      let result =
+        Agent_session.Moderator_event.run_delegated
+          ~event
+          ~claim
+          ?script_tools:runtime.moderator_script_tools
+          ~manager
+          ~history:(fun () -> !history)
+          ~available_tools:runtime.moderator_tools
+          ~session_meta:`Null
+          ~now:Agent_protocol.Timestamp.now
+          ()
+      in
+      (* A committed parent intent remains the parent's responsibility even if
+         child authority was lost before the policy reply could be disclosed. *)
+      let%bind _ = A.apply_moderator_follow_up t.actor in
+      let%bind result = result in
+      (match result with
+       | Some { receipt = { decision = Some decision; _ }; _ } -> Ok decision
+       | None | Some _ -> unavailable ()))
+;;
+
 let unload_locked t =
   match t.background_leases, t.runtime with
   | _ :: _, _ -> Error (background_busy ())

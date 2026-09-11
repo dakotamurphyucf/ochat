@@ -151,6 +151,7 @@ type _ request =
       * Session.Moderator_state.Identity_snapshot.t
       * Agent_protocol.Invocation.follow_up
       * Agent_protocol.Moderator_execution.Decision.t option
+      * string list
       -> unit request
   | Finish_queued_event : queued_event_borrow * bool -> unit request
   | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
@@ -2631,7 +2632,7 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
-let commit_queued_event t borrow snapshot requests decision =
+let commit_queued_event t borrow snapshot requests decision notifications =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
   let%bind () =
@@ -2713,7 +2714,16 @@ let commit_queued_event t borrow snapshot requests decision =
                   (Some (Runtime_builder.encode_moderator_snapshot snapshot))
               ]
             @ job_deltas))
-      ~payloads:job_payloads
+      ~payloads:
+        (job_payloads
+         @ List.map notifications ~f:(fun message ->
+           Agent_protocol.Event.Durable.Payload.Moderator_notification
+             (`Object
+                 [ "message", `String message
+                 ; ( "moderator_execution_id"
+                   , Agent_protocol.Id.Moderator_execution.to_json
+                       borrow.receipt.context.id )
+                 ])))
   in
   borrow.committed <- true;
   Ok ()
@@ -5671,9 +5681,15 @@ let run_queued_event_borrow t borrow f =
                      | true -> Eio.Cancel.cancel context Exit
                      | false -> () ))
           in
-          f ~borrow ~event:borrow.event ~commit:(fun ~decision ~snapshot ~requests ->
-            Eio.Cancel.protect (fun () ->
-              call t (Commit_queued_event (borrow, snapshot, requests, decision))))))
+          f
+            ~borrow
+            ~event:borrow.event
+            ~commit:(fun ~decision ~notifications ~snapshot ~requests ->
+              Eio.Cancel.protect (fun () ->
+                call
+                  t
+                  (Commit_queued_event
+                     (borrow, snapshot, requests, decision, notifications))))))
   in
   match execute () with
   | result ->
@@ -5709,10 +5725,18 @@ let with_queued_event_borrow t ~claim f =
     | Some borrow ->
       run_queued_event_borrow t borrow (fun ~borrow ~event ~commit ->
         f ~borrow ~event ~commit:(fun ~snapshot ~requests ->
-          commit ~decision:None ~snapshot ~requests)))
+          commit ~decision:None ~notifications:[] ~snapshot ~requests)))
 ;;
 
-let with_delegated_moderator_event t ~delegation ~event ~authorize ~snapshot f =
+let with_delegated_moderator_event
+      ?(notifications = fun () -> [])
+      t
+      ~delegation
+      ~event
+      ~authorize
+      ~snapshot
+      f
+  =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
     let%bind () = authorize () in
@@ -5766,7 +5790,11 @@ let with_delegated_moderator_event t ~delegation ~event ~authorize ~snapshot f =
                 ~execute
                 ~commit:(fun ~decision ~snapshot ~requests ->
                   let%bind () = check () in
-                  commit ~decision:(Some decision) ~snapshot ~requests)))
+                  commit
+                    ~decision:(Some decision)
+                    ~notifications:(notifications ())
+                    ~snapshot
+                    ~requests)))
       in
       let%bind state = call t State in
       let%bind () = authorize () in
@@ -8598,11 +8626,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_queued_event t id operation_id snapshot
   | Claim_queued_retirement (id, snapshot, reason) ->
     claim_queued_retirement t id snapshot reason
-  | Commit_queued_event (borrow, snapshot, requests, decision) ->
+  | Commit_queued_event (borrow, snapshot, requests, decision, notifications) ->
     let open Result.Let_syntax in
     let%bind () = validate_queued_event_borrow t borrow in
     with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
-      commit_queued_event t borrow snapshot requests decision)
+      commit_queued_event t borrow snapshot requests decision notifications)
   | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted
   | Set_queued_event_cancel (borrow, cancel) ->
     Result.map (queued_event_can_commit t borrow) ~f:(fun () ->

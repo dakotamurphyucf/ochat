@@ -3958,22 +3958,24 @@ tests verify unchanged working directory/environment, separate approval namespac
 ancestor-check composition and scope expiry. Provider responses are fake; the
 integration command is the local `/bin/echo`.
 
-This advances native shell delegation. Parent conversation-moderator mediation,
-broader shell hook/helper qualification, managed-tool delegation and independent
+This advances native shell delegation. Broader shell hook/helper qualification,
+managed-tool delegation and independent
 resource lifetime retain their separate implementation obligations.
 
 ### Durable delegated moderator handoffs
 
-The actor and moderator engine now provide an internal handoff for checking an
-admitted child invocation against the parent's live moderator state. Factory
-admission still rejects parents requiring moderator mediation until that end-to-end
-integration is installed; these primitives do not remove that guard.
+The actor and moderator engine provide an internal handoff for checking an owned
+child invocation candidate against the parent's live moderator state. The qualified
+generated-session factory installs this handoff for extensibility-v1 parents.
+Legacy parent moderators remain unsupported and reject delegation.
 
 `Session_actor.with_delegated_moderator_event` requires host authorization and owns
 the parent's moderator gate. Its receipt identifies the child session, generation,
 invocation and private admission digest. The child operation is not treated as a
 parent operation. Native policy calls belong to the parent's event, and the parent
-checkpoint, decision and runtime intent commit together. Stop-cancel interrupts
+checkpoint, decision, host UI notices and runtime intent commit together. UI notices
+belong to the parent and are not repeated on receipt replay; the extensibility-v1
+language surface itself does not expose `Ui`. Stop-cancel interrupts
 policy work even when the parent also has an unrelated foreground operation.
 Escaped executors and late decision commits cannot reuse the completed borrow.
 Ordinary foreground completion retains independently owned policy callbacks,
@@ -4006,9 +4008,9 @@ delegated decisions. Tests cover checkpoint restoration, substituted retries,
 atomic actor persistence failure, live manager rollback, stop cancellation and
 decision reuse without repeating parent effects.
 
-Factory wiring must still verify actual parent/child authority, retain the parent's
-runtime, apply parent outcomes at its own boundary, and enforce the decision on the
-child. Rewrites and redirects require coordinated routing because an admitted
+Factory wiring verifies actual parent/child authority, retains the parent's
+runtime, applies parent outcomes at its own boundary, and enforces the decision on
+the child. Rewrites and redirects require coordinated routing because an admitted
 invocation's context is immutable; the host must not execute the original arguments
 after a policy rewrite. No model-facing mediation tool is exposed by this handoff.
 
@@ -4040,8 +4042,7 @@ The streamed-provider integration tests cover function and custom rewrites,
 redirects, redacted canonical history, stable invocation IDs, published outcomes,
 invalid input, policy rejection/failure, revocation during preparation, unavailable
 legacy targets and failed admission persistence. These are internal routing
-primitives. Factory parent-policy admission still requires integration; the guard
-for moderated generated parents remains closed.
+primitives used by the qualified factory integration below.
 
 `Script_tool_calls.with_preparation` now provides the shared preparation service
 for model calls, one-off/standalone script descendants and moderator-event native
@@ -4056,8 +4057,36 @@ the target schema and remain within that selection, even if the runtime registry
 contains additional tools. Script routing preserves the original payload evidence
 across local and host rewrites. Model routing retains its function/custom kind.
 Normal authorization, execution limits and disclosure checks remain in force.
-This closes the shared routing-plumbing gap; actual factory parent mediation,
-private authority validation and outcome ownership still require integration.
+The qualified factory installs this service on generated runtimes.
+
+### Parent policies in generated sessions
+
+The factory checks the candidate's actual running model operation and reserved
+history identity, dispatching native invocation, or running moderator event. It
+also verifies the child's generation, private admission and exact selected tool
+bindings. Those checks repeat around parent-policy waits; preparation is not an
+authorization grant for the eventual native effect.
+
+Policy order is child-local moderation, immediate parent, then successive ancestors.
+An unmoderated intermediate does not hide its ancestors. Each parent uses its own
+installed manager, history, native services and actor checkpoint. A rejection
+short-circuits the chain and returns a sanitized failure to the child. Rewrites and
+redirects remain within the child's selected bindings and target schemas. Already
+committed parent state and effects remain committed if a later ancestor rejects.
+
+Delegation fingerprints include the parent's installed moderator identity without
+including its changing conversation state. The host's source proof must match the
+persisted, non-halted checkpoint. Missing or changed sources reject; unmoderated
+parents retain their existing fingerprint format. The runtime lease keeps the
+manager available while handling policy, and parent end-session intent is applied
+on the parent even if the child can no longer receive the saved decision.
+
+The offline factory regression creates a real persisted child, checks rewritten
+file contents and a rejected subsequent call, and verifies decision provenance and
+the parent's state counter. After daemon restart, a grandchild still reaches the
+root policy through an unmoderated child. A subsequent policy end-session stops
+the entire owned subtree. Other authority adapters, independent resource lifetime
+and public creation tools retain their separate implementation requirements.
 
 ### Qualified persisted child creation
 
