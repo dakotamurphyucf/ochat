@@ -948,6 +948,14 @@
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_response_watcher_test)
+ (modules chatml_response_watcher_test)
+ (libraries core chatml chatml_host_runtime)
+ (inline_tests)
+ (preprocessor_deps (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))
+
+(library
  (name agent_server_managed_send_test)
  (modules agent_server_managed_send_test)
  (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)

@@ -16,6 +16,7 @@ type t =
   ; mutable running : (Agent_protocol.Id.Job.t, running_job) Map.Poly.t
   ; mutable cursor : int
   ; mutable delivering : Session_registry.entry list
+  ; deliveries_idle : Eio.Condition.t
   ; sleep : float -> unit
   }
 
@@ -394,7 +395,8 @@ let deliver_pending entry jobs =
 
 let dispatch_delivery t sw entry jobs =
   if
-    List.exists jobs ~f:delivery_pending
+    (not (Atomic.get t.closed))
+    && List.exists jobs ~f:delivery_pending
     && not (List.mem t.delivering entry ~equal:phys_equal)
   then (
     t.delivering <- entry :: t.delivering;
@@ -403,7 +405,8 @@ let dispatch_delivery t sw entry jobs =
         ~f:(fun () -> if not (Atomic.get t.closed) then deliver_pending entry jobs)
         ~finally:(fun () ->
           t.delivering
-          <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry)))))
+          <- List.filter t.delivering ~f:(fun active -> not (phys_equal active entry));
+          if List.is_empty t.delivering then Eio.Condition.broadcast t.deliveries_idle)))
 ;;
 
 let claim_one t sw entry jobs =
@@ -512,6 +515,7 @@ let start ~sw ~clock ~registry ~capacity =
     ; running = Map.Poly.empty
     ; cursor = 0
     ; delivering = []
+    ; deliveries_idle = Eio.Condition.create ()
     ; sleep = Eio.Time.sleep clock
     }
   in
@@ -532,4 +536,13 @@ let close t =
 ;;
 
 let is_running t = not (Atomic.get t.closed)
+
+let rec await_deliveries_idle t =
+  match t.delivering with
+  | [] -> ()
+  | _ ->
+    Eio.Condition.await_no_mutex t.deliveries_idle;
+    await_deliveries_idle t
+;;
+
 let running_count t = Eio.Mutex.use_ro t.mutex (fun () -> Map.length t.running)

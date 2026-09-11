@@ -21,4 +21,10 @@ val reconcile_recovered
 val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 
 val close : t -> unit
+
+(** After [close], wait for already-dispatched deliveries and moderator callbacks.
+    No new entry is admitted. The caller must bound this cancellable wait; an
+    unresponsive handler must not prevent subsequent runtime cancellation. *)
+val await_idle : t -> unit
+
 val is_running : t -> bool

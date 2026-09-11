@@ -8,6 +8,7 @@ let watch_timeout_ms = 30000
 let watch_initial_delay_ms = 25
 let watch_max_delay_ms = 1000
 let watch_transport_retries = 2
+let watch_retry_interrupted_probe = true
 let watch_permission_policy = "wait"
 let watch_stopped_policy = "fail"
 let watch_field json name = match Json.get_field(json, name) with
@@ -83,7 +84,8 @@ let watch_after_probe item result =
       else watch_finish(item, `Failed(watch_error("watcher.child_stopped", "Child stopped before the response.")))
     | _ -> watch_finish(item, `Failed(watch_error("watcher.child_failed", "Child is not able to respond."))))
   | `Failed(error) ->
-    if (if error.retryable then item.retries < watch_transport_retries else false) then
+    let retryable = if error.code == "background.interrupted" then watch_retry_interrupted_probe else error.retryable in
+    if (if retryable then item.retries < watch_transport_retries else false) then
       watch_schedule({ item with retries = item.retries + 1 })
     else watch_finish(item, `Failed(error))
   | completion -> watch_finish(item, completion)
@@ -117,7 +119,7 @@ let watch_on_event ctx state event =
     let found = match watch_field(payload, "kind") with
     | `String("background_job_completed") ->
       Array.find(state, fun item -> let item : response_watch = item in
-        item.job == watch_string(watch_field(payload, "job_id")))
+        if item.job == "" then false else item.job == watch_string(watch_field(payload, "job_id")))
     | `String("response_watch_tick") ->
       Array.find(state, fun item -> let item : response_watch = item in
         if item.id == watch_string(watch_field(payload, "subscription_id")) then

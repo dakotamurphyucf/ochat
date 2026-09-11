@@ -744,6 +744,160 @@ let on_event ctx state event = match event with
   [%expect {| interrupted claim retried; one committed timer event |}]
 ;;
 
+let%expect_test "shutdown gives admitted timer delivery a bounded grace before retirement"
+  =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_server.Daemon in
+  List.iter [ false; true ] ~f:(fun exceed_grace ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let prompt = Filename.concat root "timer.chatmd" in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt)
+            {|<script id="timer" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Session_start -> let* timer = Schedule.after_ms(200, `Null) in Task.pure(state)
+| `Internal_event(_) -> let* () = Runtime.end_session("delivered") in Task.pure(state + 1)
+| _ -> Task.pure(state)
+</script>|};
+          let configuration = config root root prompt in
+          let configuration =
+            { configuration with
+              server = { configuration.server with shutdown_grace_ms = 100 }
+            }
+          in
+          Eio.Switch.run (fun sw ->
+            let start () =
+              D.start
+                ~sw
+                ~env
+                ~config:configuration
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { D.default_options with
+                    qualify_chatml_extensions = true
+                  ; model_post_stream =
+                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let daemon = start () in
+            let session_id =
+              Exn.protect
+                ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
+                ~f:(fun () ->
+                  let client = connection daemon (principal ()) in
+                  Exn.protect
+                    ~finally:(fun () -> Agent_client.Connection.close client)
+                    ~f:(fun () ->
+                      initialize client;
+                      let session, _ = create_session ~start_immediately:true client in
+                      let entry =
+                        Agent_server.Session_registry.find (D.registry daemon) session.id
+                        |> Option.value_exn
+                      in
+                      let rec wait predicate =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match predicate state with
+                        | true -> state
+                        | false ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait predicate
+                      in
+                      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                        ignore (wait (fun state -> not (List.is_empty state.schedules)));
+                        let shutdown =
+                          A.with_moderator_checkpoint entry.actor (fun () ->
+                            ignore
+                              (wait (fun state ->
+                                 List.exists state.schedules ~f:(fun timer ->
+                                   match timer.status with
+                                   | Delivering -> true
+                                   | _ -> false)));
+                            let shutdown =
+                              Eio.Fiber.fork_promise ~sw (fun () ->
+                                D.shutdown daemon |> protocol_ok)
+                            in
+                            let rec draining () =
+                              match D.status daemon with
+                              | Draining -> ()
+                              | _ ->
+                                Eio.Fiber.yield ();
+                                draining ()
+                            in
+                            draining ();
+                            (match exceed_grace with
+                             | false ->
+                               Agent_server.Runtime_owner.ensure_loaded entry.runtime
+                               |> protocol_ok;
+                               (match (A.state entry.actor |> protocol_ok).schedules with
+                                | [ { status = Delivering; _ } ] -> ()
+                                | _ ->
+                                  failwith "shutdown cancelled delivery before its grace")
+                             | true ->
+                               (* The held gate prevents enqueue; grace expiry must
+                              cancel that delivery and restore its pending claim. *)
+                               ignore
+                                 (wait (fun state ->
+                                    List.exists state.schedules ~f:(fun timer ->
+                                      match timer.status with
+                                      | Scheduled -> true
+                                      | _ -> false))));
+                            Ok shutdown)
+                          |> protocol_ok
+                        in
+                        Eio.Promise.await_exn shutdown);
+                      session.id))
+            in
+            let recovered = start () in
+            Exn.protect
+              ~finally:(fun () -> D.shutdown recovered |> protocol_ok)
+              ~f:(fun () ->
+                let entry =
+                  Agent_server.Session_registry.load (D.registry recovered) session_id
+                  |> protocol_ok
+                in
+                let final =
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                    let rec wait () =
+                      let state = A.state entry.actor |> protocol_ok in
+                      match state.halted with
+                      | true -> state
+                      | false ->
+                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                        wait ()
+                    in
+                    wait ())
+                in
+                [%test_eq: int]
+                  1
+                  (List.count final.moderator_executions ~f:(fun receipt ->
+                     match receipt.context.phase, receipt.status with
+                     | Internal_event, Completed _ -> true
+                     | _ -> false));
+                (match final.schedules with
+                 | [ { status = Delivered; delivery_count = 1; _ } ] -> ()
+                 | _ -> failwith "timer delivery was lost or duplicated");
+                print_s
+                  [%sexp
+                    (exceed_grace : bool), ("one committed event after restart" : string)])))));
+  [%expect
+    {|
+    (false "one committed event after restart")
+    (true "one committed event after restart")
+    |}]
+;;
+
 let%expect_test
     "X02 review references deduplicate concurrent requests and survive daemon restart"
   =

@@ -4283,6 +4283,13 @@ serialization between idle draining and delivery without locking owner queries.
 An interrupted timer enqueue restores an uncommitted claim to Scheduled so a
 later runtime can deliver it. Already committed or explicitly cancelled timers
 reject that retry; shutdown cannot turn a pending delivery into a terminal failure.
+Orderly daemon shutdown first closes scheduler admission and cancels running jobs,
+then allows already-dispatched timer and job-completion callbacks to finish within
+`shutdown_grace_ms`. This avoids interrupting short callbacks just before their
+checkpoint commits. The wait is bounded; after the grace expires, normal runtime
+retirement proceeds. A callback interrupted before commit retains its ambiguous
+receipt and is never automatically replayed. Cancellation cannot skip the final
+actor/resource cleanup, which may outlive the callback grace.
 User messages deferred during idle event handling resume after the callback
 releases its borrow, even
 when it requests no turn and publishes no notification. The handoff commits the

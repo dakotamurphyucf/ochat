@@ -780,39 +780,164 @@ let run env helper runner ~native_watch =
           check_watch_notifications daemon parent.id;
           parent.id, child, receipt)
       in
+      let cursor_watch, receipt_watch =
+        with_daemon (fun sw daemon client ->
+          let handle =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client
+              ~session_id:parent_id
+              ~mode:Read_write
+              ~subscribe:false
+              ()
+            |> protocol_ok
+          in
+          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          H.close handle;
+          let target = [ "session_id", P.Id.Session.to_json child_id ] in
+          let replay =
+            bridge sw daemon client parent_id "create" child_request |> complete
+          in
+          assert (P.Id.Session.equal child_id (id replay));
+          let output =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "read"
+              (`Object (target @ [ "receipt_id", `String receipt ]))
+            |> complete
+            |> Jsonaf.to_string
+          in
+          assert (String.is_substring output ~substring:"persisted helper answer");
+          check_notification daemon parent_id child_id;
+          check_watch_notifications daemon parent_id;
+          let child_handle =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client
+              ~session_id:child_id
+              ~mode:Read_write
+              ~subscribe:false
+              ()
+            |> protocol_ok
+          in
+          H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          await (fun () -> Option.is_none (state daemon child_id).active_operation);
+          let snapshot =
+            bridge sw daemon client parent_id "read" (`Object target) |> complete
+          in
+          assert (Jsonaf.bool_exn (field "caught_up" snapshot));
+          let paused, _release = Eio.Promise.create () in
+          child_pause := Some paused;
+          let sent =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "send"
+              (`Object
+                  (target
+                   @ [ "message", `String "interrupted by restart"
+                     ; "idempotency_key", `String "restart-message"
+                     ]))
+            |> complete
+          in
+          let receipt_watch =
+            start_watch
+              sw
+              daemon
+              client
+              parent_id
+              (target @ [ "receipt_id", field "receipt_id" sent ])
+          in
+          await_timer daemon parent_id receipt_watch;
+          let cursor_watch =
+            start_watch
+              sw
+              daemon
+              client
+              parent_id
+              (target @ [ "cursor", field "next_cursor" snapshot ])
+          in
+          await_timer daemon parent_id cursor_watch;
+          assert (Option.is_some (state daemon child_id).active_operation);
+          H.close child_handle;
+          cursor_watch, receipt_watch)
+      in
+      child_pause := None;
       with_daemon (fun sw daemon client ->
-        let handle =
-          H.attach
-            ~sw
-            ~clock:(Eio.Stdenv.clock env)
-            ~connection:client
-            ~session_id:parent_id
-            ~mode:Read_write
-            ~subscribe:false
-            ()
-          |> protocol_ok
+        let step name f =
+          match
+            Eio.Time.with_timeout (Eio.Stdenv.clock env) 10. (fun () -> Ok (f ()))
+          with
+          | Ok result -> result
+          | Error _ ->
+            let current = state daemon parent_id in
+            let failures =
+              List.filter current.moderator_executions ~f:(fun receipt ->
+                match receipt.status with
+                | Completed _ -> false
+                | _ -> true)
+            in
+            let subscriptions =
+              List.filter current.subscriptions ~f:(fun subscription ->
+                P.Id.Subscription.equal subscription.context.id cursor_watch
+                || P.Id.Subscription.equal subscription.context.id receipt_watch)
+            in
+            let jobs =
+              List.map current.jobs ~f:(fun job -> job.id, job.status, job.delivery)
+            in
+            raise_s
+              [%sexp
+                (name : string)
+              , (subscriptions : P.Subscription.t list)
+              , (failures : P.Moderator_execution.t list)
+              , (jobs : (P.Id.Job.t * P.Job.status * P.Job.delivery) list)]
         in
-        H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
-        H.close handle;
-        let target = [ "session_id", P.Id.Session.to_json child_id ] in
-        let replay =
-          bridge sw daemon client parent_id "create" child_request |> complete
-        in
-        assert (P.Id.Session.equal child_id (id replay));
-        let output =
-          bridge
-            sw
-            daemon
-            client
-            parent_id
-            "read"
-            (`Object (target @ [ "receipt_id", `String receipt ]))
-          |> complete
-          |> Jsonaf.to_string
-        in
-        assert (String.is_substring output ~substring:"persisted helper answer");
+        let before_calls = !child_calls in
+        assert (
+          P.Session.equal_desired_state (state daemon parent_id).lifecycle.desired Running);
+        (* Both recovered completions request a turn. The automatic follow-up
+           budget may suppress a wake; it must never suppress their messages. *)
+        (match
+           step "cursor completion" (fun () ->
+             await_watch ~require_wake:false daemon parent_id cursor_watch)
+         with
+         | Failed error -> [%test_eq: string] "agent.read.cursor_expired" error.code
+         | result ->
+           raise_s [%sexp "expired cursor was not reported", (result : P.Completion.t)]);
+        (match
+           step "receipt completion" (fun () ->
+             await_watch ~require_wake:false daemon parent_id receipt_watch)
+         with
+         | Failed error -> [%test_eq: string] "watcher.target_failed" error.code
+         | result ->
+           raise_s
+             [%sexp "interrupted receipt was not reported", (result : P.Completion.t)]);
+        [%test_eq: int] before_calls !child_calls;
         check_notification daemon parent_id child_id;
         check_watch_notifications daemon parent_id;
+        let pending_jobs () =
+          List.filter (state daemon parent_id).jobs ~f:(fun job ->
+            match job.status, job.delivery with
+            | ( (Succeeded | Failed _ | Cancelled | Interrupted _)
+              , (Delivered _ | Discarded _ | Not_required) ) -> false
+            | _ -> true)
+        in
+        (match
+           Eio.Time.with_timeout (Eio.Stdenv.clock env) 3. (fun () ->
+             await (fun () -> List.is_empty (pending_jobs ()));
+             Ok ())
+         with
+         | Ok () -> ()
+         | Error _ ->
+           raise_s
+             [%sexp "watch recovery left pending jobs", (pending_jobs () : P.Job.t list)]);
         let child_handle =
           H.attach
             ~sw
@@ -824,9 +949,8 @@ let run env helper runner ~native_watch =
             ()
           |> protocol_ok
         in
-        H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
-        await (fun () -> Option.is_none (state daemon child_id).active_operation);
-        H.stop child_handle ~mode:Graceful |> protocol_ok |> ignore;
+        step "stop child" (fun () ->
+          H.stop child_handle ~mode:Graceful |> protocol_ok |> ignore);
         H.close child_handle);
       with_daemon
         ~grants:

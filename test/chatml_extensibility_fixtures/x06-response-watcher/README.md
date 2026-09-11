@@ -32,6 +32,10 @@ The author configures timeout (30 seconds for waiting for a response), backoff
 (25 ms to 1 second), transport retries (two), permission-wait policy (`wait`) and
 stopped-child policy (`fail`) in the source. This response deadline is separate
 from child-creation latency and the default 10-second individual script budget.
+`watch_retry_interrupted_probe` explicitly permits a fresh probe after a recovered
+`background.interrupted` result, within the same retry/deadline bounds. This is
+safe for this read-only probe; it is not a general policy to replay interrupted
+tools with side effects.
 The subscription's extra second permits explicit timeout publication before host
 expiry; host expiry remains a fallback if the moderator cannot run.
 
@@ -44,6 +48,25 @@ registrations absent. The native backend replaces `watch_session_request` with
 Current integration coverage includes delayed receipt completion, future output
 from a cursor, concurrent-watch cancellation without child termination, foreign
 child denial and exactly one retained notification per watch across daemon restart.
-Active-watch restart, stale/duplicate callback injection and the full deadline,
-transport, permission and stopped-child policy matrix remain to be qualified.
+The restart scenario also leaves receipt and cursor watches active, shuts down
+the daemon, and requires automatic recovery without a new parent message. The
+interrupted submission reports `watcher.target_failed`; the expired cursor reports
+`agent.read.cursor_expired`, without silently replacing it or rerunning the child.
+Both notifications remain in history even if the automatic follow-up budget
+suppresses an additional model turn. Completed probe jobs must finish delivery.
+
+Orderly shutdown gives admitted moderator callbacks the configured grace period
+to commit. An abrupt crash or grace expiry inside a handler can still leave an
+ambiguous interrupted event. The runtime deliberately does not replay that event;
+explicit event reconciliation remains necessary. This fixture does not claim
+automatic recovery from arbitrary interrupted external effects.
 This fixture alone does not complete X06, X07 or E09.02.
+
+`chatml_response_watcher_test.ml` separately compiles these exact sources and
+checks the algorithm against a recording host: capped exponential backoff, bounded
+transport/interruption retries, author-selected permission/stopped policies,
+stale epochs, duplicate terminal callbacks, deadline precedence and cancellation
+of a watch with an active probe. Probe checks distinguish available output from
+an active operation, generation changes, expired cursors, permission waits and
+foreign-child denial. These tests complement the daemon integration; the recording
+host does not establish durability or OS confinement.

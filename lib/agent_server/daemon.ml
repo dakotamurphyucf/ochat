@@ -978,11 +978,21 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
 ;;
 
 let shutdown_sessions t =
-  match
-    Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
-      Ok (Session_registry.shutdown t.registry))
-  with
-  | Ok () | Error `Timeout -> ()
+  (* Admission is already closed. Let callbacks that own a checkpoint finish
+     within the configured grace, rather than needlessly leaving an ambiguous
+     interrupted event on an otherwise orderly restart. Never replay such an
+     event: if the grace expires, runtime retirement still cancels it normally.
+     Registry teardown itself is cancellation-protected and must always run. *)
+  Eio.Cancel.protect (fun () ->
+    (match
+       Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
+         Eio.Fiber.both
+           (fun () -> Schedule_scheduler.await_idle t.schedule_scheduler)
+           (fun () -> Job_scheduler.await_deliveries_idle t.job_scheduler);
+         Ok ())
+     with
+     | Ok () | Error `Timeout -> ());
+    Session_registry.shutdown t.registry)
 ;;
 
 let shutdown t =

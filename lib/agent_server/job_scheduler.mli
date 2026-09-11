@@ -41,5 +41,11 @@ val start
 val cancel : t -> Agent_protocol.Id.Job.t -> unit
 
 val close : t -> unit
+
+(** After [close], wait for already-dispatched completion delivery callbacks.
+    Running jobs are still cancelled by [close]; this does not await their
+    successful execution. The caller supplies a bounded, cancellable grace. *)
+val await_deliveries_idle : t -> unit
+
 val is_running : t -> bool
 val running_count : t -> int

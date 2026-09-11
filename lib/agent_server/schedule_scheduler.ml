@@ -3,6 +3,7 @@ open! Core
 type t =
   { closed : bool Atomic.t
   ; mutable busy : Session_registry.entry list
+  ; idle : Eio.Condition.t
   }
 
 let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
@@ -124,23 +125,25 @@ let claim entry observed (schedule : Agent_protocol.Schedule.t) =
   | Ok None | Error _ -> ()
 ;;
 
-let process_entry entry =
+let process_entry t entry =
   match Agent_session.Session_actor.due_schedules entry.Session_registry.actor with
   | Error _ -> ()
   | Ok (observed, schedules) ->
-    List.iter schedules ~f:(claim entry observed);
-    drain_idle_moderator entry
+    List.iter schedules ~f:(fun schedule ->
+      if not (Atomic.get t.closed) then claim entry observed schedule);
+    if not (Atomic.get t.closed) then drain_idle_moderator entry
 ;;
 
 let dispatch_entry t sw entry =
-  if not (List.mem t.busy entry ~equal:phys_equal)
+  if (not (Atomic.get t.closed)) && not (List.mem t.busy entry ~equal:phys_equal)
   then (
     t.busy <- entry :: t.busy;
     Eio.Fiber.fork ~sw (fun () ->
       Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry entry)
+        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry t entry)
         ~finally:(fun () ->
-          t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry)))))
+          t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry));
+          if List.is_empty t.busy then Eio.Condition.broadcast t.idle)))
 ;;
 
 let process t sw registry =
@@ -164,10 +167,19 @@ let rec run t sw clock registry =
 ;;
 
 let start ~sw ~clock ~registry =
-  let t = { closed = Atomic.make false; busy = [] } in
+  let t = { closed = Atomic.make false; busy = []; idle = Eio.Condition.create () } in
   Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
 let close t = Atomic.set t.closed true
+
+let rec await_idle t =
+  match t.busy with
+  | [] -> ()
+  | _ ->
+    Eio.Condition.await_no_mutex t.idle;
+    await_idle t
+;;
+
 let is_running t = not (Atomic.get t.closed)
