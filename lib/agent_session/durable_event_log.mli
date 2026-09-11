@@ -23,6 +23,22 @@ val replay : t -> after_sequence:int64 -> through_sequence:int64 -> replay
 val oldest_sequence : t -> int64 option
 val latest_sequence : t -> int64 option
 
+type history_epoch =
+  | Replacement of int64
+  | Window_start of int64
+[@@deriving equal, sexp]
+
+(** Bind an output snapshot to its most recent retained history replacement, or
+    the replay floor when no replacement remains. This detects deletion of an
+    unread output even when the consumed prefix is unchanged. Window eviction
+    may conservatively expire a cursor. A snapshot older than the retained window
+    requires refresh; restored snapshots without a replay suffix get a bounded
+    fresh anchor. Reads the replay window atomically without changing it. *)
+val history_epoch
+  :  t
+  -> through_sequence:int64
+  -> (history_epoch, Agent_protocol.Error.t) result
+
 (** Scan the complete retained replay window under its mutex. Validate ownership,
     continuity, full payloads and replacement/status projections before returning
     any references. Bounds events and serialized bytes. The owning actor must keep

@@ -210,6 +210,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/job_capacity.mli` | [contract](../../lib/agent_server/job_capacity.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/job_scheduler.mli` | [contract](../../lib/agent_server/job_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/maintenance.mli` | [contract](../../lib/agent_server/maintenance.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/managed_output_cursor.mli` | [contract](../../lib/agent_server/managed_output_cursor.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_server/managed_output_page.mli` | [contract](../../lib/agent_server/managed_output_page.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/operator_manifest_grant.mli` | [contract](../../lib/agent_server/operator_manifest_grant.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/pagination.mli` | [contract](../../lib/agent_server/pagination.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_review_service.mli` | [contract](../../lib/agent_server/permission_review_service.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
@@ -251,6 +253,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/mailbox.mli` | [contract](../../lib/agent_session/mailbox.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_moderator_dispatch.mli` | [contract](../../lib/agent_session/managed_moderator_dispatch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_session/managed_read_tool.mli` | [contract](../../lib/agent_session/managed_read_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_send_tool.mli` | [contract](../../lib/agent_session/managed_send_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_session_service.mli` | [contract](../../lib/agent_session/managed_session_service.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_session_tool.mli` | [contract](../../lib/agent_session/managed_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

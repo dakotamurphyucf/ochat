@@ -28,6 +28,7 @@ type limits =
   ; delegation_max_depth : int
   ; managed_submission_max_count : int option
   ; managed_message_max_bytes : int option
+  ; managed_output_page_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits

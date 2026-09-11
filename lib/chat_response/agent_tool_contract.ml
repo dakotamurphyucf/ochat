@@ -65,7 +65,6 @@ let parameters (policy : CM.agent_persistence) =
           , `Object
               [ "type", `String "string"
               ; "enum", `Array [ `String "one_off"; `String "persistent" ]
-              ; "default", `String "one_off"
               ] )
         ]
   in

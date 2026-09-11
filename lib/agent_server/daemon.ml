@@ -110,6 +110,7 @@ let default_options =
       ; delegation_max_depth = 32
       ; managed_submission_max_count = Some 4096
       ; managed_message_max_bytes = Some (256 * 1024)
+      ; managed_output_page_max_bytes = 256 * 1024
       ; delegation_recovery_max_bytes = 67108864
       ; delegation_artifact_max_entries = 65536
       ; delegation_artifact_max_bytes = 67108864

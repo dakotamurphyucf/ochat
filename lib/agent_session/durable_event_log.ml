@@ -74,6 +74,41 @@ let replay t ~after_sequence ~through_sequence =
 let oldest_sequence t = Eio.Mutex.use_ro t.mutex (fun () -> oldest t.events)
 let latest_sequence t = Eio.Mutex.use_ro t.mutex (fun () -> latest t.events)
 
+type history_epoch =
+  | Replacement of int64
+  | Window_start of int64
+[@@deriving equal, sexp]
+
+let history_epoch t ~through_sequence =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    match oldest t.events, latest t.events with
+    | Some first, _ when Int64.(first > through_sequence) ->
+      Error
+        (Agent_protocol.Error.create
+           Snapshot_required
+           ~message:"The history replay window moved beyond this output snapshot."
+           ~retryable:false
+           ~data:(`Object [ "snapshot_required", `True ])
+           ())
+    | _, None -> Ok (Window_start through_sequence)
+    | _, Some last when Int64.(last < through_sequence) ->
+      (* A restored snapshot may have no corresponding retained replay suffix.
+         A later window change expires this conservative fresh-snapshot anchor. *)
+      Ok (Window_start through_sequence)
+    | first, Some _ ->
+      let replacement =
+        List.fold t.events ~init:None ~f:(fun found event ->
+          match event.Agent_protocol.Event.Durable.kind with
+          | History_replaced when Int64.(event.sequence <= through_sequence) ->
+            Some event.sequence
+          | _ -> found)
+      in
+      Ok
+        (match replacement with
+         | Some sequence -> Replacement sequence
+         | None -> Window_start (Option.value first ~default:through_sequence)))
+;;
+
 let retained_references t ~session_id ~candidates ~max_events ~max_bytes =
   Eio.Mutex.use_ro t.mutex (fun () ->
     let open Result.Let_syntax in

@@ -4385,7 +4385,7 @@ Status reports lifecycle, current operation ID/kind/state and the count of pendi
 permissions. It omits transcript, tool arguments, failure text and permission
 details. Inspection does not resolve approvals or start a stopped child. An idle
 session does not establish completion of a particular submitted message. This is
-part of the qualified management service. Read/wait/stop tools and the public
+part of the qualified management service. Wait/stop tools and the public
 helper bridge are still being implemented.
 
 ### Managed submission receipt foundation
@@ -4431,6 +4431,44 @@ and when the child is stopped, without restarting it. New sends to a stopped chi
 reject. Receipts are not automatically expired into repeatable operations.
 Tests cover native/script retries, conflicts, busy/deferred admission, foreign
 targets, configured bounds and terminal receipt replay across daemon restart.
+
+### Qualified managed output reads
+
+Internally qualified durable hosts can declare `<tool name="agent_read"/>`.
+Requests require `session_id` and optionally accept `receipt_id`, `cursor`, and
+`limit` (default 16, maximum 128). The same scoped service handles native and
+nested ChatML calls. It authenticates the actual parent's relationship before
+loading the target and rechecks authority before disclosing results. Reads do
+not start stopped children, consume another reader's output, or resolve approvals.
+
+Output pages include committed assistant messages after the initial prompt,
+history provenance, covering submission IDs and operation IDs. They omit initial
+prompt examples, system/developer messages, reasoning and tool traffic. Redacted
+entries retain their redaction marker with a null payload. A receipt-filtered page
+also includes current receipt metadata: assistant text alone is not operation
+completion. `generation` and `revision` identify the observed snapshot.
+
+Every page includes `next_cursor`, including when `caught_up` is true. Continue
+with that cursor to read later appends. A cursor binds the private management
+relationship, target generation, query, output projection and consumed output.
+Changing those bindings, replacing history (including deleting unread output),
+replay-window expiry, tampering, or restarting the host expires the cursor
+explicitly. Retry without a cursor for a
+fresh bounded snapshot; do not interpret expiry as an empty response. When a
+selected receipt references output no longer retained, the service reports
+`agent.read.snapshot_required` and a missing-output count. An unfiltered fresh
+snapshot can inspect the remaining history, with `history_compacted` indicating
+that earlier history has been compacted.
+
+The default host page ceiling is 256 KiB, configurable through
+`managed_output_page_max_bytes`. Ordinary `items` have `kind: "output"` and a
+complete `value` record. An oversized record uses `kind: "output_fragment"`,
+`entry_id`, `byte_offset`, `total_bytes`, `text` and `complete`. Fragment text is
+valid UTF-8 containing part of the serialized output record. Concatenate fragments
+for the same entry in offset order, then decode the JSON when `complete` is true.
+This preserves large responses without truncation. A ceiling too small to fit
+metadata or make fragment progress returns an error. Caught-up status describes
+this snapshot and does not imply that the child or selected operation has ended.
 
 ### Authored agent-tool persistence contract (implementation in progress)
 

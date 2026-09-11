@@ -21,6 +21,8 @@
   authorization
   principal_projection
   pagination
+  managed_output_cursor
+  managed_output_page
   catalog_projection
   session_capacity
   start_scheduler

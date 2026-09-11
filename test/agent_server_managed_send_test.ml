@@ -57,11 +57,12 @@ let%expect_test
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt)
-          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="run_chatml"/>|};
+          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/><tool name="run_chatml"/>|};
         let configuration = config root root prompt in
         let queued = ref None in
         let child_calls = ref 0 in
         let child_inputs = Queue.create () in
+        let answer = String.concat (List.init 2500 ~f:(fun _ -> "📚\"\\\n")) in
         let child_gate = ref None in
         let phase = ref "startup" in
         let provider ~sw:_ ~inputs =
@@ -84,7 +85,33 @@ let%expect_test
               child_inputs
               (`Array (List.map inputs ~f:Res.Item.jsonaf_of_t) |> Jsonaf.to_string);
             Option.iter !child_gate ~f:Eio.Promise.await;
-            Stdlib.Seq.empty
+            (match !child_calls with
+             | 1 -> Stdlib.Seq.empty
+             | _ ->
+               let message : Res.Output_message.t =
+                 { role = Assistant
+                 ; id = "managed-answer"
+                 ; status = "completed"
+                 ; content =
+                     [ { annotations = []; text = answer; _type = "output_text" } ]
+                 ; phase = None
+                 ; _type = "message"
+                 }
+               in
+               let item = Res.Response_stream.Item.Output_message message in
+               [ Res.Response_stream.Output_item_added
+                   { item; output_index = 0; type_ = "response.output_item.added" }
+               ; Output_text_delta
+                   { item_id = message.id
+                   ; output_index = 0
+                   ; content_index = 0
+                   ; delta = answer
+                   ; type_ = "response.output_text.delta"
+                   }
+               ; Output_item_done
+                   { item; output_index = 0; type_ = "response.output_item.done" }
+               ]
+               |> Stdlib.List.to_seq)
           | false ->
             (match !queued with
              | None -> Stdlib.Seq.empty
@@ -102,7 +129,7 @@ let%expect_test
           in
           loop ()
         in
-        let with_daemon f =
+        let with_daemon ?(page_bytes = 4096) f =
           Eio.Switch.run (fun sw ->
             let calls_before = !child_calls in
             let daemon =
@@ -121,6 +148,7 @@ let%expect_test
                       { D.default_options.factory_limits with
                         managed_submission_max_count = Some 2
                       ; managed_message_max_bytes = Some 128
+                      ; managed_output_page_max_bytes = page_bytes
                       }
                   }
                 ()
@@ -194,21 +222,27 @@ let%expect_test
             ; "message", `String value
             ]
         in
-        let script args =
+        let script ?(tool = "agent_send") args =
           `Object
             [ ( "source"
               , `String
-                  {|let main input =
-  let* result = Tool.call("agent_send", input) in
+                  (sprintf
+                     {|let main input =
+  let* result = Tool.call(%S, input) in
   match result with
   | `Ok(receipt) -> Task.pure(receipt)
   | `Error(code) -> Task.fail(code)|}
-              )
+                     tool) )
             ; "input", args
-            ; "tools", `Array [ `String "agent_send" ]
+            ; "tools", `Array [ `String tool ]
             ]
         in
-        let parent_id, child_id, receipt_id =
+        let read_request child receipt cursor =
+          `Object
+            ([ "session_id", P.Id.Session.to_json child; "receipt_id", `String receipt ]
+             @ Option.to_list (Option.map cursor ~f:(fun value -> "cursor", value)))
+        in
+        let parent_id, child_id, receipt_id, output_cursor =
           with_daemon (fun sw daemon client ->
             let parent, _ = create_session ~start_immediately:true client in
             let child =
@@ -266,6 +300,14 @@ let%expect_test
               daemon
               client
               parent.id
+              "agent_read"
+              (`Object [ "session_id", P.Id.Session.to_json foreign ])
+            |> denied "agent.management.denied";
+            invoke
+              sw
+              daemon
+              client
+              parent.id
               "agent_send"
               (message foreign "foreign" "hello")
             |> denied "agent.management.denied";
@@ -296,6 +338,21 @@ let%expect_test
             await (fun () -> Int.equal !child_calls 1);
             [%test_eq: string] "assigned" (text receipt "status");
             assert (Jsonaf.exactly_equal (field receipt "terminal") `False);
+            let pending =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_read"
+                (read_request child_id (text receipt "receipt_id") None)
+              |> complete
+            in
+            assert (Jsonaf.exactly_equal (field pending "caught_up") `True);
+            assert (
+              Jsonaf.exactly_equal (field (field pending "receipt") "terminal") `False);
+            assert (List.is_empty (field pending "items" |> Jsonaf.list_exn));
+            let pending_output_cursor = field pending "next_cursor" in
             let replay =
               invoke
                 sw
@@ -397,6 +454,61 @@ let%expect_test
             H.close handle;
             let calls_before = !child_calls in
             let stopped = state daemon child_id in
+            let output = Buffer.create 32768 in
+            let rec read_pages cursor count =
+              assert (count < 32);
+              let args = read_request child_id (text receipt "receipt_id") cursor in
+              let page =
+                (match cursor with
+                 | None -> invoke sw daemon client parent.id "agent_read" args
+                 | Some _ ->
+                   invoke
+                     sw
+                     daemon
+                     client
+                     parent.id
+                     "run_chatml"
+                     (script ~tool:"agent_read" args))
+                |> complete
+              in
+              assert (String.length (Jsonaf.to_string page) <= 4096);
+              List.iter
+                (field page "items" |> Jsonaf.list_exn)
+                ~f:(fun item ->
+                  [%test_eq: string] "output_fragment" (text item "kind");
+                  let fragment = text item "text" in
+                  assert (Stdlib.String.is_valid_utf_8 fragment);
+                  Buffer.add_string output fragment);
+              let next = field page "next_cursor" in
+              match Jsonaf.exactly_equal (field page "caught_up") `True with
+              | true -> next
+              | false ->
+                Option.iter cursor ~f:(fun previous ->
+                  assert (not (Jsonaf.exactly_equal previous next)));
+                read_pages (Some next) (count + 1)
+            in
+            let output_cursor = read_pages (Some pending_output_cursor) 0 in
+            let record = Jsonaf.of_string (Buffer.contents output) in
+            let payload = field (field record "history") "payload" in
+            let content = field payload "content" |> Jsonaf.list_exn |> List.hd_exn in
+            [%test_eq: string] answer (text content "text");
+            [%test_eq: int]
+              2
+              (field record "submission_ids" |> Jsonaf.list_exn |> List.length);
+            [%test_eq: int]
+              1
+              (field record "operation_ids" |> Jsonaf.list_exn |> List.length);
+            let caught_up =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_read"
+                (read_request child_id (text receipt "receipt_id") (Some output_cursor))
+              |> complete
+            in
+            assert (List.is_empty (field caught_up "items" |> Jsonaf.list_exn));
             let replay =
               invoke
                 sw
@@ -421,10 +533,35 @@ let%expect_test
             [%test_eq: Sexp.t]
               (Agent_session.Session_state.sexp_of_t stopped)
               (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            parent.id, child_id, text receipt "receipt_id")
+            parent.id, child_id, text receipt "receipt_id", output_cursor)
         in
-        with_daemon (fun sw daemon client ->
+        with_daemon ~page_bytes:65536 (fun sw daemon client ->
           let before = state daemon child_id in
+          (match
+             invoke
+               sw
+               daemon
+               client
+               parent_id
+               "agent_read"
+               (read_request child_id receipt_id (Some output_cursor))
+           with
+           | Published (Fail error) ->
+             [%test_eq: string] "agent.read.cursor_expired" error.code;
+             assert (Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
+           | _ -> failwith "old process output cursor did not expire");
+          let fresh =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "run_chatml"
+              (script ~tool:"agent_read" (read_request child_id receipt_id None))
+            |> complete
+          in
+          assert (Jsonaf.exactly_equal (field fresh "snapshot") `True);
+          [%test_eq: int] 1 (field fresh "items" |> Jsonaf.list_exn |> List.length);
           let replay =
             invoke
               sw
@@ -440,7 +577,59 @@ let%expect_test
           [%test_eq: Sexp.t]
             (Agent_session.Session_state.sexp_of_t before)
             (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-          [%test_eq: int] 2 (List.length before.managed_submissions));
+          [%test_eq: int] 2 (List.length before.managed_submissions);
+          let read_all cursor =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "agent_read"
+              (`Object
+                  ([ "session_id", P.Id.Session.to_json child_id ]
+                   @ Option.to_list (Option.map cursor ~f:(fun value -> "cursor", value))
+                  ))
+          in
+          let all = read_all None |> complete in
+          assert (Jsonaf.exactly_equal (field all "caught_up") `True);
+          [%test_eq: int] 1 (field all "items" |> Jsonaf.list_exn |> List.length);
+          let tail = field all "next_cursor" in
+          let handle = attach sw client child_id in
+          H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+          await (fun () -> observed_idle (state daemon child_id).lifecycle.observed);
+          H.send_message
+            handle
+            { kind = Plain_text; text = "Generate an unread response."; attachments = [] }
+          |> protocol_ok
+          |> ignore;
+          await (fun () -> Option.is_none (state daemon child_id).active_operation);
+          let current = state daemon child_id in
+          let outputs =
+            List.filter current.conversation.canonical_history ~f:(fun entry ->
+              match entry.P.History.role, entry.kind with
+              | Assistant, Message -> true
+              | _ -> false)
+          in
+          [%test_eq: int] 2 (List.length outputs);
+          H.delete_history
+            handle
+            ~expected_revision:current.counters.revision
+            (List.last_exn outputs).id
+          |> protocol_ok
+          |> ignore;
+          let edited = state daemon child_id in
+          [%test_eq: int] current.identity.generation edited.identity.generation;
+          [%test_eq: int]
+            current.conversation.compaction_generation
+            edited.conversation.compaction_generation;
+          (match read_all (Some tail) with
+           | Published (Fail error) ->
+             [%test_eq: string] "agent.read.cursor_expired" error.code
+           | _ -> failwith "deleting unread output silently returned an empty page");
+          let refreshed = read_all None |> complete in
+          [%test_eq: int] 1 (field refreshed "items" |> Jsonaf.list_exn |> List.length);
+          H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+          H.close handle);
         print_endline
           "native/script retry shares one receipt; busy sends defer; conflicts and \
            foreign IDs do not mutate children; stopped/restarted receipt replay never \

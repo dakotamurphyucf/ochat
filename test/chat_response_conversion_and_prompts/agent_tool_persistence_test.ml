@@ -46,6 +46,9 @@ let%expect_test
       match parsed with
       | Persistent_agent (agent, policy) ->
         let description = Contract.description agent policy in
+        assert (
+          Result.is_ok
+            (Chatmd_shell_spec.Tool_schema.compile (Contract.parameters policy)));
         assert (String.is_prefix description ~prefix:"Review a change.\n\n");
         assert (
           String.is_substring
@@ -113,8 +116,7 @@ let%expect_test
           (mode
            (Object
             ((type (String string))
-             (enum (Array ((String one_off) (String persistent))))
-             (default (String one_off))))))))
+             (enum (Array ((String one_off) (String persistent))))))))))
        (required (Array ((String input)))) (additionalProperties False))))
     (default One_off ())
     (continue "One-off agent calls cannot include session_id.")

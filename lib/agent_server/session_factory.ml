@@ -31,6 +31,7 @@ type limits =
   ; delegation_max_depth : int
   ; managed_submission_max_count : int option
   ; managed_message_max_bytes : int option
+  ; managed_output_page_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
@@ -64,6 +65,7 @@ type t =
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; generated_creation : Agent_session.Generated_session_request.service
   ; managed_sessions : Agent_session.Managed_session_service.t
+  ; managed_output_cursors : Managed_output_cursor.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -5941,6 +5943,63 @@ let managed_send t borrowed child_id ~key ~message =
   M.to_json receipt
 ;;
 
+let managed_read t borrowed child_id ~receipt_id ~cursor ~limit =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, state = authorize () in
+  let result =
+    let open Result.Let_syntax in
+    let%bind history_epoch =
+      Agent_session.Durable_event_log.history_epoch
+        child.durable_events
+        ~through_sequence:state.counters.event_sequence
+    in
+    Managed_output_page.read
+      t.managed_output_cursors
+      ~state
+      ~receipt_id
+      ~cursor
+      ~history_epoch
+      ~limit
+      ~max_bytes:t.limits.managed_output_page_max_bytes
+  in
+  let%bind _, current = authorize () in
+  let result =
+    match
+      Int.equal current.identity.generation state.identity.generation
+      && Int.equal
+           current.conversation.compaction_generation
+           state.conversation.compaction_generation
+    with
+    | true -> result
+    | false ->
+      Error
+        (P.Error.create
+           Snapshot_required
+           ~message:"The session changed while reading output; request a fresh snapshot."
+           ~retryable:false
+           ~data:(`Object [ "snapshot_required", `True ])
+           ())
+  in
+  Result.map_error result ~f:(fun error ->
+    P.Invocation.
+      { code = "agent.read." ^ P.Error.code_to_string error.P.Error.code
+      ; message = error.message
+      ; retryable = error.retryable
+      ; details = error.data
+      })
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -6132,11 +6191,15 @@ let create
         { limits = bundle_limits
         ; create = (fun borrowed request -> create_from_native t borrowed request)
         }
+    ; managed_output_cursors = Managed_output_cursor.create ()
     ; managed_sessions =
         { status = (fun borrowed child_id -> managed_status t borrowed child_id)
         ; send =
             (fun borrowed child_id ~key ~message ->
               managed_send t borrowed child_id ~key ~message)
+        ; read =
+            (fun borrowed child_id ~receipt_id ~cursor ~limit ->
+              managed_read t borrowed child_id ~receipt_id ~cursor ~limit)
         }
     }
   in
