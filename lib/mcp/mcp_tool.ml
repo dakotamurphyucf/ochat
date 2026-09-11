@@ -9,7 +9,6 @@
 ------------------------------------------------------------------------*)
 
 open Core
-open Eio
 module Client = Mcp_client
 module Tool = Mcp_types.Tool
 module Result_ = Mcp_types.Tool_result
@@ -36,15 +35,12 @@ let string_of_result (r : Result_.t) : string =
     description [tool] into a fully-callable {!Ochat_function.t}.
 
     Parameters:
-    • [sw] – parent {!Eio.Switch.t}.  The wrapper creates one *daemon* fiber
-      under this switch to print server notifications.  When the switch
-      finishes the daemon is cancelled automatically.
+    • [sw] – retained for API compatibility. The owning host controls the
+      connected client's lifetime and notification routing.
     • [client] – already-connected {!Mcp_client.t}.  The caller is
       responsible for keeping the client alive for at least as long as the
       returned function may be invoked.
-    • [?strict] – forwarded to {!Ochat_function.create_function}.  If [true]
-      (default), the function raises {!Invalid_argument} when OpenAI sends
-      arguments that don’t match [tool.input_schema].
+    • [strict] – forwarded as provider metadata, not local schema validation.
 
     Result: a {!Ochat_function.t} whose name, description and JSON-schema are
     copied verbatim from the remote declaration and whose implementation
@@ -66,9 +62,11 @@ let string_of_result (r : Result_.t) : string =
           Printf.printf "%s\n" (Ochat_function.call echo_fn args)
     ]}
 
-    The call prints "hi" and then terminates.  Notifications (if any) from
-    the server appear concurrently on [stdout]. *)
-let ochat_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Ochat_function.t =
+    The call prints "hi". The wrapper does not consume the client's shared
+    notification queue; its owner must route catalog invalidations. *)
+let ochat_function_of_remote_tool ~sw:(_ : Eio.Switch.t) ~client ~strict (tool : Tool.t)
+  : Ochat_function.t
+  =
   let module Def = struct
     type input = Jsonaf.t
 
@@ -83,21 +81,6 @@ let ochat_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Ochat_fu
     let input_of_string s = Jsonaf.of_string s
   end
   in
-  (* Set up a daemon that listens for notifications from the MCP server
-     and prints them to stdout. This is useful for debugging and
-     monitoring tool calls. *)
-  (* Note: This is a simple example; in production, you might want to
-     handle notifications more robustly, e.g., by logging them or
-     processing them in some way. *)
-  let notifications = Client.notifications client in
-  Fiber.fork_daemon ~sw (fun () ->
-    let rec loop () =
-      let _json = Eio.Stream.take notifications in
-      (* print_endline (Jsonaf.to_string @@ Mcp_types.Jsonrpc.jsonaf_of_notification json); *)
-      loop ()
-    in
-    let _ = loop () in
-    `Stop_daemon);
   (* The function that will be called by the chat runtime. *)
   (* It takes a JSON object as input, calls the MCP server, and returns
      a string result. *)

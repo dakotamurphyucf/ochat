@@ -239,7 +239,29 @@ let mcp_tool
         | Error _ -> failwith "MCP tool discovery failed")
   in
   register_invalidation_listener ~sw ~cache ~client;
-  let wrap = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict in
+  let wrap (captured : Mcp_types.Tool.t) =
+    let function_ = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict captured in
+    let check_catalog () =
+      match
+        List.filter (Mcp_discovery_cache.get cache) ~f:(fun current ->
+          String.equal current.Mcp_types.Tool.name captured.name)
+      with
+      | [ current ]
+        when Option.equal String.equal current.description captured.description
+             && Jsonaf.exactly_equal current.input_schema captured.input_schema -> ()
+      | _ -> failwith "mcp.catalog_changed: reload the tool definition before calling it"
+    in
+    { function_ with
+      run =
+        (fun input ->
+          check_catalog ();
+          function_.run input)
+    ; run_with_progress =
+        (fun ~invocation input ->
+          check_catalog ();
+          function_.run_with_progress ~invocation input)
+    }
+  in
   let get_tool name =
     let find () =
       List.find (Mcp_discovery_cache.get cache) ~f:(fun tool ->

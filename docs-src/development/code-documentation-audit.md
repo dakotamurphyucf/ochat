@@ -238,28 +238,29 @@ code:
 
 ### MCP discovery and notifications
 
-**Open implementation defect: competing notification consumers.**
+**Resolved: competing notification consumers and stale dispatch.**
 [`Mcp_client.notifications`](../../lib/mcp/mcp_client.ml) returns the client's
 same `Eio.Stream` queue. The host's
 [`register_invalidation_listener`](../../lib/chat_response/tool.ml) reads that
-queue, but each [`Mcp_tool` wrapper](../../lib/mcp/mcp_tool.ml) also starts a
-reader that discards notifications. Thus `notifications/tools/list_changed`
-can be consumed without invalidating discovery. Per-client cache identity
-isolation remains intact; reliable notification delivery does not follow from it.
-This concerns maintained outbound MCP tools, not the deprecated prompt-serving host.
+queue. [`Mcp_tool` wrappers](../../lib/mcp/mcp_tool.ml) no longer add discard
+readers, leaving the declaration host responsible for routing. Silent and
+progress-enabled calls check the original descriptor against the refreshed cache
+and reject changed or missing tools before remote dispatch. A real stdio peer
+regression records the calls across repeated schema-change, removal and restoration
+notifications; inherited wrappers retain the original client and public selection.
+Endpoint/schema substitutions fail saved capability-pin rebinding.
 
-Fix with one notification owner and explicit routing/fan-out, removing the
-per-tool discard readers. Add a deterministic integration regression with several
-wrapped tools and repeated list-change notifications; verify invalidation,
-progress routing if provided, cancellation and runtime shutdown. Cache-only
-unit tests cannot establish correct shared-client wiring. The defect was found
-by source inspection, not reproduced in a dedicated runtime test in this review.
+That regression also exposed a stdio switch-release deadlock: the client hook
+awaited a process whose reaper daemon was cancelled, blocking the earlier Eio
+process hook. Release now closes pipes and lets the process hook reap; explicit
+close on an active switch still waits. Real subprocess tests cover ordinary and
+cancelled release. General notification fan-out/progress routing remains separate.
 
 **Open functionality gap: active catalog refresh.**
 `Tool.mcp_tool` loads descriptors and constructs wrappers during runtime creation;
-`Agent_runtime` retains that function list. Expiry/invalidation reloads only on
-another cache access and does not rebuild active names or schemas. Documentation
-now explicitly requires runtime recreation after catalog changes. Implementing
+`Agent_runtime` retains that function list. Dispatch now accesses the cache, but
+expiry/invalidation does not rebuild active names or schemas. Runtime recreation
+is still required to expose a changed catalog. Implementing
 hot refresh requires a host safe-point contract for new/removed tools, schema
 changes and in-flight calls, plus tests that inspect the next provider request
 and dispatch table. Do not represent a five-minute TTL as periodic hot reload.

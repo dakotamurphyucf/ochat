@@ -560,6 +560,18 @@
  (modules mcp_stub_server)
  (libraries core jsonaf jsonaf_ext ochat.mcp_types))
 
+(executable
+ (name mcp_delegation_peer)
+ (modules mcp_delegation_peer)
+ (libraries core jsonaf jsonaf_ext ochat.mcp_types))
+
+(library
+ (name mcp_delegation_test)
+ (modules mcp_delegation_test)
+ (libraries core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
+ (inline_tests (deps mcp_delegation_peer.exe))
+ (preprocess (pps ppx_jane ppx_expect)))
+
 ;; ---------------------------------------------------------------------------
 ;; MCP client high-level tests (uses stub server)
 ;; ---------------------------------------------------------------------------
