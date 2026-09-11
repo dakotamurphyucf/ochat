@@ -763,7 +763,8 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   in
   Session_registry.index_all registry indexed_sessions;
   Session_registry.install_loader registry (Session_factory.recover_session factory);
-  let%bind recovered = Session_factory.recover_sessions factory in
+  let%bind _ = Session_factory.recover_sessions factory in
+  let%bind () = Session_factory.reconcile_generated_creations factory in
   let pinned_revisions =
     List.filter_map indexed_sessions ~f:(fun entry ->
       entry.Agent_store.Session_index.Entry.session.prompt_revision)
@@ -791,7 +792,9 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
   in
   let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
-  let%bind () = Session_factory.complete_index_recovery factory recovered in
+  let%bind () =
+    Session_factory.complete_index_recovery factory (Session_registry.entries registry)
+  in
   let start_scheduler =
     Start_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~queue:start_queue
   in

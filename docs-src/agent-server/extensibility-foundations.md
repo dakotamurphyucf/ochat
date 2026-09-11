@@ -3907,6 +3907,42 @@ storage. It checks identical retries, conflicts, separate initial instructions a
 the same child IDs after two daemon restarts, then starts/sends through the public
 session APIs and executes inherited recursive scripts. These tests qualify normal
 creation and retained retry behavior, including rejection after archive/removal.
-Automatic start intent, model-facing creation,
-incomplete-stage startup reconciliation, fault injection at every cross-store
-boundary and safe abandoned cleanup remain required work.
+Automatic start intent, model-facing creation, concurrent lifecycle races and
+cleanup of abandoned installed artifacts/relationships remain required work.
+
+### Interrupted generated creation
+
+Factory execution and administrative preparation now require `Linked` before
+reserving history or initializing a generated runtime. A stored but unpublished
+child can be inspected; knowing its ID does not let a client start it early.
+
+Startup reconciles incomplete private creation records before accepting commands
+or starting schedulers. It verifies installed artifacts and can discover a complete
+child directory even when the index update was lost. An installed stopped child is
+recovered, its source is recompiled without initialization, and its current parent,
+capability pins, ancestry and permission profile are checked before linking under
+the parent actor checkpoint. Corrupt installed data fails closed.
+
+An intent without a child remains available for a keyed retry: the digest alone
+cannot reconstruct requested display metadata. Missing or stopped parents revoke
+unfinished admissions; changed authority or halted/failed parents also revoke.
+Temporarily queued, starting or compacting parents leave the intent pending until
+a retry can obtain active authority. Revocation retains inspectable child data.
+
+At startup, `Delegation_store.discard_uninstalled_staging` revalidates the private
+reservation and removes only that transaction's unpublished artifact/session
+staging directory when the corresponding final destination is absent and its
+installation stage has not committed. It rejects non-directory roots, does not
+follow links while deleting, and syncs the parent directory. Installed destinations
+and private retry identities remain intact. This is cleanup of interrupted private
+staging, not collection of installed artifacts or management records.
+
+The offline crash suite terminates actual creation processes at eight boundaries:
+reservation, partial artifact bytes, artifact install, artifact-stage record,
+partial initial snapshot, child install before its index update, child-stage record
+and final linking. Fresh processes recover and retry the same child ID across two
+restarts and execute a fake-provider turn. Additional injected-I/O cases lose the
+child-stage acknowledgement, verify that public start leaves the unlinked actor
+exactly unchanged, and qualify stopped/deleted-parent revocation with retained
+history and no runtime/provider activity. These tests exercise process death and
+the existing flush operations; they do not establish power-loss survival.

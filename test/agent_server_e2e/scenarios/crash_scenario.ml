@@ -80,6 +80,10 @@ let run_child env arguments =
   match arguments with
   | [ "replace"; name; target ] -> run_replace_child env name target
   | [ "journal"; count; directory ] -> run_journal_child env count directory
+  | [ "generated-create"; root; boundary ] ->
+    Crash_generated_creation.run_child env ~root ~boundary ~recover:false
+  | [ "generated-recover"; root; boundary ] ->
+    Crash_generated_creation.run_child env ~root ~boundary ~recover:true
   | [ "side-effect"; config_path; marker ] ->
     Crash_side_effect_host.run env ~config_path ~marker
   | [ "notification"; config_path; boundary ] ->
@@ -266,6 +270,7 @@ let cases =
   ; "io-failure.commit-writer-fail-closed", Persistence_faults.writers
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
+  ; "generated.creation-stage-recovery", Crash_generated_creation.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "job.committed-intent-launch-once", Crash_queued_launch.test

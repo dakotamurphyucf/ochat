@@ -101,6 +101,13 @@ val import_legacy
     inspection does not require loading a deleted/revoked parent. *)
 val recover_sessions : t -> (Session_registry.entry list, Agent_protocol.Error.t) result
 
+(** Startup, before accepting commands or starting schedulers. Validate unfinished
+    creation artifacts and complete linking for installed stopped children against
+    current parent authority. Intents without a child await a keyed retry; missing
+    or stopped parents revoke their incomplete admissions. No generated initializer
+    or model call runs here. Corrupt installed data fails closed. *)
+val reconcile_generated_creations : t -> (unit, Agent_protocol.Error.t) result
+
 (** Qualified internal host creation of an initially stopped generated child.
     Revalidates the prepared definition against the loaded parent's exact native
     bindings, persists a protected retry mapping and complete initial journal/

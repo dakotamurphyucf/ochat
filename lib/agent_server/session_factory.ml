@@ -428,6 +428,15 @@ let generated_parent t (state : Agent_session.Session_state.t) =
         reference
       |> Result.map_error ~f:protocol_of_store
     in
+    let%bind () =
+      match record.stage with
+      | Linked -> Ok ()
+      | Reserved | Artifact_installed | Child_installed ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.not_linked: child management relationship is not committed")
+    in
     (match Session_registry.find t.registry record.key.parent_session_id with
      | None -> missing_host ()
      | Some parent ->
@@ -4275,4 +4284,261 @@ let create_generated_session
   match outcome with
   | Ok result -> result
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let reconcile_generated_creations t =
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let module State = Agent_session.Session_state in
+  let module Authority = Agent_session.Delegation_authority in
+  let module G = Agent_session.Generated_definition in
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let module Artifacts = Agent_store.Prompt_artifact_store in
+  let open Result.Let_syntax in
+  let ledger = S.delegations t.store in
+  let%bind records =
+    D.with_records
+      ledger
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records -> Ok records)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let revoke record reason =
+    D.revoke ledger record reason
+    |> Result.map ~f:ignore
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let native_capabilities (runtime : Agent_session.Runtime_builder.t) =
+    match runtime.native_runtime with
+    | None ->
+      Error
+        (unavailable Invalid_state "generated recovery needs qualified parent resources")
+    | Some native ->
+      Lazy.force native.capabilities
+      |> Result.map_error ~f:(fun error ->
+        unavailable Permission_denied error.Chat_response.Tool_capability.message)
+  in
+  let loaded id =
+    Session_registry.find t.registry id
+    |> Result.of_option
+         ~error:(unavailable Permission_denied "delegation ancestor is unavailable")
+  in
+  let host : Authority.host =
+    { state = (fun id -> Result.bind (loaded id) ~f:(fun entry -> A.state entry.actor))
+    ; resolve =
+        (fun reference ->
+          D.resolve ledger reference |> Result.map_error ~f:protocol_of_store)
+    ; capabilities =
+        (fun id ->
+          Result.bind (loaded id) ~f:(fun entry ->
+            Runtime_owner.with_background_runtime entry.runtime native_capabilities))
+    }
+  in
+  List.fold_result records ~init:() ~f:(fun () record ->
+    let%bind () =
+      D.discard_uninstalled_staging ledger record |> Result.map_error ~f:protocol_of_store
+    in
+    match record.D.stage, record.revocation with
+    | Linked, _ | _, Some _ -> Ok ()
+    | (Reserved | Artifact_installed | Child_installed), None ->
+      (match Session_registry.load t.registry record.key.parent_session_id with
+       | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
+       | Error _ as failure -> failure
+       | Ok parent ->
+         let%bind before = A.state parent.actor in
+         (match
+            ( before.lifecycle.desired
+            , before.lifecycle.observed
+            , before.halted
+            , before.failure )
+          with
+          | Stopped, _, _, _ -> revoke record Parent_stopped
+          | Running, _, true, _ | Running, _, _, Some _ -> revoke record Authority_changed
+          | ( Running
+            , ( Stopped
+              | Queued_for_slot
+              | Starting
+              | Recovering
+              | Compacting _
+              | Stopping
+              | Failed _ )
+            , false
+            , None ) -> Ok ()
+          | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None ->
+            let%bind fingerprint = Authority.fingerprint before in
+            if not (String.equal fingerprint record.admission.authority_sha256)
+            then revoke record Authority_changed
+            else
+              Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+                let%bind current = native_capabilities runtime in
+                let%bind artifacts =
+                  Artifacts.create
+                    ~env:t.env
+                    ~root:
+                      (Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
+                  |> Result.map_error ~f:protocol_of_store
+                in
+                match
+                  Artifacts.exists artifacts record.admission.revision_id, record.stage
+                with
+                | false, Reserved -> Ok ()
+                | false, _ ->
+                  Error (corrupt "unfinished delegation lost its installed artifact")
+                | true, _ ->
+                  let diagnostics errors =
+                    unavailable
+                      Prompt_unavailable
+                      (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                       |> String.concat ~sep:"\n")
+                  in
+                  let%bind _ =
+                    G.load_artifact
+                      ~artifact_store:artifacts
+                      ~revision_id:record.admission.revision_id
+                      ~manifest_sha256:record.admission.manifest_sha256
+                    |> Result.map_error ~f:diagnostics
+                  in
+                  let%bind record =
+                    D.advance ledger record Artifact_installed
+                    |> Result.map_error ~f:protocol_of_store
+                  in
+                  let%bind () =
+                    D.discard_uninstalled_staging ledger record
+                    |> Result.map_error ~f:protocol_of_store
+                  in
+                  (match
+                     Chat_response.Background_request.rebind_capabilities
+                       ~pins:record.admission.capability_pins
+                       ~capabilities:current
+                   with
+                   | Error _ -> revoke record Authority_changed
+                   | Ok selected ->
+                     let reference = D.reference record in
+                     let child_id = record.admission.child_session_id in
+                     let verify (state : State.t) =
+                       match state.spec.delegation, state.lifecycle.desired with
+                       | Some actual, Stopped when D.Reference.equal reference actual ->
+                         Ok ()
+                       | _ ->
+                         Error
+                           (corrupt
+                              "unfinished generated child has an invalid identity or \
+                               running state")
+                     in
+                     let%bind child =
+                       match Session_registry.find t.registry child_id with
+                       | Some entry -> Ok (Some (entry, false))
+                       | None ->
+                         (match
+                            S.open_session
+                              t.store
+                              ~sw:t.sw
+                              ~actor_lock_nonce:
+                                (P.Id.Transaction.create () |> P.Id.Transaction.to_string)
+                              child_id
+                          with
+                          | Error (Missing _) -> Ok None
+                          | Error error -> Error (protocol_of_store error)
+                          | Ok handle ->
+                            let result =
+                              let%bind archived =
+                                S.is_archived t.store handle
+                                |> Result.map_error ~f:protocol_of_store
+                              in
+                              match archived with
+                              | true -> Ok None
+                              | false ->
+                                let%bind initial = initial_recovery_state t handle in
+                                let%bind () = verify initial in
+                                let%map entry = recover_open_handle t handle in
+                                Some (entry, true)
+                            in
+                            (match result with
+                             | Ok (Some _) -> result
+                             | Ok None | Error _ ->
+                               close_recovery_handle t handle;
+                               result))
+                     in
+                     (match child with
+                      | None ->
+                        (match record.stage with
+                         | Child_installed -> revoke record Admission_failed
+                         | Reserved | Artifact_installed -> Ok ()
+                         | Linked -> assert false)
+                      | Some (child, fresh) ->
+                        let owned = ref fresh in
+                        Exn.protect
+                          ~finally:(fun () -> if !owned then child.close ())
+                          ~f:(fun () ->
+                            let%bind state = A.state child.actor in
+                            let%bind () = verify state in
+                            let%bind _ =
+                              G.restore
+                                ~env:t.env
+                                ~artifact_store:artifacts
+                                ~revision_id:record.admission.revision_id
+                                ~manifest_sha256:record.admission.manifest_sha256
+                                ~current_capabilities:(fun () -> current)
+                                ~pins:record.admission.capability_pins
+                                ()
+                              |> Result.map_error ~f:diagnostics
+                            in
+                            let authority =
+                              Authority.create
+                                ~max_depth:t.limits.delegation_max_depth
+                                ~host
+                                ~reference
+                                ~capabilities:selected
+                                ()
+                            in
+                            let%bind profile =
+                              permission_profile_revision
+                                t
+                                state.spec.permission_profile_digest
+                            in
+                            let%bind () =
+                              Authority.check_preparation
+                                authority
+                                ~session_id:child_id
+                                ~revision_id:state.spec.prompt_revision_id
+                                ~manifest_sha256:record.admission.manifest_sha256
+                                ~permission_profile:profile
+                            in
+                            let%bind () =
+                              Agent_store.Durable_file.sync_directory
+                                ~env:t.env
+                                ~path:
+                                  (Agent_store.Data_root.sessions_path
+                                     (S.data_root t.store))
+                              |> Result.map_error ~f:protocol_of_store
+                            in
+                            let%bind record =
+                              D.advance ledger record Child_installed
+                              |> Result.map_error ~f:protocol_of_store
+                            in
+                            let%bind () =
+                              A.checkpoint parent.actor ~persist:(fun latest ->
+                                let%bind latest_fingerprint =
+                                  Authority.fingerprint latest
+                                in
+                                match
+                                  latest.lifecycle.desired, latest.halted, latest.failure
+                                with
+                                | Running, false, None
+                                  when String.equal fingerprint latest_fingerprint ->
+                                  D.advance ledger record Linked
+                                  |> Result.map ~f:ignore
+                                  |> Result.map_error ~f:protocol_of_store
+                                | Stopped, _, _ -> revoke record Parent_stopped
+                                | _ -> revoke record Authority_changed)
+                            in
+                            let%map () =
+                              match fresh with
+                              | false -> Ok ()
+                              | true ->
+                                Session_registry.add t.registry ~session_id:child_id child
+                            in
+                            owned := false)))))))
 ;;

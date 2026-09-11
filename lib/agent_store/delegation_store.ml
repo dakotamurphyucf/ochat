@@ -456,3 +456,47 @@ let revoke t expected reason =
     let%map () = save t next in
     next)
 ;;
+
+let discard_uninstalled_staging t expected =
+  locked t (fun () ->
+    let open Result.Let_syntax in
+    let%bind record = current t expected in
+    let transaction = P.Id.Transaction.to_string record.admission.transaction_id in
+    let discard ~parent ~name ~destination =
+      let stage = Filename.concat parent name in
+      let path value = Eio.Path.(Eio.Stdenv.fs t.env / value) in
+      try
+        match Eio.Path.kind ~follow:false (path destination) with
+        | `Directory -> Ok ()
+        | `Not_found ->
+          (match Eio.Path.kind ~follow:false (path stage) with
+           | `Not_found -> Ok ()
+           | `Directory ->
+             Eio.Path.rmtree (path stage);
+             Durable_file.sync_directory ~env:t.env ~path:parent
+           | _ -> corrupt "delegation staging entry is not a directory")
+        | _ -> corrupt "delegation destination is not a directory"
+      with
+      | exn ->
+        Error
+          (Store_error.of_exn
+             ~operation:"discard uninstalled delegation staging"
+             ~path:stage
+             exn)
+    in
+    match record.stage with
+    | Reserved ->
+      discard
+        ~parent:(Data_root.prompt_artifacts_path t.root)
+        ~name:(".install-" ^ transaction)
+        ~destination:
+          (Filename.concat
+             (Data_root.prompt_artifacts_path t.root)
+             (P.Id.Prompt_revision.to_string record.admission.revision_id))
+    | Artifact_installed ->
+      discard
+        ~parent:(Data_root.sessions_path t.root)
+        ~name:(".creating-" ^ transaction)
+        ~destination:(Data_root.session_path t.root record.admission.child_session_id)
+    | Child_installed | Linked -> Ok ())
+;;

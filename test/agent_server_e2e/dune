@@ -65,6 +65,7 @@
  (name agent_server_e2e)
  (modules :standard)
  (libraries
+  agent_server_test_support
   base64
   core
   core_unix.command_unix

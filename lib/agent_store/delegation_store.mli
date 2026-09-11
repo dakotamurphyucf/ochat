@@ -119,6 +119,15 @@ val advance : t -> record -> stage -> (record, Store_error.t) result
     attained stage, including records whose child installation is ambiguous. *)
 val revoke : t -> record -> revocation -> (record, Store_error.t) result
 
+(** Startup only, with exclusive root ownership and no active creation calls.
+    Revalidate the private reservation and remove only its exact transaction's
+    unpublished artifact/session staging directory when the corresponding final
+    destination is absent and its stage has not been committed. Never remove a
+    final artifact/session or staging beside an installed destination. Reject
+    non-directory roots, do not follow links during recursive deletion, and sync
+    the parent directory. The retained intent still owns the same retry IDs. *)
+val discard_uninstalled_staging : t -> record -> (unit, Store_error.t) result
+
 (** Fully validate the ledger and hold its mutex through f. All records, including
     revoked/incomplete ones, protect their artifact until explicit cross-store
     cleanup exists. Corruption, links and budget exhaustion prevent f entirely.
