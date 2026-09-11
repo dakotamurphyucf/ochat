@@ -85,6 +85,7 @@ let owner name =
         ; "independent_resources"
         ]
       , "../agent-server/extensibility-foundations.md" )
+    ; [ "request_channel" ], "../bin/ochat_agent_helper.doc.md"
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"
     ; ( [ "transport"; "protocol"; "http"; "stdio"; "client" ]
       , "../agent-server/protocol.md" )

@@ -112,6 +112,24 @@
  (libraries core eio eio_main jsonaf))
 
 (test
+ (name request_channel_integration_test)
+ (modules request_channel_integration_test)
+ (libraries core core_unix eio eio_main jsonaf ochat.shell_access)
+ (action
+  (run
+   %{test}
+   %{exe:../bin/ochat_agent_helper.exe}
+   %{exe:request_channel_probe.exe}
+   %{exe:../bin/ochat_shell_resource_runner.exe}))
+ (preprocess
+  (pps ppx_jane)))
+
+(executable
+ (name request_channel_probe)
+ (modules request_channel_probe)
+ (libraries core core_unix jsonaf ochat.shell_access))
+
+(test
  (name hook_worker_integration_test)
  (modules hook_worker_integration_test)
  (libraries core core_unix eio eio_main ochat.shell_access ochat.shell_runtime)

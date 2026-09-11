@@ -1735,6 +1735,8 @@ module Audit = struct
   ;;
 end
 
+module Request_channel = Request_channel
+
 module Execution_plan = struct
   type t =
     { id : string
@@ -1743,6 +1745,7 @@ module Execution_plan = struct
     ; environment : string array
     ; cwd : string
     ; resource_runner : Executable.t option
+    ; request_channel : bool
     }
 end
 
@@ -1785,10 +1788,12 @@ module Backend = struct
         (Execution_plan.t -> stdin:string -> (simulated, string) Result.t) option
     ; confinement : confinement
     ; eligible_for_required : bool
+    ; request_channel_supported : bool
     }
 
   let name t = t.name
   let confinement t = t.confinement
+  let request_channel_supported t = t.request_channel_supported
 
   let availability t ~fs =
     try
@@ -1834,15 +1839,19 @@ module Backend = struct
   ;;
 
   let apply_resource_runner plan ~executable ~argv =
-    if not (has_os_limits plan.Execution_plan.limits)
+    if (not (has_os_limits plan.Execution_plan.limits)) && not plan.request_channel
     then Ok (executable, argv)
     else (
       match plan.resource_runner with
-      | None -> Error "OS resource limits require a configured resource runner"
+      | None ->
+        Error
+          "OS resource limits or a private request channel require a configured resource \
+           runner"
       | Some runner ->
         Ok
           ( runner.Executable.canonical_path
           , (runner.canonical_path :: resource_args plan.limits)
+            @ (if plan.request_channel then [ "--close-extra-fds" ] else [])
             @ [ "--"; executable ]
             @ List.tl_exn argv ))
   ;;
@@ -1851,6 +1860,7 @@ module Backend = struct
     { name = "direct-unsafe"
     ; available_fn = (fun _fs -> true)
     ; confinement = Unconfined
+    ; request_channel_supported = false
     ; eligible_for_required = false
     ; simulate_fn = None
     ; prepare_fn =
@@ -1878,6 +1888,7 @@ module Backend = struct
 
   let macos_seatbelt =
     { name = "macos-seatbelt"
+    ; request_channel_supported = true
     ; available_fn =
         (fun fs ->
           String.equal Sys.os_type "Unix"
@@ -1916,6 +1927,7 @@ module Backend = struct
                   ([ "(version 1)"
                    ; "(deny default)"
                    ; "(allow file-read-metadata)"
+                   ; "(allow file-read-data (literal \"/\"))"
                    ; "(allow sysctl-read)"
                    ; "(allow mach-lookup)"
                    ]
@@ -1938,6 +1950,7 @@ module Backend = struct
 
   let linux_bubblewrap ?(executable = "bwrap") () =
     { name = "linux-bubblewrap"
+    ; request_channel_supported = true
     ; available_fn =
         (fun fs ->
           String.equal (Core_unix.Utsname.sysname (Core_unix.uname ())) "Linux"
@@ -1977,6 +1990,7 @@ module Backend = struct
 
   let fake ~name simulate =
     { name
+    ; request_channel_supported = false
     ; available_fn = (fun _fs -> true)
     ; prepare_fn = (fun _fs _plan -> Error "fake backend has no spawn plan")
     ; simulate_fn = Some simulate
@@ -2010,6 +2024,7 @@ module Backend = struct
       Ok
         { name
         ; available_fn = (fun fs -> Result.is_ok (Resolver.verify ~fs wrapper))
+        ; request_channel_supported = false
         ; confinement
         ; eligible_for_required =
             (match confinement with
@@ -2139,6 +2154,7 @@ module Executor = struct
     ; pipefail : bool
     ; streaming : streaming option
     ; stream_stdout : bool
+    ; request_channel : (Request_channel.t * (Context.t -> (unit, string) result)) option
     }
 
   type invocation =
@@ -2365,6 +2381,7 @@ module Executor = struct
     ; pipefail
     ; streaming = None
     ; stream_stdout = true
+    ; request_channel = None
     }
   ;;
 
@@ -2374,13 +2391,44 @@ module Executor = struct
       | Error _ as error -> error
       | Ok () -> check ()
     in
-    { config with session_id = Some session_id; approval_store; execution_check }
+    { config with
+      session_id = Some session_id
+    ; approval_store
+    ; execution_check
+    ; request_channel = None
+    }
   ;;
 
   let check_execution config =
     match config.execution_check () with
     | Ok () -> ()
     | Error reason -> raise (Execution_error (Denied reason))
+  ;;
+
+  let with_request_channel config ~channel ~authorize =
+    match config.request_channel with
+    | Some _ -> Error "a request channel is already installed for this execution scope"
+    | None -> Ok { config with request_channel = Some (channel, authorize) }
+  ;;
+
+  let authorize_request_channel config backend (context : Context.t) =
+    match config.request_channel with
+    | None -> ()
+    | Some (_, authorize) ->
+      (match context.capabilities.sandbox, Backend.confinement backend with
+       | Required, Verified
+         when Backend.request_channel_supported backend
+              && (not context.capabilities.network)
+              && not context.capabilities.allow_privilege_change -> ()
+       | _ ->
+         raise
+           (Execution_error
+              (Sandbox_unavailable
+                 "request channels require a supported verified sandbox without network \
+                  or privilege changes")));
+      (match authorize context with
+       | Ok () -> ()
+       | Error reason -> raise (Execution_error (Denied reason)))
   ;;
 
   let streaming_support config =
@@ -2624,7 +2672,8 @@ module Executor = struct
   ;;
 
   let resolve_resource_runner config =
-    if not (Backend.has_os_limits config.limits)
+    if
+      (not (Backend.has_os_limits config.limits)) && Option.is_none config.request_channel
     then None
     else (
       match config.resource_runner_path with
@@ -2848,6 +2897,7 @@ module Executor = struct
         | Error error -> raise (Execution_error error)
       in
       let resource_runner = resolve_resource_runner config in
+      authorize_request_channel config backend context;
       let plan =
         Execution_plan.
           { id = fresh_id ()
@@ -2856,6 +2906,7 @@ module Executor = struct
           ; environment = config.process_env
           ; cwd = config.cwd
           ; resource_runner
+          ; request_channel = Option.is_some config.request_channel
           }
       in
       emit config (Audit.Plan_created (Backend.name backend, plan.id, context));
@@ -2981,14 +3032,25 @@ module Executor = struct
       Eio.Switch.run
       @@ fun sw ->
       let count = List.length stages in
+      (match config.request_channel, count with
+       | Some _, 1 | None, _ -> ()
+       | Some _, _ ->
+         raise
+           (Execution_error
+              (Capability_violation
+                 "request channels require a single process, not a pipeline")));
       let edges =
         List.init (Int.max 0 (count - 1)) ~f:(fun _ -> Eio.Process.pipe ~sw manager)
       in
       let stderr_pipes = List.init count ~f:(fun _ -> Eio.Process.pipe ~sw manager) in
       let final_stdout = Eio.Process.pipe ~sw manager in
+      let channels =
+        List.map stages ~f:(fun _ ->
+          Option.map config.request_channel ~f:(fun (channel, _) ->
+            channel, Eio_unix.pipe sw, Eio_unix.pipe sw))
+      in
       let children =
         List.mapi stages ~f:(fun index stage ->
-          verify_plan config stage.plan;
           let stdin_pipe =
             if Int.equal index 0
             then None
@@ -3007,17 +3069,55 @@ module Executor = struct
           let stderr_flow = snd (List.nth_exn stderr_pipes index) in
           try
             check_execution config;
+            authorize_request_channel config stage.backend stage.plan.context;
+            verify_plan config stage.plan;
             let child =
-              Eio.Process.spawn
-                ~sw
-                manager
-                ?cwd:config.cwd_path
-                ~env:stage.spawn.environment
-                ~executable:stage.spawn.executable
-                ~stdin:stdin_flow
-                ~stdout:stdout_flow
-                ~stderr:stderr_flow
-                stage.spawn.argv
+              match List.nth_exn channels index with
+              | Some (_, (_, request_sink), (response_source, _)) ->
+                let input_source, input_sink = Eio_unix.pipe sw in
+                Eio.Fiber.fork ~sw (fun () ->
+                  Exn.protect
+                    ~finally:(fun () -> Eio.Flow.close input_sink)
+                    ~f:(fun () -> Eio.Flow.copy stdin_flow input_sink));
+                let child =
+                  Eio_unix.Process.spawn_unix
+                    ~sw
+                    manager
+                    ?cwd:config.cwd_path
+                    ~env:stage.spawn.environment
+                    ~executable:stage.spawn.executable
+                    ~fds:
+                      [ 0, Eio_unix.Resource.fd input_source, `Blocking
+                      ; ( 1
+                        , Option.value_exn (Eio_unix.Resource.fd_opt stdout_flow)
+                        , `Blocking )
+                      ; ( 2
+                        , Option.value_exn (Eio_unix.Resource.fd_opt stderr_flow)
+                        , `Blocking )
+                      ; ( Request_channel.request_fd
+                        , Eio_unix.Resource.fd request_sink
+                        , `Blocking )
+                      ; ( Request_channel.response_fd
+                        , Eio_unix.Resource.fd response_source
+                        , `Blocking )
+                      ]
+                    stage.spawn.argv
+                in
+                Eio.Flow.close input_source;
+                Eio.Flow.close request_sink;
+                Eio.Flow.close response_source;
+                child
+              | None ->
+                Eio.Process.spawn
+                  ~sw
+                  manager
+                  ?cwd:config.cwd_path
+                  ~env:stage.spawn.environment
+                  ~executable:stage.spawn.executable
+                  ~stdin:stdin_flow
+                  ~stdout:stdout_flow
+                  ~stderr:stderr_flow
+                  stage.spawn.argv
             in
             emit
               config
@@ -3028,7 +3128,8 @@ module Executor = struct
             Eio.Flow.close stderr_flow;
             child
           with
-          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | (Execution_error _ | Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+            raise exn
           | exn -> raise (Execution_error (Spawn_error (Exn.to_string exn))))
       in
       let stdout_capture = create_capture config.limits.max_stdout_bytes in
@@ -3075,7 +3176,37 @@ module Executor = struct
           let plan = (List.nth_exn stages index).plan in
           emit config (Audit.Finished (plan.id, plan.context, status)))
       in
-      Eio.Fiber.all (readers @ waiters);
+      let channel_workers =
+        List.filter_mapi channels ~f:(fun index -> function
+          | None -> None
+          | Some (channel, (request_source, _), (_, response_sink)) ->
+            Some
+              (fun () ->
+                Exn.protect
+                  ~finally:(fun () ->
+                    Eio.Flow.close request_source;
+                    Eio.Flow.close response_sink)
+                  ~f:(fun () ->
+                    Eio.Fiber.first
+                      (fun () ->
+                         match
+                           Request_channel.serve
+                             channel
+                             ~source:request_source
+                             ~sink:response_sink
+                             ~check:(fun () -> Result.is_ok (config.execution_check ()))
+                             ~on_activity:(fun () ->
+                               last_activity := Eio.Time.now (Eio.Stdenv.clock config.env))
+                         with
+                         | Ok () -> ()
+                         | Error error ->
+                           raise
+                             (Execution_error
+                                (Denied (Request_channel.error_to_string error))))
+                      (fun () ->
+                         Eio.Process.await (List.nth_exn children index) |> ignore))))
+      in
+      Eio.Fiber.all (readers @ waiters @ channel_workers);
       List.mapi stages ~f:(fun index stage ->
         let stdout =
           if Int.equal index (count - 1)
@@ -3105,6 +3236,12 @@ module Executor = struct
       if publish_stdout then config else { config with stream_stdout = false }
     in
     check_execution config;
+    (match config.request_channel, stage with
+     | Some _, (Synthetic_stage _ | Simulated_stage _) ->
+       raise
+         (Execution_error
+            (Sandbox_unavailable "request channels require a real sandboxed process"))
+     | _ -> ());
     match stage with
     | Synthetic_stage result -> publish_result config (fresh_id ()) result
     | Simulated_stage { plan; backend; simulate } ->

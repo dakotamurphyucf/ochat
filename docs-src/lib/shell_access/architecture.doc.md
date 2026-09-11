@@ -33,6 +33,9 @@ cancel its processes. Restart does not resurrect a running process.
 - `Backend`: direct, Seatbelt, bubblewrap, external/fake implementations and
   confinement classification.
 - `Execution_plan`, `Executor`: immutable plan and Eio-owned execution.
+- `Request_channel`: bounded private process requests with host-owned authority
+  checks, used by the [helper transport](../../bin/ochat_agent_helper.doc.md).
+  It supplies no daemon credentials or session-management authority itself.
 
 ## Execution invariants
 

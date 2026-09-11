@@ -473,6 +473,8 @@ module Audit : sig
   val context : event -> Context.t
 end
 
+module Request_channel : module type of Request_channel
+
 module Execution_plan : sig
   type t =
     { id : string
@@ -481,6 +483,7 @@ module Execution_plan : sig
     ; environment : string array
     ; cwd : string
     ; resource_runner : Executable.t option
+    ; request_channel : bool
     }
 end
 
@@ -656,13 +659,31 @@ module Executor : sig
       or sandbox configuration. [check] revalidates live host authority before
       execution, after approval waits (before remembering grants), and before
       prepared effects run. Nested scopes retain every ancestor check. This is
-      trusted host plumbing, not permission to delegate a configuration. *)
+      trusted host plumbing, not permission to delegate a configuration. A new
+      execution scope clears any request channel; its actual owner must explicitly
+      lend a new one rather than inheriting another invocation's handler. *)
   val with_execution_scope
     :  config
     -> session_id:string
     -> approval_store:Approval.store
     -> check:(unit -> (unit, string) Result.t)
     -> config
+
+  (** Trusted host opt-in for a private process request channel (FDs 3/4). Only
+      supported verified sandbox backends with networking/privilege changes denied
+      can receive it. [authorize] must validate the exact final executable,
+      environment and filesystem roots (including implicit platform roots),
+      excluding broader host credentials/control sockets. It runs after normal
+      authorization and again immediately before
+      spawn. A verified resource runner is required to close inherited descriptors
+      above 4 in the child before executing the helper. The channel's own live check
+      must validate its admitting caller.
+      Existing channels cannot be replaced by nested configuration. *)
+  val with_request_channel
+    :  config
+    -> channel:Request_channel.t
+    -> authorize:(Context.t -> (unit, string) Result.t)
+    -> (config, string) Result.t
 
   (** [streaming_support config] rejects every after-interceptor and filters
       outside {!Sanitized_stream.support}, using the total-output byte budget.

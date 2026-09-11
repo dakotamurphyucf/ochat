@@ -32,6 +32,13 @@
  (preprocess
   (pps ppx_jane)))
 
+(executable
+ (package ochat)
+ (public_name ochat-agent-helper)
+ (name ochat_agent_helper)
+ (modules ochat_agent_helper)
+ (libraries core core_unix jsonaf ochat.shell_access))
+
 ;; ---------------------------------------------------------------------------
 ;; ODoc index executables
 ;; ---------------------------------------------------------------------------

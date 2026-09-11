@@ -6,14 +6,18 @@ let set resource value =
   Core_unix.RLimit.set resource { cur = limit; max = limit }
 ;;
 
-let rec parse limits = function
-  | "--" :: executable :: arguments -> List.rev limits, executable, arguments
-  | "--cpu" :: value :: rest -> parse ((`Cpu, Int.of_string value) :: limits) rest
-  | "--memory" :: value :: rest -> parse ((`Memory, Int.of_string value) :: limits) rest
+let rec parse limits close_extra_fds = function
+  | "--" :: executable :: arguments ->
+    List.rev limits, close_extra_fds, executable, arguments
+  | "--close-extra-fds" :: rest -> parse limits true rest
+  | "--cpu" :: value :: rest ->
+    parse ((`Cpu, Int.of_string value) :: limits) close_extra_fds rest
+  | "--memory" :: value :: rest ->
+    parse ((`Memory, Int.of_string value) :: limits) close_extra_fds rest
   | "--file-size" :: value :: rest ->
-    parse ((`File_size, Int.of_string value) :: limits) rest
+    parse ((`File_size, Int.of_string value) :: limits) close_extra_fds rest
   | "--open-files" :: value :: rest ->
-    parse ((`Open_files, Int.of_string value) :: limits) rest
+    parse ((`Open_files, Int.of_string value) :: limits) close_extra_fds rest
   | [] -> failwith "missing -- executable [arguments...]"
   | option :: _ -> failwith ("invalid resource runner option: " ^ option)
 ;;
@@ -30,7 +34,21 @@ let apply = function
 
 let () =
   let arguments = Sys.get_argv () |> Array.to_list |> List.tl_exn in
-  let limits, executable, arguments = parse [] arguments in
+  let limits, close_extra_fds, executable, arguments = parse [] false arguments in
+  (match close_extra_fds with
+   | false -> ()
+   | true ->
+     (* Eio maps the requested FDs but does not close a caller's non-CLOEXEC
+        descriptors. Enumerate here, in the trusted child only, before loading
+        untrusted helper code. /dev/fd exists on the supported sandbox backends.
+        Listing closes its directory before we close the captured descriptor set. *)
+     Stdlib.Sys.readdir "/dev/fd"
+     |> Array.iter ~f:(fun name ->
+       match Stdlib.int_of_string_opt name with
+       | Some fd when fd > 4 ->
+         (try Core_unix.close (Core_unix.File_descr.of_int fd) with
+          | Caml_unix.Unix_error (EBADF, _, _) -> ())
+       | _ -> ()));
   List.iter limits ~f:apply;
   never_returns
     (Core_unix.exec ~prog:executable ~argv:(executable :: arguments) ~use_path:false ())

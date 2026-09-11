@@ -538,6 +538,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/openai/responses.mli` | [contract](../../lib/openai/responses.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/shell_access/request_channel.mli` | [contract](../../lib/shell_access/request_channel.mli) | [integration](../bin/ochat_agent_helper.doc.md) | Public interface + current host guide. |
 | `lib/shell_access/shell_access.mli` | [contract](../../lib/shell_access/shell_access.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/shell_access_v2.mli` | [contract](../../lib/shell_access/shell_access_v2.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/admin_policy.mli` | [contract](../../lib/shell_runtime/admin_policy.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -633,6 +634,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../bin/md_search.doc.md) | `docs-src/bin/md_search.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/mp_prompt.doc.md) | `docs-src/bin/mp_prompt.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/mp_refine_run.doc.md) | `docs-src/bin/mp_refine_run.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../bin/ochat_agent_helper.doc.md) | `docs-src/bin/ochat_agent_helper.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/ochat_agent_server.doc.md) | `docs-src/bin/ochat_agent_server.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/ochat_agent_stdio.doc.md) | `docs-src/bin/ochat_agent_stdio.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/ochat_shell_resource_runner.doc.md) | `docs-src/bin/ochat_shell_resource_runner.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

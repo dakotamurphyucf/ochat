@@ -146,6 +146,7 @@ let external_backend_boundaries env =
       ; environment = context.environment
       ; cwd = context.cwd
       ; resource_runner = None
+      ; request_channel = false
       }
   in
   let backend =

@@ -1,6 +1,6 @@
 # ochat-shell-resource-runner
 
-This installed helper applies OS resource limits, then replaces itself with the
+This installed helper applies OS resource limits and optional descriptor cleanup, then replaces itself with the
 selected executable. It is normally invoked by the shell runtime, not by an LLM.
 Build it with `dune build bin/ochat_shell_resource_runner.exe` or install Ochat so
 `ochat-shell-resource-runner` is discoverable. `OCHAT_SHELL_RESOURCE_RUNNER` can
@@ -10,7 +10,8 @@ select an explicit helper path; protect that executable as part of host trust.
 
 ```text
 ochat-shell-resource-runner [--cpu SECONDS] [--memory BYTES]
-  [--file-size BYTES] [--open-files COUNT] -- /absolute/executable [ARG ...]
+  [--file-size BYTES] [--open-files COUNT] [--close-extra-fds]
+  -- /absolute/executable [ARG ...]
 ```
 
 These are integer OS limit values, not ChatMD strings such as `2GiB`. The shell
@@ -18,6 +19,14 @@ compiler/runtime lowers declared values into this interface. The helper does not
 search PATH for the final executable, parse shell syntax, or create filesystem/
 network confinement. Wall/idle timeouts and output bounds are runtime controls,
 not additional helper flags.
+
+The private request-channel path requires this runner even when no OS resource
+limits are configured. `--close-extra-fds` enumerates `/dev/fd` in the trusted
+child and closes every descriptor above 4 before executing the helper. Descriptors
+0–2 retain standard input/output/error; 3 and 4 carry the private request/response
+pipes. Failure to enumerate or close a live descriptor aborts execution. This
+does not change descriptor flags in the parent process or another concurrent
+session. Ordinary shell executions do not request this cleanup flag.
 
 Limits use the platform's available rlimit facilities. Memory support depends on
 availability of the virtual-memory resource. An unavailable resource, malformed
