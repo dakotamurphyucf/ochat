@@ -6,6 +6,95 @@ module A = Agent_session.Session_actor
 module C = Chat_response.Tool_capability
 module Stream = Chat_response.In_memory_stream
 module Routing = Agent_session.Stream_invocation
+module Tools = Agent_session.Script_tool_calls
+
+let%expect_test "moderator event tool preparation retains the actual event owner" =
+  List.iter [ false; true ] ~f:(fun reject ->
+    let calls = ref 0 in
+    let policies = ref 0 in
+    let registry = native_registry calls ~raises:false in
+    Job_fixtures.with_actor (fun env _sw actor _writer backend ->
+      let manager, _, definition =
+        handoff_definition ~declare_tool:false ~capability_registry:registry env
+      in
+      let snapshot =
+        Chat_response.Moderator_manager.identity_snapshot manager |> Result.ok_or_failwith
+      in
+      A.change_moderator
+        actor
+        (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+      |> protocol_ok
+      |> ignore;
+      let tools =
+        Tools.create
+          ~registry:(fun () -> registry)
+          ~moderator_names:String.Set.empty
+          ~now:P.Timestamp.now
+          ~is_halted:(fun () -> false)
+          ~requires_active_moderator:(fun _ -> false)
+          ~authorize:(fun _ _ -> Ok ())
+          ~prepare_output:(fun _ -> Ok (`String "parent event result"))
+          ~defer_observation:(fun _ -> Ok ())
+      in
+      let event_id = ref None in
+      let tools =
+        Tools.with_preparation tools ~prepare:(fun request ->
+          Int.incr policies;
+          (match request.owner with
+           | Moderator_event id ->
+             assert (Option.equal P.Id.Moderator_execution.equal (Some id) !event_id)
+           | _ -> failwith "moderator native call lost its event owner");
+          let state = A.state actor |> protocol_ok in
+          assert (P.Id.Session.equal request.session_id state.identity.session_id);
+          [%test_eq: int] state.identity.generation request.generation;
+          assert (
+            not
+              (List.exists state.invocations ~f:(fun invocation ->
+                 P.Id.Invocation.equal request.invocation_id invocation.context.id)));
+          Eio.Fiber.yield ();
+          Ok
+            (Some
+               (if reject
+                then Chat_response.Moderation.Tool_moderation.Reject "parent rule"
+                else Approve)))
+      in
+      let claimed =
+        A.with_current_moderator_event
+          actor
+          ~operation_id:None
+          ~event:Session_start
+          ~snapshot:(fun () -> Ok snapshot)
+          (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
+             event_id := Some executing.context.id;
+             let result =
+               Tools.with_event tools ~definition ~execute ~executing (fun call ->
+                 call ~name:"read_file" ~args:(`Object []))
+               |> Result.ok_or_failwith
+             in
+             (match reject, result with
+              | true, Tool_error "invocation.pre_tool_rejected"
+              | false, Tool_ok (`String "parent event result") -> ()
+              | _ -> failwith "incorrect moderator native preparation result");
+             commit
+               ~snapshot
+               ~requests:
+                 { request_turn = false; request_compaction = false; end_session = None })
+        |> protocol_ok
+      in
+      assert claimed;
+      let state = Agent_session.Memory_backend.state backend in
+      let invocation = List.hd_exn state.invocations in
+      assert (
+        Option.equal P.Id.Moderator_execution.equal invocation.parent_event !event_id);
+      assert (Option.is_none invocation.context.parent_invocation);
+      assert (I.equal_origin invocation.context.origin Moderator);
+      [%test_eq: int] 1 !policies;
+      print_s [%sexp (reject : bool), (!calls : int)]));
+  [%expect
+    {|
+    (false 1)
+    (true 0) |}]
+;;
 
 let%expect_test "host preparation routes canonical calls before owned admission" =
   List.iter
@@ -147,34 +236,58 @@ let%expect_test "host preparation routes canonical calls before owned admission"
                     | Text text -> Ok (`String text)
                     | _ -> Error (handoff_error "expected text"))
               in
-              Stream.Tool_dispatch.with_preparation native ~prepare:(fun request ->
-                let id =
-                  Routing.id_for_call ~input ~call_id:(History_entry.id request.call)
-                in
-                let current = A.state actor |> protocol_ok in
-                assert (
-                  not
-                    (List.exists current.invocations ~f:(fun saved ->
-                       P.Id.Invocation.equal saved.context.id id)));
-                prepared_ids := !prepared_ids @ [ id ];
-                assert (String.equal request.original_name "first");
-                assert (String.equal request.original_payload "{}");
-                Eio.Fiber.yield ();
-                let args = `Object [ "rewritten", `True ] in
-                match mode with
-                | `Reject -> Ok (Some (Reject "parent rule"))
-                | `Failure -> Error "private parent diagnostic"
-                | `Invalid -> failwith "invalid input reached host policy"
-                | `Revoked ->
-                  registry
-                  := C.select declared ~names:[]
-                     |> Result.map_error ~f:(fun error -> error.C.message)
-                     |> Result.ok_or_failwith;
-                  Ok None
-                | `Legacy -> Ok (Some (Redirect ("legacy", args)))
-                | `Redirect -> Ok (Some (Redirect ("second", args)))
-                | `Custom -> Ok (Some (Rewrite_args (`String "rewritten custom")))
-                | `Rewrite | `Repeated | `Save_fail -> Ok (Some (Rewrite_args args)))
+              let tools =
+                Tools.create
+                  ~registry:(fun () -> !registry)
+                  ~moderator_names:String.Set.empty
+                  ~now:P.Timestamp.now
+                  ~is_halted:(fun () -> false)
+                  ~requires_active_moderator:(fun _ -> false)
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(function
+                    | Text text -> Ok (`String text)
+                    | _ -> Error (handoff_error "expected text"))
+                  ~defer_observation:(fun _ -> Ok ())
+              in
+              let tools =
+                Tools.with_preparation tools ~prepare:(fun request ->
+                  let id = request.invocation_id in
+                  (match request.owner with
+                   | Model_call (operation_id, call_id) ->
+                     assert (P.Id.Operation.equal operation_id input.operation.id);
+                     assert (
+                       P.Id.Invocation.equal id (Routing.id_for_call ~input ~call_id))
+                   | _ -> failwith "model preparation lost its owner");
+                  let current = A.state actor |> protocol_ok in
+                  assert (
+                    not
+                      (List.exists current.invocations ~f:(fun saved ->
+                         P.Id.Invocation.equal saved.context.id id)));
+                  prepared_ids := !prepared_ids @ [ id ];
+                  assert (String.equal request.call.name "first");
+                  assert (String.equal request.call.payload_text "{}");
+                  Eio.Fiber.yield ();
+                  let args = `Object [ "rewritten", `True ] in
+                  match mode with
+                  | `Reject -> Ok (Some (Reject "parent rule"))
+                  | `Failure -> Error (handoff_error "private parent diagnostic")
+                  | `Invalid -> failwith "invalid input reached host policy"
+                  | `Revoked ->
+                    registry
+                    := C.select declared ~names:[]
+                       |> Result.map_error ~f:(fun error -> error.C.message)
+                       |> Result.ok_or_failwith;
+                    Ok None
+                  | `Legacy -> Ok (Some (Redirect ("legacy", args)))
+                  | `Redirect -> Ok (Some (Redirect ("second", args)))
+                  | `Custom -> Ok (Some (Rewrite_args (`String "rewritten custom")))
+                  | `Rewrite | `Repeated | `Save_fail -> Ok (Some (Rewrite_args args)))
+              in
+              match mode with
+              | `Legacy ->
+                Stream.Tool_dispatch.with_preparation native ~prepare:(fun _ ->
+                  Ok (Some (Redirect ("legacy", `Object []))))
+              | _ -> Tools.with_model_preparation tools ~selected:declared ~input native
             in
             let tool_tbl = String.Table.create () in
             Hashtbl.set tool_tbl ~key:"legacy" ~data:(fun ~invocation:_ _ ->
@@ -327,7 +440,7 @@ let%expect_test "host preparation routes canonical calls before owned admission"
     (Reject invocation.pre_tool_rejected 0)
     (Failure invocation.pre_tool_failed 0)
     (Invalid "invalid input" 0)
-    (Revoked invocation.stale_binding 0)
+    (Revoked invocation.pre_tool_failed 0)
     (Legacy "admission rejected" 0)
     (Save_fail "admission rejected" 0)
     (Repeated routed 2) |}]

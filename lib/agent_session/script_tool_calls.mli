@@ -113,6 +113,43 @@ val with_authorization_guard
   -> check:(unit -> (unit, Agent_protocol.Error.t) result)
   -> t
 
+type preparation_owner =
+  | Model_call of Agent_protocol.Id.Operation.t * History_entry.Id.t
+  | Native_call of Agent_protocol.Id.Invocation.t
+  | Moderator_event of Agent_protocol.Id.Moderator_execution.t
+
+type preparation =
+  { invocation_id : Agent_protocol.Id.Invocation.t
+  ; session_id : Agent_protocol.Id.Session.t
+  ; generation : int
+  ; owner : preparation_owner
+  ; selected : Chat_response.Tool_capability.t
+  ; call : Chat_response.Moderation.Tool_call.t
+  }
+
+type preparation_policy =
+  preparation
+  -> (Chat_response.Moderation.Tool_moderation.t option, Agent_protocol.Error.t) result
+
+(** One host policy after local pre-tool moderation and before native admission.
+    The host validates private delegation and the active owner, including again
+    after waits. Candidate IDs are reserved, not yet committed invocations.
+    Invalid/rejected local requests skip the policy. Redirects must stay in the
+    selected ceiling and satisfy the final schema; normal authorization still runs.
+    This applies to script and moderator-event descendants, including nested calls.
+    Installing a second policy is rejected rather than replacing inherited rules. *)
+val with_preparation : t -> prepare:preparation_policy -> t
+
+(** Attach the same policy to the composed model dispatcher. Identity comes from
+    the allocated canonical call; model redirects retain their function/custom
+    kind. No policy installed leaves the dispatcher unchanged. *)
+val with_model_preparation
+  :  t
+  -> selected:Chat_response.Tool_capability.t
+  -> input:Operation_worker.Input.t
+  -> Chat_response.In_memory_stream.Tool_dispatch.t
+  -> Chat_response.In_memory_stream.Tool_dispatch.t
+
 type moderator_dispatch =
   execute:Native_tool_invocation.moderator_executor
   -> native_execute:Native_tool_invocation.executor

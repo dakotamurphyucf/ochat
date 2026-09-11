@@ -1263,7 +1263,8 @@ let build_with_services
         | _ -> []
       in
       Chat_response.In_memory_stream.Tool_dispatch.chain
-        (standalone @ moderator_dispatch @ [ native ]))
+        (standalone @ moderator_dispatch @ [ native ])
+      |> Script_tool_calls.with_model_preparation script_tools ~selected:declared ~input)
   in
   let config, model, reasoning = generation_config in
   let notification_source =

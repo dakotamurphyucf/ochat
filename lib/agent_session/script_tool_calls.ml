@@ -23,6 +23,24 @@ type moderator_dispatch =
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
+type preparation_owner =
+  | Model_call of Agent_protocol.Id.Operation.t * History_entry.Id.t
+  | Native_call of Agent_protocol.Id.Invocation.t
+  | Moderator_event of Agent_protocol.Id.Moderator_execution.t
+
+type preparation =
+  { invocation_id : Agent_protocol.Id.Invocation.t
+  ; session_id : Agent_protocol.Id.Session.t
+  ; generation : int
+  ; owner : preparation_owner
+  ; selected : C.t
+  ; call : Chat_response.Moderation.Tool_call.t
+  }
+
+type preparation_policy =
+  preparation
+  -> (Chat_response.Moderation.Tool_moderation.t option, Agent_protocol.Error.t) result
+
 type t =
   { registry : unit -> C.t
   ; moderator_names : String.Set.t
@@ -31,6 +49,7 @@ type t =
   ; durable_requests : bool
   ; requires_active_moderator : C.reference -> bool
   ; authorize : I.t -> C.binding -> (unit, Agent_protocol.Error.t) result
+  ; preparation : preparation_policy option
   ; prepare_output :
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
   ; defer_observation : I.t -> (unit, Agent_protocol.Error.t) result
@@ -138,6 +157,7 @@ let create
   ; durable_requests = false
   ; requires_active_moderator
   ; authorize
+  ; preparation = None
   ; prepare_output
   ; defer_observation
   ; managed = None
@@ -154,6 +174,12 @@ let create
 ;;
 
 let with_shell_context t services = { t with shell_context = Some services }
+
+let with_preparation t ~prepare =
+  match t.preparation with
+  | None -> { t with preparation = Some prepare }
+  | Some _ -> invalid_arg "script tools already have a preparation policy"
+;;
 
 let native_dispatch t ~declared ~input ~capabilities =
   let dispatch =
@@ -323,6 +349,217 @@ type prepared_call =
   ; rejection : I.outcome option
   }
 
+let call_kind selected (reference : C.reference) =
+  match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
+  | Ok binding when String.equal (C.descriptor binding).type_ "custom" ->
+    Chat_response.Moderation.Tool_call.Custom
+  | _ -> Function
+;;
+
+let call_payload kind input =
+  match kind, input with
+  | Chat_response.Moderation.Tool_call.Custom, `String text -> text
+  | Function, _ | Custom, _ -> Jsonaf.to_string input
+;;
+
+let prepare_host_call t ~selected ~session_id ~generation ~owner ~id prepared =
+  match t.preparation, prepared.rejection with
+  | None, _ | _, Some _ -> Ok prepared
+  | Some prepare, None ->
+    let open Result.Let_syntax in
+    let original = prepared.reference in
+    let kind = call_kind selected original in
+    let original_payload = call_payload kind prepared.input in
+    let fingerprint value : I.payload_fingerprint =
+      { sha256 = Chatmd_shell_spec.Source_ref.digest value
+      ; byte_length = String.length value
+      }
+    in
+    let route reference input preparation rejection =
+      let final_kind = call_kind selected reference in
+      let routing : I.routing =
+        { kind =
+            (match final_kind with
+             | Function -> Function
+             | Custom -> Custom)
+        ; original_name =
+            Option.value_map prepared.routing ~default:original.name ~f:(fun r ->
+              r.original_name)
+        ; original_payload =
+            Option.value_map
+              prepared.routing
+              ~default:(fingerprint original_payload)
+              ~f:(fun r -> r.original_payload)
+        ; final_payload = fingerprint (call_payload final_kind input)
+        ; canonical_payload = None
+        ; preparation
+        }
+      in
+      { reference; input; routing = Some routing; rejection }
+    in
+    let reject preparation code message =
+      Ok (route original prepared.input preparation (Some (fail code message)))
+    in
+    let validate reference input =
+      let%bind _ =
+        C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun e -> e.C.message)
+      in
+      let%bind schema =
+        Chatmd_shell_spec.Tool_schema.compile reference.input_schema
+        |> Result.map_error ~f:(fun _ -> "invalid tool input schema")
+      in
+      Chatmd_shell_spec.Tool_schema.validate schema input
+      |> Result.map_error ~f:(fun _ -> "invalid tool input")
+    in
+    (match validate original prepared.input with
+     | Error _ ->
+       reject Invalid_input "invocation.invalid_input" "The tool arguments are invalid."
+     | Ok () ->
+       let meta =
+         match owner with
+         | Model_call (operation_id, call_entry_id) ->
+           `Object
+             [ "origin", `String "model"
+             ; "operation_id", Agent_protocol.Id.Operation.to_json operation_id
+             ; "call_entry_id", History_entry.Id.jsonaf_of_t call_entry_id
+             ]
+         | Native_call parent ->
+           `Object
+             [ "origin", `String "script"
+             ; "parent_invocation", Agent_protocol.Id.Invocation.to_json parent
+             ]
+         | Moderator_event parent ->
+           `Object
+             [ "origin", `String "moderator"
+             ; "parent_event", Agent_protocol.Id.Moderator_execution.to_json parent
+             ]
+       in
+       let call : Chat_response.Moderation.Tool_call.t =
+         { id = Agent_protocol.Id.Invocation.to_string id
+         ; name = original.name
+         ; args = prepared.input
+         ; kind
+         ; payload_text = original_payload
+         ; meta
+         }
+       in
+       (match
+          checked () (fun () ->
+            let current () =
+              C.select
+                (t.registry ())
+                ~names:(List.map (C.references selected) ~f:(fun r -> r.C.name))
+              |> Result.map_error ~f:(fun error ->
+                Agent_protocol.Error.invalid_request error.C.message)
+              |> Result.bind ~f:(fun current ->
+                match String.equal (C.fingerprint current) (C.fingerprint selected) with
+                | true -> Ok ()
+                | false ->
+                  Error
+                    (Agent_protocol.Error.invalid_request
+                       "selected tool bindings changed"))
+            in
+            let%bind () = current () in
+            let%bind decision =
+              prepare
+                { invocation_id = id; session_id; generation; owner; selected; call }
+            in
+            let%map () = current () in
+            decision)
+        with
+        | Error () ->
+          reject
+            Pre_tool_failed
+            "invocation.pre_tool_failed"
+            "Host tool preparation failed."
+        | Ok (Some (Reject _)) ->
+          reject
+            Pre_tool_rejected
+            "invocation.pre_tool_rejected"
+            "Host policy rejected the call."
+        | Ok decision ->
+          let name, input =
+            match decision with
+            | None | Some Approve -> original.name, prepared.input
+            | Some (Rewrite_args input) -> original.name, input
+            | Some (Redirect (name, input)) -> name, input
+            | Some (Reject _) -> assert false
+          in
+          (match
+             List.find (C.references selected) ~f:(fun reference ->
+               String.equal reference.name name)
+           with
+           | None ->
+             reject
+               Pre_tool_rejected
+               "invocation.unselected_tool"
+               "The redirected tool is not selected."
+           | Some reference ->
+             (match validate reference input with
+              | Error _ ->
+                reject
+                  Pre_tool_failed
+                  "invocation.pre_tool_failed"
+                  "Host policy returned invalid tool arguments."
+              | Ok () -> Ok (route reference input Passed None)))))
+;;
+
+let with_model_preparation t ~selected ~(input : Operation_worker.Input.t) dispatch =
+  match t.preparation with
+  | None -> dispatch
+  | Some _ ->
+    Chat_response.In_memory_stream.Tool_dispatch.with_preparation
+      dispatch
+      ~prepare:(fun request ->
+        let open Result.Let_syntax in
+        let%bind () =
+          match request.source, request.parent_call_id with
+          | None, None -> Ok ()
+          | Some _, _ | _, Some _ -> Error "host preparation requires its persisted owner"
+        in
+        let%bind reference =
+          C.find selected ~name:request.name
+          |> Result.map ~f:C.reference
+          |> Result.map_error ~f:(fun error -> error.C.message)
+        in
+        let%bind value =
+          Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
+        in
+        let call_id = History_entry.id request.call in
+        let%bind prepared =
+          prepare_host_call
+            t
+            ~selected
+            ~session_id:input.session_id
+            ~generation:input.session_generation
+            ~owner:(Model_call (input.operation.id, call_id))
+            ~id:(Stream_invocation.id_for_call ~input ~call_id)
+            { reference; input = value; routing = None; rejection = None }
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+        in
+        match prepared.rejection with
+        | Some (I.Fail { code = "invocation.pre_tool_failed"; _ }) ->
+          Error "host tool preparation failed"
+        | Some _ ->
+          Ok
+            (Some
+               (Chat_response.Moderation.Tool_moderation.Reject
+                  "Host policy rejected the call."))
+        | None ->
+          let original_kind = call_kind selected reference in
+          let final_kind = call_kind selected prepared.reference in
+          (match original_kind, final_kind with
+           | Function, Custom | Custom, Function ->
+             Error "host preparation cannot change model tool kind"
+           | Function, Function | Custom, Custom ->
+             if not (String.equal reference.name prepared.reference.name)
+             then Ok (Some (Redirect (prepared.reference.name, prepared.input)))
+             else if Jsonaf.exactly_equal value prepared.input
+             then Ok None
+             else Ok (Some (Rewrite_args prepared.input))))
+;;
+
 let with_scope_results
       ~result_of_invocation
       ~result_of_error
@@ -412,6 +649,15 @@ let with_scope_results
               match prepare with
               | None -> Ok { reference; input = args; routing = None; rejection = None }
               | Some prepare -> prepare ~id reference args)
+          in
+          let%bind prepared =
+            checked `Admission (fun () ->
+              let owner =
+                match parent with
+                | Invocation parent -> Native_call parent.context.id
+                | Event parent -> Moderator_event parent.context.id
+              in
+              prepare_host_call t ~selected ~session_id ~generation ~owner ~id prepared)
           in
           let reference = prepared.reference in
           let%bind () = checked `Input (fun () -> validate_value prepared.input) in

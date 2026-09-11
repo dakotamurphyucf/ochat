@@ -27,11 +27,19 @@ let%expect_test "prepared one-off programs execute under their native caller's a
     ; `Recursive_calls
     ; `Recursive_depth
     ; `Recursive_domain
+    ; `Host_rewrite
+    ; `Host_reject
+    ; `Host_unselected
+    ; `Host_invalid
+    ; `Host_revoked
+    ; `Host_denied
+    ; `Host_after_local
     ]
     ~f:(fun mode ->
       let native_calls = ref 0
       and finished = ref false in
       let summaries = ref [] in
+      let policy_calls = ref 0 in
       let waiting, waiting_u = Eio.Promise.create () in
       let never, _ = Eio.Promise.create () in
       with_handoff_actor
@@ -133,7 +141,7 @@ let%expect_test "prepared one-off programs execute under their native caller's a
                 ~requires_active_moderator:(fun _ -> false)
                 ~authorize:(fun _ _ ->
                   match mode with
-                  | `Denied -> Error (handoff_error "denied")
+                  | `Denied | `Host_denied -> Error (handoff_error "denied")
                   | `Revoked ->
                     live
                     := C.select all ~names:[ "run_chatml" ]
@@ -145,6 +153,72 @@ let%expect_test "prepared one-off programs execute under their native caller's a
                   | Text text -> Ok (`String text)
                   | _ -> assert false)
                 ~defer_observation:(fun _ -> failwith "fixture has no moderator")
+            in
+            let tools =
+              match mode with
+              | `Host_rewrite
+              | `Host_reject
+              | `Host_unselected
+              | `Host_invalid
+              | `Host_revoked
+              | `Host_denied
+              | `Host_after_local
+              | `Pre_reject ->
+                Agent_session.Script_tool_calls.with_preparation
+                  tools
+                  ~prepare:(fun request ->
+                    Int.incr policy_calls;
+                    let current = A.state actor |> protocol_ok in
+                    (match request.owner with
+                     | Native_call parent_id ->
+                       let parent =
+                         List.find_exn current.invocations ~f:(fun i ->
+                           Agent_protocol.Id.Invocation.equal i.context.id parent_id)
+                       in
+                       (match parent.status with
+                        | Dispatching -> ()
+                        | _ -> assert false)
+                     | _ -> failwith "script preparation lost native owner");
+                    assert (
+                      not
+                        (List.exists current.invocations ~f:(fun i ->
+                           Agent_protocol.Id.Invocation.equal
+                             i.context.id
+                             request.invocation_id)));
+                    [%test_eq: string list]
+                      [ "read_file" ]
+                      (List.map (C.references request.selected) ~f:(fun r -> r.name));
+                    Eio.Fiber.yield ();
+                    match mode with
+                    | `Host_after_local ->
+                      assert (
+                        Jsonaf.exactly_equal
+                          request.call.args
+                          (`Object
+                              [ "root", `String "data"; "file", `String "from-local.txt" ]));
+                      Ok
+                        (Some
+                           (Rewrite_args
+                              (`Object
+                                  [ "root", `String "data"; "file", `String "report.txt" ])))
+                    | `Host_reject -> Ok (Some (Reject "parent rule"))
+                    | `Host_unselected -> Ok (Some (Redirect ("run_chatml", `Null)))
+                    | `Host_invalid -> Ok (Some (Rewrite_args `Null))
+                    | `Host_revoked ->
+                      live
+                      := C.select all ~names:[ "run_chatml" ]
+                         |> Result.map_error ~f:(fun e -> e.C.message)
+                         |> Result.ok_or_failwith;
+                      Ok None
+                    | `Pre_reject ->
+                      failwith "locally rejected call reached parent policy"
+                    | _ ->
+                      Ok
+                        (Some
+                           (Rewrite_args
+                              (`Object
+                                  [ "root", `String "data"; "file", `String "report.txt" ]))))
+              | _ -> tools
             in
             let source =
               match mode with
@@ -277,7 +351,7 @@ let main input = Task.bind(Tool.call("|}
                                  { Chat_response.Moderation.Outcome.empty with
                                    tool_moderation = Some (Reject "rejected")
                                  })
-                          | `Rewrite ->
+                          | `Rewrite | `Host_after_local ->
                             Ok
                               (Some
                                  { Chat_response.Moderation.Outcome.empty with
@@ -286,7 +360,12 @@ let main input = Task.bind(Tool.call("|}
                                        (Rewrite_args
                                           (`Object
                                               [ "root", `String "data"
-                                              ; "file", `String "report.txt"
+                                              ; ( "file"
+                                                , `String
+                                                    (match mode with
+                                                     | `Host_after_local ->
+                                                       "from-local.txt"
+                                                     | _ -> "report.txt") )
                                               ]))
                                  })
                           | _ -> Ok None)
@@ -316,7 +395,7 @@ let main input = Task.bind(Tool.call("|}
                         assert (
                           not (String.is_substring text ~substring:"private sentinel"));
                         (match mode with
-                         | `Success | `Rewrite ->
+                         | `Success | `Rewrite | `Host_rewrite | `Host_after_local ->
                            assert (String.is_prefix text ~prefix:"1:");
                            assert (String.is_substring text ~substring:"approved report");
                            "read"
@@ -356,7 +435,8 @@ let main input = Task.bind(Tool.call("|}
               let filename =
                 match mode with
                 | `Outside -> "../private.txt"
-                | `Rewrite -> "missing.txt"
+                | `Rewrite | `Host_rewrite | `Host_denied | `Host_after_local ->
+                  "missing.txt"
                 | _ -> "report.txt"
               in
               let file_input =
@@ -494,7 +574,32 @@ let main input = Task.bind(Tool.call("|}
                [ "chatml.call_limit"; "chatml.call_limit" ]
              | `Recursive_depth ->
                [ "chatml.invocation_depth"; "chatml.invocation_depth" ]
+             | `Host_rewrite | `Host_after_local -> [ "read" ]
+             | `Host_reject -> [ "invocation.pre_tool_rejected" ]
+             | `Host_unselected -> [ "invocation.unselected_tool" ]
+             | `Host_invalid | `Host_revoked -> [ "invocation.pre_tool_failed" ]
+             | `Host_denied -> [ "invocation.permission_denied" ]
            in
+           (match mode with
+            | `Host_rewrite
+            | `Host_reject
+            | `Host_unselected
+            | `Host_invalid
+            | `Host_revoked
+            | `Host_denied -> [%test_eq: int] 1 !policy_calls
+            | `Host_after_local ->
+              [%test_eq: int] 1 !policy_calls;
+              let reader =
+                List.find_exn children ~f:(fun i ->
+                  String.equal i.context.tool_name "read_file")
+              in
+              let routing = Option.value_exn reader.routing in
+              [%test_eq: string]
+                (Chatmd_shell_spec.Source_ref.digest
+                   "{\"root\":\"data\",\"file\":\"missing.txt\"}")
+                routing.original_payload.sha256
+            | `Pre_reject -> [%test_eq: int] 0 !policy_calls
+            | _ -> ());
            [%test_eq: string list] expected (List.sort !summaries ~compare:String.compare);
            print_s
              [%sexp
@@ -516,6 +621,13 @@ let main input = Task.bind(Tool.call("|}
                   | `Recursive_calls
                   | `Recursive_depth
                   | `Recursive_domain
+                  | `Host_rewrite
+                  | `Host_reject
+                  | `Host_unselected
+                  | `Host_invalid
+                  | `Host_revoked
+                  | `Host_denied
+                  | `Host_after_local
                   ])
              , (!native_calls : int)
              , (List.sort !summaries ~compare:String.compare : string list)
@@ -540,5 +652,12 @@ let main input = Task.bind(Tool.call("|}
     (Recursive_calls 0 (chatml.call_limit chatml.call_limit) 3 0)
     (Recursive_depth 0 (chatml.invocation_depth chatml.invocation_depth) 3 0)
     (Recursive_domain 0 (chatml.call_limit chatml.call_limit) 3 0)
+    (Host_rewrite 1 (read) 2 0)
+    (Host_reject 0 (invocation.pre_tool_rejected) 2 0)
+    (Host_unselected 0 (invocation.unselected_tool) 2 0)
+    (Host_invalid 0 (invocation.pre_tool_failed) 2 0)
+    (Host_revoked 0 (invocation.pre_tool_failed) 2 0)
+    (Host_denied 0 (invocation.permission_denied) 2 0)
+    (Host_after_local 1 (read) 2 0)
     |}]
 ;;

@@ -4040,8 +4040,24 @@ The streamed-provider integration tests cover function and custom rewrites,
 redirects, redacted canonical history, stable invocation IDs, published outcomes,
 invalid input, policy rejection/failure, revocation during preparation, unavailable
 legacy targets and failed admission persistence. These are internal routing
-primitives. Factory parent-policy admission and script-descendant preparation still
-require integration; the guard for moderated generated parents remains closed.
+primitives. Factory parent-policy admission still requires integration; the guard
+for moderated generated parents remains closed.
+
+`Script_tool_calls.with_preparation` now provides the shared preparation service
+for model calls, one-off/standalone script descendants and moderator-event native
+calls. The host receives the reserved invocation ID, actual session and generation,
+the owning model operation/history entry or native invocation/event, the selected
+capabilities, and the locally moderated call. `Runtime_builder` attaches the same
+service to the composed model dispatcher when one is installed.
+
+Local rejection and invalid local input skip host policy. The selected bindings
+are checked before and after policy waits. Rewrites and redirects must satisfy
+the target schema and remain within that selection, even if the runtime registry
+contains additional tools. Script routing preserves the original payload evidence
+across local and host rewrites. Model routing retains its function/custom kind.
+Normal authorization, execution limits and disclosure checks remain in force.
+This closes the shared routing-plumbing gap; actual factory parent mediation,
+private authority validation and outcome ownership still require integration.
 
 ### Qualified persisted child creation
 
