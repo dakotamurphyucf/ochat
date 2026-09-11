@@ -156,6 +156,17 @@ val prepare_session_start
   -> Session_registry.entry
   -> (unit, Agent_protocol.Error.t) result
 
+(** Conservatively retain an inherited workspace while a privately linked
+    Independent child is running or has a durable initial-start intent, including
+    the interval before native resource borrowing. Uses bounded private records
+    and published index hints; never enters another actor or activates a runtime.
+    Call under the workspace owner's maintenance lock and propagate read errors.
+    This supplies retention, not execution authority. *)
+val workspace_retained
+  :  t
+  -> Agent_session.Session_state.t
+  -> (bool, Agent_protocol.Error.t) result
+
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata
     and accurate scheduling hints before clearing the durable rebuild marker.
     Call with the entire successful [recover_sessions] result, only after job

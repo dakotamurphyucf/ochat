@@ -8,6 +8,27 @@ module Owner = Agent_server.Runtime_owner
 module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 
+let observe_rename (Eio.Resource.T (directory, handler) as native_directory) reached =
+  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
+  let module Directory = struct
+    include Original
+
+    let rename directory source _destination target =
+      Original.rename directory source native_directory target;
+      reached target
+    ;;
+  end
+  in
+  let bindings =
+    Eio.Resource.bindings handler
+    |> List.filter ~f:(function
+      | H (Eio.Fs.Pi.Dir, _) -> false
+      | _ -> true)
+  in
+  Eio.Resource.T
+    (directory, Eio.Resource.handler (H (Eio.Fs.Pi.Dir, (module Directory)) :: bindings))
+;;
+
 let state (entry : Registry.entry) = A.state entry.actor |> protocol_ok
 let id entry = (state entry).identity.session_id
 
@@ -56,6 +77,225 @@ let create daemon parent definition ~key ~lifetime =
     ~idempotency_key:(P.Idempotency_key.of_string key |> protocol_ok)
     ~display_name:None
     definition
+;;
+
+let%expect_test "a linked initial start retains its workspace before resource admission" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt_file = Filename.concat root "parent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<developer>Parent.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|};
+        let base = config root root prompt_file in
+        let config =
+          { base with
+            workspaces =
+              List.map base.workspaces ~f:(fun workspace ->
+                { workspace with
+                  source =
+                    Temporary
+                      { location = Session_dir
+                      ; cleanup = On_session_stop
+                      ; managed_root = None
+                      }
+                })
+          }
+        in
+        let release, release_u = Eio.Promise.create () in
+        let clock_started, clock_started_u = Eio.Promise.create () in
+        let module Clock = struct
+          type t = unit
+          type time = float
+
+          let now () = Eio.Time.now (Eio.Stdenv.clock env)
+
+          let sleep_until () time =
+            if Option.is_none (Eio.Promise.peek clock_started)
+            then Eio.Promise.resolve clock_started_u ();
+            Eio.Promise.await release;
+            Eio.Time.sleep_until (Eio.Stdenv.clock env) time
+          ;;
+        end
+        in
+        let clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
+        let armed = ref false in
+        let reached target =
+          if
+            !armed
+            && String.is_substring target ~substring:"/delegations/"
+            && String.is_suffix target ~suffix:".frame"
+          then (
+            let contents = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / target) in
+            let payload =
+              match
+                Agent_store.Frame.decode ~max_payload_length:262144 ~contents ~offset:0
+              with
+              | Ok (Complete { frame; _ }) -> Agent_store.Frame.payload frame
+              | _ -> failwith "invalid delegation frame"
+            in
+            if String.is_substring payload ~substring:"(stage Linked)"
+            then (
+              armed := false;
+              failwith "injected lost link acknowledgement"))
+        in
+        let directory, fs_path = Eio.Stdenv.fs env in
+        let observed_env =
+          object
+            method fs = observe_rename directory reached, fs_path
+            method cwd = env#cwd
+            method stdin = env#stdin
+            method stdout = env#stdout
+            method stderr = env#stderr
+            method net = env#net
+            method domain_mgr = env#domain_mgr
+            method process_mgr = env#process_mgr
+            method clock = clock
+            method mono_clock = env#mono_clock
+            method secure_random = env#secure_random
+            method debug = env#debug
+            method backend_id = env#backend_id
+          end
+        in
+        Eio.Switch.run (fun sw ->
+          let daemon =
+            Daemon.start
+              ~sw
+              ~env:observed_env
+              ~config
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; independent_lifetime_policy = Some "pending-v1"
+                ; model_post_stream =
+                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected provider call")
+                }
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () ->
+              Eio.Promise.resolve release_u ();
+              Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    Eio.Promise.await clock_started;
+                    let parent, _ = create_session ~start_immediately:true client in
+                    let entry =
+                      Registry.find (Daemon.registry daemon) parent.id |> Option.value_exn
+                    in
+                    let workspace =
+                      (state entry).spec.workspace_instance.canonical_root.native_path
+                    in
+                    let marker =
+                      Eio.Path.(Eio.Stdenv.fs env / workspace / "retained.txt")
+                    in
+                    Eio.Path.save ~create:(`Exclusive 0o600) marker "pending-child";
+                    let definition = prepare observed_env root entry in
+                    armed := true;
+                    (match
+                       create
+                         daemon
+                         entry
+                         definition
+                         ~key:"lost-linked"
+                         ~lifetime:Independent
+                     with
+                     | Error { code = Persistence_error; _ } -> ()
+                     | Error error -> raise_s [%sexp (error : P.Error.t)]
+                     | Ok _ -> failwith "creation did not lose its link acknowledgement");
+                    let module D = Agent_store.Delegation_store in
+                    let record =
+                      D.with_records
+                        (Agent_store.Session_store.delegations (Daemon.store daemon))
+                        ~max_records:8
+                        ~max_bytes:1048576
+                        ~f:(fun records -> Ok (List.hd_exn records))
+                      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                      |> protocol_ok
+                    in
+                    assert (D.equal_stage record.stage Linked);
+                    let indexed =
+                      Agent_store.Session_index.find
+                        (Agent_store.Session_store.session_index (Daemon.store daemon))
+                        record.admission.child_session_id
+                      |> Option.value_exn
+                    in
+                    assert indexed.pending_initial_start;
+                    assert (
+                      Option.is_none
+                        (Registry.find
+                           (Daemon.registry daemon)
+                           record.admission.child_session_id));
+                    let handle =
+                      H.attach
+                        ~sw
+                        ~clock:(Eio.Stdenv.clock env)
+                        ~connection:client
+                        ~session_id:parent.id
+                        ~mode:Read_write
+                        ~subscribe:false
+                        ()
+                      |> protocol_ok
+                    in
+                    H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+                    [%test_eq: string] "pending-child" (Eio.Path.load marker);
+                    (match
+                       H.reset
+                         handle
+                         ~expected_revision:(state entry).counters.revision
+                         ~keep_history:true
+                         ~keep_tasks:true
+                         ~keep_cache:false
+                         ~keep_workspace:false
+                         ~keep_grants:true
+                         ~keep_labels:true
+                     with
+                     | Error { code = Conflict; _ } -> ()
+                     | _ -> failwith "reset removed resources of a linked pending child");
+                    H.close handle;
+                    Agent_client.Connection.close client;
+                    ignore
+                      (Registry.unload_inactive
+                         (Daemon.registry daemon)
+                         ~index_entries:
+                           (Agent_store.Session_store.list_sessions (Daemon.store daemon))
+                       : int);
+                    Factory.resume_generated_initial_starts (Daemon.factory daemon);
+                    let child =
+                      Registry.find
+                        (Daemon.registry daemon)
+                        record.admission.child_session_id
+                      |> Option.value_exn
+                    in
+                    let current = state child in
+                    assert (not current.pending_initial_start);
+                    assert (
+                      P.Session.equal_desired_state current.lifecycle.desired Running);
+                    assert (Option.is_none current.failure);
+                    assert (Owner.is_loaded child.runtime);
+                    let parent =
+                      Registry.find (Daemon.registry daemon) parent.id |> Option.value_exn
+                    in
+                    assert (not (Owner.is_loaded parent.runtime));
+                    print_endline
+                      "lost linked acknowledgement preserves pending child roots through \
+                       parent stop, eviction and initial activation"))))));
+  [%expect
+    {| lost linked acknowledgement preserves pending child roots through parent stop, eviction and initial activation |}]
 ;;
 
 let%expect_test "independent ancestry retains temporary roots across stop and restart" =

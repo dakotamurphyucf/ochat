@@ -30,6 +30,8 @@ val create
   -> create_session:create_session
   -> prepare_session_start:
        (Session_registry.entry -> (unit, Agent_protocol.Error.t) result)
+  -> workspace_retained:
+       (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
   -> prepare_administration:
        (Session_registry.entry
         -> Agent_session.Session_state.t

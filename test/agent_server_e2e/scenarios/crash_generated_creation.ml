@@ -10,7 +10,15 @@ module G = Agent_session.Generated_definition
 module C = Chat_response.Tool_capability
 module Owner = Agent_server.Runtime_owner
 
-let create_child_result ?(start_immediately = false) env root daemon parent_id =
+let create_child_result
+      ?(start_immediately = false)
+      ?(lifetime = Agent_server.Session_factory.Owned)
+      ?(key = F.key "generated-crash-create")
+      env
+      root
+      daemon
+      parent_id
+  =
   let parent =
     Agent_server.Session_registry.find (Daemon.registry daemon) parent_id
     |> Option.value_exn
@@ -52,18 +60,27 @@ let create_child_result ?(start_immediately = false) env root daemon parent_id =
   in
   Agent_server.Session_factory.create_generated_session
     ~start_immediately
+    ~lifetime
     (Daemon.factory daemon)
     ~parent_session_id:parent_id
-    ~idempotency_key:(F.key "generated-crash-create")
+    ~idempotency_key:key
     ~display_name:(Some "crash child")
     definition
 ;;
 
-let create_child ?(start_immediately = false) env root daemon parent_id =
-  create_child_result ~start_immediately env root daemon parent_id |> F.protocol_ok
+let create_child ?(start_immediately = false) ?lifetime env root daemon parent_id =
+  create_child_result ~start_immediately ?lifetime env root daemon parent_id
+  |> F.protocol_ok
 ;;
 
 let run_child env ~root ~boundary ~recover =
+  let under_independent = String.is_prefix boundary ~prefix:"under-independent-" in
+  let boundary = if under_independent then String.drop_prefix boundary 18 else boundary in
+  let independent = String.is_prefix boundary ~prefix:"independent-" in
+  let lifetime =
+    if independent then Agent_server.Session_factory.Independent else Owned
+  in
+  let boundary = if independent then String.drop_prefix boundary 12 else boundary in
   let boundary =
     if String.is_prefix boundary ~prefix:"moderated-"
     then String.drop_prefix boundary 10
@@ -113,14 +130,19 @@ let run_child env ~root ~boundary ~recover =
             | "preflight"
             | "parent-stopped"
             | "parent-missing"
-            | "parent-restarted" -> 3
+            | "parent-restarted"
+            | "grant-changed" -> 3
             | "linked" -> 4
             | _ -> 1
           in
           if Int.equal !writes target
           then (
             match boundary with
-            | "preflight" | "parent-stopped" | "parent-missing" | "parent-restarted" ->
+            | "preflight"
+            | "parent-stopped"
+            | "parent-missing"
+            | "parent-restarted"
+            | "grant-changed" ->
               armed := false;
               raise
                 (Core_unix.Unix_error
@@ -142,6 +164,11 @@ let run_child env ~root ~boundary ~recover =
       ~options:
         { Daemon.default_options with
           qualify_chatml_extensions = true
+        ; independent_lifetime_policy =
+            Some
+              (if recover && String.equal boundary "grant-changed"
+               then "crash-fixture-v2"
+               else "crash-fixture-v1")
         ; model_post_stream =
             Some
               (fun ~sw:_ ~inputs:_ ->
@@ -175,16 +202,53 @@ let run_child env ~root ~boundary ~recover =
                 initialize client;
                 match recover with
                 | false ->
-                  let parent, _ = create_session ~start_immediately:true client in
+                  let root_parent, attachment =
+                    create_session ~start_immediately:true client
+                  in
+                  let parent =
+                    match under_independent with
+                    | false -> root_parent
+                    | true ->
+                      F.write
+                        env
+                        (Filename.concat root "root-id")
+                        (P.Id.Session.to_string root_parent.id);
+                      let coordinator =
+                        create_child_result
+                          ~start_immediately:true
+                          ~lifetime:Independent
+                          ~key:(F.key "independent-coordinator")
+                          wrapped
+                          root
+                          daemon
+                          root_parent.id
+                        |> F.protocol_ok
+                      in
+                      let original =
+                        Agent_server.Session_registry.find
+                          (Daemon.registry daemon)
+                          root_parent.id
+                        |> Option.value_exn
+                      in
+                      A.stop original.actor ~attachment_id:attachment.id ~mode:Cancel
+                      |> F.protocol_ok
+                      |> ignore;
+                      Owner.unload_and_wait original.runtime |> F.protocol_ok;
+                      A.state coordinator.actor
+                      |> F.protocol_ok
+                      |> Agent_session.Session_state.summary
+                  in
                   armed := true;
                   (match boundary with
                    | "preflight"
                    | "parent-stopped"
                    | "parent-missing"
-                   | "parent-restarted" ->
+                   | "parent-restarted"
+                   | "grant-changed" ->
                      (match
                         create_child_result
                           ~start_immediately
+                          ~lifetime
                           wrapped
                           root
                           daemon
@@ -197,7 +261,12 @@ let run_child env ~root ~boundary ~recover =
                          (S.delegations store)
                          ~max_records:8
                          ~max_bytes:1048576
-                         ~f:(fun records -> Ok records)
+                         ~f:(fun records ->
+                           Ok
+                             (List.filter records ~f:(fun record ->
+                                P.Idempotency_key.equal
+                                  record.D.key.idempotency_key
+                                  (F.key "generated-crash-create"))))
                        |> F.store_ok
                      in
                      let record =
@@ -316,7 +385,13 @@ let run_child env ~root ~boundary ~recover =
                        (Eio.Stdenv.stdout env)
                    | _ ->
                      ignore
-                       (create_child ~start_immediately wrapped root daemon parent.id
+                       (create_child
+                          ~start_immediately
+                          ~lifetime
+                          wrapped
+                          root
+                          daemon
+                          parent.id
                         : Agent_server.Session_registry.entry);
                      (match boundary with
                       | "started" ->
@@ -329,13 +404,19 @@ let run_child env ~root ~boundary ~recover =
                 | true
                   when String.equal boundary "parent-stopped"
                        || String.equal boundary "parent-restarted"
-                       || String.equal boundary "parent-missing" ->
+                       || String.equal boundary "parent-missing"
+                       || String.equal boundary "grant-changed" ->
                   let records =
                     D.with_records
                       (S.delegations store)
                       ~max_records:8
                       ~max_bytes:1048576
-                      ~f:(fun records -> Ok records)
+                      ~f:(fun records ->
+                        Ok
+                          (List.filter records ~f:(fun record ->
+                             P.Idempotency_key.equal
+                               record.D.key.idempotency_key
+                               (F.key "generated-crash-create"))))
                     |> F.store_ok
                   in
                   let record =
@@ -344,7 +425,9 @@ let run_child env ~root ~boundary ~recover =
                     | _ -> F.fail "lost revoked creation"
                   in
                   let reason =
-                    if String.equal boundary "parent-missing"
+                    if String.equal boundary "grant-changed"
+                    then D.Authority_changed
+                    else if String.equal boundary "parent-missing"
                     then D.Parent_deleted
                     else Parent_stopped
                   in
@@ -404,7 +487,12 @@ let run_child env ~root ~boundary ~recover =
                       (S.delegations store)
                       ~max_records:8
                       ~max_bytes:1048576
-                      ~f:(fun records -> Ok records)
+                      ~f:(fun records ->
+                        Ok
+                          (List.filter records ~f:(fun record ->
+                             P.Idempotency_key.equal
+                               record.D.key.idempotency_key
+                               (F.key "generated-crash-create"))))
                     |> F.store_ok
                   in
                   let record =
@@ -412,6 +500,25 @@ let run_child env ~root ~boundary ~recover =
                     | [ record ] -> record
                     | _ -> F.fail "creation mapping was lost or duplicated"
                   in
+                  if under_independent
+                  then (
+                    let root_id =
+                      F.read env (Filename.concat root "root-id")
+                      |> P.Id.Session.of_string
+                      |> F.protocol_ok
+                    in
+                    let original =
+                      Agent_server.Session_registry.find (Daemon.registry daemon) root_id
+                      |> Option.value_exn
+                    in
+                    F.require
+                      (P.Session.equal_desired_state
+                         (A.state original.actor |> F.protocol_ok).lifecycle.desired
+                         Stopped)
+                      "reconciliation restarted an ancestor above independent lifetime";
+                    F.require
+                      (not (Owner.is_loaded original.runtime))
+                      "reconciliation activated stopped ancestor resources");
                   (match !stored_id with
                    | None -> stored_id := Some record.admission.child_session_id
                    | Some id ->
@@ -460,6 +567,7 @@ let run_child env ~root ~boundary ~recover =
                   let child =
                     create_child
                       ~start_immediately
+                      ~lifetime
                       wrapped
                       root
                       daemon
@@ -484,7 +592,8 @@ let run_child env ~root ~boundary ~recover =
                        record.admission.child_session_id)
                     "retry created a different child";
                   F.require
-                    (List.length (S.list_sessions store) = 2)
+                    (List.length (S.list_sessions store)
+                     = if under_independent then 3 else 2)
                     "retry duplicated child storage";
                   F.require
                     (List.exists state.conversation.canonical_history ~f:(fun entry ->
@@ -533,6 +642,7 @@ let run_child env ~root ~boundary ~recover =
                     let repeated =
                       create_child
                         ~start_immediately
+                        ~lifetime
                         wrapped
                         root
                         daemon
@@ -549,7 +659,14 @@ let run_child env ~root ~boundary ~recover =
 
 let test env environment =
   List.iter
-    [ "reserved"
+    [ "independent-child-record"
+    ; "independent-auto-child-record"
+    ; "independent-linked"
+    ; "independent-auto-linked"
+    ; "independent-grant-changed"
+    ; "under-independent-child-record"
+    ; "under-independent-auto-child-record"
+    ; "reserved"
     ; "artifact-partial"
     ; "artifact"
     ; "artifact-record"
@@ -606,7 +723,8 @@ let on_event ctx state event = Task.pure(state)
             | "auto-preflight"
             | "parent-stopped"
             | "parent-missing"
-            | "parent-restarted" ->
+            | "parent-restarted"
+            | "independent-grant-changed" ->
               let result =
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   Support.Process_manager.await child)

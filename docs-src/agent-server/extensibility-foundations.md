@@ -3951,6 +3951,21 @@ they still stop with their immediate parent. Permanent ancestor deletion joins
 child cleanup before removing the workspace. Shutdown preserves running intent.
 Retaining resources never grants permission to execute under obsolete policy.
 
+Resource retention also covers a durable initial-start intent before native
+borrowing begins. Stop cleanup and reset consult privately linked independent
+records and their published workspace/start metadata under the ancestor's owner
+lock. A lost linking acknowledgement therefore cannot remove the child's temporary
+root while it awaits activation. The initial-start scheduler can recover a linked
+child that was installed but never published in the process-local registry, and
+reload evicted ancestor actors without starting their execution runtimes.
+
+Unfinished creation reconciliation validates the current lifetime grant and uses
+the live parent's retained ancestor bindings. It does not load stopped execution
+runtimes above an independent edge. An invalidated host grant revokes unfinished
+creation. Actual process-kill tests cover independent creation and an owned child
+under an independent coordinator whose original ancestor is stopped, with two
+daemon reopenings per boundary.
+
 An ancestor with stateful moderation is currently rejected for independent
 delegation, because a separately available original policy owner is required.
 The factory does not clone moderator state or silently omit its restrictions.

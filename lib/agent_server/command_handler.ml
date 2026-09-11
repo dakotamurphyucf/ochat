@@ -30,6 +30,8 @@ type t =
   ; create_session : create_session
   ; prepare_session_start :
       Session_registry.entry -> (unit, Agent_protocol.Error.t) result
+  ; workspace_retained :
+      Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result
   ; prepare_administration :
       Session_registry.entry
       -> Agent_session.Session_state.t
@@ -55,6 +57,7 @@ let create
       ~cancel_job
       ~create_session
       ~prepare_session_start
+      ~workspace_retained
       ~prepare_administration
   =
   { sw
@@ -76,6 +79,7 @@ let create
   ; cancel_job
   ; create_session
   ; prepare_session_start
+  ; workspace_retained
   ; prepare_administration
   }
 ;;
@@ -254,19 +258,23 @@ let cleanup_stopped_workspace t entry =
   let%bind cleaned =
     Runtime_owner.with_unloaded entry.Session_registry.runtime (fun () ->
       let%bind state = Agent_session.Session_actor.state entry.actor in
-      let original = state.spec.workspace_instance in
-      let%bind cleaned =
-        cleanup_temporary
-          t
-          entry
-          state
-          ~event:Agent_session.Workspace_cleanup.Session_stop
-      in
-      match cleaned.cleanup_completion with
-      | None -> Ok (Agent_session.Session_state.summary state)
-      | Some _ ->
-        let%bind replacement = resolve_replacement t entry original in
-        install_replacement entry replacement)
+      let%bind retained = t.workspace_retained state in
+      match retained with
+      | true -> Ok (Agent_session.Session_state.summary state)
+      | false ->
+        let original = state.spec.workspace_instance in
+        let%bind cleaned =
+          cleanup_temporary
+            t
+            entry
+            state
+            ~event:Agent_session.Workspace_cleanup.Session_stop
+        in
+        (match cleaned.cleanup_completion with
+         | None -> Ok (Agent_session.Session_state.summary state)
+         | Some _ ->
+           let%bind replacement = resolve_replacement t entry original in
+           install_replacement entry replacement))
   in
   match cleaned with
   | Some session -> Ok session
@@ -1472,6 +1480,14 @@ let handle_session_reset t context command_audit request =
          Runtime_owner.with_administration entry.runtime (fun () ->
            let%bind state = Agent_session.Session_actor.state entry.actor in
            let%bind () = validate_stopped_revision state request.expected_revision in
+           let%bind retained = t.workspace_retained state in
+           let%bind () =
+             match retained with
+             | false -> Ok ()
+             | true ->
+               Error
+                 (error Conflict "session resources are retained by an independent child")
+           in
            let%bind workspace_instance =
              replacement_workspace t entry state request.keep_workspace
            in

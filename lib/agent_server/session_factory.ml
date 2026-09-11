@@ -4821,6 +4821,96 @@ let with_generated_creation_lock t f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let workspace_retained t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  D.with_records
+    (Agent_store.Session_store.delegations t.store)
+    ~max_records:t.limits.delegation_recovery_max_count
+    ~max_bytes:t.limits.delegation_recovery_max_bytes
+    ~f:(fun records ->
+      (* Initial metadata precedes linking; clearing the pending-start bit follows
+         runtime resource admission. Read index hints conservatively, without
+         entering another actor while workspace maintenance holds this owner. *)
+      let index = Agent_store.Session_store.session_index t.store in
+      Ok
+        (List.exists records ~f:(fun record ->
+           match record.D.stage, record.revocation, record.admission.lifetime with
+           | Linked, None, Independent _ ->
+             (match
+                Agent_store.Session_index.find index record.admission.child_session_id
+              with
+              | Some entry ->
+                (not entry.archived)
+                && (entry.pending_initial_start
+                    || P.Session.equal_desired_state entry.session.desired_state Running)
+                && Option.equal
+                     P.Id.Prompt_revision.equal
+                     entry.session.prompt_revision
+                     (Some record.admission.revision_id)
+                && Option.equal
+                     P.Id.Workspace_instance.equal
+                     entry.session.workspace_instance
+                     (Some state.spec.workspace_instance.id)
+              | None -> false)
+           | _ -> false)))
+  |> Result.map_error ~f:protocol_of_store
+;;
+
+let load_independent_ancestors t reference =
+  let open Result.Let_syntax in
+  (* Run outside the registry loader mutex: stopped ancestors may have been
+         evicted while this independent child was stopped. Load actors only;
+         resource construction remains deferred to the child scope. *)
+  let rec load_ancestors visited reference =
+    let module D = Agent_store.Delegation_store in
+    let%bind () =
+      match
+        List.length visited < t.limits.delegation_max_depth
+        && not
+             (List.mem
+                visited
+                reference.D.Reference.child_session_id
+                ~equal:Agent_protocol.Id.Session.equal)
+      with
+      | true -> Ok ()
+      | false ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.ancestry_limit: invalid start ancestry")
+    in
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match record.stage, record.revocation with
+      | Linked, None -> Ok ()
+      | _ ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.not_linked: start ancestry is unlinked or revoked")
+    in
+    let%bind () = authorize_independent t record in
+    let%bind parent = Session_registry.load t.registry record.key.parent_session_id in
+    let%bind current = Agent_session.Session_actor.state parent.actor in
+    match current.spec.delegation with
+    | None -> Ok ()
+    | Some ancestor -> load_ancestors (reference.child_session_id :: visited) ancestor
+  in
+  let%bind admission =
+    Agent_store.Delegation_store.resolve
+      (Agent_store.Session_store.delegations t.store)
+      reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  match admission.admission.lifetime with
+  | Owned -> Ok ()
+  | Independent _ -> load_ancestors [] reference
+;;
+
 let prepare_session_start t entry =
   with_generated_creation_lock t (fun () ->
     let open Result.Let_syntax in
@@ -4828,58 +4918,7 @@ let prepare_session_start t entry =
     match state.spec.delegation with
     | None -> Ok ()
     | Some reference ->
-      (* Run outside the registry loader mutex: stopped ancestors may have been
-         evicted while this independent child was stopped. Load actors only;
-         resource construction remains deferred to the child scope. *)
-      let rec load_ancestors visited reference =
-        let module D = Agent_store.Delegation_store in
-        let%bind () =
-          match
-            List.length visited < t.limits.delegation_max_depth
-            && not
-                 (List.mem
-                    visited
-                    reference.D.Reference.child_session_id
-                    ~equal:Agent_protocol.Id.Session.equal)
-          with
-          | true -> Ok ()
-          | false ->
-            Error
-              (unavailable
-                 Permission_denied
-                 "delegation.ancestry_limit: invalid start ancestry")
-        in
-        let%bind record =
-          D.resolve (Agent_store.Session_store.delegations t.store) reference
-          |> Result.map_error ~f:protocol_of_store
-        in
-        let%bind () =
-          match record.stage, record.revocation with
-          | Linked, None -> Ok ()
-          | _ ->
-            Error
-              (unavailable
-                 Permission_denied
-                 "delegation.not_linked: start ancestry is unlinked or revoked")
-        in
-        let%bind () = authorize_independent t record in
-        let%bind parent = Session_registry.load t.registry record.key.parent_session_id in
-        let%bind current = Agent_session.Session_actor.state parent.actor in
-        match current.spec.delegation with
-        | None -> Ok ()
-        | Some ancestor -> load_ancestors (reference.child_session_id :: visited) ancestor
-      in
-      let%bind admission =
-        Agent_store.Delegation_store.resolve
-          (Agent_store.Session_store.delegations t.store)
-          reference
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let%bind () =
-        match admission.admission.lifetime with
-        | Owned -> Ok ()
-        | Independent _ -> load_ancestors [] reference
-      in
+      let%bind () = load_independent_ancestors t reference in
       let%bind parent, record = generated_parent ~check_stop_epoch:false t state in
       (match record.admission.lifetime with
        | Independent _ ->
@@ -4993,6 +5032,7 @@ let resume_generated_initial_start t entry =
            Error (unavailable Permission_denied "initial start parent authority ended"))
     in
     let attempt () =
+      let%bind () = load_independent_ancestors t reference in
       let%bind is_ready = ready 0 ~require_execution:true reference in
       match is_ready with
       | false -> Ok ()
@@ -5032,9 +5072,43 @@ let resume_generated_initial_starts t =
     |> List.filter ~f:(fun entry ->
       entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
     |> List.iter ~f:(fun indexed ->
-      match Session_registry.find t.registry indexed.session.id with
-      | None -> ()
-      | Some entry ->
+      let entry =
+        match Session_registry.find t.registry indexed.session.id with
+        | Some entry -> Ok (Some entry)
+        | None ->
+          let open Result.Let_syntax in
+          let module D = Agent_store.Delegation_store in
+          (* A lost link acknowledgement may close a new actor before registry
+             publication. Publish only a privately linked durable child here;
+             unlinked creation stages remain unavailable to the scheduler. *)
+          let%bind linked =
+            D.with_records
+              (Agent_store.Session_store.delegations t.store)
+              ~max_records:t.limits.delegation_recovery_max_count
+              ~max_bytes:t.limits.delegation_recovery_max_bytes
+              ~f:(fun records ->
+                Ok
+                  (List.exists records ~f:(fun record ->
+                     D.equal_stage record.D.stage Linked
+                     && Agent_protocol.Id.Session.equal
+                          record.admission.child_session_id
+                          indexed.session.id
+                     && Option.equal
+                          Agent_protocol.Id.Prompt_revision.equal
+                          indexed.session.prompt_revision
+                          (Some record.admission.revision_id))))
+            |> Result.map_error ~f:protocol_of_store
+          in
+          (match linked with
+           | false -> Ok None
+           | true ->
+             Session_registry.index t.registry indexed;
+             Session_registry.load t.registry indexed.session.id
+             |> Result.map ~f:Option.some)
+      in
+      match entry with
+      | Error _ | Ok None -> ()
+      | Ok (Some entry) ->
         ignore
           (resume_generated_initial_start t entry : (unit, Agent_protocol.Error.t) result)))
 ;;
@@ -5442,15 +5516,24 @@ let reconcile_generated_creations t =
     |> Result.of_option
          ~error:(unavailable Permission_denied "delegation ancestor is unavailable")
   in
-  let host : Authority.host =
+  let host ~parent_id ~(runtime : Agent_session.Runtime_builder.t) ~current
+    : Authority.host
+    =
     { state = (fun id -> Result.bind (loaded id) ~f:(fun entry -> A.state entry.actor))
     ; resolve =
         (fun reference ->
           D.resolve ledger reference |> Result.map_error ~f:protocol_of_store)
     ; capabilities =
         (fun id ->
-          Result.bind (loaded id) ~f:(fun entry ->
-            Runtime_owner.with_background_runtime entry.runtime native_capabilities))
+          match P.Id.Session.equal id parent_id, runtime.ancestor_capabilities with
+          | true, _ -> Ok current
+          | false, Some lookup -> lookup id
+          | false, None ->
+            Error
+              (unavailable
+                 Permission_denied
+                 "delegation.resources_unavailable: recovery ancestor bindings are not \
+                  retained"))
     }
   in
   List.fold_result records ~init:() ~f:(fun () record ->
@@ -5460,230 +5543,252 @@ let reconcile_generated_creations t =
     match record.D.stage, record.revocation with
     | Linked, _ | _, Some _ -> Ok ()
     | (Reserved | Artifact_installed | Child_installed), None ->
-      (match Session_registry.load t.registry record.key.parent_session_id with
-       | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
-       | Error _ as failure -> failure
-       | Ok parent ->
-         let%bind before = A.state parent.actor in
-         (match
-            ( before.lifecycle.desired
-            , before.lifecycle.observed
-            , before.halted
-            , before.failure )
-          with
-          | _
-            when not
-                   (Int64.equal
-                      before.stop_epoch
-                      (Option.value record.admission.parent_stop_epoch ~default:0L)) ->
-            revoke record Parent_stopped
-          | Stopped, _, _, _ -> revoke record Parent_stopped
-          | Running, _, true, _ | Running, _, _, Some _ -> revoke record Authority_changed
-          | ( Running
-            , ( Stopped
-              | Queued_for_slot
-              | Starting
-              | Recovering
-              | Compacting _
-              | Stopping
-              | Failed _ )
-            , false
-            , None ) -> Ok ()
-          | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None ->
-            let%bind moderator = parent_moderation_source t before.identity.session_id in
-            let%bind fingerprint = Authority.fingerprint ?moderator before in
-            if not (String.equal fingerprint record.admission.authority_sha256)
-            then revoke record Authority_changed
-            else
-              Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
-                let%bind current = native_capabilities runtime in
-                let%bind artifacts =
-                  Artifacts.create
-                    ~env:t.env
-                    ~root:
-                      (Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
-                  |> Result.map_error ~f:protocol_of_store
-                in
-                match
-                  Artifacts.exists artifacts record.admission.revision_id, record.stage
-                with
-                | false, Reserved -> Ok ()
-                | false, _ ->
-                  Error (corrupt "unfinished delegation lost its installed artifact")
-                | true, _ ->
-                  let diagnostics errors =
-                    unavailable
-                      Prompt_unavailable
-                      (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
-                       |> String.concat ~sep:"\n")
-                  in
-                  let%bind _ =
-                    G.load_artifact
-                      ~artifact_store:artifacts
-                      ~revision_id:record.admission.revision_id
-                      ~manifest_sha256:record.admission.manifest_sha256
-                    |> Result.map_error ~f:diagnostics
-                  in
-                  let%bind record =
-                    D.advance ledger record Artifact_installed
-                    |> Result.map_error ~f:protocol_of_store
-                  in
-                  let%bind () =
-                    D.discard_uninstalled_staging ledger record
-                    |> Result.map_error ~f:protocol_of_store
-                  in
-                  (match
-                     Chat_response.Background_request.rebind_capabilities
-                       ~pins:record.admission.capability_pins
-                       ~capabilities:current
+      (match authorize_independent t record with
+       | Error _ -> revoke record Authority_changed
+       | Ok () ->
+         (match Session_registry.load t.registry record.key.parent_session_id with
+          | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
+          | Error _ as failure -> failure
+          | Ok parent ->
+            let%bind before = A.state parent.actor in
+            (match
+               ( before.lifecycle.desired
+               , before.lifecycle.observed
+               , before.halted
+               , before.failure )
+             with
+             | _
+               when not
+                      (Int64.equal
+                         before.stop_epoch
+                         (Option.value record.admission.parent_stop_epoch ~default:0L)) ->
+               revoke record Parent_stopped
+             | Stopped, _, _, _ -> revoke record Parent_stopped
+             | Running, _, true, _ | Running, _, _, Some _ ->
+               revoke record Authority_changed
+             | ( Running
+               , ( Stopped
+                 | Queued_for_slot
+                 | Starting
+                 | Recovering
+                 | Compacting _
+                 | Stopping
+                 | Failed _ )
+               , false
+               , None ) -> Ok ()
+             | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None ->
+               let%bind moderator =
+                 parent_moderation_source t before.identity.session_id
+               in
+               let%bind fingerprint = Authority.fingerprint ?moderator before in
+               if not (String.equal fingerprint record.admission.authority_sha256)
+               then revoke record Authority_changed
+               else
+                 Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+                   let%bind current = native_capabilities runtime in
+                   let%bind artifacts =
+                     Artifacts.create
+                       ~env:t.env
+                       ~root:
+                         (Agent_store.Data_root.prompt_artifacts_path
+                            (S.data_root t.store))
+                     |> Result.map_error ~f:protocol_of_store
+                   in
+                   match
+                     Artifacts.exists artifacts record.admission.revision_id, record.stage
                    with
-                   | Error _ -> revoke record Authority_changed
-                   | Ok selected ->
-                     let reference = D.reference record in
-                     let child_id = record.admission.child_session_id in
-                     let verify (state : State.t) =
-                       match state.spec.delegation, state.lifecycle.desired with
-                       | Some actual, Stopped when D.Reference.equal reference actual ->
-                         Ok ()
-                       | _ ->
-                         Error
-                           (corrupt
-                              "unfinished generated child has an invalid identity or \
-                               running state")
+                   | false, Reserved -> Ok ()
+                   | false, _ ->
+                     Error (corrupt "unfinished delegation lost its installed artifact")
+                   | true, _ ->
+                     let diagnostics errors =
+                       unavailable
+                         Prompt_unavailable
+                         (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                          |> String.concat ~sep:"\n")
                      in
-                     let%bind child =
-                       match Session_registry.find t.registry child_id with
-                       | Some entry -> Ok (Some (entry, false))
-                       | None ->
-                         (match
-                            S.open_session
-                              t.store
-                              ~sw:t.sw
-                              ~actor_lock_nonce:
-                                (P.Id.Transaction.create () |> P.Id.Transaction.to_string)
-                              child_id
-                          with
-                          | Error (Missing _) -> Ok None
-                          | Error error -> Error (protocol_of_store error)
-                          | Ok handle ->
-                            let result =
-                              let%bind archived =
-                                S.is_archived t.store handle
-                                |> Result.map_error ~f:protocol_of_store
-                              in
-                              match archived with
-                              | true -> Ok None
-                              | false ->
-                                let%bind initial = initial_recovery_state t handle in
-                                let%bind () = verify initial in
-                                let%map entry = recover_open_handle t handle in
-                                Some (entry, true)
-                            in
-                            (match result with
-                             | Ok (Some _) -> result
-                             | Ok None | Error _ ->
-                               close_recovery_handle t handle;
-                               result))
+                     let%bind _ =
+                       G.load_artifact
+                         ~artifact_store:artifacts
+                         ~revision_id:record.admission.revision_id
+                         ~manifest_sha256:record.admission.manifest_sha256
+                       |> Result.map_error ~f:diagnostics
                      in
-                     (match child with
-                      | None ->
-                        (match record.stage with
-                         | Child_installed -> revoke record Admission_failed
-                         | Reserved | Artifact_installed -> Ok ()
-                         | Linked -> assert false)
-                      | Some (child, fresh) ->
-                        let owned = ref fresh in
-                        Exn.protect
-                          ~finally:(fun () -> if !owned then child.close ())
-                          ~f:(fun () ->
-                            let%bind state = A.state child.actor in
-                            let%bind () = verify state in
-                            let%bind _ =
-                              G.restore
-                                ?limits:
-                                  (Option.map
-                                     t.authoring_validation_host
-                                     ~f:
-                                       Chat_response.Authoring_validation
-                                       .compilation_limits)
-                                ?source_limits:
-                                  (Option.map
-                                     t.authoring_validation_host
-                                     ~f:Chat_response.Authoring_validation.bundle_limits)
-                                ?catalog:
-                                  (Option.bind
-                                     t.authoring_validation_host
-                                     ~f:Chat_response.Authoring_validation.catalog)
-                                ~env:t.env
-                                ~artifact_store:artifacts
-                                ~revision_id:record.admission.revision_id
-                                ~manifest_sha256:record.admission.manifest_sha256
-                                ~current_capabilities:(fun () -> current)
-                                ~pins:record.admission.capability_pins
-                                ()
-                              |> Result.map_error ~f:diagnostics
-                            in
-                            let authority =
-                              Authority.create
-                                ~max_depth:t.limits.delegation_max_depth
-                                ~moderation:(parent_moderation_source t)
-                                ~host
-                                ~reference
-                                ~capabilities:selected
-                                ()
-                            in
-                            let%bind profile =
-                              permission_profile_revision
-                                t
-                                state.spec.permission_profile_digest
-                            in
-                            let%bind () =
-                              Authority.check_preparation
-                                authority
-                                ~session_id:child_id
-                                ~revision_id:state.spec.prompt_revision_id
-                                ~manifest_sha256:record.admission.manifest_sha256
-                                ~permission_profile:profile
-                            in
-                            let%bind () =
-                              Agent_store.Durable_file.sync_directory
-                                ~env:t.env
-                                ~path:
-                                  (Agent_store.Data_root.sessions_path
-                                     (S.data_root t.store))
-                              |> Result.map_error ~f:protocol_of_store
-                            in
-                            let%bind record =
-                              D.advance ledger record Child_installed
-                              |> Result.map_error ~f:protocol_of_store
-                            in
-                            let%bind () =
-                              A.checkpoint parent.actor ~persist:(fun latest ->
-                                let%bind latest_fingerprint =
-                                  Authority.fingerprint ?moderator latest
-                                in
-                                match
-                                  latest.lifecycle.desired, latest.halted, latest.failure
-                                with
-                                | Running, false, None
-                                  when String.equal fingerprint latest_fingerprint
-                                       && Int64.equal latest.stop_epoch before.stop_epoch
-                                  ->
-                                  D.advance ledger record Linked
-                                  |> Result.map ~f:ignore
-                                  |> Result.map_error ~f:protocol_of_store
-                                | Stopped, _, _ -> revoke record Parent_stopped
-                                | _
-                                  when not
-                                         (Int64.equal latest.stop_epoch before.stop_epoch)
-                                  -> revoke record Parent_stopped
-                                | _ -> revoke record Authority_changed)
-                            in
-                            let%map () =
-                              match fresh with
-                              | false -> Ok ()
-                              | true ->
-                                Session_registry.add t.registry ~session_id:child_id child
-                            in
-                            owned := false)))))))
+                     let%bind record =
+                       D.advance ledger record Artifact_installed
+                       |> Result.map_error ~f:protocol_of_store
+                     in
+                     let%bind () =
+                       D.discard_uninstalled_staging ledger record
+                       |> Result.map_error ~f:protocol_of_store
+                     in
+                     (match
+                        Chat_response.Background_request.rebind_capabilities
+                          ~pins:record.admission.capability_pins
+                          ~capabilities:current
+                      with
+                      | Error _ -> revoke record Authority_changed
+                      | Ok selected ->
+                        let reference = D.reference record in
+                        let child_id = record.admission.child_session_id in
+                        let verify (state : State.t) =
+                          match state.spec.delegation, state.lifecycle.desired with
+                          | Some actual, Stopped when D.Reference.equal reference actual
+                            -> Ok ()
+                          | _ ->
+                            Error
+                              (corrupt
+                                 "unfinished generated child has an invalid identity or \
+                                  running state")
+                        in
+                        let%bind child =
+                          match Session_registry.find t.registry child_id with
+                          | Some entry -> Ok (Some (entry, false))
+                          | None ->
+                            (match
+                               S.open_session
+                                 t.store
+                                 ~sw:t.sw
+                                 ~actor_lock_nonce:
+                                   (P.Id.Transaction.create ()
+                                    |> P.Id.Transaction.to_string)
+                                 child_id
+                             with
+                             | Error (Missing _) -> Ok None
+                             | Error error -> Error (protocol_of_store error)
+                             | Ok handle ->
+                               let result =
+                                 let%bind archived =
+                                   S.is_archived t.store handle
+                                   |> Result.map_error ~f:protocol_of_store
+                                 in
+                                 match archived with
+                                 | true -> Ok None
+                                 | false ->
+                                   let%bind initial = initial_recovery_state t handle in
+                                   let%bind () = verify initial in
+                                   let%map entry = recover_open_handle t handle in
+                                   Some (entry, true)
+                               in
+                               (match result with
+                                | Ok (Some _) -> result
+                                | Ok None | Error _ ->
+                                  close_recovery_handle t handle;
+                                  result))
+                        in
+                        (match child with
+                         | None ->
+                           (match record.stage with
+                            | Child_installed -> revoke record Admission_failed
+                            | Reserved | Artifact_installed -> Ok ()
+                            | Linked -> assert false)
+                         | Some (child, fresh) ->
+                           let owned = ref fresh in
+                           Exn.protect
+                             ~finally:(fun () -> if !owned then child.close ())
+                             ~f:(fun () ->
+                               let%bind state = A.state child.actor in
+                               let%bind () = verify state in
+                               let%bind _ =
+                                 G.restore
+                                   ?limits:
+                                     (Option.map
+                                        t.authoring_validation_host
+                                        ~f:
+                                          Chat_response.Authoring_validation
+                                          .compilation_limits)
+                                   ?source_limits:
+                                     (Option.map
+                                        t.authoring_validation_host
+                                        ~f:
+                                          Chat_response.Authoring_validation.bundle_limits)
+                                   ?catalog:
+                                     (Option.bind
+                                        t.authoring_validation_host
+                                        ~f:Chat_response.Authoring_validation.catalog)
+                                   ~env:t.env
+                                   ~artifact_store:artifacts
+                                   ~revision_id:record.admission.revision_id
+                                   ~manifest_sha256:record.admission.manifest_sha256
+                                   ~current_capabilities:(fun () -> current)
+                                   ~pins:record.admission.capability_pins
+                                   ()
+                                 |> Result.map_error ~f:diagnostics
+                               in
+                               let authority =
+                                 Authority.create
+                                   ~max_depth:t.limits.delegation_max_depth
+                                   ~moderation:(parent_moderation_source t)
+                                   ~authorize_independent:(authorize_independent t)
+                                   ~host:
+                                     (host
+                                        ~parent_id:record.key.parent_session_id
+                                        ~runtime
+                                        ~current)
+                                   ~reference
+                                   ~capabilities:selected
+                                   ()
+                               in
+                               let%bind profile =
+                                 permission_profile_revision
+                                   t
+                                   state.spec.permission_profile_digest
+                               in
+                               let%bind () =
+                                 Authority.check_preparation
+                                   authority
+                                   ~session_id:child_id
+                                   ~revision_id:state.spec.prompt_revision_id
+                                   ~manifest_sha256:record.admission.manifest_sha256
+                                   ~permission_profile:profile
+                               in
+                               let%bind () =
+                                 Agent_store.Durable_file.sync_directory
+                                   ~env:t.env
+                                   ~path:
+                                     (Agent_store.Data_root.sessions_path
+                                        (S.data_root t.store))
+                                 |> Result.map_error ~f:protocol_of_store
+                               in
+                               let%bind record =
+                                 D.advance ledger record Child_installed
+                                 |> Result.map_error ~f:protocol_of_store
+                               in
+                               let%bind () =
+                                 A.checkpoint parent.actor ~persist:(fun latest ->
+                                   let%bind latest_fingerprint =
+                                     Authority.fingerprint ?moderator latest
+                                   in
+                                   match
+                                     ( latest.lifecycle.desired
+                                     , latest.halted
+                                     , latest.failure )
+                                   with
+                                   | Running, false, None
+                                     when String.equal fingerprint latest_fingerprint
+                                          && Int64.equal
+                                               latest.stop_epoch
+                                               before.stop_epoch ->
+                                     D.advance ledger record Linked
+                                     |> Result.map ~f:ignore
+                                     |> Result.map_error ~f:protocol_of_store
+                                   | Stopped, _, _ -> revoke record Parent_stopped
+                                   | _
+                                     when not
+                                            (Int64.equal
+                                               latest.stop_epoch
+                                               before.stop_epoch) ->
+                                     revoke record Parent_stopped
+                                   | _ -> revoke record Authority_changed)
+                               in
+                               let%map () =
+                                 match fresh with
+                                 | false -> Ok ()
+                                 | true ->
+                                   Session_registry.add
+                                     t.registry
+                                     ~session_id:child_id
+                                     child
+                               in
+                               owned := false))))))))
 ;;
