@@ -552,6 +552,10 @@ let on_event = fun ctx state event -> match event with
           in
           let delivery_cancelled =
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              (* Halt publishes before the automatic stop cleanup has joined its
+                 leases. Finish that retirement before loading a stopped runtime
+                 deliberately for this checkpoint-gate cancellation fixture. *)
+              Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
               Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
               let held, held_u = Eio.Promise.create () in
               let release, release_u = Eio.Promise.create () in

@@ -14,6 +14,7 @@
   runtime_owner
   result_retention
   session_registry
+  delegation_lifecycle
   connection_context
   authorization
   principal_projection

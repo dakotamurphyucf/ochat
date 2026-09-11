@@ -122,6 +122,12 @@ let%expect_test
           Result.try_with (fun () -> Owner.unload_and_wait owner))
       in
       Eio.Promise.await cleaning;
+      let joined =
+        List.init 2 ~f:(fun _ ->
+          Eio.Fiber.fork_promise ~sw (fun () ->
+            Result.try_with (fun () -> Owner.unload_and_wait owner)))
+      in
+      Eio.Fiber.yield ();
       [%test_eq: int] 0 !closes;
       (match Owner.ensure_loaded owner with
        | Error { code = Conflict; retryable = true; _ } -> ()
@@ -130,11 +136,12 @@ let%expect_test
       (match Eio.Promise.await_exn worker with
        | Error (Eio.Cancel.Cancelled _) -> ()
        | _ -> failwith "worker cancellation was lost");
-      (match fail_close, Eio.Promise.await_exn stopped with
-       | false, Ok (Ok ()) -> ()
-       | true, Error (Failure message)
-         when String.equal message "injected runtime close failure" -> ()
-       | _ -> failwith "stop produced an unexpected cleanup outcome");
+      List.iter (stopped :: joined) ~f:(fun waiter ->
+        match fail_close, Eio.Promise.await_exn waiter with
+        | false, Ok (Ok ()) -> ()
+        | true, Error (Failure message)
+          when String.equal message "injected runtime close failure" -> ()
+        | _ -> failwith "stop produced an unexpected cleanup outcome");
       assert (not (Owner.is_loaded owner));
       [%test_eq: int] 1 !closes;
       Owner.ensure_loaded owner |> protocol_ok;

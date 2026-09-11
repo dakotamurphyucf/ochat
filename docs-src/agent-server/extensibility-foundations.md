@@ -3724,3 +3724,38 @@ owner-aware policy mediation is installed, and rejects independent lifetime unti
 its resource ownership is implemented. A child's own moderator is supported.
 Those temporary limits, actual factory creation/recovery and lifecycle coordination
 remain E08 work; general model-visible child creation is not yet enabled.
+
+### Owned-child cancellation and resource cleanup
+
+`Session_actor.stop_delegated` is an internal host operation that matches the
+child's complete persisted private reference before applying the ordinary durable
+stop transition. It does not attach a synthetic writer or grant approval rights.
+It remains usable when the parent is stopped or the admission revoked, since
+those states may require cancelling an already-created child.
+
+`Delegation_lifecycle.stop_owned` resolves that reference in the private ledger,
+requires owned lifetime and requests cancel-stop. It waits outside actor and
+registry locks for foreground invocations, moderator work, job scopes and staged
+work to finish, then joins and unloads the child's runtime. The initial ledger
+lookup and cleanup are protected against caller cancellation so this can run from
+a cancelled parent resource lease's finalizer. A failed stop save leaves the
+runtime available for recovery; the caller must retain parent resources on error.
+Stopping preserves the child's data, history and inspectable actor.
+
+The factory's committed-stop callback now joins runtime cleanup for automatic
+stops, using the same operation as explicit stop commands. Concurrent cleanup
+requests share one retirement and its success or failure. This prevents automatic
+and explicit cleanup from racing into a spurious conflict or closing twice.
+
+Offline tests use real private records and actors with a memory persistence
+backend. They cover foreign/independent relationships, failed saves, repeated
+stop of a revoked unlinked child, and cancellation of a child invocation while
+its cleanup is deliberately blocked. A retained parent runtime cannot close
+until child cleanup finishes, including cancellation of the stop caller and a
+contended ledger lookup. No provider request is made.
+
+This supplies the shared stop/join service. The generated-session coordinator
+still needs to install the parent dependency, exclude concurrent child start and
+reload, propagate stops through its recorded descendants, and reconcile creation
+across restart. The service alone does not enable public child creation or imply
+that those relationships are already installed by the factory.

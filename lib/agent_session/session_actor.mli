@@ -585,6 +585,19 @@ val stop_with_command_audit
   -> mode:Agent_protocol.Session.stop_mode
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Internal owned-child lifecycle propagation. Atomically matches the child's
+    persisted private relationship before using the same durable stop/cancellation
+    transition as a writer request. Does not create an attachment, grant approval
+    rights, or require the parent to remain running. The host must first establish
+    management authority and the applicable lifetime policy from its private
+    ledger; a public session ID or model-provided reference is not sufficient.
+    Stop acknowledgement is not a resource-cleanup join. *)
+val stop_delegated
+  :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> mode:Agent_protocol.Session.stop_mode
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 val append_history
   :  t
   -> attachment_id:Agent_protocol.Id.Attachment.t

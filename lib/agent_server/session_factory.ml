@@ -1990,7 +1990,8 @@ let unload_stopped_runtime t runtime_owner state events =
   with
   | Agent_protocol.Session.Stopped, true, Some runtime ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
-      ignore (Runtime_owner.unload runtime : (unit, Agent_protocol.Error.t) result))
+      ignore
+        (Runtime_owner.unload_and_wait runtime : (unit, Agent_protocol.Error.t) result))
   | ( ( Queued_for_slot
       | Starting
       | Recovering

@@ -344,6 +344,9 @@ type _ request =
   | Stop :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Session.stop_mode
       -> Agent_protocol.Session.t request
+  | Stop_delegated :
+      Agent_store.Delegation_store.Reference.t * Agent_protocol.Session.stop_mode
+      -> Agent_protocol.Session.t request
   | Append_history :
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry list
       -> Agent_protocol.Session.t request
@@ -8718,6 +8721,16 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Activate_queued_start -> activate_queued_start t
   | Stop (attachment_id, mode) ->
     with_writer t attachment_id (fun () -> stop_internal t mode)
+  | Stop_delegated (reference, mode) ->
+    (match t.state.spec.delegation with
+     | Some current
+       when Agent_store.Delegation_store.Reference.equal current reference
+            && Agent_protocol.Id.Session.equal
+                 reference.child_session_id
+                 t.state.identity.session_id -> stop_internal t mode
+     | _ ->
+       Error
+         (error Permission_denied "delegation.stop: child relationship does not match"))
   | Append_history (attachment_id, entries) ->
     with_writer t attachment_id (fun () -> append_history t entries)
   | Defer_history (attachment_id, entries) ->
@@ -9082,6 +9095,10 @@ let stop t ~attachment_id ~mode = call t ~priority:Priority (Stop (attachment_id
 
 let stop_with_command_audit t ~command_audit ~attachment_id ~mode =
   call t ~priority:Priority ~command_audit (Stop (attachment_id, mode))
+;;
+
+let stop_delegated t ~reference ~mode =
+  call t ~priority:Priority (Stop_delegated (reference, mode))
 ;;
 
 let append_history t ~attachment_id entries =

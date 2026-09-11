@@ -19,7 +19,9 @@ val unload : t -> (unit, Agent_protocol.Error.t) result
     outside the owner mutex so worker finalizers can finish. Keep the actor alive
     through this call, and call from outside a retained background callback.
     Accepted-stop cleanup survives caller cancellation; the
-    owner remains reusable for a later authorized session start. *)
+    owner remains reusable for a later authorized session start. Concurrent stop
+    cleanup requests join the same retirement and observe its success or failure;
+    they do not race into a spurious Conflict or close the runtime twice. *)
 val unload_and_wait : t -> (unit, Agent_protocol.Error.t) result
 
 (** Run maintenance only with no installed runtime or background lease, excluding

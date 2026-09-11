@@ -66,6 +66,7 @@ let owner name =
         ; "generated_definition"
         ; "delegation_store"
         ; "delegation_authority"
+        ; "delegation_lifecycle"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"

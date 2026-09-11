@@ -6,13 +6,15 @@ type background_lease =
   ; finish : unit Eio.Promise.u
   }
 
+type cleanup_outcome = (unit, exn * Stdlib.Printexc.raw_backtrace) result
+
 type t =
   { actor : Agent_session.Session_actor.t
   ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
   ; mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
-  ; mutable unloading : bool
+  ; mutable unloading : cleanup_outcome Eio.Promise.t option
   ; mutable background_leases : background_lease list
   }
 
@@ -22,7 +24,7 @@ let create ~actor ~initial ~build =
   ; mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; closed = false
-  ; unloading = false
+  ; unloading = None
   ; background_leases = []
   }
 ;;
@@ -76,7 +78,7 @@ let ensure_loaded_locked t =
   in
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
-  | false, _ when t.unloading ->
+  | false, _ when Option.is_some t.unloading ->
     Error
       (Agent_protocol.Error.create
          Conflict
@@ -188,31 +190,47 @@ let unload_locked t =
     t.runtime <- None
 ;;
 
-let unload t = Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> unload_locked t)
+let unload t =
+  with_owner_lock t ~protect:true (fun () ->
+    match t.unloading with
+    | Some _ -> Error (background_busy ())
+    | None -> unload_locked t)
+;;
 
 let unload_and_wait t =
   (* A committed stop must join cleanup before closing runtime/workspace resources.
      Waiting with the mutex held would prevent the lease finalizers from releasing. *)
   Eio.Cancel.protect (fun () ->
     let open Result.Let_syntax in
-    let%bind leases =
-      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    let%bind disposition =
+      with_owner_lock t ~protect:true (fun () ->
         match t.closed, t.unloading with
         | true, _ -> Error (closed_error ())
-        | false, true -> Error (background_busy ())
-        | false, false ->
-          t.unloading <- true;
-          Ok t.background_leases)
+        | false, Some finished -> Ok (`Join finished)
+        | false, None ->
+          let finished, finish = Eio.Promise.create () in
+          t.unloading <- Some finished;
+          Ok (`Retire (t.background_leases, finish)))
     in
-    Exn.protect
-      ~finally:(fun () ->
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.unloading <- false))
-      ~f:(fun () ->
-        List.iter leases ~f:(fun lease -> lease.cancel ());
-        List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
-        Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> retire_runtime_locked t)
-        |> raise_cleanup;
-        Ok ()))
+    let outcome =
+      match disposition with
+      | `Join finished -> Eio.Promise.await finished
+      | `Retire (leases, finish) ->
+        let outcome =
+          try
+            List.iter leases ~f:(fun lease -> lease.cancel ());
+            List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
+            with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
+          with
+          | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+        in
+        with_owner_lock t ~protect:true (fun () ->
+          t.unloading <- None;
+          Eio.Promise.resolve finish outcome);
+        outcome
+    in
+    raise_cleanup outcome;
+    Ok ())
 ;;
 
 let with_unloaded t f =
@@ -224,7 +242,7 @@ let with_unloaded t f =
       try
         Ok
           (match t.closed, t.unloading, t.runtime, t.background_leases with
-           | false, false, None, [] -> Result.map (f ()) ~f:Option.some
+           | false, None, None, [] -> Result.map (f ()) ~f:Option.some
            | _ -> Ok None)
       with
       | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
@@ -253,7 +271,7 @@ let with_administration t f =
         Ok
           (if t.closed
            then Error (closed_error ())
-           else if t.unloading || not (List.is_empty t.background_leases)
+           else if Option.is_some t.unloading || not (List.is_empty t.background_leases)
            then Error (background_busy ())
            else (
              match f () with
