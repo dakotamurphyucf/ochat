@@ -431,6 +431,7 @@ let%expect_test
               ~definition
               ~artifact_store
               ~parent_runtime
+              ~inherited_managed:None
               ~authority:(authority_for definition)
               ~sw
               ~env

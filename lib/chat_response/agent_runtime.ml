@@ -708,13 +708,28 @@ let prepare_extensions
   { native; definition = Managed_tool_registry.definition managed; managed }
 ;;
 
-let inherit_native ~(parent : t) ~capabilities =
+let inherit_native ?managed ~(parent : t) ~capabilities () =
   let module C = Tool_capability in
   let open Result.Let_syntax in
   let binding_result result =
     Result.map_error result ~f:(fun error -> [ diagnostic error.C.code error.message ])
   in
   let%bind parent_capabilities = Lazy.force parent.capabilities |> binding_result in
+  let%bind () =
+    match managed with
+    | None -> Ok ()
+    | Some delegation
+      when String.equal
+             (C.fingerprint capabilities)
+             (C.fingerprint (Managed_tool_registry.delegation_selection delegation)) ->
+      Ok ()
+    | Some _ ->
+      Error
+        [ diagnostic
+            "delegation.selection_changed"
+            "managed delegation does not match the selected tools"
+        ]
+  in
   let%bind functions =
     List.fold_result (C.references capabilities) ~init:[] ~f:(fun functions reference ->
       let%bind binding =
@@ -726,6 +741,12 @@ let inherit_native ~(parent : t) ~capabilities =
       in
       match C.implementation binding with
       | Native fn -> Ok (fn :: functions)
+      | Managed _ when Option.is_some managed ->
+        let registry =
+          Managed_tool_registry.delegation_registry (Option.value_exn managed)
+        in
+        let%map _ = Managed_tool_registry.resolve registry binding |> binding_result in
+        functions
       | Managed _ ->
         Error
           [ diagnostic
@@ -738,13 +759,23 @@ let inherit_native ~(parent : t) ~capabilities =
     |> List.map ~f:(fun reference -> reference.C.name)
     |> String.Set.of_list
   in
+  let execution_names =
+    match managed with
+    | None -> names
+    | Some delegated ->
+      Managed_tool_registry.delegation_registry delegated
+      |> Managed_tool_registry.capabilities
+      |> C.references
+      |> List.map ~f:(fun reference -> reference.C.name)
+      |> String.Set.of_list
+  in
   Ok
     { parent with
       functions = List.rev functions
     ; capabilities = lazy (Ok capabilities)
     ; classifications =
         List.filter parent.classifications ~f:(fun (name, _) -> Set.mem names name)
-    ; shell_tool_names = Set.inter parent.shell_tool_names names
+    ; shell_tool_names = Set.inter parent.shell_tool_names execution_names
     ; moderator_shell_runtime = None
     }
 ;;

@@ -85,6 +85,18 @@ val definition_fingerprint : definition -> string
     Its fingerprint already participates in [definition_fingerprint]. *)
 val definition_capabilities : definition -> Tool_capability.t
 
+(** Select already compiled standalone handlers without recompilation or execution.
+    Names must exist and contain no moderator-handled tools. The supplied registry
+    must narrow the original definition while retaining every selected handler's
+    exact dependencies. No lifecycle scripts are retained in the result: this
+    projection cannot initialize or replace the parent's moderator. This is a
+    compiled-code view, not permission to dispatch a delegated invocation. *)
+val select_standalone_tools
+  :  definition
+  -> capabilities:Tool_capability.t
+  -> names:string list
+  -> (definition, Tool_capability.error) result
+
 (** Compile zero or one generated lifecycle moderator under the delegated v1
     surface, which omits direct Model, Process and stdout print. Retains the same
     definition interface used by the owning moderator manager, without adding any

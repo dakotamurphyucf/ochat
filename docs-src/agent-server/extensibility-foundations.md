@@ -3666,8 +3666,19 @@ advertised names/classifications, and retains the parent's shell redaction servi
 Changing the child's workspace does not rebase a parent's read roots. Removed or
 re-registered bindings reject; an equivalent newly constructed parent requires
 explicit saved-pin restoration through `Generated_definition.restore` first.
-Managed bindings currently reject with `delegation.owner_dispatch_unavailable`;
-their owner-aware service integration is still required.
+Standalone managed bindings retain their original compiled handlers and exact
+transitive dependencies. A child exposing only `read_report` can execute its
+private `private_reader` → `read_file` implementation without advertising either
+dependency to the model. Private calls use the invoking child's actor, approvals,
+background jobs and outcomes, while ancestor restrictions still apply. The host
+rechecks the live parent registry and the actual invocation's dependency scope;
+public tool names alone do not authorize private calls. Private shell dependencies
+keep the shell approval path without an additional generic approval prompt.
+
+The inherited view contains no parent lifecycle scripts or mutable moderator
+state. Stateful moderator-handled tools, including private transitive dependencies
+of standalone tools, still reject with `delegation.owner_dispatch_unavailable`.
+Their original-owner dispatch remains required before they can be delegated.
 
 Generated sessions can have their own instructions and supported model/reasoning
 configuration, with or without a lifecycle moderator. Moderator snapshots restore

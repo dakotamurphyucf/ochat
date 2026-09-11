@@ -293,6 +293,113 @@ let revalidate t ~current =
         }
 ;;
 
+type delegation =
+  { registry : t
+  ; selected : C.t
+  ; exposed_definition : EC.definition
+  }
+
+let delegation_registry delegation = delegation.registry
+let delegation_selection delegation = delegation.selected
+let delegation_definition delegation = delegation.exposed_definition
+
+let delegate_standalone t ~selected =
+  let open Result.Let_syntax in
+  let rec closure pending visited managed_names =
+    match pending with
+    | [] -> Ok (visited, managed_names)
+    | reference :: pending ->
+      let%bind binding =
+        C.resolve t.capabilities ~id:reference.C.id ~fingerprint:reference.fingerprint
+      in
+      (match Set.mem visited reference.name with
+       | true -> closure pending visited managed_names
+       | false ->
+         let visited = Set.add visited reference.name in
+         (match C.implementation binding with
+          | Native _ -> closure pending visited managed_names
+          | Managed _ ->
+            let%bind prepared = resolve t binding in
+            (match (EC.declaration prepared).implementation with
+             | Moderator _ ->
+               Error
+                 C.
+                   { code = "delegation.owner_dispatch_unavailable"
+                   ; message =
+                       "delegated dependency requires its original moderator owner"
+                   }
+             | Standalone _ ->
+               closure
+                 (List.rev_append (C.references (EC.capabilities prepared)) pending)
+                 visited
+                 (Set.add managed_names reference.name))))
+  in
+  let%bind names, managed_names =
+    closure (C.references selected) String.Set.empty String.Set.empty
+  in
+  let%bind capabilities = C.select t.capabilities ~names:(Set.to_list names) in
+  let%bind definition =
+    EC.select_standalone_tools
+      t.definition
+      ~capabilities
+      ~names:(Set.to_list managed_names)
+  in
+  let exposed_names =
+    C.references selected
+    |> List.filter_map ~f:(fun reference ->
+      match Set.mem managed_names reference.name with
+      | true -> Some reference.name
+      | false -> None)
+  in
+  let%map exposed_definition =
+    EC.select_standalone_tools t.definition ~capabilities ~names:exposed_names
+  in
+  let tools =
+    List.filter t.tools ~f:(fun (_, prepared) ->
+      Set.mem managed_names (EC.declaration prepared).name)
+  in
+  { registry = { t with capabilities; definition; tools }; selected; exposed_definition }
+;;
+
+let delegated_invocation_dependencies delegation invocation =
+  let module I = Agent_protocol.Invocation in
+  let open Result.Let_syntax in
+  let fail () =
+    Error
+      C.
+        { code = "delegation.invalid_owner"
+        ; message = "invocation is not an active delegated standalone handler"
+        }
+  in
+  let registry = delegation.registry in
+  let%bind binding = C.find registry.capabilities ~name:invocation.I.context.tool_name in
+  let%bind prepared = resolve registry binding in
+  let reference = C.reference binding in
+  let context = invocation.context in
+  match invocation.status, (EC.declaration prepared).implementation with
+  | Dispatching, Standalone _ when Result.is_ok (I.validate invocation) ->
+    let matches =
+      match context.origin with
+      | Model ->
+        String.equal context.implementation_revision (EC.fingerprint prepared)
+        && String.equal
+             context.capability_fingerprint
+             (C.fingerprint (EC.capabilities prepared))
+        && Result.is_ok
+             (C.resolve
+                delegation.selected
+                ~id:reference.id
+                ~fingerprint:reference.fingerprint)
+      | Script | Moderator ->
+        String.equal context.implementation_revision reference.implementation_revision
+      | _ -> false
+    in
+    (match matches with
+     | true -> Ok (EC.capabilities prepared)
+     | false -> fail ())
+  | _ -> fail ()
+;;
+
 type execution =
   { prepared : EC.t
   ; binding : C.binding

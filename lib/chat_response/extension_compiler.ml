@@ -184,6 +184,65 @@ let compiled_scripts definition = definition.compiled_scripts
 let definition_fingerprint definition = definition.definition_fingerprint
 let definition_capabilities definition = definition.definition_capabilities
 
+let select_standalone_tools definition ~capabilities ~names =
+  let module C = Tool_capability in
+  let open Result.Let_syntax in
+  let failure code message = Error C.{ code; message } in
+  let%bind () =
+    List.fold_result (C.references capabilities) ~init:() ~f:(fun () reference ->
+      C.resolve
+        definition.definition_capabilities
+        ~id:reference.id
+        ~fingerprint:reference.fingerprint
+      |> Result.map ~f:ignore)
+  in
+  let%bind () =
+    match List.find_a_dup names ~compare:String.compare with
+    | None -> Ok ()
+    | Some _ -> failure "capability.duplicate_name" "duplicate delegated tool selection"
+  in
+  let%map prepared_tools =
+    List.map names ~f:(fun name ->
+      let%bind tool =
+        List.find definition.prepared_tools ~f:(fun tool ->
+          String.equal tool.declaration.name name)
+        |> Result.of_option
+             ~error:
+               C.
+                 { code = "capability.not_managed"
+                 ; message = "delegated tool has no captured implementation"
+                 }
+      in
+      let%bind () =
+        match tool.declaration.implementation with
+        | Standalone _ -> Ok ()
+        | Moderator _ ->
+          failure
+            "delegation.owner_dispatch_unavailable"
+            "stateful tools require their original moderator owner"
+      in
+      let%map () =
+        List.fold_result (C.references tool.capabilities) ~init:() ~f:(fun () reference ->
+          C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+          |> Result.map ~f:ignore)
+      in
+      tool)
+    |> Result.all
+  in
+  { prepared_tools
+  ; compiled_scripts = []
+  ; definition_capabilities = capabilities
+  ; definition_fingerprint =
+      [%sexp
+        ("ochat.standalone-definition-selection.v1" : string)
+      , (definition.definition_fingerprint : string)
+      , (List.sort names ~compare:String.compare : string list)
+      , (C.fingerprint capabilities : string)]
+      |> Sexp.to_string
+      |> Chatmd_shell_spec.Source_ref.digest
+  }
+;;
+
 let prepare_delegated_definition_in_domain
       ?(limits = Chatml_compilation.default_limits)
       ~env

@@ -204,6 +204,22 @@ val with_managed_tools
   -> execution_limits:(Chat_response.Extension_compiler.t -> Chatml_execution.limits)
   -> t
 
+(** Captured implementations owned by this live runtime, for trusted delegation
+    setup. Reading the registry grants no invocation or moderator-state access. *)
+val managed_registry : t -> Chat_response.Managed_tool_registry.t option
+
+(** Install a checked inherited standalone closure as backing execution services.
+    [current] reads the still-owned parent's live registry. Public selection and
+    native borrows remain separate; the host must validate private dependency
+    access using the actual dispatched handler record and current delegation. *)
+val with_inherited_managed_tools
+  :  t
+  -> env:Eio_unix.Stdenv.base
+  -> delegation:Chat_response.Managed_tool_registry.delegation
+  -> current:(unit -> Chat_response.Tool_capability.t)
+  -> execution_limits:(Chat_response.Extension_compiler.t -> Chatml_execution.limits)
+  -> t
+
 (** Reuse the same live native registry, policy and disclosure service for model
     calls. The stream still supplies final-target authorization; the owning host
     should delegate these native names to this policy service to avoid duplicate

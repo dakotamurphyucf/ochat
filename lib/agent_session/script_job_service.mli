@@ -42,6 +42,11 @@ val create
   -> host:host
   -> t
 
+(** Rebind backing lookup for a host-verified inherited implementation. Every
+    scope still supplies its exact selected ceiling and actor-owned launcher;
+    current binding checks, reservations and outcome commits remain unchanged. *)
+val with_current_capabilities : t -> (unit -> Chat_response.Tool_capability.t) -> t
+
 (** Bind to a host-verified caller selection and active owner. No raw model input
     may choose owner or selected. Source compilation captures a subset of this
     ceiling and rechecks it after the domain wait. Scope handles expire on return.

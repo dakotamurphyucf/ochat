@@ -2081,6 +2081,31 @@ let prepare_runtime_at_paths
               ()
           in
           let services = extension_services t profile actor_ref ~state in
+          let%bind inherited_managed =
+            match parent_runtime.moderator_script_tools with
+            | None -> Ok None
+            | Some tools ->
+              (match Agent_session.Script_tool_calls.managed_registry tools with
+               | None -> Ok None
+               | Some managed ->
+                 Chat_response.Managed_tool_registry.delegate_standalone
+                   managed
+                   ~selected:
+                     (Chat_response.Generated_admission.capabilities
+                        (Agent_session.Generated_definition.admission definition))
+                 |> Result.map ~f:(fun delegation ->
+                   Some
+                     Agent_session.Runtime_builder.
+                       { delegation
+                       ; current =
+                           (fun () ->
+                             Agent_session.Script_tool_calls.current_capabilities tools)
+                       })
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Permission_denied
+                     error.Chat_response.Tool_capability.message))
+          in
           let prepare (request : Agent_session.Script_tool_calls.preparation) =
             let module P = Agent_protocol in
             let module D = Agent_store.Delegation_store in
@@ -2154,17 +2179,115 @@ let prepare_runtime_at_paths
                           && Int.equal context.generation request.generation -> Ok ()
                    | _ -> reject "delegation.candidate_inactive: moderator owner ended")
               in
-              let%bind selected =
-                C.select
+              let fits ceiling =
+                match
+                  C.select
+                    ceiling
+                    ~names:(List.map (C.references request.selected) ~f:(fun r -> r.name))
+                with
+                | Ok selected ->
+                  String.equal (C.fingerprint selected) (C.fingerprint request.selected)
+                | Error _ -> false
+              in
+              match
+                fits
                   (Chat_response.Generated_admission.capabilities
                      (Agent_session.Generated_definition.admission definition))
-                  ~names:(List.map (C.references request.selected) ~f:(fun r -> r.name))
-                |> Result.map_error ~f:(fun e ->
-                  unavailable Permission_denied e.C.message)
-              in
-              if String.equal (C.fingerprint selected) (C.fingerprint request.selected)
-              then Ok ()
-              else reject "delegation.candidate_tools: selected ceiling changed"
+              with
+              | true -> Ok ()
+              | false ->
+                (match inherited_managed, request.owner with
+                 | Some inherited, Native_call id ->
+                   let module Managed = Chat_response.Managed_tool_registry in
+                   let%bind () =
+                     Managed.revalidate
+                       (Managed.delegation_registry inherited.delegation)
+                       ~current:(inherited.current ())
+                     |> Result.map_error ~f:(fun error ->
+                       unavailable Permission_denied error.C.message)
+                   in
+                   let%bind () =
+                     match
+                       fits
+                         (Managed.capabilities
+                            (Managed.delegation_registry inherited.delegation))
+                     with
+                     | true -> Ok ()
+                     | false ->
+                       reject
+                         "delegation.candidate_tools: call is outside inherited \
+                          implementation dependencies"
+                   in
+                   let%bind invocation =
+                     List.find child.invocations ~f:(fun invocation ->
+                       P.Id.Invocation.equal invocation.context.id id)
+                     |> Result.of_option
+                          ~error:
+                            (unavailable
+                               Permission_denied
+                               "delegation.candidate_owner: handler owner ended")
+                   in
+                   let%bind dependencies =
+                     match
+                       Managed.delegated_invocation_dependencies
+                         inherited.delegation
+                         invocation
+                     with
+                     | Ok dependencies -> Ok dependencies
+                     | Error _ ->
+                       let module Native = Agent_session.Native_tool_invocation in
+                       let%bind borrowed = Native.borrow () in
+                       let%bind () =
+                         match
+                           P.Invocation.equal_context
+                             (Native.borrowed_invocation borrowed).context
+                             invocation.context
+                         with
+                         | true -> Ok ()
+                         | false ->
+                           reject
+                             "delegation.candidate_owner: native borrow belongs to \
+                              another invocation"
+                       in
+                       let%bind launch =
+                         Agent_session.Job_launch.derive
+                           ~session_id:child.identity.session_id
+                           ~generation:child.identity.generation
+                           ~invocations:child.invocations
+                           ~events:child.moderator_executions
+                           ~jobs:child.jobs
+                           ~owner:(Invocation invocation.context.id)
+                       in
+                       let%bind () =
+                         match launch.parent_job with
+                         | None -> Ok ()
+                         | Some (id, attempt) ->
+                           (match
+                              List.find child.jobs ~f:(fun job ->
+                                P.Id.Job.equal job.id id)
+                            with
+                            | Some
+                                { kind = Async_tool
+                                ; status = Running | Waiting_permission _
+                                ; launch = Some _
+                                ; generation
+                                ; attempt = current
+                                ; _
+                                }
+                              when Int.equal generation child.identity.generation
+                                   && Int.equal current attempt -> Ok ()
+                            | _ ->
+                              reject
+                                "delegation.candidate_owner: private background work has \
+                                 no current owned launch")
+                       in
+                       Native.borrowed_capabilities borrowed
+                   in
+                   (match fits dependencies with
+                    | true -> Ok ()
+                    | false ->
+                      reject "delegation.candidate_tools: handler dependencies changed")
+                 | _ -> reject "delegation.candidate_tools: selected ceiling changed")
             in
             let%bind () = check () in
             let rec evaluate visited depth (edge : D.Reference.t) call =
@@ -2283,6 +2406,7 @@ let prepare_runtime_at_paths
                ~definition
                ~artifact_store
                ~parent_runtime:native
+               ~inherited_managed
                ~authority)
             (fun _ ->
                Shell_runtime.Manifest_authorizer.Reject

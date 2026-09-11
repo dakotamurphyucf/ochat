@@ -186,12 +186,19 @@ let with_preparation t ~prepare =
 ;;
 
 let native_dispatch t ~declared ~input ~capabilities =
+  let registry () =
+    C.select
+      (t.registry ())
+      ~names:(List.map (C.references declared) ~f:(fun reference -> reference.C.name))
+    |> Result.map_error ~f:(fun error -> error.C.message)
+    |> Result.ok_or_failwith
+  in
   let dispatch =
     Native_tool_dispatch.create
       ~input
       ~capabilities
       ~declared
-      ~registry:t.registry
+      ~registry
       ~now:t.now
       ~is_halted:t.is_halted
       ~admit:t.authorize
@@ -1261,6 +1268,33 @@ let with_managed_tools t ~env ~definition ~execution_limits =
                 run_managed scope service execution borrowed with_result)
           })
   }
+;;
+
+let managed_registry t =
+  Option.map t.managed ~f:(fun service -> (service t).Native_tool_invocation.definition)
+;;
+
+let with_inherited_managed_tools t ~env ~delegation ~current ~execution_limits =
+  let definition = Managed.delegation_registry delegation in
+  let registry () =
+    let current = current () in
+    Managed.revalidate definition ~current
+    |> Result.map_error ~f:(fun error -> error.C.message)
+    |> Result.ok_or_failwith;
+    C.select
+      current
+      ~names:
+        (List.map
+           (C.references (Managed.capabilities definition))
+           ~f:(fun reference -> reference.C.name))
+    |> Result.map_error ~f:(fun error -> error.C.message)
+    |> Result.ok_or_failwith
+  in
+  let jobs =
+    Option.map t.jobs ~f:(fun jobs ->
+      Script_job_service.with_current_capabilities jobs registry)
+  in
+  with_managed_tools { t with registry; jobs } ~env ~definition ~execution_limits
 ;;
 
 let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =

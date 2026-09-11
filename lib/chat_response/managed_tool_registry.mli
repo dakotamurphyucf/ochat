@@ -39,6 +39,40 @@ val resolve
     widen it, and removed/re-registered bindings invalidate it. *)
 val revalidate : t -> current:Tool_capability.t -> (unit, Tool_capability.error) result
 
+(** Checked standalone delegation view. The public selection stays distinct from
+    its transitive private execution dependencies. Every binding is resolved by
+    exact identity in the original registry; no tools, resources, scripts or
+    moderator state are reconstructed or initialized. Stateful dependencies reject
+    until an original-owner dispatch service is supplied. The host still owns
+    live authority checks, permission policy, lifetime and actual dispatch. *)
+type delegation
+
+val delegate_standalone
+  :  t
+  -> selected:Tool_capability.t
+  -> (delegation, Tool_capability.error) result
+
+val delegation_selection : delegation -> Tool_capability.t
+
+(** Execution registry contains only the selected bindings and their captured
+    dependency closure. It must never replace the child's advertised/borrowed
+    public selection. Existing admission and revalidation apply to this registry. *)
+val delegation_registry : delegation -> t
+
+(** Only publicly selected standalone handlers, with no parent lifecycle scripts.
+    Transitive private handlers remain available through the execution registry. *)
+val delegation_definition : delegation -> Extension_compiler.definition
+
+(** Private dependency ceiling of an actor-verified running handler. Supports
+    persisted model standalone and nested managed invocation identities. The host
+    must supply the actual dispatched actor record and verify its owner/session/
+    generation; arbitrary caller records do not prove ownership. This function
+    checks implementation identity and grants no execution or lifecycle authority. *)
+val delegated_invocation_dependencies
+  :  delegation
+  -> Agent_protocol.Invocation.t
+  -> (Tool_capability.t, Tool_capability.error) result
+
 (** Verified link between a dispatched call's selected managed capability and
     that capability's captured implementation. Its private dependencies belong
     to this implementation, not to the calling script's tool selection. *)

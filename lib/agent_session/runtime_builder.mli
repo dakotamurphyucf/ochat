@@ -256,11 +256,20 @@ val build_with_extensions
   -> job_services:job_services
   -> (t, Agent_protocol.Error.t) result
 
+(** Captured standalone implementations and a live lookup of the parent's checked
+    execution registry. The host retains parent resources and mediates policy. *)
+type inherited_managed =
+  { delegation : Chat_response.Managed_tool_registry.delegation
+  ; current : unit -> Chat_response.Tool_capability.t
+  }
+
 (** Construct a generated child through the same worker, moderator, invocation,
     notification and background services. Verify the immutable generated tree,
     retain exact selected parent native bindings, and consume the already compiled
     delegated moderator definition. No native/shell/MCP declarations are rebuilt.
-    Managed inheritance rejects without an owner-aware dispatcher. Input accepts
+    [inherited_managed] installs checked standalone implementations, including
+    private dependencies, without copying parent lifecycle scripts or state.
+    Stateful managed dependencies still reject. Input accepts
     plain text; implicit ChatMD resource loading and direct model recipes reject.
 
     This is runtime construction, not session admission. The owning coordinator
@@ -273,6 +282,7 @@ val build_generated
   -> definition:Generated_definition.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> parent_runtime:Chat_response.Agent_runtime.t
+  -> inherited_managed:inherited_managed option
   -> authority:Delegation_authority.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base

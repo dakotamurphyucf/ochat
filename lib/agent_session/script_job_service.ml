@@ -39,6 +39,7 @@ let create ~env ~policy ~current_capabilities ~host =
   { env; policy; current_capabilities; host }
 ;;
 
+let with_current_capabilities t current_capabilities = { t with current_capabilities }
 let message result = Result.map_error result ~f:(fun error -> error.P.Error.message)
 
 let view (job : P.Job.t) =

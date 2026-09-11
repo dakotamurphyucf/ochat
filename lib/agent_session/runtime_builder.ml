@@ -727,12 +727,18 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
     History_entry.create_with_id ~id item
 ;;
 
+type inherited_managed =
+  { delegation : Chat_response.Managed_tool_registry.delegation
+  ; current : unit -> Chat_response.Tool_capability.t
+  }
+
 type source =
   | Authored of Prompt_revision.t
   | Generated of
       { definition : Generated_definition.t
       ; artifact_store : Agent_store.Prompt_artifact_store.t
       ; parent_runtime : Agent_runtime.t
+      ; inherited_managed : inherited_managed option
       ; authority : Delegation_authority.t
       }
 
@@ -919,15 +925,21 @@ let build_with_services
   in
   let%bind agent_runtime, definition, managed =
     match source with
-    | Generated { definition; parent_runtime; _ } ->
+    | Generated { definition; parent_runtime; inherited_managed; _ } ->
       let admission = Generated_definition.admission definition in
       let%map native =
         Agent_runtime.inherit_native
+          ?managed:
+            (Option.map inherited_managed ~f:(fun inherited -> inherited.delegation))
           ~parent:parent_runtime
           ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+          ()
         |> map_diagnostics
       in
-      native, Some (Chat_response.Generated_admission.definition admission), None
+      ( native
+      , Some (Chat_response.Generated_admission.definition admission)
+      , Option.map inherited_managed ~f:(fun inherited ->
+          Chat_response.Managed_tool_registry.delegation_registry inherited.delegation) )
     | Authored _ ->
       let%bind host = host ~env ~paths ~session_id ~elements in
       create_agent_runtime
@@ -972,11 +984,27 @@ let build_with_services
               extensibility-v1 moderator")
       else Ok ()
   in
+  let inherited =
+    match source with
+    | Generated { inherited_managed; _ } -> inherited_managed
+    | Authored _ -> None
+  in
+  let standalone_definition =
+    match inherited with
+    | Some inherited ->
+      Some
+        (Chat_response.Managed_tool_registry.delegation_definition inherited.delegation)
+    | None -> definition
+  in
   let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
   let tools = Chat_response.Tool.convert_tools comp_tools in
   let tools =
     tools
-    @ (Option.to_list definition
+    @ ((Option.to_list definition
+        @
+        match inherited with
+        | None -> []
+        | Some _ -> Option.to_list standalone_definition)
        |> List.concat_map ~f:(fun definition ->
          Chat_response.Extension_compiler.prepared_tools definition
          |> List.map ~f:(fun prepared ->
@@ -1045,16 +1073,26 @@ let build_with_services
     match managed, extension_services with
     | Some definition, Some services ->
       let tools_service =
-        Script_tool_calls.with_managed_tools
-          (services.script_tools agent_runtime)
-          ~env
-          ~definition
-          ~execution_limits:services.standalone_execution_limits
+        match inherited with
+        | Some inherited ->
+          Script_tool_calls.with_inherited_managed_tools
+            (services.script_tools agent_runtime)
+            ~env
+            ~delegation:inherited.delegation
+            ~current:inherited.current
+            ~execution_limits:services.standalone_execution_limits
+        | None ->
+          Script_tool_calls.with_managed_tools
+            (services.script_tools agent_runtime)
+            ~env
+            ~definition
+            ~execution_limits:services.standalone_execution_limits
       in
       Some
         (match moderator with
          | Some (moderator, _)
-           when Option.is_some (Manager.extension_definition moderator.manager) ->
+           when (not delegated)
+                && Option.is_some (Manager.extension_definition moderator.manager) ->
            Script_tool_calls.with_moderator_dispatch
              tools_service
              ~dispatch:
@@ -1201,7 +1239,7 @@ let build_with_services
         }
       in
       let standalone =
-        match definition, extension_services with
+        match standalone_definition, extension_services with
         | Some definition, Some services ->
           [ Standalone_tool_dispatch.create
               ?observer
@@ -1538,8 +1576,17 @@ let build_with_extensions ~services ~sw ~env ~paths ~storage_paths ~revision =
     ~extension_services:(Some services)
 ;;
 
-let build_generated ~services ~definition ~artifact_store ~parent_runtime ~authority =
+let build_generated
+      ~services
+      ~definition
+      ~artifact_store
+      ~parent_runtime
+      ~inherited_managed
+      ~authority
+  =
   build_with_services
-    ~source:(Generated { definition; artifact_store; parent_runtime; authority })
+    ~source:
+      (Generated
+         { definition; artifact_store; parent_runtime; inherited_managed; authority })
     ~extension_services:(Some services)
 ;;

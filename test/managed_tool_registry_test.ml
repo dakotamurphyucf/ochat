@@ -90,6 +90,33 @@ let on_event ctx state event = Task.pure(state)
     assert (Option.is_none (C.native_implementation root));
     assert (Option.is_none (C.native_implementation review));
     let root_program = R.resolve first root |> capability in
+    let public = C.select registry ~names:[ "root" ] |> capability in
+    let delegated = R.delegate_standalone first ~selected:public |> capability in
+    let execution_registry = R.delegation_registry delegated in
+    let delegated_caps = R.capabilities execution_registry in
+    let names caps =
+      C.references caps
+      |> List.map ~f:(fun reference -> reference.C.name)
+      |> List.sort ~compare:String.compare
+    in
+    [%test_eq: string list] [ "root" ] (names (R.delegation_selection delegated));
+    [%test_eq: string list] [ "leaf"; "native"; "root" ] (names delegated_caps);
+    assert (phys_equal (R.resolve execution_registry root |> capability) root_program);
+    assert (
+      phys_equal (C.find delegated_caps ~name:"native" |> capability) (find "native"));
+    let exposed = R.delegation_definition delegated in
+    [%test_eq: string list]
+      [ "root" ]
+      (List.map (E.prepared_tools exposed) ~f:(fun p -> (E.declaration p).name));
+    assert (List.is_empty (E.compiled_scripts exposed));
+    assert (List.is_empty (E.compiled_scripts (R.definition execution_registry)));
+    assert (Result.is_error (C.find delegated_caps ~name:"review"));
+    R.revalidate execution_registry ~current:delegated_caps |> capability;
+    assert (Result.is_error (R.revalidate execution_registry ~current:public));
+    let stateful = C.select registry ~names:[ "review" ] |> capability in
+    (match R.delegate_standalone first ~selected:stateful with
+     | Error e -> [%test_eq: string] "delegation.owner_dispatch_unavailable" e.code
+     | Ok _ -> failwith "stateful tool lost its original owner");
     let selected = E.capabilities root_program in
     assert (phys_equal (C.find selected ~name:"leaf" |> capability) leaf);
     assert (Result.is_error (C.find selected ~name:"native"));
@@ -103,6 +130,7 @@ let on_event ctx state event = Task.pure(state)
     assert (
       String.equal (C.permission_fingerprint root) (C.permission_fingerprint same_root));
     assert (Result.is_error (R.resolve first same_root));
+    assert (Result.is_error (R.delegate_standalone same ~selected:public));
     assert (Result.is_error (R.revalidate first ~current:(R.capabilities same)));
     R.revalidate first ~current:registry |> capability;
     let changed = build (base "broader") elements |> prepared in
@@ -130,6 +158,20 @@ let on_event ctx state event = Task.pure(state)
       mutate (fun tool ->
         if String.equal tool.name "root" then { tool with uses = [ "missing" ] } else tool)
     in
+    let with_stateful_dependency =
+      mutate (fun tool ->
+        match String.equal tool.name "leaf" with
+        | true -> { tool with uses = [ "review" ] }
+        | false -> tool)
+      |> build original
+      |> prepared
+    in
+    let stateful_root =
+      C.select (R.capabilities with_stateful_dependency) ~names:[ "root" ] |> capability
+    in
+    (match R.delegate_standalone with_stateful_dependency ~selected:stateful_root with
+     | Error e -> [%test_eq: string] "delegation.owner_dispatch_unavailable" e.code
+     | Ok _ -> failwith "transitive stateful dependency lost its owner");
     let cyclic =
       mutate (fun tool ->
         if String.equal tool.name "leaf" then { tool with uses = [ "root" ] } else tool)

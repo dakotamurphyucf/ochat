@@ -143,13 +143,18 @@ type extension_resources =
 
 (** Select exact live native bindings from an already constructed parent runtime.
     Retains their runners, resource context, shell redaction and classifications;
-    constructs no resources and exposes no unselected tools. Managed bindings
-    reject until an owner-aware inherited dispatcher is supplied. Disables the
+    constructs no resources and exposes no unselected tools. [managed] retains
+    checked standalone handlers and their private dependency closure; the host
+    must install their inherited dispatcher. Stateful dependencies reject. Private
+    shell classification is retained for execution, without advertising those
+    tools or adding native runners for managed declarations. Disables the
     child's direct moderator Process route. The host must still establish actual
     delegability, ongoing parent policy mediation and parent resource lifetime. *)
 val inherit_native
-  :  parent:t
+  :  ?managed:Managed_tool_registry.delegation
+  -> parent:t
   -> capabilities:Tool_capability.t
+  -> unit
   -> (t, diagnostic list) result
 
 (** Trusted host implementations selected only by an explicit Builtin declaration
