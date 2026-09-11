@@ -5209,6 +5209,7 @@ let create_generated_session
         ; manifest_sha256 = artifact.manifest_sha256
         ; parent_revision_id = before.spec.prompt_revision_id
         ; parent_stop_epoch = Some before.stop_epoch
+        ; authored_tool = None
         ; authority_sha256
         ; capability_pins = G.capability_pins definition
         ; lifetime = admitted_lifetime

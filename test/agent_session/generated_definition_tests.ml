@@ -127,6 +127,7 @@ let%expect_test "generated installation requires its exact durable unrevoked res
           ; manifest_sha256 = (G.artifact prepared).manifest_sha256
           ; parent_revision_id = P.Id.Prompt_revision.create ()
           ; parent_stop_epoch = None
+          ; authored_tool = None
           ; authority_sha256 = digest "host admission"
           ; capability_pins = G.capability_pins prepared
           ; lifetime = Owned
@@ -144,7 +145,7 @@ let%expect_test "generated installation requires its exact durable unrevoked res
             ~max_bytes:1048576
           |> store_ok
         with
-        | New record -> record
+        | D.New record -> record
         | _ -> failwith "expected new reservation"
       in
       let altered = prepare (bundle ~instructions:"different child" ()) in
@@ -163,6 +164,43 @@ let%expect_test "generated installation requires its exact durable unrevoked res
       G.install_reserved ~delegations ~reservation ~artifact_store prepared
       |> expect "delegation.revoked";
       let _ = Store.load artifact_store revision_id |> store_ok in
+      let authored_revision = P.Id.Prompt_revision.create () in
+      let authored =
+        G.with_identity prepared ~revision_id:authored_revision ~created_at |> get
+      in
+      let authored_admission =
+        { admission with
+          child_session_id = P.Id.Session.create ()
+        ; revision_id = authored_revision
+        ; transaction_id = P.Id.Transaction.create ()
+        ; manifest_sha256 = (G.artifact authored).manifest_sha256
+        ; authored_tool =
+            Some { name = "researcher"; source_sha256 = digest "authored source" }
+        }
+      in
+      let authored_reservation =
+        D.reserve
+          delegations
+          ~key:
+            { key with
+              idempotency_key = P.Idempotency_key.of_string "authored" |> protocol_ok
+            }
+          ~request_sha256:(digest "authored request")
+          ~admission:authored_admission
+          ~max_records:8
+          ~max_bytes:1048576
+        |> store_ok
+        |> function
+        | D.New record -> record
+        | _ -> failwith "expected authored reservation"
+      in
+      G.install_reserved
+        ~delegations
+        ~reservation:authored_reservation
+        ~artifact_store
+        authored
+      |> expect "delegation.reservation";
+      assert (not (Store.exists artifact_store authored_revision));
       print_s
         [%sexp
           { stage = (installed.stage : D.stage)

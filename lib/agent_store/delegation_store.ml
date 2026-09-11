@@ -12,6 +12,12 @@ module Key = struct
 end
 
 module Admission = struct
+  type authored_tool =
+    { name : string
+    ; source_sha256 : string
+    }
+  [@@deriving equal, sexp]
+
   type lifetime =
     | Owned
     | Independent of { authorization_sha256 : string }
@@ -25,6 +31,7 @@ module Admission = struct
     ; parent_revision_id : P.Id.Prompt_revision.t
     ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
+    ; authored_tool : authored_tool option [@sexp.option]
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : P.Timestamp.t
@@ -156,6 +163,15 @@ let validate (record : record) =
     | Owned -> true
     | Independent { authorization_sha256 } -> sha256 authorization_sha256
   in
+  let authored_valid =
+    Option.for_all a.authored_tool ~f:(fun authored ->
+      (not (String.is_empty authored.name))
+      && String.length authored.name <= 1024
+      && (not
+            (String.exists authored.name ~f:(fun c ->
+               Char.to_int c < 32 || Char.equal c '\127')))
+      && sha256 authored.source_sha256)
+  in
   match
     (not (P.Id.Session.equal record.key.parent_session_id a.child_session_id))
     && (not (P.Id.Prompt_revision.equal a.parent_revision_id a.revision_id))
@@ -164,6 +180,7 @@ let validate (record : record) =
     && sha256 a.authority_sha256
     && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
     && independent_valid
+    && authored_valid
     && (match record.artifact_collection, record.stage, record.revocation with
         | None, _, _ -> true
         | Some Prepared, (Reserved | Artifact_installed), Some _ -> true
@@ -219,7 +236,13 @@ let encode record =
     ~max_payload_length
     ~flags:0
     (Persisted.sexp_of_t
-       { version = (if Option.is_some record.artifact_collection then 3 else 2); record }
+       { version =
+           (match record.admission.authored_tool, record.artifact_collection with
+            | Some _, _ -> 4
+            | None, Some _ -> 3
+            | None, None -> 2)
+       ; record
+       }
      |> Sexp.to_string_mach)
   |> Result.map_error ~f:(fun _ ->
     Store_error.Corrupt "delegation intent exceeds its frame limit")
@@ -237,13 +260,14 @@ let decode ~name contents =
         Store_error.Corrupt "invalid delegation intent payload")
     in
     let%bind () =
-      match persisted.version with
-      | 1
+      match persisted.version, persisted.record.admission.authored_tool with
+      | 1, None
         when Option.is_none persisted.record.admission.parent_stop_epoch
              && Option.is_none persisted.record.artifact_collection -> Ok ()
-      | 2 when Option.is_none persisted.record.artifact_collection -> Ok ()
-      | 3 when Option.is_some persisted.record.artifact_collection -> Ok ()
-      | version when version > 3 -> Error (Store_error.Schema_too_new version)
+      | 2, None when Option.is_none persisted.record.artifact_collection -> Ok ()
+      | 3, None when Option.is_some persisted.record.artifact_collection -> Ok ()
+      | 4, Some _ -> Ok ()
+      | version, _ when version > 4 -> Error (Store_error.Schema_too_new version)
       | _ -> corrupt "invalid delegation intent version"
     in
     let%bind () = validate persisted.record in
@@ -498,7 +522,12 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
     let%bind () = validate candidate in
     let%bind records = records_locked t ~max_records ~max_bytes in
     match List.find records ~f:(fun r -> Key.equal key r.key) with
-    | Some record when String.equal request_sha256 record.request_sha256 ->
+    | Some record
+      when String.equal request_sha256 record.request_sha256
+           && Option.equal
+                Admission.equal_authored_tool
+                admission.authored_tool
+                record.admission.authored_tool ->
       let%map () = save t record in
       Replay record
     | Some record -> Ok (Conflict record)

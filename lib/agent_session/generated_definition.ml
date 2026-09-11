@@ -229,6 +229,14 @@ let install_reserved ~delegations ~reservation ~artifact_store t =
       error "delegation.revoked" "generated artifact reservation has been revoked"
   in
   let%bind () =
+    match current.admission.authored_tool with
+    | None -> Ok ()
+    | Some _ ->
+      error
+        "delegation.reservation"
+        "authored artifacts require authored definition admission"
+  in
+  let%bind () =
     match
       Agent_protocol.Id.Prompt_revision.equal
         current.admission.revision_id

@@ -81,6 +81,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> 
                 ; manifest_sha256 = digest "child manifest"
                 ; parent_revision_id = prompt_revision_id
                 ; parent_stop_epoch = None
+                ; authored_tool = None
                 ; authority_sha256 = digest "parent authority"
                 ; capability_pins = []
                 ; lifetime

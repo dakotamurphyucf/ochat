@@ -219,6 +219,7 @@ let%expect_test
               ; manifest_sha256 = (G.artifact definition).manifest_sha256
               ; parent_revision_id = !parent_state.spec.prompt_revision_id
               ; parent_stop_epoch = Some !parent_state.stop_epoch
+              ; authored_tool = None
               ; authority_sha256 = Authority.fingerprint !parent_state |> protocol_ok
               ; capability_pins = G.capability_pins definition
               ; lifetime =

@@ -178,7 +178,7 @@ let%expect_test
                Result.is_error (P.Job_result_reference.validate_job reference old_job))
            | _ -> failwith "wrong reference projection");
           H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-          Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+          unload_idle_runtime env entry.runtime;
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
           |> protocol_ok

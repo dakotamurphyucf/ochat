@@ -46,6 +46,8 @@
   managed_submission_tests
   managed_stop_tests
   session_management_adapter_tests
+  authored_agent_call_tests
+  authored_agent_source_tests
   managed_submission_recovery_tests
   delivery_ownership_tests
   delivery_wake_tests

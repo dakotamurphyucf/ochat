@@ -143,6 +143,7 @@ let%expect_test
                 ; manifest_sha256 = artifact.manifest_sha256
                 ; parent_revision_id = state.spec.prompt_revision_id
                 ; parent_stop_epoch = Some state.stop_epoch
+                ; authored_tool = None
                 ; authority_sha256 =
                     Agent_session.Delegation_authority.fingerprint state |> protocol_ok
                 ; capability_pins = G.capability_pins definition

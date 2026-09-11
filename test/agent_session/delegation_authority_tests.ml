@@ -51,6 +51,7 @@ let%expect_test
               ; manifest_sha256 = digest label
               ; parent_revision_id = parent.spec.prompt_revision_id
               ; parent_stop_epoch = Some parent.stop_epoch
+              ; authored_tool = None
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime
@@ -273,6 +274,7 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
               ; manifest_sha256 = digest "captured-child"
               ; parent_revision_id = parent.spec.prompt_revision_id
               ; parent_stop_epoch = Some parent.stop_epoch
+              ; authored_tool = None
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime = Owned

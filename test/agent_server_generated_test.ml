@@ -69,6 +69,7 @@ let install_child
          | _ -> artifact.manifest_sha256)
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; parent_stop_epoch = Some parent.stop_epoch
+    ; authored_tool = None
     ; authority_sha256 =
         Agent_session.Delegation_authority.fingerprint parent |> protocol_ok
     ; capability_pins

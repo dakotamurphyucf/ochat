@@ -26,6 +26,7 @@ let admission () =
     ; manifest_sha256 = digest "captured generated definition"
     ; parent_revision_id = P.Id.Prompt_revision.create ()
     ; parent_stop_epoch = None
+    ; authored_tool = None
     ; authority_sha256 = digest "parent policy and effective resource allowance"
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned
@@ -82,6 +83,140 @@ let reopen env sw root =
     ~process_start_identity:None
     ~lock_nonce:"delegation-reopen"
   |> store_ok
+;;
+
+let%expect_test "authored delegation identity survives restart and cannot change on retry"
+  =
+  with_temp_directory "ochat-authored-delegation" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let generated_key = key "generated" in
+      let generated = reserve ledger generated_key (admission ()) |> record in
+      let generated_reference = D.reference generated in
+      let authored_key = key "authored" in
+      let origin : D.Admission.authored_tool =
+        { name = "researcher"
+        ; source_sha256 = digest "pinned authored source and declaration"
+        }
+      in
+      let candidate = { (admission ()) with authored_tool = Some origin } in
+      let authored = reserve ledger authored_key candidate |> record in
+      let reference = D.reference authored in
+      let conflict key candidate =
+        match reserve ledger key candidate with
+        | Conflict _ -> ()
+        | New _ | Replay _ -> failwith "origin substitution did not conflict"
+      in
+      conflict generated_key { (admission ()) with authored_tool = Some origin };
+      conflict authored_key (admission ());
+      conflict
+        authored_key
+        { candidate with authored_tool = Some { origin with name = "reviewer" } };
+      conflict
+        authored_key
+        { candidate with
+          authored_tool = Some { origin with source_sha256 = digest "changed source" }
+        };
+      let retry = { (admission ()) with authored_tool = Some origin } in
+      assert (D.equal_record authored (reserve ledger authored_key retry |> record));
+      let forged_reference =
+        match D.Reference.sexp_of_t reference with
+        | Sexp.List fields ->
+          List.map fields ~f:(function
+            | List [ Atom "admission_sha256"; _ ] ->
+              let changed =
+                { candidate with authored_tool = Some { origin with name = "reviewer" } }
+              in
+              Sexp.List
+                [ Atom "admission_sha256"
+                ; Atom (D.Admission.sexp_of_t changed |> Sexp.to_string_mach |> digest)
+                ]
+            | field -> field)
+          |> fun fields -> D.Reference.t_of_sexp (Sexp.List fields)
+        | _ -> failwith "expected reference record"
+      in
+      assert (Result.is_error (D.resolve ledger forged_reference));
+      let filename =
+        digest (D.Key.sexp_of_t authored_key |> Sexp.to_string_mach) ^ ".frame"
+      in
+      let path =
+        Eio.Path.(Eio.Stdenv.fs env / Filename.concat root ("delegations/" ^ filename))
+      in
+      let original = Eio.Path.load path in
+      let payload =
+        match
+          Agent_store.Frame.decode ~max_payload_length:262144 ~contents:original ~offset:0
+        with
+        | Ok (Complete { frame; next_offset }) when next_offset = String.length original
+          -> Agent_store.Frame.payload frame |> Sexp.of_string
+        | _ -> failwith "expected complete delegation frame"
+      in
+      let fields =
+        match payload with
+        | Sexp.List fields -> fields
+        | _ -> failwith "expected frame record"
+      in
+      assert (
+        List.exists fields ~f:(function
+          | List [ Atom "version"; Atom "4" ] -> true
+          | _ -> false));
+      List.iter [ "1"; "2"; "3" ] ~f:(fun version ->
+        let forged =
+          List.map fields ~f:(function
+            | Sexp.List [ Atom "version"; _ ] ->
+              Sexp.List [ Atom "version"; Atom version ]
+            | field -> field)
+          |> fun fields -> Sexp.List fields |> Sexp.to_string_mach
+        in
+        let bytes =
+          Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0 forged |> frame_ok
+        in
+        Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
+        assert (Result.is_error (D.find ledger authored_key)));
+      Eio.Path.save ~create:(`Or_truncate 0o600) path original;
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let ledger = S.delegations store in
+      assert (D.equal_record authored (D.resolve ledger reference |> store_ok));
+      assert (D.equal_record generated (D.resolve ledger generated_reference |> store_ok));
+      assert (D.equal_record authored (reserve ledger authored_key retry |> record));
+      let revoked = D.revoke ledger authored Parent_stopped |> store_ok in
+      assert (
+        Option.equal
+          D.Admission.equal_authored_tool
+          revoked.admission.authored_tool
+          (Some origin));
+      assert (D.Reference.equal reference (D.reference revoked));
+      List.iter
+        [ { origin with name = "" }
+        ; { origin with name = "bad\nname" }
+        ; { origin with source_sha256 = "not-a-digest" }
+        ]
+        ~f:(fun invalid ->
+          assert (
+            Result.is_error
+              (D.reserve
+                 ledger
+                 ~key:(key "invalid")
+                 ~request_sha256:(digest "request")
+                 ~admission:{ (admission ()) with authored_tool = Some invalid }
+                 ~max_records
+                 ~max_bytes)));
+      S.close store |> store_ok));
+  print_endline
+    "v4 retains authored name/source and original instance across \
+     retry/restart/revocation";
+  print_endline
+    "changed name/source, generated/authored substitution and forged references reject";
+  print_endline
+    "downgraded frames and malformed origins reject; generated reference unchanged";
+  [%expect
+    {|
+    v4 retains authored name/source and original instance across retry/restart/revocation
+    changed name/source, generated/authored substitution and forged references reject
+    downgraded frames and malformed origins reject; generated reference unchanged
+    |}]
 ;;
 
 let%expect_test

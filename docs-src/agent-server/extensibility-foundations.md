@@ -4628,11 +4628,32 @@ calls reject session IDs; fixed persistent contracts reject mode overrides.
 Descriptions preserve authored text and add create/continue, receipt, timeout and
 shared lifecycle-tool guidance. IDs identify sessions and do not confer authority.
 
-This is currently parser and model-contract infrastructure. The legacy runner
-explicitly rejects persistence-enabled declarations until the shared authored
-session adapter is installed; it does not silently downgrade them to one-off
-calls. Pinned private bindings, durable instance admission and the named
-call-and-answer wrapper remain implementation work. Generated definitions still
+The legacy runner still rejects persistence-enabled declarations until the shared
+authored session adapter is installed. Internal foundations now include:
+
+- `Authored_agent_source` selects the named declaration from a captured parent
+  revision and constructs a specialist-root artifact from those immutable bytes.
+  Relative imports, native declarations, scripts and nested-agent sources retain
+  their directory relationships across live-file edits and store relocation. The
+  entire captured parent closure is retained conservatively. Uncaptured absolute
+  or remote specialist sources reject; source capture does not authorize tools.
+- Delegation ledger v4 can retain the authored tool name and source fingerprint
+  in its immutable admission/reference. Changed names or source identities conflict
+  on a retry, including attempts to relabel a generated reservation. Older generated
+  records keep their original admission hashes. The generated artifact installer
+  rejects authored reservations.
+- `Authored_agent_call` composes admitted creation and exact-instance validation
+  with shared send/wait/read services outside actor locks. Stable invocation keys
+  retain retry identity. Results contain session ID, receipt and a bounded output
+  page with its continuation cursor; pending and failed submissions remain explicit.
+  The freshest read determines status, so output presence never implies completion.
+
+These components are not yet a usable persisted authored-agent runtime. Private
+resource/approval binding, durable factory admission and source-bound restoration,
+native registration and end-to-end interoperability still require integration.
+The composition tests use real actor scopes with recording service callbacks;
+source and ledger tests use actual artifact and ledger persistence. They do not
+prove complete authored child-session execution. Generated definitions still
 require inherited tool references and cannot introduce fresh authored bindings.
 
 ### Durable initial activation

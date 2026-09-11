@@ -77,6 +77,7 @@ let owner name =
         ; "managed_output_page"
         ; "managed_submission"
         ; "agent_tool_contract"
+        ; "authored_agent"
         ; "delegation_store"
         ; "delegation_authority"
         ; "delegation_lifecycle"

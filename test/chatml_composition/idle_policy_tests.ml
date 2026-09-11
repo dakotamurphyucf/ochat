@@ -156,7 +156,7 @@ let%expect_test
             | Some { status = Awaiting; _ } -> ()
             | _ -> failwith "paused observation was consumed");
            let before = Option.value_exn state.automatic_turn_budget in
-           Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+           unload_idle_runtime env entry.runtime;
            Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
            Background_shell_tests.wait env (fun () ->
              List.exists (read ()).moderator_executions ~f:(fun event ->

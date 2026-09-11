@@ -17,6 +17,12 @@ module Key : sig
 end
 
 module Admission : sig
+  type authored_tool =
+    { name : string
+    ; source_sha256 : string
+    }
+  [@@deriving equal, sexp_of]
+
   type lifetime =
     | Owned
     | Independent of { authorization_sha256 : string }
@@ -32,6 +38,12 @@ module Admission : sig
       (** Stop counter observed at creation admission; legacy absence means zero
           and retains the original admission hash. New frames use ledger v2. *)
     ; authority_sha256 : string
+    ; authored_tool : authored_tool option
+      (** Present only for a host-admitted authored specialist. Binds its named
+          declaration and captured source identity, independently of instance ID.
+          Capability pins and current authority still govern resource access.
+          Absence retains the legacy generated-admission hash and wire versions;
+          presence uses ledger v4 and participates in the immutable reference. *)
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : Agent_protocol.Timestamp.t
@@ -102,7 +114,9 @@ val resolve : t -> Reference.t -> (record, Store_error.t) result
 
 (** The request digest must cover all user-selected creation inputs. Admission
     comes from trusted validation and may contain fresh candidate IDs on retry;
-    only a New result accepts those candidates. Replay reestablishes durability
+    only a New result accepts those candidates. A changed authored-tool identity
+    conflicts even if the request digest is unchanged; a generated reservation
+    cannot be relabeled as authored. Replay reestablishes durability
     after a potentially ambiguous prior write acknowledgement.
     Scan budgets include every existing intent and atomic temporary entry. *)
 val reserve

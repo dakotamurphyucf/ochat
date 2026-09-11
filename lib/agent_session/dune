@@ -16,6 +16,8 @@
   generated_session_request
   generated_session_tool
   managed_session_service
+  authored_agent_call
+  authored_agent_source
   session_management
   session_management_channel
   session_management_native
