@@ -94,6 +94,7 @@ type t =
   ; lifecycle : Lifecycle.t
   ; pending_initial_start : bool [@sexp.default false]
   ; stop_epoch : int64 [@sexp.default 0L]
+  ; parent_stop_epoch : int64 option [@sexp.option]
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
@@ -116,11 +117,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 13
+let current_schema_version = 14
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if Option.is_some t.parent_stop_epoch
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"parent stop acknowledgement requires session schema 14"
+         ~retryable:false
+         ())
+  else if t.schema_version = 13
+  then Ok { t with schema_version = current_schema_version }
   else if not (Int64.equal t.stop_epoch 0L)
   then
     Error
@@ -255,6 +266,7 @@ let create ~identity ~spec ~initial_history =
   ; lifecycle = { desired; observed = Stopped }
   ; pending_initial_start = false
   ; stop_epoch = 0L
+  ; parent_stop_epoch = None
   ; conversation =
       { canonical_history = initial_history
       ; deferred_user_entries = []
@@ -563,6 +575,15 @@ let validate t =
   in
   let%bind () = nonnegative "revision" t.counters.revision in
   let%bind () = nonnegative "stop epoch" t.stop_epoch in
+  let%bind () =
+    match t.parent_stop_epoch, t.spec.delegation with
+    | None, _ -> Ok ()
+    | Some epoch, Some _ -> nonnegative "parent stop epoch" epoch
+    | Some _, None ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "parent stop acknowledgement requires delegation")
+  in
   let%bind () =
     match
       ( t.pending_initial_start

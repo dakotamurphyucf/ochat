@@ -338,9 +338,11 @@ type _ request =
       * Session_state.Compaction_archive.kind
       * Session_state.t
       -> Agent_protocol.Session.t request
-  | Start : Agent_protocol.Id.Attachment.t -> Agent_protocol.Session.t request
+  | Start :
+      Agent_protocol.Id.Attachment.t * int64 option
+      -> Agent_protocol.Session.t request
   | Start_initial_delegated :
-      Agent_store.Delegation_store.Reference.t
+      Agent_store.Delegation_store.Reference.t * int64 option
       -> Agent_protocol.Session.t request
   | Fail_initial_delegated :
       Agent_store.Delegation_store.Reference.t * Agent_protocol.Error.t
@@ -352,6 +354,9 @@ type _ request =
       -> Agent_protocol.Session.t request
   | Stop_delegated :
       Agent_store.Delegation_store.Reference.t * Agent_protocol.Session.stop_mode
+      -> Agent_protocol.Session.t request
+  | Stop_delegated_at_epoch :
+      Agent_store.Delegation_store.Reference.t * int64 * bool
       -> Agent_protocol.Session.t request
   | Append_history :
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry list
@@ -1352,8 +1357,12 @@ let lifecycle t ~desired ~observed =
   Session_state.summary t.state
 ;;
 
-let start_internal t =
-  if t.idle_moderator_borrowed
+let start_internal ?expected_parent_stop_epoch t =
+  if
+    Option.exists expected_parent_stop_epoch ~f:(fun epoch ->
+      not (Option.equal Int64.equal t.state.parent_stop_epoch (Some epoch)))
+  then Error (error Conflict "parent stopped while child start was being prepared")
+  else if t.idle_moderator_borrowed
   then Error (error Conflict "cannot restart while the idle moderator is borrowed")
   else (
     match t.state.lifecycle.desired, t.state.lifecycle.observed with
@@ -1504,7 +1513,7 @@ let cleanup_invocation_permissions t ids =
              { desired_state = value.desired; observed_state = value.observed })) )
 ;;
 
-let stop_transition t mode ~extension_work lifecycle deltas payloads =
+let stop_transition ?parent_stop_epoch t mode ~extension_work lifecycle deltas payloads =
   let open Result.Let_syntax in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
@@ -1528,6 +1537,9 @@ let stop_transition t mode ~extension_work lifecycle deltas payloads =
              then [ Session_delta.Initial_start_consumed ]
              else [])
             @ (Session_delta.Lifecycle_changed lifecycle :: deltas)
+            @ Option.to_list
+                (Option.map parent_stop_epoch ~f:(fun epoch ->
+                   Session_delta.Parent_stop_epoch_changed epoch))
             @ List.map discarded ~f:Observation_follow_up.delta
             @ List.map events ~f:Observation_follow_up.event_delta
             @ List.map permissions ~f:(fun permission ->
@@ -1560,7 +1572,7 @@ let cancel_event_for_operation t operation_id =
       Option.iter borrow.cancel ~f:(fun cancel -> cancel ())))
 ;;
 
-let stop_internal t mode =
+let stop_internal ?parent_stop_epoch t mode =
   let open Result.Let_syntax in
   let%bind extension_work =
     Extension_stop.prepare ~state:t.state ~mode ~now:(t.services.now ())
@@ -1572,6 +1584,7 @@ let stop_internal t mode =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
         when (not t.state.pending_initial_start)
+             && Option.is_none parent_stop_epoch
              && List.is_empty (stopped_jobs t mode)
              && Extension_stop.is_empty extension_work
              && not
@@ -1582,6 +1595,7 @@ let stop_internal t mode =
         Ok (Session_state.summary t.state)
       | _, _ ->
         stop_transition
+          ?parent_stop_epoch
           t
           mode
           ~extension_work
@@ -1619,6 +1633,7 @@ let stop_internal t mode =
     let open Result.Let_syntax in
     let%bind session =
       stop_transition
+        ?parent_stop_epoch
         t
         mode
         ~extension_work
@@ -8736,8 +8751,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     upgrade_prompt_internal t attachment_id expected_revision target_revision
   | Commit_administration (attachment_id, expected_revision, kind, state) ->
     commit_administration t attachment_id expected_revision kind state
-  | Start attachment_id -> with_writer t attachment_id (fun () -> start_internal t)
-  | Start_initial_delegated reference ->
+  | Start (attachment_id, expected_parent_stop_epoch) ->
+    with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
+  | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
     (match t.state.spec.delegation with
      | Some current
        when Agent_store.Delegation_store.Reference.equal current reference
@@ -8745,7 +8761,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
                  reference.child_session_id
                  t.state.identity.session_id ->
        (match t.state.pending_initial_start with
-        | true -> start_internal t
+        | true -> start_internal ?expected_parent_stop_epoch t
         | false -> Ok (Session_state.summary t.state))
      | _ ->
        Error
@@ -8796,6 +8812,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
          (error Permission_denied "delegation.stop: child relationship does not match"))
   | Append_history (attachment_id, entries) ->
     with_writer t attachment_id (fun () -> append_history t entries)
+  | Stop_delegated_at_epoch (reference, epoch, force) ->
+    (match t.state.spec.delegation with
+     | Some current
+       when Agent_store.Delegation_store.Reference.equal current reference
+            && Agent_protocol.Id.Session.equal
+                 reference.child_session_id
+                 t.state.identity.session_id ->
+       (match t.state.parent_stop_epoch with
+        | Some previous when (not force) && Int64.(epoch <= previous) ->
+          Ok (Session_state.summary t.state)
+        | _ -> stop_internal ~parent_stop_epoch:epoch t Cancel)
+     | _ ->
+       Error
+         (error Permission_denied "delegation.stop: child relationship does not match"))
   | Defer_history (attachment_id, entries) ->
     with_writer t attachment_id (fun () -> defer_history t entries)
   | Submit_message (attachment_id, entry) -> submit_message t attachment_id entry
@@ -9141,8 +9171,13 @@ let upgrade_prompt_with_command_audit
     (Upgrade_prompt (attachment_id, expected_revision, target_revision))
 ;;
 
-let start t ~attachment_id = call t (Start attachment_id)
-let start_initial_delegated t ~reference = call t (Start_initial_delegated reference)
+let start ?expected_parent_stop_epoch t ~attachment_id =
+  call t (Start (attachment_id, expected_parent_stop_epoch))
+;;
+
+let start_initial_delegated ?expected_parent_stop_epoch t ~reference =
+  call t (Start_initial_delegated (reference, expected_parent_stop_epoch))
+;;
 
 let fail_initial_delegated t ~reference failure =
   call t ~priority:Priority (Fail_initial_delegated (reference, failure))
@@ -9151,8 +9186,8 @@ let fail_initial_delegated t ~reference failure =
 let replace_workspace t workspace = call t ~priority:Priority (Change_workspace workspace)
 let queue_start t ~attachment_id = call t (Queue_start attachment_id)
 
-let start_with_command_audit t ~command_audit ~attachment_id =
-  call t ~command_audit (Start attachment_id)
+let start_with_command_audit ?expected_parent_stop_epoch t ~command_audit ~attachment_id =
+  call t ~command_audit (Start (attachment_id, expected_parent_stop_epoch))
 ;;
 
 let queue_start_with_command_audit t ~command_audit ~attachment_id =
@@ -9168,6 +9203,10 @@ let stop_with_command_audit t ~command_audit ~attachment_id ~mode =
 
 let stop_delegated t ~reference ~mode =
   call t ~priority:Priority (Stop_delegated (reference, mode))
+;;
+
+let stop_delegated_at_epoch ?(force = false) t ~reference ~epoch =
+  call t ~priority:Priority (Stop_delegated_at_epoch (reference, epoch, force))
 ;;
 
 let append_history t ~attachment_id entries =

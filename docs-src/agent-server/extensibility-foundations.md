@@ -1853,7 +1853,7 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 introduced this disposition; current schema 13 safely upgrades schema 8/9/10/11/12
+Session-state schema 9 introduced this disposition; current schema 14 safely upgrades schema 8/9/10/11/12/13
 snapshots. Older snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
 back to a binary that cannot read the current schema; do not edit stored version numbers to
@@ -3830,9 +3830,10 @@ before publication returns `Interrupted`. Closed runtimes reject later execution
 cleanup failures remain observable to close callers. Stopping and restarting a
 child can reuse a parent that remains running.
 
-Startup orders active generated sessions by the private ledger's ancestry and
-loads/registers each parent before restoring its descendants. Missing parents or
-records, cycles and excessive depth fail recovery. The host's
+Startup orders generated sessions needing recovery by the private ledger's ancestry,
+including stopped intermediate ancestors, and loads/registers each available parent
+before restoring its descendants. Missing private records, cycles and excessive
+depth fail recovery. Owned children whose parent disappeared recover stopped. The host's
 `factory_limits.delegation_max_depth` defaults to 32 and also configures runtime
 authority checks. Failure closes and removes entries recovered by that attempt.
 Stopped generated transcript inspection does not require live ancestors.
@@ -3950,8 +3951,35 @@ Creation and startup reconciliation compare the admitted epoch even if the paren
 has already restarted. Pending initial activation also checks it before and after
 runtime loading. Loaded runtime guards pin their parent lifetime, and parent-lease
 cleanup recognizes a stop followed by a restart. Broader start/stop serialization
-and active-child recovery after interrupted descendant cleanup remain under
-implementation; the counter alone does not provide those lifecycle guarantees.
+remains under implementation; the counter alone does not provide those lifecycle
+guarantees. Interrupted descendant cleanup uses the acknowledgement described below.
+
+Session-state schema 14 adds each child's `parent_stop_epoch` acknowledgement.
+New children start with the admission's parent counter. Legacy children use the
+private admission until recovery persists an acknowledgement. Runtime preflight
+compares this saved value with the current parent counter; loading a new runtime
+cannot silently forget a parent stop.
+
+Recovery first commits stopped intent without loading the child runtime, then uses
+the normal actor cancellation path to cancel outstanding work and acknowledge the
+parent stop atomically. The unloaded runtime owner is joined before publishing the
+recovered entry. A crash between intent and cancellation leaves the old
+acknowledgement, so another recovery completes cleanup. Stopped intermediate
+ancestors are loaded before remaining active descendants, even if the intermediate
+session's index update survived an earlier interrupted recovery.
+
+An authorized explicit start reconciles and joins old child work before runtime
+loading. The actor then checks the parent acknowledgement expected by that prepared
+start. A newer stop rejects a stale start; repeated callbacks for an already handled
+parent epoch leave a subsequently restarted child unchanged. Independent children
+are outside owned stop propagation; their executable ownership support remains a
+separate unfinished feature.
+
+The offline crash fixture creates a real root/child/grandchild tree, kills the
+process after the parent's stop journal sync, and interrupts recovery twice more:
+at the child's stop journal sync and after its stopped index update. Two subsequent
+daemon restarts preserve IDs and history, finish cancellation before loading child
+runtimes, and permit explicit resumed conversation through a fake provider.
 
 Factory execution and administrative preparation now require `Linked` before
 reserving history or initializing a generated runtime. A stored but unpublished

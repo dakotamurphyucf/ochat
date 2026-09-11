@@ -411,7 +411,7 @@ let source_prompt_directory = function
       (Filename.dirname artifact.root_relative_path)
 ;;
 
-let generated_parent t (state : Agent_session.Session_state.t) =
+let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
   let missing_host () =
     Error
@@ -456,8 +456,15 @@ let generated_parent t (state : Agent_session.Session_state.t) =
           , None
           , None
           , Owned )
-          when String.equal fingerprint record.admission.authority_sha256 ->
-          Ok (parent, record)
+          when String.equal fingerprint record.admission.authority_sha256
+               && ((not check_stop_epoch)
+                   || Int64.equal
+                        current.stop_epoch
+                        (Option.value
+                           state.parent_stop_epoch
+                           ~default:
+                             (Option.value record.admission.parent_stop_epoch ~default:0L))
+                  ) -> Ok (parent, record)
         | _ ->
           Error
             (unavailable
@@ -470,6 +477,59 @@ let generated_parent t (state : Agent_session.Session_state.t) =
 let check_source_for_execution t state = function
   | Authored _ -> Ok ()
   | Generated_artifact _ -> Result.map (generated_parent t state) ~f:ignore
+;;
+
+type parent_stop_recovery =
+  { reference : Agent_store.Delegation_store.Reference.t
+  ; epoch : int64
+  ; stop : bool
+  }
+
+let parent_stop_recovery t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  match state.spec.delegation with
+  | None -> Ok None
+  | Some reference ->
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    (match record.admission.lifetime with
+     | Independent _ -> Ok None
+     | Owned ->
+       let previous =
+         Option.value
+           state.parent_stop_epoch
+           ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+       in
+       let%bind parent =
+         match Session_registry.find t.registry record.key.parent_session_id with
+         | None -> Ok None
+         | Some entry ->
+           Agent_session.Session_actor.state entry.actor |> Result.map ~f:Option.some
+       in
+       let epoch =
+         Option.value_map parent ~default:previous ~f:(fun parent -> parent.stop_epoch)
+       in
+       let%bind () =
+         match Int64.(epoch < previous) with
+         | false -> Ok ()
+         | true ->
+           Error
+             (protocol_of_store
+                (Agent_store.Store_error.Corrupt
+                   "parent stop counter moved backwards during child recovery"))
+       in
+       let stop =
+         Option.is_some record.revocation
+         || Int64.(epoch > previous)
+         || Option.value_map parent ~default:true ~f:(fun parent ->
+           Agent_protocol.Session.equal_desired_state parent.lifecycle.desired Stopped
+           || parent.halted
+           || Option.is_some parent.failure)
+       in
+       Ok (Some { reference; epoch; stop }))
 ;;
 
 let runtime_paths t handle source state =
@@ -1850,8 +1910,11 @@ let prepare_runtime_at_paths
        | true -> prepare_extension_runtime_scope t construct)
     | Generated_artifact { artifact; _ } ->
       let%bind parent, record = generated_parent t state in
-      let%bind parent_state = Agent_session.Session_actor.state parent.actor in
-      let parent_stop_epoch = parent_state.stop_epoch in
+      let parent_stop_epoch =
+        Option.value
+          state.parent_stop_epoch
+          ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+      in
       let%bind artifact_store =
         Agent_store.Prompt_artifact_store.create
           ~env:t.env
@@ -1884,7 +1947,10 @@ let prepare_runtime_at_paths
                    current.lifecycle.desired
                    Stopped
                  || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
-            Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
+            Agent_session.Session_actor.stop_delegated_at_epoch
+              actor
+              ~reference
+              ~epoch:current.stop_epoch
             |> Result.map ~f:ignore
           | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
           | Error error, _ -> Error error)
@@ -3440,6 +3506,7 @@ let recovery_attachment_deltas state ~now =
 ;;
 
 let recovery_transition
+      ~parent_stop
       state
       ~now
       ~reserved_history_through
@@ -3448,7 +3515,12 @@ let recovery_transition
   =
   let lifecycle =
     Agent_session.Session_state.Lifecycle.
-      { desired = state.Agent_session.Session_state.lifecycle.desired; observed }
+      { desired =
+          (if Option.exists parent_stop ~f:(fun parent -> parent.stop)
+           then Stopped
+           else state.Agent_session.Session_state.lifecycle.desired)
+      ; observed
+      }
   in
   let attachment_deltas = recovery_attachment_deltas state ~now in
   let owner_was_attached =
@@ -3493,7 +3565,12 @@ let recovery_transition
           @ invocations.deltas
           @ permission_deltas
           @ reviewer_job_deltas
-          @ attachment_deltas))
+          @ attachment_deltas
+          @
+          match parent_stop with
+          | None -> []
+          | Some { stop = true; _ } -> [ Initial_start_consumed ]
+          | Some { stop = false; epoch; _ } -> [ Parent_stop_epoch_changed epoch ]))
     ~payloads:
       (operation_payload
        @ (if List.is_empty invocations.appended
@@ -3526,6 +3603,7 @@ let create_recovery_writer t journal recovery session_id =
 ;;
 
 let commit_recovery_boundary
+      ~parent_stop
       t
       persistence
       state
@@ -3536,6 +3614,7 @@ let commit_recovery_boundary
   let open Result.Let_syntax in
   let%bind transition =
     recovery_transition
+      ~parent_stop
       state
       ~now:(now t)
       ~reserved_history_through
@@ -3669,11 +3748,14 @@ let recover_open_handle t handle =
   let%bind journal, recovery = open_recovery t handle initial in
   let%bind () = reconcile_command_audits t recovery in
   let state = recovery.Agent_store.Recovery.state in
+  let%bind parent_stop = parent_stop_recovery t state in
+  let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
   let%bind revision = recovered_revision t state in
   let%bind () =
     match state.lifecycle.desired with
     | Stopped -> Ok ()
-    | Running -> check_source_for_execution t state revision
+    | Running when not stopping -> check_source_for_execution t state revision
+    | Running -> Ok ()
   in
   let%bind profile = recovered_profile t state in
   let%bind () = verify_recovered_workspace t state in
@@ -3689,7 +3771,13 @@ let recover_open_handle t handle =
     recovery_reservation t (Int64.of_int invocations.next_sequence)
   in
   let%bind durable_events = recovered_events recovery in
-  let%bind observed, capacity = prepare_recovery_capacity t state in
+  let%bind observed, capacity =
+    prepare_recovery_capacity
+      t
+      (if stopping
+       then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+       else state)
+  in
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
   let persistence =
     Agent_session.Session_persistence.create
@@ -3705,6 +3793,7 @@ let recover_open_handle t handle =
   in
   match
     commit_recovery_boundary
+      ~parent_stop
       t
       persistence
       state
@@ -3727,15 +3816,36 @@ let recover_open_handle t handle =
           Agent_store.Commit_writer.close writer;
           failure
         | Ok () ->
-          create_unloaded_entry
-            t
-            handle
-            journal
-            state
-            writer
-            persistence
-            durable_events
-            capacity)
+          let%bind entry =
+            create_unloaded_entry
+              t
+              handle
+              journal
+              state
+              writer
+              persistence
+              durable_events
+              capacity
+          in
+          (match parent_stop with
+           | Some { stop = true; reference; epoch } ->
+             (match
+                Agent_session.Session_actor.stop_delegated_at_epoch
+                  ~force:true
+                  entry.actor
+                  ~reference
+                  ~epoch
+              with
+              | Ok _ ->
+                (match Runtime_owner.unload_and_wait entry.runtime with
+                 | Ok () -> Ok entry
+                 | Error failure ->
+                   entry.close ();
+                   Error failure)
+              | Error failure ->
+                entry.close ();
+                Error failure)
+           | None | Some { stop = false; _ } -> Ok entry))
      | Queued_for_slot
      | Starting
      | Recovering
@@ -3896,12 +4006,15 @@ let recover_sessions t =
            Hash_set.add visiting key;
            let%bind height =
              match entry.session.spec.prompt, entry.session.desired_state with
-             | Generated _, Running ->
+             | Generated _, (Running | Stopped) ->
                (match Map.find parents key with
                 | None ->
                   Error
                     (corrupt "generated recovery requires a private delegation record")
-                | Some parent -> Result.map (visit (depth + 1) parent) ~f:(( + ) 1))
+                | Some parent ->
+                  (match Map.mem entries (Agent_protocol.Id.Session.to_string parent) with
+                   | true -> Result.map (visit (depth + 1) parent) ~f:(( + ) 1)
+                   | false -> Ok 0))
              | _ -> Ok 0
            in
            Hash_set.remove visiting key;
@@ -3997,6 +4110,31 @@ let with_generated_creation_lock t f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let prepare_session_start t entry =
+  with_generated_creation_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
+    match state.spec.delegation with
+    | None -> Ok ()
+    | Some reference ->
+      let%bind parent, _ = generated_parent ~check_stop_epoch:false t state in
+      let%bind current = Agent_session.Session_actor.state parent.actor in
+      (match
+         Option.equal Int64.equal state.parent_stop_epoch (Some current.stop_epoch)
+       with
+       | true -> Ok ()
+       | false ->
+         Delegation_lifecycle.stop_owned
+           ~parent_stop_epoch:current.stop_epoch
+           ~clock:(Eio.Stdenv.clock t.env)
+           ~delegations:(Agent_store.Session_store.delegations t.store)
+           ~reference
+           ~actor:entry.actor
+           ~runtime:entry.runtime
+           ()
+         |> Result.map ~f:ignore))
+;;
+
 let resume_generated_initial_start t entry =
   let module A = Agent_session.Session_actor in
   let module D = Agent_store.Delegation_store in
@@ -4082,7 +4220,11 @@ let resume_generated_initial_start t entry =
         (match still_ready with
          | false -> Ok ()
          | true ->
-           A.start_initial_delegated entry.actor ~reference |> Result.map ~f:ignore)
+           A.start_initial_delegated
+             ?expected_parent_stop_epoch:state.parent_stop_epoch
+             entry.actor
+             ~reference
+           |> Result.map ~f:ignore)
     in
     (match attempt () with
      | Ok () -> Ok ()
@@ -4362,6 +4504,8 @@ let create_generated_session
                   { initial with
                     lifecycle = { desired = Stopped; observed = Stopped }
                   ; pending_initial_start = start_immediately
+                  ; parent_stop_epoch =
+                      Some (Option.value record.admission.parent_stop_epoch ~default:0L)
                   ; conversation =
                       { initial.conversation with
                         next_history_sequence = Int64.of_int next

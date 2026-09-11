@@ -8,6 +8,7 @@ type t =
   | Lifecycle_changed of Session_state.Lifecycle.t
   | Initial_start_consumed
   | Stop_epoch_changed of int64
+  | Parent_stop_epoch_changed of int64
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list

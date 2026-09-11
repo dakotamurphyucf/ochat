@@ -134,6 +134,14 @@ val create_generated_session
     are committed to the child. Persistence failures remain pending for retry. *)
 val resume_generated_initial_starts : t -> unit
 
+(** Reconcile a generated child's acknowledged parent stop and join old work
+    before an authorized explicit start. Must run outside runtime-owner locks.
+    Current parent policy and linkage are checked before changing child state. *)
+val prepare_session_start
+  :  t
+  -> Session_registry.entry
+  -> (unit, Agent_protocol.Error.t) result
+
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata
     and accurate scheduling hints before clearing the durable rebuild marker.
     Call with the entire successful [recover_sessions] result, only after job

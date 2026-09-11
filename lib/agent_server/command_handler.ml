@@ -28,6 +28,8 @@ type t =
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
   ; cancel_job : Agent_protocol.Id.Job.t -> unit
   ; create_session : create_session
+  ; prepare_session_start :
+      Session_registry.entry -> (unit, Agent_protocol.Error.t) result
   ; prepare_administration :
       Session_registry.entry
       -> Agent_session.Session_state.t
@@ -52,6 +54,7 @@ let create
       ~server_health
       ~cancel_job
       ~create_session
+      ~prepare_session_start
       ~prepare_administration
   =
   { sw
@@ -72,6 +75,7 @@ let create
   ; server_health
   ; cancel_job
   ; create_session
+  ; prepare_session_start
   ; prepare_administration
   }
 ;;
@@ -904,6 +908,7 @@ let rec handle_session_start t context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
+       let%bind () = t.prepare_session_start entry in
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () =
          Agent_session.Workspace_resolver.verify_available
@@ -922,10 +927,12 @@ let rec handle_session_start t context command_audit request =
            command_audit
            ~plain:(fun () ->
              Agent_session.Session_actor.start
+               ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~attachment_id:request.attachment_id)
            ~audited:(fun command_audit ->
              Agent_session.Session_actor.start_with_command_audit
+               ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~command_audit
                ~attachment_id:request.attachment_id)

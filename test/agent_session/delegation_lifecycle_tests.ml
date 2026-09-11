@@ -174,6 +174,7 @@ let%expect_test
              ~reference
              ~actor:child
              ~runtime
+             ()
          in
          let unchanged () =
            assert_same_session_snapshot
@@ -216,6 +217,59 @@ let%expect_test
     {|
     failed save retains resources; revoked unlinked child stops without attachment; retry is idempotent
     foreign and independent relationships leave the child unchanged
+    |}]
+;;
+
+let%expect_test
+    "parent stop acknowledgements survive failure and reject late starts without \
+     stopping a new lifetime"
+  =
+  with_fixture
+    (fun _env _sw _ledger record _foreign child _runtime _backend _closes reject _ ->
+       let reference = D.reference record in
+       let attachment, _ =
+         A.attach child ~mode:Read_write ~subscribe:false |> protocol_ok
+       in
+       let initial = A.state child |> protocol_ok in
+       reject := true;
+       assert (Result.is_error (A.stop_delegated_at_epoch child ~reference ~epoch:1L));
+       assert_same_session_snapshot initial (A.state child |> protocol_ok);
+       reject := false;
+       A.stop_delegated_at_epoch child ~reference ~epoch:1L |> protocol_ok |> ignore;
+       let stopped = A.state child |> protocol_ok in
+       assert (Option.equal Int64.equal stopped.parent_stop_epoch (Some 1L));
+       let restored =
+         Agent_session.Session_persistence.restore_snapshot
+           (State.sexp_of_t stopped |> Sexp.to_string_mach)
+         |> store_ok
+       in
+       assert_same_session_snapshot stopped restored;
+       A.start ~expected_parent_stop_epoch:1L child ~attachment_id:attachment.id
+       |> protocol_ok
+       |> ignore;
+       let restarted = A.state child |> protocol_ok in
+       A.stop_delegated_at_epoch child ~reference ~epoch:1L |> protocol_ok |> ignore;
+       assert_same_session_snapshot restarted (A.state child |> protocol_ok);
+       A.stop_delegated_at_epoch child ~reference ~epoch:2L |> protocol_ok |> ignore;
+       let latest = A.state child |> protocol_ok in
+       (match
+          A.start ~expected_parent_stop_epoch:1L child ~attachment_id:attachment.id
+        with
+        | Error { code = Conflict; _ } -> ()
+        | _ -> failwith "stale prepared start crossed parent stop");
+       assert_same_session_snapshot latest (A.state child |> protocol_ok);
+       print_s
+         [%sexp
+           { failed_save_unchanged = true
+           ; restored_epoch = (restored.parent_stop_epoch : int64 option)
+           ; current_epoch = (latest.parent_stop_epoch : int64 option)
+           ; late_stop_preserved_restart = true
+           ; late_start_rejected = true
+           }]);
+  [%expect
+    {|
+    ((failed_save_unchanged true) (restored_epoch (1)) (current_epoch (2))
+     (late_stop_preserved_restart true) (late_start_rejected true))
     |}]
 ;;
 
@@ -305,6 +359,7 @@ let%expect_test
                          ~reference:(D.reference record)
                          ~actor:child
                          ~runtime
+                         ()
                        |> protocol_ok
                        |> ignore)
                      ~f:(fun () ->

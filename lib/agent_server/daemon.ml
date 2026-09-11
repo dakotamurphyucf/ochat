@@ -879,6 +879,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~prepare_session_start:(Session_factory.prepare_session_start factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
   in
   let dispatcher = Dispatcher.create handler in

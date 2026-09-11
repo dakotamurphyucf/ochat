@@ -3,7 +3,7 @@ module P = Agent_protocol
 module D = Agent_store.Delegation_store
 module A = Agent_session.Session_actor
 
-let stop_owned ~clock ~delegations ~reference ~actor ~runtime =
+let stop_owned ?parent_stop_epoch ~clock ~delegations ~reference ~actor ~runtime () =
   (* This is also called from a cancelled parent lease's finalizer. Protect the
      private lookup itself, including waiting for the ledger lock. *)
   Eio.Cancel.protect (fun () ->
@@ -27,7 +27,11 @@ let stop_owned ~clock ~delegations ~reference ~actor ~runtime =
     (* Once cancellation is accepted, the resource owner must not leave while a
      worker or moderator is still unwinding. No actor/registry/owner lock is held
      through this wait. A failed stop does not grant permission to retire tools. *)
-    let%bind _ = A.stop_delegated actor ~reference ~mode:Cancel in
+    let%bind _ =
+      match parent_stop_epoch with
+      | None -> A.stop_delegated actor ~reference ~mode:Cancel
+      | Some epoch -> A.stop_delegated_at_epoch actor ~reference ~epoch
+    in
     let rec quiescent () =
       let%bind state =
         A.with_quiescent_state actor ~f:(fun state ->

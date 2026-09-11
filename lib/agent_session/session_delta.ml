@@ -6,6 +6,7 @@ type t =
   | Lifecycle_changed of Session_state.Lifecycle.t
   | Initial_start_consumed
   | Stop_epoch_changed of int64
+  | Parent_stop_epoch_changed of int64
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
@@ -79,6 +80,15 @@ let rec apply state = function
   | Created created -> Session_state.upgrade_schema created
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
   | Initial_start_consumed -> Ok { state with pending_initial_start = false }
+  | Parent_stop_epoch_changed epoch ->
+    (match
+       Int64.(epoch >= 0L)
+       && Option.for_all state.parent_stop_epoch ~f:(fun previous ->
+         Int64.(epoch >= previous))
+     with
+     | true -> Ok { state with parent_stop_epoch = Some epoch }
+     | false ->
+       Error (Agent_protocol.Error.invalid_request "parent stop epoch moved backwards"))
   | Stop_epoch_changed stop_epoch ->
     (match Int64.(stop_epoch > state.stop_epoch) with
      | true -> Ok { state with stop_epoch }

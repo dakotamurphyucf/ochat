@@ -540,7 +540,8 @@ val upgrade_prompt_with_command_audit
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val start
-  :  t
+  :  ?expected_parent_stop_epoch:int64
+  -> t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -548,7 +549,8 @@ val start
     The trusted host must load and authorize its runtime first. Retries after a
     completed start or explicit stop preserve the current lifecycle. *)
 val start_initial_delegated
-  :  t
+  :  ?expected_parent_stop_epoch:int64
+  -> t
   -> reference:Agent_store.Delegation_store.Reference.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -568,7 +570,8 @@ val replace_workspace
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val start_with_command_audit
-  :  t
+  :  ?expected_parent_stop_epoch:int64
+  -> t
   -> command_audit:string
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -599,6 +602,17 @@ val stop_with_command_audit
   -> command_audit:string
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> mode:Agent_protocol.Session.stop_mode
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Stop and record the observed parent counter in one transaction. Already
+    reconciled epochs do not stop a subsequently restarted child. [force] is for
+    exclusive recovery before publication, including revocation without an epoch
+    advance. Callers must use the verified private parent relationship. *)
+val stop_delegated_at_epoch
+  :  ?force:bool
+  -> t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> epoch:int64
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 (** Internal owned-child lifecycle propagation. Atomically matches the child's

@@ -20,9 +20,11 @@
     operation, propagate failures, and must not release inherited resources after
     an error. Call outside the child's own retained runtime callback. *)
 val stop_owned
-  :  clock:_ Eio.Time.clock
+  :  ?parent_stop_epoch:int64
+  -> clock:_ Eio.Time.clock
   -> delegations:Agent_store.Delegation_store.t
   -> reference:Agent_store.Delegation_store.Reference.t
   -> actor:Agent_session.Session_actor.t
   -> runtime:Runtime_owner.t
+  -> unit
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
