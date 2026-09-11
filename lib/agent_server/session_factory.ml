@@ -30,6 +30,7 @@ type limits =
   ; delegation_artifact_max_bytes : int
   ; delegation_max_depth : int
   ; managed_submission_max_count : int option
+  ; managed_stop_max_count : int option
   ; managed_message_max_bytes : int option
   ; managed_output_page_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
@@ -6112,6 +6113,68 @@ let managed_wait t borrowed child_id ~target ~timeout_ms =
   loop ()
 ;;
 
+let managed_stop t borrowed child_id ~key ~mode =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, initial = authorize () in
+  let%bind receipt =
+    match initial.spec.delegation with
+    | None ->
+      Error
+        P.Invocation.
+          { code = "agent.management.denied"
+          ; message = "The child session is unavailable to this caller."
+          ; retryable = false
+          ; details = `Null
+          }
+    | Some reference ->
+      Agent_session.Session_actor.stop_managed
+        child.actor
+        ~reference
+        ~key
+        ~mode
+        ~generation:initial.identity.generation
+        ~max_receipts:t.limits.managed_stop_max_count
+      |> Result.map_error ~f:(fun error ->
+        P.Invocation.
+          { code = "agent.stop." ^ P.Error.code_to_string error.P.Error.code
+          ; message =
+              "The stop request could not be admitted. Reuse its original key and mode \
+               for retries."
+          ; retryable = error.retryable
+          ; details = `Null
+          })
+  in
+  let%map _, current = authorize () in
+  let progress =
+    match
+      ( Int.equal receipt.generation current.identity.generation
+        && Int64.equal receipt.stop_epoch current.stop_epoch
+      , current.lifecycle.desired
+      , current.lifecycle.observed )
+    with
+    | true, Stopped, Stopped -> "stopped"
+    | true, Stopped, _ -> "stopping"
+    | _ -> "superseded"
+  in
+  `Object
+    [ "version", `Number "1"
+    ; "receipt", Agent_session.Managed_stop.to_json receipt
+    ; "progress", `String progress
+    ; "status", Agent_session.Managed_session_service.status_json current
+    ]
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -6315,6 +6378,9 @@ let create
         ; wait =
             (fun borrowed child_id ~target ~timeout_ms ->
               managed_wait t borrowed child_id ~target ~timeout_ms)
+        ; stop =
+            (fun borrowed child_id ~key ~mode ->
+              managed_stop t borrowed child_id ~key ~mode)
         }
     }
   in

@@ -63,6 +63,26 @@ let apply ~now state ~delta ~payloads =
     Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now
   in
   let%bind state, delta =
+    match delta with
+    | Session_delta.Created _ ->
+      let%map managed_stops =
+        List.fold_result
+          previous.managed_stops
+          ~init:state.managed_stops
+          ~f:(fun receipts receipt ->
+            match List.find receipts ~f:(Managed_stop.same_key receipt) with
+            | Some retained when Managed_stop.equal receipt retained -> Ok receipts
+            | Some _ ->
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "replacement changed an immutable stop receipt")
+            | None -> Ok (receipts @ [ receipt ]))
+      in
+      let state = { state with managed_stops } in
+      state, Session_delta.Created state
+    | _ -> Ok (state, delta)
+  in
+  let%bind state, delta =
     match previous.lifecycle.desired, state.lifecycle.desired with
     | Running, Stopped ->
       let%map stop_epoch = increment "stop epoch" previous.stop_epoch in

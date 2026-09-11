@@ -628,6 +628,20 @@ val stop_delegated
   -> mode:Agent_protocol.Session.stop_mode
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Atomically admit stop intent and its immutable retry receipt. A matching key
+    replays before generation/readiness/capacity checks and never stops again,
+    including after explicit restart or administrative replacement. Changed modes
+    conflict. The host must authenticate current management authority first.
+    Admission is not a join of runtime or descendant cleanup. *)
+val stop_managed
+  :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> mode:Agent_protocol.Session.stop_mode
+  -> generation:int
+  -> max_receipts:int option
+  -> (Managed_stop.t, Agent_protocol.Error.t) result
+
 val append_history
   :  t
   -> attachment_id:Agent_protocol.Id.Attachment.t

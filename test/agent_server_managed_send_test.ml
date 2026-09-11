@@ -57,7 +57,7 @@ let%expect_test
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt)
-          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/><tool name="agent_wait"/><tool name="run_chatml"/>|};
+          {|<developer>MANAGED_SEND_PARENT</developer><tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/><tool name="agent_wait"/><tool name="agent_stop"/><tool name="run_chatml"/>|};
         let configuration = config root root prompt in
         let queued = ref None in
         let child_calls = ref 0 in
@@ -260,7 +260,14 @@ let%expect_test
             `Object (fields @ [ "timeout_ms", `Number (Int.to_string timeout_ms) ])
           | _ -> assert false
         in
-        let parent_id, child_id, receipt_id, output_cursor =
+        let stop_request child key mode =
+          `Object
+            [ "session_id", P.Id.Session.to_json child
+            ; "idempotency_key", `String key
+            ; "mode", `String mode
+            ]
+        in
+        let parent_id, child_id, receipt_id, output_cursor, stop_receipt =
           with_daemon (fun sw daemon client ->
             let parent, _ = create_session ~start_immediately:true client in
             let child =
@@ -313,6 +320,14 @@ let%expect_test
                   ])
             |> denied "invocation.invalid_input";
             let foreign = P.Id.Session.create () in
+            invoke
+              sw
+              daemon
+              client
+              parent.id
+              "agent_stop"
+              (stop_request foreign "foreign-stop" "cancel")
+            |> denied "agent.management.denied";
             invoke
               sw
               daemon
@@ -508,6 +523,20 @@ let%expect_test
               |> complete
             in
             [%test_eq: string] "timeout" (text still_pending "reason");
+            let stopping =
+              invoke
+                sw
+                daemon
+                client
+                parent.id
+                "agent_stop"
+                (stop_request child_id "native-stop" "graceful")
+              |> complete
+            in
+            [%test_eq: string] "stopping" (text stopping "progress");
+            [%test_eq: string] "stopped" (text (field stopping "status") "desired_state");
+            assert (Option.is_some (state daemon child_id).active_operation);
+            let stop_receipt = field stopping "receipt" in
             Eio.Fiber.fork ~sw (fun () ->
               wait_dispatched daemon parent.id;
               terminal_gate := None;
@@ -523,6 +552,27 @@ let%expect_test
               |> complete
             in
             [%test_eq: string] "receipt_terminal" (text finished "reason");
+            (match text (field finished "receipt") "status" with
+             | "completed" -> ()
+             | _ ->
+               let current = state daemon child_id in
+               let child_entry = R.load (D.registry daemon) child_id |> protocol_ok in
+               let events =
+                 Agent_session.Durable_event_log.replay
+                   child_entry.durable_events
+                   ~after_sequence:0L
+                   ~through_sequence:current.counters.event_sequence
+               in
+               let failures =
+                 match events with
+                 | Snapshot_required -> []
+                 | Available events ->
+                   List.filter_map events ~f:(fun event ->
+                     match event.P.Event.Durable.kind with
+                     | Operation_failed -> Some event.payload
+                     | _ -> None)
+               in
+               raise_s [%sexp "graceful child failed", (failures : Jsonaf.t list)]);
             [%test_eq: string] "completed" (text (field finished "receipt") "status");
             phase := "child receipts complete";
             await (fun () ->
@@ -567,13 +617,10 @@ let%expect_test
                ; { status = Terminal (Some second, Completed); _ }
                ] -> assert (P.Id.Operation.equal first second)
              | _ -> failwith "deferred inputs did not share the completed operation");
-            let handle = attach sw client child_id in
-            H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
             await (fun () ->
               match (state daemon child_id).lifecycle.observed with
               | Stopped -> true
               | _ -> false);
-            H.close handle;
             let calls_before = !child_calls in
             let stopped = state daemon child_id in
             let output = Buffer.create 32768 in
@@ -667,10 +714,22 @@ let%expect_test
             [%test_eq: Sexp.t]
               (Agent_session.Session_state.sexp_of_t stopped)
               (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            parent.id, child_id, text receipt "receipt_id", output_cursor)
+            parent.id, child_id, text receipt "receipt_id", output_cursor, stop_receipt)
         in
         with_daemon ~page_bytes:65536 (fun sw daemon client ->
           let before = state daemon child_id in
+          let stopped_replay =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "agent_stop"
+              (stop_request child_id "native-stop" "graceful")
+            |> complete
+          in
+          assert (Jsonaf.exactly_equal stop_receipt (field stopped_replay "receipt"));
+          [%test_eq: string] "stopped" (text stopped_replay "progress");
           let retained =
             invoke
               sw
@@ -755,6 +814,31 @@ let%expect_test
           let handle = attach sw client child_id in
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           await (fun () -> observed_idle (state daemon child_id).lifecycle.observed);
+          let resumed = state daemon child_id in
+          let old_stop =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "run_chatml"
+              (script ~tool:"agent_stop" (stop_request child_id "native-stop" "graceful"))
+            |> complete
+          in
+          assert (Jsonaf.exactly_equal stop_receipt (field old_stop "receipt"));
+          [%test_eq: string] "superseded" (text old_stop "progress");
+          [%test_eq: string] "running" (text (field old_stop "status") "desired_state");
+          invoke
+            sw
+            daemon
+            client
+            parent_id
+            "agent_stop"
+            (stop_request child_id "native-stop" "cancel")
+          |> denied "agent.stop.conflict";
+          [%test_eq: Sexp.t]
+            (Agent_session.Session_state.sexp_of_t resumed)
+            (Agent_session.Session_state.sexp_of_t (state daemon child_id));
           H.send_message
             handle
             { kind = Plain_text; text = "Generate an unread response."; attachments = [] }
@@ -786,7 +870,17 @@ let%expect_test
            | _ -> failwith "deleting unread output silently returned an empty page");
           let refreshed = read_all None |> complete in
           [%test_eq: int] 1 (field refreshed "items" |> Jsonaf.list_exn |> List.length);
-          H.stop handle ~mode:Cancel |> protocol_ok |> ignore;
+          let stopped_again =
+            invoke
+              sw
+              daemon
+              client
+              parent_id
+              "agent_stop"
+              (stop_request child_id "stop-new-lifetime" "cancel")
+            |> complete
+          in
+          [%test_eq: string] "stopped" (text stopped_again "progress");
           H.close handle;
           let quiet = state daemon child_id in
           let ledger = Agent_store.Session_store.delegations (D.store daemon) in
@@ -823,12 +917,16 @@ let%expect_test
           "waits distinguish output from terminal receipts; timeout/cancellation \
            preserve children; quiet revocation denies disclosure";
         print_endline
+          "native graceful stop completes existing work; restart/script retries retain \
+           receipt without stopping a new lifetime";
+        print_endline
           "native/script retry shares one receipt; busy sends defer; conflicts and \
            foreign IDs do not mutate children; stopped/restarted receipt replay never \
            runs a child"));
   [%expect
     {|
     waits distinguish output from terminal receipts; timeout/cancellation preserve children; quiet revocation denies disclosure
+    native graceful stop completes existing work; restart/script retries retain receipt without stopping a new lifetime
     native/script retry shares one receipt; busy sends defer; conflicts and foreign IDs do not mutate children; stopped/restarted receipt replay never runs a child
     |}]
 ;;

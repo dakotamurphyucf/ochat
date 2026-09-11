@@ -27,6 +27,7 @@ type limits =
   ; delegation_artifact_max_bytes : int
   ; delegation_max_depth : int
   ; managed_submission_max_count : int option
+  ; managed_stop_max_count : int option
   ; managed_message_max_bytes : int option
   ; managed_output_page_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits

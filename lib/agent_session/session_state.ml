@@ -104,6 +104,7 @@ type t =
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; managed_submissions : Managed_submission.t list [@sexp.list]
+  ; managed_stops : Managed_stop.t list [@sexp.list]
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -118,11 +119,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 16
+let current_schema_version = 17
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if not (List.is_empty t.managed_stops)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"managed stop receipts require session schema 17"
+         ~retryable:false
+         ())
+  else if t.schema_version = 16
+  then Ok { t with schema_version = current_schema_version }
   else if not (List.is_empty t.managed_submissions)
   then
     Error
@@ -310,6 +321,7 @@ let create ~identity ~spec ~initial_history =
   ; schedules = []
   ; invocations = []
   ; managed_submissions = []
+  ; managed_stops = []
   ; moderator_executions = []
   ; subscriptions = []
   ; deliveries = []
@@ -669,6 +681,26 @@ let validate t =
              "managed submission identity/generation is inconsistent"))
   in
   let%bind () = nonnegative "transaction sequence" t.counters.transaction_sequence in
+  let%bind _ =
+    List.fold_result t.managed_stops ~init:[] ~f:(fun seen receipt ->
+      let%bind () = Managed_stop.validate receipt in
+      match
+        receipt.generation <= t.identity.generation
+        && Int64.(receipt.stop_epoch <= t.stop_epoch)
+        && Agent_protocol.Id.Session.equal
+             receipt.reference.child_session_id
+             t.identity.session_id
+        && not
+             (List.exists seen ~f:(fun previous ->
+                Managed_stop.same_key previous receipt
+                || Agent_protocol.Id.Transaction.equal previous.id receipt.id))
+      with
+      | true -> Ok (receipt :: seen)
+      | false ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed stop identity/generation is inconsistent"))
+  in
   let%bind () =
     nonnegative "next history sequence" t.conversation.next_history_sequence
   in

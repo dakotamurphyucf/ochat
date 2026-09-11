@@ -368,6 +368,13 @@ type _ request =
   | Stop_delegated :
       Agent_store.Delegation_store.Reference.t * Agent_protocol.Session.stop_mode
       -> Agent_protocol.Session.t request
+  | Stop_managed :
+      Agent_store.Delegation_store.Reference.t
+      * Agent_protocol.Idempotency_key.t
+      * Agent_protocol.Session.stop_mode
+      * int
+      * int option
+      -> Managed_stop.t request
   | Stop_delegated_at_epoch :
       Agent_store.Delegation_store.Reference.t * int64 * bool
       -> Agent_protocol.Session.t request
@@ -1534,7 +1541,16 @@ let cleanup_invocation_permissions t ids =
              { desired_state = value.desired; observed_state = value.observed })) )
 ;;
 
-let stop_transition ?parent_stop_epoch t mode ~extension_work lifecycle deltas payloads =
+let stop_transition
+      ?parent_stop_epoch
+      ?managed_receipt
+      t
+      mode
+      ~extension_work
+      lifecycle
+      deltas
+      payloads
+  =
   let open Result.Let_syntax in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
@@ -1558,6 +1574,9 @@ let stop_transition ?parent_stop_epoch t mode ~extension_work lifecycle deltas p
              then [ Session_delta.Initial_start_consumed ]
              else [])
             @ (Session_delta.Lifecycle_changed lifecycle :: deltas)
+            @ Option.to_list
+                (Option.map managed_receipt ~f:(fun receipt ->
+                   Session_delta.Managed_stop_admitted receipt))
             @ Option.to_list
                 (Option.map parent_stop_epoch ~f:(fun epoch ->
                    Session_delta.Parent_stop_epoch_changed epoch))
@@ -1608,7 +1627,7 @@ let cancel_independent_moderator t =
       Option.iter borrow.cancel ~f:(fun cancel -> cancel ()))
 ;;
 
-let stop_internal ?parent_stop_epoch t mode =
+let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
   let open Result.Let_syntax in
   let%bind extension_work =
     Extension_stop.prepare ~state:t.state ~mode ~now:(t.services.now ())
@@ -1621,6 +1640,7 @@ let stop_internal ?parent_stop_epoch t mode =
       | Stopped, Stopped
         when (not t.state.pending_initial_start)
              && Option.is_none parent_stop_epoch
+             && Option.is_none managed_receipt
              && List.is_empty (stopped_jobs t mode)
              && Extension_stop.is_empty extension_work
              && not
@@ -1632,6 +1652,7 @@ let stop_internal ?parent_stop_epoch t mode =
       | _, _ ->
         stop_transition
           ?parent_stop_epoch
+          ?managed_receipt
           t
           mode
           ~extension_work
@@ -1662,6 +1683,7 @@ let stop_internal ?parent_stop_epoch t mode =
     let%bind session =
       stop_transition
         ?parent_stop_epoch
+        ?managed_receipt
         t
         mode
         ~extension_work
@@ -1676,6 +1698,55 @@ let stop_internal ?parent_stop_epoch t mode =
       cancel_independent_moderator t;
       Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
+;;
+
+let stop_managed_internal t reference key mode generation max_receipts =
+  let module M = Managed_stop in
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.state.spec.delegation with
+    | Some current
+      when D.Reference.equal current reference
+           && P.Id.Session.equal reference.child_session_id t.state.identity.session_id ->
+      Ok ()
+    | _ ->
+      Error (error Permission_denied "delegation.stop: child relationship does not match")
+  in
+  match
+    List.find t.state.managed_stops ~f:(fun receipt ->
+      D.Reference.equal receipt.M.reference reference
+      && P.Idempotency_key.equal receipt.key key)
+  with
+  | Some receipt ->
+    (match P.Session.equal_stop_mode receipt.mode mode with
+     | true -> Ok receipt
+     | false -> Error (error Conflict "managed stop key was used for a different mode"))
+  | None ->
+    let%bind () =
+      match Int.equal generation t.state.identity.generation with
+      | true -> Ok ()
+      | false -> Error (error Conflict "child generation changed before managed stop")
+    in
+    let%bind () =
+      match max_receipts with
+      | Some maximum when maximum < 1 || List.length t.state.managed_stops >= maximum ->
+        Error (error Invalid_state "managed stop receipt capacity reached")
+      | None | Some _ -> Ok ()
+    in
+    let%bind stop_epoch =
+      match t.state.lifecycle.desired with
+      | Stopped -> Ok t.state.stop_epoch
+      | Running when Int64.equal t.state.stop_epoch Int64.max_value ->
+        Error (error Invalid_state "stop epoch overflow")
+      | Running -> Ok Int64.(t.state.stop_epoch + 1L)
+    in
+    let%bind receipt =
+      M.create ~reference ~key ~mode ~generation ~stop_epoch ~now:(t.services.now ())
+    in
+    let%map _ = stop_internal ~managed_receipt:receipt t mode in
+    receipt
 ;;
 
 let append_history t entries =
@@ -4229,10 +4300,13 @@ let commit_worker_moderator t operation_id moderator =
 let consume_deferred t operation_id =
   let open Result.Let_syntax in
   let%bind _ = current_operation t operation_id in
-  let entries = t.state.conversation.deferred_user_entries in
-  let%bind decoded = History_codec.all_of_protocol entries in
-  let%map _ = adopt_deferred t in
-  decoded
+  match t.state.lifecycle.desired with
+  | Stopped -> Ok []
+  | Running ->
+    let entries = t.state.conversation.deferred_user_entries in
+    let%bind decoded = History_codec.all_of_protocol entries in
+    let%map _ = adopt_deferred t in
+    decoded
 ;;
 
 let admit_standalone_delivery_internal t plan =
@@ -4459,52 +4533,60 @@ let consume_notifications_internal
       plan
   =
   let open Result.Let_syntax in
-  let%bind _ = running_operation t operation_id in
-  let%bind () =
-    match
-      List.exists t.invocation_executions ~f:(fun execution ->
-        match execution.owner with
-        | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
-        | _ -> false)
-    with
-    | true ->
-      Error (error Conflict "notification insertion waits for the foreground tool batch")
-    | false -> Ok ()
-  in
-  let%bind () = validate_notification_plan t plan in
-  let%bind deltas, entries, committed = notification_changes t plan in
-  let deltas =
-    deltas
-    @ List.map discarded_wakes ~f:(fun value -> Session_delta.Delivery_wake_changed value)
-  in
-  let%bind decoded = History_codec.all_of_protocol entries in
-  let%map () =
-    match deltas with
-    | [] -> Ok ()
-    | _ ->
-      transition
-        t
-        ~delta:(Session_delta.Batch deltas)
-        ~payloads:(notification_payloads entries)
-      |> Result.map ~f:ignore
-  in
-  let existing =
-    match t.notification_inputs with
-    | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
-    | _ -> []
-  in
-  let ids =
-    List.map (committed @ wakes) ~f:(fun value ->
-      value.Agent_protocol.Delivery.context.id)
-  in
-  t.notification_inputs <- Some (operation_id, ids @ existing);
-  let wake =
-    List.exists (committed @ wakes) ~f:(fun value ->
-      Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
-  in
-  Chat_response.In_memory_stream.Safe_point_input.notification_entries
-    ~request_turn:wake
-    decoded
+  let%bind _ = running_operation ~allow_stopping:true t operation_id in
+  match t.state.lifecycle.desired with
+  | Stopped ->
+    (* An admitted provider may finish during graceful stop. Its final safe point
+       must not fail, consume retained deliveries, or request another turn. *)
+    Ok Chat_response.In_memory_stream.Safe_point_input.empty
+  | Running ->
+    let%bind () =
+      match
+        List.exists t.invocation_executions ~f:(fun execution ->
+          match execution.owner with
+          | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+          | _ -> false)
+      with
+      | true ->
+        Error
+          (error Conflict "notification insertion waits for the foreground tool batch")
+      | false -> Ok ()
+    in
+    let%bind () = validate_notification_plan t plan in
+    let%bind deltas, entries, committed = notification_changes t plan in
+    let deltas =
+      deltas
+      @ List.map discarded_wakes ~f:(fun value ->
+        Session_delta.Delivery_wake_changed value)
+    in
+    let%bind decoded = History_codec.all_of_protocol entries in
+    let%map () =
+      match deltas with
+      | [] -> Ok ()
+      | _ ->
+        transition
+          t
+          ~delta:(Session_delta.Batch deltas)
+          ~payloads:(notification_payloads entries)
+        |> Result.map ~f:ignore
+    in
+    let existing =
+      match t.notification_inputs with
+      | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
+      | _ -> []
+    in
+    let ids =
+      List.map (committed @ wakes) ~f:(fun value ->
+        value.Agent_protocol.Delivery.context.id)
+    in
+    t.notification_inputs <- Some (operation_id, ids @ existing);
+    let wake =
+      List.exists (committed @ wakes) ~f:(fun value ->
+        Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
+    in
+    Chat_response.In_memory_stream.Safe_point_input.notification_entries
+      ~request_turn:wake
+      decoded
 ;;
 
 let notification_wake_deltas t operation_id ~accept =
@@ -9096,6 +9178,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
      | _ ->
        Error
          (error Permission_denied "delegation.stop: child relationship does not match"))
+  | Stop_managed (reference, key, mode, generation, max_receipts) ->
+    stop_managed_internal t reference key mode generation max_receipts
   | Append_history (attachment_id, entries) ->
     with_writer t attachment_id (fun () -> append_history t entries)
   | Stop_delegated_at_epoch (reference, epoch, force) ->
@@ -9491,6 +9575,13 @@ let stop_with_command_audit t ~command_audit ~attachment_id ~mode =
 
 let stop_delegated t ~reference ~mode =
   call t ~priority:Priority (Stop_delegated (reference, mode))
+;;
+
+let stop_managed t ~reference ~key ~mode ~generation ~max_receipts =
+  call
+    t
+    ~priority:Priority
+    (Stop_managed (reference, key, mode, generation, max_receipts))
 ;;
 
 let stop_delegated_at_epoch ?(force = false) t ~reference ~epoch =

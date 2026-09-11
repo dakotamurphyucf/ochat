@@ -38,6 +38,12 @@ type t =
       -> target:wait_target
       -> timeout_ms:int
       -> (Jsonaf.t, Agent_protocol.Invocation.tool_error) result
+  ; stop :
+      Native_tool_invocation.borrowed
+      -> Agent_protocol.Id.Session.t
+      -> key:Agent_protocol.Idempotency_key.t
+      -> mode:Agent_protocol.Session.stop_mode
+      -> (Jsonaf.t, Agent_protocol.Invocation.tool_error) result
   }
 
 (** Bounded metadata only, excluding transcript, tool arguments, permission

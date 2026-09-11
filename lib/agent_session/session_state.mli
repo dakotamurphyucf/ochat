@@ -117,6 +117,9 @@ type t =
   ; managed_submissions : Managed_submission.t list [@sexp.list]
     (** Protected send identities and operation correlation. Historical terminal
         receipts survive generation replacement; they are not raw public state. *)
+  ; managed_stops : Managed_stop.t list [@sexp.list]
+    (** Immutable stop admission identities, retained across target restart/reset.
+        A retried old key must not stop a subsequent runtime lifetime. *)
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]

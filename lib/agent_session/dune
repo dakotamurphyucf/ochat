@@ -20,7 +20,9 @@
   managed_send_tool
   managed_read_tool
   managed_wait_tool
+  managed_stop_tool
   managed_submission
+  managed_stop
   managed_submission_tracking
   prompt_catalog
   security_grant

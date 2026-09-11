@@ -44,6 +44,7 @@
   generated_runtime_tests
   generated_session_state_tests
   managed_submission_tests
+  managed_stop_tests
   managed_submission_recovery_tests
   delivery_ownership_tests
   delivery_wake_tests

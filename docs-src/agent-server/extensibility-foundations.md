@@ -4507,6 +4507,48 @@ child generation during a wait also requires a new snapshot. After host restart,
 durable receipts remain queryable while process-bound cursors must be refreshed.
 This path remains internally gated pending the complete authoring-guidance phase.
 
+### Managed child stop admission
+
+Internally qualified durable hosts can declare `<tool name="agent_stop"/>`.
+Requests require `session_id`, `idempotency_key`, and an explicit `mode`:
+`graceful` permits already admitted work to finish; `cancel` requests cancellation
+through the existing session stop transition. New work still requires a running
+session. Stopping preserves stored history and never grants approval authority.
+
+Session-state schema 17 adds immutable private stop receipts. The actor checks the
+private relationship and saves the receipt in the same transaction as stop intent,
+before invoking cancellation. The retry key is scoped to that relationship. A
+matching key/mode returns the original receipt, including after daemon restart,
+explicit child restart or administrative reset. Reusing a key with a different
+mode returns `agent.stop.conflict`. Use a new key for a new stop or to escalate a
+graceful stop to cancellation. Failed persistence admits no receipt or stop effect.
+
+Responses contain `receipt`, bounded current `status`, and `progress`:
+
+- `stopping`: the original stop is still applicable and observed state is not yet
+  stopped.
+- `stopped`: that stop remains applicable and the actor reports stopped.
+- `superseded`: the child has resumed, changed generation or entered a later stop
+  epoch. The old request was replayed without stopping the new lifetime.
+
+The immutable receipt proves durable admission. Even an observed stopped state is
+not a join of all runtime/descendant resource cleanup. Consult current status for
+operation and permission state; repeated status/read calls do not resume children.
+Progress does not claim that a particular submission completed successfully; use
+its submission receipt with `agent_wait` or `agent_read` to inspect that outcome.
+Authority is checked before target access and again before receipt/status disclosure.
+
+`managed_stop_max_count` defaults to `Some 4096`; trusted hosts can set `None` for
+unrestricted receipt admission. Existing retry identities remain usable at capacity
+and are not automatically expired into repeatable effects. Older checkpoints without
+stop receipts migrate to schema 17, while an older schema tag carrying stop receipts
+is rejected. Administrative replacement retains immutable retry identities.
+
+Graceful completion uses a non-adopting final safe point: deferred user input and
+notifications remain stored for later explicit resume. An admitted response can
+finish without failing merely because desired state changed to stopped. Cancellation
+continues to reject finishing work through the existing operation-state guards.
+
 ### Authored agent-tool persistence contract (implementation in progress)
 
 The parser now accepts author-controlled policies:

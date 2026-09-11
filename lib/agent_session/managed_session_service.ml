@@ -32,6 +32,12 @@ type t =
       -> target:wait_target
       -> timeout_ms:int
       -> (Jsonaf.t, P.Invocation.tool_error) result
+  ; stop :
+      Native_tool_invocation.borrowed
+      -> P.Id.Session.t
+      -> key:P.Idempotency_key.t
+      -> mode:P.Session.stop_mode
+      -> (Jsonaf.t, P.Invocation.tool_error) result
   }
 
 let status_json (state : Session_state.t) =

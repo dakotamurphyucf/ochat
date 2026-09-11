@@ -25,6 +25,7 @@ type t =
   | Invocation_changed of Agent_protocol.Invocation.t
   | Managed_submission_admitted of Managed_submission.t
   | Managed_submission_changed of Managed_submission.t
+  | Managed_stop_admitted of Managed_stop.t
   | Invocation_reconciled of Agent_protocol.Invocation.t
   | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
@@ -80,6 +81,24 @@ let nonexecuting_intent_transition
 let rec apply state = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
   | Created created -> Session_state.upgrade_schema created
+  | Managed_stop_admitted receipt ->
+    let open Result.Let_syntax in
+    let%bind () = Managed_stop.validate receipt in
+    (match
+       Int.equal receipt.generation state.identity.generation
+       && Option.exists
+            state.spec.delegation
+            ~f:(Agent_store.Delegation_store.Reference.equal receipt.reference)
+       && not
+            (List.exists state.managed_stops ~f:(fun previous ->
+               Managed_stop.same_key previous receipt
+               || Agent_protocol.Id.Transaction.equal previous.id receipt.id))
+     with
+     | true -> Ok { state with managed_stops = receipt :: state.managed_stops }
+     | false ->
+       Error
+         (Agent_protocol.Error.invalid_request
+            "managed stop admission conflicts with retained identity"))
   | Managed_submission_admitted receipt ->
     let open Result.Let_syntax in
     let%bind () = Managed_submission.validate receipt in
