@@ -52,6 +52,41 @@ val prepare_resources
   -> approval_store:Shell_access.Approval.store
   -> (resources, Agent_protocol.Error.t) result
 
+type authored_resources = private
+  { source : Authored_agent_source.t
+  ; revision : Prompt_revision.t
+  ; resources : resources
+  }
+
+(** Prepare the named specialist's private resources from its defining parent's
+    captured source tree. Retains the authored parser, source-relative paths and
+    host-supplied workspace/tool/storage capabilities. Only [prompt_dir] is re-rooted
+    to the specialist's captured source directory. Does not prepare/expose the
+    parent's public tools, install an artifact/session or initialize scripts.
+
+    Native setup follows [prepare_resources], including explicit shell admission
+    and MCP connection effects. The host must authorize this private closure and
+    retain [sw] through its consumers' lifetimes. The returned preparation revision
+    is not a persisted child identity. Invocation mediation, wrapper binding and
+    durable creation still belong to the owning service. Moderators and their
+    handlers compile against the delegated tool-mediated surface; legacy scripts
+    and direct Process/Model recipes reject before any initializer runs. *)
+val prepare_authored_resources
+  :  parent_revision:Prompt_revision.t
+  -> tool_name:string
+  -> native_service_revision:string option
+  -> env:Eio_unix.Stdenv.base
+  -> sw:Eio.Switch.t
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> one_off_policy:Chat_response.One_off_request.policy
+  -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> (authored_resources, Agent_protocol.Error.t) result
+
 (** Narrow an already prepared ancestor's exact resources using an admitted
     generated definition. Shares native implementations and captures standalone
     private dependency closures without initializing any ancestor/child scripts.
@@ -180,7 +215,7 @@ type t =
     (** Enable durable accounting with this exact captured policy at installation.
         Absent for unqualified runtimes. *)
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
-    (** Generated authority gate for owner-managed work, including idle callbacks.
+    (** Delegated authority gate for owner-managed work, including idle callbacks.
         This does not authorize disclosure of retained history or replace leases. *)
   ; ancestor_capabilities :
       (Agent_protocol.Id.Session.t
@@ -353,6 +388,47 @@ val build_generated
   -> history_namespace:string
   -> next_history_sequence:int
   -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> model_post_stream:model_post_stream option
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (t, Agent_protocol.Error.t) result
+
+(** Construct an authored child using the shared session worker and a fresh
+    moderator manager, retaining the specialist's preadmitted private resources.
+    Verifies both captured trees, exact source identity and the guard's live
+    private registry before initialization. The host must retain the preparation
+    switch and provide actual-caller policy/approval services and canonical stored
+    history. This path never reconstructs tools or implicitly executes prompt
+    content while allocating initial history.
+
+    The specialist's own moderator-handled tools dispatch to its own manager.
+    Delegated moderators use the tool-mediated compiler surface: legacy moderator
+    scripts, direct Process/Model recipes and implicit ChatMD input loading are
+    unavailable. Parent restrictions, activity cancellation, notifications and
+    background work use the same guards as generated children. This does not
+    create/publish a durable session or install root authored-tool registrations. *)
+val build_authored_child
+  :  services:extension_services
+  -> revision:Prompt_revision.t
+  -> prepared:authored_resources
+  -> authority:Delegation_authority.t
+  -> history:History_entry.t list
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
   -> existing_moderator_snapshot:Jsonaf.t option
   -> moderator_reservation_size:int
   -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t

@@ -186,10 +186,14 @@ type native_registration =
     respective host services and are rejected. Resources remain owned by [sw];
     the caller must release that scope after failed preparation or runtime teardown.
     [native_service_revision] has the same resource-identity meaning as in [create].
+    [delegated_moderator] defaults to false; true compiles moderators and their
+    managed handlers against the tool-mediated delegated contract. The host still
+    must enforce inherited execution authority when constructing the live runtime.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
   :  ?native_service_revision:string
   -> ?native_registrations:native_registration list
+  -> ?delegated_moderator:bool
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t

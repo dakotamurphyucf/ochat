@@ -16,9 +16,12 @@ type t
     Uses existing definition limits and Eio-managed compilation. This preparation
     does not expose tools, initialize a moderator or install invocation dispatch.
     The host must use the matching prepared definitions under actor ownership and
-    current permission/disclosure policy, including revalidation after waits. *)
+    current permission/disclosure policy, including revalidation after waits.
+    [delegated_moderator] selects the restricted moderator compiler contract and
+    includes it in the managed authority identity; defaults to false. *)
 val prepare
   :  ?limits:Chatml_compilation.limits
+  -> ?delegated_moderator:bool
   -> env:Eio_unix.Stdenv.base
   -> owner:string
   -> capabilities:Tool_capability.t

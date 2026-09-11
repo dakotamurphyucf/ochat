@@ -18,6 +18,7 @@ let authority_fingerprint t = t.authority_fingerprint
 
 let prepare
       ?(limits = Chatml_compilation.default_limits)
+      ?(delegated_moderator = false)
       ~env
       ~owner
       ~capabilities
@@ -183,7 +184,11 @@ let prepare
     , (helps : Spec.authoring_help list)
     , (base_permissions : (string * string) list)
     , (Chatml_compilation.contract Tool_v1 : Sexp.t)
-    , (Chatml_compilation.contract Moderator_v1 : Sexp.t)
+    , (Chatml_compilation.contract
+         (match delegated_moderator with
+          | false -> Moderator_v1
+          | true -> Delegated_moderator_v1)
+       : Sexp.t)
     , (Chatmd_shell_spec.Tool_schema.dialect : string)]
     |> Sexp.to_string
     |> Chatmd_shell_spec.Source_ref.digest
@@ -233,7 +238,12 @@ let prepare
     |> Result.map_error ~f:(fun error -> [ D.error ~code:error.C.code error.message ])
   in
   let%map definition =
-    EC.prepare_definition_in_domain ~limits ~env ~capabilities elements
+    EC.prepare_definition_in_domain
+      ~limits
+      ~delegated_moderator
+      ~env
+      ~capabilities
+      elements
   in
   let tools =
     List.map (EC.prepared_tools definition) ~f:(fun prepared ->

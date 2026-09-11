@@ -89,6 +89,19 @@ val check_preparation
   -> permission_profile:Permission_policy.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** The same preparation gate, additionally requiring the exact authored origin
+    and live prepared private registry. Prevents constructing a child with a
+    different resource set than the one validated by this authority guard. *)
+val check_authored_preparation
+  :  t
+  -> origin:Agent_store.Delegation_store.Admission.authored_tool
+  -> capabilities:Chat_response.Tool_capability.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> manifest_sha256:string
+  -> permission_profile:Permission_policy.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Execution requires Linked, unrevoked admission and a running, unchanged parent
     with the exact current binding selection. Generation/source/policy/workspace
     changes or a missing/stopped ancestor deny, except execution liveness above a

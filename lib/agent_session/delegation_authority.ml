@@ -273,9 +273,16 @@ let read t =
     t.reference
 ;;
 
-let check_preparation t ~session_id ~revision_id ~manifest_sha256 ~permission_profile =
+let check_preparation_record
+      t
+      (record : D.record)
+      (parent : Session_state.t)
+      ~session_id
+      ~revision_id
+      ~manifest_sha256
+      ~permission_profile
+  =
   let open Result.Let_syntax in
-  let%bind record, parent = read t in
   let%bind () =
     match record.stage with
     | Artifact_installed | Child_installed | Linked -> Ok ()
@@ -294,6 +301,54 @@ let check_preparation t ~session_id ~revision_id ~manifest_sha256 ~permission_pr
   | true -> Ok ()
   | false ->
     denied "delegation.child_identity: child or permission profile differs from admission"
+;;
+
+let check_preparation t ~session_id ~revision_id ~manifest_sha256 ~permission_profile =
+  let open Result.Let_syntax in
+  let%bind record, parent = read t in
+  check_preparation_record
+    t
+    record
+    parent
+    ~session_id
+    ~revision_id
+    ~manifest_sha256
+    ~permission_profile
+;;
+
+let check_authored_preparation
+      t
+      ~origin
+      ~capabilities
+      ~session_id
+      ~revision_id
+      ~manifest_sha256
+      ~permission_profile
+  =
+  let open Result.Let_syntax in
+  let%bind record, parent = read t in
+  let%bind () =
+    match
+      Option.equal
+        D.Admission.equal_authored_tool
+        record.admission.authored_tool
+        (Some origin)
+      && String.equal (C.fingerprint capabilities) (C.fingerprint t.capabilities)
+    with
+    | true -> Ok ()
+    | false ->
+      denied
+        "delegation.authored_resources: prepared source or resources differ from \
+         admission"
+  in
+  check_preparation_record
+    t
+    record
+    parent
+    ~session_id
+    ~revision_id
+    ~manifest_sha256
+    ~permission_profile
 ;;
 
 let check_execution t =

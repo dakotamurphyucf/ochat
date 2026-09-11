@@ -64,9 +64,15 @@ type definition
     nested tool selection. This service does not construct new tools, perform
     source loading, apply authoring context, or authorize generated definitions.
     A host must consume the prepared result before exposing extension runners;
-    code editing or registry changes require fresh admission. *)
+    code editing or registry changes require fresh admission.
+
+    [delegated_moderator] defaults to false. When true, all moderator scripts,
+    including ghost handlers, compile against the tool-mediated delegated surface
+    without direct Process/Model recipes. The selected contract participates in
+    definition and handler fingerprints. Standalone tool contracts are unchanged. *)
 val prepare_definition_in_domain
   :  ?limits:Chatml_compilation.limits
+  -> ?delegated_moderator:bool
   -> env:Eio_unix.Stdenv.base
   -> capabilities:Tool_capability.t
   -> Prompt.Chat_markdown.top_level_elements list

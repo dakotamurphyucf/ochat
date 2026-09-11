@@ -4646,6 +4646,22 @@ authored session adapter is installed. Internal foundations now include:
   executable runtime restoration still needs the authored resource adapter.
   An inherited wrapper keeps its original defining source. The shared authority
   service separately checks the actual calling parent's revision and permissions.
+  `Runtime_builder.prepare_authored_resources` now reparses the selected captured
+  specialist through the shared authored parser, then prepares its native/managed
+  private tools with explicit host admission. Imported source-relative roots retain
+  their captured directories; the parent's public tools are not prepared or merged.
+  Preparation initializes no scripts and installs no speculative child artifact.
+  Shell authorization and MCP setup can still have their normal explicit host
+  effects. The owning host must retain the resource switch, bind the wrapper and
+  supply actual-caller invocation/approval mediation before executing a child.
+  `Runtime_builder.build_authored_child` consumes those prepared resources and
+  canonical admitted history through the shared worker, dispatch and lifecycle
+  services. It verifies the captured source, installed tree and exact live private
+  registry before initialization. Each runtime gets its own moderator manager;
+  its own moderator-handled tools dispatch there. Captured moderators compile
+  against the delegated tool-mediated contract, excluding direct Process/Model
+  recipes and legacy scripts. The same inherited authority, activity cancellation
+  and plain-text input restrictions apply as for generated children.
 - Delegation ledger v4 can retain the authored tool name and source fingerprint
   in its immutable admission/reference. Changed names or source identities conflict
   on a retry, including attempts to relabel a generated reservation. Older generated
@@ -4670,13 +4686,18 @@ authored session adapter is installed. Internal foundations now include:
   Each invocation resolves services through its actual actor borrow, after semantic
   argument validation. This constructor does not supply a durable factory adapter.
 
-These components are not yet a usable persisted authored-agent runtime. Actual
-private resource construction/approval routing, durable factory admission and
+These components are not yet exposed as persisted authored-agent sessions. Actual
+host private-resource ownership/approval routing, durable factory admission and
 source-bound restoration, factory-installed registration and end-to-end
 interoperability still require integration.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. They do not
-prove complete authored child-session execution. Generated definitions still
+prove complete factory-created authored child-session execution. The authored
+runtime integration test uses real captured resources, artifact/ledger storage and
+a session actor with memory persistence: its own ghost tool performs native reads,
+state survives repeated calls, fresh managers isolate state, checkpoints restore,
+and revocation during read authorization blocks execution and further model calls.
+The provider stream is simulated. Generated definitions still
 require inherited tool references and cannot introduce fresh authored bindings.
 Mixed-ancestry tests use real capability registrations and ledger records with
 fixture parent states. They check private-tool isolation, quiet grant revocation,

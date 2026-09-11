@@ -684,6 +684,7 @@ type extension_resources =
 let prepare_extensions
       ?native_service_revision
       ?(native_registrations = [])
+      ?(delegated_moderator = false)
       ~sw
       ~ctx
       ~host
@@ -739,6 +740,7 @@ let prepare_extensions
   in
   let%map managed =
     Managed_tool_registry.prepare
+      ~delegated_moderator
       ~env:(Ctx.env ctx)
       ~owner:host.session_id
       ~capabilities

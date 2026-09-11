@@ -52,6 +52,18 @@ val artifact
   -> created_at:Agent_protocol.Timestamp.t
   -> (Agent_store.Prompt_artifact_store.Artifact.t, Agent_store.Store_error.t) result
 
+(** Re-root and reparse this captured specialist in the defining parent's verified
+    tree, using the shared authored parser and retained source bytes. The returned
+    revision has a deterministic source-derived preparation identity; it is not
+    installed and must not be published as a persisted child revision. No script
+    initializer or tool runs. [parent] must be the original source owner, even if
+    another caller later inherits the wrapper. Retains the original catalog policy
+    and directory relationships for host-authorized private resource preparation. *)
+val resource_revision
+  :  parent:Prompt_revision.t
+  -> t
+  -> (Prompt_revision.t, Agent_protocol.Error.t) result
+
 (** Install only the captured source bound to a live durable authored reservation.
     Rebuilds artifact identity from the original reservation for uncertain retries;
     checks the source/declaration, manifest and exact private pins

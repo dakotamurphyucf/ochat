@@ -118,6 +118,40 @@ let artifact t ~revision_id ~created_at =
     ()
 ;;
 
+let resource_revision ~parent t =
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      P.Id.Prompt_revision.equal (Prompt_revision.id parent) t.identity.parent_revision_id
+      && String.equal
+           (Prompt_revision.artifact parent).manifest_sha256
+           t.identity.parent_manifest_sha256
+    with
+    | true -> Ok ()
+    | false -> denied "authored resource preparation requires its original source owner"
+  in
+  let%bind revision_id =
+    P.Id.Prompt_revision.of_string ("prv_authored_" ^ fingerprint t)
+  in
+  let%bind artifact =
+    artifact t ~revision_id ~created_at:t.parent_artifact.created_at
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  Prompt_revision_builder.reparse
+    ~definition:(Prompt_revision.definition parent)
+    ~artifact
+    ~materialized_tree:(Prompt_revision.materialized_tree parent)
+  |> Result.map_error ~f:(fun diagnostics ->
+    P.Error.create
+      Prompt_unavailable
+      ~message:
+        (List.map diagnostics ~f:(fun diagnostic ->
+           diagnostic.Prompt_revision_builder.Diagnostic.message)
+         |> String.concat ~sep:"\n")
+      ~retryable:false
+      ())
+;;
+
 let store_result result =
   Result.map_error result ~f:Agent_store.Store_error.to_protocol_error
 ;;

@@ -226,6 +226,7 @@ let run_agent
 
 let create_agent_runtime
       ~extensions
+      ~delegated_moderator
       ~native_registrations
       ~native_service_revision
       ~sw
@@ -255,6 +256,7 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ~delegated_moderator
       ?native_service_revision
       ~native_registrations
       ~sw
@@ -356,6 +358,7 @@ let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_ho
 
 let create_authored_resources
       ~native_service_revision
+      ~delegated_moderator
       ~env
       ~sw
       ~ctx
@@ -369,26 +372,38 @@ let create_authored_resources
       ~response_dir
   =
   let open Result.Let_syntax in
+  let%bind () =
+    match
+      delegated_moderator
+      && List.exists elements ~f:(function
+        | Prompt.Chat_markdown.Script _ -> true
+        | _ -> false)
+    with
+    | false -> Ok ()
+    | true -> Error (failure "authored delegation requires an extensibility-v1 moderator")
+  in
   let%bind native_registrations =
     native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
   in
   let extensions =
-    Option.is_some one_off_policy
-    && (declares_native elements Run_chatml_tool.name
-        || declares_native elements Generated_session_tool.name
-        || declares_native elements Managed_session_tool.status_name
-        || declares_native elements Managed_send_tool.name
-        || declares_native elements Managed_read_tool.name
-        || declares_native elements Managed_wait_tool.name
-        || declares_native elements Managed_stop_tool.name
-        || declares_native elements Authoring_validation_tool.name
-        || List.exists elements ~f:(function
-          | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
-          | _ -> false))
+    delegated_moderator
+    || (Option.is_some one_off_policy
+        && (declares_native elements Run_chatml_tool.name
+            || declares_native elements Generated_session_tool.name
+            || declares_native elements Managed_session_tool.status_name
+            || declares_native elements Managed_send_tool.name
+            || declares_native elements Managed_read_tool.name
+            || declares_native elements Managed_wait_tool.name
+            || declares_native elements Managed_stop_tool.name
+            || declares_native elements Authoring_validation_tool.name
+            || List.exists elements ~f:(function
+              | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+              | _ -> false)))
   in
   let%map native, definition, managed =
     create_agent_runtime
       ~extensions
+      ~delegated_moderator
       ~native_registrations
       ~native_service_revision
       ~sw
@@ -403,7 +418,8 @@ let create_authored_resources
   { native; definition; managed }
 ;;
 
-let prepare_resources
+let prepare_resources_internal
+      ~delegated_moderator
       ~native_service_revision
       ~env
       ~sw
@@ -431,6 +447,7 @@ let prepare_resources
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
     ~native_service_revision
+    ~delegated_moderator
     ~env
     ~sw
     ~ctx
@@ -442,6 +459,61 @@ let prepare_resources
     ~approval_provider
     ~approval_store
     ~response_dir
+;;
+
+let prepare_resources = prepare_resources_internal ~delegated_moderator:false
+
+type authored_resources =
+  { source : Authored_agent_source.t
+  ; revision : Prompt_revision.t
+  ; resources : resources
+  }
+
+let prepare_authored_resources
+      ~parent_revision
+      ~tool_name
+      ~native_service_revision
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  =
+  let open Result.Let_syntax in
+  let%bind source = Authored_agent_source.capture ~parent:parent_revision ~tool_name in
+  let%bind revision =
+    Authored_agent_source.resource_revision ~parent:parent_revision source
+  in
+  let paths =
+    { paths with
+      Runtime_paths.prompt_dir =
+        Eio.Path.(
+          Prompt_revision.materialized_tree revision
+          / Filename.dirname (Prompt_revision.root_relative_path revision))
+    }
+  in
+  let%map resources =
+    prepare_resources_internal
+      ~delegated_moderator:true
+      ~native_service_revision
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~revision
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  in
+  { source; revision; resources }
 ;;
 
 let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
@@ -641,7 +713,10 @@ let create_moderator
         ~artifact
         ~capabilities
         ~allocator
-        ?on_process_run:(Agent_runtime.moderator_process_handler agent_runtime)
+        ?on_process_run:
+          (match delegated with
+           | true -> None
+           | false -> Agent_runtime.moderator_process_handler agent_runtime)
         ?snapshot
         ()
       |> Result.map_error ~f:failure
@@ -962,6 +1037,11 @@ type inherited_managed =
 
 type source =
   | Authored of Prompt_revision.t
+  | Authored_child of
+      { revision : Prompt_revision.t
+      ; prepared : authored_resources
+      ; authority : Delegation_authority.t
+      }
   | Generated of
       { definition : Generated_definition.t
       ; artifact_store : Agent_store.Prompt_artifact_store.t
@@ -1028,6 +1108,43 @@ let build_with_services
   let%bind () =
     match source with
     | Authored _ -> Ok ()
+    | Authored_child { revision; prepared; authority } ->
+      let artifact = Prompt_revision.artifact revision in
+      let%bind expected =
+        Authored_agent_source.artifact
+          prepared.source
+          ~revision_id:artifact.revision_id
+          ~created_at:artifact.created_at
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      in
+      let%bind () =
+        match String.equal expected.manifest_sha256 artifact.manifest_sha256 with
+        | true -> Ok ()
+        | false ->
+          Error (failure "authored runtime source differs from its prepared specialist")
+      in
+      let%bind () =
+        Agent_store.Prompt_artifact_store.verify_tree
+          ~root:(Prompt_revision.materialized_tree prepared.revision)
+          (Prompt_revision.artifact prepared.revision)
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      in
+      let%bind capabilities =
+        Lazy.force prepared.resources.native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      Delegation_authority.check_authored_preparation
+        authority
+        ~origin:
+          { name = (Authored_agent_source.identity prepared.source).tool_name
+          ; source_sha256 = Authored_agent_source.fingerprint prepared.source
+          }
+        ~capabilities
+        ~session_id
+        ~revision_id:artifact.revision_id
+        ~manifest_sha256:artifact.manifest_sha256
+        ~permission_profile
     | Generated { definition; authority; _ } ->
       Delegation_authority.check_preparation
         authority
@@ -1038,7 +1155,7 @@ let build_with_services
   in
   let extension_services =
     match source, extension_services with
-    | Generated { authority; _ }, Some services ->
+    | (Generated { authority; _ } | Authored_child { authority; _ }), Some services ->
       Some (guarded_services authority services)
     | _, services -> services
   in
@@ -1048,7 +1165,8 @@ let build_with_services
         Option.map services.authoring_validation_host ~f:(fun host ->
           match source with
           | Authored _ -> host
-          | Generated _ -> Chat_response.Authoring_validation.for_delegated host)
+          | Generated _ | Authored_child _ ->
+            Chat_response.Authoring_validation.for_delegated host)
       in
       { services with
         authoring_validation_host = host
@@ -1066,6 +1184,11 @@ let build_with_services
       , Prompt_revision.artifact revision
       , Prompt_revision.materialized_tree revision
       , false )
+    | Authored_child { revision; _ } ->
+      ( Prompt_revision.elements revision
+      , Prompt_revision.artifact revision
+      , Prompt_revision.materialized_tree revision
+      , true )
     | Generated { definition; artifact_store; _ } ->
       let artifact = Generated_definition.artifact definition in
       ( Chat_response.Generated_admission.elements
@@ -1095,6 +1218,9 @@ let build_with_services
   let declares_one_off = declares_native elements Run_chatml_tool.name in
   let%bind agent_runtime, definition, managed =
     match source with
+    | Authored_child { prepared; _ } ->
+      let resources = prepared.resources in
+      Ok (resources.native, resources.definition, resources.managed)
     | Generated { definition; parent_runtime; inherited_managed; _ } ->
       let%map resources =
         inherit_prepared_resources
@@ -1108,6 +1234,7 @@ let build_with_services
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~delegated_moderator:false
           ~native_service_revision:
             (Option.bind extension_services ~f:(fun services ->
                services.native_service_revision))
@@ -1155,7 +1282,7 @@ let build_with_services
   let inherited =
     match source with
     | Generated { inherited_managed; _ } -> inherited_managed
-    | Authored _ -> None
+    | Authored _ | Authored_child _ -> None
   in
   let standalone_definition =
     match inherited with
@@ -1259,7 +1386,9 @@ let build_with_services
       Some
         (match moderator with
          | Some (moderator, _)
-           when (not delegated)
+           when (match source with
+                 | Generated _ -> false
+                 | Authored _ | Authored_child _ -> true)
                 && Option.is_some (Manager.extension_definition moderator.manager) ->
            Script_tool_calls.with_moderator_dispatch
              tools_service
@@ -1537,7 +1666,7 @@ let build_with_services
   let check_execution =
     match source with
     | Authored _ -> None
-    | Generated { authority; _ } ->
+    | Generated { authority; _ } | Authored_child { authority; _ } ->
       Some (fun () -> Delegation_authority.check_execution authority)
   in
   let worker =
@@ -1552,7 +1681,7 @@ let build_with_services
   let activity =
     match source with
     | Authored _ -> None
-    | Generated _ -> Some (Runtime_activity.create ~sw)
+    | Generated _ | Authored_child _ -> Some (Runtime_activity.create ~sw)
   in
   let with_activity f =
     match activity with
@@ -1757,5 +1886,12 @@ let build_generated
     ~source:
       (Generated
          { definition; artifact_store; parent_runtime; inherited_managed; authority })
+    ~extension_services:(Some services)
+;;
+
+let build_authored_child ~services ~revision ~prepared ~authority ~history =
+  build_with_services
+    ~source:(Authored_child { revision; prepared; authority })
+    ~existing_history:(Some history)
     ~extension_services:(Some services)
 ;;

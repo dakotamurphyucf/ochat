@@ -50,6 +50,8 @@
   authored_agent_source_tests
   authored_agent_authority_tests
   authored_agent_artifact_tests
+  authored_agent_resource_tests
+  authored_agent_runtime_tests
   authored_agent_registration_tests
   managed_submission_recovery_tests
   delivery_ownership_tests

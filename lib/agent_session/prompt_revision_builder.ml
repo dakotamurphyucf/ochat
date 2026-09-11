@@ -201,21 +201,16 @@ let validate_parser_closure ~parser_version ~dir loader root_source =
   done
 ;;
 
-let parse_artifact artifact_store artifact =
+let parse_tree tree artifact =
   let parser_version =
     artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
   in
   if (parser_version < 1 || parser_version > 5) || artifact.runtime_schema_version <> 1
   then failwith "unsupported prompt parser/runtime schema version";
-  Agent_store.Prompt_artifact_store.verify_materialized_tree artifact_store artifact
+  Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
   |> Result.ok_or_failwith;
-  let tree =
-    Agent_store.Prompt_artifact_store.materialized_tree
-      artifact_store
-      artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id
-  in
   let sources =
     (artifact.root_relative_path, artifact.root_chatmd)
     :: List.map artifact.sources ~f:(fun source -> source.relative_path, source.contents)
@@ -235,6 +230,23 @@ let parse_artifact artifact_store artifact =
   in
   validate_parser_elements ~parser_version elements;
   tree, elements
+;;
+
+let parse_artifact artifact_store artifact =
+  parse_tree
+    (Agent_store.Prompt_artifact_store.materialized_tree
+       artifact_store
+       artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id)
+    artifact
+;;
+
+let reparse ~definition ~artifact ~materialized_tree =
+  try
+    let tree, elements = parse_tree materialized_tree artifact in
+    Ok (Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements)
+  with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | exn -> Error [ exception_error ~source:definition.Prompt_definition.root_file exn ]
 ;;
 
 let restore ~artifact_store (definition : Prompt_definition.t) revision_id =

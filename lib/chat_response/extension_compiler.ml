@@ -62,6 +62,7 @@ let validate_script ~max_source_bytes (script : Spec.script) =
 
 let prepare_with
       ?(validate_schema = Spec.validate_schema)
+      ?(moderator_target = Chatml_compilation.Moderator_v1)
       ~compile
       ~max_source_bytes
       ~scripts
@@ -84,7 +85,7 @@ let prepare_with
   let%bind id, kind, target, selected =
     match tool.implementation with
     | Moderator id when List.is_empty tool.uses ->
-      Ok (id, Spec.Moderator_script, Chatml_compilation.Moderator_v1, capabilities)
+      Ok (id, Spec.Moderator_script, moderator_target, capabilities)
     | Standalone { script; entrypoint = "run" } ->
       Tool_capability.select capabilities ~names:tool.uses
       |> Result.map_error ~f:(fun error ->
@@ -313,6 +314,7 @@ let prepare_delegated_definition_in_domain
 
 let prepare_definition_in_domain
       ?(limits = Chatml_compilation.default_limits)
+      ?(delegated_moderator = false)
       ~env
       ~capabilities
       elements
@@ -320,6 +322,11 @@ let prepare_definition_in_domain
   let module CM = Prompt.Chat_markdown in
   let open Result.Let_syntax in
   let fail code message = Error [ D.error ~code message ] in
+  let moderator_target =
+    match delegated_moderator with
+    | false -> Chatml_compilation.Moderator_v1
+    | true -> Delegated_moderator_v1
+  in
   let%bind () =
     if
       (not (Float.is_finite limits.wall_seconds))
@@ -421,7 +428,7 @@ let prepare_definition_in_domain
              let%bind compiled = result in
              let target =
                match script.Spec.kind with
-               | Moderator_script -> Chatml_compilation.Moderator_v1
+               | Moderator_script -> moderator_target
                | Tool_script -> Tool_v1
              in
              compile ~target ~source:(Spec.script_text script)
@@ -448,6 +455,7 @@ let prepare_definition_in_domain
              let%map tool =
                prepare_with
                  ~validate_schema
+                 ~moderator_target
                  ~compile:(fun ~target:_ ~source:_ -> Ok program)
                  ~max_source_bytes:limits.max_source_bytes
                  ~scripts
@@ -464,7 +472,7 @@ let prepare_definition_in_domain
            , (List.map prepared_tools ~f:fingerprint : string list)
            , (Tool_capability.fingerprint capabilities : string)
            , (Chatml_compilation.contract Tool_v1 : Sexp.t)
-           , (Chatml_compilation.contract Moderator_v1 : Sexp.t)]
+           , (Chatml_compilation.contract moderator_target : Sexp.t)]
            |> Sexp.to_string
            |> Chatmd_shell_spec.Source_ref.digest
          in
