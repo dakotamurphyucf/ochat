@@ -78,6 +78,7 @@ let run_journal_child env count directory =
 
 let run_child env arguments =
   match arguments with
+  | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
   | [ "owned-stop"; root ] -> Crash_owned_stop.run_child env ~root ~recover:false
   | [ "owned-stop-recover"; root ] -> Crash_owned_stop.run_child env ~root ~recover:true
   | [ "owned-stop-recover"; root; boundary ] ->

@@ -14,6 +14,9 @@ type t
     Generated lifecycle scripts use extensibility-v1 without direct Model or
     Process modules. Compilation in Eio-managed domains shares one aggregate cooperative time budget;
     cancellation waits for the current compiler stage to finish.
+    Generation configuration checks include the installed reasoning-effort codec;
+    unsupported values reject before initialization. Remote model availability is
+    not inferred from successful static validation.
     This does not create a child, materialize an artifact, authorize model use,
     enforce ongoing revocation, or provide parent-moderator mediation. Those
     remain responsibilities of the owning delegation service. *)

@@ -3591,6 +3591,8 @@ source path. Parser contract 4 and generated runtime contract 2 distinguish it
 from ordinary prompt artifacts; the ordinary prompt loader rejects this contract.
 Model/reasoning configuration remains in the captured definition, but its actual
 host availability must still be authorized by session admission.
+Generated admission parses `reasoning_effort` with the installed runtime's codec;
+unsupported values fail readonly validation before session creation or initialization.
 
 Installation is atomic through the existing prompt artifact store. Retrying an
 installed revision succeeds only when its verified manifest is identical; changed
@@ -3675,6 +3677,15 @@ resource loading rejects. The delegated surface omits direct `Model`, `Process`
 and stdout `print`, the runtime supplies no direct model recipe capability, and
 the direct model-job execution entrypoint rejects. Ordinary conversation model
 turns remain available, as do effects through admitted inherited tools.
+
+The offline `generated.provider-settings-restart` runtime fixture inspects the
+actual HTTP request JSON sent to a loopback Responses endpoint. Parent, child and
+grandchild retain distinct models, reasoning effort and token limits, while child
+requests advertise only their selected tools and contain only their own instructions.
+The same assertions hold after daemon restart and a live parent-file edit: existing
+sessions keep their pinned definitions. This verifies request construction and
+persistence without a paid provider call; remote model availability is a separate
+provider/host concern.
 
 Native stream routing keeps the tool registry that was advertised at runtime
 construction separate from the current execution registry. A removed tool remains

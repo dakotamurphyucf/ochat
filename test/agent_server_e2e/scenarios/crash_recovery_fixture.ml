@@ -255,18 +255,25 @@ let self_executable env =
   else Filename.concat (Eio.Path.native_exn (Eio.Stdenv.cwd env)) executable
 ;;
 
-let child ~sw env environment ~case ~arguments =
+let child ~sw ?(environment_overrides = []) env environment ~case ~arguments =
   let overrides =
-    "OCHAT_E2E_CRASH_ARGUMENTS=" ^ Sexp.to_string_mach ([%sexp_of: string list] arguments)
+    ("OCHAT_E2E_CRASH_ARGUMENTS", Sexp.to_string_mach ([%sexp_of: string list] arguments))
+    :: environment_overrides
   in
   let inherited =
     Temporary_environment.child_environment environment ~base:(Core_unix.environment ())
-    |> Array.filter ~f:(Fn.non (String.is_prefix ~prefix:"OCHAT_E2E_CRASH_ARGUMENTS="))
+    |> Array.filter ~f:(fun entry ->
+      not
+        (List.exists overrides ~f:(fun (name, _) ->
+           String.is_prefix entry ~prefix:(name ^ "="))))
   in
   Process_manager.spawn
     ~sw
     ~env
-    ~environment:(Array.append inherited [| overrides |])
+    ~environment:
+      (Array.append
+         inherited
+         (Array.of_list (List.map overrides ~f:(fun (name, value) -> name ^ "=" ^ value))))
     ~max_output_bytes:(1024 * 1024)
     [ self_executable env; "--scenario"; "crash-matrix"; "--case"; "child." ^ case ]
 ;;

@@ -146,6 +146,9 @@ let on_event ctx state event = let* result = Model.call("worker", `Null) in Task
             ] )
       ; "duplicate source", bundle_request (List.hd_exn sources :: sources)
       ; "removed authority", bundle_request ~tools:[] sources
+      ; ( "unsupported reasoning"
+        , bundle_request
+            [ "child.chatmd", {|<config reasoning_effort="not-an-effort"/>|} ] )
       ]
     in
     List.iter failures ~f:(fun (label, request) ->
@@ -169,6 +172,7 @@ let on_event ctx state event = let* result = Model.call("worker", `Null) in Task
     delegated model surface: rejected
     duplicate source: rejected
     removed authority: rejected
+    unsupported reasoning: rejected
     captured bundle checked; no initializers or native tools; identities bind closure and host limits |}]
 ;;
 

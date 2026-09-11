@@ -86,6 +86,7 @@ val snapshot_directory : Support.Config_fixture.t -> Agent_protocol.Id.Session.t
     shared dispatcher changes or production executable flags are required. *)
 val child
   :  sw:Eio.Switch.t
+  -> ?environment_overrides:(string * string) list
   -> Eio_unix.Stdenv.base
   -> Support.Temporary_environment.t
   -> case:string

@@ -14,6 +14,11 @@ let runtime_cases =
           invoke Runtime_integrity_scenario.run "history.tool-pair-deferred-restart" env;
           invoke Multi_client_scenario.run "observer.same-event-order" env)
     }
+  ; { name = "generated-model-settings"
+    ; run =
+        (fun env ->
+          invoke Runtime_integrity_scenario.run "generated.provider-settings-restart" env)
+    }
   ; { name = "safe-points-moderator-wakeup"
     ; run =
         (fun env ->

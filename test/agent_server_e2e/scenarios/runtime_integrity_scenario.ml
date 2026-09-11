@@ -469,6 +469,7 @@ let cases =
   ; "moderator.boundaries-overlays-halt", test_moderator
   ; "moderator.self-trigger-budget", test_budget
   ; "moderator.wakeup-during-tool", test_wake
+  ; "generated.provider-settings-restart", Generated_provider_scenario.test
   ]
 ;;
 

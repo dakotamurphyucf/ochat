@@ -82,6 +82,15 @@ let inspect elements =
       | Authoring_context _ ->
         error "authoring.duplicate_policy" "only one authoring policy is permitted"
       | Config config ->
+        let%bind () =
+          match config.reasoning_effort with
+          | None -> Ok ()
+          | Some effort ->
+            (match Openai.Responses.Request.Reasoning.Effort.of_str_exn effort with
+             | _ -> Ok ()
+             | exception Failure _ ->
+               error "delegation.invalid_config" "unsupported generated reasoning effort")
+        in
         let valid_string = function
           | None -> true
           | Some s -> (not (String.is_empty (String.strip s))) && String.length s <= 256
