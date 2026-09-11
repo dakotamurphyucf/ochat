@@ -37,8 +37,14 @@ let check_storage before (job : P.Job.t) =
   same state restored;
   same state (Agent_session.Session_delta.apply state delta |> protocol_ok);
   List.iter [ 7; 8 ] ~f:(fun version ->
-    rejected (State.upgrade_schema { state with schema_version = version }));
-  State.upgrade_schema { before with schema_version = 8 } |> protocol_ok |> same before;
+    rejected
+      (State.upgrade_schema { state with schema_version = version; stop_epoch = 0L }));
+  (* Legacy schemas had no stop counter; test retirement migration independently
+     of that later lifecycle field, including the rejection cases above. *)
+  let legacy_before = { before with stop_epoch = 0L } in
+  State.upgrade_schema { legacy_before with schema_version = 8 }
+  |> protocol_ok
+  |> same legacy_before;
   List.iter
     [ { retired with delivery = Pending }
     ; { retired with delivery = Delivered (Option.value_exn retired.completed_at) }

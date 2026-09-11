@@ -46,6 +46,7 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
               ; transaction_id = P.Id.Transaction.create ()
               ; manifest_sha256 = digest "captured-child"
               ; parent_revision_id = parent.spec.prompt_revision_id
+              ; parent_stop_epoch = Some parent.stop_epoch
               ; authority_sha256 = Authority.fingerprint parent |> protocol_ok
               ; capability_pins = Request.capability_pins selected |> protocol_ok
               ; lifetime = Owned
@@ -156,6 +157,9 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
                 root_state
                 := { root with lifecycle = { desired = Stopped; observed = Stopped } });
           check "root stops during yielding lookup" guard;
+          root_state := root;
+          (during_lookup := fun () -> root_state := { root with stop_epoch = 1L });
+          check "root stops and restarts during yielding lookup" guard;
           (during_lookup := fun () -> ());
           root_state := root;
           root_capabilities := Generated_definition_tests.registry calls;
@@ -174,6 +178,8 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
     ("middle cannot regain root's unused tool" delegation.bindings_changed)
     ("root generation changed" delegation.authority_changed)
     ("root stops during yielding lookup" delegation.parent_inactive)
+    ("root stops and restarts during yielding lookup"
+     delegation.authority_changed)
     ("equivalent replacement still needs fresh live bindings"
      delegation.bindings_changed)
     ("freshly rebound complete chain" allowed)

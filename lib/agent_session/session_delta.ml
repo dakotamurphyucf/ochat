@@ -5,6 +5,7 @@ type t =
   | Created of Session_state.t
   | Lifecycle_changed of Session_state.Lifecycle.t
   | Initial_start_consumed
+  | Stop_epoch_changed of int64
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
@@ -78,6 +79,10 @@ let rec apply state = function
   | Created created -> Session_state.upgrade_schema created
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
   | Initial_start_consumed -> Ok { state with pending_initial_start = false }
+  | Stop_epoch_changed stop_epoch ->
+    (match Int64.(stop_epoch > state.stop_epoch) with
+     | true -> Ok { state with stop_epoch }
+     | false -> Error (Agent_protocol.Error.invalid_request "stop epoch did not advance"))
   | Workspace_changed workspace_instance ->
     let quota_key =
       Option.map state.spec.quota_key ~f:(fun quota_key ->

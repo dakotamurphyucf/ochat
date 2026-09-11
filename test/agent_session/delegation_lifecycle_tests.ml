@@ -80,6 +80,7 @@ let with_fixture ?(lifetime = D.Admission.Owned) f =
                 ; transaction_id = P.Id.Transaction.create ()
                 ; manifest_sha256 = digest "child manifest"
                 ; parent_revision_id = prompt_revision_id
+                ; parent_stop_epoch = None
                 ; authority_sha256 = digest "parent authority"
                 ; capability_pins = []
                 ; lifetime

@@ -28,6 +28,9 @@ module Admission : sig
     ; transaction_id : Agent_protocol.Id.Transaction.t
     ; manifest_sha256 : string
     ; parent_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; parent_stop_epoch : int64 option
+      (** Stop counter observed at creation admission; legacy absence means zero
+          and retains the original admission hash. New frames use ledger v2. *)
     ; authority_sha256 : string
     ; capability_pins : (string * string) list
     ; lifetime : lifetime

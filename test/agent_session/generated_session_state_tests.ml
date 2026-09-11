@@ -54,6 +54,7 @@ let%expect_test
           ; transaction_id = P.Id.Transaction.create ()
           ; manifest_sha256 = artifact.manifest_sha256
           ; parent_revision_id = prompt_revision_id
+          ; parent_stop_epoch = None
           ; authority_sha256 = digest "admitted host authority"
           ; capability_pins = []
           ; lifetime = Owned
@@ -273,7 +274,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 12) (stage Child_installed)
+    ((checkpoint_schema 13) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

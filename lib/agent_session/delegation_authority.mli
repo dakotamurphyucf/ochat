@@ -26,9 +26,13 @@ val fingerprint : Session_state.t -> (string, Agent_protocol.Error.t) result
 
 (** Bind a verified prepared child's exact live selection to its durable pointer.
     Does not grant permission or perform IO; [check_preparation] is mandatory before
-    initialization and [check_execution] before every effectful runtime boundary. *)
+    initialization and [check_execution] before every effectful runtime boundary.
+    [parent_stop_epoch] pins the current loaded parent lifetime; omission uses the
+    creation admission's epoch (legacy zero). A stop/restart invalidates that live
+    guard even when the parent is running again. *)
 val create
   :  ?max_depth:int
+  -> ?parent_stop_epoch:int64
   -> host:host
   -> reference:Agent_store.Delegation_store.Reference.t
   -> capabilities:Chat_response.Tool_capability.t

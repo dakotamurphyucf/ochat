@@ -14,10 +14,11 @@ type t =
   ; reference : D.Reference.t
   ; capabilities : C.t
   ; max_depth : int
+  ; parent_stop_epoch : int64 option
   }
 
-let create ?(max_depth = 32) ~host ~reference ~capabilities () =
-  { host; reference; capabilities; max_depth }
+let create ?(max_depth = 32) ?parent_stop_epoch ~host ~reference ~capabilities () =
+  { host; reference; capabilities; max_depth; parent_stop_epoch }
 ;;
 
 let reference t = t.reference
@@ -94,6 +95,16 @@ let rec read_chain t ~visited ~depth ~expected reference =
   in
   let%bind parent = t.host.state record.key.parent_session_id in
   let%bind () = active parent in
+  let%bind () =
+    let expected =
+      Option.value
+        t.parent_stop_epoch
+        ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+    in
+    match depth = 0 && not (Int64.equal parent.stop_epoch expected) with
+    | false -> Ok ()
+    | true -> denied "delegation.parent_stopped: parent stopped since runtime admission"
+  in
   let%bind current_fingerprint = fingerprint parent in
   let%bind () =
     match
@@ -155,7 +166,9 @@ let rec read_chain t ~visited ~depth ~expected reference =
   let%bind latest_fingerprint = fingerprint latest in
   let%bind retained = t.host.resolve reference in
   match
-    String.equal latest_fingerprint current_fingerprint && D.equal_record record retained
+    String.equal latest_fingerprint current_fingerprint
+    && D.equal_record record retained
+    && Int64.equal latest.stop_epoch parent.stop_epoch
   with
   | true -> Ok (retained, latest)
   | false -> denied "delegation.authority_changed: admission changed during validation"

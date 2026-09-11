@@ -100,6 +100,7 @@ type t =
   ; pending_initial_start : bool
     (** New generated creation's durable, unconsumed start intent. Older sessions
         never infer this from their original start_immediately configuration. *)
+  ; stop_epoch : int64 (** Durable count of transitions from running to stopped intent. *)
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]

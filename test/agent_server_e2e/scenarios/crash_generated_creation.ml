@@ -104,14 +104,18 @@ let run_child env ~root ~boundary ~recover =
           let target =
             match boundary with
             | "artifact-record" -> 2
-            | "child-record" | "preflight" | "parent-stopped" | "parent-missing" -> 3
+            | "child-record"
+            | "preflight"
+            | "parent-stopped"
+            | "parent-missing"
+            | "parent-restarted" -> 3
             | "linked" -> 4
             | _ -> 1
           in
           if Int.equal !writes target
           then (
             match boundary with
-            | "preflight" | "parent-stopped" | "parent-missing" ->
+            | "preflight" | "parent-stopped" | "parent-missing" | "parent-restarted" ->
               armed := false;
               raise
                 (Core_unix.Unix_error
@@ -169,7 +173,10 @@ let run_child env ~root ~boundary ~recover =
                   let parent, _ = create_session ~start_immediately:true client in
                   armed := true;
                   (match boundary with
-                   | "preflight" | "parent-stopped" | "parent-missing" ->
+                   | "preflight"
+                   | "parent-stopped"
+                   | "parent-missing"
+                   | "parent-restarted" ->
                      (match
                         create_child_result
                           ~start_immediately
@@ -248,7 +255,7 @@ let run_child env ~root ~boundary ~recover =
                          "stop failed to cancel unpublished initial intent");
                      Agent_client.Session_handle.detach handle |> F.protocol_ok;
                      (match boundary with
-                      | "parent-stopped" | "parent-missing" ->
+                      | "parent-stopped" | "parent-missing" | "parent-restarted" ->
                         let parent_handle =
                           Agent_client.Session_handle.attach
                             ~sw
@@ -263,6 +270,24 @@ let run_child env ~root ~boundary ~recover =
                         Agent_client.Session_handle.stop parent_handle ~mode:Cancel
                         |> F.protocol_ok
                         |> ignore;
+                        if String.equal boundary "parent-restarted"
+                        then (
+                          Agent_client.Session_handle.start
+                            parent_handle
+                            ~queue_if_limited:false
+                          |> F.protocol_ok
+                          |> ignore;
+                          let parent_entry =
+                            Agent_server.Session_registry.find
+                              (Daemon.registry daemon)
+                              parent.id
+                            |> Option.value_exn
+                          in
+                          F.require
+                            Int64.(
+                              (A.state parent_entry.actor |> F.protocol_ok).stop_epoch
+                              > 0L)
+                            "parent stop was not durably counted");
                         Agent_client.Session_handle.detach parent_handle |> F.protocol_ok;
                         (match boundary with
                          | "parent-missing" ->
@@ -298,6 +323,7 @@ let run_child env ~root ~boundary ~recover =
                      F.fail "creation did not hit its crash boundary")
                 | true
                   when String.equal boundary "parent-stopped"
+                       || String.equal boundary "parent-restarted"
                        || String.equal boundary "parent-missing" ->
                   let records =
                     D.with_records
@@ -532,6 +558,7 @@ let test env environment =
     ; "auto-preflight"
     ; "preflight"
     ; "parent-stopped"
+    ; "parent-restarted"
     ; "parent-missing"
     ]
     ~f:(fun boundary ->
@@ -558,7 +585,11 @@ let test env environment =
           ~finally:(fun () -> F.terminate env child)
           ~f:(fun () ->
             match boundary with
-            | "preflight" | "auto-preflight" | "parent-stopped" | "parent-missing" ->
+            | "preflight"
+            | "auto-preflight"
+            | "parent-stopped"
+            | "parent-missing"
+            | "parent-restarted" ->
               let result =
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   Support.Process_manager.await child)

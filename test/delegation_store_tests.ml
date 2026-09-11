@@ -25,6 +25,7 @@ let admission () =
     ; transaction_id = P.Id.Transaction.create ()
     ; manifest_sha256 = digest "captured generated definition"
     ; parent_revision_id = P.Id.Prompt_revision.create ()
+    ; parent_stop_epoch = None
     ; authority_sha256 = digest "parent policy and effective resource allowance"
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned
@@ -121,9 +122,30 @@ let%expect_test
              ~max_records
              ~max_bytes));
       let installed = D.advance ledger first Artifact_installed |> store_ok in
+      (* An actual v1 frame must retain its original admission digest when read
+         and rewritten by the v2 ledger. Absent epoch fields preserve old hashes. *)
+      let private_path =
+        Filename.concat
+          root
+          ("delegations/"
+           ^ digest (D.Key.sexp_of_t request_key |> Sexp.to_string_mach)
+           ^ ".frame")
+      in
+      let legacy_frame =
+        [%sexp { version = (1 : int); record = (installed : D.record) }]
+        |> Sexp.to_string_mach
+        |> Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0
+        |> frame_ok
+      in
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(Eio.Stdenv.fs env / private_path)
+        legacy_frame;
+      let legacy_reference = D.reference installed in
       S.close store |> store_ok;
       let store = reopen env sw root in
       let ledger = S.delegations store in
+      assert (D.equal_record installed (D.resolve ledger legacy_reference |> store_ok));
       assert (
         D.equal_record installed (reserve ledger request_key (admission ()) |> record));
       let created = D.advance ledger first Child_installed |> store_ok in

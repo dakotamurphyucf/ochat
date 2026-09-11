@@ -126,6 +126,7 @@ let%expect_test "generated installation requires its exact durable unrevoked res
           ; transaction_id = P.Id.Transaction.create ()
           ; manifest_sha256 = (G.artifact prepared).manifest_sha256
           ; parent_revision_id = P.Id.Prompt_revision.create ()
+          ; parent_stop_epoch = None
           ; authority_sha256 = digest "host admission"
           ; capability_pins = G.capability_pins prepared
           ; lifetime = Owned

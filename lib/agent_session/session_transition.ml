@@ -59,6 +59,19 @@ let apply ~now state ~delta ~payloads =
   let open Result.Let_syntax in
   let previous = state in
   let%bind state = Session_delta.apply state delta in
+  let%bind state, delta =
+    match previous.lifecycle.desired, state.lifecycle.desired with
+    | Running, Stopped ->
+      let%map stop_epoch = increment "stop epoch" previous.stop_epoch in
+      let state = { state with stop_epoch } in
+      let delta =
+        match delta with
+        | Session_delta.Created _ -> Session_delta.Created state
+        | _ -> Session_delta.Batch [ delta; Stop_epoch_changed stop_epoch ]
+      in
+      state, delta
+    | _ -> Ok (state, delta)
+  in
   let payloads = projected_payloads ~previous state payloads in
   let statuses = Session_state.extension_status state in
   let statuses_changed =

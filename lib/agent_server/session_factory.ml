@@ -1850,6 +1850,8 @@ let prepare_runtime_at_paths
        | true -> prepare_extension_runtime_scope t construct)
     | Generated_artifact { artifact; _ } ->
       let%bind parent, record = generated_parent t state in
+      let%bind parent_state = Agent_session.Session_actor.state parent.actor in
+      let parent_stop_epoch = parent_state.stop_epoch in
       let%bind artifact_store =
         Agent_store.Prompt_artifact_store.create
           ~env:t.env
@@ -1877,7 +1879,11 @@ let prepare_runtime_at_paths
         ~parent:parent.runtime
         ~on_revoked:(fun () ->
           match Agent_session.Session_actor.state parent.actor, !actor_ref with
-          | Ok { lifecycle = { desired = Stopped; _ }; _ }, Some actor ->
+          | Ok current, Some actor
+            when Agent_protocol.Session.equal_desired_state
+                   current.lifecycle.desired
+                   Stopped
+                 || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
             Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
             |> Result.map ~f:ignore
           | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
@@ -1918,6 +1924,7 @@ let prepare_runtime_at_paths
           let authority =
             Agent_session.Delegation_authority.create
               ~max_depth:t.limits.delegation_max_depth
+              ~parent_stop_epoch
               ~reference
               ~capabilities:
                 (Chat_response.Generated_admission.capabilities
@@ -4027,6 +4034,21 @@ let resume_generated_initial_start t entry =
                  (unavailable Permission_denied "initial start parent is unavailable")
         in
         let%bind current = A.state parent.actor in
+        let%bind () =
+          match
+            depth = 0
+            && not
+                 (Int64.equal
+                    current.stop_epoch
+                    (Option.value record.admission.parent_stop_epoch ~default:0L))
+          with
+          | false -> Ok ()
+          | true ->
+            Error
+              (unavailable
+                 Permission_denied
+                 "initial start parent stopped after admission")
+        in
         let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
         (match
            ( current.lifecycle.desired
@@ -4051,12 +4073,16 @@ let resume_generated_initial_start t entry =
            Error (unavailable Permission_denied "initial start parent authority ended"))
     in
     let attempt () =
-      let%bind ready = ready 0 reference in
-      match ready with
+      let%bind is_ready = ready 0 reference in
+      match is_ready with
       | false -> Ok ()
       | true ->
         let%bind () = Runtime_owner.ensure_loaded entry.runtime in
-        A.start_initial_delegated entry.actor ~reference |> Result.map ~f:ignore
+        let%bind still_ready = ready 0 reference in
+        (match still_ready with
+         | false -> Ok ()
+         | true ->
+           A.start_initial_delegated entry.actor ~reference |> Result.map ~f:ignore)
     in
     (match attempt () with
      | Ok () -> Ok ()
@@ -4120,7 +4146,9 @@ let create_generated_session
       let check_parent current =
         let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
         match current.State.lifecycle.desired, current.halted, current.failure with
-        | Running, false, None when String.equal fingerprint authority_sha256 -> Ok ()
+        | Running, false, None
+          when String.equal fingerprint authority_sha256
+               && Int64.equal current.stop_epoch before.stop_epoch -> Ok ()
         | _ ->
           Error
             (unavailable Permission_denied "parent no longer permits generated creation")
@@ -4192,6 +4220,7 @@ let create_generated_session
         ; transaction_id = P.Id.Transaction.create ()
         ; manifest_sha256 = artifact.manifest_sha256
         ; parent_revision_id = before.spec.prompt_revision_id
+        ; parent_stop_epoch = Some before.stop_epoch
         ; authority_sha256
         ; capability_pins = G.capability_pins definition
         ; lifetime = Owned
@@ -4217,6 +4246,26 @@ let create_generated_session
             Error (unavailable Permission_denied "generated admission was revoked")
           | Conflict _ ->
             Error (unavailable Conflict "generated creation key has different inputs")
+        in
+        let%bind () =
+          match record.stage with
+          | Linked -> Ok ()
+          | Reserved | Artifact_installed | Child_installed ->
+            (match
+               Int64.equal
+                 before.stop_epoch
+                 (Option.value record.admission.parent_stop_epoch ~default:0L)
+             with
+             | true -> Ok ()
+             | false ->
+               let%bind _ =
+                 D.revoke ledger record Parent_stopped
+                 |> Result.map_error ~f:protocol_of_store
+               in
+               Error
+                 (unavailable
+                    Permission_denied
+                    "parent stopped since generated creation admission"))
         in
         let%bind () =
           match
@@ -4373,6 +4422,8 @@ let create_generated_session
             | Error error ->
               let reason =
                 match current.lifecycle.desired with
+                | _ when not (Int64.equal current.stop_epoch before.stop_epoch) ->
+                  D.Parent_stopped
                 | Stopped -> D.Parent_stopped
                 | Running -> Authority_changed
               in
@@ -4466,6 +4517,12 @@ let reconcile_generated_creations t =
             , before.halted
             , before.failure )
           with
+          | _
+            when not
+                   (Int64.equal
+                      before.stop_epoch
+                      (Option.value record.admission.parent_stop_epoch ~default:0L)) ->
+            revoke record Parent_stopped
           | Stopped, _, _, _ -> revoke record Parent_stopped
           | Running, _, true, _ | Running, _, _, Some _ -> revoke record Authority_changed
           | ( Running
@@ -4639,11 +4696,17 @@ let reconcile_generated_creations t =
                                   latest.lifecycle.desired, latest.halted, latest.failure
                                 with
                                 | Running, false, None
-                                  when String.equal fingerprint latest_fingerprint ->
+                                  when String.equal fingerprint latest_fingerprint
+                                       && Int64.equal latest.stop_epoch before.stop_epoch
+                                  ->
                                   D.advance ledger record Linked
                                   |> Result.map ~f:ignore
                                   |> Result.map_error ~f:protocol_of_store
                                 | Stopped, _, _ -> revoke record Parent_stopped
+                                | _
+                                  when not
+                                         (Int64.equal latest.stop_epoch before.stop_epoch)
+                                  -> revoke record Parent_stopped
                                 | _ -> revoke record Authority_changed)
                             in
                             let%map () =

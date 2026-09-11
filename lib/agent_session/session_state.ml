@@ -93,6 +93,7 @@ type t =
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
   ; pending_initial_start : bool [@sexp.default false]
+  ; stop_epoch : int64 [@sexp.default 0L]
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
   ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
@@ -115,11 +116,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 12
+let current_schema_version = 13
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if not (Int64.equal t.stop_epoch 0L)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"durable stop epochs require session schema 13"
+         ~retryable:false
+         ())
+  else if t.schema_version = 12
+  then Ok { t with schema_version = current_schema_version }
   else if t.pending_initial_start
   then
     Error
@@ -243,6 +254,7 @@ let create ~identity ~spec ~initial_history =
   ; spec
   ; lifecycle = { desired; observed = Stopped }
   ; pending_initial_start = false
+  ; stop_epoch = 0L
   ; conversation =
       { canonical_history = initial_history
       ; deferred_user_entries = []
@@ -550,6 +562,7 @@ let validate t =
                 ())))
   in
   let%bind () = nonnegative "revision" t.counters.revision in
+  let%bind () = nonnegative "stop epoch" t.stop_epoch in
   let%bind () =
     match
       ( t.pending_initial_start

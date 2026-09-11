@@ -23,6 +23,7 @@ module Admission = struct
     ; transaction_id : P.Id.Transaction.t
     ; manifest_sha256 : string
     ; parent_revision_id : P.Id.Prompt_revision.t
+    ; parent_stop_epoch : int64 option [@sexp.option]
     ; authority_sha256 : string
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
@@ -158,6 +159,7 @@ let validate (record : record) =
     && sha256 record.request_sha256
     && sha256 a.manifest_sha256
     && sha256 a.authority_sha256
+    && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
     && independent_valid
     && List.is_sorted_strictly a.capability_pins ~compare:(fun (left, _) (right, _) ->
       String.compare left right)
@@ -209,7 +211,7 @@ let encode record =
   Frame.encode
     ~max_payload_length
     ~flags:0
-    (Persisted.sexp_of_t { version = 1; record } |> Sexp.to_string_mach)
+    (Persisted.sexp_of_t { version = 2; record } |> Sexp.to_string_mach)
   |> Result.map_error ~f:(fun _ ->
     Store_error.Corrupt "delegation intent exceeds its frame limit")
 ;;
@@ -227,8 +229,9 @@ let decode ~name contents =
     in
     let%bind () =
       match persisted.version with
-      | 1 -> Ok ()
-      | version when version > 1 -> Error (Store_error.Schema_too_new version)
+      | 1 when Option.is_none persisted.record.admission.parent_stop_epoch -> Ok ()
+      | 2 -> Ok ()
+      | version when version > 2 -> Error (Store_error.Schema_too_new version)
       | _ -> corrupt "invalid delegation intent version"
     in
     let%bind () = validate persisted.record in

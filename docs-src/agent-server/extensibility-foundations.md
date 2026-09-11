@@ -1853,7 +1853,7 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 introduced this disposition; current schema 12 safely upgrades schema 8/9/10/11
+Session-state schema 9 introduced this disposition; current schema 13 safely upgrades schema 8/9/10/11/12
 snapshots. Older snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
 back to a binary that cannot read the current schema; do not edit stored version numbers to
@@ -3938,6 +3938,20 @@ restarts. The active descendant fixture uses automatic creation, and a failing
 generated moderator initializer is checked through the real factory API.
 
 ### Interrupted generated creation
+
+Session-state schema 13 records a monotonic `stop_epoch` when running intent
+becomes stopped. The epoch advances in the same journal transaction, including
+moderator-driven end-session and administrative replacements. Replaying older
+journals does not invent historical epochs; older snapshots start at zero.
+Ledger v2 binds the observed parent epoch into new creation admissions. Legacy
+v1 admissions retain their original reference hashes.
+
+Creation and startup reconciliation compare the admitted epoch even if the parent
+has already restarted. Pending initial activation also checks it before and after
+runtime loading. Loaded runtime guards pin their parent lifetime, and parent-lease
+cleanup recognizes a stop followed by a restart. Broader start/stop serialization
+and active-child recovery after interrupted descendant cleanup remain under
+implementation; the counter alone does not provide those lifecycle guarantees.
 
 Factory execution and administrative preparation now require `Linked` before
 reserving history or initializing a generated runtime. A stored but unpublished
