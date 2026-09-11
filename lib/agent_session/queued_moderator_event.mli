@@ -105,6 +105,25 @@ val claim_ordinary
        , Agent_protocol.Error.t )
        result
 
+type delegated_claim =
+  | Claimed of Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+  | Replayed of Agent_protocol.Moderator_execution.t
+
+(** Pure admission for a parent's pre-tool check of an already admitted child
+    invocation. The event ID must be that invocation's stable ID. The caller must
+    establish live parent ownership and private delegation authority separately.
+    Identical completed retries reuse the saved decision even after unrelated
+    checkpoint changes. Changed inputs/source/admission and running or failed
+    attempts reject; they cannot rerun policy side effects. *)
+val claim_delegated
+  :  delegation:Agent_protocol.Moderator_execution.delegation
+  -> state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> event:Chat_response.Moderation.Event.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (delegated_claim, Agent_protocol.Error.t) result
+
 (** Ordinary events preserve the existing queue and may append emits. Their
     checkpoint/outcome/request intent must commit in one actor transaction. *)
 val complete_ordinary
@@ -124,6 +143,16 @@ val claim_retirement
   -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
        , Agent_protocol.Error.t )
        result
+
+(** Persist this decision with the same parent state/queue checkpoint. This does
+    not itself authorize a child effect or interpret parent runtime requests. *)
+val complete_delegated
+  :  decision:Agent_protocol.Moderator_execution.Decision.t
+  -> claimed:Agent_protocol.Moderator_execution.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> requests:Agent_protocol.Invocation.follow_up
+  -> (Agent_protocol.Moderator_execution.t, Agent_protocol.Error.t) result
 
 (** Prepare retirement paired with a checkpoint removing only that head. *)
 val retire

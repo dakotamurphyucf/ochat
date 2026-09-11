@@ -3962,6 +3962,42 @@ This advances native shell delegation. Parent conversation-moderator mediation,
 broader shell hook/helper qualification, managed-tool delegation and independent
 resource lifetime retain their separate implementation obligations.
 
+### Durable delegated moderator handoffs
+
+The actor and moderator engine now provide an internal handoff for checking an
+admitted child invocation against the parent's live moderator state. Factory
+admission still rejects parents requiring moderator mediation until that end-to-end
+integration is installed; these primitives do not remove that guard.
+
+`Session_actor.with_delegated_moderator_event` requires host authorization and owns
+the parent's moderator gate. Its receipt identifies the child session, generation,
+invocation and private admission digest. The child operation is not treated as a
+parent operation. Native policy calls belong to the parent's event, and the parent
+checkpoint, decision and runtime intent commit together. Stop-cancel interrupts
+policy work even when the parent also has an unrelated foreground operation.
+Escaped executors and late decision commits cannot reuse the completed borrow.
+
+`Moderator_event.run_delegated` uses the normal transactional event engine and
+parent services. A fresh result includes the parent's outcome for host handling;
+an identical completed retry returns the stored receipt without reexecuting the
+handler. Changed request, admission, parent identity or moderator source rejects.
+Failed and interrupted attempts cannot automatically repeat policy side effects.
+The saved decision cannot change when the parent's runtime intent is later applied.
+An end-session request retains the parent's intent and produces a rejecting decision.
+
+Delegated receipts use moderator-execution JSON codec 4; ordinary and job receipts
+retain codecs 2 and 3. Session-state schema 15 stores these optional fields. Earlier
+snapshots without them upgrade normally, while older schema labels cannot carry
+delegated decisions. Tests cover checkpoint restoration, substituted retries,
+atomic actor persistence failure, live manager rollback, stop cancellation and
+decision reuse without repeating parent effects.
+
+Factory wiring must still verify actual parent/child authority, retain the parent's
+runtime, apply parent outcomes at its own boundary, and enforce the decision on the
+child. Rewrites and redirects require coordinated routing because an admitted
+invocation's context is immutable; the host must not execute the original arguments
+after a policy rewrite. No model-facing mediation tool is exposed by this handoff.
+
 ### Qualified persisted child creation
 
 `Session_factory.create_generated_session` is an internal host service for creating

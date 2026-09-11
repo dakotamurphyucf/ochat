@@ -2098,6 +2098,30 @@ type retirement =
   }
 [@@deriving equal, sexp]
 
+(** Cross-session provenance for a parent policy check of an already admitted
+    child invocation. The host must validate the private delegation and actual
+    child invocation; these identifiers grant no authority by themselves. *)
+type delegation =
+  { child_session_id : Id.Session.t
+  ; child_generation : int
+  ; child_invocation_id : Id.Invocation.t
+  ; admission_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+module Decision : sig
+  type t =
+    | Approve
+    | Reject of string
+    | Rewrite_args of Jsonaf.t
+    | Redirect of string * Jsonaf.t
+  [@@deriving equal, sexp]
+
+  val validate : t -> (unit, Error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
 type t = private
   { context : context
   ; status : status
@@ -2106,14 +2130,24 @@ type t = private
   ; compaction_operation_id : Id.Operation.t option
     (** Retained after application/discard for provenance and recovery checks. *)
   ; retirement : retirement option [@sexp.option]
+  ; delegation : delegation option [@sexp.option]
+  ; decision : Decision.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
 val create : context -> (t, Error.t) result
+
+(** Only pre-tool checks without parent operation/job ownership may carry this
+    provenance. Completed checks require a decision in the same receipt as the
+    committed parent checkpoint. Failed/interrupted checks carry no decision.
+    JSON codec4; ordinary/job receipts keep their existing codec2/3 encoding. *)
+val create_delegated : delegation:delegation -> context -> (t, Error.t) result
+
 val validate : t -> (unit, Error.t) result
 
 val complete
-  :  t
+  :  ?decision:Decision.t
+  -> t
   -> checkpoint_sha256:string
   -> requests:Invocation.follow_up
   -> (t, Error.t) result

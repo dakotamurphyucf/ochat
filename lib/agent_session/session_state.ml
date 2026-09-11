@@ -117,11 +117,24 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 14
+let current_schema_version = 15
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    List.exists t.moderator_executions ~f:(fun event ->
+      Option.is_some event.Agent_protocol.Moderator_execution.delegation
+      || Option.is_some event.decision)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"delegated moderator receipts require session schema 15"
+         ~retryable:false
+         ())
+  else if t.schema_version = 14
+  then Ok { t with schema_version = current_schema_version }
   else if Option.is_some t.parent_stop_epoch
   then
     Error

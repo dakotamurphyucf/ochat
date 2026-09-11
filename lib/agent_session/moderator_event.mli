@@ -68,6 +68,44 @@ val run_ordinary
   -> unit
   -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
 
+type delegated_claim =
+  snapshot:
+    (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+  -> (executing:Agent_protocol.Moderator_execution.t
+      -> event:Session.Snapshot.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (decision:Agent_protocol.Moderator_execution.Decision.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Moderator_execution.t option, Agent_protocol.Error.t) result
+
+type delegated_result =
+  { receipt : Agent_protocol.Moderator_execution.t
+  ; outcome : Chat_response.Moderation.Outcome.t option
+  }
+
+(** Execute policy against the actual parent's installed manager. Uses the normal
+    transactional event engine and parent event-owned native services. State,
+    decision and parent runtime intent commit together. Completed retry returns
+    the saved receipt with outcome=None and does not replay parent handler effects.
+    End_session produces a rejecting decision while retaining the parent's intent.
+    The caller must consume fresh UI outcomes and durable runtime requests on the
+    parent, enforce the decision on the child, and recheck current authority. *)
+val run_delegated
+  :  event:Chat_response.Moderation.Event.t
+  -> claim:delegated_claim
+  -> ?script_tools:Script_tool_calls.t
+  -> manager:Chat_response.Moderator_manager.t
+  -> history:(unit -> History_entry.t list)
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> unit
+  -> (delegated_result option, Agent_protocol.Error.t) result
+
 (** One owned startup/resume attempt for a constructed runtime. This coordinator
     runs only after the host installs the initial checkpoint. It adds no authority:
     [claim] must bind the event to the actual idle or foreground actor operation. *)

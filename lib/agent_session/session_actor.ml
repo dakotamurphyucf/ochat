@@ -98,6 +98,11 @@ type invocation_owner =
   | Event_moderator of queued_event_borrow
   | Background_job of job_scope
 
+type delegated_event_claim =
+  | Delegated_unavailable
+  | Delegated_borrow of queued_event_borrow
+  | Delegated_replay of Agent_protocol.Moderator_execution.t
+
 type invocation_execution =
   { owner : invocation_owner
   ; dispatched : Agent_protocol.Invocation.t
@@ -105,6 +110,12 @@ type invocation_execution =
   }
 
 type _ request =
+  | Claim_delegated_event :
+      Agent_protocol.Id.Moderator_execution.t
+      * Agent_protocol.Moderator_execution.delegation
+      * Session.Moderator_state.Identity_snapshot.t
+      * Chat_response.Moderation.Event.t
+      -> delegated_event_claim request
   | Claim_job_moderator :
       job_scope * Agent_protocol.Invocation.t
       -> moderator_borrow request
@@ -139,6 +150,7 @@ type _ request =
       queued_event_borrow
       * Session.Moderator_state.Identity_snapshot.t
       * Agent_protocol.Invocation.follow_up
+      * Agent_protocol.Moderator_execution.Decision.t option
       -> unit request
   | Finish_queued_event : queued_event_borrow * bool -> unit request
   | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
@@ -1645,6 +1657,12 @@ let stop_internal ?parent_stop_epoch t mode =
     then (
       abort_all_staged_work t;
       cancel_event_for_operation t operation.id;
+      Option.iter t.queued_event_borrow ~f:(fun borrow ->
+        match borrow.receipt.delegation with
+        | None -> ()
+        | Some _ ->
+          borrow.cancel_requested <- true;
+          Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
       Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
 ;;
@@ -2322,6 +2340,50 @@ let claim_ordinary_event t id operation_id snapshot event =
     Ok (Some borrow)
 ;;
 
+let claim_delegated_event t id delegation snapshot event =
+  let open Result.Let_syntax in
+  match t.state.lifecycle.desired, t.state.halted, t.state.failure with
+  | Stopped, _, _ | _, true, _ | _, _, Some _ -> Ok Delegated_unavailable
+  | Running, false, None ->
+    if t.idle_moderator_borrowed || moderator_is_borrowed t
+    then Ok Delegated_unavailable
+    else (
+      let%bind claimed =
+        Queued_moderator_event.claim_delegated
+          ~delegation
+          ~state:t.state
+          ~id
+          ~snapshot
+          ~event
+          ~now:(t.services.now ())
+      in
+      match claimed with
+      | Replayed receipt -> Ok (Delegated_replay receipt)
+      | Claimed (receipt, event) ->
+        let%bind _ =
+          transition
+            t
+            ~delta:(Session_delta.Moderator_execution_changed receipt)
+            ~payloads:[]
+        in
+        let borrow =
+          { kind = Ordinary
+          ; job_scope = None
+          ; receipt
+          ; before = snapshot
+          ; event
+          ; retirement_reason = None
+          ; callback_active = true
+          ; committed = false
+          ; cancel = None
+          ; cancel_requested = false
+          }
+        in
+        t.queued_event_borrow <- Some borrow;
+        t.idle_moderator_borrowed <- true;
+        Ok (Delegated_borrow borrow))
+;;
+
 let claim_job_event t scope id snapshot event =
   let open Result.Let_syntax in
   let%bind () = job_scope_can_execute t scope in
@@ -2369,6 +2431,7 @@ let validate_queued_event_borrow t borrow =
       match borrow.job_scope, borrow.receipt.context.operation_id with
       | Some scope, None -> Result.map (job_scope_current t scope) ~f:ignore
       | None, Some id -> Result.map (current_operation t id) ~f:ignore
+      | None, None when Option.is_some borrow.receipt.delegation -> Ok ()
       | None, None when Option.is_none t.state.active_operation -> Ok ()
       | _ -> Error (error Conflict "event no longer owns the moderator")
     in
@@ -2435,6 +2498,14 @@ let queued_event_can_commit t borrow =
      | true -> Ok ()
      | false -> Error (error Conflict "job event cannot commit after completion or stop"))
   | Some _, Some _ -> Error (error Conflict "job event cannot borrow a model operation")
+  | None, None when Option.is_some borrow.receipt.delegation ->
+    (match t.state.lifecycle.desired, t.state.failure with
+     | Running, None
+       when borrow.callback_active
+            && not (borrow.committed || borrow.cancel_requested || t.state.halted) ->
+       Ok ()
+     | _ ->
+       Error (error Conflict "delegated policy cannot commit after completion or stop"))
   | None, Some id ->
     let%bind _ = running_operation t id in
     if
@@ -2558,7 +2629,7 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
-let commit_queued_event t borrow snapshot requests =
+let commit_queued_event t borrow snapshot requests decision =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
   let%bind () =
@@ -2593,8 +2664,17 @@ let commit_queued_event t borrow snapshot requests =
     | _ -> Ok (borrow.receipt, [])
   in
   let%bind completed =
-    match borrow.retirement_reason with
-    | None ->
+    match borrow.receipt.delegation, decision, borrow.retirement_reason with
+    | Some _, Some decision, None ->
+      Queued_moderator_event.complete_delegated
+        ~decision
+        ~claimed:borrow.receipt
+        ~before:borrow.before
+        ~snapshot
+        ~requests
+    | Some _, _, _ | None, Some _, _ ->
+      Error (error Invalid_state "delegated decision does not match event ownership")
+    | None, None, None ->
       (match borrow.kind with
        | Queued -> Queued_moderator_event.complete
        | Ordinary -> Queued_moderator_event.complete_ordinary)
@@ -2602,7 +2682,7 @@ let commit_queued_event t borrow snapshot requests =
         ~before:borrow.before
         ~snapshot
         ~requests
-    | Some reason ->
+    | None, None, Some reason ->
       (match
          ( requests.Agent_protocol.Invocation.request_turn
          , requests.request_compaction
@@ -5545,6 +5625,50 @@ let with_moderator_gate t f =
 
 let with_moderator_checkpoint = with_moderator_gate
 
+let run_queued_event_borrow t borrow f =
+  let open Result.Let_syntax in
+  let finish interrupted =
+    Eio.Cancel.protect (fun () -> call t (Finish_queued_event (borrow, interrupted)))
+  in
+  let execute () =
+    Eio.Cancel.sub (fun context ->
+      let active = ref true in
+      Exn.protect
+        ~finally:(fun () -> active := false)
+        ~f:(fun () ->
+          let%bind () =
+            call
+              t
+              (Set_queued_event_cancel
+                 ( borrow
+                 , fun () ->
+                     match !active with
+                     | true -> Eio.Cancel.cancel context Exit
+                     | false -> () ))
+          in
+          f ~borrow ~event:borrow.event ~commit:(fun ~decision ~snapshot ~requests ->
+            Eio.Cancel.protect (fun () ->
+              call t (Commit_queued_event (borrow, snapshot, requests, decision))))))
+  in
+  match execute () with
+  | result ->
+    let%bind () = finish false in
+    let%bind () = result in
+    (match borrow.committed with
+     | true -> Ok true
+     | false ->
+       Error (error Invalid_state "queued event returned without a checkpoint commit"))
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    let interrupted =
+      match exn with
+      | Eio.Cancel.Cancelled _ -> true
+      | _ -> false
+    in
+    ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
 let with_queued_event_borrow t ~claim f =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
@@ -5558,47 +5682,58 @@ let with_queued_event_borrow t ~claim f =
     match claimed with
     | None -> Ok false
     | Some borrow ->
-      let finish interrupted =
-        Eio.Cancel.protect (fun () -> call t (Finish_queued_event (borrow, interrupted)))
-      in
-      let execute () =
-        Eio.Cancel.sub (fun context ->
-          let active = ref true in
+      run_queued_event_borrow t borrow (fun ~borrow ~event ~commit ->
+        f ~borrow ~event ~commit:(fun ~snapshot ~requests ->
+          commit ~decision:None ~snapshot ~requests)))
+;;
+
+let with_delegated_moderator_event t ~delegation ~event ~authorize ~snapshot f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = authorize () in
+    let%bind snapshot = snapshot () in
+    let%bind claimed =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Claim_delegated_event
+             (Agent_protocol.Id.Moderator_execution.create (), delegation, snapshot, event)))
+    in
+    match claimed with
+    | Delegated_unavailable -> Ok None
+    | Delegated_replay previous -> Ok (Some previous)
+    | Delegated_borrow borrow ->
+      let%bind _ =
+        run_queued_event_borrow t borrow (fun ~borrow ~event ~commit ->
+          let active = Atomic.make true in
+          let execute ~invocation callback =
+            match Atomic.get active with
+            | false ->
+              Error (error Conflict "delegated policy invocation scope has ended")
+            | true ->
+              with_invocation_claim
+                t
+                (Claim_event_invocation (borrow, invocation))
+                callback
+          in
           Exn.protect
-            ~finally:(fun () -> active := false)
+            ~finally:(fun () -> Atomic.set active false)
             ~f:(fun () ->
-              let%bind () =
-                call
-                  t
-                  (Set_queued_event_cancel
-                     ( borrow
-                     , fun () ->
-                         match !active with
-                         | true -> Eio.Cancel.cancel context Exit
-                         | false -> () ))
-              in
-              f ~borrow ~event:borrow.event ~commit:(fun ~snapshot ~requests ->
-                Eio.Cancel.protect (fun () ->
-                  call t (Commit_queued_event (borrow, snapshot, requests))))))
+              f
+                ~executing:borrow.receipt
+                ~event
+                ~execute
+                ~commit:(fun ~decision ~snapshot ~requests ->
+                  commit ~decision:(Some decision) ~snapshot ~requests)))
       in
-      (match execute () with
-       | result ->
-         let%bind () = finish false in
-         let%bind () = result in
-         (match borrow.committed with
-          | true -> Ok true
-          | false ->
-            Error
-              (error Invalid_state "queued event returned without a checkpoint commit"))
-       | exception exn ->
-         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-         let interrupted =
-           match exn with
-           | Eio.Cancel.Cancelled _ -> true
-           | _ -> false
-         in
-         ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
-         Stdlib.Printexc.raise_with_backtrace exn backtrace))
+      let%bind state = call t State in
+      List.find state.moderator_executions ~f:(fun receipt ->
+        Agent_protocol.Id.Moderator_execution.equal
+          receipt.context.id
+          borrow.receipt.context.id)
+      |> Result.of_option
+           ~error:(error Internal_error "delegated policy receipt disappeared")
+      |> Result.map ~f:Option.some)
 ;;
 
 let with_idle_queued_moderator_event t ~snapshot f =
@@ -8409,6 +8544,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     manage_moderator_follow_up t operation_id observer
   | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
   | Admit_notification_turn operation_id -> admit_notification_turn t operation_id
+  | Claim_delegated_event (id, delegation, snapshot, event) ->
+    claim_delegated_event t id delegation snapshot event
   | Claim_job_event (scope, id, snapshot, event) ->
     claim_job_event t scope id snapshot event
   | Claim_job_moderator (scope, invocation) -> claim_job_moderator t scope invocation
@@ -8418,11 +8555,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_queued_event t id operation_id snapshot
   | Claim_queued_retirement (id, snapshot, reason) ->
     claim_queued_retirement t id snapshot reason
-  | Commit_queued_event (borrow, snapshot, requests) ->
+  | Commit_queued_event (borrow, snapshot, requests, decision) ->
     let open Result.Let_syntax in
     let%bind () = validate_queued_event_borrow t borrow in
     with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
-      commit_queued_event t borrow snapshot requests)
+      commit_queued_event t borrow snapshot requests decision)
   | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted
   | Set_queued_event_cancel (borrow, cancel) ->
     Result.map (queued_event_can_commit t borrow) ~f:(fun () ->

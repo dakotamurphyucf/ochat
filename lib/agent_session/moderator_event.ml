@@ -22,6 +22,7 @@ type event =
   | Ordinary of Chat_response.Moderation.Event.t
 
 let run
+      ~prepare_decision
       ~event
       ~claim
       ?script_tools
@@ -173,6 +174,7 @@ let run
                           ~outcome:(prepared : Chat_response.Moderation.Outcome.t)
                           ~snapshot
                       =
+                      prepare_decision prepared;
                       let requests : P.Invocation.follow_up =
                         { request_turn =
                             Chat_response.Runtime_semantics.request_turn
@@ -244,8 +246,96 @@ let run
      | _ -> Error (failed "event handoff returned inconsistent completion"))
 ;;
 
-let run_queued_idle = run ~event:Queued
-let run_ordinary ~event = run ~event:(Ordinary event)
+let run_queued_idle = run ~prepare_decision:ignore ~event:Queued
+let run_ordinary ~event = run ~prepare_decision:ignore ~event:(Ordinary event)
+
+type delegated_claim =
+  snapshot:(unit -> (Session.Moderator_state.Identity_snapshot.t, P.Error.t) result)
+  -> (executing:P.Moderator_execution.t
+      -> event:Session.Snapshot.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (decision:P.Moderator_execution.Decision.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:P.Invocation.follow_up
+            -> (unit, P.Error.t) result)
+      -> (unit, P.Error.t) result)
+  -> (P.Moderator_execution.t option, P.Error.t) result
+
+type delegated_result =
+  { receipt : P.Moderator_execution.t
+  ; outcome : Chat_response.Moderation.Outcome.t option
+  }
+
+let run_delegated
+      ~event
+      ~(claim : delegated_claim)
+      ?script_tools
+      ~manager
+      ~history
+      ~available_tools
+      ~session_meta
+      ~now
+      ()
+  =
+  let open Result.Let_syntax in
+  let decision = ref None in
+  let receipt = ref None in
+  let prepare_decision (outcome : Chat_response.Moderation.Outcome.t) =
+    let value : P.Moderator_execution.Decision.t =
+      match
+        Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests
+      with
+      | Some _ -> Reject "parent moderator ended session"
+      | None ->
+        (match outcome.tool_moderation with
+         | None | Some Approve -> Approve
+         | Some (Reject reason) -> Reject reason
+         | Some (Rewrite_args args) -> Rewrite_args args
+         | Some (Redirect (name, args)) -> Redirect (name, args))
+    in
+    decision := Some value
+  in
+  let ordinary_claim ~snapshot f =
+    let ran = ref false in
+    let%map result =
+      claim ~snapshot (fun ~executing ~event ~execute ~commit ->
+        ran := true;
+        f
+          ~executing
+          ~retirement_reason:None
+          ~event
+          ~execute
+          ~commit:(fun ~snapshot ~requests ->
+            match !decision with
+            | None -> Error (failed "delegated policy decision was not prepared")
+            | Some decision -> commit ~decision ~snapshot ~requests))
+    in
+    receipt := result;
+    !ran
+  in
+  let%bind outcome =
+    run
+      ~prepare_decision
+      ~event:(Ordinary event)
+      ~claim:ordinary_claim
+      ?script_tools
+      ~manager
+      ~history
+      ~available_tools
+      ~session_meta
+      ~now
+      ()
+  in
+  match !receipt, outcome with
+  | None, None -> Ok None
+  | Some receipt, outcome ->
+    (match receipt.status, receipt.delegation, receipt.decision with
+     | Completed _, Some _, Some _ -> Ok (Some { receipt; outcome })
+     | _ -> Error (failed "delegated policy returned an incomplete receipt"))
+  | None, Some _ ->
+    Error (failed "delegated policy returned an outcome without a receipt")
+;;
 
 module Lifecycle = struct
   type state =
@@ -438,6 +528,7 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
              | [ outcome ] -> Ok (Some outcome)
              | [] ->
                run
+                 ~prepare_decision:ignore
                  ~event:Queued
                  ~claim:capabilities.with_queued_moderator_event
                  ?script_tools

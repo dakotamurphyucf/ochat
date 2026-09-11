@@ -434,7 +434,86 @@ let claim_ordinary_in_context ~job ~state ~id ~(snapshot : S.t) ~operation_id ~e
 let claim_ordinary = claim_ordinary_in_context ~job:None
 let claim_job ~job = claim_ordinary_in_context ~job:(Some job) ~operation_id:None
 
-let complete_ordinary ~claimed ~(before : S.t) ~(snapshot : S.t) ~requests =
+type delegated_claim =
+  | Claimed of E.t * Session.Snapshot.t
+  | Replayed of E.t
+
+let claim_delegated ~delegation ~state ~id ~(snapshot : S.t) ~event ~now =
+  let open Result.Let_syntax in
+  let%bind () = installed ~state ~snapshot in
+  let%bind () =
+    match event with
+    | Chat_response.Moderation.Event.Pre_tool_call call
+      when String.equal
+             call.id
+             (P.Id.Invocation.to_string delegation.E.child_invocation_id) -> Ok ()
+    | _ -> conflict "delegated policy event must identify the admitted child invocation"
+  in
+  let%bind captured =
+    Chat_response.Moderation.Event.to_value event
+    |> Session.Snapshot.of_value
+    |> Result.map_error ~f:P.Error.invalid_request
+  in
+  let%bind candidate =
+    E.create_delegated
+      ~delegation
+      { id
+      ; session_id = state.identity.session_id
+      ; generation = state.identity.generation
+      ; source =
+          { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+      ; operation_id = None
+      ; job = None
+      ; phase = Pre_tool_call
+      ; event = encoded_event captured
+      ; checkpoint_sha256 = checkpoint snapshot
+      ; created_at = now
+      }
+  in
+  let matching =
+    List.filter state.moderator_executions ~f:(fun receipt ->
+      match receipt.E.delegation with
+      | None -> false
+      | Some previous ->
+        P.Id.Session.equal previous.child_session_id delegation.child_session_id
+        && Int.equal previous.child_generation delegation.child_generation
+        && P.Id.Invocation.equal
+             previous.child_invocation_id
+             delegation.child_invocation_id)
+  in
+  match matching with
+  | [] -> Ok (Claimed (candidate, captured))
+  | [ previous ] ->
+    let%bind () = E.validate previous in
+    let%bind () =
+      if
+        Option.equal E.equal_delegation previous.delegation candidate.delegation
+        && P.Id.Session.equal previous.context.session_id candidate.context.session_id
+        && P.Invocation.equal_observer previous.context.source candidate.context.source
+        && Int.equal previous.context.generation candidate.context.generation
+        && Jsonaf.exactly_equal previous.context.event candidate.context.event
+      then Ok ()
+      else conflict "delegated policy retry changed its request, source or admission"
+    in
+    (match previous.status, previous.decision with
+     | Completed _, Some _ -> Ok (Replayed previous)
+     | Running, _ -> conflict "delegated policy check is already running"
+     | Failed _, _ | Interrupted _, _ ->
+       conflict
+         "delegated policy effects cannot be replayed after failure or interruption"
+     | Completed _, None ->
+       conflict "completed delegated policy check has no saved decision")
+  | _ -> conflict "duplicate delegated policy receipts"
+;;
+
+let complete_ordinary_with_decision
+      ?decision
+      ~claimed
+      ~(before : S.t)
+      ~(snapshot : S.t)
+      ~requests
+      ()
+  =
   let open Result.Let_syntax in
   let%bind () =
     match
@@ -448,7 +527,15 @@ let complete_ordinary ~claimed ~(before : S.t) ~(snapshot : S.t) ~requests =
     | true -> Ok ()
     | false -> conflict "ordinary event must preserve its source and existing queue"
   in
-  E.complete claimed ~checkpoint_sha256:(checkpoint snapshot) ~requests
+  E.complete ?decision claimed ~checkpoint_sha256:(checkpoint snapshot) ~requests
+;;
+
+let complete_ordinary ~claimed ~before ~snapshot ~requests =
+  complete_ordinary_with_decision ~claimed ~before ~snapshot ~requests ()
+;;
+
+let complete_delegated ~decision ~claimed ~before ~snapshot ~requests =
+  complete_ordinary_with_decision ~decision ~claimed ~before ~snapshot ~requests ()
 ;;
 
 let claim_retirement ~state ~id ~(snapshot : S.t) =

@@ -60,6 +60,73 @@ type retirement =
   }
 [@@deriving equal, sexp]
 
+type delegation =
+  { child_session_id : Id.Session.t
+  ; child_generation : int
+  ; child_invocation_id : Id.Invocation.t
+  ; admission_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+module Decision = struct
+  type t =
+    | Approve
+    | Reject of string
+    | Rewrite_args of Jsonaf.t
+    | Redirect of string * Jsonaf.t
+  [@@deriving equal, sexp]
+
+  let validate = function
+    | Approve -> Ok ()
+    | Reject reason ->
+      if String.is_empty reason
+      then Ok ()
+      else text ~name:"policy rejection" ~max:4096 reason
+    | Rewrite_args args -> validate_json ~max_bytes:(1024 * 1024) args
+    | Redirect (name, args) ->
+      let open Result.Let_syntax in
+      let%bind () = text ~name:"policy redirect tool" ~max:256 name in
+      validate_json ~max_bytes:(1024 * 1024) args
+  ;;
+
+  let to_json = function
+    | Approve -> `Object [ "kind", `String "approve" ]
+    | Reject reason -> `Object [ "kind", `String "reject"; "reason", `String reason ]
+    | Rewrite_args args -> `Object [ "kind", `String "rewrite_args"; "args", args ]
+    | Redirect (name, args) ->
+      `Object [ "kind", `String "redirect"; "name", `String name; "args", args ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind () = validate_json json in
+    let%bind fields = Json_codec.fields json in
+    let%bind kind = Json_codec.required_as fields "kind" Json_codec.string in
+    let%bind decision =
+      match kind with
+      | "approve" ->
+        let%map () = closed fields [ "kind" ] in
+        Approve
+      | "reject" ->
+        let%bind () = closed fields [ "kind"; "reason" ] in
+        let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
+        Reject reason
+      | "rewrite_args" ->
+        let%bind () = closed fields [ "kind"; "args" ] in
+        let%map args = Json_codec.required_as fields "args" (fun value -> Ok value) in
+        Rewrite_args args
+      | "redirect" ->
+        let%bind () = closed fields [ "kind"; "name"; "args" ] in
+        let%bind name = Json_codec.required_as fields "name" Json_codec.string in
+        let%map args = Json_codec.required_as fields "args" (fun value -> Ok value) in
+        Redirect (name, args)
+      | _ -> invalid "unknown delegated policy decision"
+    in
+    let%map () = validate decision in
+    decision
+  ;;
+end
+
 type t =
   { context : context
   ; status : status
@@ -67,6 +134,8 @@ type t =
   ; intent : intent option
   ; compaction_operation_id : Id.Operation.t option
   ; retirement : retirement option [@sexp.option]
+  ; delegation : delegation option [@sexp.option]
+  ; decision : Decision.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -111,6 +180,38 @@ let validate t =
   let%bind () = text ~name:"moderator script ID" ~max:256 c.source.script_id in
   let%bind () = digest c.source.source_sha256 in
   let%bind () = digest c.checkpoint_sha256 in
+  let%bind () =
+    match t.delegation, c.phase, c.operation_id, c.job with
+    | None, _, _, _ -> Ok ()
+    | Some delegation, Pre_tool_call, None, None ->
+      let%bind () =
+        validate_id Id.Session.to_json Id.Session.of_json delegation.child_session_id
+      in
+      let%bind () =
+        validate_id
+          Id.Invocation.to_json
+          Id.Invocation.of_json
+          delegation.child_invocation_id
+      in
+      let%bind () = digest delegation.admission_sha256 in
+      if
+        delegation.child_generation < 0
+        || Id.Session.equal delegation.child_session_id c.session_id
+      then invalid "delegated moderation requires a distinct child and valid generation"
+      else Ok ()
+    | _ ->
+      invalid
+        "delegated moderation requires a pre-tool event without local operation or job \
+         ownership"
+  in
+  let%bind () =
+    match t.delegation, t.status, t.decision with
+    | None, _, None | Some _, (Running | Failed _ | Interrupted _), None -> Ok ()
+    | Some _, Completed _, Some decision -> Decision.validate decision
+    | _ ->
+      invalid
+        "delegated moderation must commit its decision with its completed checkpoint"
+  in
   let%bind () = validate_json ~max_bytes:(1024 * 1024) c.event in
   let%bind () =
     match t.retirement, c.phase, t.status with
@@ -169,7 +270,7 @@ let validate t =
   | _ -> invalid "runtime intent requires a completed event and matching requests"
 ;;
 
-let create context =
+let create_record ?delegation context =
   let t =
     { context
     ; status = Running
@@ -177,10 +278,15 @@ let create context =
     ; intent = None
     ; compaction_operation_id = None
     ; retirement = None
+    ; delegation
+    ; decision = None
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
 ;;
+
+let create context = create_record context
+let create_delegated ~delegation context = create_record ~delegation context
 
 let validate_transition ~previous next =
   let open Result.Let_syntax in
@@ -192,11 +298,21 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "event must start running")
   | Some previous ->
     let%bind () = validate previous in
-    if not (equal_context previous.context next.context)
+    if
+      (not (equal_context previous.context next.context))
+      || not (Option.equal equal_delegation previous.delegation next.delegation)
     then failure Conflict "event execution context is immutable"
     else if equal previous next
     then Ok ()
     else (
+      let%bind () =
+        match previous.status with
+        | Running -> Ok ()
+        | Completed _ | Failed _ | Interrupted _ ->
+          if Option.equal Decision.equal previous.decision next.decision
+          then Ok ()
+          else failure Conflict "delegated policy decision is immutable"
+      in
       let%bind () =
         match previous.retirement, next.retirement with
         | None, None -> Ok ()
@@ -244,7 +360,7 @@ let finish t next =
     failure Already_resolved "event is already terminal"
 ;;
 
-let complete t ~checkpoint_sha256 ~requests =
+let complete ?decision t ~checkpoint_sha256 ~requests =
   let requests = Option.some_if (has_requests requests) requests in
   finish
     t
@@ -252,6 +368,7 @@ let complete t ~checkpoint_sha256 ~requests =
       status = Completed checkpoint_sha256
     ; requests
     ; intent = Option.map requests ~f:(fun _ -> Pending)
+    ; decision
     }
 ;;
 
@@ -340,9 +457,10 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (match c.job with
-            | None -> "2"
-            | Some _ -> "3") )
+           (match t.delegation, c.job with
+            | Some _, _ -> "4"
+            | None, None -> "2"
+            | None, Some _ -> "3") )
      ; "id", Id.Moderator_execution.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -365,6 +483,14 @@ let to_json t =
           ]
           @ optional "deadline" job.deadline Timestamp.to_json))
      @ optional "requests" t.requests requests_to_json
+     @ optional "delegation" t.delegation (fun delegation ->
+       `Object
+         [ "child_session_id", Id.Session.to_json delegation.child_session_id
+         ; "child_generation", `Number (Int.to_string delegation.child_generation)
+         ; "child_invocation_id", Id.Invocation.to_json delegation.child_invocation_id
+         ; "admission_sha256", `String delegation.admission_sha256
+         ])
+     @ optional "decision" t.decision Decision.to_json
      @ optional "intent" t.intent intent_to_json
      @ optional "compaction_operation_id" t.compaction_operation_id Id.Operation.to_json
      @ optional "retirement" t.retirement (fun retired ->
@@ -459,11 +585,51 @@ let of_json json =
       ; "intent"
       ; "compaction_operation_id"
       ; "retirement"
+      ; "delegation"
+      ; "decision"
       ]
   in
   let%bind version =
-    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:3)
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:4)
   in
+  let%bind () =
+    if
+      version < 4
+      && (Option.is_some (Json_codec.optional fields "delegation")
+          || Option.is_some (Json_codec.optional fields "decision"))
+    then invalid "delegated moderation requires schema version 4"
+    else Ok ()
+  in
+  let%bind delegation =
+    Json_codec.optional_as fields "delegation" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () =
+        closed
+          fields
+          [ "child_session_id"
+          ; "child_generation"
+          ; "child_invocation_id"
+          ; "admission_sha256"
+          ]
+      in
+      let%bind child_session_id =
+        Json_codec.required_as fields "child_session_id" Id.Session.of_json
+      in
+      let%bind child_generation =
+        Json_codec.required_as
+          fields
+          "child_generation"
+          (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+      in
+      let%bind child_invocation_id =
+        Json_codec.required_as fields "child_invocation_id" Id.Invocation.of_json
+      in
+      let%map admission_sha256 =
+        Json_codec.required_as fields "admission_sha256" Json_codec.string
+      in
+      { child_session_id; child_generation; child_invocation_id; admission_sha256 })
+  in
+  let%bind decision = Json_codec.optional_as fields "decision" Decision.of_json in
   let%bind () =
     match version, Option.is_some (Json_codec.optional fields "retirement") with
     | 1, true -> invalid "event retirement requires schema version 2"
@@ -546,6 +712,8 @@ let of_json json =
     ; intent
     ; compaction_operation_id
     ; retirement
+    ; delegation
+    ; decision
     }
   in
   let%map () = validate t in

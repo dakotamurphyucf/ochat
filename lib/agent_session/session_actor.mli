@@ -1164,6 +1164,37 @@ val with_current_moderator_event
 
 val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 
+(** Trusted host handoff for a parent's live delegated policy check. [authorize]
+    must validate the private relation and admitted child invocation after entering
+    the parent gate. Revalidate before handler effects and before using the reply.
+    The actor persists claim before executing [f]; [commit] saves parent snapshot,
+    runtime intent and decision atomically and retains ownership through callback
+    return. Native calls are parent event-owned and must use the normal scoped
+    capability/policy dispatcher. No child invocation is fabricated in this actor.
+
+    An identical completed retry returns its receipt without calling [f]. Failed
+    or interrupted handlers never replay. Stop-cancel interrupts active callbacks;
+    late commits and escaped executors reject. None means parent unavailable.
+    This does not install factory mediation or admit moderated generated parents. *)
+val with_delegated_moderator_event
+  :  t
+  -> delegation:Agent_protocol.Moderator_execution.delegation
+  -> event:Chat_response.Moderation.Event.t
+  -> authorize:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> snapshot:
+       (unit
+        -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+  -> (executing:Agent_protocol.Moderator_execution.t
+      -> event:Session.Snapshot.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (decision:Agent_protocol.Moderator_execution.Decision.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Moderator_execution.t option, Agent_protocol.Error.t) result
+
 (** Serialize external checkpoint preparation with owned moderator execution.
     This does not run a handler or grant tool authority. Delivery commits must
     also compare the prepared [expected] checkpoint in the actor mailbox. *)
