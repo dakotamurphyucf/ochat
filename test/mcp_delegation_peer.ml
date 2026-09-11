@@ -30,7 +30,12 @@ let () =
     | request ->
       let respond result = J.ok ~id:request.id result |> J.jsonaf_of_response |> write in
       (match request.method_ with
-       | "initialize" -> respond (`Object [])
+       | "initialize" ->
+         Out_channel.with_file
+           (Filename.concat root "connections")
+           ~append:true
+           ~f:(fun channel -> Out_channel.output_string channel "connected\n");
+         respond (`Object [])
        | "tools/list" ->
          Mcp_types.Tools_list_result.{ tools = tools (); next_cursor = None }
          |> Mcp_types.Tools_list_result.jsonaf_of_t

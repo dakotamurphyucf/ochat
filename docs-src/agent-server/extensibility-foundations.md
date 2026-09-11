@@ -3680,6 +3680,16 @@ state. Stateful moderator-handled tools, including private transitive dependenci
 of standalone tools, still reject with `delegation.owner_dispatch_unavailable`.
 Their original-owner dispatch remains required before they can be delegated.
 
+Inherited MCP tools retain the parent's connected client and catalog identity;
+creating children does not reconnect to the server or expose its other tools.
+Observed schema changes or removal reject before the remote call, and saved
+capability pins reject a changed schema when a stopped child starts after restart.
+Restoring the original catalog permits matching bindings to be reconstructed.
+The daemon regression exercises a parent, child and grandchild across four starts,
+checks child-owned one-off approvals and invocation records, rejects an unselected
+catalog-control tool, and audits actual remote calls. Its provider is fake and
+the MCP peer runs locally over stdio.
+
 Generated sessions can have their own instructions and supported model/reasoning
 configuration, with or without a lifecycle moderator. Moderator snapshots restore
 against the pinned script, and startup effects still wait for actor-owned lifecycle
