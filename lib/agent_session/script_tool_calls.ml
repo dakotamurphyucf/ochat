@@ -91,6 +91,24 @@ let native_dispatch t ~declared ~input ~capabilities =
 let is_halted t = t.is_halted ()
 let current_capabilities t = t.registry ()
 let authorize t = t.authorize
+
+let with_authorization_guard t ~check =
+  let authorize invocation binding =
+    let open Result.Let_syntax in
+    let%bind () = check () in
+    let%bind () = t.authorize invocation binding in
+    check ()
+  in
+  let prepare_output output =
+    let open Result.Let_syntax in
+    let%bind () = check () in
+    let%bind output = t.prepare_output output in
+    let%map () = check () in
+    output
+  in
+  { t with authorize; prepare_output }
+;;
+
 let with_lifecycle t ~is_halted = { t with is_halted }
 let with_durable_requests t = { t with durable_requests = true }
 let durable_requests t = t.durable_requests

@@ -93,6 +93,14 @@ val authorize
   -> Chat_response.Tool_capability.binding
   -> (unit, Agent_protocol.Error.t) result
 
+(** Additional host authority gate, before and after the existing authorization
+    (including permission waits) and output preparation. Preserves
+    the original invocation/approval service, selected tools and owned work. *)
+val with_authorization_guard
+  :  t
+  -> check:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> t
+
 type moderator_dispatch =
   execute:Native_tool_invocation.moderator_executor
   -> native_execute:Native_tool_invocation.executor

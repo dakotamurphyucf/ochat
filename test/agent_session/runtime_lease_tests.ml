@@ -4,7 +4,7 @@ open Job_fixtures
 module Owner = Agent_server.Runtime_owner
 module Builder = Agent_session.Runtime_builder
 
-let runtime ?script_tools ~close () : Builder.t =
+let runtime ?script_tools ?check_execution ~close () : Builder.t =
   { worker =
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
         failwith "unexpected model operation")
@@ -20,6 +20,7 @@ let runtime ?script_tools ~close () : Builder.t =
   ; background_executor = None
   ; idle_notifications = None
   ; automatic_turn_policy = None
+  ; check_execution
   ; moderator_activation = None
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
@@ -28,6 +29,50 @@ let runtime ?script_tools ~close () : Builder.t =
   ; enqueue_model_job_completion = (fun ?prepare:_ _ -> failwith "unexpected completion")
   ; close
   }
+;;
+
+let%expect_test "failed authority lookup preserves owner cleanup and rechecks every lease"
+  =
+  with_actor (fun _env _sw actor _writer _backend ->
+    let unavailable = ref true in
+    let checks = ref 0 in
+    let closes = ref 0 in
+    let initial =
+      runtime
+        ~check_execution:(fun () ->
+          Int.incr checks;
+          Eio.Fiber.yield ();
+          match !unavailable with
+          | true -> failwith "injected authority lookup failure"
+          | false -> Ok ())
+        ~close:(fun () -> Int.incr closes)
+        ()
+    in
+    let owner =
+      Owner.create ~actor ~initial:(Some initial) ~build:(fun () -> assert false)
+    in
+    let expect_lookup_failure f =
+      match f () with
+      | _ -> failwith "missing authority failure"
+      | exception Failure message ->
+        [%test_eq: string] "injected authority lookup failure" message
+    in
+    expect_lookup_failure (fun () -> Owner.ensure_loaded owner);
+    expect_lookup_failure (fun () ->
+      Owner.with_background_runtime owner (fun _ -> failwith "unauthorized lease"));
+    assert (Owner.is_loaded owner);
+    unavailable := false;
+    Owner.with_background_runtime owner (fun _ -> Ok ()) |> protocol_ok;
+    unavailable := true;
+    expect_lookup_failure (fun () -> Owner.ensure_loaded owner);
+    Owner.unload_and_wait owner |> protocol_ok;
+    assert (not (Owner.is_loaded owner));
+    [%test_eq: int] 4 !checks;
+    [%test_eq: int] 1 !closes;
+    Owner.close owner;
+    print_endline
+      "failed reads deny entry without poisoning retirement; leases revalidate");
+  [%expect {| failed reads deny entry without poisoning retirement; leases revalidate |}]
 ;;
 
 let%expect_test

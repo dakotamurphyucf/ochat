@@ -99,6 +99,7 @@ type t =
   ; background_executor : background_executor option
   ; moderator_activation : moderator_activation option
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
+  ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -759,7 +760,40 @@ type source =
       { definition : Generated_definition.t
       ; artifact_store : Agent_store.Prompt_artifact_store.t
       ; parent_runtime : Agent_runtime.t
+      ; authority : Delegation_authority.t
       }
+
+let guarded_services authority (services : extension_services) =
+  let checked f =
+    let open Result.Let_syntax in
+    let%bind () = Delegation_authority.check_execution authority in
+    let%bind result = f () in
+    let%map () = Delegation_authority.check_execution authority in
+    result
+  in
+  { services with
+    script_tools =
+      (fun native ->
+        Script_tool_calls.with_authorization_guard
+          (services.script_tools native)
+          ~check:(fun () -> Delegation_authority.check_execution authority))
+  ; claim_lifecycle =
+      (fun ~event ~snapshot f ->
+        checked (fun () -> services.claim_lifecycle ~event ~snapshot f))
+  ; notification_input =
+      (fun ~source ~tools ~operation_id () ->
+        checked (fun () -> services.notification_input ~source ~tools ~operation_id ()))
+  ; initial_notification_input =
+      (fun ~source ~tools ~operation_id () ->
+        checked (fun () ->
+          services.initial_notification_input ~source ~tools ~operation_id ()))
+  ; idle_notifications =
+      (fun ~source ~tools () ->
+        checked (fun () -> services.idle_notifications ~source ~tools ()))
+  ; standalone_completion =
+      (fun ~tools job -> checked (fun () -> services.standalone_completion ~tools job))
+  }
+;;
 
 let build_with_services
       ~extension_services
@@ -784,6 +818,23 @@ let build_with_services
       ~job_services
   =
   let open Result.Let_syntax in
+  let%bind () =
+    match source with
+    | Authored _ -> Ok ()
+    | Generated { definition; authority; _ } ->
+      Delegation_authority.check_preparation
+        authority
+        ~session_id
+        ~revision_id:(Generated_definition.artifact definition).revision_id
+        ~manifest_sha256:(Generated_definition.artifact definition).manifest_sha256
+        ~permission_profile
+  in
+  let extension_services =
+    match source, extension_services with
+    | Generated { authority; _ }, Some services ->
+      Some (guarded_services authority services)
+    | _, services -> services
+  in
   let elements, artifact, materialized_tree, delegated =
     match source with
     | Authored revision ->
@@ -1292,6 +1343,21 @@ let build_with_services
                 Shell_runtime.Registry.redact_tool_input registry ~tool_name:name payload))
       }
   in
+  let check_execution =
+    match source with
+    | Authored _ -> None
+    | Generated { authority; _ } ->
+      Some (fun () -> Delegation_authority.check_execution authority)
+  in
+  let worker =
+    match check_execution with
+    | None -> worker
+    | Some check ->
+      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+        match check () with
+        | Error error -> Operation_worker.Failed error
+        | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+  in
   let parse_user_content =
     match delegated with
     | false ->
@@ -1344,6 +1410,11 @@ let build_with_services
                    ~claim_event
                    ~is_halted
                    ~request ->
+                   let%bind () =
+                     match check_execution with
+                     | None -> Ok ()
+                     | Some check -> check ()
+                   in
                    let script_tools =
                      Script_tool_calls.with_lifecycle script_tools ~is_halted
                      |> Script_tool_calls.with_durable_requests
@@ -1414,6 +1485,7 @@ let build_with_services
              }
          | _ -> None)
     ; moderator_activation
+    ; check_execution
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in
@@ -1456,8 +1528,8 @@ let build_with_extensions ~services ~sw ~env ~paths ~storage_paths ~revision =
     ~extension_services:(Some services)
 ;;
 
-let build_generated ~services ~definition ~artifact_store ~parent_runtime =
+let build_generated ~services ~definition ~artifact_store ~parent_runtime ~authority =
   build_with_services
-    ~source:(Generated { definition; artifact_store; parent_runtime })
+    ~source:(Generated { definition; artifact_store; parent_runtime; authority })
     ~extension_services:(Some services)
 ;;

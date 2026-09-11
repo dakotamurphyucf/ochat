@@ -54,7 +54,26 @@ let closed_error () =
     ()
 ;;
 
+(* Host admission callbacks can fail while consulting another actor or store.
+   Propagate their exception after releasing the mutex, so cleanup remains usable. *)
+let with_owner_lock t ~protect f =
+  let outcome =
+    Eio.Mutex.use_rw ~protect t.mutex (fun () ->
+      match f () with
+      | result -> Ok result
+      | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let ensure_loaded_locked t =
+  let check (runtime : Agent_session.Runtime_builder.t) =
+    match runtime.check_execution with
+    | None -> Ok ()
+    | Some check -> check ()
+  in
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
   | false, _ when t.unloading ->
@@ -64,21 +83,19 @@ let ensure_loaded_locked t =
          ~message:"session runtime is waiting for background cleanup"
          ~retryable:true
          ())
-  | false, Some _ -> Ok ()
+  | false, Some runtime -> check runtime
   | false, None ->
     (match t.build () with
      | Error _ as failure -> failure
      | Ok runtime ->
        (match install t runtime with
-        | Ok () -> Ok ()
+        | Ok () -> check runtime
         | Error _ as failure ->
           runtime.close ();
           failure))
 ;;
 
-let ensure_loaded t =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> ensure_loaded_locked t)
-;;
+let ensure_loaded t = with_owner_lock t ~protect:true (fun () -> ensure_loaded_locked t)
 
 let background_busy () =
   Agent_protocol.Error.create
@@ -124,7 +141,7 @@ let with_background_runtime t f =
       }
     in
     let admitted =
-      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      with_owner_lock t ~protect:true (fun () ->
         let open Result.Let_syntax in
         let%map () = ensure_loaded_locked t in
         let runtime = Option.value_exn t.runtime in
@@ -266,18 +283,7 @@ let parse_user_content t ~id content =
            ()))
 ;;
 
-let with_cancellable_access t f =
-  let outcome =
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-      match f () with
-      | result -> Ok result
-      | exception (Eio.Cancel.Cancelled _ as exn) ->
-        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
-  in
-  match outcome with
-  | Ok result -> result
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
-;;
+let with_cancellable_access t f = with_owner_lock t ~protect:false f
 
 let submit_ingress t ~producer ~registration_id ~namespace ~key ~payload =
   with_cancellable_access t (fun () ->

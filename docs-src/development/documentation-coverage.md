@@ -227,6 +227,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/background_job_event.mli` | [contract](../../lib/agent_session/background_job_event.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/delegation_authority.mli` | [contract](../../lib/agent_session/delegation_authority.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/delivery_ownership.mli` | [contract](../../lib/agent_session/delivery_ownership.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/durable_event_log.mli` | [contract](../../lib/agent_session/durable_event_log.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/extension_clock.mli` | [contract](../../lib/agent_session/extension_clock.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

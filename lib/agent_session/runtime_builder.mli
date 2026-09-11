@@ -126,6 +126,9 @@ type t =
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
     (** Enable durable accounting with this exact captured policy at installation.
         Absent for unqualified runtimes. *)
+  ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
+    (** Generated authority gate for owner-managed work, including idle callbacks.
+        This does not authorize disclosure of retained history or replace leases. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -262,6 +265,7 @@ val build_generated
   -> definition:Generated_definition.t
   -> artifact_store:Agent_store.Prompt_artifact_store.t
   -> parent_runtime:Chat_response.Agent_runtime.t
+  -> authority:Delegation_authority.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> paths:Runtime_paths.t

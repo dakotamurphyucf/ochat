@@ -3689,3 +3689,38 @@ snapshot, reopens the store and checks this relationship through revocation.
 This supplies the typed identity and storage checks for the upcoming generated
 session factory. The public creation coordinator, parent-policy mediator and
 automatic generated runtime recovery are still under implementation.
+
+### Current delegated execution authority
+
+`Delegation_authority` binds a prepared generated runtime to its private creation
+reference and exact live selected capabilities. The host supplies authoritative
+parent state, ledger resolution and live registrations. Preparation checks the
+child ID, revision, manifest and inherited permission profile. Execution requires
+the durable `Linked` stage and an unrevoked admission.
+
+Every ancestor must still have the admitted generation, source, permission profile,
+workspace and runtime policy, and be running without a terminal failure. The
+checker follows private parent references, validates each narrowing against its
+parent's current bindings, and requires linked ancestor admissions. The ancestry
+depth limit is configurable (default 32); cycles and excess depth reject. An
+equivalent newly registered tool still requires explicit live rebinding throughout
+the chain. Ordinary conversation changes do not invalidate the policy fingerprint.
+
+Generated runtime construction now requires this guard. Checks surround native
+authorization and output preparation, including their waits, and guard worker
+entry, lifecycle admission, model-input safe points, idle delivery and background
+execution. Runtime-owner access also revalidates. A failing host lookup propagates
+without poisoning the owner's mutex, allowing resource cleanup to finish.
+
+Offline tests exercise parent stop and policy changes during authorization,
+admission revocation during output preparation or model-input gathering, unlinked
+children and ancestor revocation. They assert no unauthorized file disclosure or
+subsequent provider request. Separate ancestry tests check narrowing across two
+delegation edges and fresh live rebinding without invoking a tool.
+
+These are current-state checks, not a substitute for coordinated resource leases
+or stop/cancellation. The current guard explicitly rejects parent moderators until
+owner-aware policy mediation is installed, and rejects independent lifetime until
+its resource ownership is implemented. A child's own moderator is supported.
+Those temporary limits, actual factory creation/recovery and lifecycle coordination
+remain E08 work; general model-visible child creation is not yet enabled.

@@ -16,6 +16,7 @@
   prompt_catalog
   security_grant
   session_state
+  delegation_authority
   automatic_turn_budget
   external_ingress
   ingress_submission

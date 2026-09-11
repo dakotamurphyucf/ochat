@@ -34,6 +34,7 @@
   notification_history_tests
   authoring_history_tests
   generated_definition_tests
+  delegation_authority_tests
   generated_runtime_tests
   generated_session_state_tests
   delivery_ownership_tests
