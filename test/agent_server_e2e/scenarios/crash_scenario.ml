@@ -78,6 +78,10 @@ let run_journal_child env count directory =
 
 let run_child env arguments =
   match arguments with
+  | [ "creator"; root; boundary ] ->
+    Crash_creator.run_child env ~root ~boundary ~recover:false
+  | [ "creator-recover"; root; boundary ] ->
+    Crash_creator.run_child env ~root ~boundary ~recover:true
   | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
   | [ "owned-stop"; root ] -> Crash_owned_stop.run_child env ~root ~recover:false
   | [ "owned-stop-recover"; root ] -> Crash_owned_stop.run_child env ~root ~recover:true
@@ -284,6 +288,7 @@ let cases =
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
   ; "generated.creation-stage-recovery", Crash_generated_creation.test
+  ; "generated.creator-outcome-recovery", Crash_creator.test
   ; "generated.owned-stop-recovery", Crash_owned_stop.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
   ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test

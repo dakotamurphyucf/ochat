@@ -60,6 +60,7 @@ type t =
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; generated_creation : Agent_session.Generated_session_request.service
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -84,67 +85,6 @@ type runtime_source =
       { artifact : Agent_store.Prompt_artifact_store.Artifact.t
       ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
       }
-
-let create
-      ~sw
-      ~env
-      ~store
-      ~registry
-      ~idempotency_store
-      ~blob_store
-      ~prompts
-      ~workspaces
-      ~permission_profiles
-      ~manifest_grants
-      ~quota_manager
-      ~job_capacity
-      ~tool_dir
-      ~home
-      ~model_post_stream
-      ~qualify_chatml_extensions
-      ~independent_lifetime_policy
-      ~chatml_runtime_policy
-      ~authoring_validation_host
-      ~durability
-      ~limits
-  =
-  let permission_profiles_by_id =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
-  in
-  let permission_profile_revisions =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set
-        profiles
-        ~key:profile.Agent_session.Permission_policy.revision_digest
-        ~data:profile)
-  in
-  { sw
-  ; env
-  ; store
-  ; registry
-  ; generated_creation_mutex = Eio.Mutex.create ()
-  ; idempotency_store
-  ; blob_store
-  ; prompts
-  ; workspaces
-  ; catalog_mutex = Eio.Mutex.create ()
-  ; permission_profiles = permission_profiles_by_id
-  ; permission_profile_revisions
-  ; manifest_grants
-  ; quota_manager
-  ; job_capacity
-  ; tool_dir
-  ; home
-  ; model_post_stream
-  ; qualify_chatml_extensions
-  ; independent_lifetime_policy
-  ; chatml_runtime_policy
-  ; authoring_validation_host
-  ; durability
-  ; limits
-  }
-;;
 
 let install_catalogs t ~workspaces ~permission_profiles ~manifest_grants =
   Agent_session.Workspace_catalog.install t.workspaces ~replacement:workspaces;
@@ -1657,6 +1597,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
             ~defer_observation:(fun _ -> Ok ())
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_generated_creation_service
+            tools
+            t.generated_creation
           |> fun tools ->
           Agent_session.Script_tool_calls.with_shell_context tools shell_context
           |> fun tools ->
@@ -5791,4 +5735,200 @@ let reconcile_generated_creations t =
                                      child
                                in
                                owned := false))))))))
+;;
+
+let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
+  let module Q = Agent_session.Generated_session_request in
+  let module N = Agent_session.Native_tool_invocation in
+  let module C = Chat_response.Tool_capability in
+  let module G = Agent_session.Generated_definition in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let failure error =
+    P.Invocation.
+      { code = "agent.create." ^ P.Error.code_to_string error.P.Error.code
+      ; message = "The child session could not be admitted."
+      ; retryable = error.retryable
+      ; details = `Null
+      }
+  in
+  let protocol result = Result.map_error result ~f:failure in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind ceiling = N.borrowed_capabilities borrowed |> protocol in
+  let%bind parent =
+    Session_registry.find t.registry context.session_id
+    |> Result.of_option
+         ~error:(failure (unavailable Permission_denied "invoking parent is unavailable"))
+  in
+  let%bind state = Agent_session.Session_actor.state parent.actor |> protocol in
+  let%bind () =
+    match state.spec.protocol.persistence with
+    | Transient ->
+      Error
+        P.Invocation.
+          { code = "capability_unavailable"
+          ; message =
+              "Persisted child creation requires a durable Ochat host. Use a daemon or \
+               durable embedded session."
+          ; retryable = false
+          ; details = `Null
+          }
+    | Durable -> Ok ()
+  in
+  let%bind () =
+    match Int.equal state.identity.generation context.generation with
+    | true -> Ok ()
+    | false ->
+      Error (failure (unavailable Permission_denied "invoking parent generation changed"))
+  in
+  let capability result =
+    Result.map_error result ~f:(fun error ->
+      P.Invocation.
+        { code = error.C.code
+        ; message = "Requested tools exceed the invoking capability scope."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind selected = C.select ceiling ~names:request.tools |> capability in
+  let%bind definition =
+    G.prepare
+      ?limits:
+        (Option.map
+           t.authoring_validation_host
+           ~f:Chat_response.Authoring_validation.compilation_limits)
+      ~env:t.env
+      ~dir:
+        Eio.Path.(
+          Eio.Stdenv.fs t.env / state.spec.workspace_instance.canonical_root.native_path)
+      ?catalog:
+        (Option.bind
+           t.authoring_validation_host
+           ~f:Chat_response.Authoring_validation.catalog)
+      ~revision_id:(P.Id.Prompt_revision.create ())
+      ~created_at:(now t)
+      ~current_capabilities:(fun () -> selected)
+      ~references:(C.references selected)
+      request.bundle
+    |> Result.map_error ~f:(fun diagnostics ->
+      P.Invocation.
+        { code = "agent.create.invalid_definition"
+        ; message = "The generated ChatMD definition could not be prepared."
+        ; retryable = false
+        ; details =
+            `Object
+              [ ( "diagnostics"
+                , `Array
+                    (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.jsonaf_of_t) )
+              ]
+        })
+  in
+  let%bind current = N.borrowed_capabilities borrowed |> protocol in
+  let%bind () =
+    List.fold_result (C.references selected) ~init:() ~f:(fun () reference ->
+      C.resolve current ~id:reference.id ~fingerprint:reference.fingerprint
+      |> capability
+      |> Result.map ~f:ignore)
+  in
+  let lifetime =
+    match request.lifetime with
+    | Q.Owned -> Owned
+    | Independent -> Independent
+  in
+  let%bind child =
+    create_generated_session
+      t
+      ~lifetime
+      ~start_immediately:request.start_immediately
+      ~parent_session_id:context.session_id
+      ~idempotency_key:request.idempotency_key
+      ~display_name:request.display_name
+      definition
+    |> protocol
+  in
+  let%bind _ = N.borrowed_capabilities borrowed |> protocol in
+  let%map state = Agent_session.Session_actor.state child.actor |> protocol in
+  Q.
+    { session = Agent_session.Session_state.summary state
+    ; parent_session_id = context.session_id
+    ; tools =
+        List.map
+          (C.references
+             (Chat_response.Generated_admission.capabilities (G.admission definition)))
+          ~f:(fun reference -> reference.name)
+    }
+;;
+
+let create
+      ~sw
+      ~env
+      ~store
+      ~registry
+      ~idempotency_store
+      ~blob_store
+      ~prompts
+      ~workspaces
+      ~permission_profiles
+      ~manifest_grants
+      ~quota_manager
+      ~job_capacity
+      ~tool_dir
+      ~home
+      ~model_post_stream
+      ~qualify_chatml_extensions
+      ~independent_lifetime_policy
+      ~chatml_runtime_policy
+      ~authoring_validation_host
+      ~durability
+      ~limits
+  =
+  let profiles =
+    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
+      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
+  in
+  let revisions =
+    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
+      Map.set
+        profiles
+        ~key:profile.Agent_session.Permission_policy.revision_digest
+        ~data:profile)
+  in
+  let bundle_limits =
+    Option.value_map
+      authoring_validation_host
+      ~default:Chatmd_source_bundle.default_limits
+      ~f:Chat_response.Authoring_validation.bundle_limits
+  in
+  let rec t =
+    { sw
+    ; env
+    ; store
+    ; registry
+    ; generated_creation_mutex = Eio.Mutex.create ()
+    ; idempotency_store
+    ; blob_store
+    ; prompts
+    ; workspaces
+    ; catalog_mutex = Eio.Mutex.create ()
+    ; permission_profiles = profiles
+    ; permission_profile_revisions = revisions
+    ; manifest_grants
+    ; quota_manager
+    ; job_capacity
+    ; tool_dir
+    ; home
+    ; model_post_stream
+    ; qualify_chatml_extensions
+    ; independent_lifetime_policy
+    ; chatml_runtime_policy
+    ; authoring_validation_host
+    ; durability
+    ; limits
+    ; generated_creation =
+        { limits = bundle_limits
+        ; create = (fun borrowed request -> create_from_native t borrowed request)
+        }
+    }
+  in
+  t
 ;;

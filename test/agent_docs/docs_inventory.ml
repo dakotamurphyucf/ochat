@@ -64,6 +64,8 @@ let owner name =
         ; "authoring"
         ; "generated_admission"
         ; "generated_definition"
+        ; "generated_session_request"
+        ; "generated_session_tool"
         ; "delegation_store"
         ; "delegation_authority"
         ; "delegation_lifecycle"

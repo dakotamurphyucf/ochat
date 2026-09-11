@@ -28,6 +28,12 @@ val with_authoring_validation_host
 
 val authoring_validation_host : t -> Chat_response.Authoring_validation.host option
 
+(** Actual caller's persisted creation service. Installing it does not register
+    tools or grant capabilities; its host must recheck the native borrow. *)
+val with_generated_creation_service : t -> Generated_session_request.service -> t
+
+val generated_creation_service : t -> Generated_session_request.service option
+
 (** Bind inherited shell approvals to this host's actual session. Native dispatch
     adds the final live authorization guard, including inherited parent checks,
     so waits and delayed effects cannot bypass revocation. *)

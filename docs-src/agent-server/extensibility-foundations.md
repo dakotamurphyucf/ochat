@@ -4324,9 +4324,51 @@ storage. It checks identical retries, conflicts, separate initial instructions a
 the same child IDs after two daemon restarts, then starts/sends through the public
 session APIs and executes inherited recursive scripts. These tests qualify normal
 creation and retained retry behavior, including rejection after archive/removal.
-Model-facing creation and remaining concurrent lifecycle/relationship contracts
-remain required work. Abandoned unreferenced source artifacts use the startup
+The qualified native creator described below exercises this service through model
+and nested script invocation. Public session management tools and the external
+helper bridge remain separate work. Abandoned unreferenced source artifacts use the startup
 collection protocol described above; creation records are retained.
+
+### Qualified native creator invocation
+
+Internally qualified hosts can explicitly declare `<tool name="agent_create"/>`.
+This registration uses the shared native invocation contract and the invoking
+session's service scope. Ordinary hosts and prompts do not gain it automatically;
+general exposure and installed authoring guidance remain pending.
+
+The current version 1 request supplies `root_file`, `sources` (an array of objects
+with `path` and `text`), an explicit `tools` array and `idempotency_key`. Optional
+`start_immediately` defaults to false, `lifetime` defaults to `owned`, and
+`display_name` supplies display metadata. Model and reasoning settings belong in
+the captured ChatMD configuration. Independent lifetime still requires the host's
+explicit authorization. Source capture and compilation use the host's configured
+limits. This internal request currently accepts inline captured bundles; it does
+not accept arbitrary server source paths or a different workspace selection.
+
+Parent identity, generation, principal, workspace and tool bindings come from
+the live invocation and retained factory records. A nested `run_chatml` call uses
+that script's narrowed tools and actual calling session, including when the
+creator registration was inherited from an ancestor. Generated declarations may
+select inherited bindings but cannot replace them with new resource configuration.
+The service rechecks live authority after compilation and before returning data.
+
+A successful outcome contains the session ID, pinned definition revision,
+current session summary, effective tool names and parent/child management IDs.
+Those IDs identify the recorded relationship; possessing them grants no authority.
+A transient embedded host returns `capability_unavailable` and guidance to use a
+durable host. Invalid source, changed-key payloads and unavailable tool selection
+return typed failed outcomes without silently creating a different child.
+
+Each model call has one persisted provider response. A nested script creator call
+has its own invocation record and returns its value to the script without adding
+a synthetic provider response. Real process-kill tests disconnect the issuing
+client before execution and interrupt both after child linkage and after the
+initial successful outcome is synced but before provider publication. Recovery
+publishes the exact saved response when available, otherwise records interruption;
+it does not automatically replay the model or creator implementation. An explicit
+retry with the original creation key resolves to the same child across repeated
+daemon restarts. These tests establish process-restart behavior, not power-loss
+survival beyond the configured store flush guarantees.
 
 ### Durable initial activation
 

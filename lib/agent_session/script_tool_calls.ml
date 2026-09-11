@@ -64,6 +64,7 @@ type t =
   ; progress_ceiling : C.t option
   ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; generated_creation_service : Generated_session_request.service option
   }
 
 type native_services =
@@ -172,12 +173,19 @@ let create
   ; progress_ceiling = None
   ; shell_context = None
   ; authoring_validation_host = None
+  ; generated_creation_service = None
   }
 ;;
 
 let with_shell_context t services = { t with shell_context = Some services }
 let with_authoring_validation_host t host = { t with authoring_validation_host = host }
 let authoring_validation_host t = t.authoring_validation_host
+
+let with_generated_creation_service t service =
+  { t with generated_creation_service = Some service }
+;;
+
+let generated_creation_service t = t.generated_creation_service
 
 let with_preparation t ~prepare =
   match t.preparation with

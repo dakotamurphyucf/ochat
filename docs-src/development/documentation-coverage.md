@@ -238,6 +238,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/extension_stop.mli` | [contract](../../lib/agent_session/extension_stop.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/external_ingress.mli` | [contract](../../lib/agent_session/external_ingress.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/generated_definition.mli` | [contract](../../lib/agent_session/generated_definition.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/generated_session_request.mli` | [contract](../../lib/agent_session/generated_session_request.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/generated_session_tool.mli` | [contract](../../lib/agent_session/generated_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/history_codec.mli` | [contract](../../lib/agent_session/history_codec.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/history_id_source.mli` | [contract](../../lib/agent_session/history_id_source.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/ingress_submission.mli` | [contract](../../lib/agent_session/ingress_submission.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

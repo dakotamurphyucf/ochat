@@ -13,6 +13,8 @@
   prompt_revision
   prompt_revision_builder
   generated_definition
+  generated_session_request
+  generated_session_tool
   prompt_catalog
   security_grant
   session_state
