@@ -94,6 +94,17 @@ let drain_idle_moderator entry =
 
 let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
   match Runtime_owner.deliver_schedule entry.Session_registry.runtime schedule with
+  | Error { code = Interrupted; _ } ->
+    (* Runtime retirement can interrupt a delivery before its checkpoint commit.
+       Preserve it for a later runtime/restart. A committed or cancelled schedule
+       rejects retry, so this cannot undo a terminal delivery or explicit stop. *)
+    ignore
+      (Agent_session.Session_actor.retry_schedule
+         entry.actor
+         ~schedule_id:schedule.id
+         ~generation:schedule.generation
+       : (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result);
+    unload_if_stopped entry observed
   | Error error ->
     fail_claim entry schedule error;
     unload_if_stopped entry observed

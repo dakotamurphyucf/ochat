@@ -26,6 +26,7 @@ foreign-parent denial, inherited file restrictions, one notification across
 restart, and rejection of changed helper policy on child reactivation. Providers
 are deterministic local fixtures.
 
-The timer-based response watcher (X06) and its helper-backed qualification remain
-separate work. This fixture alone does not establish full X07 or public feature
-availability.
+The sibling [X06 response watcher](../x06-response-watcher/README.md) composes this
+helper with polling jobs, timers and correlated notifications. Its active-watch
+recovery and remaining policy matrix still require qualification. These fixtures
+alone do not establish full X07 or public feature availability.

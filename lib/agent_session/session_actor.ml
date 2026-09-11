@@ -8359,8 +8359,18 @@ let apply_observation_follow_up t =
       ; remaining_events = false
       }
     in
+    let resume_deferred =
+      (not halted) && not (List.is_empty t.state.conversation.deferred_user_entries)
+    in
     let%map () =
       match plan.action, extra_deltas with
+      | Checkpoint, _ when resume_deferred && Option.is_none t.operation_worker ->
+        Error (error Invalid_state "deferred user turn requires an installed worker")
+      | Checkpoint, _ when resume_deferred ->
+        (* Queued/background callbacks can defer a user submission without
+           requesting a moderator turn. Resume it once the callback releases
+           its borrow; no notification or later event should be required. *)
+        start_idle_turn ~extra_deltas t drain ~reason:User_submit ~adopt_deferred:true
       | Checkpoint, [] -> Ok ()
       | Checkpoint, _ ->
         transition t ~delta:(Session_delta.Batch extra_deltas) ~payloads:[]
@@ -8378,7 +8388,7 @@ let apply_observation_follow_up t =
           ~reason:Moderator_request
           ~adopt_deferred:(not (List.is_empty t.state.conversation.deferred_user_entries))
     in
-    not (List.is_empty extra_deltas)
+    resume_deferred || not (List.is_empty extra_deltas)
 ;;
 
 let checkpoint_idle_moderator t (drain : Runtime_builder.moderator_drain) =

@@ -19,9 +19,10 @@ let%expect_test
       let idle () =
         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
           let rec wait () =
-            match (read actor).active_operation with
-            | None -> ()
-            | Some _ ->
+            let state = read actor in
+            match state.active_operation, state.conversation.deferred_user_entries with
+            | None, [] -> ()
+            | _ ->
               Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
               wait ()
           in

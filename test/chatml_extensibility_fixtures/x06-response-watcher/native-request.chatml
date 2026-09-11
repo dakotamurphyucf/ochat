@@ -1,0 +1,15 @@
+let field json name = match Json.get_field(json, name) with
+| `Some(value) -> value
+| `None -> `Null
+
+let run ctx input =
+  let target = match field(input, "operation") with
+  | `String("wait") -> "agent_wait"
+  | `String("read") -> "agent_read"
+  | `String("status") -> "agent_status"
+  | _ -> fail("Unsupported watcher operation.") in
+  let* response = Tool.call(target, field(input, "arguments")) in
+  match response with
+  | `Ok(value) -> Task.pure(`Complete(value))
+  | `Error(code) -> Task.pure(`Fail({ code = code; message = "Session request failed.";
+      retryable = false; details = `Null }))

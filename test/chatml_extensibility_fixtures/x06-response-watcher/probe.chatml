@@ -1,0 +1,76 @@
+let field json name = match Json.get_field(json, name) with
+| `Some(value) -> value
+| `None -> `Null
+let string json = match json with | `String(value) -> value | _ -> ""
+let result state value = `Complete(`Object([
+  { key = "state"; value = `String(state) }, { key = "value"; value = value }
+]))
+let failure code message = `Fail({ code = code; message = message;
+  retryable = code == "agent.helper.transport"; details = `Null })
+let request operation arguments = Tool.call("watch_session_request", `Object([
+  { key = "version"; value = `Number(1.0) },
+  { key = "operation"; value = `String(operation) },
+  { key = "arguments"; value = arguments }
+]))
+
+let pending status =
+  let state = match field(status, "state") with
+  | `String("waiting_for_permission") -> "permission_wait"
+  | `String("failed") -> "failed"
+  | _ -> match field(status, "desired_state") with
+    | `String("stopped") -> "stopped"
+    | _ -> "pending" in
+  result(state, status)
+
+let receipt_probe input =
+  let target = [
+    { key = "session_id"; value = field(input, "session_id") },
+    { key = "receipt_id"; value = field(input, "receipt_id") }
+  ] in
+  let* response = request("wait", `Object(Array.append(target,
+    [{ key = "timeout_ms"; value = `Number(0.0) }]))) in
+  match response with
+  | `Error(code) -> Task.pure(failure(code, "Response status could not be checked."))
+  | `Ok(waited) ->
+    let receipt = field(waited, "receipt") in
+    (match field(waited, "reason") with
+    | `String("receipt_terminal") ->
+      (match field(receipt, "status") with
+      | `String("completed") ->
+        let* output = request("read", `Object(Array.append(target,
+          [{ key = "limit"; value = `Number(16.0) }]))) in
+        (match output with
+        | `Error(code) -> Task.pure(failure(code, "Completed output could not be read."))
+        | `Ok(page) -> Task.pure(result("ready", page)))
+      | _ -> Task.pure(failure("watcher.target_failed",
+          "The watched submission ended with status: " ++ string(field(receipt, "status")))))
+    | `String("timeout") ->
+      Task.pure(pending(field(waited, "status")))
+    | _ -> Task.pure(failure("watcher.invalid_response", "Unexpected wait response.")))
+
+let cursor_probe input =
+  let target = `Object([{ key = "session_id"; value = field(input, "session_id") }]) in
+  let query = Json.set_field(Json.set_field(target, "cursor", field(input, "cursor")), "limit", `Number(16.0)) in
+  let* response = request("read", query) in
+  match response with
+  | `Error(code) -> Task.pure(failure(code, "Output cursor could not be read."))
+  | `Ok(page) ->
+    let* response = request("status", target) in
+    (match response with
+    | `Error(code) -> Task.pure(failure(code, "Child status could not be checked."))
+    | `Ok(status) ->
+      if Json.stringify(field(page, "generation")) != Json.stringify(field(status, "generation")) then
+        Task.pure(failure("watcher.snapshot_required", "Child generation changed during output check."))
+      else
+        let available = match field(page, "items") with
+        | `Array(items) -> Array.length(items) > 0
+        | _ -> false in
+        let quiescent = match field(status, "operation") with
+        | `Null -> (match field(status, "state") with | `String("idle") -> true | _ -> false)
+        | _ -> false in
+        if (if available then quiescent else false) then Task.pure(result("ready", page))
+        else Task.pure(pending(status)))
+
+let run ctx input = match field(input, "receipt_id") with
+| `String(_) -> receipt_probe(input)
+| _ -> cursor_probe(input)

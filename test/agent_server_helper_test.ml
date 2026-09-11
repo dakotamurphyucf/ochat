@@ -20,6 +20,36 @@ let helper_moderator =
 
 let helper_tools = [%blob "chatml_extensibility_fixtures/x07-helper-session/tools.chatmd"]
 let helper_schema = [%blob "chatml_extensibility_fixtures/x07-helper-session/any.json"]
+let watcher = [%blob "chatml_extensibility_fixtures/x06-response-watcher/watcher.chatml"]
+
+let watch_probe =
+  [%blob "chatml_extensibility_fixtures/x06-response-watcher/probe.chatml"]
+;;
+
+let watch_native =
+  [%blob "chatml_extensibility_fixtures/x06-response-watcher/native-request.chatml"]
+;;
+
+let watch_input = [%blob "chatml_extensibility_fixtures/x06-response-watcher/input.json"]
+
+let watch_tools =
+  [%blob "chatml_extensibility_fixtures/x06-response-watcher/tools.chatmd"]
+;;
+
+let coordinator =
+  helper_moderator
+  ^ "\nlet helper_initial_state = initial_state\nlet helper_on_event = on_event\n"
+  ^ watcher
+  ^ {|
+type coordinator_state = { helpers : request array; watches : response_watch array }
+let initial_state : coordinator_state = { helpers = helper_initial_state; watches = watch_initial_state }
+let on_event ctx state event =
+  let state : coordinator_state = state in
+  let* helpers = helper_on_event(ctx, state.helpers, event) in
+  let* watches = watch_on_event(ctx, state.watches, event) in
+  Task.pure({ helpers = helpers; watches = watches })
+|}
+;;
 
 let state daemon id =
   let entry = R.load (D.registry daemon) id |> protocol_ok in
@@ -51,7 +81,7 @@ let function_call name arguments =
   |> Stdlib.List.to_seq
 ;;
 
-let run env helper runner =
+let run env helper runner ~native_watch =
   Mirage_crypto_rng_unix.use_default ();
   let root = temporary_root env |> Caml_unix.realpath in
   let path file = Eio.Path.(Eio.Stdenv.fs env / file) in
@@ -72,8 +102,11 @@ let run env helper runner =
       Caml_unix.putenv "OCHAT_SHELL_RESOURCE_RUNNER" runner_path;
       List.iter
         [ "helper-request.chatml", helper_request
-        ; "helper-moderator.chatml", helper_moderator
+        ; "helper-moderator.chatml", coordinator
         ; "helper-any.json", helper_schema
+        ; "watch-probe.chatml", watch_probe
+        ; "watch-native.chatml", watch_native
+        ; "watch-input.json", watch_input
         ]
         ~f:(fun (name, contents) ->
           Eio.Path.save
@@ -96,7 +129,17 @@ let run env helper runner =
 </shell_access>
 <tool name="session_bridge" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
 <tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>|}
-         ^ helper_tools);
+         ^ helper_tools
+         ^ watch_tools
+         ^
+         match native_watch with
+         | false ->
+           {|<tool name="watch_session_request" type="chatml" script="session_request_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="session_bridge"/></tool>|}
+         | true ->
+           {|<tool name="agent_wait"/><tool name="agent_read"/><tool name="agent_status"/>
+<script id="watch_native_script" language="chatml" kind="tool" src="watch-native.chatml"/>
+<tool name="watch_session_request" type="chatml" script="watch_native_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="agent_wait"/><uses tool="agent_read"/><uses tool="agent_status"/></tool>|}
+        );
       let configuration = config root public prompt in
       let configuration =
         { configuration with
@@ -109,6 +152,7 @@ let run env helper runner =
               })
         }
       in
+      let authorization_times = ref [] in
       let grant name allowed =
         Agent_session.Session_management_channel.grant
           ~policy_revision:"helper-fixture-v1"
@@ -116,6 +160,8 @@ let run env helper runner =
           ~allowed
           ~limits:Shell_access.Request_channel.default_limits
           ~authorize:(fun context ->
+            authorization_times
+            := (name, Eio.Time.now (Eio.Stdenv.clock env)) :: !authorization_times;
             let caps = context.Shell_access.Context.capabilities in
             match
               String.equal context.executable.canonical_path helper_path
@@ -147,6 +193,7 @@ let run env helper runner =
       let queued = ref None in
       let child_tool = ref None in
       let child_calls = ref 0 in
+      let child_pause = ref None in
       let private_file = Filename.concat root "private-fixture.txt" in
       Eio.Path.save
         ~create:(`Exclusive 0o600)
@@ -162,7 +209,9 @@ let run env helper runner =
             | _ -> false)
         in
         (match child with
-         | true -> Int.incr child_calls
+         | true ->
+           Int.incr child_calls;
+           Option.iter !child_pause ~f:Eio.Promise.await
          | false -> ());
         match child with
         | false ->
@@ -309,7 +358,10 @@ let run env helper runner =
       let check_notification daemon parent child =
         let current = state daemon parent in
         let delivery =
-          match current.deliveries with
+          match
+            List.filter current.deliveries ~f:(fun delivery ->
+              String.equal delivery.context.correlation "agent-helper-result")
+          with
           | [ delivery ] -> delivery
           | deliveries ->
             raise_s
@@ -322,7 +374,10 @@ let run env helper runner =
         let notifications =
           List.filter current.conversation.canonical_history ~f:(fun entry ->
             match entry.P.History.provenance with
-            | Runtime_notification _ -> true
+            | Runtime_notification _ ->
+              (match delivery.status with
+               | Committed { history_id; _ } -> History_entry.Id.equal history_id entry.id
+               | _ -> false)
             | _ -> false)
         in
         [%test_eq: int] 1 (List.length notifications);
@@ -348,6 +403,83 @@ let run env helper runner =
           ; "idempotency_key", `String "helper-child"
           ]
       in
+      let watch_subscription daemon parent subscription_id =
+        List.find_exn (state daemon parent).subscriptions ~f:(fun subscription ->
+          P.Id.Subscription.equal subscription.context.id subscription_id)
+      in
+      let start_watch sw daemon client parent query =
+        match
+          invoke_status
+            sw
+            daemon
+            client
+            parent
+            "notify_when_agent_responds"
+            (`Object query)
+        with
+        | Published (Pending (Subscription id, _)) -> id
+        | status ->
+          raise_s
+            [%sexp "watch did not return a subscription", (status : P.Invocation.status)]
+      in
+      let await_timer daemon parent subscription_id =
+        await (fun () ->
+          let subscription = watch_subscription daemon parent subscription_id in
+          match subscription.result with
+          | Some result ->
+            raise_s
+              [%sexp "watch ended before delayed response", (result : P.Completion.t)]
+          | None -> Option.is_some subscription.timer_id)
+      in
+      let await_watch ?(require_wake = true) daemon parent subscription_id =
+        await (fun () ->
+          let current = state daemon parent in
+          Option.is_none current.active_operation
+          && List.exists current.deliveries ~f:(fun delivery ->
+            match delivery.context.work, delivery.status, delivery.wake_disposition with
+            | Some (Subscription id), Committed _, _ when not require_wake ->
+              P.Id.Subscription.equal id subscription_id
+            | Some (Subscription id), Committed _, Some (Accepted_wake _) ->
+              P.Id.Subscription.equal id subscription_id
+            | Some (Subscription id), Committed _, None
+              when P.Completion.equal_wake delivery.context.wake No_wake ->
+              P.Id.Subscription.equal id subscription_id
+            | Some (Subscription id), _, Some (Discarded_wake reason)
+              when P.Id.Subscription.equal id subscription_id ->
+              failwith ("watch wake rejected: " ^ reason)
+            | Some (Subscription id), Failed error, _
+              when P.Id.Subscription.equal id subscription_id ->
+              failwith ("watch delivery failed: " ^ error.message)
+            | _ -> false));
+        (watch_subscription daemon parent subscription_id).result |> Option.value_exn
+      in
+      let check_watch_notifications daemon parent =
+        let current = state daemon parent in
+        List.iter current.subscriptions ~f:(fun subscription ->
+          let completion = Option.value_exn subscription.result in
+          let deliveries =
+            List.filter current.deliveries ~f:(fun delivery ->
+              match delivery.context.work with
+              | Some (Subscription id) ->
+                P.Id.Subscription.equal id subscription.context.id
+              | _ -> false)
+          in
+          [%test_eq: int] 1 (List.length deliveries);
+          let delivery = List.hd_exn deliveries in
+          assert (P.Completion.equal completion delivery.context.completion);
+          let history_id =
+            match delivery.status with
+            | Committed { history_id; _ } -> history_id
+            | status ->
+              raise_s
+                [%sexp "watch notification not committed", (status : P.Delivery.status)]
+          in
+          let entry =
+            List.find_exn current.conversation.canonical_history ~f:(fun entry ->
+              History_entry.Id.equal entry.id history_id)
+          in
+          Agent_session.Notification_history.validate ~delivery entry |> protocol_ok)
+      in
       let parent_id, child_id, receipt =
         with_daemon (fun sw daemon client ->
           let parent, _ = create_session ~start_immediately:true client in
@@ -370,8 +502,16 @@ let run env helper runner =
               ; "agent_stop"
               ]
               ~f:(fun name ->
-                assert (
-                  Result.is_error (Chat_response.Tool_capability.find registry ~name)));
+                let present =
+                  Result.is_ok (Chat_response.Tool_capability.find registry ~name)
+                in
+                [%test_eq: bool]
+                  (native_watch
+                   && List.mem
+                        [ "agent_read"; "agent_wait"; "agent_status" ]
+                        name
+                        ~equal:String.equal)
+                  present);
             Ok ())
           |> protocol_ok;
           let create_envelope =
@@ -382,6 +522,8 @@ let run env helper runner =
               ]
           in
           let created =
+            authorization_times := [];
+            let creation_started = Eio.Time.now (Eio.Stdenv.clock env) in
             let job_id =
               match
                 invoke_status sw daemon client parent.id "manage_agent" create_envelope
@@ -396,7 +538,15 @@ let run env helper runner =
               List.iter current.jobs ~f:(fun job ->
                 match job.status with
                 | Failed _ | Cancelled | Interrupted _ ->
-                  raise_s [%sexp "asynchronous helper failed", (job : P.Job.t)]
+                  let authorization_checkpoints =
+                    List.rev_map !authorization_times ~f:(fun (name, time) ->
+                      name, time -. creation_started)
+                  in
+                  raise_s
+                    [%sexp
+                      "asynchronous helper failed"
+                    , (authorization_checkpoints : (string * float) list)
+                    , (job : P.Job.t)]
                 | _ -> ());
               Option.is_none current.active_operation
               && List.exists current.deliveries ~f:(fun delivery ->
@@ -475,6 +625,8 @@ let run env helper runner =
            | Fail error -> [%test_eq: string] "agent.management.denied" error.code
            | _ -> failwith "readonly helper gained send authority");
           await (fun () -> Option.is_none (state daemon child).active_operation);
+          let paused, release = Eio.Promise.create () in
+          child_pause := Some paused;
           child_tool := Some (`Object [ "file", `String private_file ]);
           let sent =
             bridge
@@ -492,6 +644,18 @@ let run env helper runner =
           in
           let receipt = text sent "receipt_id" in
           let query = target @ [ "receipt_id", `String receipt ] in
+          let subscription_id = start_watch sw daemon client parent.id query in
+          await_timer daemon parent.id subscription_id;
+          assert (Option.is_some (state daemon child).active_operation);
+          child_pause := None;
+          Eio.Promise.resolve release ();
+          (match await_watch daemon parent.id subscription_id with
+           | Succeeded page ->
+             assert (
+               String.is_substring
+                 (Jsonaf.to_string page)
+                 ~substring:"persisted helper answer")
+           | result -> raise_s [%sexp "watch failed", (result : P.Completion.t)]);
           let waited =
             bridge
               sw
@@ -533,6 +697,55 @@ let run env helper runner =
             |> Jsonaf.to_string
           in
           assert (String.is_substring output ~substring:"persisted helper answer");
+          let snapshot =
+            bridge sw daemon client parent.id "read" (`Object target) |> complete
+          in
+          assert (Jsonaf.bool_exn (field "caught_up" snapshot));
+          let cursor_query = target @ [ "cursor", field "next_cursor" snapshot ] in
+          let cursor_watch = start_watch sw daemon client parent.id cursor_query in
+          await_timer daemon parent.id cursor_watch;
+          let cancelled_watch = start_watch sw daemon client parent.id cursor_query in
+          await_timer daemon parent.id cancelled_watch;
+          let calls_before_cancel = !child_calls in
+          [%test_eq: string]
+            "cancelled"
+            (invoke
+               sw
+               daemon
+               client
+               parent.id
+               "cancel_response_watch"
+               (`Object [ "subscription_id", P.Id.Subscription.to_json cancelled_watch ]));
+          (match await_watch daemon parent.id cancelled_watch with
+           | Cancelled _ -> ()
+           | result ->
+             raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
+          [%test_eq: int] calls_before_cancel !child_calls;
+          assert (
+            P.Session.equal_desired_state (state daemon child).lifecycle.desired Running);
+          ignore
+            (bridge
+               sw
+               daemon
+               client
+               parent.id
+               "send"
+               (`Object
+                   (target
+                    @ [ "message", `String "future output"
+                      ; "idempotency_key", `String "cursor-message"
+                      ]))
+             |> complete);
+          (match await_watch daemon parent.id cursor_watch with
+           | Succeeded page ->
+             assert (
+               String.is_substring
+                 (Jsonaf.to_string page)
+                 ~substring:"persisted helper answer");
+             assert (
+               not (String.equal (text page "next_cursor") (text snapshot "next_cursor")))
+           | result -> raise_s [%sexp "cursor watch failed", (result : P.Completion.t)]);
+          check_watch_notifications daemon parent.id;
           let foreign, _ =
             create_session ~start_immediately:true ~key:"foreign-parent" client
           in
@@ -540,6 +753,16 @@ let run env helper runner =
           (match bridge sw daemon client foreign.id "status" (`Object target) with
            | Fail _ -> ()
            | _ -> failwith "foreign parent accessed helper-created child");
+          let foreign_watch = start_watch sw daemon client foreign.id query in
+          (* An immediate denial may be delivered before this foreground ends;
+             its retained error/history matters here, not another model turn. *)
+          (match await_watch ~require_wake:false daemon foreign.id foreign_watch with
+           | Failed error -> [%test_eq: string] "agent.management.denied" error.code
+           | result ->
+             raise_s
+               [%sexp
+                 "foreign response watcher was not denied", (result : P.Completion.t)]);
+          check_watch_notifications daemon foreign.id;
           ignore
             (bridge
                sw
@@ -554,6 +777,7 @@ let run env helper runner =
                       ]))
              |> complete);
           check_notification daemon parent.id child;
+          check_watch_notifications daemon parent.id;
           parent.id, child, receipt)
       in
       with_daemon (fun sw daemon client ->
@@ -588,6 +812,7 @@ let run env helper runner =
         in
         assert (String.is_substring output ~substring:"persisted helper answer");
         check_notification daemon parent_id child_id;
+        check_watch_notifications daemon parent_id;
         let child_handle =
           H.attach
             ~sw
@@ -658,5 +883,6 @@ let run env helper runner =
 let () =
   let args = Sys.get_argv () in
   Eio_main.run (fun env ->
-    run env (Caml_unix.realpath args.(1)) (Caml_unix.realpath args.(2)))
+    List.iter [ false; true ] ~f:(fun native_watch ->
+      run env (Caml_unix.realpath args.(1)) (Caml_unix.realpath args.(2)) ~native_watch))
 ;;

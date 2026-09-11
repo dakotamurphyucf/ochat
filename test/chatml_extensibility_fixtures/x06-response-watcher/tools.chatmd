@@ -1,0 +1,6 @@
+<script id="watch_probe_script" language="chatml" kind="tool" src="watch-probe.chatml"/>
+<tool name="watch_probe" type="chatml" script="watch_probe_script" entrypoint="run" input_schema="watch-input.json" output_schema="helper-any.json">
+  <uses tool="watch_session_request"/>
+</tool>
+<tool name="notify_when_agent_responds" type="moderator" moderator="session_manager" input_schema="watch-input.json" output_schema="helper-any.json" completion_schema="helper-any.json"/>
+<tool name="cancel_response_watch" type="moderator" moderator="session_manager" input_schema="helper-any.json" output_schema="helper-any.json"/>

@@ -20,6 +20,7 @@ type t =
   ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
   ; before_unload : (closing:bool -> (unit, Agent_protocol.Error.t) result) option
   ; mutex : Eio.Mutex.t
+  ; moderator_work_mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
   ; mutable close_finished : bool
@@ -33,6 +34,7 @@ let create_internal ~before_unload ~actor ~initial ~build =
   ; build
   ; before_unload
   ; mutex = Eio.Mutex.create ()
+  ; moderator_work_mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; closed = false
   ; close_finished = false
@@ -511,20 +513,40 @@ let with_activity (runtime : Agent_session.Runtime_builder.t) f =
 ;;
 
 let with_cancellable_access t f =
-  with_owner_lock t ~protect:false (fun () ->
-    let open Result.Let_syntax in
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-    with_activity (Option.value_exn t.runtime) f)
+  (* Moderator checkpoints may reauthorize delegated calls through this owner.
+     Keep the runtime alive with a cancellable lease, without holding the owner
+     mutex while waiting for or executing a moderator checkpoint. Unload cancels
+     and joins the lease before closing its runtime. The separate work mutex
+     preserves serialization between delivery and idle draining without blocking
+     queries of the runtime's immutable moderation identity. *)
+  match
+    with_background_runtime t (fun runtime ->
+      Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
+        with_activity runtime (fun () -> f runtime)))
+  with
+  | result -> result
+  | exception (Eio.Cancel.Cancelled _ as exn) ->
+    (* Retirement cancels its delivery lease, not the shared scheduler. Let
+       caller/shutdown cancellation propagate, but keep a local interruption
+       from cancelling the daemon switch and its still-needed actor loops. *)
+    (match Eio.Fiber.is_cancelled () with
+     | true -> raise exn
+     | false ->
+       Error
+         (Agent_protocol.Error.create
+            Interrupted
+            ~message:"runtime delivery was cancelled"
+            ~retryable:false
+            ()))
 ;;
 
 let submit_ingress t ~producer ~registration_id ~namespace ~key ~payload =
-  with_cancellable_access t (fun () ->
+  with_cancellable_access t (fun runtime ->
     let module A = Agent_session.Session_actor in
     let open Result.Let_syntax in
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     let%bind runtime, source =
-      match t.runtime with
-      | Some runtime when Option.is_some runtime.moderator_script_tools ->
+      match runtime.moderator_script_tools with
+      | Some _ ->
         Option.bind
           runtime.moderator_manager
           ~f:Chat_response.Moderator_manager.invocation_observer
@@ -572,60 +594,49 @@ let submit_ingress t ~producer ~registration_id ~namespace ~key ~payload =
 ;;
 
 let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
-  with_cancellable_access t (fun () ->
+  with_cancellable_access t (fun runtime ->
     let open Result.Let_syntax in
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-    match t.runtime with
-    | Some runtime ->
-      let%bind () =
-        match schedule.ownership with
-        | None -> Ok ()
-        | Some ownership ->
-          (match
-             Option.bind
-               runtime.moderator_manager
-               ~f:Chat_response.Moderator_manager.invocation_observer
-           with
-           | Some source
-             when Agent_protocol.Invocation.equal_observer source ownership.source ->
-             Ok ()
-           | _ ->
-             Error
-               (Agent_protocol.Error.create
-                  Permission_denied
-                  ~message:"timer belongs to a different moderator source"
-                  ~retryable:false
-                  ()))
-      in
-      let%bind payload =
-        match schedule.ownership with
-        | None -> Ok schedule.payload
-        | Some _ ->
-          let module V = Chatml.Chatml_value_codec in
-          Chat_response.Schedule_delivery.capture schedule
-          |> Result.bind ~f:V.Snapshot.of_value
-          |> Result.map ~f:V.Snapshot.to_jsonaf
-          |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-      in
-      Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
-        runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
-          Agent_session.Session_actor.complete_schedule
-            ~expected:before
-            ~expected_schedule:schedule
-            t.actor
-            ~schedule_id:schedule.id
-            ~generation:schedule.generation
-            ~moderator_snapshot:
-              (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
-          |> Result.map ~f:ignore)
+    let%bind () =
+      match schedule.ownership with
+      | None -> Ok ()
+      | Some ownership ->
+        (match
+           Option.bind
+             runtime.moderator_manager
+             ~f:Chat_response.Moderator_manager.invocation_observer
+         with
+         | Some source
+           when Agent_protocol.Invocation.equal_observer source ownership.source -> Ok ()
+         | _ ->
+           Error
+             (Agent_protocol.Error.create
+                Permission_denied
+                ~message:"timer belongs to a different moderator source"
+                ~retryable:false
+                ()))
+    in
+    let%bind payload =
+      match schedule.ownership with
+      | None -> Ok schedule.payload
+      | Some _ ->
+        let module V = Chatml.Chatml_value_codec in
+        Chat_response.Schedule_delivery.capture schedule
+        |> Result.bind ~f:V.Snapshot.of_value
+        |> Result.map ~f:V.Snapshot.to_jsonaf
+        |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
+      runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+        Agent_session.Session_actor.complete_schedule
+          ~expected:before
+          ~expected_schedule:schedule
+          t.actor
+          ~schedule_id:schedule.id
+          ~generation:schedule.generation
+          ~moderator_snapshot:
+            (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
         |> Result.map ~f:ignore)
-    | None ->
-      Error
-        (Agent_protocol.Error.create
-           Internal_error
-           ~message:"runtime load completed without an installed runtime"
-           ~retryable:false
-           ()))
+      |> Result.map ~f:ignore))
 ;;
 
 let fail_idle_moderator t failure =
@@ -865,6 +876,7 @@ let snapshot_has_pending_events t =
              (Option.exists observer ~f:(fun observer ->
                 Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer))
        )
+    || ((not halted) && not (List.is_empty state.conversation.deferred_user_entries))
     || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
     || List.exists
          state.moderator_executions
@@ -874,58 +886,58 @@ let snapshot_has_pending_events t =
   else Ok false
 ;;
 
-let drain_idle_moderator_locked t =
-  let open Result.Let_syntax in
-  let%bind pending = snapshot_has_pending_events t in
-  if not pending
-  then Ok false
-  else (
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-    match t.runtime with
-    | Some runtime ->
-      with_activity runtime (fun () ->
-        let%bind notifications = drain_loaded_notifications runtime in
-        let%bind applied =
-          match notifications with
-          | true -> Ok true
-          | false -> Agent_session.Session_actor.apply_moderator_follow_up t.actor
-        in
-        if applied
-        then Ok true
-        else (
-          let%bind activated =
-            match runtime.moderator_activation with
-            | None -> Ok false
-            | Some activation -> activation.run ()
-          in
-          if activated
-          then Ok true
-          else (
-            let%bind more_observations = drain_loaded_observations t runtime in
+let drain_idle_moderator_leased t =
+  with_lease
+    t
+    ~survives_stop:false
+    ~admit:(fun () ->
+      let open Result.Let_syntax in
+      let%bind pending = snapshot_has_pending_events t in
+      match pending with
+      | false -> Ok (None, None)
+      | true ->
+        let%map () = ensure_loaded_locked t in
+        t.runtime, None)
+    (function
+      | None -> Ok false
+      | Some runtime ->
+        let open Result.Let_syntax in
+        Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
+          with_activity runtime (fun () ->
+            let%bind notifications = drain_loaded_notifications runtime in
             let%bind applied =
-              Agent_session.Session_actor.apply_moderator_follow_up t.actor
+              match notifications with
+              | true -> Ok true
+              | false -> Agent_session.Session_actor.apply_moderator_follow_up t.actor
             in
             if applied
             then Ok true
             else (
-              let%map more_events = drain_loaded_idle_moderator t runtime in
-              more_observations || more_events))))
-    | None ->
-      Error
-        (Agent_protocol.Error.create
-           Internal_error
-           ~message:"runtime load completed without an installed runtime"
-           ~retryable:false
-           ()))
+              let%bind activated =
+                match runtime.moderator_activation with
+                | None -> Ok false
+                | Some activation -> activation.run ()
+              in
+              if activated
+              then Ok true
+              else (
+                let%bind more_observations = drain_loaded_observations t runtime in
+                let%bind applied =
+                  Agent_session.Session_actor.apply_moderator_follow_up t.actor
+                in
+                if applied
+                then Ok true
+                else (
+                  let%map more_events = drain_loaded_idle_moderator t runtime in
+                  more_observations || more_events))))))
 ;;
 
 let drain_idle_moderator t =
   let outcome =
-    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
-      match drain_idle_moderator_locked t with
-      | result -> Ok result
-      | exception (Eio.Cancel.Cancelled _ as exn) ->
-        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    match drain_idle_moderator_leased t with
+    | result -> Ok result
+    | exception (Eio.Cancel.Cancelled _ as exn) ->
+      Error (exn, Stdlib.Printexc.get_raw_backtrace ())
   in
   match outcome with
   | Ok result -> result
@@ -962,7 +974,10 @@ let with_loaded_runtime t f =
 ;;
 
 module For_testing = struct
-  let with_loaded_runtime t f = with_loaded_runtime t (fun _ -> f ())
+  let with_loaded_runtime t f =
+    Eio.Mutex.use_ro t.moderator_work_mutex (fun () ->
+      with_loaded_runtime t (fun _ -> f ()))
+  ;;
 end
 
 let execute_model_job t ~recipe ~payload =
@@ -1099,10 +1114,7 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
 ;;
 
 let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
-  with_cancellable_access t (fun () ->
-    let open Result.Let_syntax in
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-    let runtime = Option.value_exn t.runtime in
+  with_cancellable_access t (fun runtime ->
     Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
       runtime.enqueue_model_job_completion job ~prepare:(fun ~before ~snapshot ->
         Agent_session.Session_actor.deliver_job
@@ -1164,10 +1176,8 @@ let deliver_moderated_background_job_completion
 ;;
 
 let deliver_background_job_completion t (job : Agent_protocol.Job.t) =
-  with_cancellable_access t (fun () ->
+  with_cancellable_access t (fun runtime ->
     let open Result.Let_syntax in
-    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
-    let runtime = Option.value_exn t.runtime in
     let%bind state = Agent_session.Session_actor.state t.actor in
     let standalone =
       match job.launch with

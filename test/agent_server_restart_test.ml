@@ -550,6 +550,7 @@ let on_event = fun ctx state event -> match event with
               Option.is_some invocation.parent_event
               && Option.is_none invocation.context.parent_invocation)
           in
+          let owner_available_during_delivery = ref false in
           let delivery_cancelled =
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
               (* Halt publishes before the automatic stop cleanup has joined its
@@ -591,10 +592,37 @@ let on_event = fun ctx state event -> match event with
                   (fun () ->
                      Eio.Promise.await started;
                      Eio.Fiber.yield ();
+                     (* A delegated policy check can need this owner while it
+                        holds the checkpoint that delivery is waiting for. Keep
+                        this bounded so a lock-order regression still cleans up. *)
+                     owner_available_during_delivery
+                     := Result.is_ok
+                          (Eio.Time.with_timeout (Eio.Stdenv.clock env) 2. (fun () ->
+                             Agent_server.Runtime_owner.ensure_loaded entry.runtime
+                             |> protocol_ok;
+                             Ok ()));
                      true)
               in
-              Eio.Promise.resolve release_u ();
-              Eio.Promise.await released;
+              Exn.protect
+                ~finally:(fun () ->
+                  Eio.Promise.resolve release_u ();
+                  Eio.Promise.await released)
+                ~f:(fun () ->
+                  (* Owner retirement cancels this lease independently of its
+                     scheduler caller. It must return an interruption, rather
+                     than let Cancelled escape and terminate the daemon switch. *)
+                  let delivery_started, delivery_started_u = Eio.Promise.create () in
+                  let delivery =
+                    Eio.Fiber.fork_promise ~sw (fun () ->
+                      Eio.Promise.resolve delivery_started_u ();
+                      Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed)
+                  in
+                  Eio.Promise.await delivery_started;
+                  Eio.Fiber.yield ();
+                  Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
+                  match Eio.Promise.await_exn delivery with
+                  | Error { code = Interrupted; _ } -> ()
+                  | _ -> failwith "retired delivery did not report interruption");
               Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
               let after = A.state entry.actor |> protocol_ok in
               assert (Option.equal Jsonaf.exactly_equal final.moderator after.moderator);
@@ -609,15 +637,111 @@ let on_event = fun ctx state event -> match event with
               ; native_calls = (List.length final.invocations : int)
               ; native_event_owned : bool
               ; delivery_cancelled : bool
+              ; owner_available_during_delivery =
+                  (!owner_available_during_delivery : bool)
               ; model_calls = (!model_calls : int)
               ; halt_reason = (final.halt_reason : string option)
               }])));
   [%expect
     {|
     ((delivered (1 1)) (completed_events 2) (native_calls 2)
-     (native_event_owned true) (delivery_cancelled true) (model_calls 0)
+     (native_event_owned true) (delivery_cancelled true)
+     (owner_available_during_delivery true) (model_calls 0)
      (halt_reason ("timers complete")))
     |}]
+;;
+
+let%expect_test "a timer interrupted before enqueue survives runtime retirement" =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_server.Daemon in
+  let module O = Agent_server.Runtime_owner in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt = Filename.concat root "timer.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          {|<script id="timer" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Session_start ->
+  let* timer = Schedule.after_ms(200, `String("deliver once")) in Task.pure(state)
+| `Internal_event(_) ->
+  let* () = Runtime.end_session("timer delivered") in Task.pure(state + 1)
+| _ -> Task.pure(state)
+</script>|};
+        Eio.Switch.run (fun sw ->
+          let daemon =
+            D.start
+              ~sw
+              ~env
+              ~config:(config root root prompt)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { D.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                }
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                ~f:(fun () ->
+                  initialize client;
+                  let session, _ = create_session ~start_immediately:true client in
+                  let entry =
+                    Agent_server.Session_registry.find (D.registry daemon) session.id
+                    |> Option.value_exn
+                  in
+                  let state () = A.state entry.actor |> protocol_ok in
+                  let wait predicate =
+                    let rec loop () =
+                      let current = state () in
+                      match predicate current with
+                      | true -> current
+                      | false ->
+                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                        loop ()
+                    in
+                    loop ()
+                  in
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                    ignore (wait (fun current -> not (List.is_empty current.schedules)));
+                    A.with_moderator_checkpoint entry.actor (fun () ->
+                      ignore
+                        (wait (fun current ->
+                           List.exists current.schedules ~f:(fun schedule ->
+                             match schedule.status with
+                             | Delivering -> true
+                             | _ -> false)));
+                      O.unload_and_wait entry.runtime |> protocol_ok;
+                      O.ensure_loaded entry.runtime)
+                    |> protocol_ok;
+                    let final = wait (fun current -> current.halted) in
+                    (match final.schedules with
+                     | [ { status = Delivered; delivery_count = 1; _ } ] -> ()
+                     | _ -> failwith "interrupted timer was lost or delivered twice");
+                    [%test_eq: int]
+                      1
+                      (List.count final.moderator_executions ~f:(fun receipt ->
+                         match receipt.context.phase, receipt.status with
+                         | Internal_event, Completed _ -> true
+                         | _ -> false));
+                    print_endline "interrupted claim retried; one committed timer event"))))));
+  [%expect {| interrupted claim retried; one committed timer event |}]
 ;;
 
 let%expect_test
@@ -741,13 +865,14 @@ let%expect_test
               }
             |> protocol_ok
           in
-          let operation_id = Option.value_exn submission.operation_id in
           let final =
             Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
               let rec loop () =
                 let state = A.state entry.actor |> protocol_ok in
                 match state.active_operation with
-                | None when !requests >= expected_requests -> state
+                | None
+                  when !requests >= expected_requests
+                       && List.is_empty state.conversation.deferred_user_entries -> state
                 | _ ->
                   Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                   loop ()
@@ -764,6 +889,27 @@ let%expect_test
             | Available events -> events
             | Snapshot_required -> failwith "test lost operation completion evidence"
           in
+          let operation_id =
+            match submission.operation_id with
+            | Some id -> id
+            | None ->
+              (match
+                 List.filter_map events ~f:(fun event ->
+                   match
+                     Agent_protocol.Event.Durable.Payload.of_json
+                       ~kind:event.kind
+                       event.payload
+                     |> protocol_ok
+                   with
+                   | Operation_started { id; kind = Turn User_submit; _ } -> Some id
+                   | _ -> None)
+               with
+               | [ id ] -> id
+               | _ -> failwith "expected exactly one deferred user operation")
+          in
+          assert (
+            List.exists final.conversation.canonical_history ~f:(fun entry ->
+              Agent_protocol.History.Id.equal entry.id submission.history_id));
           assert (
             List.exists events ~f:(fun event ->
               match
@@ -812,13 +958,17 @@ let%expect_test
         let id, first =
           Eio.Switch.run (fun sw ->
             let daemon = start sw in
-            let client = connection daemon (principal ()) in
-            initialize client;
-            let session, _ = create_session ~start_immediately:true client in
-            let state = run daemon sw client session.id 3 in
-            Agent_client.Connection.close client;
-            Agent_server.Daemon.shutdown daemon |> protocol_ok;
-            session.id, state)
+            Exn.protect
+              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    let session, _ = create_session ~start_immediately:true client in
+                    let state = run daemon sw client session.id 3 in
+                    session.id, state)))
         in
         let changed_source =
           String.substr_replace_all
@@ -833,12 +983,15 @@ let%expect_test
         let second =
           Eio.Switch.run (fun sw ->
             let daemon = start sw in
-            let client = connection daemon (principal ()) in
-            initialize client;
-            let state = run daemon sw client id 5 in
-            Agent_client.Connection.close client;
-            Agent_server.Daemon.shutdown daemon |> protocol_ok;
-            state)
+            Exn.protect
+              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    run daemon sw client id 5)))
         in
         assert (
           Agent_protocol.Id.Prompt_revision.equal

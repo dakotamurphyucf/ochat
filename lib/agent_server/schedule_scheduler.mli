@@ -15,7 +15,9 @@ val reconcile_recovered
   -> (unit, Agent_protocol.Error.t) result
 
 (** Each pass also sweeps subscription deadlines through the actor, independently
-    of any earlier callback holding this entry's runtime. *)
+    of any earlier callback holding this entry's runtime. Interrupted runtime
+    delivery retries an uncommitted claim; it does not turn shutdown into a
+    terminal schedule failure or undo a committed/cancelled schedule. *)
 val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 
 val close : t -> unit

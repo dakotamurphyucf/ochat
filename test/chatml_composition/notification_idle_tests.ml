@@ -89,7 +89,12 @@ let%expect_test
                  String.is_prefix text ~prefix:"Ochat runtime notification."
                | _ -> false))
       ~after_turn:(fun env handle entry ->
-        let idle () = wait env (fun () -> Option.is_none (read entry).active_operation) in
+        let idle () =
+          wait env (fun () ->
+            let state = read entry in
+            Option.is_none state.active_operation
+            && List.is_empty state.conversation.deferred_user_entries)
+        in
         (match mode with
          | Denied ->
            A.claim_idle_moderator entry.actor |> protocol_ok |> Option.value_exn |> ignore;

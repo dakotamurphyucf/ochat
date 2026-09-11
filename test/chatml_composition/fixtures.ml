@@ -146,13 +146,15 @@ let with_daemon
                   }
                 |> protocol_ok
               in
-              let operation_id = Option.value_exn submission.operation_id in
               let final =
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   let rec wait () =
                     let state = A.state entry.actor |> protocol_ok in
                     match state.active_operation with
-                    | None when !requests >= initial_requests -> state
+                    | None
+                      when !requests >= initial_requests
+                           && List.is_empty state.conversation.deferred_user_entries ->
+                      state
                     | _ ->
                       Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                       wait ()
@@ -169,6 +171,30 @@ let with_daemon
                 | Available events -> events
                 | Snapshot_required -> failwith "lost operation completion evidence"
               in
+              let operation_id =
+                match submission.operation_id with
+                | Some id -> id
+                | None ->
+                  (* Idle moderator work can defer this first user input. Its
+                     eventual user-turn admission is recorded durably. *)
+                  let starts =
+                    List.filter_map events ~f:(fun event ->
+                      match
+                        Agent_protocol.Event.Durable.Payload.of_json
+                          ~kind:event.kind
+                          event.payload
+                        |> protocol_ok
+                      with
+                      | Operation_started { kind = Turn User_submit; id; _ } -> Some id
+                      | _ -> None)
+                  in
+                  (match starts with
+                   | [ id ] -> id
+                   | _ -> failwith "expected one deferred user-turn admission")
+              in
+              assert (
+                List.exists final.conversation.canonical_history ~f:(fun entry ->
+                  Agent_protocol.History.Id.equal entry.id submission.history_id));
               assert (
                 List.exists events ~f:(fun event ->
                   match

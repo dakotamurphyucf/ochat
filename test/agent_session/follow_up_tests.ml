@@ -1,6 +1,85 @@
 open Core
 open Fixtures
 
+let%expect_test "a user deferred by an idle event resumes without a moderator wake" =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let reject = ref false in
+  let runs = ref 0 in
+  Job_fixtures.with_actor
+    ~reject_save:(fun _ -> !reject)
+    (fun _env _sw actor writer backend ->
+       let before =
+         { Subscription_transaction_tests.before with
+           queued_internal_events =
+             [ Session.Snapshot.Variant
+                 ("Internal_event", [ Variant ("String", [ String "tick" ]) ])
+             ]
+         }
+       in
+       let after = { before with queued_internal_events = [] } in
+       A.change_moderator actor (Some (B.encode_moderator_snapshot before))
+       |> protocol_ok
+       |> ignore;
+       A.set_operation_worker
+         actor
+         (Some
+            (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+               Int.incr runs;
+               (match input.operation.kind with
+                | Turn User_submit -> ()
+                | _ -> failwith "expected user turn");
+               Completed
+                 { final_history = input.history
+                 ; moderator_snapshot = Some (B.encode_moderator_snapshot after)
+                 ; runtime_requests = []
+                 })))
+       |> protocol_ok;
+       let entry =
+         Agent_session.History_codec.user_text ~id:history_id "arrived during event"
+         |> Agent_session.History_codec.to_protocol
+       in
+       assert (
+         A.with_idle_queued_moderator_event
+           actor
+           ~snapshot:before
+           (fun ~event:_ ~commit ->
+              let submission =
+                A.submit_message actor ~attachment_id:writer.id entry |> protocol_ok
+              in
+              (match submission.disposition with
+               | Deferred -> ()
+               | _ -> failwith "message was not deferred");
+              commit
+                ~snapshot:after
+                ~requests:
+                  { request_turn = false; request_compaction = false; end_session = None })
+         |> protocol_ok);
+       let pending = A.state actor |> protocol_ok in
+       assert (Option.is_none pending.active_operation);
+       [%test_eq: int] 1 (List.length pending.conversation.deferred_user_entries);
+       reject := true;
+       assert (Result.is_error (A.apply_moderator_follow_up actor));
+       reject := false;
+       assert_same_session_snapshot pending (Agent_session.Memory_backend.state backend);
+       [%test_eq: int] 0 !runs;
+       assert (A.apply_moderator_follow_up actor |> protocol_ok);
+       let finished = await_idle actor in
+       [%test_eq: int] 1 !runs;
+       assert (List.is_empty finished.conversation.deferred_user_entries);
+       assert (
+         List.equal
+           Agent_protocol.History.equal_entry
+           [ entry ]
+           finished.conversation.canonical_history);
+       assert (not (A.apply_moderator_follow_up actor |> protocol_ok));
+       assert_same_session_snapshot finished (Agent_session.Memory_backend.state backend);
+       print_endline
+         "deferred user retained after failed save; one user turn; no wake required");
+  [%expect
+    {| deferred user retained after failed save; one user turn; no wake required |}]
+;;
+
 let%expect_test
     "follow-up scheduling survives save failure and reload without repeating compaction"
   =

@@ -44,6 +44,7 @@ let%expect_test
       [%test_eq: string]
         "started\nstarted\n"
         (Eio.Path.load (file "fixture-work.started"));
+      let before_sequence = (state ()).counters.event_sequence in
       let submission =
         H.send_message
           handle
@@ -53,25 +54,37 @@ let%expect_test
           }
         |> protocol_ok
       in
-      wait env (fun () -> Option.is_none (state ()).active_operation);
-      let operation_id = Option.value_exn submission.operation_id in
+      wait env (fun () ->
+        let current = state () in
+        Option.is_none current.active_operation
+        && List.is_empty current.conversation.deferred_user_entries);
       let events =
         match
           Agent_session.Durable_event_log.replay
             entry.durable_events
-            ~after_sequence:0L
+            ~after_sequence:before_sequence
             ~through_sequence:Int64.max_value
         with
         | Available events -> events
         | Snapshot_required -> failwith "lost failure audit"
       in
-      assert (
-        List.exists events ~f:(fun event ->
+      let failures =
+        List.filter_map events ~f:(fun event ->
           match
             P.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> protocol_ok
           with
-          | Operation_failed operation -> P.Id.Operation.equal operation_id operation.id
-          | _ -> false));
+          | Operation_failed ({ kind = Turn User_submit; _ } as operation) ->
+            Some operation
+          | _ -> None)
+      in
+      (match failures with
+       | [ operation ] ->
+         Option.iter submission.operation_id ~f:(fun id ->
+           assert (P.Id.Operation.equal id operation.id))
+       | _ -> failwith "expected one failed user turn after the new submission");
+      assert (
+        List.exists (state ()).conversation.canonical_history ~f:(fun entry ->
+          P.History.Id.equal entry.id submission.history_id));
       H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
       Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;

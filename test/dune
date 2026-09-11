@@ -930,7 +930,8 @@
  (modules agent_server_helper_test)
  (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (preprocessor_deps
-  (glob_files chatml_extensibility_fixtures/x07-helper-session/*))
+  (glob_files chatml_extensibility_fixtures/x07-helper-session/*)
+  (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
  (action
   (run
    %{test}

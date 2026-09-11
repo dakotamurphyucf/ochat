@@ -103,7 +103,9 @@ let%expect_test
         |> protocol_ok
         |> ignore;
         wait env (fun () ->
-          Option.is_none (A.state entry.actor |> protocol_ok).active_operation);
+          let state = A.state entry.actor |> protocol_ok in
+          Option.is_none state.active_operation
+          && List.is_empty state.conversation.deferred_user_entries);
         assert_running ();
         (match finish with
          | Success ->

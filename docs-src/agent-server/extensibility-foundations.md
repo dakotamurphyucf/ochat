@@ -4271,6 +4271,23 @@ parents retain their existing fingerprint format. The runtime lease keeps the
 manager available while handling policy, and parent end-session intent is applied
 on the parent even if the child can no longer receive the saved decision.
 
+Timer delivery, job completion, ingress and idle moderator work retain cancellable
+runtime leases while waiting for moderator checkpoints. They do not hold the
+runtime-owner mutex across those waits: a delegated policy callback may already
+own the checkpoint and need the owner to recheck its authority. Stop retirement
+cancels and joins these leases before releasing resources. Delivery interrupted by
+that local retirement returns `Interrupted` to a live scheduler caller; propagating
+its cancellation into the shared daemon switch would terminate actors still needed
+for cleanup. Caller cancellation still propagates. A separate work mutex preserves
+serialization between idle draining and delivery without locking owner queries.
+An interrupted timer enqueue restores an uncommitted claim to Scheduled so a
+later runtime can deliver it. Already committed or explicitly cancelled timers
+reject that retry; shutdown cannot turn a pending delivery into a terminal failure.
+User messages deferred during idle event handling resume after the callback
+releases its borrow, even
+when it requests no turn and publishes no notification. The handoff commits the
+message adoption and user turn together; a failed save leaves the message pending.
+
 The offline factory regression creates a real persisted child, checks rewritten
 file contents and a rejected subsequent call, and verifies decision provenance and
 the parent's state counter. After daemon restart, a grandchild still reaches the

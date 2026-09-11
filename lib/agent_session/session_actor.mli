@@ -1323,8 +1323,11 @@ val claim_idle_moderator
 (** At an idle safe point, coalesce retained event and observation requests into
     one action and atomically accept them
     with scheduling/stop. A compaction-plus-turn request retains its turn until
-    the next idle safe point. Stop discards outstanding requests. Returns whether
-    receipts changed; false while unavailable or no work remains. No observer
+    the next idle safe point. Stop discards outstanding requests. A user message
+    deferred during an idle callback can start a user turn even without explicit
+    moderator intent; adoption and admission commit together. Returns whether
+    receipts changed or deferred user work was resumed; false while unavailable
+    or no work remains. No observer
     executes here. The host must install the worker before admitting a turn. *)
 val apply_moderator_follow_up : t -> (bool, Agent_protocol.Error.t) result
 

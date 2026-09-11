@@ -181,7 +181,13 @@ val submit_ingress
 
 (** Load the pinned runtime and prepare one external event under the actor
     checkpoint gate. Persist the schedule delivery and queue checkpoint together
-    before installing the live append. Rejection does not mutate the live queue. *)
+    before installing the live append. Rejection does not mutate the live queue.
+    Delivery retains a cancellable runtime lease without holding the owner mutex
+    across the checkpoint wait, so delegated policy checks can consult the owner.
+    Stop retirement cancels and joins the lease before releasing resources.
+    Retirement of this lease returns Interrupted to a still-live caller; it must
+    not cancel the shared scheduler switch. Caller cancellation still propagates.
+    A separate work mutex preserves serialization with idle moderator draining. *)
 val deliver_schedule
   :  t
   -> Agent_protocol.Schedule.t
@@ -208,7 +214,10 @@ val deliver_schedule
     Native child results join subsequent bounded observation work. A runtime
     without these services returns invocation.unavailable for Tool.call. A
     completed event also requests another probe for newly created observations.
-    V1 handler cancellation releases the owner mutex. Cancellation confined to
+    Pending deferred user submissions also trigger a probe after an idle callback
+    releases its borrow, even without a notification or moderator turn request.
+    Draining retains a cancellable lease rather than the owner mutex across
+    moderator work. Cancellation confined to
     the owned event returns Interrupted, keeping the shared scheduler alive;
     cancellation of the caller still propagates. Later polling and administration
     remain usable. Runtime installation and legacy draining
