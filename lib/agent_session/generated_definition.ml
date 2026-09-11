@@ -183,6 +183,34 @@ let install_reserved ~delegations ~reservation ~artifact_store t =
   D.advance delegations current Artifact_installed |> store_result
 ;;
 
+let load_artifact ~artifact_store ~revision_id ~manifest_sha256 =
+  let open Result.Let_syntax in
+  let%bind artifact = Store.load artifact_store revision_id |> store_result in
+  let%bind () =
+    match String.equal artifact.manifest_sha256 manifest_sha256 with
+    | true -> Ok ()
+    | false ->
+      error
+        "delegation.artifact_identity"
+        "generated artifact differs from its admitted manifest"
+  in
+  let%map () =
+    match
+      ( artifact.parser_schema_version
+      , artifact.runtime_schema_version
+      , artifact.prompt_definition_id
+      , artifact.canonical_source
+      , artifact.shell_manifest_sha256 )
+    with
+    | 4, 2, None, None, None -> Ok ()
+    | _ ->
+      error
+        "delegation.artifact_contract"
+        "artifact is not a supported scoped generated definition"
+  in
+  artifact
+;;
+
 let restore
       ?limits
       ?source_limits
@@ -199,29 +227,7 @@ let restore
   let%bind selected =
     B.rebind_capabilities ~pins ~capabilities:(current_capabilities ()) |> protocol_result
   in
-  let%bind artifact = Store.load artifact_store revision_id |> store_result in
-  let%bind () =
-    match String.equal artifact.manifest_sha256 manifest_sha256 with
-    | true -> Ok ()
-    | false ->
-      error
-        "delegation.artifact_identity"
-        "generated artifact differs from its admitted manifest"
-  in
-  let%bind () =
-    match
-      ( artifact.parser_schema_version
-      , artifact.runtime_schema_version
-      , artifact.prompt_definition_id
-      , artifact.canonical_source
-      , artifact.shell_manifest_sha256 )
-    with
-    | 4, 2, None, None, None -> Ok ()
-    | _ ->
-      error
-        "delegation.artifact_contract"
-        "artifact is not a supported scoped generated definition"
-  in
+  let%bind artifact = load_artifact ~artifact_store ~revision_id ~manifest_sha256 in
   let sources =
     (artifact.root_relative_path, artifact.root_chatmd)
     :: List.map artifact.sources ~f:(fun source ->

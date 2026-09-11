@@ -44,6 +44,19 @@ val install_reserved
   -> t
   -> (Agent_store.Delegation_store.record, Chatmd_shell_spec.Diagnostic.t list) result
 
+(** Verify the exact generated artifact and its full materialized tree without
+    compiling, evaluating initializers or resolving parent tools. The expected
+    manifest digest must come from the verified private admission. Permits
+    inspection of retained stopped children after parent revocation/unavailability;
+    this supplies no executable admission or parent authority. *)
+val load_artifact
+  :  artifact_store:Agent_store.Prompt_artifact_store.t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> manifest_sha256:string
+  -> ( Agent_store.Prompt_artifact_store.Artifact.t
+       , Chatmd_shell_spec.Diagnostic.t list )
+       result
+
 (** Requires the parent's currently authorized delegable registry and pins from
     the host-owned delegation record. Names alone do not restore a grant. Checks
     every pin, the admission record's expected manifest digest, generated-only

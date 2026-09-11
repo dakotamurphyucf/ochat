@@ -3686,9 +3686,31 @@ catalog substitutions and transient generated checkpoints reject during restore.
 The offline storage fixture installs an actual artifact, child directory and
 snapshot, reopens the store and checks this relationship through revocation.
 
-This supplies the typed identity and storage checks for the upcoming generated
-session factory. The public creation coordinator, parent-policy mediator and
-automatic generated runtime recovery are still under implementation.
+The factory now restores stopped generated sessions through a distinct generated
+source path. It resolves the private admission, verifies the expected manifest and
+the complete artifact tree, and requires the scoped generated parser/runtime
+contract. `Generated_definition.load_artifact` performs this verification without
+compiling scripts, evaluating initializers or obtaining parent tool capabilities.
+The same verification is reused by executable definition restoration.
+
+Retained transcript inspection therefore works after parent deletion or delegation
+revocation. The existing authenticated session access and disclosure rules still
+apply. A generated source never becomes a synthetic catalog prompt or uses the
+ordinary authored runtime as a fallback. Manifest substitution and an ordinary
+artifact contract reject before a recovered actor or transcript is exposed.
+
+Execution and administrative runtime preparation still require the pending scoped
+parent runtime host. They currently return `delegation.runtime_unavailable` before
+history reservation or runtime initialization. Running generated recovery also
+rejects before committing a recovery boundary; it does not silently downgrade a
+running child to stopped. Actual public creation, live child runtime recovery and
+parent-policy mediation remain under implementation.
+
+The offline daemon fixture seeds a genuine child artifact, ledger record, directory,
+journal and snapshot, then revokes its admission and removes the parent. Two daemon
+restarts retrieve the retained transcript through `session.get` without loading a
+runtime or calling a provider. This qualifies factory recovery of stored children;
+the fixture's direct storage setup is not a public child-creation implementation.
 
 ### Current delegated execution authority
 

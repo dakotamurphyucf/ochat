@@ -67,6 +67,13 @@ module Legacy_provenance = struct
   [@@deriving sexp]
 end
 
+type runtime_source =
+  | Authored of Agent_session.Prompt_revision.t
+  | Generated_artifact of
+      { artifact : Agent_store.Prompt_artifact_store.Artifact.t
+      ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
+      }
+
 let create
       ~sw
       ~env
@@ -390,13 +397,31 @@ let prompt_directory revision =
     (Agent_session.Prompt_revision.root_relative_path revision |> Filename.dirname)
 ;;
 
-let runtime_paths t handle revision state =
+let source_prompt_directory = function
+  | Authored revision -> prompt_directory revision
+  | Generated_artifact { artifact; materialized_tree } ->
+    Filename.concat
+      (Eio.Path.native_exn materialized_tree)
+      (Filename.dirname artifact.root_relative_path)
+;;
+
+let source_for_execution = function
+  | Authored revision -> Ok revision
+  | Generated_artifact _ ->
+    Error
+      (unavailable
+         Invalid_state
+         "delegation.runtime_unavailable: generated execution requires the scoped parent \
+          runtime host")
+;;
+
+let runtime_paths t handle source state =
   Agent_session.Runtime_paths.create
     ~env:t.env
     ~tool_dir:t.tool_dir
     ~workspace:
       state.Agent_session.Session_state.spec.workspace_instance.canonical_root.native_path
-    ~prompt_dir:(prompt_directory revision)
+    ~prompt_dir:(source_prompt_directory source)
     ~session_dir:(Agent_store.Session_store.Handle.directory handle)
     ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
     ~home:t.home
@@ -1711,7 +1736,7 @@ let prepare_runtime_at_paths
       t
       paths
       storage_paths
-      revision
+      source
       profile
       (state : Agent_session.Session_state.t)
       ~next_history_sequence
@@ -1722,6 +1747,7 @@ let prepare_runtime_at_paths
       ~pending_jobs
   =
   let open Result.Let_syntax in
+  let%bind revision = source_for_execution source in
   let shell_state = ref state.Agent_session.Session_state.shell in
   let manifest_authorizer =
     manifest_authorizer t profile revision state actor_ref shell_state
@@ -2118,19 +2144,56 @@ let history_source t actor session_id =
       Agent_session.Session_actor.reserve_history_block actor ~count)
 ;;
 
-let restore_state_revision t state =
-  match state.Agent_session.Session_state.spec.prompt_definition_id with
-  | None ->
-    Error (unavailable Prompt_unavailable "session has no catalog prompt identity")
-  | Some definition_id ->
-    Agent_session.Prompt_catalog.restore_revision
-      t.prompts
-      ~definition_id
-      ~revision_id:state.spec.prompt_revision_id
-    |> Result.map_error ~f:(fun diagnostics ->
-      unavailable
-        Prompt_unavailable
-        (List.map diagnostics ~f:(fun value -> value.message) |> String.concat ~sep:"\n"))
+let restore_state_source t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_state.validate state in
+  match state.spec.protocol.prompt, state.spec.delegation with
+  | Generated revision_id, Some reference ->
+    let%bind record =
+      Agent_store.Delegation_store.resolve
+        (Agent_store.Session_store.delegations t.store)
+        reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind artifact_store =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%map artifact =
+      Agent_session.Generated_definition.load_artifact
+        ~artifact_store
+        ~revision_id
+        ~manifest_sha256:record.admission.manifest_sha256
+      |> Result.map_error ~f:(fun diagnostics ->
+        unavailable
+          Prompt_unavailable
+          (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+           |> String.concat ~sep:"\n"))
+    in
+    Generated_artifact
+      { artifact
+      ; materialized_tree =
+          Agent_store.Prompt_artifact_store.materialized_tree artifact_store revision_id
+      }
+  | _ ->
+    (match state.spec.prompt_definition_id with
+     | None ->
+       Error (unavailable Prompt_unavailable "session has no catalog prompt identity")
+     | Some definition_id ->
+       Agent_session.Prompt_catalog.restore_revision
+         t.prompts
+         ~definition_id
+         ~revision_id:state.spec.prompt_revision_id
+       |> Result.map ~f:(fun revision -> Authored revision)
+       |> Result.map_error ~f:(fun diagnostics ->
+         unavailable
+           Prompt_unavailable
+           (List.map diagnostics ~f:(fun value -> value.message)
+            |> String.concat ~sep:"\n")))
 ;;
 
 let restore_state_profile t (state : Agent_session.Session_state.t) =
@@ -2252,7 +2315,8 @@ let prepare_administration t entry state ~fresh_history =
       |> Result.of_option
            ~error:(unavailable Invalid_state "session has no administration store")
     in
-    let%bind revision = restore_state_revision t state in
+    let%bind revision = restore_state_source t state in
+    let%bind _ = source_for_execution revision in
     let%bind profile = restore_state_profile t state in
     let%bind paths = runtime_paths t handle revision state in
     with_preparation_storage paths (fun storage_paths ->
@@ -2332,7 +2396,8 @@ let close_unregistered_runtime t handle runtime writer actor capacity =
 let build_runtime_for_actor t handle actor =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
-  let%bind revision = restore_state_revision t state in
+  let%bind revision = restore_state_source t state in
+  let%bind _ = source_for_execution revision in
   let%bind profile = restore_state_profile t state in
   let%bind reservation =
     Agent_session.Session_actor.reserve_history_block
@@ -2808,7 +2873,7 @@ let finish_creation t handle revision profile provisional ~command_audit =
     prepare_runtime
       t
       handle
-      revision
+      (Authored revision)
       profile
       provisional
       ~next_history_sequence:0
@@ -3080,7 +3145,7 @@ let open_recovery t handle initial =
   journal, recovery
 ;;
 
-let recovered_revision = restore_state_revision
+let recovered_revision = restore_state_source
 let recovered_profile = restore_state_profile
 
 let verify_recovered_workspace t state =
@@ -3430,6 +3495,11 @@ let recover_open_handle t handle =
   let%bind () = reconcile_command_audits t recovery in
   let state = recovery.Agent_store.Recovery.state in
   let%bind revision = recovered_revision t state in
+  let%bind () =
+    match state.lifecycle.desired with
+    | Stopped -> Ok ()
+    | Running -> Result.map (source_for_execution revision) ~f:ignore
+  in
   let%bind profile = recovered_profile t state in
   let%bind () = verify_recovered_workspace t state in
   let%bind recovery_first = preparation_sequence t state in
