@@ -115,6 +115,15 @@ module Tool_dispatch : sig
           service atomically saves the call and its invocation intent and returns
           true. False uses the ordinary history append. Failure saves neither and
           aborts the turn. No policy/implementation callback runs here. *)
+    ; prepare_call :
+        (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
+      (** Optional host policy after the canonical history identity is allocated,
+          before the call is saved or observed. Input contains the child's already
+          moderated call. Rewrites update both canonical history and dispatch;
+          identity and original request evidence are retained. Rejected/invalid
+          calls skip this callback. The host must validate its delegation and final
+          selected capability; this callback grants no execution authority.
+          Requests using this policy cannot fall back to a legacy dispatcher. *)
     ; validate_original :
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
       (** Pure validation of the original target and arguments before pre-tool
@@ -129,6 +138,14 @@ module Tool_dispatch : sig
       final target owns execution/publication. Errors propagate, never fall
       through. The host must reject conflicting registrations before composing. *)
   val chain : t list -> t
+
+  (** Install one host preparation policy on the composed dispatch service.
+      Composing or replacing multiple such policies is rejected; the host must
+      explicitly coordinate ancestor decisions in its single callback. *)
+  val with_preparation
+    :  t
+    -> prepare:(request -> (Moderation.Tool_moderation.t option, string) Result.t)
+    -> t
 end
 
 (** A post-tool observer failed after the initial output was committed. Hosts

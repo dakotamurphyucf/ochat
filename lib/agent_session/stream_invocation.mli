@@ -36,6 +36,15 @@ val parse_input
   -> payload:string
   -> (Jsonaf.t, string) result
 
+(** Stable identity available to an owned preparation policy before native
+    admission. Binds the actual session/generation/operation and allocated
+    canonical history ID, not provider-supplied tool call IDs. Rewrites retain
+    this identity. It is provenance, not evidence that admission has committed. *)
+val id_for_call
+  :  input:Operation_worker.Input.t
+  -> call_id:History_entry.Id.t
+  -> Agent_protocol.Id.Invocation.t
+
 val create
   :  completion_contract:Agent_protocol.Completion_contract.t option
   -> input:Operation_worker.Input.t

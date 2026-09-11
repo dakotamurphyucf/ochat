@@ -4012,6 +4012,37 @@ child. Rewrites and redirects require coordinated routing because an admitted
 invocation's context is immutable; the host must not execute the original arguments
 after a policy rewrite. No model-facing mediation tool is exposed by this handoff.
 
+### Host preparation before model tool admission
+
+`In_memory_stream.Tool_dispatch.with_preparation` installs one host policy on a
+composed persisted dispatcher. It runs after the child's pre-tool moderation and
+after allocation of the canonical history identity, but before the call is saved,
+observed or executed. It may approve, reject, rewrite arguments or redirect to a
+selected target. Rewriting changes both the canonical call and the eventual
+dispatch; redaction is applied to the final display payload. The original request
+and final execution payload retain separate routing fingerprints.
+
+`Stream_invocation.id_for_call` binds a model invocation ID to its session,
+generation, operation and allocated history ID. Preparation can use that identity
+before admission, and argument changes retain it. It is an owned candidate identity,
+not proof that the invocation has already committed. Reused provider item/call IDs
+in later turns do not collapse distinct history entries into one invocation.
+
+Invalid and previously rejected calls skip host preparation. Transient fork
+requests cannot use this persisted-owner hook. With the hook installed, admission
+and execution must use an owned dispatcher; a redirect cannot fall back to a legacy
+runner. The existing final-target schema, binding, permission and disclosure checks
+still apply. Preparation exceptions become bounded pre-tool failures, while
+cancellation propagates normally. Hosts must explicitly coordinate ancestor policy
+decisions in one callback; composing multiple preparation policies is rejected.
+
+The streamed-provider integration tests cover function and custom rewrites,
+redirects, redacted canonical history, stable invocation IDs, published outcomes,
+invalid input, policy rejection/failure, revocation during preparation, unavailable
+legacy targets and failed admission persistence. These are internal routing
+primitives. Factory parent-policy admission and script-descendant preparation still
+require integration; the guard for moderated generated parents remains closed.
+
 ### Qualified persisted child creation
 
 `Session_factory.create_generated_session` is an internal host service for creating

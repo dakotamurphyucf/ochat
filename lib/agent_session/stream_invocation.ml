@@ -112,6 +112,22 @@ let parse_input ~kind ~payload =
     |> Result.map ~f:(fun () -> value))
 ;;
 
+let id_for_call ~(input : Operation_worker.Input.t) ~call_id =
+  let digest =
+    [%sexp
+      ("ochat.model-invocation.v1" : string)
+    , (input.session_id : Agent_protocol.Id.Session.t)
+    , (input.session_generation : int)
+    , (input.operation.id : Agent_protocol.Id.Operation.t)
+    , (call_id : History_entry.Id.t)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+  in
+  Agent_protocol.Id.Invocation.of_string ("inv_" ^ digest)
+  |> Result.ok
+  |> Option.value_exn
+;;
+
 let create
       ~completion_contract
       ~input
@@ -152,7 +168,7 @@ let create
   I.create
     ~routing
     ?completion_contract
-    { id = Agent_protocol.Id.Invocation.create ()
+    { id = id_for_call ~input ~call_id:(History_entry.id request.call)
     ; session_id = input.Operation_worker.Input.session_id
     ; generation = input.session_generation
     ; origin = Model

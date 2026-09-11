@@ -38,13 +38,22 @@ module Tool_dispatch = struct
 
   type t =
     { commit_call : request -> bool
+    ; prepare_call :
+        (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
     ; validate_original :
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
     ; run : request -> authorize:(unit -> unit) -> result option
     }
 
   let chain services =
-    { commit_call =
+    let prepare_call =
+      match List.filter_map services ~f:(fun service -> service.prepare_call) with
+      | [] -> None
+      | [ prepare ] -> Some prepare
+      | _ -> invalid_arg "tool dispatch requires a single host preparation policy"
+    in
+    { prepare_call
+    ; commit_call =
         (fun request ->
           List.exists services ~f:(fun service -> service.commit_call request))
     ; validate_original =
@@ -55,6 +64,12 @@ module Tool_dispatch = struct
         (fun request ~authorize ->
           List.find_map services ~f:(fun service -> service.run request ~authorize))
     }
+  ;;
+
+  let with_preparation t ~prepare =
+    match t.prepare_call with
+    | None -> { t with prepare_call = Some prepare }
+    | Some _ -> invalid_arg "tool dispatch already has a host preparation policy"
   ;;
 end
 
@@ -954,6 +969,7 @@ let history_with_new_entries ~hist st = List.append hist (List.rev st.new_entrie
 let append_history_item
       (c : ctx)
       ?commit_entry
+      ?prepare_entry
       ~(moderator : moderator option)
       ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
       ~available_tools
@@ -980,6 +996,7 @@ let append_history_item
   then st
   else (
     let entry = History_entry.create_with_id ~id item in
+    let entry = Option.value_map prepare_entry ~default:entry ~f:(fun f -> f entry) in
     (Option.value commit_entry ~default:c.on_history_item_appended) entry;
     let st = add_entry st entry in
     handle_item_appended_entries
@@ -1304,6 +1321,10 @@ let dispatch_tool
   let result =
     match routed with
     | Some result -> result
+    | None
+      when Option.exists c.dispatch_tool ~f:(fun service ->
+             Option.is_some service.prepare_call) ->
+      failwith "host-prepared tool call requires its owned dispatcher"
     | None ->
       let output =
         match synthetic_result with
@@ -1377,6 +1398,83 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
 ;;
 
+let prepare_host_tool_entry
+      (c : ctx)
+      ~hist
+      ~st
+      ~original_name
+      ~original_payload
+      ~call_id
+      ~item_id
+      (prepared : (moderated_tool_call * Tool_dispatch.rejection option) ref)
+      entry
+  =
+  let moderated, rejection = !prepared in
+  match
+    Option.bind c.dispatch_tool ~f:(fun dispatch -> dispatch.prepare_call), rejection
+  with
+  | None, _ | _, Some _ -> entry
+  | Some _, None when Option.is_some moderated.synthetic_result -> entry
+  | Some prepare, None ->
+    let request =
+      Tool_dispatch.
+        { kind = moderated.kind
+        ; original_name
+        ; original_payload
+        ; name = moderated.name
+        ; payload = moderated.payload
+        ; rejection = None
+        ; call = entry
+        ; history = history_with_new_entries ~hist st @ [ entry ]
+        ; source = c.source
+        ; parent_call_id = c.parent_call_id
+        }
+    in
+    let decision =
+      match request.source, request.parent_call_id with
+      | Some _, _ | _, Some _ -> Error "host preparation requires its persisted owner"
+      | None, None ->
+        (try prepare request with
+         | Eio.Cancel.Cancelled _ as exn -> raise exn
+         | _ -> Error "host preparation failed")
+    in
+    let moderated, rejection =
+      match decision with
+      | Ok (None | Some Moderation.Tool_moderation.Approve) -> moderated, None
+      | Ok (Some (Reject reason)) ->
+        ( { moderated with synthetic_result = Some (Output.Text reason) }
+        , Some Tool_dispatch.Pre_tool )
+      | Error _ ->
+        ( { moderated with
+            synthetic_result = Some (Output.Text "Pre-tool moderation failed.")
+          }
+        , Some Tool_dispatch.Pre_tool_failed )
+      | Ok (Some (Rewrite_args args)) ->
+        { moderated with payload = payload_of_jsonaf ~kind:moderated.kind args }, None
+      | Ok (Some (Redirect (name, args))) ->
+        ( { moderated with name; payload = payload_of_jsonaf ~kind:moderated.kind args }
+        , None )
+    in
+    let call_item =
+      Tool_call.call_item
+        ~kind:moderated.kind
+        ~name:moderated.name
+        ~payload:moderated.payload
+        ~call_id
+        ~id:(Some item_id)
+    in
+    prepared := { moderated with call_item }, rejection;
+    let displayed =
+      Tool_call.call_item
+        ~kind:moderated.kind
+        ~name:moderated.name
+        ~payload:(c.redact_tool_payload ~name:moderated.name moderated.payload)
+        ~call_id
+        ~id:(Some item_id)
+    in
+    History_entry.create_with_id ~id:(History_entry.id entry) displayed
+;;
+
 let commit_tool_call
       (c : ctx)
       ~hist
@@ -1404,7 +1502,12 @@ let commit_tool_call
       }
   in
   if not (Option.exists c.dispatch_tool ~f:(fun service -> service.commit_call request))
-  then c.on_history_item_appended entry
+  then (
+    if
+      Option.exists c.dispatch_tool ~f:(fun service ->
+        Option.is_some service.prepare_call)
+    then failwith "host-prepared tool call requires owned invocation admission";
+    c.on_history_item_appended entry)
 ;;
 
 let schedule_function_done
@@ -1437,6 +1540,7 @@ let schedule_function_done
         ~call_id
         ~item_id
     in
+    let prepared = ref (moderated, rejection) in
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
       Tool_call.call_item
@@ -1449,17 +1553,29 @@ let schedule_function_done
     let st =
       append_history_item
         c
-        ~commit_entry:
-          (commit_tool_call
+        ~prepare_entry:
+          (prepare_host_tool_entry
              c
              ~hist
              ~st
-             ~kind:Tool_call.Kind.Function
              ~original_name
              ~original_payload
-             ~name:moderated.name
-             ~payload:moderated.payload
-             ~rejection)
+             ~call_id
+             ~item_id
+             prepared)
+        ~commit_entry:(fun entry ->
+          let moderated, rejection = !prepared in
+          commit_tool_call
+            c
+            ~hist
+            ~st
+            ~kind:Tool_call.Kind.Function
+            ~original_name
+            ~original_payload
+            ~name:moderated.name
+            ~payload:moderated.payload
+            ~rejection
+            entry)
         ~moderator:
           (if
              Option.is_some
@@ -1473,6 +1589,7 @@ let schedule_function_done
         st
         history_item
     in
+    let moderated, rejection = !prepared in
     let name = moderated.name in
     let arguments = moderated.payload in
     let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
@@ -1544,6 +1661,7 @@ let schedule_custom_done
         ~call_id
         ~item_id
     in
+    let prepared = ref (moderated, rejection) in
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
       Tool_call.call_item
@@ -1556,17 +1674,29 @@ let schedule_custom_done
     let st =
       append_history_item
         c
-        ~commit_entry:
-          (commit_tool_call
+        ~prepare_entry:
+          (prepare_host_tool_entry
              c
              ~hist
              ~st
-             ~kind:Tool_call.Kind.Custom
              ~original_name
              ~original_payload
-             ~name:moderated.name
-             ~payload:moderated.payload
-             ~rejection)
+             ~call_id
+             ~item_id
+             prepared)
+        ~commit_entry:(fun entry ->
+          let moderated, rejection = !prepared in
+          commit_tool_call
+            c
+            ~hist
+            ~st
+            ~kind:Tool_call.Kind.Custom
+            ~original_name
+            ~original_payload
+            ~name:moderated.name
+            ~payload:moderated.payload
+            ~rejection
+            entry)
         ~moderator:
           (if
              Option.is_some
@@ -1580,6 +1710,7 @@ let schedule_custom_done
         st
         history_item
     in
+    let moderated, rejection = !prepared in
     let name = moderated.name in
     let input = moderated.payload in
     let run_tool () =

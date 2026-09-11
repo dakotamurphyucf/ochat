@@ -399,6 +399,7 @@ let create
   in
   Stream.Tool_dispatch.
     { commit_call
+    ; prepare_call = None
     ; validate_original
     ; run =
         dispatch
