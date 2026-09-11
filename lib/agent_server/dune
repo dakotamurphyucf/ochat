@@ -12,6 +12,7 @@
   operator_manifest_grant
   catalog_builder
   runtime_owner
+  delegated_runtime
   result_retention
   session_registry
   delegation_lifecycle

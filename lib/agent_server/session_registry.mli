@@ -45,6 +45,10 @@ val add
   -> entry
   -> (unit, Agent_protocol.Error.t) result
 
+(** Read one immutable loaded-entry snapshot without entering the loader lock.
+    Allows a child loader to consult an already loaded parent. This does not load
+    an ancestor or retain its runtime; callers still need actor validation and a
+    runtime lease. Mutations and indexed loads remain serialized. *)
 val find : t -> Agent_protocol.Id.Session.t -> entry option
 
 (** Returns a loaded entry or reconstructs an indexed stopped session on

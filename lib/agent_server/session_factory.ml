@@ -21,6 +21,7 @@ type limits =
   ; job_result_recovery_max_bytes : int
   ; delegation_recovery_max_count : int
   ; delegation_recovery_max_bytes : int
+  ; delegation_max_depth : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
@@ -32,6 +33,7 @@ type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
+  ; registry : Session_registry.t
   ; idempotency_store : Agent_store.Idempotency_store.t
   ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
@@ -78,6 +80,7 @@ let create
       ~sw
       ~env
       ~store
+      ~registry
       ~idempotency_store
       ~blob_store
       ~prompts
@@ -109,6 +112,7 @@ let create
   { sw
   ; env
   ; store
+  ; registry
   ; idempotency_store
   ; blob_store
   ; prompts
@@ -405,14 +409,56 @@ let source_prompt_directory = function
       (Filename.dirname artifact.root_relative_path)
 ;;
 
-let source_for_execution = function
-  | Authored revision -> Ok revision
-  | Generated_artifact _ ->
+let generated_parent t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let missing_host () =
     Error
       (unavailable
          Invalid_state
-         "delegation.runtime_unavailable: generated execution requires the scoped parent \
-          runtime host")
+         "delegation.runtime_unavailable: a qualified live parent runtime host is \
+          required")
+  in
+  match t.qualify_chatml_extensions, state.spec.delegation with
+  | true, Some reference ->
+    let%bind record =
+      Agent_store.Delegation_store.resolve
+        (Agent_store.Session_store.delegations t.store)
+        reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    (match Session_registry.find t.registry record.key.parent_session_id with
+     | None -> missing_host ()
+     | Some parent ->
+       let%bind current = Agent_session.Session_actor.state parent.actor in
+       let%bind fingerprint = Agent_session.Delegation_authority.fingerprint current in
+       (match
+          ( current.lifecycle.desired
+          , current.lifecycle.observed
+          , current.halted
+          , current.failure
+          , record.revocation
+          , record.admission.lifetime )
+        with
+        | ( Running
+          , (Idle | Running_turn _ | Waiting_for_permission _)
+          , false
+          , None
+          , None
+          , Owned )
+          when String.equal fingerprint record.admission.authority_sha256 ->
+          Ok (parent, record)
+        | _ ->
+          Error
+            (unavailable
+               Permission_denied
+               "delegation.parent_authority: parent authority or lifetime does not \
+                permit execution")))
+  | _ -> missing_host ()
+;;
+
+let check_source_for_execution t state = function
+  | Authored _ -> Ok ()
+  | Generated_artifact _ -> Result.map (generated_parent t state) ~f:ignore
 ;;
 
 let runtime_paths t handle source state =
@@ -1747,27 +1793,15 @@ let prepare_runtime_at_paths
       ~pending_jobs
   =
   let open Result.Let_syntax in
-  let%bind revision = source_for_execution source in
   let shell_state = ref state.Agent_session.Session_state.shell in
-  let manifest_authorizer =
-    manifest_authorizer t profile revision state actor_ref shell_state
-  in
   let approval_provider = shell_approval_provider t profile actor_ref in
   let approval_store = shell_approval_store state actor_ref shell_state in
-  let build =
-    match t.qualify_chatml_extensions with
-    | false -> Agent_session.Runtime_builder.build
-    | true ->
-      Agent_session.Runtime_builder.build_with_extensions
-        ~services:(extension_services t profile actor_ref ~state)
-  in
-  let construct sw =
+  let construct sw build manifest_authorizer =
     build
       ~sw
       ~env:t.env
       ~paths
       ~storage_paths
-      ~revision
       ~session_id:state.Agent_session.Session_state.identity.session_id
       ~history_namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
       ~next_history_sequence
@@ -1784,9 +1818,131 @@ let prepare_runtime_at_paths
       ~job_services:(job_services t state actor_ref pending_jobs)
   in
   let%map runtime =
-    match t.qualify_chatml_extensions with
-    | false -> construct t.sw
-    | true -> prepare_extension_runtime_scope t construct
+    match source with
+    | Authored revision ->
+      let build =
+        match t.qualify_chatml_extensions with
+        | false -> Agent_session.Runtime_builder.build ~revision
+        | true ->
+          Agent_session.Runtime_builder.build_with_extensions
+            ~revision
+            ~services:(extension_services t profile actor_ref ~state)
+      in
+      let construct sw =
+        construct
+          sw
+          build
+          (manifest_authorizer t profile revision state actor_ref shell_state)
+      in
+      (match t.qualify_chatml_extensions with
+       | false -> construct t.sw
+       | true -> prepare_extension_runtime_scope t construct)
+    | Generated_artifact { artifact; _ } ->
+      let%bind parent, record = generated_parent t state in
+      let%bind artifact_store =
+        Agent_store.Prompt_artifact_store.create
+          ~env:t.env
+          ~root:
+            (Agent_store.Data_root.prompt_artifacts_path
+               (Agent_store.Session_store.data_root t.store))
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let reference = Agent_store.Delegation_store.reference record in
+      let capabilities (runtime : Agent_session.Runtime_builder.t) =
+        match runtime.native_runtime with
+        | None ->
+          Error
+            (unavailable
+               Invalid_state
+               "delegation.runtime_unavailable: parent does not expose qualified native \
+                resources")
+        | Some native ->
+          Lazy.force native.capabilities
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.Chat_response.Tool_capability.message)
+      in
+      Delegated_runtime.prepare
+        ~sw:t.sw
+        ~parent:parent.runtime
+        ~on_revoked:(fun () ->
+          match Agent_session.Session_actor.state parent.actor, !actor_ref with
+          | Ok { lifecycle = { desired = Stopped; _ }; _ }, Some actor ->
+            Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
+            |> Result.map ~f:ignore
+          | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
+          | Error error, _ -> Error error)
+        ~build:(fun ~sw parent_runtime ->
+          let%bind current = capabilities parent_runtime in
+          let%bind native =
+            Result.of_option
+              parent_runtime.native_runtime
+              ~error:
+                (unavailable
+                   Invalid_state
+                   "delegation.runtime_unavailable: parent native runtime is missing")
+          in
+          let%bind definition =
+            Agent_session.Generated_definition.restore
+              ~env:t.env
+              ~artifact_store
+              ~revision_id:artifact.revision_id
+              ~manifest_sha256:record.admission.manifest_sha256
+              ~current_capabilities:(fun () -> current)
+              ~pins:record.admission.capability_pins
+              ()
+            |> Result.map_error ~f:(fun diagnostics ->
+              unavailable
+                Prompt_unavailable
+                (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                 |> String.concat ~sep:"\n"))
+          in
+          let lookup id =
+            Session_registry.find t.registry id
+            |> Result.of_option
+                 ~error:
+                   (unavailable
+                      Permission_denied
+                      "delegation.parent_missing: ancestor is not loaded")
+          in
+          let authority =
+            Agent_session.Delegation_authority.create
+              ~max_depth:t.limits.delegation_max_depth
+              ~reference
+              ~capabilities:
+                (Chat_response.Generated_admission.capabilities
+                   (Agent_session.Generated_definition.admission definition))
+              ~host:
+                { state =
+                    (fun id ->
+                      Result.bind (lookup id) ~f:(fun entry ->
+                        Agent_session.Session_actor.state entry.actor))
+                ; resolve =
+                    (fun reference ->
+                      Agent_store.Delegation_store.resolve
+                        (Agent_store.Session_store.delegations t.store)
+                        reference
+                      |> Result.map_error ~f:protocol_of_store)
+                ; capabilities =
+                    (fun id ->
+                      if Agent_protocol.Id.Session.equal id record.key.parent_session_id
+                      then Ok current
+                      else
+                        Result.bind (lookup id) ~f:(fun entry ->
+                          Runtime_owner.with_background_runtime entry.runtime capabilities))
+                }
+              ()
+          in
+          construct
+            sw
+            (Agent_session.Runtime_builder.build_generated
+               ~services:(extension_services t profile actor_ref ~state)
+               ~definition
+               ~artifact_store
+               ~parent_runtime:native
+               ~authority)
+            (fun _ ->
+               Shell_runtime.Manifest_authorizer.Reject
+                 "generated definitions cannot authorize new shell manifests"))
   in
   runtime, shell_state
 ;;
@@ -2316,7 +2472,7 @@ let prepare_administration t entry state ~fresh_history =
            ~error:(unavailable Invalid_state "session has no administration store")
     in
     let%bind revision = restore_state_source t state in
-    let%bind _ = source_for_execution revision in
+    let%bind () = check_source_for_execution t state revision in
     let%bind profile = restore_state_profile t state in
     let%bind paths = runtime_paths t handle revision state in
     with_preparation_storage paths (fun storage_paths ->
@@ -2397,7 +2553,7 @@ let build_runtime_for_actor t handle actor =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
   let%bind revision = restore_state_source t state in
-  let%bind _ = source_for_execution revision in
+  let%bind () = check_source_for_execution t state revision in
   let%bind profile = restore_state_profile t state in
   let%bind reservation =
     Agent_session.Session_actor.reserve_history_block
@@ -3498,7 +3654,7 @@ let recover_open_handle t handle =
   let%bind () =
     match state.lifecycle.desired with
     | Stopped -> Ok ()
-    | Running -> Result.map (source_for_execution revision) ~f:ignore
+    | Running -> check_source_for_execution t state revision
   in
   let%bind profile = recovered_profile t state in
   let%bind () = verify_recovered_workspace t state in
@@ -3667,20 +3823,96 @@ let index_requires_load entry =
 ;;
 
 let recover_sessions t =
-  let indexed =
+  let open Result.Let_syntax in
+  let all =
     Agent_store.Session_store.list_sessions t.store
     |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
+  in
+  let indexed =
+    all
     |> List.filter ~f:(fun entry ->
       Agent_store.Session_store.index_was_rebuilt t.store || index_requires_load entry)
   in
+  let%bind records =
+    Agent_store.Delegation_store.with_records
+      (Agent_store.Session_store.delegations t.store)
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records -> Ok records)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let entries =
+    String.Map.of_alist_exn
+      (List.map all ~f:(fun entry ->
+         ( Agent_protocol.Id.Session.to_string
+             entry.Agent_store.Session_index.Entry.session.id
+         , entry )))
+  in
+  let parents =
+    String.Map.of_alist_exn
+      (List.map records ~f:(fun record ->
+         ( Agent_protocol.Id.Session.to_string
+             record.Agent_store.Delegation_store.admission.child_session_id
+         , record.key.parent_session_id )))
+  in
+  let visiting = Hash_set.create (module String) in
+  let heights = Hashtbl.create (module String) in
+  let ordered = ref [] in
+  let rec visit depth id =
+    let key = Agent_protocol.Id.Session.to_string id in
+    if depth > t.limits.delegation_max_depth || Hash_set.mem visiting key
+    then
+      Error (corrupt "generated recovery ancestry is cyclic or exceeds its depth limit")
+    else (
+      match Hashtbl.find heights key with
+      | Some height ->
+        if height > t.limits.delegation_max_depth - depth
+        then Error (corrupt "generated recovery ancestry exceeds its depth limit")
+        else Ok height
+      | None ->
+        (match Map.find entries key with
+         | None -> Error (corrupt "generated recovery requires a missing parent session")
+         | Some entry ->
+           Hash_set.add visiting key;
+           let%bind height =
+             match entry.session.spec.prompt, entry.session.desired_state with
+             | Generated _, Running ->
+               (match Map.find parents key with
+                | None ->
+                  Error
+                    (corrupt "generated recovery requires a private delegation record")
+                | Some parent -> Result.map (visit (depth + 1) parent) ~f:(( + ) 1))
+             | _ -> Ok 0
+           in
+           Hash_set.remove visiting key;
+           Hashtbl.set heights ~key ~data:height;
+           ordered := entry :: !ordered;
+           Ok height))
+  in
+  let%bind () =
+    List.fold_result indexed ~init:() ~f:(fun () entry ->
+      Result.map (visit 0 entry.session.id) ~f:ignore)
+  in
+  let rollback recovered =
+    List.iter recovered ~f:(fun (id, entry) ->
+      ignore (Session_registry.remove t.registry id : Session_registry.entry option);
+      entry.Session_registry.close ())
+  in
   let rec loop recovered = function
-    | [] -> Ok (List.rev recovered)
+    | [] -> Ok (List.rev_map recovered ~f:snd)
     | index_entry :: rest ->
       (match recover_index_entry t index_entry with
-       | Ok entry -> loop (entry :: recovered) rest
+       | Ok entry ->
+         let id = index_entry.session.id in
+         (match Session_registry.add t.registry ~session_id:id entry with
+          | Ok () -> loop ((id, entry) :: recovered) rest
+          | Error _ as failure ->
+            entry.close ();
+            rollback recovered;
+            failure)
        | Error _ as failure ->
-         List.iter recovered ~f:(fun entry -> entry.Session_registry.close ());
+         rollback recovered;
          failure)
   in
-  loop [] indexed
+  loop [] (List.rev !ordered)
 ;;

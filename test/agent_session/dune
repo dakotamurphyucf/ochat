@@ -77,6 +77,7 @@
   runtime_builder_tests
   runtime_lease_tests
   runtime_activity_tests
+  delegated_runtime_tests
   observations_tests
   one_off_preparation_tests
   one_off_execution_tests

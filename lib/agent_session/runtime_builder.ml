@@ -101,6 +101,7 @@ type t =
   ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
   ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
   ; activity : Runtime_activity.t option
+  ; native_runtime : Agent_runtime.t option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -1508,6 +1509,10 @@ let build_with_services
     ; moderator_activation
     ; check_execution
     ; activity
+    ; native_runtime =
+        (match extension_services with
+         | None -> None
+         | Some _ -> Some agent_runtime)
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in

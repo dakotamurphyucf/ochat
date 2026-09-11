@@ -23,6 +23,7 @@ type limits =
   ; job_result_recovery_max_bytes : int
   ; delegation_recovery_max_count : int
   ; delegation_recovery_max_bytes : int
+  ; delegation_max_depth : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
@@ -36,6 +37,7 @@ val create
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> store:Agent_store.Session_store.t
+  -> registry:Session_registry.t
   -> idempotency_store:Agent_store.Idempotency_store.t
   -> blob_store:Agent_store.Blob_store.t
   -> prompts:Agent_session.Prompt_catalog.t
@@ -93,8 +95,10 @@ val import_legacy
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
-(** Loads every indexed non-archived durable session required at daemon
-    startup. Corrupt sessions fail closed and are not partially registered. *)
+(** Loads and registers indexed durable sessions required at startup, in private
+    parent-before-child dependency order. Includes needed ancestors, rejects cycles
+    and excessive depth, and rolls back loaded entries on failure. Stopped generated
+    inspection does not require loading a deleted/revoked parent. *)
 val recover_sessions : t -> (Session_registry.entry list, Agent_protocol.Error.t) result
 
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata

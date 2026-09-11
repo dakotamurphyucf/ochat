@@ -7,6 +7,8 @@ module State = Agent_session.Session_state
 module S = Agent_store.Session_store
 module D = Agent_store.Delegation_store
 module Artifacts = Agent_store.Prompt_artifact_store
+module H = Agent_client.Session_handle
+module Owner = Agent_server.Runtime_owner
 
 let store_ok = function
   | Ok value -> value
@@ -23,7 +25,16 @@ let on_event ctx state event = Task.pure(state)
 </script>|}
 ;;
 
-let install_child ~env ~sw ~daemon ~(parent : State.t) ~mode =
+let install_child
+      ~env
+      ~sw
+      ~daemon
+      ~(parent : State.t)
+      ~mode
+      ~source
+      ~capability_pins
+      ~revoke
+  =
   let store = Daemon.store daemon in
   let ledger = S.delegations store in
   let artifacts =
@@ -37,7 +48,7 @@ let install_child ~env ~sw ~daemon ~(parent : State.t) ~mode =
     Artifacts.Artifact.create
       ~revision_id:(P.Id.Prompt_revision.create ())
       ~root_relative_path:"child/main.chatmd"
-      ~root_chatmd:child_source
+      ~root_chatmd:source
       ~sources:[]
       ~parser_schema_version:4
       ~runtime_schema_version:
@@ -59,7 +70,7 @@ let install_child ~env ~sw ~daemon ~(parent : State.t) ~mode =
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; authority_sha256 =
         Agent_session.Delegation_authority.fingerprint parent |> protocol_ok
-    ; capability_pins = []
+    ; capability_pins
     ; lifetime = Owned
     ; created_at = parent.identity.created_at
     }
@@ -71,7 +82,8 @@ let install_child ~env ~sw ~daemon ~(parent : State.t) ~mode =
         { parent_session_id = parent.identity.session_id
         ; parent_generation = parent.identity.generation
         ; principal_id = (principal ()).id
-        ; idempotency_key = P.Idempotency_key.of_string "stored-child" |> protocol_ok
+        ; idempotency_key =
+            P.Idempotency_key.of_string (P.Id.Session.to_string child_id) |> protocol_ok
         }
       ~request_sha256:(digest "generated request")
       ~admission
@@ -160,7 +172,10 @@ let install_child ~env ~sw ~daemon ~(parent : State.t) ~mode =
          : Agent_store.Snapshot.installed);
       ignore (D.advance ledger record Child_installed |> store_ok : D.record);
       ignore (D.advance ledger record Linked |> store_ok : D.record);
-      ignore (D.revoke ledger record Parent_deleted |> store_ok : D.record));
+      if revoke then ignore (D.revoke ledger record Parent_deleted |> store_ok : D.record));
+  Agent_server.Session_registry.index
+    (Daemon.registry daemon)
+    (Agent_store.Session_index.find (S.session_index store) child_id |> Option.value_exn);
   child_id, retained
 ;;
 
@@ -225,7 +240,15 @@ let%expect_test
                       in
                       let parent_state = A.state entry.actor |> protocol_ok in
                       let child_id, retained =
-                        install_child ~env ~sw ~daemon ~parent:parent_state ~mode
+                        install_child
+                          ~env
+                          ~sw
+                          ~daemon
+                          ~parent:parent_state
+                          ~mode
+                          ~source:child_source
+                          ~capability_pins:[]
+                          ~revoke:true
                       in
                       parent.id, child_id, retained)))
           in
@@ -339,5 +362,504 @@ let%expect_test
     (2 "invalid generated source rejected before transcript disclosure")
     (1 "invalid generated source rejected before transcript disclosure")
     (2 "invalid generated source rejected before transcript disclosure")
+    |}]
+;;
+
+let%expect_test
+    "factory executes an inherited file tool and parent stop joins the child's model \
+     cleanup"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / root / "data");
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / root / "data/value.txt")
+          "inherited-parent-file";
+        let prompt_file = Filename.concat root "parent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<developer>Parent.</developer><tool name="read_file"><read id="data" path="${workspace}/data"/></tool><tool name="append_to_file"/>|};
+        let config = config root root prompt_file in
+        let requests = ref 0 in
+        let entered, entered_u = Eio.Promise.create () in
+        let cleaning, cleaning_u = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let released = ref false in
+        let release_cleanup () =
+          if not !released
+          then (
+            released := true;
+            Eio.Promise.resolve release_u ())
+        in
+        let never, _ = Eio.Promise.create () in
+        let cleaned = ref false in
+        let post_stream ~sw:_ ~inputs:_ =
+          Int.incr requests;
+          match !requests with
+          | 1 ->
+            let open Openai.Responses.Response_stream in
+            [ Output_item_added
+                { item =
+                    Function_call
+                      { name = "read_file"
+                      ; arguments = ""
+                      ; call_id = "read"
+                      ; _type = "function_call"
+                      ; id = Some "read-item"
+                      ; status = None
+                      }
+                ; output_index = 0
+                ; type_ = "response.output_item.added"
+                }
+            ; Function_call_arguments_done
+                { arguments = {|{"root":"data","file":"value.txt"}|}
+                ; item_id = "read-item"
+                ; output_index = 0
+                ; type_ = "response.function_call_arguments.done"
+                }
+            ]
+            |> Stdlib.List.to_seq
+          | 2 -> Stdlib.Seq.empty
+          | 3 ->
+            Eio.Promise.resolve entered_u ();
+            Exn.protect
+              ~finally:(fun () ->
+                Eio.Cancel.protect (fun () ->
+                  Eio.Promise.resolve cleaning_u ();
+                  Eio.Promise.await release;
+                  cleaned := true))
+              ~f:(fun () ->
+                Eio.Promise.await never;
+                Stdlib.Seq.empty)
+          | _ -> failwith "unexpected extra provider request"
+        in
+        let options =
+          { Daemon.default_options with
+            qualify_chatml_extensions = true
+          ; model_post_stream = Some post_stream
+          }
+        in
+        let start sw =
+          Daemon.start
+            ~sw
+            ~env
+            ~config
+            ~tool_dir:root
+            ~home:root
+            ~process_start_identity:None
+            ~options
+            ()
+          |> protocol_ok
+        in
+        let child_id =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw in
+            Exn.protect
+              ~finally:(fun () ->
+                release_cleanup ();
+                Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                  let client = connection daemon (principal ()) in
+                  Exn.protect
+                    ~finally:(fun () -> Agent_client.Connection.close client)
+                    ~f:(fun () ->
+                      initialize client;
+                      let parent, _ = create_session ~start_immediately:true client in
+                      let parent_entry =
+                        Agent_server.Session_registry.find
+                          (Daemon.registry daemon)
+                          parent.id
+                        |> Option.value_exn
+                      in
+                      let pins =
+                        Owner.with_background_runtime parent_entry.runtime (fun runtime ->
+                          let native =
+                            Option.value_exn
+                              runtime.Agent_session.Runtime_builder.native_runtime
+                          in
+                          let capabilities =
+                            Lazy.force native.capabilities
+                            |> Result.map_error ~f:(fun error ->
+                              error.Chat_response.Tool_capability.message)
+                            |> Result.ok_or_failwith
+                          in
+                          let selected =
+                            Chat_response.Tool_capability.select
+                              capabilities
+                              ~names:[ "read_file" ]
+                            |> Result.map_error ~f:(fun error ->
+                              error.Chat_response.Tool_capability.message)
+                            |> Result.ok_or_failwith
+                          in
+                          Chat_response.Background_request.capability_pins selected)
+                        |> protocol_ok
+                      in
+                      let parent_state = A.state parent_entry.actor |> protocol_ok in
+                      let bad_id, _ =
+                        install_child
+                          ~env
+                          ~sw
+                          ~daemon
+                          ~parent:parent_state
+                          ~mode:`Valid
+                          ~source:
+                            {|<developer>Bad initializer.</developer><script id="bad" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = if true then fail("fixture initialization failure") else 0
+let on_event ctx state event = Task.pure(state)
+</script>|}
+                          ~capability_pins:[]
+                          ~revoke:false
+                      in
+                      let bad =
+                        H.attach
+                          ~sw
+                          ~clock:(Eio.Stdenv.clock env)
+                          ~connection:client
+                          ~session_id:bad_id
+                          ~mode:Read_write
+                          ~subscribe:false
+                          ()
+                        |> protocol_ok
+                      in
+                      assert (Result.is_error (H.start bad ~queue_if_limited:false));
+                      H.detach bad |> protocol_ok;
+                      [%test_eq: int] 0 !requests;
+                      assert (Owner.is_loaded parent_entry.runtime);
+                      let child_id, _ =
+                        install_child
+                          ~env
+                          ~sw
+                          ~daemon
+                          ~parent:parent_state
+                          ~mode:`Valid
+                          ~source:
+                            {|<config model="child-test" reasoning_effort="high"/><developer>Child.</developer><tool type="inherited" name="read_file"/>|}
+                          ~capability_pins:pins
+                          ~revoke:false
+                      in
+                      let child =
+                        H.attach
+                          ~sw
+                          ~clock:(Eio.Stdenv.clock env)
+                          ~connection:client
+                          ~session_id:child_id
+                          ~mode:Read_write
+                          ~subscribe:false
+                          ()
+                        |> protocol_ok
+                      in
+                      let parent_handle =
+                        H.attach
+                          ~sw
+                          ~clock:(Eio.Stdenv.clock env)
+                          ~connection:client
+                          ~session_id:parent.id
+                          ~mode:Read_write
+                          ~subscribe:false
+                          ()
+                        |> protocol_ok
+                      in
+                      H.start child ~queue_if_limited:false |> protocol_ok |> ignore;
+                      let child_entry =
+                        Agent_server.Session_registry.find
+                          (Daemon.registry daemon)
+                          child_id
+                        |> Option.value_exn
+                      in
+                      let send text =
+                        H.send_message child { kind = Plain_text; text; attachments = [] }
+                        |> protocol_ok
+                        |> ignore
+                      in
+                      send "Read the inherited file.";
+                      let rec idle () =
+                        let state = A.state child_entry.actor |> protocol_ok in
+                        match state.active_operation with
+                        | None -> state
+                        | Some _ ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                          idle ()
+                      in
+                      let state = idle () in
+                      assert (
+                        List.exists state.conversation.canonical_history ~f:(fun entry ->
+                          String.is_substring
+                            (Jsonaf.to_string entry.P.History.payload)
+                            ~substring:"inherited-parent-file"));
+                      [%test_eq: int] 2 !requests;
+                      assert (
+                        List.for_all state.invocations ~f:(fun invocation ->
+                          String.equal
+                            invocation.P.Invocation.context.tool_name
+                            "read_file"));
+                      H.stop child ~mode:Cancel |> protocol_ok |> ignore;
+                      assert (Owner.is_loaded parent_entry.runtime);
+                      assert (
+                        P.Session.equal_desired_state
+                          (A.state parent_entry.actor |> protocol_ok).lifecycle.desired
+                          Running);
+                      H.start child ~queue_if_limited:false |> protocol_ok |> ignore;
+                      [%test_eq: int] 2 !requests;
+                      send "Wait for parent cancellation.";
+                      Eio.Promise.await entered;
+                      let stop =
+                        Eio.Fiber.fork_promise ~sw (fun () ->
+                          H.stop parent_handle ~mode:Cancel)
+                      in
+                      Eio.Promise.await cleaning;
+                      assert (not !cleaned);
+                      assert (Owner.is_loaded parent_entry.runtime);
+                      release_cleanup ();
+                      Eio.Promise.await_exn stop |> protocol_ok |> ignore;
+                      let state = idle () in
+                      assert !cleaned;
+                      assert (
+                        P.Session.equal_desired_state state.lifecycle.desired Stopped);
+                      assert (not (Owner.is_loaded parent_entry.runtime));
+                      [%test_eq: int] 3 !requests;
+                      H.detach child |> protocol_ok;
+                      H.detach parent_handle |> protocol_ok;
+                      child_id))))
+        in
+        Eio.Switch.run (fun sw ->
+          let daemon = start sw in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                ~f:(fun () ->
+                  initialize client;
+                  match
+                    Agent_client.Connection.request
+                      client
+                      (Session_get { session_id = child_id; history = None })
+                    |> protocol_ok
+                  with
+                  | Session_get snapshot ->
+                    assert (
+                      P.Session.equal_desired_state snapshot.session.desired_state Stopped);
+                    assert (
+                      List.exists snapshot.canonical_history.entries ~f:(fun entry ->
+                        String.is_substring
+                          (Jsonaf.to_string entry.P.History.payload)
+                          ~substring:"inherited-parent-file"));
+                    [%test_eq: int] 3 !requests;
+                    print_endline
+                      "inherited read executed; parent stop joined child provider \
+                       cleanup; stopped history recovered"
+                  | _ -> failwith "unexpected child snapshot")))));
+  [%expect
+    {| inherited read executed; parent stop joined child provider cleanup; stopped history recovered |}]
+;;
+
+let%expect_test
+    "active generated descendants recover in dependency order with fresh bindings and \
+     configured depth"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt_file = Filename.concat root "parent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|};
+        let config = config root root prompt_file in
+        let requests = ref 0 in
+        let start sw depth =
+          let options =
+            { Daemon.default_options with
+              qualify_chatml_extensions = true
+            ; factory_limits =
+                { Daemon.default_options.factory_limits with
+                  delegation_max_depth = depth
+                }
+            ; model_post_stream =
+                Some
+                  (fun ~sw:_ ~inputs:_ ->
+                    Int.incr requests;
+                    Stdlib.Seq.empty)
+            }
+          in
+          Daemon.start
+            ~sw
+            ~env
+            ~config
+            ~tool_dir:root
+            ~home:root
+            ~process_start_identity:None
+            ~options
+            ()
+        in
+        let root_id, child_id, leaf_id =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw 2 |> protocol_ok in
+            Exn.protect
+              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    let parent, _ = create_session ~start_immediately:true client in
+                    let make_child parent_id =
+                      let entry =
+                        Agent_server.Session_registry.find
+                          (Daemon.registry daemon)
+                          parent_id
+                        |> Option.value_exn
+                      in
+                      let pins =
+                        Owner.with_background_runtime entry.runtime (fun runtime ->
+                          let native =
+                            Option.value_exn
+                              runtime.Agent_session.Runtime_builder.native_runtime
+                          in
+                          let capabilities =
+                            Lazy.force native.capabilities
+                            |> Result.map_error ~f:(fun error ->
+                              error.Chat_response.Tool_capability.message)
+                            |> Result.ok_or_failwith
+                          in
+                          Chat_response.Background_request.capability_pins capabilities)
+                        |> protocol_ok
+                      in
+                      let id, _ =
+                        install_child
+                          ~env
+                          ~sw
+                          ~daemon
+                          ~parent:(A.state entry.actor |> protocol_ok)
+                          ~mode:`Valid
+                          ~source:
+                            {|<developer>Generated descendant.</developer><tool type="inherited" name="read_file"/>|}
+                          ~capability_pins:pins
+                          ~revoke:false
+                      in
+                      let handle =
+                        H.attach
+                          ~sw
+                          ~clock:(Eio.Stdenv.clock env)
+                          ~connection:client
+                          ~session_id:id
+                          ~mode:Read_write
+                          ~subscribe:false
+                          ()
+                        |> protocol_ok
+                      in
+                      H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+                      H.detach handle |> protocol_ok;
+                      id
+                    in
+                    let child = make_child parent.id in
+                    let leaf = make_child child in
+                    [%test_eq: int] 0 !requests;
+                    parent.id, child, leaf)))
+        in
+        Eio.Switch.run (fun sw ->
+          match start sw 1 with
+          | Error { code = Persistence_error; message; _ } ->
+            assert (String.is_substring message ~substring:"depth")
+          | Ok daemon ->
+            Daemon.shutdown daemon |> protocol_ok;
+            failwith "recovery ignored configured ancestry limit"
+          | Error error -> raise_s [%sexp (error : P.Error.t)]);
+        List.iter [ 1; 2 ] ~f:(fun restart ->
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw 2 |> protocol_ok in
+            Exn.protect
+              ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                List.iter [ root_id; child_id; leaf_id ] ~f:(fun id ->
+                  let entry =
+                    Agent_server.Session_registry.find (Daemon.registry daemon) id
+                    |> Option.value_exn
+                  in
+                  assert (
+                    P.Session.equal_desired_state
+                      (A.state entry.actor |> protocol_ok).lifecycle.desired
+                      Running);
+                  assert (Owner.is_loaded entry.runtime));
+                let registry = Daemon.registry daemon in
+                let previous =
+                  Agent_server.Session_registry.find registry leaf_id |> Option.value_exn
+                in
+                previous.close ();
+                ignore
+                  (Agent_server.Session_registry.remove registry leaf_id
+                   : Agent_server.Session_registry.entry option);
+                Agent_server.Session_registry.index
+                  registry
+                  (Agent_store.Session_index.find
+                     (S.session_index (Daemon.store daemon))
+                     leaf_id
+                   |> Option.value_exn);
+                let reloaded =
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                    Agent_server.Session_registry.load registry leaf_id |> protocol_ok)
+                in
+                assert (Owner.is_loaded reloaded.runtime);
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    let handle =
+                      H.attach
+                        ~sw
+                        ~clock:(Eio.Stdenv.clock env)
+                        ~connection:client
+                        ~session_id:leaf_id
+                        ~mode:Read_write
+                        ~subscribe:false
+                        ()
+                      |> protocol_ok
+                    in
+                    H.send_message
+                      handle
+                      { kind = Plain_text
+                      ; text = "Continue after restart."
+                      ; attachments = []
+                      }
+                    |> protocol_ok
+                    |> ignore;
+                    let entry =
+                      Agent_server.Session_registry.find (Daemon.registry daemon) leaf_id
+                      |> Option.value_exn
+                    in
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                      let rec done_ () =
+                        match (A.state entry.actor |> protocol_ok).active_operation with
+                        | None -> ()
+                        | Some _ ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                          done_ ()
+                      in
+                      done_ ());
+                    [%test_eq: int] restart !requests;
+                    H.detach handle |> protocol_ok;
+                    print_s
+                      [%sexp
+                        (restart : int)
+                      , "active ancestry recovered; fresh inherited bindings execute"]))))));
+  [%expect
+    {|
+    (1 "active ancestry recovered; fresh inherited bindings execute")
+    (2 "active ancestry recovered; fresh inherited bindings execute")
     |}]
 ;;

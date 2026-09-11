@@ -133,6 +133,10 @@ type t =
     (** Generated execution belongs to the runtime's construction switch even
         when invoked by a foreground/scheduler fiber from another switch. The
         owner must run direct moderator/event work through this scope too. *)
+  ; native_runtime : Chat_response.Agent_runtime.t option
+    (** Internal qualified host resource source for delegation. Access only while
+        holding the owning runtime lease; this is not permission to invoke tools.
+        Absent for unqualified construction. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue

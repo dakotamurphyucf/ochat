@@ -3699,12 +3699,13 @@ apply. A generated source never becomes a synthetic catalog prompt or uses the
 ordinary authored runtime as a fallback. Manifest substitution and an ordinary
 artifact contract reject before a recovered actor or transcript is exposed.
 
-Execution and administrative runtime preparation still require the pending scoped
-parent runtime host. They currently return `delegation.runtime_unavailable` before
-history reservation or runtime initialization. Running generated recovery also
-rejects before committing a recovery boundary; it does not silently downgrade a
-running child to stopped. Actual public creation, live child runtime recovery and
-parent-policy mediation remain under implementation.
+Qualified execution and administrative runtime preparation require a loaded,
+running parent with the admitted current authority. A missing qualified parent
+returns `delegation.runtime_unavailable` before history reservation or runtime
+initialization. The factory restores executable definitions against that parent's
+leased native bindings, then builds the child with its own actor, permission,
+schedule and job services. Public generated creation and the remaining inherited
+policy adapters are still under implementation.
 
 The offline daemon fixture seeds a genuine child artifact, ledger record, directory,
 journal and snapshot, then revokes its admission and removes the parent. Two daemon
@@ -3744,8 +3745,9 @@ These are current-state checks, not a substitute for coordinated resource leases
 or stop/cancellation. The current guard explicitly rejects parent moderators until
 owner-aware policy mediation is installed, and rejects independent lifetime until
 its resource ownership is implemented. A child's own moderator is supported.
-Those temporary limits, actual factory creation/recovery and lifecycle coordination
-remain E08 work; general model-visible child creation is not yet enabled.
+Those temporary limits, public generated creation, contextual native/shell/managed
+adapters and creation-race coordination remain E08 work; general model-visible
+child creation is not yet enabled.
 
 ### Owned-child cancellation and resource cleanup
 
@@ -3776,11 +3778,10 @@ its cleanup is deliberately blocked. A retained parent runtime cannot close
 until child cleanup finishes, including cancellation of the stop caller and a
 contended ledger lookup. No provider request is made.
 
-This supplies the shared stop/join service. The generated-session coordinator
-still needs to install the parent dependency, exclude concurrent child start and
-reload, propagate stops through its recorded descendants, and reconcile creation
-across restart. The service alone does not enable public child creation or imply
-that those relationships are already installed by the factory.
+This supplies the shared stop/join service. Executable factory loads now install
+the parent dependency described below. The generated-session coordinator still
+needs to serialize creation with parent stop/revocation, reconcile incomplete
+creation stages and cover descendants without a currently loaded runtime.
 
 ### Generated execution lifetime
 
@@ -3805,5 +3806,41 @@ retain their existing execution path without this optional scope.
 Offline tests hold nested cleanup behind barriers, cancel individual callers or
 the whole runtime, verify context bindings and sibling isolation, and check late
 requests and owner cleanup. Generated runtime/actor tests also exercise the scope
-with real inherited file tools and fake provider turns. Installing the automatic
-parent-runtime dependency and executable generated factory host is still pending.
+with real inherited file tools and fake provider turns.
+
+### Executable generated factory loads and recovery
+
+`Agent_server.Delegated_runtime.prepare` holds a parent runtime lease around the
+child's construction switch. Closing the child cancels and joins its activities,
+closes its native runtime, then releases the lease. Parent cancellation also joins
+the child's work before releasing inherited resources. If the parent has durably
+stopped, the factory applies the child's private-reference stop transition after
+activity cleanup. Daemon shutdown preserves running intent for later recovery.
+This callback uses the actor only: acquiring the child's runtime-owner mutex here
+could deadlock against a close already waiting for the same scope to finish.
+
+Construction failure and cancellation do not publish a usable runtime. Cancellation
+before publication returns `Interrupted`. Closed runtimes reject later execution;
+cleanup failures remain observable to close callers. Stopping and restarting a
+child can reuse a parent that remains running.
+
+Startup orders active generated sessions by the private ledger's ancestry and
+loads/registers each parent before restoring its descendants. Missing parents or
+records, cycles and excessive depth fail recovery. The host's
+`factory_limits.delegation_max_depth` defaults to 32 and also configures runtime
+authority checks. Failure closes and removes entries recovered by that attempt.
+Stopped generated transcript inspection does not require live ancestors.
+
+The registry publishes its loaded entries as one immutable atomic map. A lookup
+can inspect an already-loaded parent while an on-demand child loader holds the
+registry mutation lock. This snapshot does not load parents, retain resources or
+grant authority: the factory still obtains actual actor state and a runtime lease.
+
+Offline daemon tests seed real artifacts and private child records, then exercise
+public attach/start/send/stop operations. They cover inherited scoped file reads,
+initializer failure, child stop/restart, and parent stop waiting on deliberately
+blocked provider cleanup. An active root/child/grandchild tree survives two daemon
+restarts with fresh inherited bindings; the leaf also reloads on demand and runs
+a fake-provider turn. A configured depth below the stored chain length rejects.
+The seeded setup does not qualify the still-pending public creation transaction,
+creation crash recovery, independent lifetime or the remaining policy adapters.

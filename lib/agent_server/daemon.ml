@@ -106,6 +106,7 @@ let default_options =
       ; job_result_max_bytes = 9 * 1024 * 1024
       ; job_result_recovery_max_count = 4096
       ; delegation_recovery_max_count = 4096
+      ; delegation_max_depth = 32
       ; delegation_recovery_max_bytes = 67108864
       ; job_result_recovery_max_bytes = 64 * 1024 * 1024
       ; subscriptions = Agent_session.Staged_subscriptions.default_limits
@@ -583,23 +584,6 @@ let health t ~include_details =
   server_health services Agent_protocol.Health.Request.{ include_details }
 ;;
 
-let register_recovered registry entries =
-  let rec loop registered = function
-    | [] -> Ok ()
-    | entry :: rest ->
-      let open Result.Let_syntax in
-      let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
-      (match
-         Session_registry.add registry ~session_id:state.identity.session_id entry
-       with
-       | Ok () -> loop (entry :: registered) rest
-       | Error _ as failure ->
-         List.iter ((entry :: rest) @ registered) ~f:(fun value -> value.close ());
-         failure)
-  in
-  loop [] entries
-;;
-
 let reload_diagnostic config code message remediation =
   Config.Diagnostic.
     { code
@@ -754,6 +738,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~sw
       ~env
       ~store
+      ~registry
       ~idempotency_store
       ~blob_store
       ~prompts
@@ -778,7 +763,6 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   Session_registry.index_all registry indexed_sessions;
   Session_registry.install_loader registry (Session_factory.recover_session factory);
   let%bind recovered = Session_factory.recover_sessions factory in
-  let%bind () = register_recovered registry recovered in
   let pinned_revisions =
     List.filter_map indexed_sessions ~f:(fun entry ->
       entry.Agent_store.Session_index.Entry.session.prompt_revision)
