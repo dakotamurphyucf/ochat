@@ -528,6 +528,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/shell_runtime/approval_store.mli` | [contract](../../lib/shell_runtime/approval_store.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/audit_replay.mli` | [contract](../../lib/shell_runtime/audit_replay.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/audit_sink.mli` | [contract](../../lib/shell_runtime/audit_sink.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/shell_runtime/call_context.mli` | [contract](../../lib/shell_runtime/call_context.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/chatml_approval_value.mli` | [contract](../../lib/shell_runtime/chatml_approval_value.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/chatml_audit_value.mli` | [contract](../../lib/shell_runtime/chatml_audit_value.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/chatml_codec.mli` | [contract](../../lib/shell_runtime/chatml_codec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |

@@ -651,6 +651,19 @@ module Executor : sig
       input is bounded and included in approval identity before execution. *)
   val run : config -> invocation -> (result, error) Result.t
 
+  (** Bind the actual invoking session and its grant store without rebuilding
+      inherited executables, paths, environment, policy, reviewers, limits, audit
+      or sandbox configuration. [check] revalidates live host authority before
+      execution, after approval waits (before remembering grants), and before
+      prepared effects run. Nested scopes retain every ancestor check. This is
+      trusted host plumbing, not permission to delegate a configuration. *)
+  val with_execution_scope
+    :  config
+    -> session_id:string
+    -> approval_store:Approval.store
+    -> check:(unit -> (unit, string) Result.t)
+    -> config
+
   (** [streaming_support config] rejects every after-interceptor and filters
       outside {!Sanitized_stream.support}, using the total-output byte budget.
       Check at tool registration; [run_streaming] checks again before execution. *)

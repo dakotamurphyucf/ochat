@@ -43,6 +43,7 @@ type t =
   ; ingress : Script_ingress_service.t option
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
+  ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
   }
 
 type native_services =
@@ -58,7 +59,55 @@ let with_native_services tools ~session_id ~generation f =
   let context = { tools; session_id; generation; active = Atomic.make true } in
   Exn.protect
     ~finally:(fun () -> Atomic.set context.active false)
-    ~f:(fun () -> Eio.Fiber.with_binding native_services_key context f)
+    ~f:(fun () ->
+      Eio.Fiber.with_binding native_services_key context (fun () ->
+        match tools.shell_context with
+        | None -> Shell_runtime.Call_context.without_services f
+        | Some services ->
+          let check () =
+            let open Result.Let_syntax in
+            let%bind invocation =
+              match Native_tool_invocation.current_scope () with
+              | Active invocation
+                when Atomic.get context.active
+                     && Agent_protocol.Id.Session.equal
+                          session_id
+                          invocation.context.session_id
+                     && Int.equal generation invocation.context.generation ->
+                Ok invocation
+              | Active _ | Expired | Unbound ->
+                Error "shell caller scope is stale or foreign"
+            in
+            let%bind binding =
+              C.find (tools.registry ()) ~name:invocation.context.tool_name
+              |> Result.map_error ~f:(fun error -> error.C.message)
+            in
+            let%bind () =
+              match tools.is_halted () with
+              | true -> Error "shell caller is halted or stopping"
+              | false ->
+                (match
+                   String.equal
+                     (C.reference binding).implementation_revision
+                     invocation.context.implementation_revision
+                 with
+                 | true -> Ok ()
+                 | false -> Error "shell registered implementation changed")
+            in
+            tools.authorize invocation binding
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+          in
+          Shell_runtime.Call_context.with_services
+            (fun () ->
+               let open Result.Let_syntax in
+               let%map services = services () in
+               { services with
+                 check =
+                   (fun () ->
+                     let%bind () = check () in
+                     services.check ())
+               })
+            f))
 ;;
 
 let current_native_services () =
@@ -100,8 +149,11 @@ let create
   ; ingress = None
   ; progress = None
   ; progress_ceiling = None
+  ; shell_context = None
   }
 ;;
+
+let with_shell_context t services = { t with shell_context = Some services }
 
 let native_dispatch t ~declared ~input ~capabilities =
   let dispatch =

@@ -1421,6 +1421,39 @@ let extension_schedules actor_ref =
 
 let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
   let module A = Agent_session.Session_actor in
+  let shell_provider = shell_approval_provider t profile actor_ref in
+  let shell_store = shell_approval_store state actor_ref (ref state.shell) in
+  let shell_context () =
+    let open Result.Let_syntax in
+    let check () =
+      let%bind actor = extension_actor actor_ref in
+      let%bind current = A.state actor in
+      match Agent_session.Native_tool_invocation.current_scope () with
+      | Active invocation
+        when Agent_protocol.Id.Session.equal
+               current.identity.session_id
+               state.identity.session_id
+             && Agent_protocol.Id.Session.equal
+                  invocation.context.session_id
+                  current.identity.session_id
+             && Int.equal invocation.context.generation current.identity.generation
+             && String.equal
+                  profile.Agent_session.Permission_policy.revision_digest
+                  current.spec.permission_profile_digest -> Ok ()
+      | Active _ | Expired | Unbound ->
+        Error (unavailable Permission_denied "shell caller authority is stale or foreign")
+    in
+    let check () =
+      check () |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let%map () = check () in
+    Shell_runtime.Call_context.
+      { session_id = Agent_protocol.Id.Session.to_string state.identity.session_id
+      ; approval_provider = shell_provider
+      ; approval_store = shell_store
+      ; check
+      }
+  in
   let notification_snapshot () =
     let open Result.Let_syntax in
     let%bind actor = extension_actor actor_ref in
@@ -1488,6 +1521,8 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
             ~defer_observation:(fun _ -> Ok ())
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_shell_context tools shell_context
           |> fun tools ->
           Agent_session.Script_tool_calls.with_job_service
             tools

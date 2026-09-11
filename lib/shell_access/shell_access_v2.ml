@@ -2122,6 +2122,7 @@ module Executor = struct
     ; reviewer : Approval.reviewer option
     ; reviewer_with_metadata : Approval.reviewer_with_metadata option
     ; approval_store : Approval.store
+    ; execution_check : unit -> (unit, string) result
     ; administrative_check : Context.t -> (unit, string) result
     ; analyzers : Analyzer.t list
     ; interceptors : Interceptor.t list
@@ -2347,6 +2348,7 @@ module Executor = struct
     ; reviewer
     ; reviewer_with_metadata
     ; approval_store
+    ; execution_check = (fun () -> Ok ())
     ; administrative_check
     ; analyzers
     ; interceptors
@@ -2364,6 +2366,21 @@ module Executor = struct
     ; streaming = None
     ; stream_stdout = true
     }
+  ;;
+
+  let with_execution_scope config ~session_id ~approval_store ~check =
+    let execution_check () =
+      match config.execution_check () with
+      | Error _ as error -> error
+      | Ok () -> check ()
+    in
+    { config with session_id = Some session_id; approval_store; execution_check }
+  ;;
+
+  let check_execution config =
+    match config.execution_check () with
+    | Ok () -> ()
+    | Error reason -> raise (Execution_error (Denied reason))
   ;;
 
   let streaming_support config =
@@ -2637,6 +2654,7 @@ module Executor = struct
             command
     =
     if depth > 12 then raise (Execution_error (Denied "too many command rewrites"));
+    check_execution config;
     let executable =
       match
         Resolver.resolve
@@ -2790,6 +2808,7 @@ module Executor = struct
                     ; metadata = None
                     }
               in
+              check_execution config;
               let response = review.Approval.response in
               let response_name =
                 match response with
@@ -2821,6 +2840,7 @@ module Executor = struct
                | Rewrite rewritten -> raise (Rewrite_requested rewritten)))
       in
       if not approved then raise (Execution_error (Denied "approval was not granted"));
+      check_execution config;
       Option.iter metadata.script_file ~f:(verify_script_file config);
       let backend =
         match select_backend config with
@@ -2986,6 +3006,7 @@ module Executor = struct
           in
           let stderr_flow = snd (List.nth_exn stderr_pipes index) in
           try
+            check_execution config;
             let child =
               Eio.Process.spawn
                 ~sw
@@ -3083,6 +3104,7 @@ module Executor = struct
     let config =
       if publish_stdout then config else { config with stream_stdout = false }
     in
+    check_execution config;
     match stage with
     | Synthetic_stage result -> publish_result config (fresh_id ()) result
     | Simulated_stage { plan; backend; simulate } ->
@@ -3291,6 +3313,7 @@ module Executor = struct
     let request_id = fresh_id () in
     let input_bytes = Input.byte_length invocation.input in
     try
+      check_execution config;
       if input_bytes > config.limits.max_stdin_bytes
       then raise (Execution_error (Stdin_limit_exceeded input_bytes));
       let stdin = Input.to_string invocation.input in

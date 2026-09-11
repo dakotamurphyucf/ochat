@@ -4,8 +4,7 @@ module S = Shell_access
 let workspace env = Eio.Path.native_exn (Eio.Stdenv.cwd env)
 
 let capabilities ?(sandbox = S.Capabilities.Preferred) env =
-  S.Capabilities.
-    { (development ~workspace:(workspace env)) with sandbox }
+  S.Capabilities.{ (development ~workspace:(workspace env)) with sandbox }
 ;;
 
 let fake_backend run = S.Backend.fake ~name:"phase2-fake" run
@@ -44,6 +43,94 @@ let executor_ok = function
   | Error error -> failwith (S.Executor.error_to_string error)
 ;;
 
+let%expect_test
+    "delegated execution scopes isolate grants and recheck authority after review"
+  =
+  Eio_main.run
+  @@ fun env ->
+  let allowed = ref true in
+  let revoke_on_review = ref false in
+  let reviewed = ref [] in
+  let executed = ref [] in
+  let reviewer (request : S.Approval.request) =
+    reviewed := !reviewed @ [ Option.value_exn request.context.session_id ];
+    if !revoke_on_review then allowed := false;
+    S.Approval.Approve_for (Exact_session { expires_at = None })
+  in
+  let environment = [| "OCHAT_SCOPE=parent" |] in
+  let original_environment = ref None in
+  let backend =
+    fake_backend (fun plan ~stdin:_ ->
+      let context = plan.S.Execution_plan.context in
+      [%test_eq: string] (workspace env) context.cwd;
+      (match !original_environment with
+       | None ->
+         assert (Array.mem context.environment "OCHAT_SCOPE=parent" ~equal:String.equal);
+         original_environment := Some (Array.copy context.environment)
+       | Some original -> [%test_eq: string array] original context.environment);
+      let session = Option.value_exn context.session_id in
+      executed := !executed @ [ session ];
+      Ok { status = `Exited 0; stdout = session; stderr = "" })
+  in
+  let parent =
+    S.Executor.config
+      ~env
+      ~runtime_id:"inherited"
+      ~manifest_sha256:"original-manifest"
+      ~policy:(S.Policy.create ~default:Ask [])
+      ~capabilities:(capabilities env)
+      ~reviewer
+      ~approval_store:(S.Approval.create_store ())
+      ~session_id:"parent"
+      ~cwd:(Eio.Stdenv.cwd env)
+      ~process_env:environment
+      ~backends:[ backend ]
+      ()
+  in
+  let store = S.Approval.create_store () in
+  let child =
+    S.Executor.with_execution_scope
+      parent
+      ~session_id:"child"
+      ~approval_store:store
+      ~check:(fun () -> if !allowed then Ok () else Error "delegation revoked")
+  in
+  let grandchild =
+    S.Executor.with_execution_scope
+      child
+      ~session_id:"grandchild"
+      ~approval_store:store
+      ~check:(fun () -> Ok ())
+  in
+  let request text =
+    invocation (S.Request.command (S.Command.create "/bin/echo" [ text ]))
+  in
+  List.iter [ parent; parent; child; child; parent; grandchild ] ~f:(fun config ->
+    S.Executor.run config (request "shared") |> executor_ok |> ignore);
+  [%test_eq: string list] [ "parent"; "child"; "grandchild" ] !reviewed;
+  [%test_eq: string list]
+    [ "parent"; "parent"; "child"; "child"; "parent"; "grandchild" ]
+    !executed;
+  revoke_on_review := true;
+  (match S.Executor.run child (request "fresh approval") with
+   | Error (Denied "delegation revoked") -> ()
+   | _ -> failwith "revocation during approval allowed execution");
+  (match S.Executor.run grandchild (request "shared") with
+   | Error (Denied "delegation revoked") -> ()
+   | _ -> failwith "nested scope discarded ancestor authority");
+  [%test_eq: int] 6 (List.length !executed);
+  allowed := true;
+  revoke_on_review := false;
+  S.Executor.run child (request "fresh approval") |> executor_ok |> ignore;
+  [%test_eq: string list] [ "parent"; "child"; "grandchild"; "child"; "child" ] !reviewed;
+  [%test_eq: int] 7 (List.length !executed);
+  print_endline
+    "separate grants; original cwd/environment; revoked approval not saved; ancestor \
+     check retained";
+  [%expect
+    {| separate grants; original cwd/environment; revoked approval not saved; ancestor check retained |}]
+;;
+
 let%expect_test "stdin is bounded and included in approval identity" =
   Eio_main.run
   @@ fun env ->
@@ -53,7 +140,8 @@ let%expect_test "stdin is bounded and included in approval identity" =
     S.Approval.Approve
   in
   let backend =
-    fake_backend (fun _plan ~stdin -> Ok { status = `Exited 0; stdout = stdin; stderr = "" })
+    fake_backend (fun _plan ~stdin ->
+      Ok { status = `Exited 0; stdout = stdin; stderr = "" })
   in
   let limits = S.Limits.{ default with max_stdin_bytes = 3 } in
   let config = config ~reviewer ~limits env backend in
@@ -90,11 +178,14 @@ let%expect_test "conditional chains prepare only selected branches" =
     parse_chain "/usr/bin/false && /usr/bin/printf skipped || /bin/echo recovered"
   in
   let result =
-    S.Executor.run (config ~reviewer env backend)
+    S.Executor.run
+      (config ~reviewer env backend)
       (invocation (S.Request.Structured chain))
   in
   let result = executor_ok result in
-  print_s [%sexp ((!reviewed, result.stdout, status_code result.status) : string list * string * int)];
+  print_s
+    [%sexp
+      ((!reviewed, result.stdout, status_code result.status) : string list * string * int)];
   [%expect {| ((false echo) echo 0) |}]
 ;;
 
@@ -104,11 +195,11 @@ let%expect_test "real Eio pipelines preserve backpressure and stdout flow" =
   let config = config ~sandbox:Direct_unsafe env S.Backend.direct in
   let chain = parse_chain "/usr/bin/printf abc | /usr/bin/wc -c" in
   let result =
-    S.Executor.run config (invocation (S.Request.Structured chain))
-    |> executor_ok
+    S.Executor.run config (invocation (S.Request.Structured chain)) |> executor_ok
   in
   (* BSD wc pads its count; GNU wc does not. Check the byte count itself. *)
-  printf "status=%d count=%d\n"
+  printf
+    "status=%d count=%d\n"
     (status_code result.status)
     (Int.of_string (String.strip result.stdout));
   [%expect {| status=0 count=3 |}]
@@ -130,7 +221,7 @@ let%expect_test "pipefail selects the rightmost failing pipeline status" =
   let run pipefail =
     let result : S.Executor.result =
       S.Executor.run
-      (config ~pipefail env backend)
+        (config ~pipefail env backend)
         (invocation (S.Request.Structured chain))
       |> executor_ok
     in
@@ -143,30 +234,22 @@ let%expect_test "pipefail selects the rightmost failing pipeline status" =
 let%expect_test "real pipelines handle early consumer exit and total output limits" =
   Eio_main.run
   @@ fun env ->
-  let direct ?limits () =
-    config ?limits ~sandbox:Direct_unsafe env S.Backend.direct
-  in
+  let direct ?limits () = config ?limits ~sandbox:Direct_unsafe env S.Backend.direct in
   let early =
     S.Executor.run
       (direct ())
       (invocation
-         (S.Request.Structured
-            (parse_chain "/usr/bin/yes | /usr/bin/head -n 1")))
+         (S.Request.Structured (parse_chain "/usr/bin/yes | /usr/bin/head -n 1")))
     |> executor_ok
   in
   let constrained =
     S.Limits.
-      { default with
-        max_stdout_bytes = 3
-      ; max_stderr_bytes = 3
-      ; max_total_bytes = 3
-      }
+      { default with max_stdout_bytes = 3; max_stderr_bytes = 3; max_total_bytes = 3 }
   in
   let limited =
     S.Executor.run
       (direct ~limits:constrained ())
-      (invocation
-         (S.Request.command (S.Command.create "/usr/bin/printf" [ "abcdef" ])))
+      (invocation (S.Request.command (S.Command.create "/usr/bin/printf" [ "abcdef" ])))
   in
   printf
     "early=%d producer-failed=%b output-limited=%b\n"
@@ -189,9 +272,7 @@ let%expect_test "wall timeout cancels an active pipeline" =
   let result =
     S.Executor.run
       (config ~limits ~sandbox:Direct_unsafe env S.Backend.direct)
-      (invocation
-         (S.Request.Structured
-            (parse_chain "/bin/sleep 1 | /bin/cat")))
+      (invocation (S.Request.Structured (parse_chain "/bin/sleep 1 | /bin/cat")))
   in
   printf
     "timed-out=%b\n"
@@ -210,13 +291,12 @@ let%expect_test "raw approval identity includes the complete script digest" =
     S.Approval.Approve
   in
   let backend =
-    fake_backend (fun _plan ~stdin:_ -> Ok { status = `Exited 0; stdout = ""; stderr = "" })
+    fake_backend (fun _plan ~stdin:_ ->
+      Ok { status = `Exited 0; stdout = ""; stderr = "" })
   in
   let config = config ~reviewer env backend in
   let run script =
-    S.Executor.run
-      config
-      (invocation (S.Request.raw_shell ~executable:"/bin/sh" script))
+    S.Executor.run config (invocation (S.Request.raw_shell ~executable:"/bin/sh" script))
     |> executor_ok
     |> ignore
   in
@@ -255,7 +335,8 @@ let%expect_test "script files are rehashed immediately before execution" =
   in
   Eio.Path.save ~create:(`Or_truncate 0o700) path "printf changed\n";
   let backend =
-    fake_backend (fun _plan ~stdin:_ -> Ok { status = `Exited 0; stdout = ""; stderr = "" })
+    fake_backend (fun _plan ~stdin:_ ->
+      Ok { status = `Exited 0; stdout = ""; stderr = "" })
   in
   let result = S.Executor.run (config env backend) (invocation request) in
   printf
@@ -310,10 +391,8 @@ let%expect_test "script executables retain their instantiation fingerprint" =
   Eio_main.run
   @@ fun env ->
   let root =
-    Eio.Path.
-      (Eio.Stdenv.fs env
-       / "/tmp"
-       / sprintf "ochat-shell-phase2-%08x" (Random.bits ()))
+    Eio.Path.(
+      Eio.Stdenv.fs env / "/tmp" / sprintf "ochat-shell-phase2-%08x" (Random.bits ()))
   in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
   let script = Eio.Path.(root / "phase2-executable-script.sh") in
@@ -324,9 +403,7 @@ let%expect_test "script executables retain their instantiation fingerprint" =
   let source_sha256 =
     Eio.Path.load script |> Digestif.SHA256.digest_string |> Digestif.SHA256.to_hex
   in
-  let executable_sha256 =
-    Digestif.SHA256.(to_hex (digest_string original))
-  in
+  let executable_sha256 = Digestif.SHA256.(to_hex (digest_string original)) in
   let request =
     S.Request.script_file
       ~executable:(Eio.Path.native_exn executable)

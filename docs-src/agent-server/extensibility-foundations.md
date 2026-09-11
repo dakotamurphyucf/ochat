@@ -3924,6 +3924,44 @@ ancestor receives invocation/job records. The fixture explicitly uses manual
 authoring policy; it does not qualify automatic corpus injection or the remaining
 validation-helper, shell and managed-tool delegation adapters.
 
+### Inherited shell caller services
+
+Generated children keep the registered parent's compiled shell configuration:
+executable identities, working directory, environment, roots, command policy,
+reviewers, interceptors, audit configuration, sandbox requirements and limits.
+Changing a child's source directory does not reconstruct those resources.
+
+Native dispatch supplies the actual caller through an expiring
+`Shell_runtime.Call_context`. `Runtime.executor_config_for_call` overlays that
+session's identity and approval store on the original executor. UI approval uses
+the actual child's actor and invocation owner. An exact-session grant is recorded
+in that child's persisted shell state; neither its parent nor a grandchild gains
+the grant merely by sharing the inherited implementation. Other compiled reviewer
+decisions remain part of the inherited configuration.
+
+`Shell_access.Executor.with_execution_scope` retains existing authority checks and
+adds the invoking host's current check. The dispatcher verifies session/generation,
+implementation identity, lifecycle and the final inherited authorization guard.
+Execution checks run after approval returns, before remembering grants, and before
+prepared commands execute. Revocation during an approval wait therefore prevents
+the approval from authorizing a later effect. An expired lexical scope rejects
+both escaped fibers and retained executor configurations; it does not fall back
+to the registration owner's approvals.
+
+Offline qualification creates actual persisted child and grandchild sessions with
+an inherited fixed shell command. The child receives and stores its own approval,
+reuses its exact-session grant, and reuses it after daemon restart. The grandchild
+requires a separate approval; revoking its private admission while it waits leaves
+no grant or subsequent provider call. Normal disclosure checks return the retained
+sanitized failure, and restart keeps the revoked grandchild stopped. Lower-level
+tests verify unchanged working directory/environment, separate approval namespaces,
+ancestor-check composition and scope expiry. Provider responses are fake; the
+integration command is the local `/bin/echo`.
+
+This advances native shell delegation. Parent conversation-moderator mediation,
+broader shell hook/helper qualification, managed-tool delegation and independent
+resource lifetime retain their separate implementation obligations.
+
 ### Qualified persisted child creation
 
 `Session_factory.create_generated_session` is an internal host service for creating
