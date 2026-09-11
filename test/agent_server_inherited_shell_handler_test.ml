@@ -7,7 +7,7 @@ module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module C = Chat_response.Tool_capability
 
-let%expect_test "private shell dependency keeps one child shell approval" =
+let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -57,6 +57,7 @@ let run ctx input = let* result = Tool.call("fixed_echo", `Object([])) in match 
               ~options:
                 { Daemon.default_options with
                   qualify_chatml_extensions = true
+                ; independent_lifetime_policy = Some "handler-fixture-v1"
                 ; model_post_stream =
                     Some
                       (fun ~sw:_ ~inputs:_ ->
@@ -99,7 +100,9 @@ let run ctx input = let* result = Tool.call("fixed_echo", `Object([])) in match 
                   ~finally:(fun () -> Agent_client.Connection.close client)
                   ~f:(fun () ->
                     initialize client;
-                    let parent, _ = create_session ~start_immediately:true client in
+                    let parent, parent_attachment =
+                      create_session ~start_immediately:true client
+                    in
                     let parent_entry =
                       R.find (Daemon.registry daemon) parent.id |> Option.value_exn
                     in
@@ -144,6 +147,7 @@ let run ctx input = let* result = Tool.call("fixed_echo", `Object([])) in match 
                     let child =
                       Agent_server.Session_factory.create_generated_session
                         ~start_immediately:true
+                        ~lifetime
                         (Daemon.factory daemon)
                         ~parent_session_id:parent.id
                         ~idempotency_key:
@@ -153,6 +157,19 @@ let run ctx input = let* result = Tool.call("fixed_echo", `Object([])) in match 
                         definition
                       |> protocol_ok
                     in
+                    (match lifetime with
+                     | Owned -> ()
+                     | Independent ->
+                       A.stop
+                         parent_entry.actor
+                         ~attachment_id:parent_attachment.id
+                         ~mode:Cancel
+                       |> protocol_ok
+                       |> ignore;
+                       Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
+                       |> protocol_ok;
+                       assert (
+                         not (Agent_server.Runtime_owner.is_loaded parent_entry.runtime)));
                     let state () = A.state child.actor |> protocol_ok in
                     let child_id = (state ()).identity.session_id in
                     let handle =
@@ -225,6 +242,18 @@ let run ctx input = let* result = Tool.call("fixed_echo", `Object([])) in match 
                     assert (
                       List.is_empty
                         (A.state parent_entry.actor |> protocol_ok).permissions);
-                    H.detach handle |> protocol_ok))))));
-  [%expect {||}]
+                    H.detach handle |> protocol_ok))))))
+;;
+
+let%expect_test
+    "private shell dependency keeps one child shell approval in both lifetimes"
+  =
+  List.iter [ Agent_server.Session_factory.Owned; Independent ] ~f:(fun lifetime ->
+    print_s [%sexp (lifetime : Agent_server.Session_factory.generated_lifetime)];
+    run lifetime);
+  [%expect
+    {|
+    Owned
+    Independent
+  |}]
 ;;

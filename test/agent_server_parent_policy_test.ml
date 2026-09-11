@@ -9,7 +9,13 @@ module H = Agent_client.Session_handle
 
 let state (entry : Registry.entry) = A.state entry.actor |> protocol_ok
 
-let create_child env root daemon (parent : Registry.entry) =
+let create_child_result
+      ?(lifetime = Agent_server.Session_factory.Owned)
+      env
+      root
+      daemon
+      (parent : Registry.entry)
+  =
   let module G = Agent_session.Generated_definition in
   let module C = Chat_response.Tool_capability in
   let definition =
@@ -49,12 +55,16 @@ let create_child env root daemon (parent : Registry.entry) =
   in
   Agent_server.Session_factory.create_generated_session
     ~start_immediately:true
+    ~lifetime
     (Daemon.factory daemon)
     ~parent_session_id:(state parent).identity.session_id
     ~idempotency_key:(P.Idempotency_key.of_string "policy-child" |> protocol_ok)
     ~display_name:None
     definition
-  |> protocol_ok
+;;
+
+let create_child env root daemon parent =
+  create_child_result env root daemon parent |> protocol_ok
 ;;
 
 let%expect_test "generated descendants use persisted parent policy across restart" =
@@ -105,6 +115,7 @@ let on_event = fun ctx state event -> match event with
                 ~options:
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
+                  ; independent_lifetime_policy = Some "moderation-fixture-v1"
                   ; model_post_stream =
                       Some
                         (fun ~sw:_ ~inputs ->
@@ -213,6 +224,33 @@ let on_event = fun ctx state event -> match event with
             let parent_entry =
               Registry.find (Daemon.registry daemon) parent.id |> Option.value_exn
             in
+            let before = (state parent_entry).moderator in
+            (match
+               create_child_result ~lifetime:Independent env root daemon parent_entry
+             with
+             | Error { code = Permission_denied; message; _ } ->
+               assert (
+                 String.is_prefix
+                   message
+                   ~prefix:"delegation.independent_moderation_unavailable")
+             | _ -> failwith "independent creation omitted the original parent policy");
+            assert (
+              Option.equal Jsonaf.exactly_equal before (state parent_entry).moderator);
+            [%test_eq: int] 0 !requests;
+            [%test_eq: int]
+              1
+              (List.length
+                 (Agent_store.Session_store.list_sessions (Daemon.store daemon)));
+            let records =
+              Agent_store.Delegation_store.with_records
+                (Agent_store.Session_store.delegations (Daemon.store daemon))
+                ~max_records:8
+                ~max_bytes:1048576
+                ~f:(fun records -> Ok records)
+              |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+              |> protocol_ok
+            in
+            assert (List.is_empty records);
             let child = create_child env root daemon parent_entry in
             let child_id = (state child).identity.session_id in
             let handle = attach sw client child_id in

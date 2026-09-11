@@ -9,7 +9,7 @@ module H = Agent_client.Session_handle
 
 let state (entry : R.entry) = A.state entry.actor |> protocol_ok
 
-let create_child env root daemon parent =
+let create_child ?(lifetime = Agent_server.Session_factory.Owned) env root daemon parent =
   let definition =
     Agent_server.Runtime_owner.with_background_runtime parent.R.runtime (fun runtime ->
       let native =
@@ -47,6 +47,7 @@ let create_child env root daemon parent =
   in
   Agent_server.Session_factory.create_generated_session
     ~start_immediately:true
+    ~lifetime
     (Daemon.factory daemon)
     ~parent_session_id:(state parent).identity.session_id
     ~idempotency_key:(P.Idempotency_key.of_string "standalone-child" |> protocol_ok)
@@ -55,9 +56,7 @@ let create_child env root daemon parent =
   |> protocol_ok
 ;;
 
-let%expect_test
-    "inherited standalone handlers keep private dependencies and caller ownership"
-  =
+let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -77,7 +76,7 @@ let%expect_test
         save "schema.json" "true";
         save
           "parent.chatmd"
-          {|<developer>Parent.</developer>
+          ({|<developer>Parent.</developer>
 <tool name="read_file"><read id="data" path="${workspace}/data"/></tool>
 <script id="reader" language="chatml" kind="tool">
 let run ctx input = let* result = Tool.call("read_file", input) in match result with
@@ -92,16 +91,20 @@ let run ctx input = let* result = Tool.call("private_reader", input) in match re
 <script id="start-report" language="chatml" kind="tool">
 let run ctx input = let* id = Job.start_tool("private_reader", input) in
   Task.pure(`Pending(`Job(id), `String("accepted")))
-</script>
-<script id="policy" language="chatml" kind="moderator" api="extensibility-v1">
+</script>|}
+           ^ (match lifetime with
+              | Independent -> ""
+              | Owned ->
+                {|<script id="policy" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = 0
 let on_event ctx state event = match event with
   | `Pre_tool_call(call) -> Task.pure(state + 1)
   | _ -> Task.pure(state)
-</script>
-<tool name="private_reader" type="chatml" script="reader" entrypoint="run" input_schema="schema.json" output_schema="schema.json"><uses tool="read_file"/></tool>
+</script>|})
+           ^ {|<tool name="private_reader" type="chatml" script="reader" entrypoint="run" input_schema="schema.json" output_schema="schema.json"><uses tool="read_file"/></tool>
 <tool name="read_report" type="chatml" script="report" entrypoint="run" input_schema="schema.json" output_schema="schema.json"><uses tool="private_reader"/></tool>
-<tool name="start_report" type="chatml" script="start-report" entrypoint="run" input_schema="schema.json" output_schema="schema.json" completion_schema="schema.json"><uses tool="private_reader"/></tool>|};
+<tool name="start_report" type="chatml" script="start-report" entrypoint="run" input_schema="schema.json" output_schema="schema.json" completion_schema="schema.json"><uses tool="private_reader"/></tool>|}
+          );
         let profile = { permission_profile with tool_default = Ask } in
         let configuration =
           config ~profile root root (Filename.concat root "parent.chatmd")
@@ -122,6 +125,7 @@ let on_event ctx state event = match event with
                 ~options:
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
+                  ; independent_lifetime_policy = Some "standalone-fixture-v1"
                   ; model_post_stream =
                       Some
                         (fun ~sw:_ ~inputs:_ ->
@@ -292,22 +296,38 @@ let on_event ctx state event = match event with
           let current = state entry in
           assert (List.is_empty current.invocations);
           assert (List.is_empty current.permissions);
-          let snapshot =
-            Agent_session.Moderator_checkpoint.decode current.moderator
-            |> protocol_ok
-            |> Option.value_exn
-          in
-          match snapshot.current_state with
-          | Session.Snapshot.Int actual -> [%test_eq: int] count actual
-          | _ -> failwith "parent moderation state lost"
+          match lifetime with
+          | Independent ->
+            assert (Option.is_none current.moderator);
+            assert (P.Session.equal_desired_state current.lifecycle.desired Stopped);
+            assert (not (Agent_server.Runtime_owner.is_loaded entry.runtime))
+          | Owned ->
+            let snapshot =
+              Agent_session.Moderator_checkpoint.decode current.moderator
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            (match snapshot.current_state with
+             | Session.Snapshot.Int actual -> [%test_eq: int] count actual
+             | _ -> failwith "parent moderation state lost")
         in
         let parent_id, child_id, grandchild_id =
           with_daemon (fun sw daemon client ->
-            let parent, _ = create_session ~start_immediately:true client in
+            let parent, parent_attachment =
+              create_session ~start_immediately:true client
+            in
             let parent_entry =
               R.find (Daemon.registry daemon) parent.id |> Option.value_exn
             in
-            let child = create_child env root daemon parent_entry in
+            let child = create_child ~lifetime env root daemon parent_entry in
+            (match lifetime with
+             | Owned -> ()
+             | Independent ->
+               A.stop parent_entry.actor ~attachment_id:parent_attachment.id ~mode:Cancel
+               |> protocol_ok
+               |> ignore;
+               Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
+               |> protocol_ok);
             check_public child;
             call sw client child "read_report" |> check_success;
             check_parent parent_entry 3;
@@ -407,9 +427,23 @@ let on_event ctx state event = match event with
                   "revoked private effect returned success"
                 , (status : P.Invocation.status)]));
         print_endline
-          "private dependency chain executes in child; parent policy remains \
-           parent-owned; direct private calls blocked; grandchild restart and private \
-           background work succeed"));
+          "private dependency chain executes in child; parent authority preserved; \
+           direct private calls blocked; grandchild restart and private background work \
+           succeed"))
+;;
+
+let%expect_test
+    "standalone handlers retain private dependencies and caller ownership in both \
+     lifetimes"
+  =
+  List.iter [ Agent_server.Session_factory.Owned; Independent ] ~f:(fun lifetime ->
+    print_s [%sexp (lifetime : Agent_server.Session_factory.generated_lifetime)];
+    run lifetime);
   [%expect
-    {| private dependency chain executes in child; parent policy remains parent-owned; direct private calls blocked; grandchild restart and private background work succeed |}]
+    {|
+    Owned
+    private dependency chain executes in child; parent authority preserved; direct private calls blocked; grandchild restart and private background work succeed
+    Independent
+    private dependency chain executes in child; parent authority preserved; direct private calls blocked; grandchild restart and private background work succeed
+    |}]
 ;;

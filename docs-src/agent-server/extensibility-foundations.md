@@ -3970,8 +3970,12 @@ An ancestor with stateful moderation is currently rejected for independent
 delegation, because a separately available original policy owner is required.
 The factory does not clone moderator state or silently omit its restrictions.
 Offline daemon tests cover temporary-root retention, actual inherited file reads,
-owned descendants, stop/restart, lazy ancestor loading and deletion. Expanded
-native-adapter and race qualification remains part of E08.
+owned descendants, stop/restart, lazy ancestor loading and deletion. They also
+exercise inherited shell approvals/grants, MCP connection sharing and schema pins,
+and private standalone/background dependencies under both Owned and Independent
+lifetimes. The Independent cases keep the original ancestor stopped and unloaded,
+including after restart. Unsupported parent moderation rejects before any child
+reservation, without changing its policy state or making a model call.
 
 `Runtime_builder.prepare_resources` supplies the construction part of stopped
 ancestor restoration. It verifies an authored revision's captured source tree and
@@ -4142,9 +4146,10 @@ tests verify unchanged working directory/environment, separate approval namespac
 ancestor-check composition and scope expiry. Provider responses are fake; the
 integration command is the local `/bin/echo`.
 
-This advances native shell delegation. Broader shell hook/helper qualification,
-managed-tool delegation and independent
-resource lifetime retain their separate implementation obligations.
+The same direct-shell and private standalone-to-shell checks run with Independent
+lifetime and a stopped original parent. Approval provenance and grant reuse remain
+with the calling child after resources are reconstructed. The future public
+session/helper bridge has separate service and authorization requirements.
 
 ### Durable delegated moderator handoffs
 
@@ -4269,8 +4274,9 @@ The offline factory regression creates a real persisted child, checks rewritten
 file contents and a rejected subsequent call, and verifies decision provenance and
 the parent's state counter. After daemon restart, a grandchild still reaches the
 root policy through an unmoderated child. A subsequent policy end-session stops
-the entire owned subtree. Other authority adapters, independent resource lifetime
-and public creation tools retain their separate implementation requirements.
+the entire owned subtree. A companion admission check proves that an Independent
+request cannot omit these parent rules: it rejects before creating a private
+delegation record or child. Public creation tools remain a separate phase.
 
 ### Qualified persisted child creation
 

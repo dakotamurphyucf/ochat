@@ -9,7 +9,14 @@ module H = Agent_client.Session_handle
 
 let state (entry : R.entry) = A.state entry.actor |> protocol_ok
 
-let create_child env root daemon parent =
+let create_child
+      ?(lifetime = Agent_server.Session_factory.Owned)
+      ?(control = false)
+      env
+      root
+      daemon
+      parent
+  =
   let definition =
     Agent_server.Runtime_owner.with_background_runtime parent.R.runtime (fun runtime ->
       let native =
@@ -25,7 +32,9 @@ let create_child env root daemon parent =
           ~root_file:"child.chatmd"
           ~sources:
             [ ( "child.chatmd"
-              , {|<developer>Use only the inherited echo.</developer><tool type="inherited" name="echo"/>|}
+              , {|<developer>Use inherited tools.</developer><tool type="inherited" name="echo"/>|}
+                ^
+                if control then {|<tool type="inherited" name="change_catalog"/>|} else ""
               )
             ]
           ()
@@ -47,6 +56,7 @@ let create_child env root daemon parent =
   in
   Agent_server.Session_factory.create_generated_session
     ~start_immediately:true
+    ~lifetime
     (Daemon.factory daemon)
     ~parent_session_id:(state parent).identity.session_id
     ~idempotency_key:(P.Idempotency_key.of_string "mcp-child" |> protocol_ok)
@@ -55,9 +65,10 @@ let create_child env root daemon parent =
   |> protocol_ok
 ;;
 
-let%expect_test
-    "persisted MCP descendants retain one connection, caller approvals and schema pins"
-  =
+let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
+  let independent =
+    Agent_server.Session_factory.equal_generated_lifetime lifetime Independent
+  in
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -100,6 +111,7 @@ let%expect_test
                 ~options:
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
+                  ; independent_lifetime_policy = Some "mcp-fixture-v1"
                   ; model_post_stream =
                       Some
                         (fun ~sw:_ ~inputs:_ ->
@@ -210,15 +222,32 @@ let%expect_test
         let connections () = List.length (lines "connections") in
         let parent_id, child_id, leaf_id =
           with_daemon (fun sw daemon client ->
-            let parent, _ = create_session ~start_immediately:true client in
+            let parent, parent_attachment =
+              create_session ~start_immediately:true client
+            in
             let parent_entry =
               R.find (Daemon.registry daemon) parent.id |> Option.value_exn
             in
             let connected = connections () in
             assert (connected > 0);
-            let child = create_child env root daemon parent_entry in
+            let child =
+              create_child ~lifetime ~control:independent env root daemon parent_entry
+            in
+            (match lifetime with
+             | Owned -> ()
+             | Independent ->
+               A.stop parent_entry.actor ~attachment_id:parent_attachment.id ~mode:Cancel
+               |> protocol_ok
+               |> ignore;
+               Agent_server.Runtime_owner.unload_and_wait parent_entry.runtime
+               |> protocol_ok;
+               assert (not (Agent_server.Runtime_owner.is_loaded parent_entry.runtime)));
+            let retained_connections = connections () in
             let leaf = create_child env root daemon child in
-            [%test_eq: int] connected (connections ());
+            [%test_eq: int] retained_connections (connections ());
+            (match lifetime with
+             | Owned -> [%test_eq: int] connected retained_connections
+             | Independent -> [%test_eq: int] (connected + 1) retained_connections);
             call sw client child "echo" "{}" |> success child;
             call sw client leaf "echo" "{}" |> success leaf;
             List.iter [ child; leaf ] ~f:(fun entry ->
@@ -246,11 +275,23 @@ let%expect_test
           let parent = R.load (Daemon.registry daemon) parent_id |> protocol_ok in
           let child = R.load (Daemon.registry daemon) child_id |> protocol_ok in
           let leaf = R.load (Daemon.registry daemon) leaf_id |> protocol_ok in
+          (match lifetime with
+           | Owned -> ()
+           | Independent ->
+             assert (
+               P.Session.equal_desired_state (state parent).lifecycle.desired Stopped);
+             assert (not (Agent_server.Runtime_owner.is_loaded parent.runtime)));
           assert (connections () > initial_connections);
           let connected = connections () in
           call sw client leaf "echo" "{}" |> success leaf;
           [%test_eq: int] connected (connections ());
-          call sw client parent "change_catalog" {|{"mode":"schema"}|} |> success parent;
+          let controller =
+            match lifetime with
+            | Owned -> parent
+            | Independent -> child
+          in
+          call sw client controller "change_catalog" {|{"mode":"schema"}|}
+          |> success controller;
           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
           (match call sw client leaf "echo" "{}" with
            | [ { status = Published (Fail error); _ } ] ->
@@ -291,7 +332,20 @@ let%expect_test
           (lines "calls");
         print_endline
           "MCP connection shared; child approvals isolated; descendants restore; live \
-           and restored schema substitution blocked; original catalog recovers"));
+           and restored schema substitution blocked; original catalog recovers"))
+;;
+
+let%expect_test
+    "MCP descendants retain connection, approval and schema authority in both lifetimes"
+  =
+  List.iter [ Agent_server.Session_factory.Owned; Independent ] ~f:(fun lifetime ->
+    print_s [%sexp (lifetime : Agent_server.Session_factory.generated_lifetime)];
+    run lifetime);
   [%expect
-    {| MCP connection shared; child approvals isolated; descendants restore; live and restored schema substitution blocked; original catalog recovers |}]
+    {|
+    Owned
+    MCP connection shared; child approvals isolated; descendants restore; live and restored schema substitution blocked; original catalog recovers
+    Independent
+    MCP connection shared; child approvals isolated; descendants restore; live and restored schema substitution blocked; original catalog recovers
+    |}]
 ;;
