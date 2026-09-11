@@ -53,6 +53,16 @@ let records ledger =
   D.with_records ledger ~max_records ~max_bytes ~f:(fun records -> Ok records) |> store_ok
 ;;
 
+let retention ledger ?(entries = 4096) ?(bytes = max_bytes) f =
+  D.with_artifact_retention
+    ledger
+    ~max_records
+    ~max_bytes
+    ~max_artifact_entries:entries
+    ~max_artifact_bytes:bytes
+    ~f
+;;
+
 let create env sw root =
   S.create
     ~env
@@ -72,6 +82,195 @@ let reopen env sw root =
     ~process_start_identity:None
     ~lock_nonce:"delegation-reopen"
   |> store_ok
+;;
+
+let%expect_test
+    "abandoned artifacts retire durably without losing protected source or retry identity"
+  =
+  with_temp_directory "ochat-abandoned-artifacts" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let data = S.data_root store in
+      let ledger = S.delegations store in
+      let artifact_root = Agent_store.Data_root.prompt_artifacts_path data in
+      let artifacts = A.create ~env ~root:artifact_root |> store_ok in
+      let make ?parent_revision name =
+        let artifact =
+          A.Artifact.create
+            ~revision_id:(P.Id.Prompt_revision.create ())
+            ~root_chatmd:("<developer>" ^ name ^ "</developer>")
+            ~sources:[]
+            ~parser_schema_version:4
+            ~runtime_schema_version:2
+            ~created_at:timestamp
+            ()
+          |> store_ok
+        in
+        let base = admission () in
+        let candidate =
+          { base with
+            revision_id = artifact.revision_id
+          ; manifest_sha256 = artifact.manifest_sha256
+          ; parent_revision_id =
+              Option.value parent_revision ~default:base.parent_revision_id
+          }
+        in
+        let record = reserve ledger (key name) candidate |> record in
+        A.install artifacts ~transaction_id:candidate.transaction_id artifact |> store_ok;
+        record, artifact
+      in
+      let abandoned, doomed = make "abandoned" in
+      let abandoned = D.advance ledger abandoned Artifact_installed |> store_ok in
+      let abandoned = D.revoke ledger abandoned Admission_failed |> store_ok in
+      let active, active_artifact = make "active-intent" in
+      let ambiguous, ambiguous_artifact = make "ambiguous-child-install" in
+      let ambiguous = D.revoke ledger ambiguous Parent_stopped |> store_ok in
+      Eio.Path.mkdir
+        ~perm:0o700
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / Agent_store.Data_root.session_path data ambiguous.admission.child_session_id);
+      let staged, staged_artifact = make "staged-child" in
+      let staged = D.advance ledger staged Artifact_installed |> store_ok in
+      let staged = D.revoke ledger staged Admission_failed |> store_ok in
+      let stage =
+        Filename.concat
+          (Agent_store.Data_root.sessions_path data)
+          (".creating-" ^ P.Id.Transaction.to_string staged.admission.transaction_id)
+      in
+      Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / stage);
+      let shared, shared_artifact = make "other-session-reference" in
+      let _ = D.revoke ledger shared Admission_failed |> store_ok in
+      let ancestor, ancestor_artifact = make "ancestor-source" in
+      let _ = D.revoke ledger ancestor Admission_failed |> store_ok in
+      let _, referencing_artifact =
+        make ~parent_revision:ancestor_artifact.revision_id "retained-ancestor-reference"
+      in
+      let prune protected =
+        A.prune_unreferenced
+          artifacts
+          ~protected:(shared_artifact.revision_id :: protected)
+      in
+      let called = ref false in
+      let blocked result =
+        assert (Result.is_error result);
+        assert (not !called)
+      in
+      let observe protected =
+        called := true;
+        prune protected
+      in
+      blocked (retention ledger ~entries:1 observe);
+      blocked (retention ledger ~bytes:1 observe);
+      let active_path =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / root
+          / "delegations"
+          / (digest (D.Key.sexp_of_t active.key |> Sexp.to_string_mach) ^ ".frame"))
+      in
+      let saved_record = Eio.Path.load active_path in
+      let forged_record =
+        match D.sexp_of_record active with
+        | Sexp.List fields ->
+          Sexp.List
+            (fields @ [ Sexp.List [ Atom "artifact_collection"; Atom "Prepared" ] ])
+        | _ -> assert false
+      in
+      let forged =
+        Sexp.List
+          [ List [ Atom "version"; Atom "3" ]; List [ Atom "record"; forged_record ] ]
+        |> Sexp.to_string_mach
+        |> Agent_store.Frame.encode ~flags:0 ~max_payload_length:262144
+        |> frame_ok
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) active_path forged;
+      (match retention ledger observe with
+       | Error (Agent_store.Store_error.Corrupt message) ->
+         [%test_eq: string]
+           "invalid delegated creation identity or capability pins"
+           message
+       | _ -> failwith "expected rejection of collection intent on an active admission");
+      assert (not !called);
+      Eio.Path.save ~create:(`Or_truncate 0o600) active_path saved_record;
+      let original_root =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / artifact_root
+          / P.Id.Prompt_revision.to_string doomed.revision_id
+          / "root.chatmd")
+      in
+      Eio.Path.unlink original_root;
+      Eio.Path.save ~create:(`Exclusive 0o400) original_root "changed artifact";
+      blocked (retention ledger observe);
+      assert (
+        Option.is_none
+          (D.find ledger abandoned.key |> store_ok |> Option.value_exn)
+            .artifact_collection);
+      Eio.Path.unlink original_root;
+      Eio.Path.save ~create:(`Exclusive 0o400) original_root doomed.root_chatmd;
+      let outside = Eio.Path.(Eio.Stdenv.fs env / root / "outside") in
+      Eio.Path.save ~create:(`Exclusive 0o600) outside "do not delete";
+      let extra =
+        Eio.Path.(
+          Eio.Stdenv.fs env
+          / artifact_root
+          / P.Id.Prompt_revision.to_string doomed.revision_id
+          / "foreign")
+      in
+      Eio.Path.symlink ~link_to:(Eio.Path.native_exn outside) extra;
+      blocked (retention ledger observe);
+      Eio.Path.unlink extra;
+      let armed = ref (Some true) in
+      let fault_env =
+        Job_store_fixtures.fault_env
+          ~matches_rename:(fun path ->
+            String.is_substring path ~substring:"/delegations/"
+            && String.is_suffix path ~suffix:".frame")
+          env
+          armed
+      in
+      let fault_ledger = D.create ~env:fault_env ~data_root:data in
+      blocked (retention fault_ledger observe);
+      assert (Option.is_none !armed);
+      assert (A.exists artifacts doomed.revision_id);
+      (* The consumer fails after a partial deletion. Collection intent must
+         already be durable, so a fresh store can finish this exact cleanup. *)
+      assert (
+        Result.is_error
+          (retention ledger (fun _ ->
+             Eio.Path.unlink original_root;
+             Error (Agent_store.Store_error.Corrupt "interrupted deletion"))));
+      let prepared = D.find ledger abandoned.key |> store_ok |> Option.value_exn in
+      assert (Option.is_some prepared.artifact_collection);
+      assert (D.Reference.equal (D.reference abandoned) (D.reference prepared));
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let ledger = S.delegations store in
+      [%test_eq: int] 1 (retention ledger prune |> store_ok);
+      assert (not (A.exists artifacts doomed.revision_id));
+      List.iter
+        [ active_artifact
+        ; ambiguous_artifact
+        ; staged_artifact
+        ; shared_artifact
+        ; ancestor_artifact
+        ; referencing_artifact
+        ]
+        ~f:(fun artifact -> assert (A.exists artifacts artifact.A.Artifact.revision_id));
+      [%test_eq: string] "do not delete" (Eio.Path.load outside);
+      let replayed = reserve ledger abandoned.key (admission ()) |> record in
+      assert (D.equal_record prepared replayed);
+      assert (Result.is_error (D.advance ledger replayed Child_installed));
+      assert (
+        D.equal_record active (D.find ledger active.key |> store_ok |> Option.value_exn));
+      [%test_eq: int] 0 (retention ledger prune |> store_ok);
+      S.close store |> store_ok;
+      print_endline
+        "bounded verified cleanup; active/ambiguous/staged/shared artifacts retained; \
+         lost acknowledgement and partial deletion recover; revoked retry stays revoked"));
+  [%expect
+    {| bounded verified cleanup; active/ambiguous/staged/shared artifacts retained; lost acknowledgement and partial deletion recover; revoked retry stays revoked |}]
 ;;
 
 let%expect_test

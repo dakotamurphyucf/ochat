@@ -57,12 +57,15 @@ type revocation =
   | Admission_failed
 [@@deriving equal, sexp]
 
+type artifact_collection = Prepared [@@deriving equal, sexp]
+
 type record =
   { key : Key.t
   ; request_sha256 : string
   ; admission : Admission.t
   ; stage : stage
   ; revocation : revocation option
+  ; artifact_collection : artifact_collection option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -161,6 +164,10 @@ let validate (record : record) =
     && sha256 a.authority_sha256
     && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
     && independent_valid
+    && (match record.artifact_collection, record.stage, record.revocation with
+        | None, _, _ -> true
+        | Some Prepared, (Reserved | Artifact_installed), Some _ -> true
+        | Some Prepared, _, _ -> false)
     && List.is_sorted_strictly a.capability_pins ~compare:(fun (left, _) (right, _) ->
       String.compare left right)
     && List.for_all a.capability_pins ~f:(fun (name, pin) ->
@@ -211,7 +218,9 @@ let encode record =
   Frame.encode
     ~max_payload_length
     ~flags:0
-    (Persisted.sexp_of_t { version = 2; record } |> Sexp.to_string_mach)
+    (Persisted.sexp_of_t
+       { version = (if Option.is_some record.artifact_collection then 3 else 2); record }
+     |> Sexp.to_string_mach)
   |> Result.map_error ~f:(fun _ ->
     Store_error.Corrupt "delegation intent exceeds its frame limit")
 ;;
@@ -229,9 +238,12 @@ let decode ~name contents =
     in
     let%bind () =
       match persisted.version with
-      | 1 when Option.is_none persisted.record.admission.parent_stop_epoch -> Ok ()
-      | 2 -> Ok ()
-      | version when version > 2 -> Error (Store_error.Schema_too_new version)
+      | 1
+        when Option.is_none persisted.record.admission.parent_stop_epoch
+             && Option.is_none persisted.record.artifact_collection -> Ok ()
+      | 2 when Option.is_none persisted.record.artifact_collection -> Ok ()
+      | 3 when Option.is_some persisted.record.artifact_collection -> Ok ()
+      | version when version > 3 -> Error (Store_error.Schema_too_new version)
       | _ -> corrupt "invalid delegation intent version"
     in
     let%bind () = validate persisted.record in
@@ -376,11 +388,112 @@ let save t record =
     contents
 ;;
 
+let with_artifact_retention
+      t
+      ~max_records
+      ~max_bytes
+      ~max_artifact_entries
+      ~max_artifact_bytes
+      ~f
+  =
+  locked t (fun () ->
+    let open Result.Let_syntax in
+    let%bind records = records_locked t ~max_records ~max_bytes in
+    let%bind reader =
+      Retention_reader.create
+        ~env:t.env
+        ~root:(Data_root.path t.root)
+        ~max_entries:max_artifact_entries
+        ~max_bytes:max_artifact_bytes
+    in
+    let directory path =
+      let%bind kind = Retention_reader.kind reader ~path in
+      match kind with
+      | `Directory -> Ok ()
+      | `File -> corrupt "retention root is not a directory"
+    in
+    let%bind () = directory "sessions" in
+    let%bind () = directory "prompt-artifacts" in
+    let%bind artifacts =
+      Prompt_artifact_store.create
+        ~env:t.env
+        ~root:(Data_root.prompt_artifacts_path t.root)
+    in
+    let presence path =
+      try
+        match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs t.env / path) with
+        | `Not_found -> Ok false
+        | `Directory -> Ok true
+        | _ -> corrupt "delegation retention found a linked or invalid destination"
+      with
+      | exn ->
+        Error (Store_error.of_exn ~operation:"inspect abandoned delegation" ~path exn)
+    in
+    let%bind retained, collected =
+      List.fold_result records ~init:([], []) ~f:(fun (retained, collected) record ->
+        let%map keep =
+          match record.stage, record.revocation with
+          | (Reserved | Artifact_installed), Some _ ->
+            let%bind installed =
+              presence (Data_root.session_path t.root record.admission.child_session_id)
+            in
+            let%bind staged =
+              presence
+                (Filename.concat
+                   (Data_root.sessions_path t.root)
+                   (".creating-"
+                    ^ P.Id.Transaction.to_string record.admission.transaction_id))
+            in
+            (match installed || staged with
+             | true -> Ok `Retain
+             | false ->
+               let%bind exists =
+                 presence
+                   (Filename.concat
+                      (Data_root.prompt_artifacts_path t.root)
+                      (P.Id.Prompt_revision.to_string record.admission.revision_id))
+               in
+               let%map () =
+                 match exists, record.artifact_collection with
+                 | false, _ | true, Some Prepared -> Ok ()
+                 | true, None ->
+                   Prompt_artifact_store.verify_retained
+                     artifacts
+                     ~reader
+                     ~revision_id:record.admission.revision_id
+                     ~manifest_sha256:record.admission.manifest_sha256
+               in
+               `Collect exists)
+          | _, _ -> Ok `Retain
+        in
+        match keep with
+        | `Collect true -> retained, record :: collected
+        | `Collect false -> retained, collected
+        | `Retain -> record.admission.revision_id :: retained, collected)
+    in
+    (* Persist the verified ownership before any deletion. A later pass can then
+       finish partially removed directories without treating them as new artifacts.
+       Reflush existing intent too, including a prior ambiguous acknowledgement. *)
+    let%bind () =
+      List.fold_result collected ~init:() ~f:(fun () record ->
+        save t { record with artifact_collection = Some Prepared })
+    in
+    (* Even a revoked record may retain an ancestor's source identity. The host
+       adds catalog and session references before choosing any deletion. *)
+    f (retained @ List.map records ~f:(fun record -> record.admission.parent_revision_id)))
+;;
+
 let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
   locked t (fun () ->
     let open Result.Let_syntax in
     let candidate =
-      { key; request_sha256; admission; stage = Reserved; revocation = None }
+      { key
+      ; request_sha256
+      ; admission
+      ; stage = Reserved
+      ; revocation = None
+      ; artifact_collection = None
+      }
     in
     let%bind () = validate candidate in
     let%bind records = records_locked t ~max_records ~max_bytes in

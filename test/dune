@@ -922,6 +922,13 @@
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_server_artifact_retention_test)
+ (modules agent_server_artifact_retention_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name agent_server_inherited_standalone_test)
  (modules agent_server_inherited_standalone_test)
  (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)

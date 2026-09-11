@@ -3637,18 +3637,34 @@ artifact stage only after verifying the complete installed artifact. If revocati
 races with installation, advancement fails and the captured bytes remain retained
 for reconciliation.
 
-Daemon startup artifact pruning now includes every validated reservation, including
-incomplete and revoked records. The ledger mutex covers the scan and pruning;
-corrupt records, links, unknown files or exhausted scan budgets prevent deletion.
-The host can configure `delegation_recovery_max_count` and
-`delegation_recovery_max_bytes` in its factory limits. Ordinary command-receipt
-expiration does not remove creation records. Explicit abandoned-admission cleanup
-is not implemented yet, so revoked reservations conservatively retain artifacts.
+Daemon startup pruning protects active reservations, installed/linked children,
+every recorded parent revision, cached catalog revisions and all indexed session
+revisions, including archives. A permanently revoked `Reserved` or
+`Artifact_installed` attempt can release its artifact only when neither a final
+nor staged child directory exists. The artifact's complete manifest, source and
+materialized file inventory must match its admitted digest under bounded reads.
+Links, mismatched data and exhausted validation budgets prevent pruning.
 
-This is the durable storage and artifact-installation part of child creation.
-Actual child-session initialization, parent-management linking, policy enforcement,
-stop coordination and restart reconciliation remain under implementation. Neither
-a stored record nor possession of a child ID grants execution or management access.
+Before deletion, the ledger durably records `artifact_collection = Prepared`.
+This uses ledger version 3; unmarked records remain version 2 and older versions
+remain readable. The immutable admission/reference hash does not change. If
+deletion is interrupted, the same marked artifact can be finished after restart
+without requiring the already-deleted files to validate again. Child-directory
+and reference protection still applies. The ledger lock spans this decision and
+pruning; startup runs it before accepting new management/creation calls.
+
+`delegation_recovery_max_count` and `delegation_recovery_max_bytes` bound ledger
+scans. `delegation_artifact_max_entries` (65,536) and
+`delegation_artifact_max_bytes` (64 MiB) bound the shared artifact validation pass.
+Ordinary command-receipt expiration never removes creation records: revoked retry
+identities remain inspectable and cannot reactivate a collected attempt. Tests
+cover source corruption, links, invalid markers, lost write acknowledgement,
+partial deletion/store reopen, shared references and actual daemon restarts.
+
+The scoped factory connects these records to initialization, parent-management
+linking, policy checks and recovery. Model-facing creation has separate service
+and qualification requirements. A stored record or child ID alone grants no
+execution or management access.
 
 ### Generated runtime construction
 
@@ -4203,8 +4219,9 @@ storage. It checks identical retries, conflicts, separate initial instructions a
 the same child IDs after two daemon restarts, then starts/sends through the public
 session APIs and executes inherited recursive scripts. These tests qualify normal
 creation and retained retry behavior, including rejection after archive/removal.
-Model-facing creation, remaining concurrent lifecycle races and
-cleanup of abandoned installed artifacts/relationships remain required work.
+Model-facing creation and remaining concurrent lifecycle/relationship contracts
+remain required work. Abandoned unreferenced source artifacts use the startup
+collection protocol described above; creation records are retained.
 
 ### Durable initial activation
 

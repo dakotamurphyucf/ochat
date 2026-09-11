@@ -53,12 +53,15 @@ type revocation =
   | Admission_failed
 [@@deriving equal, sexp_of]
 
+type artifact_collection = Prepared [@@deriving equal, sexp_of]
+
 type record = private
   { key : Key.t
   ; request_sha256 : string
   ; admission : Admission.t
   ; stage : stage
   ; revocation : revocation option
+  ; artifact_collection : artifact_collection option
   }
 [@@deriving equal, sexp_of]
 
@@ -131,9 +134,10 @@ val revoke : t -> record -> revocation -> (record, Store_error.t) result
     the parent directory. The retained intent still owns the same retry IDs. *)
 val discard_uninstalled_staging : t -> record -> (unit, Store_error.t) result
 
-(** Fully validate the ledger and hold its mutex through f. All records, including
-    revoked/incomplete ones, protect their artifact until explicit cross-store
-    cleanup exists. Corruption, links and budget exhaustion prevent f entirely.
+(** Fully validate the ledger and hold its mutex through f. This general reader
+    does not authorize discarding any record's artifact; the startup collection
+    policy is supplied separately by [with_artifact_retention]. Corruption, links
+    and budget exhaustion prevent f entirely.
     f must not reenter the ledger or wait on an actor; acquire parent coordination
     before this lock. Exceptions propagate outside the mutex without poisoning it. *)
 val with_records
@@ -141,4 +145,26 @@ val with_records
   -> max_records:int
   -> max_bytes:int
   -> f:(record list -> ('a, Store_error.t) result)
+  -> ('a, Store_error.t) result
+
+(** Startup-only retention decision, under exclusive root ownership and before
+    accepting creation/management calls. Holds the ledger lock through [f]. A
+    permanently revoked Reserved/Artifact_installed attempt can release its own
+    artifact only when both final and staged child directories are absent and
+    the complete artifact matches its admitted digest under bounded validation.
+    Persist a collection intent before invoking [f]; future passes may finish
+    partially deleted artifacts under that same irrevocable intent. This uses
+    ledger v3 only for marked records; old records and reference hashes persist.
+    Installed/linked children, unrevoked attempts and every parent revision remain
+    protected. The immutable retry record is never removed or unrevoked.
+    [f] receives protected revisions and must add all catalog/session references,
+    including archives. Invalid ledger/destinations, failed verification and
+    exhausted budgets prevent [f]. Marked partial deletions are resumable. *)
+val with_artifact_retention
+  :  t
+  -> max_records:int
+  -> max_bytes:int
+  -> max_artifact_entries:int
+  -> max_artifact_bytes:int
+  -> f:(Agent_protocol.Id.Prompt_revision.t list -> ('a, Store_error.t) result)
   -> ('a, Store_error.t) result

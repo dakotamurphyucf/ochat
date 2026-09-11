@@ -21,6 +21,8 @@ type limits =
   ; job_result_recovery_max_bytes : int
   ; delegation_recovery_max_count : int
   ; delegation_recovery_max_bytes : int
+  ; delegation_artifact_max_entries : int
+  ; delegation_artifact_max_bytes : int
   ; delegation_max_depth : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits

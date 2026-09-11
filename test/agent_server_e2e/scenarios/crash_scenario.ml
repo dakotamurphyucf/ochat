@@ -85,6 +85,14 @@ let run_child env arguments =
     Crash_owned_stop.run_child ~interrupt_recovery:boundary env ~root ~recover:true
   | [ "replace"; name; target ] -> run_replace_child env name target
   | [ "journal"; count; directory ] -> run_journal_child env count directory
+  | [ "generated-create"
+    ; root
+    ; (("collection-prepared" | "collection-partial") as boundary)
+    ] -> Crash_artifact_collection.run_child env ~root ~boundary ~recover:false
+  | [ "generated-recover"
+    ; root
+    ; (("collection-prepared" | "collection-partial") as boundary)
+    ] -> Crash_artifact_collection.run_child env ~root ~boundary ~recover:true
   | [ "generated-create"; root; boundary ] ->
     Crash_generated_creation.run_child env ~root ~boundary ~recover:false
   | [ "generated-recover"; root; boundary ] ->

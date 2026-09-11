@@ -108,6 +108,8 @@ let default_options =
       ; delegation_recovery_max_count = 4096
       ; delegation_max_depth = 32
       ; delegation_recovery_max_bytes = 67108864
+      ; delegation_artifact_max_entries = 65536
+      ; delegation_artifact_max_bytes = 67108864
       ; job_result_recovery_max_bytes = 64 * 1024 * 1024
       ; subscriptions = Agent_session.Staged_subscriptions.default_limits
       ; schedules = Agent_session.Staged_schedules.default_limits
@@ -766,19 +768,17 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   let%bind _ = Session_factory.recover_sessions factory in
   let%bind () = Session_factory.reconcile_generated_creations factory in
   let pinned_revisions =
-    List.filter_map indexed_sessions ~f:(fun entry ->
+    List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
       entry.Agent_store.Session_index.Entry.session.prompt_revision)
   in
   ignore
-    (Agent_store.Delegation_store.with_records
+    (Agent_store.Delegation_store.with_artifact_retention
        (Agent_store.Session_store.delegations store)
        ~max_records:factory_limits.delegation_recovery_max_count
        ~max_bytes:factory_limits.delegation_recovery_max_bytes
-       ~f:(fun records ->
-         let generated_revisions =
-           List.map records ~f:(fun record ->
-             record.Agent_store.Delegation_store.admission.revision_id)
-         in
+       ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
+       ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
+       ~f:(fun generated_revisions ->
          Agent_session.Prompt_catalog.prune_unreferenced_artifacts
            prompts
            ~additional:(generated_revisions @ pinned_revisions))

@@ -567,6 +567,8 @@ let test env environment =
     ; "parent-missing"
     ; "moderated-child-record"
     ; "moderated-auto-child"
+    ; "collection-prepared"
+    ; "collection-partial"
     ]
     ~f:(fun boundary ->
       let root =
