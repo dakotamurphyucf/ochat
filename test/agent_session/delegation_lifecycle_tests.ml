@@ -45,7 +45,7 @@ let actor ~env ~sw ~state ~reject_save =
   actor, backend
 ;;
 
-let with_fixture ?(lifetime = D.Admission.Owned) f =
+let with_fixture ?(lifetime = D.Admission.Owned) ?(reject_transition = fun _ -> false) f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let store =
@@ -117,13 +117,14 @@ let with_fixture ?(lifetime = D.Admission.Owned) f =
           let reject = ref false in
           let child, backend =
             actor ~env ~sw ~state ~reject_save:(fun transition ->
-              !reject
-              &&
-              match
-                transition.Agent_session.Session_transition.state.lifecycle.desired
-              with
-              | Stopped -> true
-              | Running -> false)
+              reject_transition transition
+              || (!reject
+                  &&
+                  match
+                    transition.Agent_session.Session_transition.state.lifecycle.desired
+                  with
+                  | Stopped -> true
+                  | Running -> false))
           in
           let closes = ref 0 in
           let runtime =

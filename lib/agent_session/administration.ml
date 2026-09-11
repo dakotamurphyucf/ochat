@@ -52,6 +52,7 @@ let reset_state (state : Session_state.t) options =
   ; jobs = []
   ; schedules = []
   ; invocations = []
+  ; managed_submissions = []
   ; subscriptions = []
   ; ingress_registrations = []
   ; deliveries = []

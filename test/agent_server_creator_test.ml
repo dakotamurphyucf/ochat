@@ -38,15 +38,26 @@ let%expect_test
       ~f:(fun () ->
         let source =
           {|<developer>Create children.</developer>
-<tool name="agent_create"/><tool name="run_chatml"/>
-<tool name="read_file"><read id="data" path="${workspace}"/></tool><tool name="append_to_file"/>|}
+<tool name="agent_create"/><tool name="agent_status"/><tool name="run_chatml"/>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool><tool name="append_to_file"/>
+<shell_access id="direct" cwd="${workspace}">
+  <capabilities sandbox="direct_unsafe" network="false" child_processes="false" arbitrary_code="false" privilege_change="false"><read path="${workspace}"/></capabilities>
+  <backends merge="replace"><direct when="macos"/><direct when="linux"/></backends>
+  <policy default="ask"/>
+  <approvals provider="ui" unavailable="deny" scopes="once,exact_session"/>
+  <audit format="none"/>
+</shell_access>
+<tool name="fixed_echo" type="shell" mode="fixed" runtime="direct" command="/bin/echo private-permission-command" result="stdout"/>|}
         in
         let prompt = Filename.concat root "parent.chatmd" in
         Eio.Path.save
           ~create:(`Exclusive 0o600)
           Eio.Path.(Eio.Stdenv.fs env / prompt)
           source;
-        let configuration = config root root prompt in
+        let configuration =
+          config ~profile:{ permission_profile with tool_default = Ask } root root prompt
+        in
+        let phase = ref "startup" in
         let queued = ref None
         and calls = ref 0 in
         let provider ~sw:_ ~inputs:_ =
@@ -101,13 +112,16 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  let client = connection daemon (principal ()) in
-                  Exn.protect
-                    ~finally:(fun () -> Agent_client.Connection.close client)
-                    ~f:(fun () ->
-                      initialize client;
-                      f sw daemon client))))
+                try
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                    let client = connection daemon (principal ()) in
+                    Exn.protect
+                      ~finally:(fun () -> Agent_client.Connection.close client)
+                      ~f:(fun () ->
+                        initialize client;
+                        f sw daemon client))
+                with
+                | Eio.Time.Timeout -> failwith ("creator fixture timeout: " ^ !phase)))
         in
         let get daemon id = R.load (D.registry daemon) id |> protocol_ok in
         let invoke sw daemon client id name args =
@@ -135,6 +149,20 @@ let%expect_test
             let current = state entry in
             match current.active_operation with
             | Some _ ->
+              (* The test operator approves this caller's requested tool only.
+                 A status call never approves the separate target child's request. *)
+              List.iter current.permissions ~f:(fun permission ->
+                match permission.P.Permission.state with
+                | Pending ->
+                  H.respond_permission
+                    handle
+                    ~permission_id:permission.id
+                    ~permission_generation:permission.generation
+                    ~choice:Approve_once
+                    ~reason:None
+                  |> protocol_ok
+                  |> ignore
+                | _ -> ());
               Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
               wait ()
             | None -> current
@@ -169,12 +197,13 @@ let%expect_test
         in
         let child_source =
           {|<authoring_context policy="manual"/><developer>Child creator.</developer><config model="child-model" reasoning_effort="low"/>
-<tool type="inherited" name="agent_create"/><tool type="inherited" name="run_chatml"/><tool type="inherited" name="read_file"/>|}
+<tool type="inherited" name="agent_create"/><tool type="inherited" name="agent_status"/><tool type="inherited" name="run_chatml"/><tool type="inherited" name="read_file"/><tool type="inherited" name="fixed_echo"/>|}
         in
         let child_request =
           request
             ~key:"retained-child"
-            ~tools:[ "agent_create"; "run_chatml"; "read_file" ]
+            ~tools:
+              [ "agent_create"; "agent_status"; "run_chatml"; "read_file"; "fixed_echo" ]
             child_source
         in
         let root_id, child_id, grandchild_id, revision =
@@ -191,7 +220,13 @@ let%expect_test
             let changed =
               request
                 ~key:"retained-child"
-                ~tools:[ "agent_create"; "run_chatml"; "read_file" ]
+                ~tools:
+                  [ "agent_create"
+                  ; "agent_status"
+                  ; "run_chatml"
+                  ; "read_file"
+                  ; "fixed_echo"
+                  ]
                 (child_source ^ "<user>Different initial input.</user>")
             in
             (match invoke sw daemon client parent.id "agent_create" changed with
@@ -237,8 +272,8 @@ let%expect_test
             let grandchild_request =
               request
                 ~key:"script-child"
-                ~tools:[ "read_file" ]
-                {|<developer>Script-created grandchild.</developer><tool type="inherited" name="read_file"/>|}
+                ~tools:[ "read_file"; "fixed_echo" ]
+                {|<developer>Script-created grandchild.</developer><tool type="inherited" name="read_file"/><tool type="inherited" name="fixed_echo"/>|}
             in
             let script_request =
               `Object
@@ -251,7 +286,12 @@ let%expect_test
   | `Error(code) -> Task.fail(code)|}
                   )
                 ; "input", grandchild_request
-                ; "tools", `Array [ `String "agent_create"; `String "read_file" ]
+                ; ( "tools"
+                  , `Array
+                      [ `String "agent_create"
+                      ; `String "read_file"
+                      ; `String "fixed_echo"
+                      ] )
                 ]
             in
             let outcome, invocations =
@@ -275,6 +315,131 @@ let%expect_test
               |> protocol_ok
             in
             assert (P.Id.Session.equal record.key.parent_session_id child_id);
+            let inspect caller target =
+              invoke
+                sw
+                daemon
+                client
+                caller
+                "agent_status"
+                (`Object [ "session_id", `String (P.Id.Session.to_string target) ])
+            in
+            let before_status = state (get daemon grandchild_id) in
+            let status = inspect child_id grandchild_id |> complete in
+            [%test_eq: string] "idle" (field status "state" |> Jsonaf.string_exn);
+            assert (
+              Jsonaf.exactly_equal (field status "waiting_permissions") (`Number "0"));
+            assert (Jsonaf.exactly_equal (field status "operation") `Null);
+            assert (P.Id.Session.equal grandchild_id (session_id status));
+            (match inspect parent.id grandchild_id with
+             | Published (Fail error), _ ->
+               [%test_eq: string] "agent.management.denied" error.code;
+               assert (Jsonaf.exactly_equal error.details `Null)
+             | _ -> failwith "ancestor acquired an unrecorded management relationship");
+            (match inspect child_id parent.id with
+             | Published (Fail error), _ ->
+               [%test_eq: string] "agent.management.denied" error.code
+             | _ -> failwith "child could inspect its parent by ID");
+            [%test_eq: Sexp.t]
+              (Agent_session.Session_state.sexp_of_t before_status)
+              (Agent_session.Session_state.sexp_of_t (state (get daemon grandchild_id)));
+            let script_status =
+              `Object
+                [ ( "source"
+                  , `String
+                      {|let main input =
+  let* result = Tool.call("agent_status", input) in
+  match result with
+  | `Ok(status) -> Task.pure(status)
+  | `Error(code) -> Task.fail(code)|}
+                  )
+                ; ( "input"
+                  , `Object [ "session_id", `String (P.Id.Session.to_string child_id) ] )
+                ; "tools", `Array [ `String "agent_status" ]
+                ]
+            in
+            let inspected =
+              invoke sw daemon client parent.id "run_chatml" script_status |> complete
+            in
+            assert (P.Id.Session.equal child_id (session_id inspected));
+            let grandchild_handle =
+              H.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection:client
+                ~session_id:grandchild_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> protocol_ok
+            in
+            queued := Some ("fixed_echo", `Object []);
+            phase := "submit shell permission request";
+            H.send_message
+              grandchild_handle
+              { kind = Plain_text
+              ; text = "Request the protected shell command."
+              ; attachments = []
+              }
+            |> protocol_ok
+            |> ignore;
+            let rec await_permission () =
+              let current = state (get daemon grandchild_id) in
+              match
+                List.find current.permissions ~f:(fun permission ->
+                  P.Permission.equal_state permission.state Pending)
+              with
+              | Some permission -> permission
+              | None ->
+                (match current.active_operation with
+                 | None ->
+                   raise_s
+                     [%sexp
+                       "shell request finished without pending permission"
+                     , (current.invocations : P.Invocation.t list)]
+                 | Some _ ->
+                   Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                   await_permission ())
+            in
+            phase := "await shell permission";
+            let permission = await_permission () in
+            phase := "inspect pending permission";
+            let waiting = inspect child_id grandchild_id |> complete in
+            [%test_eq: string]
+              "waiting_for_permission"
+              (field waiting "state" |> Jsonaf.string_exn);
+            assert (
+              Jsonaf.exactly_equal (field waiting "waiting_permissions") (`Number "1"));
+            assert (
+              not
+                (String.is_substring
+                   (Jsonaf.to_string waiting)
+                   ~substring:"private-permission-command"));
+            let still_waiting = state (get daemon grandchild_id) in
+            let current_permission =
+              List.find_exn still_waiting.permissions ~f:(fun current ->
+                P.Id.Permission.equal current.id permission.id)
+            in
+            assert (P.Permission.equal_state current_permission.state Pending);
+            assert (List.is_empty still_waiting.grants);
+            phase := "stop grandchild";
+            H.stop grandchild_handle ~mode:Cancel |> protocol_ok |> ignore;
+            let rec await_stopped () =
+              match (state (get daemon grandchild_id)).lifecycle.observed with
+              | Stopped -> ()
+              | _ ->
+                Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                await_stopped ()
+            in
+            await_stopped ();
+            phase := "inspect stopped grandchild";
+            let stopped = inspect child_id grandchild_id |> complete in
+            [%test_eq: string] "stopped" (field stopped "state" |> Jsonaf.string_exn);
+            assert (
+              Jsonaf.exactly_equal (field stopped "waiting_permissions") (`Number "0"));
+            phase := "restart grandchild";
+            H.start grandchild_handle ~queue_if_limited:false |> protocol_ok |> ignore;
+            H.close grandchild_handle;
             [%test_eq: int]
               3
               (List.length (Agent_store.Session_store.list_sessions (D.store daemon)));
@@ -288,6 +453,42 @@ let%expect_test
           assert (Jsonaf.exactly_equal revision (field repeated "definition_revision"));
           let grandchild = state (get daemon grandchild_id) in
           assert (P.Session.equal_desired_state grandchild.lifecycle.desired Running);
+          let inspected =
+            invoke
+              sw
+              daemon
+              client
+              child_id
+              "agent_status"
+              (`Object [ "session_id", `String (P.Id.Session.to_string grandchild_id) ])
+            |> complete
+          in
+          assert (P.Id.Session.equal grandchild_id (session_id inspected));
+          let ledger = Agent_store.Session_store.delegations (D.store daemon) in
+          let record =
+            Agent_store.Delegation_store.resolve
+              ledger
+              (Option.value_exn grandchild.spec.delegation)
+            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+            |> protocol_ok
+          in
+          Agent_store.Delegation_store.revoke ledger record Authority_changed
+          |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+          |> protocol_ok
+          |> ignore;
+          (match
+             invoke
+               sw
+               daemon
+               client
+               child_id
+               "agent_status"
+               (`Object [ "session_id", `String (P.Id.Session.to_string grandchild_id) ])
+           with
+           | Published (Fail error), _ ->
+             [%test_eq: string] "agent.management.denied" error.code;
+             assert (Jsonaf.exactly_equal error.details `Null)
+           | _ -> failwith "revoked management disclosed child state");
           [%test_eq: int]
             3
             (List.length (Agent_store.Session_store.list_sessions (D.store daemon))));

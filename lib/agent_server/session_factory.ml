@@ -61,6 +61,7 @@ type t =
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; generated_creation : Agent_session.Generated_session_request.service
+  ; managed_sessions : Agent_session.Managed_session_service.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -1601,6 +1602,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           Agent_session.Script_tool_calls.with_generated_creation_service
             tools
             t.generated_creation
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_managed_session_service
+            tools
+            t.managed_sessions
           |> fun tools ->
           Agent_session.Script_tool_calls.with_shell_context tools shell_context
           |> fun tools ->
@@ -5737,6 +5742,106 @@ let reconcile_generated_creations t =
                                owned := false))))))))
 ;;
 
+let managed_child t borrowed child_id =
+  let module N = Agent_session.Native_tool_invocation in
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let denied () = unavailable Permission_denied "managed child is unavailable" in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  let%bind parent =
+    Session_registry.find t.registry context.session_id
+    |> Result.of_option ~error:(denied ())
+  in
+  let parent_state () =
+    let%bind state = A.state parent.actor in
+    match state.spec.protocol.persistence, state.identity.creating_principal with
+    | Durable, Some principal when Int.equal state.identity.generation context.generation
+      -> Ok (state, principal)
+    | _ -> Error (denied ())
+  in
+  let%bind initial_parent, principal = parent_state () in
+  let ledger = Agent_store.Session_store.delegations t.store in
+  (* Prove relationship before loading any supplied ID. Drop the ledger lock
+     before actor/runtime access; even a foreign-ID probe cannot initialize a
+     session or recover its stored work. *)
+  let%bind record =
+    D.with_records
+      ledger
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records ->
+        Ok
+          (List.find records ~f:(fun record ->
+             P.Id.Session.equal record.D.admission.child_session_id child_id
+             && P.Id.Session.equal record.key.parent_session_id context.session_id
+             && Int.equal record.key.parent_generation context.generation
+             && P.Id.Principal.equal record.key.principal_id principal)))
+    |> Result.map_error ~f:protocol_of_store
+    |> Result.bind ~f:(Result.of_option ~error:(denied ()))
+  in
+  let reference = D.reference record in
+  let validate_parent state =
+    let%bind current =
+      D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match current.stage, current.revocation with
+      | Linked, None -> authorize_independent t current
+      | _ -> Error (denied ())
+    in
+    let%bind fingerprint = parent_authority_fingerprint t state in
+    match String.equal fingerprint current.admission.authority_sha256 with
+    | true -> Ok ()
+    | false -> Error (denied ())
+  in
+  let%bind () = validate_parent initial_parent in
+  let%bind child = Session_registry.load t.registry child_id in
+  let%bind child_state = A.state child.actor in
+  let%bind () =
+    match child_state.spec.delegation with
+    | Some actual
+      when D.Reference.equal actual reference
+           && P.Id.Prompt_revision.equal
+                child_state.spec.prompt_revision_id
+                reference.revision_id -> Ok ()
+    | _ -> Error (denied ())
+  in
+  let%bind final_parent, final_principal = parent_state () in
+  let%bind () =
+    match P.Id.Principal.equal principal final_principal with
+    | true -> validate_parent final_parent
+    | false -> Error (denied ())
+  in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  (* Native/parent checks may yield. Refresh the private child's revocation after
+     those waits, before returning even bounded metadata. *)
+  let%bind current =
+    D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+  in
+  let%map () =
+    match current.stage, current.revocation with
+    | Linked, None -> authorize_independent t current
+    | _ -> Error (denied ())
+  in
+  child, child_state
+;;
+
+let managed_status t borrowed child_id =
+  managed_child t borrowed child_id
+  |> Result.map ~f:(fun (_, state) ->
+    Agent_session.Managed_session_service.status_json state)
+  |> Result.map_error ~f:(fun _ ->
+    Agent_protocol.Invocation.
+      { code = "agent.management.denied"
+      ; message = "The child session is unavailable to this caller."
+      ; retryable = false
+      ; details = `Null
+      })
+;;
+
 let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
   let module Q = Agent_session.Generated_session_request in
   let module N = Agent_session.Native_tool_invocation in
@@ -5928,6 +6033,8 @@ let create
         { limits = bundle_limits
         ; create = (fun borrowed request -> create_from_native t borrowed request)
         }
+    ; managed_sessions =
+        { status = (fun borrowed child_id -> managed_status t borrowed child_id) }
     }
   in
   t

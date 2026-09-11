@@ -23,6 +23,8 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Managed_submission_admitted of Managed_submission.t
+  | Managed_submission_changed of Managed_submission.t
   | Invocation_reconciled of Agent_protocol.Invocation.t
   | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
@@ -78,6 +80,33 @@ let nonexecuting_intent_transition
 let rec apply state = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
   | Created created -> Session_state.upgrade_schema created
+  | Managed_submission_admitted receipt ->
+    let open Result.Let_syntax in
+    let%bind () = Managed_submission.validate receipt in
+    (match receipt.status with
+     | Deferred
+       when not
+              (List.exists state.managed_submissions ~f:(fun previous ->
+                 Managed_submission.same_key previous receipt
+                 || Agent_protocol.History.Id.equal previous.history_id receipt.history_id))
+       -> Ok { state with managed_submissions = receipt :: state.managed_submissions }
+     | _ ->
+       Error
+         (Agent_protocol.Error.invalid_request
+            "managed submission admission conflicts with retained receipt"))
+  | Managed_submission_changed receipt ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      List.find state.managed_submissions ~f:(Managed_submission.same_key receipt)
+      |> Result.of_option
+           ~error:(Agent_protocol.Error.invalid_request "managed submission is absent")
+    in
+    let%map () = Managed_submission.validate_transition ~previous receipt in
+    { state with
+      managed_submissions =
+        List.map state.managed_submissions ~f:(fun value ->
+          if Managed_submission.same_key value receipt then receipt else value)
+    }
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
   | Initial_start_consumed -> Ok { state with pending_initial_start = false }
   | Parent_stop_epoch_changed epoch ->

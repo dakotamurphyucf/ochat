@@ -65,6 +65,7 @@ type t =
   ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; generated_creation_service : Generated_session_request.service option
+  ; managed_session_service : Managed_session_service.t option
   }
 
 type native_services =
@@ -174,6 +175,7 @@ let create
   ; shell_context = None
   ; authoring_validation_host = None
   ; generated_creation_service = None
+  ; managed_session_service = None
   }
 ;;
 
@@ -186,6 +188,12 @@ let with_generated_creation_service t service =
 ;;
 
 let generated_creation_service t = t.generated_creation_service
+
+let with_managed_session_service t service =
+  { t with managed_session_service = Some service }
+;;
+
+let managed_session_service t = t.managed_session_service
 
 let with_preparation t ~prepare =
   match t.preparation with

@@ -309,6 +309,11 @@ let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_ho
     | true, Some _ -> registrations @ [ Generated_session_tool.registration () ]
     | _ -> registrations
   in
+  let registrations =
+    match declares_native elements Managed_session_tool.status_name, one_off_policy with
+    | true, Some _ -> registrations @ [ Managed_session_tool.status_registration () ]
+    | _ -> registrations
+  in
   match
     declares_native elements Authoring_validation_tool.name, authoring_validation_host
   with
@@ -346,6 +351,7 @@ let create_authored_resources
     Option.is_some one_off_policy
     && (declares_native elements Run_chatml_tool.name
         || declares_native elements Generated_session_tool.name
+        || declares_native elements Managed_session_tool.status_name
         || declares_native elements Authoring_validation_tool.name
         || List.exists elements ~f:(function
           | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true

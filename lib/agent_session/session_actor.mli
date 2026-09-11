@@ -653,6 +653,23 @@ val submit_message_with_command_audit
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
 
+(** Internal authenticated management admission. The host must validate the
+    calling parent's current relationship/authority first. Atomically binds the
+    exact child reference, request key/hash and accepted input to a durable receipt.
+    Identical retries return the retained receipt, even after a later stop/reset;
+    changed input conflicts. New input preserves normal stopped/failed rejection.
+    [max_receipts=None] is an explicit trusted-host choice without a count ceiling.
+    This does not create a client attachment or grant approval rights. *)
+val submit_managed_message
+  :  t
+  -> reference:Agent_store.Delegation_store.Reference.t
+  -> key:Agent_protocol.Idempotency_key.t
+  -> request_sha256:string
+  -> generation:int
+  -> max_receipts:int option
+  -> Agent_protocol.History.entry
+  -> (Managed_submission.t, Agent_protocol.Error.t) result
+
 (** [delete_history t ... id] removes one canonical occurrence and its matching
     tool call/result occurrence. Requires an idle/stopped writable session and
     an exact revision; rejects borrowed moderator work. Commits before broadcast. *)

@@ -103,6 +103,7 @@ type t =
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
+  ; managed_submissions : Managed_submission.t list [@sexp.list]
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
@@ -117,11 +118,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 15
+let current_schema_version = 16
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if not (List.is_empty t.managed_submissions)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"managed submission receipts require session schema 16"
+         ~retryable:false
+         ())
+  else if t.schema_version = 15
+  then Ok { t with schema_version = current_schema_version }
   else if
     List.exists t.moderator_executions ~f:(fun event ->
       Option.is_some event.Agent_protocol.Moderator_execution.delegation
@@ -298,6 +309,7 @@ let create ~identity ~spec ~initial_history =
   ; jobs = []
   ; schedules = []
   ; invocations = []
+  ; managed_submissions = []
   ; moderator_executions = []
   ; subscriptions = []
   ; deliveries = []
@@ -611,6 +623,51 @@ let validate t =
         (Agent_protocol.Error.invalid_request "invalid generated initial start intent")
   in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in
+  let%bind _ =
+    List.fold_result t.managed_submissions ~init:[] ~f:(fun seen receipt ->
+      let%bind () = Managed_submission.validate receipt in
+      let current =
+        match receipt.status with
+        | Terminal _ -> true
+        | Deferred | Ready | Assigned _ ->
+          Int.equal receipt.generation t.identity.generation
+          && Option.exists
+               t.spec.delegation
+               ~f:(Agent_store.Delegation_store.Reference.equal receipt.reference)
+      in
+      let correlation =
+        match receipt.status with
+        | Assigned id ->
+          Option.exists t.active_operation ~f:(fun operation ->
+            Agent_protocol.Id.Operation.equal id operation.id
+            && Int.equal receipt.generation operation.generation
+            &&
+            match operation.kind with
+            | Turn _ -> true
+            | Compaction -> false)
+        | Deferred ->
+          List.exists t.conversation.deferred_user_entries ~f:(fun entry ->
+            Agent_protocol.History.Id.equal entry.id receipt.history_id)
+        | Ready | Terminal _ -> true
+      in
+      match
+        current
+        && correlation
+        && receipt.generation <= t.identity.generation
+        && Agent_protocol.Id.Session.equal
+             receipt.reference.child_session_id
+             t.identity.session_id
+        && not
+             (List.exists seen ~f:(fun previous ->
+                Managed_submission.same_key previous receipt
+                || Agent_protocol.History.Id.equal previous.history_id receipt.history_id))
+      with
+      | true -> Ok (receipt :: seen)
+      | false ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed submission identity/generation is inconsistent"))
+  in
   let%bind () = nonnegative "transaction sequence" t.counters.transaction_sequence in
   let%bind () =
     nonnegative "next history sequence" t.conversation.next_history_sequence

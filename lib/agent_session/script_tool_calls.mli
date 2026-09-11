@@ -33,6 +33,8 @@ val authoring_validation_host : t -> Chat_response.Authoring_validation.host opt
 val with_generated_creation_service : t -> Generated_session_request.service -> t
 
 val generated_creation_service : t -> Generated_session_request.service option
+val with_managed_session_service : t -> Managed_session_service.t -> t
+val managed_session_service : t -> Managed_session_service.t option
 
 (** Bind inherited shell approvals to this host's actual session. Native dispatch
     adds the final live authorization guard, including inherited parent checks,

@@ -4370,6 +4370,53 @@ retry with the original creation key resolves to the same child across repeated
 daemon restarts. These tests establish process-restart behavior, not power-loss
 survival beyond the configured store flush guarantees.
 
+### Qualified managed-session status
+
+Internally qualified hosts can also declare `<tool name="agent_status"/>` and
+select that exact binding in generated children. Its request is a `session_id`
+object. The service checks the invoking parent's recorded relationship before
+loading the target, then current policy, generation and revocation before
+disclosure. Being an ancestor or sharing an operator principal does not create
+a direct management relationship. Nested scripts use their actual invoking
+session and need only the selected status capability to inspect a child they own.
+
+Status reports lifecycle, current operation ID/kind/state and the count of pending
+permissions. It omits transcript, tool arguments, failure text and permission
+details. Inspection does not resolve approvals or start a stopped child. An idle
+session does not establish completion of a particular submitted message. This is
+the initial qualified management service; correlated send/read/wait/stop tools
+and the public helper bridge are still being implemented.
+
+### Managed submission receipt foundation
+
+Session-state schema 16 adds internal managed submission receipts. The actor's
+authenticated management entrypoint commits a receipt with the accepted input,
+using the same idle/deferred admission paths as ordinary client messages. It
+requires an exact child delegation reference; the host must authorize the calling
+parent before invoking it. It creates no client attachment or approval rights.
+
+A receipt retains the scoped creation reference, send key, request digest, target
+generation and accepted history ID. Identical retries reuse it; changed payloads
+conflict. New sends to stopped sessions reject. Hosts explicitly choose a receipt
+count ceiling or an unrestricted trusted setting; existing identities remain
+readable when the admission ceiling is reached.
+
+Deferred input is distinct from adopted input awaiting a turn. Adoption survives
+compaction, and assignment records the actual processing operation. Assistant
+message IDs can accumulate while that operation runs, but only its typed terminal
+event marks the receipt completed, failed, cancelled or interrupted. Thus several
+deferred messages can share an operation without treating an intermediate message
+or Idle status as proof of completion. Reconciliation is written into the same
+journal delta as the input/operation change.
+
+Reset retains terminal receipt identities and invalidates unresolved old-generation
+receipts. Reusing a pre-reset key cannot silently submit the message again. Explicit
+input removal invalidates unresolved correlation; compaction preserves adopted
+correlation. Older state without receipts migrates with an empty list, while old
+schema tags carrying the new records reject. These are internal actor foundations;
+native send/read/wait tools, receipt projection and full daemon restart qualification
+remain separate work.
+
 ### Durable initial activation
 
 Automatic creation starts the child only after its management relationship is

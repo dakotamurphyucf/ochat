@@ -820,7 +820,7 @@ let%expect_test
       (Persistence.restore_snapshot (encode { saved with schema_version = 14 }));
     let legacy = { initial with schema_version = 14 } in
     let upgraded = Persistence.restore_snapshot (encode legacy) |> store_ok in
-    [%test_eq: int] 15 upgraded.schema_version;
+    [%test_eq: int] State.current_schema_version upgraded.schema_version;
     assert (List.is_empty upgraded.moderator_executions);
     let ordinary =
       E.create { receipt.context with operation_id = Some operation_id } |> protocol_ok

@@ -60,6 +60,9 @@ let apply ~now state ~delta ~payloads =
   let previous = state in
   let%bind state = Session_delta.apply state delta in
   let%bind state, delta =
+    Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now
+  in
+  let%bind state, delta =
     match previous.lifecycle.desired, state.lifecycle.desired with
     | Running, Stopped ->
       let%map stop_epoch = increment "stop epoch" previous.stop_epoch in

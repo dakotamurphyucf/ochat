@@ -15,6 +15,10 @@
   generated_definition
   generated_session_request
   generated_session_tool
+  managed_session_service
+  managed_session_tool
+  managed_submission
+  managed_submission_tracking
   prompt_catalog
   security_grant
   session_state

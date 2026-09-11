@@ -28,6 +28,8 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Managed_submission_admitted of Managed_submission.t
+  | Managed_submission_changed of Managed_submission.t
   | Invocation_reconciled of Agent_protocol.Invocation.t
   (** Recovery-only terminalization/publication of an existing invocation,
         including older generations. Cannot admit, dispatch or create outcomes. *)

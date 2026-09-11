@@ -380,6 +380,14 @@ type _ request =
   | Submit_message :
       Agent_protocol.Id.Attachment.t * Agent_protocol.History.entry
       -> submission request
+  | Submit_managed_message :
+      Agent_store.Delegation_store.Reference.t
+      * Agent_protocol.Idempotency_key.t
+      * string
+      * int
+      * int option
+      * Agent_protocol.History.entry
+      -> Managed_submission.t request
   | Compact :
       Agent_protocol.Id.Attachment.t * int64 option
       -> Agent_protocol.Session.t request
@@ -1677,12 +1685,17 @@ let append_history t entries =
     ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
 ;;
 
-let defer_history t entries =
+let defer_history ?(extra_deltas = []) t entries =
   let payloads =
     List.map entries ~f:(fun entry ->
       Agent_protocol.Event.Durable.Payload.History_message_deferred entry)
   in
-  transition t ~delta:(Session_delta.Deferred_entries_enqueued entries) ~payloads
+  transition
+    t
+    ~delta:
+      (Session_delta.Batch
+         (extra_deltas @ [ Session_delta.Deferred_entries_enqueued entries ]))
+    ~payloads
 ;;
 
 let write_attachment t attachment_id =
@@ -6164,17 +6177,18 @@ let create_turn_operation t reason =
     }
 ;;
 
-let submit_idle_message t entry =
+let submit_idle_message ?(extra_deltas = []) t entry =
   let open Result.Let_syntax in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t User_submit in
   let lifecycle = lifecycle_for_operation t operation.id in
   let delta =
     Session_delta.Batch
-      [ Canonical_entries_appended [ entry ]
-      ; Active_operation_changed (Some operation)
-      ; Lifecycle_changed lifecycle
-      ]
+      (extra_deltas
+       @ [ Session_delta.Canonical_entries_appended [ entry ]
+         ; Active_operation_changed (Some operation)
+         ; Lifecycle_changed lifecycle
+         ])
   in
   let payloads =
     [ Agent_protocol.Event.Durable.Payload.History_appended [ entry ]
@@ -6194,15 +6208,13 @@ let submit_idle_message t entry =
     }
 ;;
 
-let submit_deferred_message t entry =
+let submit_deferred_message ?(extra_deltas = []) t entry =
   let open Result.Let_syntax in
-  let%map session = defer_history t [ entry ] in
+  let%map session = defer_history ~extra_deltas t [ entry ] in
   { session; history_id = entry.id; disposition = Deferred; operation_id = None }
 ;;
 
-let submit_message t attachment_id entry =
-  let open Result.Let_syntax in
-  let%bind _ = write_attachment t attachment_id in
+let submit_authorized_message ?(extra_deltas = []) t entry =
   if t.state.halted
   then Error (error Invalid_state "session is halted")
   else if Option.is_some t.state.failure
@@ -6214,15 +6226,76 @@ let submit_message t attachment_id entry =
     match
       t.idle_moderator_borrowed, t.state.active_operation, t.state.lifecycle.observed
     with
-    | true, _, _ -> submit_deferred_message t entry
+    | true, _, _ -> submit_deferred_message ~extra_deltas t entry
     | false, Some _, _
     | false, None, (Running_turn _ | Compacting _ | Waiting_for_permission _) ->
-      submit_deferred_message t entry
-    | false, None, Idle -> submit_idle_message t entry
+      submit_deferred_message ~extra_deltas t entry
+    | false, None, Idle -> submit_idle_message ~extra_deltas t entry
     | ( false
       , None
       , (Stopped | Queued_for_slot | Starting | Recovering | Stopping | Failed _) ) ->
       Error (error Invalid_state "session is not ready to accept a turn"))
+;;
+
+let submit_message t attachment_id entry =
+  Result.bind (write_attachment t attachment_id) ~f:(fun _ ->
+    submit_authorized_message t entry)
+;;
+
+let submit_managed_message t reference key request_sha256 generation max_receipts entry =
+  let module M = Managed_submission in
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.state.spec.delegation with
+    | Some current
+      when Agent_store.Delegation_store.Reference.equal current reference
+           && Agent_protocol.Id.Session.equal
+                reference.child_session_id
+                t.state.identity.session_id -> Ok ()
+    | _ ->
+      Error (error Permission_denied "delegation.send: child relationship does not match")
+  in
+  let%bind candidate =
+    M.create
+      ~reference
+      ~key
+      ~request_sha256
+      ~generation
+      ~history_id:entry.Agent_protocol.History.id
+      ~now:(t.services.now ())
+  in
+  match List.find t.state.managed_submissions ~f:(M.same_key candidate) with
+  | Some receipt ->
+    (match String.equal receipt.request_sha256 request_sha256 with
+     | true -> Ok receipt
+     | false -> Error (error Conflict "managed send key was used for a different request"))
+  | None ->
+    let%bind () =
+      match
+        ( Int.equal generation t.state.identity.generation
+        , entry.role
+        , entry.kind
+        , entry.provenance )
+      with
+      | true, User, Message, Canonical -> Ok ()
+      | _ -> Error (error Conflict "managed message generation or input is invalid")
+    in
+    let%bind () =
+      match max_receipts with
+      | Some maximum
+        when maximum < 1 || List.length t.state.managed_submissions >= maximum ->
+        Error (error Invalid_state "managed submission receipt capacity reached")
+      | None | Some _ -> Ok ()
+    in
+    let%bind _ =
+      submit_authorized_message
+        t
+        entry
+        ~extra_deltas:[ Managed_submission_admitted candidate ]
+    in
+    List.find t.state.managed_submissions ~f:(M.same_key candidate)
+    |> Result.of_option
+         ~error:(error Invalid_state "managed send did not retain its receipt")
 ;;
 
 let find_permission t permission_id =
@@ -9037,6 +9110,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Defer_history (attachment_id, entries) ->
     with_writer t attachment_id (fun () -> defer_history t entries)
   | Submit_message (attachment_id, entry) -> submit_message t attachment_id entry
+  | Submit_managed_message (reference, key, fingerprint, generation, maximum, entry) ->
+    submit_managed_message t reference key fingerprint generation maximum entry
   | Compact (attachment_id, expected_revision) ->
     compact_internal t attachment_id expected_revision
   | Delete_history (attachment_id, revision, history_id) ->
@@ -9426,6 +9501,22 @@ let defer_history t ~attachment_id entries =
 ;;
 
 let submit_message t ~attachment_id entry = call t (Submit_message (attachment_id, entry))
+
+let submit_managed_message
+      t
+      ~reference
+      ~key
+      ~request_sha256
+      ~generation
+      ~max_receipts
+      entry
+  =
+  Eio.Cancel.protect (fun () ->
+    call
+      t
+      (Submit_managed_message
+         (reference, key, request_sha256, generation, max_receipts, entry)))
+;;
 
 let submit_message_with_command_audit t ~command_audit ~attachment_id entry =
   call t ~command_audit (Submit_message (attachment_id, entry))

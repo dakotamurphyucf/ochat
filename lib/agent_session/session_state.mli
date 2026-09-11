@@ -114,6 +114,9 @@ type t =
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
+  ; managed_submissions : Managed_submission.t list [@sexp.list]
+    (** Protected send identities and operation correlation. Historical terminal
+        receipts survive generation replacement; they are not raw public state. *)
   ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
