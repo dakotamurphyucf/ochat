@@ -381,6 +381,7 @@ let%expect_test
             ; standalone_execution_limits =
                 Agent_session.Standalone_tool_dispatch.declared_execution_limits
             ; one_off_policy = Chat_response.One_off_request.default_policy
+            ; native_service_revision = None
             ; authoring_validation_host = None
             ; claim_lifecycle =
                 (fun ~event ->

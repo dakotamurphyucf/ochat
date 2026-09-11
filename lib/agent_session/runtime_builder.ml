@@ -32,6 +32,7 @@ type prepare_enqueue =
 
 type extension_services =
   { runtime_policy : Chat_response.Runtime_semantics.policy
+  ; native_service_revision : string option
   ; script_tools : Agent_runtime.t -> Script_tool_calls.t
   ; standalone_execution_limits :
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
@@ -226,6 +227,7 @@ let run_agent
 let create_agent_runtime
       ~extensions
       ~native_registrations
+      ~native_service_revision
       ~sw
       ~ctx
       ~host
@@ -238,6 +240,7 @@ let create_agent_runtime
   match extensions with
   | false ->
     Agent_runtime.create
+      ?native_service_revision
       ~sw
       ~ctx
       ~host
@@ -252,6 +255,7 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ?native_service_revision
       ~native_registrations
       ~sw
       ~ctx
@@ -351,6 +355,7 @@ let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_ho
 ;;
 
 let create_authored_resources
+      ~native_service_revision
       ~env
       ~sw
       ~ctx
@@ -385,6 +390,7 @@ let create_authored_resources
     create_agent_runtime
       ~extensions
       ~native_registrations
+      ~native_service_revision
       ~sw
       ~ctx
       ~host
@@ -398,6 +404,7 @@ let create_authored_resources
 ;;
 
 let prepare_resources
+      ~native_service_revision
       ~env
       ~sw
       ~paths
@@ -423,6 +430,7 @@ let prepare_resources
   let ctx = context ~env paths (cache storage_paths) in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
+    ~native_service_revision
     ~env
     ~sw
     ~ctx
@@ -1100,6 +1108,9 @@ let build_with_services
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~native_service_revision:
+            (Option.bind extension_services ~f:(fun services ->
+               services.native_service_revision))
           ~env
           ~one_off_policy:
             (Option.map extension_services ~f:(fun services -> services.one_off_policy))

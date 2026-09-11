@@ -38,7 +38,8 @@ type resources = private
     Caller supplies the ancestor's original admitted paths, not a child's broader
     roots. Independent generated-ancestor reconstruction remains a separate step. *)
 val prepare_resources
-  :  env:Eio_unix.Stdenv.base
+  :  native_service_revision:string option
+  -> env:Eio_unix.Stdenv.base
   -> sw:Eio.Switch.t
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
@@ -75,6 +76,10 @@ type prepare_enqueue =
 type extension_services =
   { runtime_policy : Chat_response.Runtime_semantics.policy
     (** Captured host policy shared by foreground and idle execution. *)
+  ; native_service_revision : string option
+    (** Host native-service grant identity in resource fingerprints. Resource-only
+        restoration must use the same identity; changing it invalidates old
+        delegated bindings rather than silently granting new operations. *)
   ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
     (** Bind shared native policy/disclosure to the exact constructed runtime.
         This service owns generic native tool approval; delegated shell tools

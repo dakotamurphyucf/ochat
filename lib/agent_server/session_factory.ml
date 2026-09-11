@@ -61,6 +61,7 @@ type t =
   ; home : string
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
+  ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
@@ -1614,6 +1615,8 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           |> fun tools ->
           Agent_session.Script_tool_calls.with_shell_context tools shell_context
           |> fun tools ->
+          Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
+          |> fun tools ->
           Agent_session.Script_tool_calls.with_job_service
             tools
             (extension_jobs t actor_ref registry)
@@ -1655,6 +1658,8 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               (Agent_session.Script_tool_calls.current_capabilities tools)
             ~policy:Chat_response.One_off_request.default_policy)
     ; one_off_policy = Chat_response.One_off_request.default_policy
+    ; native_service_revision =
+        Agent_session.Session_management_channel.policy_fingerprint t.session_helpers
     ; authoring_validation_host = t.authoring_validation_host
     ; claim_lifecycle =
         (fun ~event ~snapshot handle ->
@@ -1974,6 +1979,9 @@ let independent_resource_host t =
           let actor_ref = ref (Some parent.actor) in
           let shell_state = ref state.shell in
           B.prepare_resources
+            ~native_service_revision:
+              (Agent_session.Session_management_channel.policy_fingerprint
+                 t.session_helpers)
             ~env:t.env
             ~sw
             ~paths
@@ -6314,6 +6322,7 @@ let create
       ~home
       ~model_post_stream
       ~qualify_chatml_extensions
+      ~session_helpers
       ~independent_lifetime_policy
       ~chatml_runtime_policy
       ~authoring_validation_host
@@ -6357,6 +6366,7 @@ let create
     ; home
     ; model_post_stream
     ; qualify_chatml_extensions
+    ; session_helpers
     ; independent_lifetime_policy
     ; chatml_runtime_policy
     ; authoring_validation_host

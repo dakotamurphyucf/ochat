@@ -89,9 +89,12 @@ val host
 
     Documents without shell or legacy command declarations do not invoke the
     manifest authorizer and return no shell registry. All resources remain
-    owned by [sw]. *)
+    owned by [sw]. [native_service_revision] optionally binds trusted host-service
+    policy to resource/capability identity. Hosts restoring those resources must
+    supply the same policy identity; omission preserves legacy fingerprints. *)
 val create
-  :  sw:Eio.Switch.t
+  :  ?native_service_revision:string
+  -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
   -> platform:Chatmd_shell_spec.Shell_spec.platform
@@ -162,9 +165,11 @@ type native_registration =
     tool names. Inherited/generated and authoring declarations still require their
     respective host services and are rejected. Resources remain owned by [sw];
     the caller must release that scope after failed preparation or runtime teardown.
+    [native_service_revision] has the same resource-identity meaning as in [create].
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
-  :  ?native_registrations:native_registration list
+  :  ?native_service_revision:string
+  -> ?native_registrations:native_registration list
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t

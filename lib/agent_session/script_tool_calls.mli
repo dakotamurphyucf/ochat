@@ -41,6 +41,10 @@ val managed_session_service : t -> Managed_session_service.t option
     so waits and delayed effects cannot bypass revocation. *)
 val with_shell_context : t -> (unit -> (Shell_runtime.Call_context.t, string) result) -> t
 
+(** Trusted host opt-ins for named shell tools. Bound at actual dispatch with
+    the same current-caller services used by native lifecycle tools. *)
+val with_session_helpers : t -> Session_management_channel.grant list -> t
+
 (** Read the owning host's current lifecycle policy. *)
 val is_halted : t -> bool
 

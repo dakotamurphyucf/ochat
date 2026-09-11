@@ -27,6 +27,11 @@ type options =
   ; qualify_chatml_extensions : bool
     (** Internal integration qualification only. Defaults to false, has no CLI or
         configuration-file flag, and does not advertise public extension features. *)
+  ; session_helpers : Agent_session.Session_management_channel.grant list
+    (** Trusted host opt-ins for named shell tools using the private helper
+        channel. Empty by default. Each grant must validate its helper's actual
+        filesystem/environment boundary against this host's credentials/control
+        endpoints. This does not enable public extensions before qualification. *)
   ; independent_lifetime_policy : string option
     (** Explicit trusted host policy revision authorizing independent lifetime.
         None denies it. The revision is hashed into private admissions; changing

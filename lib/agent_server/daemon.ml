@@ -21,6 +21,7 @@ type options =
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
+  ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
@@ -136,6 +137,7 @@ let default_options =
   ; policy_evaluator_resolver = None
   ; model_post_stream = None
   ; qualify_chatml_extensions = false
+  ; session_helpers = []
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
@@ -760,6 +762,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~home
       ~model_post_stream:options.model_post_stream
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
+      ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
       ~chatml_runtime_policy:options.chatml_runtime_policy
       ~authoring_validation_host:options.authoring_validation_host

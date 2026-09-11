@@ -164,7 +164,10 @@ let%expect_test
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                  (* This guard covers the whole multi-operation/restart scenario,
+                     including durable I/O under a parallel full build. Individual
+                     agent_wait deadlines and cancellation assertions stay below. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 90. (fun () ->
                     let client = connection daemon (principal ()) in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)

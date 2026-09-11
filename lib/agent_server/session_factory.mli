@@ -61,6 +61,7 @@ val create
   -> home:string
   -> model_post_stream:Agent_session.Runtime_builder.model_post_stream option
   -> qualify_chatml_extensions:bool
+  -> session_helpers:Agent_session.Session_management_channel.grant list
   -> independent_lifetime_policy:string option
   -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option

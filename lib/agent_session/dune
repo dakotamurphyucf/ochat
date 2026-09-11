@@ -17,6 +17,7 @@
   generated_session_tool
   managed_session_service
   session_management
+  session_management_channel
   session_management_native
   managed_session_tool
   managed_send_tool

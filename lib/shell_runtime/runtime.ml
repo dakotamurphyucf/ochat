@@ -1329,15 +1329,18 @@ let executor_config t = t.executor_config
 
 let executor_config_for_call t =
   let open Result.Let_syntax in
-  let%map context = Call_context.current () in
-  match context with
-  | None -> t.executor_config
-  | Some context ->
-    Shell_access.Executor.with_execution_scope
-      t.executor_config
-      ~session_id:context.session_id
-      ~approval_store:context.approval_store
-      ~check:context.check
+  let%bind context = Call_context.current () in
+  let config =
+    match context with
+    | None -> t.executor_config
+    | Some context ->
+      Shell_access.Executor.with_execution_scope
+        t.executor_config
+        ~session_id:context.session_id
+        ~approval_store:context.approval_store
+        ~check:context.check
+  in
+  Call_context.prepare_executor config
 ;;
 
 let redact t value = Shell_access.Secret_filter.redact t.secret_filter value

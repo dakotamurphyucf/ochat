@@ -90,6 +90,7 @@ let run ctx input =
       in
       let prepare () =
         B.prepare_resources
+          ~native_service_revision:None
           ~env
           ~sw
           ~paths

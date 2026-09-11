@@ -925,6 +925,18 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+(test
+ (name agent_server_helper_test)
+ (modules agent_server_helper_test)
+ (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (action
+  (run
+   %{test}
+   %{exe:../bin/ochat_agent_helper.exe}
+   %{exe:../bin/ochat_shell_resource_runner.exe}))
+ (preprocess
+  (pps ppx_jane)))
+
 (library
  (name agent_server_creator_test)
  (modules agent_server_creator_test)

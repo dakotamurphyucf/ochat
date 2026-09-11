@@ -496,6 +496,7 @@ let moderator_process_handler t =
 let create_native
       ~extension_resources
       ?(native_registrations = [])
+      ?native_service_revision
       ~sw
       ~ctx
       ~host
@@ -585,6 +586,17 @@ let create_native
                        |> Sexp.to_string
                        |> Chatmd_shell_spec.Source_ref.digest
                      in
+                     let resource_fingerprint =
+                       match native_service_revision with
+                       | None -> resource_fingerprint
+                       | Some revision ->
+                         [%sexp
+                           ("ochat.tool-service-policy.v1" : string)
+                         , (resource_fingerprint : string)
+                         , (revision : string)]
+                         |> Sexp.to_string_mach
+                         |> Chatmd_shell_spec.Source_ref.digest
+                     in
                      Authoring_registration.create
                        ~delegation_restrictions:
                          (List.filter_map declarations.tools ~f:(function
@@ -653,6 +665,7 @@ type extension_resources =
   }
 
 let prepare_extensions
+      ?native_service_revision
       ?(native_registrations = [])
       ~sw
       ~ctx
@@ -688,6 +701,7 @@ let prepare_extensions
     create_native
       ~extension_resources:true
       ~native_registrations
+      ?native_service_revision
       ~sw
       ~ctx
       ~host

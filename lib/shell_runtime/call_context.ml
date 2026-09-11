@@ -9,13 +9,15 @@ type t =
 
 type binding =
   { services : unit -> (t, string) result
+  ; prepare_executor :
+      Shell_access.Executor.config -> (Shell_access.Executor.config, string) result
   ; active : bool Atomic.t
   }
 
 let key = Eio.Fiber.create_key ()
 
-let with_services services f =
-  let binding = { services; active = Atomic.make true } in
+let with_services ?(prepare_executor = fun config -> Ok config) services f =
+  let binding = { services; prepare_executor; active = Atomic.make true } in
   Exn.protect
     ~finally:(fun () -> Atomic.set binding.active false)
     ~f:(fun () -> Eio.Fiber.with_binding key (Some binding) f)
@@ -39,4 +41,13 @@ let current () =
        in
        let%map () = check () in
        Some { services with check })
+;;
+
+let prepare_executor config =
+  let open Result.Let_syntax in
+  let%bind context = current () in
+  match context, Option.join (Eio.Fiber.get key) with
+  | None, _ -> Ok config
+  | Some _, Some binding -> binding.prepare_executor config
+  | Some _, None -> Error "shell executor adapter scope is unavailable"
 ;;

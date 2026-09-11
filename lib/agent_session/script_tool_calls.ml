@@ -63,6 +63,7 @@ type t =
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
+  ; session_helpers : Session_management_channel.grant list
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
@@ -120,6 +121,11 @@ let with_native_services tools ~session_id ~generation f =
             |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
           in
           Shell_runtime.Call_context.with_services
+            ~prepare_executor:
+              (Session_management_channel.prepare_executor
+                 ~grants:tools.session_helpers
+                 ~creation:tools.generated_creation_service
+                 ~sessions:tools.managed_session_service)
             (fun () ->
                let open Result.Let_syntax in
                let%map services = services () in
@@ -173,6 +179,7 @@ let create
   ; progress = None
   ; progress_ceiling = None
   ; shell_context = None
+  ; session_helpers = []
   ; authoring_validation_host = None
   ; generated_creation_service = None
   ; managed_session_service = None
@@ -180,6 +187,7 @@ let create
 ;;
 
 let with_shell_context t services = { t with shell_context = Some services }
+let with_session_helpers t grants = { t with session_helpers = grants }
 let with_authoring_validation_host t host = { t with authoring_validation_host = host }
 let authoring_validation_host t = t.authoring_validation_host
 

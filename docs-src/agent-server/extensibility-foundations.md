@@ -4575,10 +4575,15 @@ unknown operations reject. The envelope cannot choose a caller identity or expan
 the allowed operation list. Disallowed operations and expired borrows fail before
 calling a service; the services still enforce current relationship/target authority.
 
-This is a host API foundation, not a transport credential or an active public
-protocol method. Hosts must authenticate and admit each caller before constructing
-an adapter. The scoped external CLI transport, process isolation and end-to-end
-helper qualification remain E09/E10 work; ordinary same-user Unix CLI access is
+This is a host API, not a transport credential or a new public protocol method.
+The [private helper bridge](../bin/ochat_agent_helper.doc.md) now binds it to
+internally qualified durable-host shell invocations through explicit named-tool
+grants. The actual caller's borrow and existing services are acquired at dispatch,
+and the helper has no operator token or control-socket lookup. Grant policy identity
+participates in authored resource fingerprints and resource-only reconstruction,
+so an older delegated binding cannot silently acquire widened helper services.
+The complete moderator-handled helper/subscription compositions remain E09/E10
+qualification work; ordinary same-user Unix CLI access is
 not a substitute for a constrained helper identity. General exposure remains
 gated until A01.
 
