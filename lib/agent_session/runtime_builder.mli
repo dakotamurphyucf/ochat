@@ -16,6 +16,54 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+(** Native resources and compiled, non-evaluated extension definitions. No
+    operation worker, moderator manager, history or actor service is installed. *)
+type resources = private
+  { native : Chat_response.Agent_runtime.t
+  ; definition : Chat_response.Extension_compiler.definition option
+  ; managed : Chat_response.Managed_tool_registry.t option
+  }
+
+(** Reconstruct an authored revision's resources using the same native/extension
+    registration path as normal runtime construction, including contextual one-off
+    and validation helpers. Verify the stored source tree first. Does not convert
+    prompt messages, reserve history, evaluate ChatML initializers or invoke a
+    moderator/model. Authorized native setup (including shell policy checks and
+    MCP connections) can perform IO; this is not the no-effect authoring validator.
+
+    Resources belong to [sw]. The host must retain it through every borrower and
+    release it after failed preparation. This does not authorize delegation:
+    selection, current authority and owner-aware parent policy remain required.
+    Inherited stateful managed tools must still reject unavailable delegation.
+    Caller supplies the ancestor's original admitted paths, not a child's broader
+    roots. Independent generated-ancestor reconstruction remains a separate step. *)
+val prepare_resources
+  :  env:Eio_unix.Stdenv.base
+  -> sw:Eio.Switch.t
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> revision:Prompt_revision.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> one_off_policy:Chat_response.One_off_request.policy
+  -> authoring_validation_host:Chat_response.Authoring_validation.host option
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> (resources, Agent_protocol.Error.t) result
+
+(** Narrow an already prepared ancestor's exact resources using an admitted
+    generated definition. Shares native implementations and captures standalone
+    private dependency closures without initializing any ancestor/child scripts.
+    Stateful managed dependencies reject. This constructs no independent scope:
+    the root resource switch must outlive the whole inherited chain. Restoration
+    must first rebind stored capability pins to the parent's fresh resources via
+    Generated_definition.restore. Current delegation/lifetime authority checks and
+    policy mediation remain the host's responsibility. *)
+val inherit_resources
+  :  parent:resources
+  -> definition:Generated_definition.t
+  -> (resources, Agent_protocol.Error.t) result
+
 (** Host preparation for external queue ingress. Compare [before] and save
     [snapshot] atomically with the delivery receipt under actor ownership. An
     error leaves the live queue unchanged; success must mean durable acceptance. *)

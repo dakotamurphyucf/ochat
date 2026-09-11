@@ -4,6 +4,7 @@ type background_lease =
   { cancel : unit -> unit
   ; finished : unit Eio.Promise.t
   ; finish : unit Eio.Promise.u
+  ; survives_stop : bool
   ; mutable resources : Agent_session.Runtime_builder.t option
   }
 
@@ -171,13 +172,14 @@ let raise_cleanup = function
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let with_runtime_lease t ~retain_resources f =
+let with_lease t ~survives_stop ~admit f =
   Eio.Cancel.sub (fun context ->
     let active = Atomic.make true in
     let finished, finish = Eio.Promise.create () in
     let lease =
       { finished
       ; finish
+      ; survives_stop
       ; resources = None
       ; cancel =
           (fun () ->
@@ -189,11 +191,10 @@ let with_runtime_lease t ~retain_resources f =
     let admitted =
       with_owner_lock t ~protect:true (fun () ->
         let open Result.Let_syntax in
-        let%map () = ensure_loaded_locked t in
-        let runtime = Option.value_exn t.runtime in
-        lease.resources <- (if retain_resources then Some runtime else None);
+        let%map value, resources = admit () in
+        lease.resources <- resources;
         t.background_leases <- lease :: t.background_leases;
-        runtime)
+        value)
     in
     match admitted with
     | Error _ as failure ->
@@ -225,8 +226,32 @@ let with_runtime_lease t ~retain_resources f =
           result))
 ;;
 
+let with_runtime_lease t ~retain_resources f =
+  with_lease
+    t
+    ~survives_stop:retain_resources
+    ~admit:(fun () ->
+      let open Result.Let_syntax in
+      let%map () = ensure_loaded_locked t in
+      let runtime = Option.value_exn t.runtime in
+      runtime, if retain_resources then Some runtime else None)
+    f
+;;
+
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
+
+let with_resource_lifetime t f =
+  with_lease
+    t
+    ~survives_stop:true
+    ~admit:(fun () ->
+      match t.closed, t.unloading with
+      | true, _ -> Error (closed_error ())
+      | false, Some _ -> Error (background_busy ())
+      | false, None -> Ok ((), None))
+    f
+;;
 
 let moderation_source t =
   with_background_runtime t (fun runtime ->
@@ -356,8 +381,7 @@ let unload_and_wait t =
                 | Some prepare -> prepare ~closing
               in
               let leases =
-                List.filter leases ~f:(fun lease ->
-                  closing || Option.is_none lease.resources)
+                List.filter leases ~f:(fun lease -> closing || not lease.survives_stop)
               in
               List.iter leases ~f:(fun lease -> lease.cancel ());
               List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);

@@ -101,6 +101,20 @@ val with_delegation_resources
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Register independently constructed resources against this ancestor's lifetime
+    without loading or entering its execution runtime. Usable for stopped owners;
+    no worker/manager is constructed and no execution-authority check is implied.
+    The trusted host must check durable delegation and current policy before IO.
+    Run resource construction, all descendant use and scope cleanup inside [f].
+    Ordinary stop preserves this borrow; permanent close cancels/joins it.
+    Reset-style unload, administration and with_unloaded maintenance remain
+    excluded while borrowed. Admission rejects a closed owner or current unload.
+    Call from outside actor checkpoints and owner locks. *)
+val with_resource_lifetime
+  :  t
+  -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** Read the installed immutable source while retaining its runtime. Legacy
     moderators reject. Check persisted halt state in the authority guard; querying
     the manager's mutable state here would reenter its execution lock during native

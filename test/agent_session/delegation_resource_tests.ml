@@ -2,6 +2,68 @@ open Core
 open Fixtures
 module Owner = Agent_server.Runtime_owner
 
+let%expect_test "stopped ancestor resources have a lifetime without loading execution" =
+  Job_fixtures.with_actor (fun _env sw actor writer _backend ->
+    Agent_session.Session_actor.stop actor ~attachment_id:writer.id ~mode:Cancel
+    |> protocol_ok
+    |> ignore;
+    let ready, ready_u = Eio.Promise.create () in
+    let cleaning, cleaning_u = Eio.Promise.create () in
+    let release, release_u = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    let cleaned = ref false in
+    let owner =
+      Owner.create ~actor ~initial:None ~build:(fun () ->
+        failwith "stopped ancestor execution must not load")
+    in
+    let before = Agent_session.Session_actor.state actor |> protocol_ok in
+    assert (Agent_protocol.Session.equal_desired_state before.lifecycle.desired Stopped);
+    let borrowed =
+      Eio.Fiber.fork_promise ~sw (fun () ->
+        Result.try_with (fun () ->
+          Owner.with_resource_lifetime owner (fun () ->
+            Exn.protect
+              ~finally:(fun () ->
+                Eio.Cancel.protect (fun () ->
+                  Eio.Promise.resolve cleaning_u ();
+                  Eio.Promise.await release;
+                  cleaned := true))
+              ~f:(fun () ->
+                Eio.Promise.resolve ready_u ();
+                Eio.Promise.await never;
+                Ok ()))))
+    in
+    Eio.Promise.await ready;
+    Owner.unload_and_wait owner |> protocol_ok;
+    assert (not (Owner.is_loaded owner));
+    assert (not !cleaned);
+    assert (
+      Option.is_none
+        (Owner.with_unloaded owner (fun () -> failwith "borrowed resources pruned")
+         |> protocol_ok));
+    (match Owner.unload owner with
+     | Error { code = Conflict; _ } -> ()
+     | _ -> failwith "stopped resource lifetime did not exclude reset");
+    let after = Agent_session.Session_actor.state actor |> protocol_ok in
+    [%test_eq: Sexp.t]
+      (Agent_session.Session_state.sexp_of_t before)
+      (Agent_session.Session_state.sexp_of_t after);
+    let closing = Eio.Fiber.fork_promise ~sw (fun () -> Owner.close_and_wait owner) in
+    Eio.Promise.await cleaning;
+    assert (Option.is_none (Eio.Promise.peek closing));
+    Eio.Promise.resolve release_u ();
+    (match Eio.Promise.await_exn borrowed with
+     | Error (Eio.Cancel.Cancelled _) -> ()
+     | _ -> failwith "permanent close failed to cancel independent resources");
+    Eio.Promise.await_exn closing;
+    assert !cleaned;
+    print_endline
+      "no runtime load or actor mutation; stop preserves resources; maintenance excludes \
+       them; close joins cleanup");
+  [%expect
+    {| no runtime load or actor mutation; stop preserves resources; maintenance excludes them; close joins cleanup |}]
+;;
+
 let%expect_test
     "resource borrowers survive ordinary stop and release the exact retired runtime"
   =

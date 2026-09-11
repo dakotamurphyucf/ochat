@@ -19,6 +19,12 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+type resources =
+  { native : Agent_runtime.t
+  ; definition : Chat_response.Extension_compiler.definition option
+  ; managed : Chat_response.Managed_tool_registry.t option
+  }
+
 type prepare_enqueue =
   before:Session.Moderator_state.Identity_snapshot.t
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
@@ -256,6 +262,180 @@ let create_agent_runtime
     |> map_diagnostics
     |> Result.map ~f:(fun resources ->
       resources.Agent_runtime.native, Some resources.definition, Some resources.managed)
+;;
+
+let declares_native elements name =
+  List.exists elements ~f:(function
+    | Prompt.Chat_markdown.Tool (Builtin declared) -> String.equal declared name
+    | _ -> false)
+;;
+
+let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host =
+  let registrations =
+    match declares_native elements Run_chatml_tool.name, one_off_policy with
+    | true, Some policy ->
+      [ Run_chatml_tool.registration ~env ~policy ~services:(fun () ->
+          let open Result.Let_syntax in
+          let%bind script_tools = Script_tool_calls.current_native_services () in
+          let%map moderation = Native_tool_moderation.current () in
+          Run_chatml_tool.
+            { script_tools
+            ; observer = Native_tool_moderation.observer moderation
+            ; now =
+                (fun () ->
+                  Eio.Time.now (Eio.Stdenv.clock env)
+                  |> Time_ns.Span.of_sec
+                  |> Time_ns.of_span_since_epoch
+                  |> Agent_protocol.Timestamp.of_time_ns)
+            ; moderate_tool =
+                (fun _ call ->
+                  Native_tool_moderation.prepare moderation call
+                  |> Result.map ~f:(fun tool_moderation ->
+                    Some { Moderation.Outcome.empty with tool_moderation }))
+            ; prepare_outcome =
+                (fun outcome ->
+                  Agent_protocol.Invocation.validate_outcome outcome
+                  |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+            })
+      ]
+    | _ -> []
+  in
+  match
+    declares_native elements Authoring_validation_tool.name, authoring_validation_host
+  with
+  | false, _ -> Ok registrations
+  | true, Some host ->
+    Ok (registrations @ [ Authoring_validation_tool.registration ~env ~host ])
+  | true, None ->
+    Error
+      (Agent_protocol.Error.create
+         Invalid_state
+         ~message:
+           "authoring.unavailable: readonly validation needs an explicit host target"
+         ~retryable:false
+         ())
+;;
+
+let create_authored_resources
+      ~env
+      ~sw
+      ~ctx
+      ~host
+      ~elements
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~response_dir
+  =
+  let open Result.Let_syntax in
+  let%bind native_registrations =
+    native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
+  in
+  let extensions =
+    Option.is_some one_off_policy
+    && (declares_native elements Run_chatml_tool.name
+        || declares_native elements Authoring_validation_tool.name
+        || List.exists elements ~f:(function
+          | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+          | _ -> false))
+  in
+  let%map native, definition, managed =
+    create_agent_runtime
+      ~extensions
+      ~native_registrations
+      ~sw
+      ~ctx
+      ~host
+      ~elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~response_dir
+  in
+  { native; definition; managed }
+;;
+
+let prepare_resources
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~revision
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_store.Prompt_artifact_store.verify_tree
+      ~root:(Prompt_revision.materialized_tree revision)
+      (Prompt_revision.artifact revision)
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let elements = Prompt_revision.elements revision in
+  let response_dir = response_dir storage_paths in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
+  let ctx = context ~env paths (cache storage_paths) in
+  let%bind host = host ~env ~paths ~session_id ~elements in
+  create_authored_resources
+    ~env
+    ~sw
+    ~ctx
+    ~host
+    ~elements
+    ~one_off_policy:(Some one_off_policy)
+    ~authoring_validation_host
+    ~manifest_authorizer
+    ~approval_provider
+    ~approval_store
+    ~response_dir
+;;
+
+let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
+  let open Result.Let_syntax in
+  let admission = Generated_definition.admission definition in
+  let%map native =
+    Agent_runtime.inherit_native
+      ?managed:inherited_managed
+      ~parent:parent_runtime
+      ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+      ()
+    |> map_diagnostics
+  in
+  { native
+  ; definition = Some (Chat_response.Generated_admission.definition admission)
+  ; managed =
+      Option.map
+        inherited_managed
+        ~f:Chat_response.Managed_tool_registry.delegation_registry
+  }
+;;
+
+let inherit_resources ~(parent : resources) ~definition =
+  let open Result.Let_syntax in
+  let%bind inherited_managed =
+    match parent.managed with
+    | None -> Ok None
+    | Some managed ->
+      Chat_response.Managed_tool_registry.delegate_standalone
+        managed
+        ~selected:
+          (Chat_response.Generated_admission.capabilities
+             (Generated_definition.admission definition))
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.create
+          Permission_denied
+          ~message:error.Chat_response.Tool_capability.message
+          ~retryable:false
+          ())
+  in
+  inherit_prepared_resources ~parent_runtime:parent.native ~inherited_managed ~definition
 ;;
 
 let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
@@ -864,101 +1044,38 @@ let build_with_services
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
-  let declares_one_off =
-    List.exists elements ~f:(function
-      | Prompt.Chat_markdown.Tool (Builtin name) -> String.equal name Run_chatml_tool.name
-      | _ -> false)
-  in
-  let declares_validation =
-    List.exists elements ~f:(function
-      | Prompt.Chat_markdown.Tool (Builtin name) ->
-        String.equal name Authoring_validation_tool.name
-      | _ -> false)
-  in
-  let native_registrations =
-    match extension_services, declares_one_off with
-    | Some services, true ->
-      [ Run_chatml_tool.registration
-          ~env
-          ~policy:services.one_off_policy
-          ~services:(fun () ->
-            let%bind script_tools = Script_tool_calls.current_native_services () in
-            let%map moderation = Native_tool_moderation.current () in
-            Run_chatml_tool.
-              { script_tools
-              ; observer = Native_tool_moderation.observer moderation
-              ; now =
-                  (fun () ->
-                    Eio.Time.now (Eio.Stdenv.clock env)
-                    |> Time_ns.Span.of_sec
-                    |> Time_ns.of_span_since_epoch
-                    |> Agent_protocol.Timestamp.of_time_ns)
-              ; moderate_tool =
-                  (fun _ call ->
-                    Native_tool_moderation.prepare moderation call
-                    |> Result.map ~f:(fun tool_moderation ->
-                      Some { Moderation.Outcome.empty with tool_moderation }))
-              ; prepare_outcome =
-                  (fun outcome ->
-                    Agent_protocol.Invocation.validate_outcome outcome
-                    |> Result.map_error ~f:(fun error ->
-                      error.Agent_protocol.Error.message))
-              })
-      ]
-    | None, _ | Some _, false -> []
-  in
-  let%bind native_registrations =
-    match declares_validation, extension_services with
-    | false, _ -> Ok native_registrations
-    | true, Some { authoring_validation_host = Some validation_host; _ } ->
-      Ok
-        (native_registrations
-         @ [ Authoring_validation_tool.registration ~env ~host:validation_host ])
-    | true, (None | Some { authoring_validation_host = None; _ }) ->
-      Error
-        (Agent_protocol.Error.create
-           Invalid_state
-           ~message:
-             "authoring.unavailable: readonly validation needs an explicit host target"
-           ~retryable:false
-           ())
-  in
+  let declares_one_off = declares_native elements Run_chatml_tool.name in
   let%bind agent_runtime, definition, managed =
     match source with
     | Generated { definition; parent_runtime; inherited_managed; _ } ->
-      let admission = Generated_definition.admission definition in
-      let%map native =
-        Agent_runtime.inherit_native
-          ?managed:
+      let%map resources =
+        inherit_prepared_resources
+          ~inherited_managed:
             (Option.map inherited_managed ~f:(fun inherited -> inherited.delegation))
-          ~parent:parent_runtime
-          ~capabilities:(Chat_response.Generated_admission.capabilities admission)
-          ()
-        |> map_diagnostics
+          ~parent_runtime
+          ~definition
       in
-      ( native
-      , Some (Chat_response.Generated_admission.definition admission)
-      , Option.map inherited_managed ~f:(fun inherited ->
-          Chat_response.Managed_tool_registry.delegation_registry inherited.delegation) )
+      resources.native, resources.definition, resources.managed
     | Authored _ ->
       let%bind host = host ~env ~paths ~session_id ~elements in
-      create_agent_runtime
-        ~extensions:
-          (Option.is_some extension_services
-           && (declares_one_off
-               || declares_validation
-               || List.exists elements ~f:(function
-                 | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
-                 | _ -> false)))
-        ~native_registrations
-        ~sw
-        ~ctx
-        ~host
-        ~elements
-        ~manifest_authorizer
-        ~approval_provider
-        ~approval_store
-        ~response_dir
+      let%map resources =
+        create_authored_resources
+          ~env
+          ~one_off_policy:
+            (Option.map extension_services ~f:(fun services -> services.one_off_policy))
+          ~authoring_validation_host:
+            (Option.bind extension_services ~f:(fun services ->
+               services.authoring_validation_host))
+          ~sw
+          ~ctx
+          ~host
+          ~elements
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ~response_dir
+      in
+      resources.native, resources.definition, resources.managed
   in
   let%bind () =
     match definition with

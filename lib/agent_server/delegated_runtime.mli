@@ -37,3 +37,21 @@ val prepare_independent
         -> Agent_session.Runtime_builder.t
         -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
   -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
+
+(** Build from independently reconstructed ancestor resources. [with_resources]
+    must acquire the ancestors' resource-lifetime borrows and keep the resource
+    construction switch alive through its callback and cleanup. The child uses
+    the same activity/join/terminal-guard implementation as [prepare]. No ancestor
+    execution runtime need be loaded. Current lifetime/delegation authorization,
+    source verification and parent policy mediation remain the host's duty. *)
+val prepare_resources
+  :  with_resources:
+       ((Agent_session.Runtime_builder.resources -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result)
+  -> sw:Eio.Switch.t
+  -> on_revoked:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> build:
+       (sw:Eio.Switch.t
+        -> Agent_session.Runtime_builder.resources
+        -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result)
+  -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result

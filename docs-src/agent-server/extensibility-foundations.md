@@ -3946,6 +3946,32 @@ to execute under obsolete policy or run the parent's worker/moderator. Offline
 tests qualify resource sharing, reload, cleanup faults and actual child activity
 switches across unload/close; they do not claim persisted independent recovery.
 
+`Runtime_builder.prepare_resources` supplies the construction part of stopped
+ancestor restoration. It verifies an authored revision's captured source tree and
+uses the same native/extension registrations as ordinary construction, including
+contextual `run_chatml` and validation helpers. The returned resource bundle has no
+worker, moderator manager, actor services or history. It does not convert prompt
+messages or evaluate any ChatML initializer. Authorized native setup can still
+perform IO, such as shell-policy checks and MCP connection setup; this is separate
+from the no-effect authoring validator.
+
+`Runtime_builder.inherit_resources` narrows an admitted generated definition from
+those exact resources. Standalone handlers retain their original compiled objects
+and private dependencies across ancestor levels; unavailable stateful handlers
+reject. All levels depend on the root resource switch. Fresh native registrations
+require explicit readmission/rebinding, even when their persisted permission pins
+match. The fixture uses failing parent, standalone and child initializers to prove
+that none are evaluated during construction, then checks retained private read
+roots, handler identity and rejection of a corrupted captured tree.
+
+`Runtime_owner.with_resource_lifetime` can retain separately reconstructed resources
+for a stopped ancestor without loading its execution runtime. Stop preserves the
+borrow; permanent close cancels/joins it, and reset/maintenance remain excluded.
+`Delegated_runtime.prepare_resources` connects externally owned resource bundles to
+the common child construction/activity scope. Hosts must still validate delegation
+before resource setup and retain every ancestor scope. These pieces do not yet
+install factory ancestry traversal, lifetime admission or workspace retention.
+
 `Agent_server.Delegated_runtime.prepare` holds a parent runtime lease around the
 child's construction switch. Closing the child cancels and joins its activities,
 closes its native runtime, then releases the lease. Parent cancellation also joins

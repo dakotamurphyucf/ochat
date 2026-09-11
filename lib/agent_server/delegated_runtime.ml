@@ -141,3 +141,7 @@ let prepare = prepare_with_lease ~with_parent:Runtime_owner.with_background_runt
 let prepare_independent =
   prepare_with_lease ~with_parent:Runtime_owner.with_delegation_resources
 ;;
+
+let prepare_resources ~with_resources =
+  prepare_with_lease ~with_parent:(fun () f -> with_resources f) ~parent:()
+;;
