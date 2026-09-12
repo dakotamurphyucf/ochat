@@ -68,7 +68,9 @@ and `hashtbl_mappings` add all exports with the checked [String](chatml-strings.
 [collections](chatml-collections.md), [JSON](chatml-json.md) and
 [table](chatml-tables.md) references. `global_mappings` covers the ten shared
 globals plus ordinary moderator `print`; `json_alias_mappings` covers the common
-recursive type. `Coverage.reviewed_mappings` combines these 343 exact targets
+recursive type. `moderator_data_mappings` adds Item, Context and Tool_call plus
+their five data aliases on the two moderator surfaces.
+`Coverage.reviewed_mappings` combines these 431 exact targets
 across the four surfaces. Other compiler
 APIs remain explicitly unmapped. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
@@ -92,11 +94,20 @@ export inventory on every surface, so a new export cannot silently remain outsid
 that module's documentation check.
 
 Use `--globals TOPIC_ID` or `--alias NAME TOPIC_ID` to inspect those candidate
-families. A separate completeness test derives the core API from the compiler's
+families. Optional trailing surface IDs select a narrower exact set; for example:
+
+```sh
+opam exec -- dune exec test/authoring_sources/review_coverage.exe -- Item chatml.moderator-data moderator_v1 delegated_moderator_v1
+```
+
+A separate completeness test derives the core API from the compiler's
 actual core inventory, checks that each extensibility surface includes that API
 with its explicit `print` exclusion, and requires every resulting target to have
 a reviewed mapping. That test covers core modules, globals and the shared `json`
 alias; it does not claim coverage of all syntax constructs or runtime extensions.
+The moderator data test requires every export of those three modules and the
+five documented aliases, and checks that both the APIs and topic are unavailable
+on one-off/standalone targets. Other runtime families still need audited coverage.
 
 ## Initial topic corpus
 
@@ -117,6 +128,14 @@ mutable payloads, duplicate-key policies, syntax-only validation and nonfinite
 export failures. `chatml.tables` covers every Hashtbl operation and local mutation
 recovery boundaries. `chatml.globals` explains value rendering, reflection and
 surface availability. Eleven further checked examples accompany these guides.
+
+`chatml.moderator-data` covers all Item, Context and Tool_call exports plus the
+item/tool_desc/tool_call/tool_result/context aliases. Three complete moderator
+examples each execute on ordinary and delegated surfaces, verifying state returned
+from `on_event` after `Session_start` with synthetic context and no host operations.
+The checker honors explicit `also_run` metadata and reports additional executions
+separately; existing integration-fixture `also_check` means compilation only.
+This proves data-helper behavior, not daemon projection or permission enforcement.
 
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):
@@ -209,7 +228,8 @@ materialization services. Public enablement awaits complete qualification.
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
-coverage, 51 language examples (including expected errors) and exact source/entrypoint checks for the
+coverage, 54 language examples (including expected errors), three additional
+moderator surface executions, and exact source/entrypoint checks for the
 four runtime integration fixtures. The invocation and background moderator fixtures
 also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be

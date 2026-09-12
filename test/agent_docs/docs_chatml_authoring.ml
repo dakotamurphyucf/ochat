@@ -15,6 +15,7 @@ let collections_fixture = "docs-src/guide/chatml-collections.md"
 let json_fixture = "docs-src/guide/chatml-json.md"
 let tables_fixture = "docs-src/guide/chatml-tables.md"
 let globals_fixture = "docs-src/guide/chatml-global-helpers.md"
+let moderator_data_fixture = "docs-src/guide/chatml-moderator-data.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -55,6 +56,7 @@ type expectation =
 type example =
   { id : string
   ; target : target
+  ; also_run : target list
   ; expectation : expectation
   ; source : string
   }
@@ -90,6 +92,21 @@ let metadata_exn line =
   let fields = fields_exn "metadata" json in
   let id = string_exn "metadata" fields "id" in
   let target = target_exn id (string_exn id fields "surface") in
+  let also_run =
+    match List.Assoc.find fields "also_run" ~equal:String.equal with
+    | None -> []
+    | Some (`Array (_ :: _ as values)) ->
+      List.map values ~f:(function
+        | `String name -> target_exn id name
+        | _ -> fail id "also_run must contain surface IDs")
+    | Some _ -> fail id "also_run must be a nonempty surface list"
+  in
+  (match List.find_a_dup (target :: also_run) ~compare:compare_target with
+   | None -> ()
+   | Some _ -> fail id "duplicate execution surface");
+  let fields =
+    List.filter fields ~f:(fun (name, _) -> not (String.equal name "also_run"))
+  in
   let expectation =
     match List.Assoc.find fields "runtime_error" ~equal:String.equal with
     | Some _ ->
@@ -105,9 +122,10 @@ let metadata_exn line =
        with
        | Some result, None ->
          exact_fields_exn id fields [ "id"; "surface"; "result" ];
-         (match target with
-          | One_off -> ()
-          | _ -> fail id "pure result fixtures must use the one-off contract");
+         List.iter (target :: also_run) ~f:(function
+           | One_off | Moderator | Delegated -> ()
+           | Standalone ->
+             fail id "result fixtures require one-off or moderator contracts");
          Result result
        | None, Some (`String path)
          when String.is_prefix path ~prefix:"test/chatml_extensibility_fixtures/"
@@ -146,7 +164,10 @@ let metadata_exn line =
          in
          Diagnostic { stage; contains = string_exn id fields "contains"; has_span })
   in
-  id, target, expectation
+  (match expectation, also_run with
+   | Result _, _ | _, [] -> ()
+   | _ -> fail id "also_run requires a result expectation");
+  id, target, also_run, expectation
 ;;
 
 let examples_exn text =
@@ -158,11 +179,11 @@ let examples_exn text =
   let rec scan reversed = function
     | [] -> List.rev reversed
     | line :: rest when String.is_prefix line ~prefix:marker ->
-      let id, target, expectation = metadata_exn line in
+      let id, target, also_run, expectation = metadata_exn line in
       (match rest with
        | "```ocaml" :: rest ->
          let source, rest = take_code id [] rest in
-         scan ({ id; target; expectation; source } :: reversed) rest
+         scan ({ id; target; also_run; expectation; source } :: reversed) rest
        | _ -> fail id "metadata must immediately precede an ocaml code fence")
     | line :: _ when String.is_prefix line ~prefix:"```" ->
       fail "metadata" "every code fence in this reference must have example metadata"
@@ -179,7 +200,7 @@ let examples_exn text =
   | _ -> examples
 ;;
 
-let check_exn env root { id; target; expectation; source } =
+let check_one_exn env root { id; target; expectation; source; also_run = _ } =
   (match expectation with
    | Fixture { path; also_check } ->
      let original = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / path) in
@@ -209,17 +230,32 @@ let check_exn env root { id; target; expectation; source } =
   | (Result _ | Runtime_failure _), Ok compiled ->
     (* Deliberately install no operations. These are pure language examples;
        accidental host calls must fail, never access a tool or a provider. *)
-    let config : Runtime.runtime_config =
-      { surface = Surface.one_off_v1; operations = [] }
-    in
+    let config : Runtime.runtime_config = { surface; operations = [] } in
+    let limits : Runtime.execution_limits = { fuel = 10_000; max_tasks = 1_000 } in
     let result =
-      Runtime.run_entrypoint
-        ~limits:{ fuel = 10_000; max_tasks = 1_000 }
-        config
-        compiled
-        ~entrypoint:"main"
-        ~arguments:[ Codec.jsonaf_to_value `Null ]
-        ()
+      (match target with
+       | One_off ->
+         Runtime.run_entrypoint
+           ~limits
+           config
+           compiled
+           ~entrypoint:"main"
+           ~arguments:[ Codec.jsonaf_to_value `Null ]
+           ()
+       | Moderator | Delegated ->
+         Runtime.instantiate_session
+           config
+           compiled
+           ~entrypoints:
+             { initial_state_name = "initial_state"; on_event_name = "on_event" }
+         |> Result.bind ~f:(fun session ->
+           Runtime.handle_event
+             ~limits
+             session
+             ~context:(Docs_chatml.context "session_start")
+             ~event:(Chatml.Chatml_lang.VVariant ("Session_start", []))
+           |> Result.map ~f:(fun () -> Runtime.current_state session))
+       | Standalone -> Error "unsupported result fixture contract")
       |> Result.bind ~f:Codec.value_to_jsonaf_result
     in
     (match expectation, result with
@@ -244,6 +280,12 @@ let check_exn env root { id; target; expectation; source } =
                (Jsonaf.to_string expected)
                (Jsonaf.to_string actual)))
      | (Fixture _ | Diagnostic _), _ -> assert false)
+;;
+
+let check_exn env root example =
+  check_one_exn env root example;
+  List.iter example.also_run ~f:(fun target ->
+    check_one_exn env root { example with target })
 ;;
 
 let check_topic_coverage corpus ~path ~text =
@@ -315,6 +357,7 @@ let run env root =
       ; json_fixture
       ; tables_fixture
       ; globals_fixture
+      ; moderator_data_fixture
       ]
       ~f:(fun file ->
         let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
@@ -336,11 +379,15 @@ let run env root =
       | Fixture _ -> true
       | _ -> false)
   in
+  let additional_runs =
+    List.sum (module Int) examples ~f:(fun example -> List.length example.also_run)
+  in
   Eio.Flow.copy_string
     (sprintf
        "ChatML authoring reference: %d language checks, %d integration-source/contract \
-        checks PASS\n"
+        checks, %d additional surface executions PASS\n"
        (List.length examples - integration_count)
-       integration_count)
+       integration_count
+       additional_runs)
     (Eio.Stdenv.stdout env)
 ;;

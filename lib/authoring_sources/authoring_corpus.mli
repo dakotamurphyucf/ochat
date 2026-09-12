@@ -222,6 +222,11 @@ module Coverage : sig
   (** Shared recursive json alias, with checked constructor/access/codec examples. *)
   val json_alias_mappings : mapping list
 
+  (** All Item, Context and Tool_call exports plus item/tool_desc/tool_call/
+      tool_result/context aliases on ordinary and delegated moderator surfaces.
+      Checked examples execute actual moderator entrypoints on both targets. *)
+  val moderator_data_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list
@@ -248,7 +253,9 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     Notification/example prerequisites include acknowledgement and recovery
     boundaries. Flat String, Array/Option, Json, Hashtbl and global-helper topics
     cover the entire shared core API with executable semantic examples and exact
-    surface availability. This remains a foundation, not complete feature/native-schema
+    surface availability. Moderator data inspection adds Item/Context/Tool_call
+    and five aliases only on the two moderator targets. This remains a foundation,
+    not complete feature/native-schema
     coverage or complete task packages. The separate Authoring_context service
     adds retrieval and selected compiler/tool inventories. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result

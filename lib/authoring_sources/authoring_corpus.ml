@@ -1588,6 +1588,205 @@ module Coverage = struct
           }))
   ;;
 
+  let moderator_data_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "d4ce8120be3e86db7402d7219ef6c20d7be6f33c61c726163175867d25b6913e"
+        , [ ( "module/Item"
+            , "30a1aec7224048beb927ac1cff733daaaebb03fc4144e90f3ec7319bb0694158" )
+          ; ( "module_export/Item.assistant_text"
+            , "cf578bc994928f4348b8e067b2461572d66e1604ff461e6e37182c5a58244d94" )
+          ; ( "module_export/Item.create"
+            , "704fda1c71dcb740a91d2fd943aa750353bad90d9c194bacc0726d1778253e15" )
+          ; ( "module_export/Item.id"
+            , "532ddc88cfd83472978223b9ade524e79f44fbd2249260d69b2d8ac993fafea4" )
+          ; ( "module_export/Item.input_text_message"
+            , "a4bdfb3ddaf6407d4be3e41b07abe5058bc61da6ed66865294634573d52fcafe" )
+          ; ( "module_export/Item.is_assistant"
+            , "4e346c0d7de146e1ba9027acc449fedd19f7a4188e87c5df476de4a9afceb52c" )
+          ; ( "module_export/Item.is_system"
+            , "9e103c00e4484437419546317daf16d06201c9a86fd13175c1677bf17fafa09c" )
+          ; ( "module_export/Item.is_tool_call"
+            , "15aa85c8320799fc6c30852b5c56d382d02e4dd790eff040f53f27400133d0e1" )
+          ; ( "module_export/Item.is_tool_result"
+            , "1bcad8669f63f03eb08873a94c1f33a698d8efa692496d36044bcdec9627749c" )
+          ; ( "module_export/Item.is_user"
+            , "5b5e494465dbcad2a191cd62f796161ae47fe6fa2cefd9d93a71d99352956da6" )
+          ; ( "module_export/Item.kind"
+            , "767450723e3f4a1268f02be829af3cd499189702e31f516c829a36b4e297fd02" )
+          ; ( "module_export/Item.notice"
+            , "bb0ad752aeef9745666d7b664c6dd8cfcc161af3f90f266b3c5614e22ce1a694" )
+          ; ( "module_export/Item.output_text_message"
+            , "10d40acab895a4e2070bf59a793d5c03a54391f48de1cb79e0e19c6d45167dd5" )
+          ; ( "module_export/Item.role"
+            , "4a2fe4c1f6a687303dc9ccfc96685e33901eae729651b9c225238db52d6c65e8" )
+          ; ( "module_export/Item.system_text"
+            , "cf8f7f4c56dfb94c0c5349a378b03068076acadbdf70ee15e0d6e98a3c80c6a9" )
+          ; ( "module_export/Item.text"
+            , "e4253815a8748b57f8a188950d988c76bf4ffdd584e77e88772b0ff4a605aba2" )
+          ; ( "module_export/Item.text_parts"
+            , "b878659118156cdb333bbf655ae91f5d08cca8016b6bfa593fcdc1dd83705ee6" )
+          ; ( "module_export/Item.user_text"
+            , "45e6ceae4da7869937c2243b7ee26ad8629f35f1cb4b0d7289294fadf5a1af7b" )
+          ; ( "module_export/Item.value"
+            , "9cabc262c61b9ba48e9bd55ace070fd562726681337d0bd825eb18cc716e299f" )
+          ; ( "module/Context"
+            , "043cc243406f1aa4741526787e90f317d226bd14b92760e36ef8a9ba3eef2744" )
+          ; ( "module_export/Context.find_item"
+            , "a8d0272c2226938cc40ae557c20aadd116b9666b66e553ceca85ae17d64871f3" )
+          ; ( "module_export/Context.find_tool"
+            , "d7ffe66f65805602fa631ac544bd36f9b26aded3eeb01f7afe207edbeaaab2b2" )
+          ; ( "module_export/Context.has_tool"
+            , "02ae43507446afe8943d42b9d802cac242b47dd7a917dcb9f968a1a7ae0df3cb" )
+          ; ( "module_export/Context.items_by_role"
+            , "198343498107c7fa8437f13f274843de60f4f59bed49105bcc37007fa807e6f8" )
+          ; ( "module_export/Context.items_since_last_assistant_turn"
+            , "58c9a361b0a161c425889c729cd8259b5183ba1950ae146c4ceae8a3c46a3e28" )
+          ; ( "module_export/Context.items_since_last_user_turn"
+            , "d7b087b72cfd1824dfc8c86e0a9f118e42458ddc9f2d5de408acb7ba0c9ece18" )
+          ; ( "module_export/Context.last_assistant_item"
+            , "7e56934cf1ce82cda82ee1af9b4981d910338cb8547067bb658d3765500c08ad" )
+          ; ( "module_export/Context.last_item"
+            , "6e04c6d34aa9ffe8a2d47f9ef45ac86d80d803cdf990e433c625cfc0700facf2" )
+          ; ( "module_export/Context.last_system_item"
+            , "7e60d76843cc05b63ca6ca2ac8b2d520ee7da5b68e0275093305869bdc5987e4" )
+          ; ( "module_export/Context.last_tool_call"
+            , "dcefc73376380fbb4202917913a8d7cff86d1f298b78175c0547f562fb82751f" )
+          ; ( "module_export/Context.last_tool_result"
+            , "efe92cf875383db48ade2f6ab8b41f825a29695ab36d52e32834add52ddca11f" )
+          ; ( "module_export/Context.last_user_item"
+            , "505edd3235a262b04e00cc926747b1579f117dcdc39fa5c2541506f21f74c7f7" )
+          ; ( "module/Tool_call"
+            , "111edba6b295387104b0daccf838d3bc4a1bc1d28a33ed408f9e3602bb848389" )
+          ; ( "module_export/Tool_call.arg"
+            , "ff23aaf75ece3686c3f4c561eb14044cc3b6ef59c380ded64866d5027d0f86c5" )
+          ; ( "module_export/Tool_call.arg_array"
+            , "1137b0615c993dfe16891439d506ccc5196b8ce288905d1162548a648acb4bc7" )
+          ; ( "module_export/Tool_call.arg_bool"
+            , "93a8a9a3d182c14d76e892c747abb903e486cf3a74331b298288032b54dced08" )
+          ; ( "module_export/Tool_call.arg_string"
+            , "cebfd4d7276c5193e6fcdaadc2eb483875eeedfb6caf370fd92c2ac2a7ff4b96" )
+          ; ( "module_export/Tool_call.is_named"
+            , "4616ee49bf74e25bbbc5c5659d966ba87ddca0ada28e7d7cce71a5762dbd6872" )
+          ; ( "module_export/Tool_call.is_one_of"
+            , "9a9959bf2f20bb67ce8601f8d6e7093bdb8b1caccf7075984bac6698b68ddcc7" )
+          ; ( "type_alias/item"
+            , "beef73d64b592da99811f34b299e75303d8c12e97cfb40431abde2b0f9a33c03" )
+          ; ( "type_alias/tool_desc"
+            , "cd826999c2542ae21c78dcb2940d332aed76840cc9a5f0c65a38b7c5852bb022" )
+          ; ( "type_alias/tool_call"
+            , "09a1aa6f00a9112f05fb6464a6afd6a61a40044997e6a2250273d03e7acbdb66" )
+          ; ( "type_alias/tool_result"
+            , "734a1df5a6e56c584f3f4daba9ffbdf3411e38a5d2ec196745a423968e585bad" )
+          ; ( "type_alias/context"
+            , "a7b9f78044d68da69b89b360bcf237eda4850f54c188c113720e779b1fbfa678" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "096df7d0f9d867430390952d1709e1224bbf71396c5780bc23ef2bed40cb3741"
+        , [ ( "module/Item"
+            , "0d8a88fe4ea744ffef1c1e2c8ae566e17f6f27503da74c9ca8072fbb85f1b612" )
+          ; ( "module_export/Item.assistant_text"
+            , "3adfc202ac93250c4e07746f32d92c0f2250bb0e09e0d503d1405a5220b27970" )
+          ; ( "module_export/Item.create"
+            , "c8ba4855c84164e00b135cab440fbd80f9c6f86d84997ca4a2656762bc33f64d" )
+          ; ( "module_export/Item.id"
+            , "42a186df0cb6277bf66c16281908ff7677035f3eefd636af09a44ba931d26992" )
+          ; ( "module_export/Item.input_text_message"
+            , "85b0a03f74d1bd46bfea84005c73f2d64747a5753ce50488c18166adbc41ebae" )
+          ; ( "module_export/Item.is_assistant"
+            , "c2d3d90d5a8853ddb80d3a814b836b1142f2c15b429e3a63cee5119321d03a4c" )
+          ; ( "module_export/Item.is_system"
+            , "7292d21e3e3ee9d95cbc1388fa588655275dd7a1ba6d2664e49c9ca588d32ff2" )
+          ; ( "module_export/Item.is_tool_call"
+            , "8900de12fef3a2a92d2682d0d71282985a62c509479bdefa5241eb0ef27eab79" )
+          ; ( "module_export/Item.is_tool_result"
+            , "8c67babd17c68b9df53e221801471c94e16a7cfbb44688cf914bc764adbe2609" )
+          ; ( "module_export/Item.is_user"
+            , "a89a1a3c1c013247f66674f8a4785842e457671cf7409fe2f2a1edfedebf1847" )
+          ; ( "module_export/Item.kind"
+            , "dfd0d585688145e2754307371cfff203ee8615a35a70f83b57877a72e751a7aa" )
+          ; ( "module_export/Item.notice"
+            , "45029382b3634b9a4549673a0810a80244fe3e327a8e609466b483d2d48e0036" )
+          ; ( "module_export/Item.output_text_message"
+            , "f3c566ed335cbc5ac0b1c762bc7e98723ab4503681f16a11c462c7bd671fc3a5" )
+          ; ( "module_export/Item.role"
+            , "841f5b281d54fa62153ad8b1ddd4067d6944d11247a46cd1ea76f2c865d8dafb" )
+          ; ( "module_export/Item.system_text"
+            , "f0a794bb32a97371b3e07c998accc6dffdd2b80d8555acad35d3acfc75835871" )
+          ; ( "module_export/Item.text"
+            , "1eec79aa6b59e0c49053f23d53b75d411f47359e542c1bcbe8d266bb31319ef7" )
+          ; ( "module_export/Item.text_parts"
+            , "f9dc702b51db124dd34fe36dc27b40e630670572d64c46578b4f0b5741f2f282" )
+          ; ( "module_export/Item.user_text"
+            , "3d22c6642c585b36a0005916d68512637a5740f5a4bb53ccc32e29365e25cb96" )
+          ; ( "module_export/Item.value"
+            , "e98f64390a63417572f4fb00a3251e7ef272b93b226c8bd8511ab90893a92ce1" )
+          ; ( "module/Context"
+            , "f504951196837027022c550e85b3f7955f6776d45fe26eb1798afee2014f8ad4" )
+          ; ( "module_export/Context.find_item"
+            , "f8116d44d87140c57816551319164101fa19a3c0b1a78e0c4cf8fa5b3e421940" )
+          ; ( "module_export/Context.find_tool"
+            , "f5ab3a9f626b554a8f86ec1e7c2db741bc671c483e9c4ea8d440a4e4308f76d3" )
+          ; ( "module_export/Context.has_tool"
+            , "09f7ea897c0ba9c71d018f1a1b3859e77e07f7dbb1f49a092c2410f109c7aaf6" )
+          ; ( "module_export/Context.items_by_role"
+            , "557819a6dd9a90f6b30dc4f16393d89a7717b041cf6d71f70fb737db69febf83" )
+          ; ( "module_export/Context.items_since_last_assistant_turn"
+            , "05bb2547ea71936f43f55a780cfdc518e0a8bbd8df324cae843e1a6846458231" )
+          ; ( "module_export/Context.items_since_last_user_turn"
+            , "a43bb672ac3f778455f93616ce562c88229e727521f7e897831a4d8cb5dedf2c" )
+          ; ( "module_export/Context.last_assistant_item"
+            , "c04fdd7c7c8c584bbd182083e465615ec5faeb46e7cb9a00ae7faa63c71ef1f9" )
+          ; ( "module_export/Context.last_item"
+            , "bfdb43de466793fd74614563a25440977fab92f6f7bb1e77712ec22458015043" )
+          ; ( "module_export/Context.last_system_item"
+            , "d078a6428444090b671728ebefda3e2ff792b437a58de7ba5baeaf3c94a4d714" )
+          ; ( "module_export/Context.last_tool_call"
+            , "e315beee6f8bb3bee7c740b26c18b989b318a273c826752b55c7d7d4df5479d4" )
+          ; ( "module_export/Context.last_tool_result"
+            , "f0ec9f7c7b8dd0cacba71f60bde816331c6c4e413dd09fc04387b1bbb3acae5f" )
+          ; ( "module_export/Context.last_user_item"
+            , "6275e676a682560182f1422c153263ae25430fc115a47cdb9898e1c1276bb241" )
+          ; ( "module/Tool_call"
+            , "b499b0cb8501b221b1099eeac7c45a8a07f475ae341c7ceee839d74e574ce6a3" )
+          ; ( "module_export/Tool_call.arg"
+            , "bbe41b104a4ccfd15bdb2ade37884353286b168b3b125ab2b6e57c45725e5584" )
+          ; ( "module_export/Tool_call.arg_array"
+            , "ba41adb1a59a64c021838b87ac4ff19f62b3562eda465772b4e1ac0bea52f1e3" )
+          ; ( "module_export/Tool_call.arg_bool"
+            , "d48e0b051210a1d6c1c9c49797c1a9de92dd4a13c57c6e69f889e5e1c47f3a6f" )
+          ; ( "module_export/Tool_call.arg_string"
+            , "34cccc4e251168b7aa03fd465bd7187b6668a829262c87468d0a601ae8f612ff" )
+          ; ( "module_export/Tool_call.is_named"
+            , "4112e3c9d65d86b7d344bdd921b40c84a2ee498cd40754eff7d17e8ed54275ab" )
+          ; ( "module_export/Tool_call.is_one_of"
+            , "7fd2a29ce7d0113d2fc3ef2e28b19860b7d62c2eb57bdc612ef8e8806e8a58b7" )
+          ; ( "type_alias/item"
+            , "628df52e13e1d7e441045a492cf29eb5b4c1dbe73737267d69cd32c06d3e0f61" )
+          ; ( "type_alias/tool_desc"
+            , "cdb74ea1a94bc0ec5d130f01d7ab658a62ce64a9c8fef489535e876659769af8" )
+          ; ( "type_alias/tool_call"
+            , "30fd3f543f345e877ba33d259e73f1c9dbe3bf35baf625370ea406a9ad07cbd0" )
+          ; ( "type_alias/tool_result"
+            , "de8443bb4f09b27bfc6695008ed0cfbd6ee20d3a07f9b78a755eb91ff62015c1" )
+          ; ( "type_alias/context"
+            , "31a2f45106393766153ef623ff3c658b50c7cbe14d8fb6bcbac1e31fb1da3cf8" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.moderator-data"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "lib/chatml/chatml_extension_surface.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -1598,6 +1797,7 @@ module Coverage = struct
     @ hashtbl_mappings
     @ global_mappings
     @ json_alias_mappings
+    @ moderator_data_mappings
   ;;
 end
 
@@ -2085,6 +2285,27 @@ let runtime_foundation ~sources =
                    [ "lib/chatml/chatml_builtin_spec.ml"
                    ; "lib/chatml/chatml_extension_surface.ml"
                    ; "test/chatml_runtime_test.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.moderator-data"
+         ; title = "Moderator item, context and tool-call data inspection"
+         ; prerequisites = [ "runtime.invocations.moderator"; "chatml.json" ]
+         ; surfaces = moderators
+         ; excerpts =
+             [ { path = "guide/chatml-moderator-data.md"
+               ; heading = "# Inspecting moderator items, context and tool calls"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "dc48ddcc95daa0af13600e6864719db323ede7644f3f282eac6e6b1e1ed50cea" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "lib/chatml/chatml_extension_surface.ml"
                    ; "test/agent_docs/docs_chatml_authoring.ml"
                    ]
                }

@@ -107,6 +107,53 @@ let%expect_test "shared core inventory is fully mapped with exact print availabi
     |}]
 ;;
 
+let%expect_test "moderator data families are complete and absent from narrower surfaces" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  let family name =
+    List.exists [ "Item"; "Context"; "Tool_call" ] ~f:(fun module_name ->
+      String.equal name ("module/" ^ module_name)
+      || String.is_prefix name ~prefix:("module_export/" ^ module_name ^ "."))
+    || List.exists
+         [ "item"; "tool_desc"; "tool_call"; "tool_result"; "context" ]
+         ~f:(fun alias -> String.equal name ("type_alias/" ^ alias))
+  in
+  List.iter
+    [ "one_off_v1", false
+    ; "tool_v1", false
+    ; "moderator_v1", true
+    ; "delegated_moderator_v1", true
+    ]
+    ~f:(fun (surface, available) ->
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface ] |> ok in
+      let selected =
+        List.filter targets ~f:(fun target ->
+          family (String.chop_prefix_exn target.V.id ~prefix:(surface ^ "/")))
+      in
+      let mappings =
+        List.filter V.moderator_data_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.V.target_id ~prefix:(surface ^ "/"))
+      in
+      (match
+         ( available
+         , C.assemble corpus ~surface_id:surface ~roots:[ "chatml.moderator-data" ] )
+       with
+       | true, Ok _ ->
+         V.audit corpus ~targets:selected ~mappings |> ok |> V.require_complete |> ok
+       | false, Error _ ->
+         assert (List.is_empty selected);
+         assert (List.is_empty mappings)
+       | _ -> failwith "moderator data topic/target availability changed");
+      print_s [%sexp (surface : string), (available : bool), (List.length selected : int)]);
+  [%expect
+    {|
+    (one_off_v1 false 0)
+    (tool_v1 false 0)
+    (moderator_v1 true 44)
+    (delegated_moderator_v1 true 44)
+    |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)

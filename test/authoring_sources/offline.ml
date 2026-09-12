@@ -25,6 +25,7 @@ let () =
     ; "guide/chatml-json.md"
     ; "guide/chatml-language-spec.md"
     ; "guide/chatml-match-semantics.md"
+    ; "guide/chatml-moderator-data.md"
     ; "guide/chatml-moderator-runtime.md"
     ; "guide/chatml-ocaml-differences.md"
     ; "guide/chatml-strings.md"
