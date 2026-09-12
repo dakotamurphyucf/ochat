@@ -129,6 +129,39 @@ let run env root =
        | true -> ()
        | false -> fail ())
     | _ -> fail ());
+  List.iter Authoring_corpus.Coverage.declaration_features ~f:(fun feature ->
+    let closure =
+      Authoring_corpus.assemble
+        corpus
+        ~surface_id:"delegated_moderator_v1"
+        ~roots:[ feature.topic_id ]
+      |> Result.ok_or_failwith
+      |> List.concat_map ~f:(fun topic -> topic.Authoring_corpus.fragments)
+      |> List.concat_map ~f:(fun fragment -> String.split_lines fragment.text)
+      |> List.filter_map ~f:(fun line ->
+        match String.is_prefix line ~prefix:D.marker with
+        | false -> None
+        | true ->
+          String.chop_prefix_exn line ~prefix:D.marker
+          |> fun text ->
+          String.chop_suffix_exn text ~suffix:" -->"
+          |> Jsonaf.of_string
+          |> Jsonaf.member_exn "id"
+          |> Jsonaf.string_exn
+          |> Option.some)
+    in
+    List.iter feature.evidence ~f:(fun reference ->
+      match String.is_prefix reference ~prefix:"test/" with
+      | true ->
+        let source = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / reference) in
+        if String.is_empty source then D.fail feature.id ("empty evidence: " ^ reference)
+      | false ->
+        (match
+           List.mem closure reference ~equal:String.equal
+           && List.exists examples ~f:(fun example -> String.equal example.id reference)
+         with
+         | true -> ()
+         | false -> D.fail feature.id ("missing checked ChatMD example: " ^ reference))));
   Eio.Flow.copy_string
     (sprintf
        "ChatMD authoring reference: %d generated-definition examples, including \

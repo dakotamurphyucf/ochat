@@ -125,9 +125,20 @@ Generated children currently accept inherited tools and lifecycle moderation;
 they do not install new standalone or moderator-handled tool implementations.
 To reuse those behaviors, inherit a parent-authorized tool implementing them.
 An authored agent-backed tool can opt into `persistence="persistent"` or
-`persistence="optional"`; read the [child-session reference](chatml-authoring-children.md)
-for call shapes and shared lifecycle operations. That authored-tool option does
-not relax the generated-child declaration rules.
+`persistence="optional"`. Omitted persistence or `one_off` preserves ordinary
+one-off behavior. The persistence-enabled tool takes required string `input`
+and optional `session_id`. With optional persistence it also accepts `mode`
+(`one_off` or `persistent`), defaulting to `one_off`. Always-persistent tools do
+not accept a `mode` field. A one-off invocation cannot supply a session ID.
+
+For a persistent invocation, omit `session_id` to create an instance or supply
+the ID returned by this authored tool to continue that instance. The result
+retains the session ID and submission receipt even when the response is pending
+or the wait times out. The [shared lifecycle tools](chatml-authoring-children.md)
+can address that same session when available. An ID does not authorize another
+tool instance or bypass the parent relationship. Persistence retains history;
+it does not authorize execution after parent stop. This option applies only to
+agent-backed declarations and does not relax generated-child tool rules.
 
 ## Attach ChatML moderation
 
@@ -204,7 +215,20 @@ documentation or upgrade capabilities. Manual policy does not implicitly grant
 documentation or validation tools—select them when the agent needs them.
 
 User-authored `<authoring_help>` can reference a trusted custom package for a
-tool, adding conventions and prerequisites. A generated child cannot replace
+tool, adding conventions and prerequisites. The empty declaration accepts:
+
+| Attribute | Value |
+|---|---|
+| `tool` | Required exact registered callable name; no wildcard or renaming |
+| `package` | Required trusted package ID |
+| `tasks` | Required whitespace-separated unique task IDs: `one_off_script`, `standalone_tool`, `moderator_tool`, `child_agent`, `background_workflow` |
+| `topics` | Required whitespace-separated list of 1–32 unique topic IDs |
+| `required_helpers` | Optional unique names `ochat_authoring_context` and/or `ochat_validate` |
+
+Unknown attributes, duplicate lists and nonempty bodies are rejected. A package
+reference does not install its content; the host must already supply the package.
+Required helpers are dependency declarations, not a way to claim a trusted helper
+role or add permissions. A generated child cannot replace
 the inherited tool's metadata this way. See the [authoring policy reference](chatml-authoring-primer.md)
 for discovery, context insertion and compaction behavior.
 

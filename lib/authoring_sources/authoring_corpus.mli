@@ -203,6 +203,22 @@ module Coverage : sig
 
   val semantic_mappings : mapping list
 
+  (** Reviewed ChatMD extension, generated-definition and authoring declarations.
+      Surface IDs select documentation compatibility, not permission to execute
+      every authored declaration in a generated child. The referenced guides
+      distinguish those contexts. Legacy shell/MCP details and native operation
+      semantics still require their separate feature accounting. *)
+  val declaration_features : semantic_feature list
+
+  (** Requires nonempty unique selections from tool_v1, moderator_v1 and
+      delegated_moderator_v1. One-off scripts do not declare ChatMD tools. *)
+  val declaration_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  val declaration_mappings : mapping list
+
   (** Digest the complete prerequisite-first topic closure for this surface.
       Every topic must be audited; a prerequisite change invalidates the pin
       even if the root topic's excerpts remain unchanged. *)

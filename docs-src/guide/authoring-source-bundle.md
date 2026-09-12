@@ -19,7 +19,9 @@ Format version 3 assigns each document a SHA-256 digest of its exact bytes, each
 compiler surface a digest of its structural inventory, and each grammar
 production a digest of its left/right symbols and semantic action. It also records
 build-time hashes of seven language implementation sources: the lexer, parser,
-type checker, resolver, evaluator, runtime values and value codec. The bundle
+type checker, resolver, evaluator, runtime values and value codec. Twenty further
+source hashes cover reviewed ChatMD declarations, source capture, generated
+admission, authoring policy and authored persistence contracts. The bundle
 identity hashes the format version and sorted document, surface, production and
 implementation contracts. Changing any of these inputs changes the source
 identity. The structural `manifest` exposes these hashes without repeating

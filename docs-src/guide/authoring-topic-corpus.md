@@ -78,7 +78,8 @@ names its implementation sources, a reference topic and evidence.
 targets). `semantic_mappings` binds literal reviewed source hashes and topic
 closures, so an implementation or prerequisite change requires documentation
 review. The normal offline gate requires every inventoried rule to have a valid
-mapping and every embedded implementation source to participate in the inventory.
+mapping. The combined language/declaration gate requires every embedded
+implementation source to participate in at least one maintained rule group.
 The docs checker also requires each named example to run and appear in the
 mapped topic's prerequisite closure. File references identify separate behavior
 suites; their existence does not mean the docs checker ran those suites.
@@ -87,6 +88,19 @@ This is a maintained taxonomy with coarse source drift detection. It cannot
 automatically discover a newly introduced semantic feature. Reviewing changes
 must include deciding whether to add or split rules. Full ChatMD and native-tool
 contract accounting remains separate from this language inventory.
+
+`Coverage.declaration_features` adds 14 groups for ChatMD markup/source capture,
+generated messages/configuration/tools, lifecycle scripts, extension bindings,
+schemas, selected dependencies, authoring policy/help and authored persistence.
+Its 42 mappings cover the three surfaces that use ChatMD declarations. Surface
+IDs select reference compatibility; they do not make authored tool declarations
+legal in a generated child. The guide explicitly distinguishes those contexts.
+Twenty implementation source pins and six topic-closure pins are maintained in
+`declaration_coverage_data.ml`. Normal tests require complete mappings, and the
+docs checker verifies named XML evidence against the actual checked guide.
+File evidence names separately executed behavioral suites. This extends the
+maintained taxonomy; legacy shell/MCP details and native operation semantics
+still require their own coverage audit.
 
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
@@ -109,8 +123,8 @@ topic closure and its relevant behavior tests first; regenerating pins on each
 build would defeat this check. Authoring-context service construction also audits
 this maintained subset against the installed compiler and corpus; incompatible
 reviewed guidance fails before queries are served. Service construction now
-requires complete mappings for all three maintained inventories: bindings,
-grammar productions and the language semantic taxonomy. Packages remain labelled
+requires complete mappings for all four maintained inventories: bindings,
+grammar productions, language semantics and ChatMD declarations. Packages remain labelled
 incomplete while the other required feature mappings are missing.
 
 After reviewing a module's implementation, writing its full reference, and running
@@ -129,8 +143,9 @@ that module's documentation check.
 
 Use `--globals TOPIC_ID` or `--alias NAME TOPIC_ID` to inspect those candidate
 families. `--semantics` prints the maintained language rules, source hashes and
-candidate topic contracts. `--changed-docs` lists changed topic closures only
-after verifying that reviewed binding, grammar and semantic implementation contracts still match;
+candidate topic contracts. `--declarations` does the same for ChatMD, defaulting
+to its three compatible surfaces. `--changed-docs` lists changed topic closures
+only after verifying that reviewed binding, grammar, semantic and declaration contracts still match;
 it never updates pins. Optional trailing surface IDs select a narrower exact set;
 for example:
 

@@ -24,7 +24,27 @@
     lib/chatml/chatml_resolver.ml %{dep:../chatml/chatml_resolver.ml}
     lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
     lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}
-    lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}))))
+    lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
+    lib/chat_response/agent_tool_contract.ml %{dep:../chat_response/agent_tool_contract.ml}
+    lib/chat_response/authoring_policy.ml %{dep:../chat_response/authoring_policy.ml}
+    lib/chat_response/generated_admission.ml %{dep:../chat_response/generated_admission.ml}
+    lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
+    lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
+    lib/chatmd/chatmd_extension_declaration.ml %{dep:../chatmd/chatmd_extension_declaration.ml}
+    lib/chatmd/chatmd_import_expansion.ml %{dep:../chatmd/chatmd_import_expansion.ml}
+    lib/chatmd/chatmd_lexer.mll %{dep:../chatmd/chatmd_lexer.mll}
+    lib/chatmd/chatmd_parser.mly %{dep:../chatmd/chatmd_parser.mly}
+    lib/chatmd/chatmd_script_declaration.ml %{dep:../chatmd/chatmd_script_declaration.ml}
+    lib/chatmd/chatmd_source_bundle.ml %{dep:../chatmd/chatmd_source_bundle.ml}
+    lib/chatmd/prompt.ml %{dep:../chatmd/prompt.ml}
+    lib/chatmd/source_loader.ml %{dep:../chatmd/source_loader.ml}
+    lib/chatmd_shell_spec/authoring_metadata.ml %{dep:../chatmd_shell_spec/authoring_metadata.ml}
+    lib/chatmd_shell_spec/extension_spec.ml %{dep:../chatmd_shell_spec/extension_spec.ml}
+    lib/chatmd_shell_spec/tool_schema.ml %{dep:../chatmd_shell_spec/tool_schema.ml}
+    lib/meta_prompting/preprocessor.ml %{dep:../meta_prompting/preprocessor.ml}
+    lib/chatmd/chatmd_attributes.ml %{dep:../chatmd/chatmd_attributes.ml}
+    lib/chatmd_shell_spec/duration.ml %{dep:../chatmd_shell_spec/duration.ml}
+    lib/chatmd_shell_spec/source_ref.ml %{dep:../chatmd_shell_spec/source_ref.ml}))))
 
 (rule
  (targets bundled_grammar.ml)
@@ -76,7 +96,7 @@
 (library
  (name authoring_corpus)
  (public_name ochat.authoring_corpus)
- (modules authoring_corpus grammar_coverage_data semantic_coverage_data)
- (private_modules grammar_coverage_data semantic_coverage_data)
+ (modules authoring_corpus grammar_coverage_data semantic_coverage_data declaration_coverage_data)
+ (private_modules grammar_coverage_data semantic_coverage_data declaration_coverage_data)
  (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))

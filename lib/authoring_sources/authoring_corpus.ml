@@ -524,9 +524,9 @@ module Coverage = struct
     }
   [@@deriving sexp]
 
-  let semantic_features =
+  let features entries =
     List.map
-      Semantic_coverage_data.features
+      entries
       ~f:(fun (id, description, implementation_paths, topic_id, evidence) ->
         { id
         ; description
@@ -535,6 +535,9 @@ module Coverage = struct
         ; evidence = List.dedup_and_sort evidence ~compare:String.compare
         })
   ;;
+
+  let semantic_features = features Semantic_coverage_data.features
+  let declaration_features = features Declaration_coverage_data.features
 
   let semantic_contract ~surface_id ~implementation_sources feature =
     let open Result.Let_syntax in
@@ -590,7 +593,7 @@ module Coverage = struct
     |> List.sort ~compare:(fun a b -> String.compare a.id b.id)
   ;;
 
-  let semantic_targets ~sources ~surface_ids =
+  let feature_targets ~namespace ~features ~sources ~surface_ids =
     let open Result.Let_syntax in
     let%bind _ = compiler_targets ~sources ~surface_ids in
     let implementation_sources =
@@ -598,38 +601,77 @@ module Coverage = struct
       |> List.map ~f:(fun source -> source.Authoring_sources.path, source.sha256)
     in
     List.concat_map surface_ids ~f:(fun surface_id ->
-      List.map semantic_features ~f:(fun feature ->
+      List.map features ~f:(fun feature ->
         let%map contract_sha256 =
           semantic_contract ~surface_id ~implementation_sources feature
         in
-        { id = surface_id ^ "/semantics/" ^ feature.id; surface_id; contract_sha256 }))
+        { id = surface_id ^ "/" ^ namespace ^ "/" ^ feature.id
+        ; surface_id
+        ; contract_sha256
+        }))
     |> Result.all
   ;;
 
+  let semantic_targets =
+    feature_targets ~namespace:"semantics" ~features:semantic_features
+  ;;
+
+  let declaration_targets ~sources ~surface_ids =
+    match
+      List.for_all surface_ids ~f:(function
+        | "tool_v1" | "moderator_v1" | "delegated_moderator_v1" -> true
+        | _ -> false)
+    with
+    | false -> Error "ChatMD coverage requires a declaration-authoring surface"
+    | true ->
+      feature_targets
+        ~namespace:"declarations"
+        ~features:declaration_features
+        ~sources
+        ~surface_ids
+  ;;
+
+  let feature_mappings
+        ~namespace
+        ~features
+        ~implementation_sources
+        ~topic_contracts
+        ~surface_ids
+    =
+    List.concat_map surface_ids ~f:(fun surface_id ->
+      List.map features ~f:(fun feature ->
+        let contract_sha256 =
+          semantic_contract ~surface_id ~implementation_sources feature
+          |> Result.ok_or_failwith
+        in
+        let _, _, topic_closure_sha256 =
+          List.find_exn topic_contracts ~f:(fun (surface, topic, _) ->
+            String.equal surface surface_id && String.equal topic feature.topic_id)
+        in
+        { target_id = surface_id ^ "/" ^ namespace ^ "/" ^ feature.id
+        ; contract_sha256
+        ; topic_id = feature.topic_id
+        ; topic_closure_sha256
+        ; evidence = feature.evidence
+        }))
+  ;;
+
   let semantic_mappings =
-    List.concat_map
-      [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
-      ~f:(fun surface_id ->
-        List.map semantic_features ~f:(fun feature ->
-          let contract_sha256 =
-            semantic_contract
-              ~surface_id
-              ~implementation_sources:Semantic_coverage_data.implementation_sources
-              feature
-            |> Result.ok_or_failwith
-          in
-          let _, _, topic_closure_sha256 =
-            List.find_exn
-              Semantic_coverage_data.topic_contracts
-              ~f:(fun (surface, topic, _) ->
-                String.equal surface surface_id && String.equal topic feature.topic_id)
-          in
-          { target_id = surface_id ^ "/semantics/" ^ feature.id
-          ; contract_sha256
-          ; topic_id = feature.topic_id
-          ; topic_closure_sha256
-          ; evidence = feature.evidence
-          }))
+    feature_mappings
+      ~namespace:"semantics"
+      ~features:semantic_features
+      ~implementation_sources:Semantic_coverage_data.implementation_sources
+      ~topic_contracts:Semantic_coverage_data.topic_contracts
+      ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+  ;;
+
+  let declaration_mappings =
+    feature_mappings
+      ~namespace:"declarations"
+      ~features:declaration_features
+      ~implementation_sources:Declaration_coverage_data.implementation_sources
+      ~topic_contracts:Declaration_coverage_data.topic_contracts
+      ~surface_ids:[ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
   ;;
 
   let grammar_targets ~sources ~surface_ids =
@@ -2704,7 +2746,7 @@ let runtime_foundation ~sources =
       ; review =
           Audited
             { excerpt_sha256 =
-                [ "20a098f887398a049e61316111998db10fde601b2cfcaa2bd2a6232010d66999" ]
+                [ "0309f7693f172a95000878f412e582acb7c73b6197fb02ec75c3281cdadfc8da" ]
             ; evidence =
                 [ "test/agent_docs/docs_chatmd_authoring.ml"
                 ; "lib/chatmd/prompt.ml"

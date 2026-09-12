@@ -11,6 +11,7 @@ type request =
   | Missing
   | Grammar
   | Semantics
+  | Declarations
   | Changed_docs
   | Candidates of selection * string
 
@@ -20,6 +21,7 @@ let () =
     | _ :: "--missing" :: surfaces -> Missing, surfaces
     | _ :: "--grammar" :: surfaces -> Grammar, surfaces
     | _ :: "--semantics" :: surfaces -> Semantics, surfaces
+    | _ :: "--declarations" :: surfaces -> Declarations, surfaces
     | _ :: "--changed-docs" :: surfaces -> Changed_docs, surfaces
     | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
     | _ :: "--alias" :: name :: topic :: surfaces ->
@@ -28,11 +30,15 @@ let () =
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...] | (--missing | --grammar | --semantics | --changed-docs) [SURFACE ...]"
+         ...] | (--missing | --grammar | --semantics | --declarations | --changed-docs) \
+         [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
-    | [] -> [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    | [] ->
+      (match request with
+       | Declarations -> [ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+       | _ -> [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ])
     | surfaces -> surfaces
   in
   (match List.find_a_dup surfaces ~compare:String.compare with
@@ -97,14 +103,17 @@ let () =
                    ; "contract_sha256", `String target.contract_sha256
                    ])) )
         ]
-    | Semantics ->
+    | Semantics | Declarations ->
       let module C = Authoring_corpus.Coverage in
-      let targets =
-        C.semantic_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith
+      let features, inventory =
+        match request with
+        | Declarations -> C.declaration_features, C.declaration_targets
+        | _ -> C.semantic_features, C.semantic_targets
       in
+      let targets = inventory ~sources ~surface_ids:surfaces |> Result.ok_or_failwith in
       `Object
         [ "review_required", `True
-        ; "scope", `String "maintained language taxonomy; not automatic feature discovery"
+        ; "scope", `String "maintained feature taxonomy; not automatic feature discovery"
         ; ( "implementation_sources"
           , `Array
               (List.map
@@ -114,7 +123,7 @@ let () =
                      [ "path", `String source.path; "sha256", `String source.sha256 ])) )
         ; ( "features"
           , `Array
-              (List.map C.semantic_features ~f:(fun feature ->
+              (List.map features ~f:(fun feature ->
                  `Object
                    [ "id", `String feature.id
                    ; "description", `String feature.description
@@ -138,7 +147,7 @@ let () =
         ; ( "topic_contracts"
           , `Array
               (List.concat_map surfaces ~f:(fun surface ->
-                 C.semantic_features
+                 features
                  |> List.map ~f:(fun feature -> feature.topic_id)
                  |> List.dedup_and_sort ~compare:String.compare
                  |> List.map ~f:(fun topic ->
@@ -154,15 +163,29 @@ let () =
         ]
     | Changed_docs ->
       let module C = Authoring_corpus.Coverage in
+      let declaration_targets =
+        match
+          List.filter surfaces ~f:(function
+            | "tool_v1" | "moderator_v1" | "delegated_moderator_v1" -> true
+            | _ -> false)
+        with
+        | [] -> []
+        | surface_ids ->
+          C.declaration_targets ~sources ~surface_ids |> Result.ok_or_failwith
+      in
       let targets =
         (C.compiler_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ (C.grammar_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ (C.semantic_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
+        @ declaration_targets
         |> List.map ~f:(fun target -> target.C.id, target)
         |> String.Map.of_alist_exn
       in
       let changes =
-        C.reviewed_mappings @ C.grammar_mappings @ C.semantic_mappings
+        C.reviewed_mappings
+        @ C.grammar_mappings
+        @ C.semantic_mappings
+        @ C.declaration_mappings
         |> List.filter_map ~f:(fun mapping ->
           match Map.find targets mapping.C.target_id with
           | None ->

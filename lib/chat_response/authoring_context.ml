@@ -101,18 +101,17 @@ let create
      feature; packages remain incomplete until the full authoring audit. *)
   let%bind () =
     let module Coverage = Corpus.Coverage in
+    let shared = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
     List.map
-      [ Coverage.compiler_targets, Coverage.reviewed_mappings
-      ; Coverage.grammar_targets, Coverage.grammar_mappings
-      ; Coverage.semantic_targets, Coverage.semantic_mappings
+      [ Coverage.compiler_targets, Coverage.reviewed_mappings, shared
+      ; Coverage.grammar_targets, Coverage.grammar_mappings, shared
+      ; Coverage.semantic_targets, Coverage.semantic_mappings, shared
+      ; ( Coverage.declaration_targets
+        , Coverage.declaration_mappings
+        , [ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] )
       ]
-      ~f:(fun (inventory, mappings) ->
-        let%bind targets =
-          inventory
-            ~sources
-            ~surface_ids:
-              [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
-        in
+      ~f:(fun (inventory, mappings, surface_ids) ->
+        let%bind targets = inventory ~sources ~surface_ids in
         let%bind report = Coverage.audit corpus ~targets ~mappings in
         Coverage.require_complete report)
     |> Result.all_unit
