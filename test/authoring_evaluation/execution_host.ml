@@ -152,6 +152,7 @@ type background =
    Calls traverse provider serialization, invocation admission and tool dispatch.
    The scripted provider is local and never opens a model connection. *)
 let with_session
+      ?audit
       ?(durable = false)
       ?(replay_job_delivery = false)
       ~env
@@ -162,6 +163,19 @@ let with_session
   =
   Mirage_crypto_rng_unix.use_default ();
   let root = Agent_server_test_support.temporary_root env in
+  let sentinel = "PRIVATE-EVALUATION-" ^ P.Id.Session.(create () |> to_string) in
+  let sources = sources @ [ "private.json", sentinel ] in
+  let post_stream ~sw ~inputs =
+    Option.iter audit ~f:(fun audit ->
+      List.iter inputs ~f:(fun input ->
+        Openai.Responses.Item.jsonaf_of_t input
+        |> Jsonaf.to_string
+        |> Execution_audit.text
+             audit
+             ~check:"provider-input:no-private-file-content"
+             ~sentinel));
+    post_stream ~sw ~inputs
+  in
   Exn.protect
     ~finally:(fun () ->
       Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
@@ -176,6 +190,36 @@ let with_session
       in
       List.iter sources ~f:(save root);
       List.iter workspace_files ~f:(save workspace);
+      let observed session =
+        Exn.protect
+          ~f:(fun () -> f ~workspace session)
+          ~finally:(fun () ->
+            Option.iter audit ~f:(fun audit ->
+              Eio.Cancel.protect (fun () ->
+                Execution_audit.files
+                  audit
+                  ~scope:"source"
+                  ~dir:Eio.Path.(Eio.Stdenv.fs env / root)
+                  sources;
+                Execution_audit.files
+                  audit
+                  ~scope:"workspace-input"
+                  ~dir:Eio.Path.(Eio.Stdenv.fs env / workspace)
+                  workspace_files;
+                match
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+                    snapshot session)
+                with
+                | value ->
+                  P.Snapshot.to_json value
+                  |> Jsonaf.to_string
+                  |> Execution_audit.text
+                       audit
+                       ~check:"snapshot:no-private-file-content"
+                       ~sentinel
+                | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+                | exception _ -> ())))
+      in
       Eio.Switch.run (fun sw ->
         match replay_job_delivery with
         | true ->
@@ -254,8 +298,7 @@ let with_session
                           (Jsonaf.exactly_equal before (checkpoint ()))
                           "rejected completion replay changed the moderator checkpoint")
                   in
-                  f
-                    ~workspace
+                  observed
                     { connection
                     ; session_id = created.id
                     ; attachment
@@ -293,8 +336,7 @@ let with_session
           Exn.protect
             ~finally:(fun () -> Embedded.close embedded)
             ~f:(fun () ->
-              f
-                ~workspace
+              observed
                 { connection = Embedded.connection embedded
                 ; session_id = Embedded.session_id embedded
                 ; attachment = Embedded.attachment embedded
@@ -303,6 +345,7 @@ let with_session
 ;;
 
 let run
+      ?audit
       ?(sequential = false)
       ?background
       ?replay_job_delivery
@@ -326,6 +369,7 @@ let run
     | None -> Stdlib.Seq.empty
   in
   with_session
+    ?audit
     ?replay_job_delivery
     ~env
     ~sources

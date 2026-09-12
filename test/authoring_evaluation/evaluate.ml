@@ -65,6 +65,9 @@ let () =
   | true ->
     List.iter artifact.rows ~f:(fun row ->
       let fail () = raise_s [%sexp (row : D.row)] in
+      (match row.audit with
+       | Partial { checks; violations = [] } when not (List.is_empty checks) -> ()
+       | _ -> fail ());
       match row.result with
       | Some result when result.runtime_success ->
         (match row.task_id, result.attempts with

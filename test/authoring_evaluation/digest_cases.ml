@@ -64,7 +64,7 @@ let validate ~env ~host ~capabilities candidate =
     |> Reference_backend.classification
 ;;
 
-let execute ~env candidate =
+let execute ?audit ~env candidate =
   let module H = Execution_host in
   match
     Moderator_cases.binding_validation ~id:"digest_owner" ~name:"hash" ~env candidate
@@ -150,8 +150,19 @@ let execute ~env candidate =
                ~validate_work:(fun _ -> Error "no background work in digest evaluation")
                ~on_tool_call:(fun ~name ~args ->
                  match C.find caps ~name with
-                 | Error e -> Error e.message
+                 | Error e ->
+                   Option.iter audit ~f:(fun audit ->
+                     Execution_audit.observe
+                       audit
+                       ~check:"digest:unselected-call-rejected"
+                       ~passed:true);
+                   Error e.message
                  | Ok binding ->
+                   Option.iter audit ~f:(fun audit ->
+                     Execution_audit.observe
+                       audit
+                       ~check:"digest:selected-native-dispatch"
+                       ~passed:(String.equal (C.reference binding).name "digest"));
                    (match C.native_implementation binding with
                     | None -> Error "digest host has no managed dependencies"
                     | Some implementation ->

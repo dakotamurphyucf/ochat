@@ -6,6 +6,7 @@ module C = Chat_response.Tool_capability
 
 (* The task selects trusted evaluator code, never a candidate-supplied host. *)
 let with_backend ~env ~runtime_revision (task : task) f =
+  let audit = Execution_audit.create () in
   let prepare ~target ~surface ~validate ~execute capabilities =
     let host =
       V.create_host
@@ -52,7 +53,7 @@ let with_backend ~env ~runtime_revision (task : task) f =
         ; target_identity = V.host_fingerprint host
         ; capability_identity = C.fingerprint capabilities
         ; (* Passing output oracles alone is not a comprehensive authority audit. *)
-          audit = (fun () -> Unmeasured)
+          audit = (fun () -> Execution_audit.result audit)
         }
   in
   let validate ~host ~capabilities candidate =
@@ -82,21 +83,21 @@ let with_backend ~env ~runtime_revision (task : task) f =
          ~target:One_off_script
          ~surface:Ordinary
          ~validate
-         ~execute:(Execution_cases.execute_one_off ~env))
+         ~execute:(Execution_cases.execute_one_off ~audit ~env))
   | "standalone-delta" ->
     empty
       (prepare
          ~target:Standalone_tool
          ~surface:Ordinary
          ~validate
-         ~execute:(Execution_cases.execute_standalone ~env))
+         ~execute:(Execution_cases.execute_standalone ~audit ~env))
   | "moderator-quota" ->
     empty
       (prepare
          ~target:Moderator
          ~surface:Ordinary
          ~validate:(Moderator_cases.validate ~id:"quota" ~name:"reserve" ~env)
-         ~execute:(Moderator_cases.execute ~env))
+         ~execute:(Moderator_cases.execute ~audit ~env))
   | "async-observe-once" ->
     Execution_host.with_capabilities
       ~env
@@ -109,6 +110,7 @@ let with_backend ~env ~runtime_revision (task : task) f =
          ~execute:(fun candidate ->
            match
              Background_cases.execute
+               ~audit
                ~replay_job_delivery:true
                ~env
                ~finish:Release
@@ -116,6 +118,7 @@ let with_backend ~env ~runtime_revision (task : task) f =
            with
            | Passed ->
              Background_cases.execute
+               ~audit
                ~replay_job_delivery:true
                ~env
                ~finish:Cancel
@@ -127,27 +130,27 @@ let with_backend ~env ~runtime_revision (task : task) f =
          ~target:Generated_chatmd
          ~surface:Ordinary
          ~validate:(Child_cases.validate ~env)
-         ~execute:(Child_cases.execute ~env))
+         ~execute:(Child_cases.execute ~audit ~env))
   | "ocaml-transfer-repair" ->
     empty
       (prepare
          ~target:One_off_script
          ~surface:Ordinary
          ~validate
-         ~execute:(Repair_cases.execute_count ~env))
+         ~execute:(Repair_cases.execute_count ~audit ~env))
   | "compacted-event-repair" ->
     empty
       (prepare
          ~target:Moderator
          ~surface:Ordinary
          ~validate:(Moderator_cases.validate ~id:"tally" ~name:"tally" ~env)
-         ~execute:(Repair_cases.execute_tally ~env))
+         ~execute:(Repair_cases.execute_tally ~audit ~env))
   | "missing-process-capability" ->
     Digest_cases.capabilities ~on_call:(fun _ -> failwith "readonly host executed digest")
     |> prepare
          ~target:Moderator
          ~surface:Delegated
          ~validate:(Digest_cases.validate ~env)
-         ~execute:(Digest_cases.execute ~env)
+         ~execute:(Digest_cases.execute ~audit ~env)
   | id -> invalid_arg ("unknown evaluation task: " ^ id)
 ;;

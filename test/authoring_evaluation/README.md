@@ -1,4 +1,4 @@
-# Authoring evaluation harness (A01.09, in progress)
+# Authoring evaluation harness (A01.09)
 
 This developer-only harness compares authoring under three experimental guidance
 conditions. It is not installed with Ochat or embedded in its authoring corpus.
@@ -263,12 +263,36 @@ cases remain in rate denominators; absent provider usage remains unknown. It
 evaluates the predeclared compile/runtime thresholds and separately records known
 capability-boundary violations and whether safety was measured. Any known
 violation fails the threshold verdict even if other rows lack measurements.
-The current whole-suite factory marks comprehensive safety audits **unmeasured**;
-passing output/permission-negative oracles alone does not establish that claim.
+The current whole-suite factory records **partial safety observations**;
+passing output/permission-negative oracles alone does not establish a complete audit.
 Consequently its overall threshold verdict remains `Incomplete`. Offline
 `real_model_evaluation` remains `not_run` even when synthetic plumbing fixtures
 meet every numeric threshold. The two intentionally broken initial submissions
 produce a 0.75 first-pass rate in the scripted suite, not a model-quality estimate.
+
+`Execution_audit` records named checks independently of task success. Embedded and
+daemon scenarios check source/input file contents before host closure and inspect
+actual provider inputs plus the final parent snapshot for a fresh private-file
+canary. The canary changes on every host creation and lives outside the confined
+reader's workspace; the ledger root-escape input addresses that actual file.
+The digest host records selected native dispatch and rejection of unselected
+names. Every whole-suite task must supply nonempty observations with no detected
+violation in the offline check.
+
+File observations run in cleanup even when a scenario aborts. The driver collects
+observations after backend teardown, preserving failures discovered there on both
+successful and failed exits. `Partial` evidence keeps its named `safety_checks`
+and violations in reports, with `safety_measurement_complete = false`. A known
+violation makes the threshold verdict `Not_met` even on an infrastructure failure.
+Fault-injection tests modify fixture files, feed an actual canary through session
+input, then abort; they prove the observers detect those changes and retain the
+evidence after cleanup. This trusted host injection is not a candidate bypass.
+
+These are scoped observations: file checks compare contents, not permissions or
+all new paths; canary checks detect the exact content, not arbitrary transformed
+disclosure. They do not instrument every OS effect, native call, descendant or
+shutdown transition. A failed snapshot read contributes no snapshot check. The
+report therefore continues to withhold a complete capability-boundary claim.
 
 ## Optional authorized provider evaluation
 
@@ -318,10 +342,16 @@ is limited to 2 MiB and cancellation propagates. Artifacts retain decoded action
 and measured inputs; rejected raw bodies are not persisted. This deliberately
 does not preserve private reasoning output or resumable provider conversations.
 
-## Remaining evaluation work
+## Qualification scope
 
-Add measured capability-boundary observations appropriate to each execution host.
-A01.09/T15 remain open. Actual production policy/daemon compaction behavior is
-qualified in the corresponding runtime tests; these three experimental conditions
-do not claim to compare those production policy implementations. Real-model runs
-remain optional and separate from mandatory offline qualification.
+The A01.09 harness and T15 deterministic retrieval/repair/metrics requirements are
+qualified offline. Real-model runs remain optional and unperformed. Prospective
+quality thresholds need not pass on deliberately scripted mistakes, and an
+unperformed model experiment is not an implementation failure.
+
+Broader capability-boundary/security qualification belongs to T08/E11 and remains
+separate from these scoped file/digest observations. Production policy/daemon
+compaction behavior is covered by its corresponding runtime tests; these three
+experimental conditions do not claim to compare those policy implementations.
+Completion of this harness does not complete A01's corpus/policy audit or the
+remaining project phases.

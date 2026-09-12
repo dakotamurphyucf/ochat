@@ -18,6 +18,10 @@ type config =
 type audit =
   | Unmeasured
   | Observed of string list
+  | Partial of
+      { checks : string list
+      ; violations : string list
+      }
 [@@deriving sexp, jsonaf]
 
 type prepared =
@@ -115,6 +119,7 @@ let run ~env ?(real_model_authorized = false) ~config ~with_backend ~make_provid
           let started = now () in
           let exchanges = ref [] in
           let transcript_bytes = ref 0 in
+          let current_audit = ref (fun () -> Unmeasured) in
           let add exchange =
             let bytes = String.length (Jsonaf.to_string (jsonaf_of_exchange exchange)) in
             match bytes > config.max_transcript_bytes - !transcript_bytes with
@@ -138,7 +143,8 @@ let run ~env ?(real_model_authorized = false) ~config ~with_backend ~make_provid
           let measured =
             protect (fun () ->
               Eio.Time.with_timeout_exn clock config.case_timeout_seconds (fun () ->
-                with_backend task (fun prepared ->
+                with_backend task (fun (prepared : prepared) ->
+                  current_audit := prepared.audit;
                   let provider = make_provider ~config ~task ~policy ~repetition ~seed in
                   let provider ~step ~messages =
                     let request_bytes =
@@ -216,16 +222,14 @@ let run ~env ?(real_model_authorized = false) ~config ~with_backend ~make_provid
                       ~provider
                       task
                   in
-                  ( result
-                  , prepared.target_identity
-                  , prepared.capability_identity
-                  , prepared.audit () ))))
+                  result, prepared.target_identity, prepared.capability_identity)))
           in
+          let audit = !current_audit () in
           let result, target_identity, capability_identity, audit, failure =
             match measured with
-            | Ok (result, target, capabilities, audit) ->
+            | Ok (result, target, capabilities) ->
               Some result, Some target, Some capabilities, audit, None
-            | Error message -> None, None, None, Unmeasured, Some message
+            | Error message -> None, None, None, audit, Some message
           in
           { task_id = task.id
           ; policy

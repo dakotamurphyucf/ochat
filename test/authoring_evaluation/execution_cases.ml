@@ -83,9 +83,10 @@ let standalone_sources candidate =
   ]
 ;;
 
-let execute_standalone ~env candidate =
+let execute_standalone ?audit ~env candidate =
   let snapshot =
     Execution_host.run
+      ?audit
       ~env
       ~sources:(standalone_sources candidate)
       ~workspace_files:[]
@@ -132,7 +133,8 @@ let read_declaration =
   {|<tool name="read_file"><read id="ledgers" path="${workspace}"/></tool>|}
 ;;
 
-let execute_one_off ~env candidate =
+let execute_one_off ?audit ~env candidate =
+  let audit = Option.value_or_thunk audit ~default:Execution_audit.create in
   let sources =
     [ ( "agent.chatmd"
       , {|<developer>Run the ledger evaluation.</developer>
@@ -140,7 +142,6 @@ let execute_one_off ~env candidate =
 <tool name="run_chatml"/>
 |}
         ^ read_declaration )
-    ; "private.json", "PRIVATE-EVALUATION-SENTINEL"
     ]
   in
   let calls =
@@ -153,12 +154,10 @@ let execute_one_off ~env candidate =
           ; "tools", field candidate "tools"
           ] ))
   in
-  let snapshot = Execution_host.run ~env ~sources ~workspace_files:ledgers ~calls () in
-  match
-    String.is_substring
-      (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string)
-      ~substring:"PRIVATE-EVALUATION-SENTINEL"
-  with
-  | true -> Failed (Capability, "confined source content appeared in session output")
-  | false -> assess one_off snapshot
+  let snapshot =
+    Execution_host.run ~audit ~env ~sources ~workspace_files:ledgers ~calls ()
+  in
+  match audit.violations with
+  | [] -> assess one_off snapshot
+  | _ -> Failed (Capability, "file-boundary observation failed during ledger execution")
 ;;

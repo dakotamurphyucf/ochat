@@ -111,12 +111,13 @@ let cases =
   ]
 ;;
 
-let execute ~env candidate =
+let execute ?audit ~env candidate =
   match binding_validation ~env candidate with
   | Invalid (kind, message) -> Failed (kind, message)
   | Valid ->
     let snapshot =
       Execution_host.run
+        ?audit
         ~sequential:true
         ~env
         ~sources:(sources candidate)

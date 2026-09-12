@@ -123,7 +123,7 @@ let wait env ready =
   loop ()
 ;;
 
-let execute_checked ?replay_job_delivery ~env ~finish candidate =
+let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
   match binding_validation ~env candidate with
   | Invalid (kind, message) -> Failed (kind, message)
   | Valid ->
@@ -212,6 +212,7 @@ let execute_checked ?replay_job_delivery ~env ~finish candidate =
     in
     let snapshot =
       H.run
+        ?audit
         ?replay_job_delivery
         ~env
         ~background:
@@ -269,8 +270,8 @@ let execute_checked ?replay_job_delivery ~env ~finish candidate =
          , "background completion or process cleanup did not satisfy the scenario" ))
 ;;
 
-let execute ?replay_job_delivery ~env ~finish candidate =
-  match execute_checked ?replay_job_delivery ~env ~finish candidate with
+let execute ?audit ?replay_job_delivery ~env ~finish candidate =
+  match execute_checked ?audit ?replay_job_delivery ~env ~finish candidate with
   | result -> result
   | exception H.Scenario_failure message -> Failed (Semantics, message)
   | exception Eio.Time.Timeout ->

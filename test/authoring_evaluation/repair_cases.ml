@@ -19,7 +19,7 @@ let count_cases =
   ]
 ;;
 
-let execute_count ~env candidate =
+let execute_count ?audit ~env candidate =
   let calls =
     List.map count_cases ~f:(fun case ->
       ( case.id
@@ -31,6 +31,7 @@ let execute_count ~env candidate =
           ] ))
   in
   H.run
+    ?audit
     ~env
     ~sources:
       [ "agent.chatmd", {|<authoring_context policy="manual"/><tool name="run_chatml"/>|}
@@ -54,11 +55,12 @@ let tally_cases =
       E.{ id; input = `Object [ "amount", amount ]; expected })
 ;;
 
-let execute_tally ~env candidate =
+let execute_tally ?audit ~env candidate =
   match Moderator_cases.binding_validation ~id:"tally" ~name:"tally" ~env candidate with
   | Invalid (kind, message) -> Failed (kind, message)
   | Valid ->
     H.run
+      ?audit
       ~sequential:true
       ~env
       ~sources:(Moderator_cases.sources ~id:"tally" candidate)

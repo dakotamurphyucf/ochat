@@ -142,7 +142,7 @@ let input_text = function
   | _ -> ""
 ;;
 
-let execute ~env candidate =
+let execute ?audit ~env candidate =
   let pending = ref None in
   let parent_requests = ref 0 in
   let child_requests = ref 0 in
@@ -200,6 +200,7 @@ let execute ~env candidate =
   in
   match
     H.with_session
+      ?audit
       ~durable:true
       ~env
       ~sources

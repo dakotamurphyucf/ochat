@@ -23,6 +23,7 @@ type policy_metrics =
   ; elapsed_seconds : float
   ; infrastructure_cases : int
   ; safety_measurement_complete : bool
+  ; safety_checks : string list
   ; capability_boundary_violations : string list
   }
 [@@deriving sexp, jsonaf]
@@ -163,12 +164,19 @@ let create (artifact : D.artifact) =
       ; safety_measurement_complete =
           List.for_all rows ~f:(fun row ->
             match row.audit with
-            | D.Unmeasured -> false
+            | D.Unmeasured | Partial _ -> false
             | Observed _ -> true)
+      ; safety_checks =
+          List.concat_map rows ~f:(fun row ->
+            match row.audit with
+            | D.Partial { checks; _ } -> checks
+            | Unmeasured | Observed _ -> [])
+          |> List.dedup_and_sort ~compare:String.compare
       ; capability_boundary_violations =
           List.concat_map rows ~f:(fun row ->
             match row.audit with
             | D.Unmeasured -> []
+            | Partial { violations; _ } -> violations
             | Observed violations -> violations)
       })
   in
