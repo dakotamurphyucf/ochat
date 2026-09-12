@@ -143,7 +143,7 @@ type background =
    their scenario's captured-source admission before reaching this helper.
    Calls traverse provider serialization, invocation admission and tool dispatch.
    The scripted provider is local and never opens a model connection. *)
-let run ?(sequential = false) ?background ~env ~sources ~workspace_files ~calls () =
+let with_session ?(durable = false) ~env ~sources ~workspace_files ~post_stream f =
   Mirage_crypto_rng_unix.use_default ();
   let root = Agent_server_test_support.temporary_root env in
   Exn.protect
@@ -160,19 +160,6 @@ let run ?(sequential = false) ?background ~env ~sources ~workspace_files ~calls 
       in
       List.iter sources ~f:(save root);
       List.iter workspace_files ~f:(save workspace);
-      let batches =
-        match sequential with
-        | false -> [ calls ]
-        | true -> List.map calls ~f:(fun call -> [ call ])
-      in
-      let expected_requests = List.length batches + 1 in
-      let requests = ref 0 in
-      let post_stream ~sw:_ ~inputs:_ =
-        incr requests;
-        match List.nth batches (!requests - 1) with
-        | Some calls -> call_events calls
-        | None -> Stdlib.Seq.empty
-      in
       Eio.Switch.run (fun sw ->
         let embedded =
           Embedded.start
@@ -187,7 +174,10 @@ let run ?(sequential = false) ?background ~env ~sources ~workspace_files ~calls 
             ; workspace
             ; tool_dir = root
             ; home = root
-            ; data_root = None
+            ; data_root =
+                (match durable with
+                 | false -> None
+                 | true -> Some (Filename.concat root "data"))
             ; start_immediately = true
             ; permission_profile =
                 { Embedded.default_permission_profile with
@@ -201,52 +191,67 @@ let run ?(sequential = false) ?background ~env ~sources ~workspace_files ~calls 
         in
         Exn.protect
           ~finally:(fun () -> Embedded.close embedded)
-          ~f:(fun () ->
-            ignore
-              (request
-                 embedded
-                 (Session_send_message
-                    { session_id = Embedded.session_id embedded
-                    ; attachment_id = (Embedded.attachment embedded).id
-                    ; content =
-                        { kind = Plain_text
-                        ; text = "Execute the evaluation calls."
-                        ; attachments = []
-                        }
-                    ; idempotency_key =
-                        P.Idempotency_key.of_string "evaluation:execute" |> get
-                    })
-               : P.Method_result.t);
-            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-              let rec wait expected_requests ready =
-                let current = snapshot embedded in
-                Option.iter current.failure ~f:(fun error -> raise (Protocol_error error));
-                let is_ready = ready current in
-                match
-                  !requests >= expected_requests
-                  && Option.is_none current.session.active_operation
-                  && is_ready
-                with
-                | true ->
-                  (match !requests = expected_requests with
-                   | true -> current
-                   | false ->
-                     raise
-                       (Scenario_failure
-                          "evaluation unexpectedly requested an extra model turn"))
-                | false ->
-                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                  wait expected_requests ready
-              in
-              let initial = wait expected_requests (fun _ -> true) in
-              match background with
-              | None ->
-                (match List.is_empty initial.jobs with
-                 | true -> initial
-                 | false -> failwith "synchronous evaluation unexpectedly started jobs")
-              | Some scenario ->
-                scenario.after_ack ~workspace embedded initial;
-                wait scenario.final_requests scenario.settled))))
+          ~f:(fun () -> f ~workspace embedded)))
+;;
+
+let run ?(sequential = false) ?background ~env ~sources ~workspace_files ~calls () =
+  let batches =
+    match sequential with
+    | false -> [ calls ]
+    | true -> List.map calls ~f:(fun call -> [ call ])
+  in
+  let expected_requests = List.length batches + 1 in
+  let requests = ref 0 in
+  let post_stream ~sw:_ ~inputs:_ =
+    incr requests;
+    match List.nth batches (!requests - 1) with
+    | Some calls -> call_events calls
+    | None -> Stdlib.Seq.empty
+  in
+  with_session ~env ~sources ~workspace_files ~post_stream (fun ~workspace embedded ->
+    ignore
+      (request
+         embedded
+         (Session_send_message
+            { session_id = Embedded.session_id embedded
+            ; attachment_id = (Embedded.attachment embedded).id
+            ; content =
+                { kind = Plain_text
+                ; text = "Execute the evaluation calls."
+                ; attachments = []
+                }
+            ; idempotency_key = P.Idempotency_key.of_string "evaluation:execute" |> get
+            })
+       : P.Method_result.t);
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+      let rec wait expected_requests ready =
+        let current = snapshot embedded in
+        Option.iter current.failure ~f:(fun error -> raise (Protocol_error error));
+        let is_ready = ready current in
+        match
+          !requests >= expected_requests
+          && Option.is_none current.session.active_operation
+          && is_ready
+        with
+        | true ->
+          (match !requests = expected_requests with
+           | true -> current
+           | false ->
+             raise
+               (Scenario_failure "evaluation unexpectedly requested an extra model turn"))
+        | false ->
+          Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+          wait expected_requests ready
+      in
+      let initial = wait expected_requests (fun _ -> true) in
+      match background with
+      | None ->
+        (match List.is_empty initial.jobs with
+         | true -> initial
+         | false -> failwith "synchronous evaluation unexpectedly started jobs")
+      | Some scenario ->
+        scenario.after_ack ~workspace embedded initial;
+        wait scenario.final_requests scenario.settled))
 ;;
 
 let outcome (snapshot : P.Snapshot.t) call_id =

@@ -151,8 +151,33 @@ same fixed declarations under their own temporary roots; their capability IDs
 are distinct and validation does not transfer authority between hosts. The
 background integration requires both release and cancellation to pass.
 
-Add execution oracles/transcripts for the generated-child family and the extra
-repair/capability/compaction tasks. Generalize replay scoring beyond the private
+`Child_cases` submits a captured definition through the real `agent_create`
+registration in a temporary durable embedded host. The evaluation envelope has
+`create`, `send` and `read` fields: a native creation request and native request
+templates with literal `$session_id`, `$message`, `$key` and `$cursor` substitutions.
+Static validation requires an owned running child selecting only `read_file`,
+explicit model/reasoning settings and imported companion developer instructions.
+Unused companion bytes do not satisfy that last requirement. This task's companion
+check replaces non-root captured files with whitespace and requires successful
+parsing with changed effective developer instructions; it is an evaluator contract,
+not a new restriction on Ochat's general generated-bundle format.
+
+The fake child provider calls the actual inherited reader twice, checks evidence
+content and retained prior assistant output on follow-up, and emits distinguishable
+answers. The submitted send/read templates must deliver both rounds to the created
+session and use the previous cursor without repeating older output. The host waits
+on actual submission receipts, stops the child through `agent_stop`, and checks
+that it reaches stopped state before teardown. Missing/unused companion files,
+new native file roots, foreign IDs and omitted cursors fail. All three guidance
+conditions run actual static validation and execution. This proves local persisted
+lifecycle integration, not crash/restart recovery or real-model review quality.
+
+`Execution_host.with_session` shares startup/cleanup between these adaptive
+lifecycle calls and the existing synchronous/background scenarios. Durable storage
+is explicitly selected only for the child scenario; defaults remain transient.
+
+Add execution oracles/transcripts for the extra repair/capability/compaction tasks.
+Generalize replay scoring beyond the private
 background fixture so arbitrary submitted handlers receive the same stimulus.
 Add the reproducible optional
 provider driver, fixed model settings/seeds/repetitions and deadlines, transcript

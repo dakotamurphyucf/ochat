@@ -50,7 +50,7 @@ let evaluate ~env ~capabilities ~id ~target ~candidate ~validate ~execute =
         (match step with
          | 1 -> Retrieve (Reference_backend.request ~task:task.family "prepare")
          | 2 -> Submit candidate
-         | _ -> failwith "unexpected native-metadata evaluation request")
+         | _ -> Decline "scripted candidate failed; inspect the recorded attempt")
     ; provider_input_tokens = None
     }
   in

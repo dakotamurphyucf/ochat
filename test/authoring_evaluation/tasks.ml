@@ -63,9 +63,14 @@ let all =
     ; prompt =
         "Produce an agent_create request for a persistent evidence-review child. Select \
          only the parent's read_file binding, choose its instructions and model \
-         settings, and capture a companion file with those instructions. Explain how to \
-         send a follow-up and read only output newer than the previous cursor. Do not \
-         add a new shell, file root or tool implementation."
+         settings, and capture an imported companion ChatMD file with those \
+         instructions. Submit an object with create, send and read fields: create is the \
+         agent_create request (owned lifetime, start_immediately=true); send and read \
+         are request templates for agent_send and agent_read. In the templates use the \
+         literal strings $session_id, $message, $key and $cursor for the created session \
+         ID, follow-up message, unique send idempotency key and previous read cursor. \
+         Read only newer output. Do not add a new shell, file root or tool \
+         implementation."
     ; preload_topics = [ "chatmd.definitions"; "runtime.delegation.creation" ]
     ; compaction_after_step = None
     }
