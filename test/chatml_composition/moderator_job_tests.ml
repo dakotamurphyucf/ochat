@@ -11,8 +11,15 @@ type trigger =
 [@@deriving sexp_of]
 
 let agent trigger =
+  let start_operation =
+    match trigger with
+    | Lifecycle -> "Tool.spawn"
+    | Queued | Handler | Pre_tool | Observation -> "Job.start_tool"
+  in
   let start =
-    {|Task.bind(Job.start_tool("read_file", `Object([
+    "Task.bind("
+    ^ start_operation
+    ^ {|("read_file", `Object([
       {key = "root"; value = `String("reports")},
       {key = "file"; value = `String("second.txt")}
     ])), fun job -> Task.pure(true))|}

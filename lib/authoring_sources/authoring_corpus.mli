@@ -227,6 +227,11 @@ module Coverage : sig
       Checked examples execute actual moderator entrypoints on both targets. *)
   val moderator_data_mappings : mapping list
 
+  (** Log on all surfaces, Turn on moderators, and each surface's exact Tool
+      exports. Evidence covers diagnostic/external versus local rollback and
+      the versioned owned-job spawn alias through an actual daemon. *)
+  val host_effect_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list
@@ -254,7 +259,9 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     boundaries. Flat String, Array/Option, Json, Hashtbl and global-helper topics
     cover the entire shared core API with executable semantic examples and exact
     surface availability. Moderator data inspection adds Item/Context/Tool_call
-    and five aliases only on the two moderator targets. This remains a foundation,
+    and five aliases only on the two moderator targets. The host-effect guide
+    covers Log/Turn/Tool with explicit target and host-service distinctions.
+    This remains a foundation,
     not complete feature/native-schema
     coverage or complete task packages. The separate Authoring_context service
     adds retrieval and selected compiler/tool inventories. *)

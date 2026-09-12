@@ -70,7 +70,8 @@ and `hashtbl_mappings` add all exports with the checked [String](chatml-strings.
 globals plus ordinary moderator `print`; `json_alias_mappings` covers the common
 recursive type. `moderator_data_mappings` adds Item, Context and Tool_call plus
 their five data aliases on the two moderator surfaces.
-`Coverage.reviewed_mappings` combines these 431 exact targets
+`host_effect_mappings` adds Log, Turn and each surface's exact Tool exports.
+`Coverage.reviewed_mappings` combines these 493 exact targets
 across the four surfaces. Other compiler
 APIs remain explicitly unmapped. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
@@ -136,6 +137,13 @@ from `on_event` after `Session_start` with synthetic context and no host operati
 The checker honors explicit `also_run` metadata and reports additional executions
 separately; existing integration-fixture `also_check` means compilation only.
 This proves data-helper behavior, not daemon projection or permission enforcement.
+
+`runtime.effects` documents Log, Turn and Tool with explicit per-target availability
+and actual host boundaries. A linked moderator fixture runs on both targets with
+a fake probe tool, checking logs/external effects surviving recovery or failed
+commit, discarded staged edits, decision conflicts, turn aliases and halt intent.
+Separate daemon composition exercises the versioned Tool.spawn alias through the
+owned job service. Readability of the guide does not install its host services.
 
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):
@@ -230,7 +238,7 @@ boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
 coverage, 54 language examples (including expected errors), three additional
 moderator surface executions, and exact source/entrypoint checks for the
-four runtime integration fixtures. The invocation and background moderator fixtures
+five runtime integration fixtures. The invocation and background moderator fixtures
 also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be
 accompanied by semantic review and the relevant checks, rather than automatically

@@ -22,6 +22,7 @@ let () =
     ; "guide/chatml-authoring-runtime.md"
     ; "guide/chatml-collections.md"
     ; "guide/chatml-global-helpers.md"
+    ; "guide/chatml-host-effects.md"
     ; "guide/chatml-json.md"
     ; "guide/chatml-language-spec.md"
     ; "guide/chatml-match-semantics.md"

@@ -154,6 +154,36 @@ let%expect_test "moderator data families are complete and absent from narrower s
     |}]
 ;;
 
+let%expect_test "effect module coverage follows each exact target's exports" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface ->
+      let prefix = surface ^ "/" in
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface ] |> ok in
+      let targets =
+        List.filter targets ~f:(fun target ->
+          let name = String.chop_prefix_exn target.V.id ~prefix in
+          List.exists [ "Log"; "Turn"; "Tool" ] ~f:(fun module_name ->
+            String.equal name ("module/" ^ module_name)
+            || String.is_prefix name ~prefix:("module_export/" ^ module_name ^ ".")))
+      in
+      let mappings =
+        List.filter V.host_effect_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.V.target_id ~prefix)
+      in
+      V.audit corpus ~targets ~mappings |> ok |> V.require_complete |> ok;
+      print_s [%sexp (surface : string), (List.length targets : int)]);
+  [%expect
+    {|
+    (one_off_v1 8)
+    (tool_v1 8)
+    (moderator_v1 23)
+    (delegated_moderator_v1 23)
+    |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)

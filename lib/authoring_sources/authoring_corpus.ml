@@ -1787,6 +1787,161 @@ module Coverage = struct
           }))
   ;;
 
+  let host_effect_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "4a94e46ff3a00587ead7baffae617d869e8ed2bfaa26a43b026eeefc221d5aa1"
+        , [ ( "module/Log"
+            , "ae0c2cefee5c6d21a40afcd7011a1c9a56e06e677743ac3b850ac468c122eb81" )
+          ; ( "module_export/Log.debug"
+            , "a610ab55f8fce0f6956a50e90152f265c9952599351a728eaae32cc884ebda58" )
+          ; ( "module_export/Log.error"
+            , "276ff8059e1fbc55e03ddb23edea47aa5ccb0a6c73ef0aa08aa74022adfba13c" )
+          ; ( "module_export/Log.info"
+            , "1260dcdfcc20e66d6a12591ceffb8e5448a85b52bbcb6bcb06d1910e5f2666dc" )
+          ; ( "module_export/Log.warn"
+            , "596fa893422c76269570d34c82fa7a2aed1f84220f9f6ab040c5b23dfd61d66e" )
+          ; ( "module/Tool"
+            , "6817970dd16c418885b75e649ad6d7df8cf71f073c4ff1fd677eabce77864fa0" )
+          ; ( "module_export/Tool.call"
+            , "41a0b2a8fb0ba5500b2ca8c569740450f53f9a5f22b69f5ce2fcd912650f3a54" )
+          ; ( "module_export/Tool.spawn"
+            , "028ac3d67d7024a24bc0a593c101802600a2c3f3e59751c6da738f0ec64c59fe" )
+          ] )
+      ; ( "tool_v1"
+        , "74b032714520fe0d50a1169893fed4f9e614e1c2e5cbe348952d8a474da0a2d1"
+        , [ ( "module/Log"
+            , "86a23151273713e0f33cc4e8603c5a3134e37be245390e7dc6fdfbc6a779ee57" )
+          ; ( "module_export/Log.debug"
+            , "a985d003e8441992198cb628122aff73a27a0a139f968c0a7467c171777ad737" )
+          ; ( "module_export/Log.error"
+            , "0f4d60b7c478d3ca119afcf10e7c5a2e279611577e9976c2add1e822e5332131" )
+          ; ( "module_export/Log.info"
+            , "a7b60f8eb1da0a0462e4870c2dd0845c30cdd2725a95dd7775fd05983f046776" )
+          ; ( "module_export/Log.warn"
+            , "facd0904b796187f63dcb83aab21765078154e59c3be2cbe80bf1f8de60f9183" )
+          ; ( "module/Tool"
+            , "42b49f23f03690fbc49b42e32d6f1d586be4039833ec48292088294f85d064a7" )
+          ; ( "module_export/Tool.call"
+            , "bb611c148b20cc79a98f50f5ab0281eebadb596f6fda6a6754e1a288717beec9" )
+          ; ( "module_export/Tool.spawn"
+            , "6651cd9b8567afaf2ecee63645f00d82dc79c60e596ad044497f561cef67de82" )
+          ] )
+      ; ( "moderator_v1"
+        , "456ffbd37f6614a15fe6a97fb7e4ec9ae5e31cec1eb739ce041cfac2349f2990"
+        , [ ( "module/Log"
+            , "d273c73d08a97532f5fe61b4796c631c0782d667279e79a3ec2b0fdf18bc61e2" )
+          ; ( "module_export/Log.debug"
+            , "c6bc08a709902b953042bcbee6bed85ab152922b47645f61cc2a84801613395d" )
+          ; ( "module_export/Log.error"
+            , "cb0a928173f6bc5a12a1990345cf0d787544390f5444444811feeaec91231c31" )
+          ; ( "module_export/Log.info"
+            , "b7321d2383ede11b20c2f2a0256c7fc0aa1ead57b599afda58f9e580ebf8c27c" )
+          ; ( "module_export/Log.warn"
+            , "efe84b9d8563c240e284c84b1b1f1a4f562b6470acda9a77b9d70f8336269d26" )
+          ; ( "module/Tool"
+            , "0e3cff5a3f10b65183e4f3c6aad28ef955645d4a6da02c66f38fd6717b2ebeaa" )
+          ; ( "module_export/Tool.approve"
+            , "25a858e9067c7bbdeac5faf9e1cbb07923d85d385ade44a8c3a121e06d316594" )
+          ; ( "module_export/Tool.call"
+            , "8923978bf683b1c9d0e0a2161a7a44d152395aa424386fa539699261f714f44f" )
+          ; ( "module_export/Tool.redirect"
+            , "1e7e84a8cfeb56b97b6989eafb673b37f05c07adec9b02003d132a6cc097d2b9" )
+          ; ( "module_export/Tool.reject"
+            , "0ca7d1cf1b0bef06206b900f5162bdf6d85396fdcff95558ce8b9ac931583405" )
+          ; ( "module_export/Tool.rewrite_args"
+            , "dde819fe1642cfa51d883461ab45785da9b54aee41fa4ea616f7ef421fa3f685" )
+          ; ( "module_export/Tool.spawn"
+            , "cba9420e9726709ff64b5c8f317f7981e9d713ce7a9b8668de79727f14cd88c4" )
+          ; ( "module/Turn"
+            , "1e28ee53d9b5bda92bb82bfd26e3dc56a67c111903f83c794f5c7339273a93e2" )
+          ; ( "module_export/Turn.append_item"
+            , "9d69d90e9542c89e441b0727385b98c0dedc4e0643b3e7d5891d1d5e786fa271" )
+          ; ( "module_export/Turn.append_message"
+            , "7ee8aadbc7899f4cc96035b6c0a18bd59f30479b1b139f62b2ee5c7c49fb7723" )
+          ; ( "module_export/Turn.append_notice"
+            , "10174b9d538c71819dd0dc2c369d83575a62bd052b6385f583c9dc4049a97e91" )
+          ; ( "module_export/Turn.delete_item"
+            , "ada7c56b9c9e5de50f0e3cdbc89c6c69f7f7cb6e163e158cf090bade83f8ef17" )
+          ; ( "module_export/Turn.delete_message"
+            , "c2dcc209778d78839355168360063549e7025467f1a2cae2c587921350bbdd00" )
+          ; ( "module_export/Turn.halt"
+            , "56fe2d13829df37b4966ca1a7d2d83025c89b5171c522ff7f306822410275a52" )
+          ; ( "module_export/Turn.prepend_system"
+            , "023c26e1e66e0d14f762a10d0d14bcb2d13a7fb5a45c2e1fb39a0e8d20b675ec" )
+          ; ( "module_export/Turn.replace_item"
+            , "77ce43494aebf37706d4b95b6bf8c19ec614e4dbc40abb25cdb9b03d78825f20" )
+          ; ( "module_export/Turn.replace_message"
+            , "f1eac988c6e2cc8f6a1803934e4460d9e352efe554f63934eebde9b43f4411a9" )
+          ; ( "module_export/Turn.replace_or_append"
+            , "fcae7de888d753e97b1b01203e8f0917fc035971bb5c3bf72755f732399bc89b" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "ddb43c2be5935284b28640c84310057c7d4961b708866b761577fa7fee954088"
+        , [ ( "module/Log"
+            , "8bf27bc541206797209a5b21e7249350da83a72476de50ee7478daac9df9acd4" )
+          ; ( "module_export/Log.debug"
+            , "97cd8c2451cc7ff7769ac1738e34bd96fe335d4f7bbef430dd8f22786e819e4a" )
+          ; ( "module_export/Log.error"
+            , "8069257dca202f0519e790fb172bbd4ee7bad8bb252da5b691e34f058c8d8c85" )
+          ; ( "module_export/Log.info"
+            , "eb5b144a9a214c179d1190ab040d7e2f3326da290fca264cee53fcc3b20e2d98" )
+          ; ( "module_export/Log.warn"
+            , "939dc46770f12bb4f2063b15fd2d33ae3b4c227584a1c1484588e824a8e9e695" )
+          ; ( "module/Tool"
+            , "5ec4ff4a683f610c500d9bf1f545c8b64bef440db73ac5c034518d1c75d81598" )
+          ; ( "module_export/Tool.approve"
+            , "3b167c46c3c5c2e29dd5ff4560c8772bfe39dfa8c104f305757fbf1a47bd81ec" )
+          ; ( "module_export/Tool.call"
+            , "7169f22230525f7f19abf17c754acdc3943adfe2b5726c3f9dc86bf777582351" )
+          ; ( "module_export/Tool.redirect"
+            , "0adcd86df6f82772c6df514c462bf1ef80a393342e421fa31cfa59b2af618af4" )
+          ; ( "module_export/Tool.reject"
+            , "750429786a525fa4af39e96dfc60cd329fba459a051d92a306676ed72abee88d" )
+          ; ( "module_export/Tool.rewrite_args"
+            , "48de739642f0b3766d6cc1e394b823dbda77ccbb09ceb8418a80db053cf61c60" )
+          ; ( "module_export/Tool.spawn"
+            , "d53ad5b4b7915ae0d6dd6761531ed7d2305de3a126667cafe392a3a3c9e2eaf9" )
+          ; ( "module/Turn"
+            , "e0a0406931a6c5156b39ca4e43ab61584afc884027deec39c42002c3345b8d92" )
+          ; ( "module_export/Turn.append_item"
+            , "411ab5f40b3343b1ab55b0ca8e7ecdc0fdb4f1ffb7e6a701ec27ea8446b963b8" )
+          ; ( "module_export/Turn.append_message"
+            , "ac59a05c1a1cc55aa536bd8c0be8d8a75f9c28ad6e1464e1f17bf066b2a2f6f5" )
+          ; ( "module_export/Turn.append_notice"
+            , "cc60b629572b98834e1840b0b0c1ff804d6a5c369bb894cf37b8e4f508f3e521" )
+          ; ( "module_export/Turn.delete_item"
+            , "0ae6c222113ac17a28dd6ffb922d60ee099bf4b59540954be0ffdf5652c6cf56" )
+          ; ( "module_export/Turn.delete_message"
+            , "33b5980ac24671ed8579744a1182ab1ae283af8672d575891909dc4014238bee" )
+          ; ( "module_export/Turn.halt"
+            , "de729f2623e216695a698fea0824caf099c988a52609e0fd493048a8e42a386c" )
+          ; ( "module_export/Turn.prepend_system"
+            , "ec1f368da810fec03b8472c9f2072378693be1b8a14c4183b6e68395e12988a2" )
+          ; ( "module_export/Turn.replace_item"
+            , "7725ec529310ecf86d92248b72fe9044b3f61f9dea46b05602d70e920990568c" )
+          ; ( "module_export/Turn.replace_message"
+            , "c3f79c8ebdaede49de7298809037c69b6a0905d4ef6d016264f4e95fda09f2c9" )
+          ; ( "module_export/Turn.replace_or_append"
+            , "fb7e721dff88bae60309e2f17de79c3a85b7bd5812d9a6d50e4f465d4a7057c0" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.effects"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_effects.ml"
+              ; "test/chatml_composition/moderator_job_tests.ml"
+              ; "test/moderation/chat_response_moderator_manager_test.ml"
+              ; "lib/chatml/chatml_extension_surface.ml"
+              ; "lib/chat_response/in_memory_stream.ml"
+              ]
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -1798,6 +1953,7 @@ module Coverage = struct
     @ global_mappings
     @ json_alias_mappings
     @ moderator_data_mappings
+    @ host_effect_mappings
   ;;
 end
 
@@ -2307,6 +2463,36 @@ let runtime_foundation ~sources =
                    [ "lib/chatml/chatml_builtin_spec.ml"
                    ; "lib/chatml/chatml_extension_surface.ml"
                    ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "runtime.effects"
+         ; title = "Logging, transactional turn edits and scoped tool effects"
+         ; prerequisites =
+             [ "chatml.task-effects"
+             ; "runtime.invocations.contracts"
+             ; "runtime.authority.tool-selection"
+             ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-host-effects.md"
+               ; heading = "# Logging, turn edits and tool effects"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "b74f7e25bdfe7a4fb4eeade8f0f377a20f6cb7f078566a8c78e877bd043e7e02" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "lib/chatml/chatml_extension_surface.ml"
+                   ; "lib/chatml/chatml_host_runtime.ml"
+                   ; "lib/chat_response/moderation.ml"
+                   ; "lib/chat_response/in_memory_stream.ml"
+                   ; "test/agent_docs/docs_chatml_effects.ml"
+                   ; "test/chatml_composition/moderator_job_tests.ml"
+                   ; "test/moderation/chat_response_moderator_manager_test.ml"
                    ]
                }
          }

@@ -104,6 +104,9 @@ On moderator targets, [conversation data](chatml-moderator-data.md), topic
 `chatml.moderator-data`, covers Item, Context and Tool_call operations and their
 data aliases. Its examples run on both ordinary and delegated moderator surfaces.
 It distinguishes projected snapshots and read-only inspection from admitted effects.
+The [host-effects guide](chatml-host-effects.md), topic `runtime.effects`, explains
+Log, Turn and Tool, including target restrictions, single tool decisions,
+transactional edits versus external effects, and the versioned owned-job spawn alias.
 Every task package includes the broad `chatml.programs` guide and its checked
 OCaml-differences prerequisites, covering source syntax, control flow, matching,
 types, structured-data utilities and effect boundaries before the task's runtime
