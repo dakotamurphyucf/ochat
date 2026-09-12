@@ -129,6 +129,10 @@ lookups. Different compiler surfaces remain separate; all pointers share the
 topic/byte allowance. Narrowing tools recomputes the selected schema hash, and
 withdrawing a target removes its pointer. Explicit reference-only configurations
 can rediscover documentation without acquiring execution tools or a primer.
+When a reference helper is selected, rediscovery covers the same host-enabled
+compiler targets as direct queries. Selecting an execution tool does not narrow
+that readonly access. Without a reference helper, rediscovery uses the selected
+authoring tools' supported tasks. Neither path grants execution capabilities.
 Older version-1/2 provenance remains readable, but virtual references without a
 recorded surface are omitted from rediscovery rather than assigned a guessed target.
 
@@ -141,8 +145,14 @@ different-context outcomes remain ordinary outputs when no matching binding is
 available; the runtime does not invent author-policy metadata. Annotated outputs
 must match their original receipt, and model call occurrences remain canonical.
 
-The complete post-compaction retrieve-and-author
-flow remains open; pointer and actor tests use offline fixtures and fake providers.
+An offline daemon integration now retrieves a paginated background-workflow
+package, compacts its actual conversation, restores the persisted snapshot/index,
+and checks the next model input for a manual-policy rediscovery pointer. It then
+retrieves the coordinator example again, validates the retrieved moderator, and
+executes its completion parser through `run_chatml`. The fake provider supplies
+the transcript; the compactor uses its offline summary branch. This proves the
+runtime flow, not a model's independent ability to author correct code. The broader
+X10 changed-host and narrowed-child matrix remains open.
 
 Public custom-package configuration and public qualification also remain open.
 Manual mode inserts no automatic documentation prose; it can preserve the compact

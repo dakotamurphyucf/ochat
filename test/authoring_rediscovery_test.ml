@@ -301,7 +301,8 @@ let%expect_test
 let%expect_test
     "pointer bounds retain whole recent topics and unavailable targets do not leak"
   =
-  F.fixture (fun context host _ plan ->
+  F.fixture (fun context _host _ plan ->
+    let host = F.make_host ~targets:[ One_off_script ] () in
     let policy = plan ~selected_names:[ "script" ] Auto in
     let materialization = make context host policy in
     let make number id =

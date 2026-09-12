@@ -45,10 +45,16 @@ let create ~context ~host ~policy =
       | Error message, (Auto | Preload _) -> Error message
     in
     let identity = C.identity (Q.corpus_for_host context ~host) in
+    let can_query =
+      List.exists (P.helper_pointers policy) ~f:(fun (helper, _) ->
+        M.equal_helper helper Reference)
+    in
     let tasks =
       match available, tools with
       | None, _ -> []
-      | Some _, [] ->
+      | Some _, _ when can_query ->
+        (* Reference access covers enabled compiler targets independently of
+           execution-tool help. Reading a contract grants none of its effects. *)
         M.
           [ One_off_script
           ; Standalone_tool

@@ -66,12 +66,18 @@ let with_daemon
       ?(followup_calls = fun _ -> [])
       ?(expected_requests = 2)
       ?(initial_requests = 2)
+      ?request_counts
       ?(expected_schedules = 0)
       ?(expect_moderator = false)
       ~sources
       ~calls
       f
   =
+  (* Multi-page protocols can determine their exact turn counts from authenticated
+     continuation responses. Existing fixed transcripts retain their assertions. *)
+  let request_counts =
+    Option.value request_counts ~default:(fun () -> initial_requests, expected_requests)
+  in
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -102,7 +108,7 @@ let with_daemon
           inspect_request !requests inputs;
           match !requests with
           | 1 -> call_events calls
-          | request when request <= expected_requests ->
+          | request when request <= snd (request_counts ()) ->
             call_events (followup_calls request)
           | _ -> failwith "tool execution requested an unexpected model turn"
         in
@@ -173,9 +179,11 @@ let with_daemon
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   let rec wait () =
                     let state = A.state entry.actor |> protocol_ok in
+                    Option.iter state.failure ~f:(fun error ->
+                      raise_s [%sexp (error : Agent_protocol.Error.t)]);
                     match state.active_operation with
                     | None
-                      when !requests >= initial_requests
+                      when !requests >= fst (request_counts ())
                            && List.is_empty state.conversation.deferred_user_entries ->
                       state
                     | _ ->
@@ -229,7 +237,7 @@ let with_daemon
                   | Operation_completed operation ->
                     Agent_protocol.Id.Operation.equal operation.id operation_id
                   | _ -> false));
-              [%test_eq: int] initial_requests !requests;
+              [%test_eq: int] (fst (request_counts ())) !requests;
               [%test_eq: int]
                 1
                 (List.length
@@ -283,7 +291,7 @@ let with_daemon
                   settle env entry;
                   A.state entry.actor |> protocol_ok
               in
-              [%test_eq: int] expected_requests !requests;
+              [%test_eq: int] (snd (request_counts ())) !requests;
               f final;
               H.close handle;
               Agent_client.Connection.close client))))

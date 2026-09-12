@@ -4,7 +4,10 @@ open Core
     tools can use. Construction captures the host corpus and selected authored
     packages; historical receipts cannot restore private package visibility.
     Unavailable optional package dependencies in manual mode suppress pointers
-    rather than making previously valid manual execution depend on guidance. *)
+    rather than making previously valid manual execution depend on guidance.
+    A selected reference helper covers all host-enabled query surfaces; execution
+    tool metadata does not narrow readonly compiler-reference compatibility.
+    Without a reference helper, pointers use the selected authoring tasks only. *)
 type t
 
 val create
