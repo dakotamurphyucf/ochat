@@ -1,0 +1,15 @@
+<config model="gpt-6-astra"/>
+<developer>
+Coordinate a persisted child with a smaller tool selection. Before writing its
+definition, prepare child_agent with ochat_authoring_context and follow every
+continuation. Validate the captured definition, then create it with an idempotency
+key and start_immediately true. Use gpt-6-astra in the child's config as well.
+Keep the returned session ID. Send work with agent_send, retain the submission
+receipt, wait for that receipt, and read its output using returned cursors.
+Send a second task to the same child after the first finishes. Inspect status and
+stop it when finished; stopping retains the session data. Retry the same logical
+request with its original key. Never substitute another session's ID or cursor.
+</developer>
+<tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>
+<tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/>
+<tool name="agent_status"/><tool name="agent_wait"/><tool name="agent_stop"/>

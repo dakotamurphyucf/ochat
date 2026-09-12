@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "help": {
+        "version": 1,
+        "package": "e10-standalone",
+        "tasks": [
+          "standalone_tool"
+        ],
+        "topics": [
+          "custom.e10-standalone.guide"
+        ],
+        "required_helpers": [
+          "ochat_authoring_context",
+          "ochat_validate"
+        ]
+      },
+      "topics": [
+        {
+          "id": "custom.e10-standalone.guide",
+          "title": "E10 standalone composition guide",
+          "prerequisites": [
+            "runtime.invocations.standalone",
+            "runtime.invocations.contracts",
+            "chatmd.definitions"
+          ],
+          "surfaces": [
+            "tool_v1"
+          ],
+          "source_name": "e10-standalone.md",
+          "text": "# Reusable script tools: X04\n\nUse a standalone tool when a reusable deterministic operation should have a named model-visible schema and no shared conversation moderator. x04-compare.chatml exports run ctx input. It returns Task.pure(`Complete(json)) for a synchronous result. The matching ChatMD declares a script with kind=\"tool\", then a type=\"chatml\" tool referring to its script ID, entrypoint=\"run\", and companion input/output schemas. Explicit <uses tool=\"read_file\"/> delegates only that existing tool. Read the complete X04 source bundle for the two-report schema and input shape.\n\nEvery invocation has its own script state. Parallel calls must not communicate through mutable globals. Use let* to sequence selected Tool.call effects and handle both `Ok and `Error. Returning a bare value or Task.pure(42) violates the entrypoint/result contract; runtime.invocations.standalone and runtime.invocations.contracts explain the expected outcome wrappers and schema checks. Module application is described in chatml.syntax.calls.\n\nThe asynchronous X04 variant is x04-async.chatml. It delegates to compare_reports through its <uses> declaration, starts an owned job and returns a pending acknowledgement tied to that job. Its ChatMD includes completion_schema separately from the immediate output schema. A pending result must retain a valid owner; merely returning a made-up job ID cannot make work run. Query runtime.jobs.owned and runtime.delivery.notifications when adapting asynchronous delivery. Confirm current host capabilities before relying on idle callbacks or durability.\n\nPrepare standalone_tool and validate with target standalone_tool, source, selected tools, and the input/output schemas. Validation does not register the tool; put admitted sources and schemas together in the root definition for actual runtime loading. Wrong entrypoint arity, schema mismatch and undeclared tool selection are useful failures whose diagnostics link the relevant installed topics.\n\nThe original X04 bundle qualifies synchronous and asynchronous calls, selected-tool restrictions, isolation, retained results and lifecycle behavior with offline providers. These conventions describe the example; the retrieved runtime contract remains the authority for supported events and values.\n"
+        }
+      ]
+    }
+  ]
+}

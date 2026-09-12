@@ -1,0 +1,38 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "help": {
+        "version": 1,
+        "package": "e10-background",
+        "tasks": [
+          "background_workflow"
+        ],
+        "topics": [
+          "custom.e10-background.guide"
+        ],
+        "required_helpers": [
+          "ochat_authoring_context",
+          "ochat_validate"
+        ]
+      },
+      "topics": [
+        {
+          "id": "custom.e10-background.guide",
+          "title": "E10 background composition guide",
+          "prerequisites": [
+            "runtime.jobs.shell-example",
+            "runtime.jobs.timers",
+            "runtime.delivery.notifications",
+            "runtime.recovery.background"
+          ],
+          "surfaces": [
+            "moderator_v1"
+          ],
+          "source_name": "e10-background.md",
+          "text": "# Background work and composed session notifications: X03, X06-X08, X10\n\nUse owned jobs for work that outlives the tool acknowledgement and subscriptions/timers for later observations. x03-coordinator.chatml starts a shell-backed job, returns Pending immediately, then publishes a source-labelled notification when its completion arrives. The X03 bundle intentionally uses direct_unsafe for a trusted fixture: it tests sequencing/cancellation, not OS confinement. Changing to a required sandbox without qualifying its executable/subprocess policy is not equivalent.\n\nPrepare background_workflow, including the installed runtime.jobs.shell-example prerequisites. Moderator entrypoints are initial_state and on_event ctx state event; callbacks return Task of state. The event pump owns effect execution. Track the original invocation/job identity, commit a delivery receipt and clear timers before requesting the next model turn. Use let* to express this order. Wrong event variants, forged terminal payloads and an unowned Pending job must fail; follow diagnostic topics runtime.jobs.owned, runtime.invocations.moderator and runtime.delivery.notifications.\n\nx06-watcher.chatml implements receipt/cursor watching using one-shot timers and bounded polls, not a native child push subscription. State tracks child/target IDs, epoch, timer/job IDs, deadline, backoff and terminal disposition. Ignore stale callbacks; cancellation stops watching without stopping the child. Distinguish permission waiting, stopped children, transport errors and timeout. Read every returned page; a visible response is not always the target's final completion.\n\nThe complete X07 bundle supplies x07-helper-request.chatml's session bridge, scoped helper grants and the same watcher. Its native-watcher variant changes polling to agent_wait/read/status; creation still uses the helper. Helper-only mode has no native lifecycle tool registrations. The optional helper is an external extension example, not an Ochat runtime executable dependency. Neither copied JSON nor an ambient admin token substitutes for scoped authorization.\n\nX08 uses Subscription.create and Ingress.register to authorize an external data event. A producer authenticates through the normal endpoint and submits ingress.submit with the registration ID and namespace; the moderator uses Subscription.complete and Notification.publish. Producer authority is scoped and completion payloads are data, not forged native events. Follow that bundle's exact registration and protocol.initialize flow. Duplicate publication must deduplicate; invalid namespace/schema must reject.\n\nX10 prepares this task, compacts the conversation, and retrieves runtime.jobs.shell-example again before another validation/execution. Missing reference content is not still loaded merely because a receipt survives. Respect current runtime/capability identity and fresh cursors. Manual policy stays manual. No process-bound host should promise execution after exit. runtime.recovery.background explains ambiguous effects and non-replay rules; retained receipts do not make arbitrary external effects exactly-once.\n\nOffline fixtures use real compiled scripts, fake providers and controlled clocks to prove these compositions. They are separate from optional live-model evaluations.\n"
+        }
+      ]
+    }
+  ]
+}

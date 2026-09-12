@@ -1,4 +1,34 @@
-# Captured child authoring request
+# X05: persisted generated and authored specialists
+
+Build `@test/chatml_extensibility_fixtures/x05-child-session/bundle` and copy the
+entire `_build/default/test/chatml_extensibility_fixtures/x05-child-session/`
+directory to a new location. Keep `public/` as the workspace; the configuration,
+prompt definitions, socket and private daemon data stay outside it.
+
+Validate with `ochat-agent-server -config "$PWD/server.sexp" -validate-only`, then
+start `ochat-agent-server -config "$PWD/server.sexp"`. From another terminal in
+that directory, connect with
+`chat-tui --no-config --connect "unix://$PWD/agent.sock" --new-daemon-session --prompt generated --workspace examples`.
+Use `--prompt authored` for the optional/persistent named-tool variant. Both
+select `gpt-6-astra`; interactive use requires your provider credentials and
+normal tool approvals. There is no helper executable in this native bundle.
+
+Ask the generated coordinator to review `report-a.json`, then give the same child
+a second request for `report-b.json`. Keep its ID, creation key and each send's
+receipt. Restart the daemon between exchanges to check retained source and
+output. An owned child stopped during shutdown must be resumed through the
+authorized host session-start operation; `agent_send` never starts a stopped
+session implicitly. Read and stop preserve historical data.
+
+For the authored prompt, ask `researcher` for a one-off count, then for a retained
+session and another count using its ID. Start a second retained instance to see
+independent moderator state. `reviewer` always uses persistence. The actual
+`test/agent_server_authored_test.ml` fixture loads these parent/specialist files
+and schemas and qualifies native calls, private state and daemon restart over a
+Unix socket with offline providers. The wider authored fixture family qualifies
+timeouts, approvals, concurrency and generic lifecycle interoperability.
+
+## Captured child authoring request
 
 `create.json` is the complete version-1 creation request displayed in the shared
 [child authoring guide](../../../docs-src/guide/chatml-authoring-children.md).
@@ -21,8 +51,9 @@ after creation. The selected model and any approvals remain host policy decision
 ## Persisted lifecycle composition
 
 `helper-child.chatmd` is the generated source used by the real confined helper
-integration fixture (`test/agent_server_helper_test.ml`). It selects `o4-mini` with
-high reasoning, while the parent selects `gpt-4.1` with low reasoning, inherits only
+integration fixture (`test/agent_server_helper_test.ml`). Both parent and child
+select `gpt-6-astra`; the child requests high reasoning and the parent leaves
+reasoning at the provider default. The child inherits only
 `read_file`, and counts pre-tool events in its lifecycle moderator's persisted state.
 The fixture uses deterministic provider responses, not a paid model endpoint.
 

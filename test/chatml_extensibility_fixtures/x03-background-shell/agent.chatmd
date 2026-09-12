@@ -1,3 +1,4 @@
+<config model="gpt-6-astra"/>
 <developer>Use begin_work to start the bounded fixture. Continue answering while its job runs.</developer>
 <shell_access id="fixture" cwd="${workspace}">
   <capabilities sandbox="direct_unsafe" network="false" child_processes="true" arbitrary_code="true" privilege_change="false">

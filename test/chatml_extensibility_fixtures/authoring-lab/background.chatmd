@@ -1,0 +1,2 @@
+<import src="base.chatmd"/>
+<authoring_help tool="read_file" package="e10-background" tasks="background_workflow" topics="custom.e10-background.guide" required_helpers="ochat_authoring_context ochat_validate"/>

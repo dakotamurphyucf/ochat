@@ -178,7 +178,8 @@ let%expect_test
         ~sources:
           [ ( "agent.chatmd"
             , policy
-              ^ {|<developer>Return the input.</developer><tool name="run_chatml"/><tool name="agent_create"/>|}
+              ^ [%blob
+                  "../chatml_extensibility_fixtures/x09-authoring-discovery/agent.chatmd"]
               ^ String.concat
                   (List.map explicit_helpers ~f:(fun name ->
                      sprintf "<tool name=%S/>" name)) )

@@ -1,5 +1,8 @@
 # X06 response watcher qualification fixture
 
+For complete agent entrypoints and setup instructions, use the
+[helper/native-watcher bundle](../x07-helper-session/bundle/README.md).
+
 This is user-authored polling built from existing ChatML jobs, one-shot schedules,
 subscriptions and notifications. It does not use a native child-response push API.
 The shared extension runtime is enabled by default; the agent must declare its

@@ -1,9 +1,13 @@
 # X08: external completion through a registered data event
 
-This source bundle is qualified with a daemon using the extensibility-v1 host
-services. General model-facing availability remains gated by the authoring and
-host-integration phases. The offline test runs a fake provider; it does not call
-an LLM service.
+This source bundle uses the daemon's extensibility-v1 host services. The offline
+test runs a fake provider; it does not call an LLM service.
+
+Build with `dune build @test/chatml_extensibility_fixtures/x08-external-completion/bundle`.
+The complete directory is under `_build/default/test/chatml_extensibility_fixtures/x08-external-completion/`.
+Copy it outside the build tree and configure its `agent.chatmd` as a daemon prompt.
+Use a connected TUI session to call `watch`, then submit the completion through
+the authenticated protocol flow below. Interactive model turns use your provider.
 
 The agent's `watch` tool creates a subscription and registers an `external.report`
 event schema. Its initial Pending acknowledgement exposes the registration ID

@@ -1,4 +1,4 @@
-<config model="o4-mini" reasoning_effort="high"/>
+<config model="gpt-6-astra" reasoning_effort="high"/>
 <authoring_context policy="manual"/>
 <developer>HELPER_CHILD: read the report requested by your parent through the inherited file tool.</developer>
 <tool type="inherited" name="read_file"/>

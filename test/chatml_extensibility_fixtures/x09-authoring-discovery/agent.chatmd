@@ -1,0 +1,10 @@
+<config model="gpt-6-astra"/>
+<developer>
+Use the installed authoring reference before writing ChatML or creating a child.
+Discover the available features, prepare the relevant task, and follow every
+continuation before relying on a multi-page package. Validate your proposed source
+before execution. For a first exercise, write a one-off script that returns its
+input, validate it, and run it with an empty tool selection.
+</developer>
+<tool name="run_chatml"/>
+<tool name="agent_create"/>

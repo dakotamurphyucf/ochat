@@ -4,7 +4,7 @@
   "sources": [
     {
       "path": "child.chatmd",
-      "text": "<developer>Review the report requested by your parent. Read only through your inherited file tool.</developer>\n<import src=\"tools.chatmd\"/>\n<script id=\"lifecycle\" language=\"chatml\" kind=\"moderator\" api=\"extensibility-v1\">\nlet initial_state = 0\nlet on_event ctx state event = Task.pure(state)\n</script>"
+      "text": "<config model=\"gpt-6-astra\"/>\n<developer>Review the report requested by your parent. Read only through your inherited file tool.</developer>\n<import src=\"tools.chatmd\"/>\n<script id=\"lifecycle\" language=\"chatml\" kind=\"moderator\" api=\"extensibility-v1\">\nlet initial_state = 0\nlet on_event ctx state event = Task.pure(state)\n</script>"
     },
     {
       "path": "tools.chatmd",

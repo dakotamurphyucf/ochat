@@ -89,22 +89,22 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
      b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)
     (agent_create runtime.delegation.creation
      f50060c1bdd22759d368f8962e1f21f2f347fdcc2bb5383d392d99025f5dd664
-     7642a7ae7b8d366a9eaa24e3e28f0aed4ca1da5923d81972d5a31fb5bb5038c0)
+     6a6783530e01cfe406cedecad6cb9642437cbce0ba98545af12c2504f74aa57f)
     (agent_status runtime.delegation.submissions
      c948e863b277175b367e349d6edd845405843173ab2845a17dd220a0bcbe1273
-     83180a03a8933f5f195ab1640ef3eaa2e9f7036b0260e92230106c2fabac00fe)
+     2f8d1fd0a800aa31b2795aeecda363415d68bd80fa1bf7928f09a4821d673e25)
     (agent_send runtime.delegation.submissions
      ebd399228691c35671afa1fe353623284f6eabd788c95748e7e6b38f3ebdbf0e
-     83180a03a8933f5f195ab1640ef3eaa2e9f7036b0260e92230106c2fabac00fe)
+     2f8d1fd0a800aa31b2795aeecda363415d68bd80fa1bf7928f09a4821d673e25)
     (agent_read runtime.delegation.output
      7b7763f30e055fcc0a81a0578b08d75c7d90ccc5b7e524ead6e99b450fe8d946
-     e1d5360e4122e0737faa3de0ee9be013ae429010c0bc172beccdf42ff26a8ec4)
+     f28bd62a783a22ef96071060afdfd1c6e0bf28af60997033cfe5030d60d73f36)
     (agent_wait runtime.delegation.output
      88196ca1f4dc34e34441e8687ffff3557e8e48215205e4cdcd0303b50a2be722
-     e1d5360e4122e0737faa3de0ee9be013ae429010c0bc172beccdf42ff26a8ec4)
+     f28bd62a783a22ef96071060afdfd1c6e0bf28af60997033cfe5030d60d73f36)
     (agent_stop runtime.delegation.stop-helper
      d10ebc8001ca0ea8e709be0a4ee5a3d64de024e9fcff086774aba2463a9d1a6d
-     8e649991f4609dba8714dfec5bda048c2ffe4fa0dd7b16a2e848a76149d34725)
+     f3eb8929a24eb98735ec67a35507117fe598732b6b2c68ef7bb8a6931e485c89)
     (ochat_validate runtime.native.requests
      f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
      b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)

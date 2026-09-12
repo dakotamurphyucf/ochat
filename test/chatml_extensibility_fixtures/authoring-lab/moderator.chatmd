@@ -1,0 +1,2 @@
+<import src="base.chatmd"/>
+<authoring_help tool="read_file" package="e10-moderator" tasks="moderator_tool" topics="custom.e10-moderator.guide" required_helpers="ochat_authoring_context ochat_validate"/>

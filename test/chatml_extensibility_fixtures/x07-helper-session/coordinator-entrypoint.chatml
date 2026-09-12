@@ -1,0 +1,7 @@
+type coordinator_state = { helpers : request array; watches : response_watch array }
+let initial_state : coordinator_state = { helpers = helper_initial_state; watches = watch_initial_state }
+let on_event ctx state event =
+  let state : coordinator_state = state in
+  let* helpers = helper_on_event(ctx, state.helpers, event) in
+  let* watches = watch_on_event(ctx, state.watches, event) in
+  Task.pure({ helpers = helpers; watches = watches })

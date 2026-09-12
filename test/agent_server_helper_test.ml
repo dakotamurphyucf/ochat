@@ -14,18 +14,12 @@ let helper_request =
   [%blob "chatml_extensibility_fixtures/x07-helper-session/request.chatml"]
 ;;
 
-let helper_moderator =
-  [%blob "chatml_extensibility_fixtures/x07-helper-session/moderator.chatml"]
-;;
-
 let helper_tools = [%blob "chatml_extensibility_fixtures/x07-helper-session/tools.chatmd"]
 let helper_schema = [%blob "chatml_extensibility_fixtures/x07-helper-session/any.json"]
 
 let child_source =
   [%blob "chatml_extensibility_fixtures/x05-child-session/helper-child.chatmd"]
 ;;
-
-let watcher = [%blob "chatml_extensibility_fixtures/x06-response-watcher/watcher.chatml"]
 
 let watch_probe =
   [%blob "chatml_extensibility_fixtures/x06-response-watcher/probe.chatml"]
@@ -42,18 +36,8 @@ let watch_tools =
 ;;
 
 let coordinator =
-  helper_moderator
-  ^ "\nlet helper_initial_state = initial_state\nlet helper_on_event = on_event\n"
-  ^ watcher
-  ^ {|
-type coordinator_state = { helpers : request array; watches : response_watch array }
-let initial_state : coordinator_state = { helpers = helper_initial_state; watches = watch_initial_state }
-let on_event ctx state event =
-  let state : coordinator_state = state in
-  let* helpers = helper_on_event(ctx, state.helpers, event) in
-  let* watches = watch_on_event(ctx, state.watches, event) in
-  Task.pure({ helpers = helpers; watches = watches })
-|}
+  [%blob
+    "chatml_extensibility_fixtures/x07-helper-session/bundle/helper-moderator.chatml"]
 ;;
 
 let state daemon id =
@@ -107,12 +91,26 @@ let run env helper ~native_watch =
       List.iter
         [ "helper-request.chatml", helper_request
         ; ( "authored-helper.chatmd"
-          , "<developer>HELPER_CHILD authored specialist.</developer>" )
+          , "<config model=\"gpt-6-astra\"/>\n\
+             <developer>HELPER_CHILD authored specialist.</developer>" )
         ; "helper-moderator.chatml", coordinator
         ; "helper-any.json", helper_schema
         ; "watch-probe.chatml", watch_probe
         ; "watch-native.chatml", watch_native
         ; "watch-input.json", watch_input
+        ; "helper-tools.chatmd", helper_tools
+        ; "watch-tools.chatmd", watch_tools
+        ; ( "base.chatmd"
+          , [%blob "chatml_extensibility_fixtures/x07-helper-session/bundle/base.chatmd"]
+          )
+        ; ( "helper-watch.chatmd"
+          , [%blob
+              "chatml_extensibility_fixtures/x07-helper-session/bundle/helper-watch.chatmd"]
+          )
+        ; ( "native-watch.chatmd"
+          , [%blob
+              "chatml_extensibility_fixtures/x07-helper-session/bundle/native-watch.chatmd"]
+          )
         ]
         ~f:(fun (name, contents) ->
           Eio.Path.save
@@ -120,24 +118,46 @@ let run env helper ~native_watch =
             (path (Filename.concat root name))
             contents);
       let prompt = Filename.concat root "parent.chatmd" in
+      let example =
+        match native_watch with
+        | false ->
+          [%blob "chatml_extensibility_fixtures/x07-helper-session/bundle/agent.chatmd"]
+        | true ->
+          [%blob
+            "chatml_extensibility_fixtures/x07-helper-session/bundle/native-watch-agent.chatmd"]
+      in
+      Eio.Path.save
+        ~create:(`Exclusive 0o600)
+        (path (Filename.concat root "agent.chatmd"))
+        example;
+      let template =
+        [%blob
+          "chatml_extensibility_fixtures/x07-helper-session/bundle/server.template.sexp"]
+        |> String.substr_replace_all
+             ~pattern:"REPLACE_WITH_HELPER_SHA256"
+             ~with_:
+               (Eio.Path.load (path helper_path) |> Chatmd_shell_spec.Source_ref.digest)
+      in
+      let packaged_config =
+        Agent_server.Config_parser.parse_string
+          ~source_file:(Filename.concat root "bundle-check.sexp")
+          template
+        |> Result.bind ~f:(Agent_server.Config_validator.validate ~env)
+        |> function
+        | Ok configuration -> configuration
+        | Error diagnostics ->
+          raise_s
+            [%sexp
+              "packaged helper configuration is invalid"
+            , (diagnostics : Agent_server.Config.Diagnostic.t list)]
+      in
+      [%test_eq: int] 2 (List.length packaged_config.server.session_helpers);
+      print_endline "packaged agent imports and scoped helper configuration validate";
       Eio.Path.save
         ~create:(`Exclusive 0o600)
         (path prompt)
-        ({|<config model="gpt-4.1" reasoning_effort="low"/>
-<authoring_context policy="manual"/>
-<developer>HELPER_PARENT</developer>
-<tool name="specialist" agent="authored-helper.chatmd" local persistence="persistent"/>
-<tool name="run_chatml"/>
-<tool name="read_file"><read id="data" path="${workspace}"/></tool>
-<shell_access id="helper" cwd="${workspace}">
-  <capabilities sandbox="required" network="false" child_processes="true" arbitrary_code="true" privilege_change="false"><read path="${workspace}"/></capabilities>
-  <environment inherit="selected"><set name="PATH" value="/usr/bin:/bin"/></environment>
-  <policy default="allow"/>
-  <limits wall_time="30s" idle_time="none"/>
-  <audit format="none"/>
-</shell_access>
-<tool name="session_bridge" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
-<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+        (example
+         ^ {|<tool name="specialist" agent="authored-helper.chatmd" local persistence="persistent"/>
 <tool name="bad_helper_digest" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
 <tool name="bad_helper_environment" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
 <tool name="bad_helper_arguments" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
@@ -149,16 +169,6 @@ let run env helper ~native_watch =
   <audit format="none"/>
 </shell_access>
 <tool name="bad_helper_roots" type="shell" mode="fixed" runtime="helper_escape" command="./helper" stdin="required" result="stdout"/>|}
-         ^ helper_tools
-         ^ watch_tools
-         ^
-         match native_watch with
-         | false ->
-           {|<tool name="watch_session_request" type="chatml" script="session_request_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="session_bridge"/></tool>|}
-         | true ->
-           {|<tool name="agent_wait"/><tool name="agent_read"/><tool name="agent_status"/>
-<script id="watch_native_script" language="chatml" kind="tool" src="watch-native.chatml"/>
-<tool name="watch_session_request" type="chatml" script="watch_native_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="agent_wait"/><uses tool="agent_read"/><uses tool="agent_status"/></tool>|}
         );
       let configuration = config root public prompt in
       let configuration =
@@ -208,14 +218,6 @@ let run env helper ~native_watch =
         ; { (grant "bad_helper_arguments" [ Create ]) with arguments = [ "unexpected" ] }
         ; grant "bad_helper_roots" [ Create ]
         ]
-      in
-      let authoring_host =
-        Chat_response.Authoring_validation.create_host
-          ~runtime_identity:"helper-authoring-fixture-v1"
-          ~targets:[ One_off_script; Standalone_tool; Moderator; Generated_chatmd ]
-          ~moderator_surface:Ordinary
-          ~compilation:Chatml_compilation.default_limits
-        |> Result.ok_or_failwith
       in
       let queued = ref None in
       let last_tool = ref "none" in
@@ -353,11 +355,7 @@ let run env helper ~native_watch =
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options:
-                { D.default_options with
-                  authoring_validation_host = Some authoring_host
-                ; model_post_stream = Some provider
-                }
+              ~options:{ D.default_options with model_post_stream = Some provider }
               ()
             |> protocol_ok
           in
@@ -1058,7 +1056,8 @@ let run env helper ~native_watch =
       Eio.Path.save
         ~create:(`Or_truncate 0o600)
         (path (Filename.concat root "authored-helper.chatmd"))
-        "<developer>Edited live authored specialist.</developer>";
+        "<config model=\"gpt-6-astra\"/>\n\
+         <developer>Edited live authored specialist.</developer>";
       let restart_started = ref 0. in
       let restart_steps = ref [] in
       let restart_step name =

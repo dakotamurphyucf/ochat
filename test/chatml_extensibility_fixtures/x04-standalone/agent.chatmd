@@ -1,3 +1,4 @@
+<config model="gpt-6-astra"/>
 <developer>Use compare_reports to inspect two approved reports.</developer>
 <tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>
 <script id="compare" language="chatml" kind="tool" src="compare.chatml"/>

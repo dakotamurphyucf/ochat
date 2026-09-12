@@ -2935,7 +2935,7 @@ let runtime_foundation ~sources =
         [ ( "# ChatML authoring: persisted child sessions"
           , "928f6305d1a1276069889a94f78439cb75b1a20e1ca24e8c32ed1bdfd7fb67a5" )
         ; ( "## Capture and validate a generated definition"
-          , "f9d854a4e0b53f824bb4c20197c3432fe4854dfa02a70db1e5eae5c45197af6a" )
+          , "cd825e7dca6042c6bbeae0a1eebd3b037db196e5f8954e24f0ebf8a89a4984da" )
         ]
     ; make_child
         "runtime.delegation.creation"

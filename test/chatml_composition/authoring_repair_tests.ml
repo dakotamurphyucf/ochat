@@ -80,7 +80,7 @@ let on_event ctx state event = Task.pure(state)
   [ language
       "calls"
       "chatml.syntax.calls"
-      "let main input = Task.pure input"
+      [%blob "../chatml_extensibility_fixtures/x11-authoring-repair/invalid-call.chatml"]
       "calls.wrapper"
   ; language
       "records"
@@ -217,11 +217,7 @@ let main input =
   with_daemon
     ~sources:
       [ ( "agent.chatmd"
-        , {|<developer>Repair candidates using the installed authoring reference.</developer>
-<authoring_context policy="manual"/>
-<tool name="ochat_validate"/><tool name="ochat_authoring_context"/><tool name="run_chatml"/>
-<tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>|}
-        )
+        , [%blob "../chatml_extensibility_fixtures/x11-authoring-repair/agent.chatmd"] )
       ]
     ~calls:(List.map candidates ~f:(fun c -> "bad-" ^ c.id, "ochat_validate", c.invalid))
     ~request_counts:(fun () -> !final_count, !final_count)

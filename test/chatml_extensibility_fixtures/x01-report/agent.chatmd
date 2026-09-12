@@ -1,3 +1,4 @@
+<config model="gpt-6-astra"/>
 <developer>Use run_chatml to aggregate failed checks in the approved reports root.</developer>
 <tool name="run_chatml"/>
 <tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>

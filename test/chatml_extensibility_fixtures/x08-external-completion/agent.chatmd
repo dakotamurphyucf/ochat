@@ -1,3 +1,4 @@
+<config model="gpt-6-astra"/>
 <script id="receiver" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = { subscription = ""; registration = ""; invocation = "" }
 let rec find_field fields name index =

@@ -1,7 +1,14 @@
 # X04: reusable standalone report comparison
 
-This bundle includes synchronous and asynchronous internal qualification fixtures.
-Public feature exposure remains gated on A01.
+This bundle includes synchronous and asynchronous standalone tools.
+
+Build with `dune build @test/chatml_extensibility_fixtures/x04-standalone/bundle`.
+Copy `_build/default/test/chatml_extensibility_fixtures/x04-standalone/` to a new
+workspace; its generated `reports/` directory contains the required inputs.
+Run `chat-tui --no-config --local -file agent.chatmd` there, or choose
+`-file async.chatmd` for background delivery. Ask it to compare `report-a.json`
+and `report-b.json`. These interactive commands use your configured model;
+the offline qualification command below does not.
 
 `agent.chatmd` loads `compare.chatml` as a standalone tool with explicit input
 and output schemas and one selected dependency, `read_file`. No conversation
@@ -32,5 +39,5 @@ moderator and never produces a second response to the original provider tool cal
 The asynchronous job/contract tests explicitly disable extra automatic turns while
 still allowing delivery. Separate standalone notification tests use a delayed real
 shell job to prove a later model wake, schema-error redaction, policy suppression
-and reload without repeated work or messages. Artifact/size/recovery edge cases and
-the final E06 audit remain open.
+and reload without repeated work or messages. Separate artifact, size, lifecycle
+and crash tests cover retained results and interruption boundaries.

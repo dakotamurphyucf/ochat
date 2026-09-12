@@ -124,13 +124,10 @@ let exercise with_session =
     with_session
       ~sources:
         [ ( "agent.chatmd"
-          , {|<developer>Author a background coordinator using the installed reference.</developer>
-<authoring_context policy="manual"/>
-<tool name="ochat_authoring_context"/><tool name="ochat_validate"/><tool name="run_chatml"/>
-<script id="work" language="chatml" kind="tool">let run ctx input = Task.pure(`Complete(input))</script>
-<tool name="fixture_work" type="chatml" script="work" entrypoint="run" input_schema="any.json" output_schema="any.json"/>|}
-          )
-        ; "any.json", {|{"type":"object","properties":{},"additionalProperties":false}|}
+          , [%blob
+              "../chatml_extensibility_fixtures/x10-authoring-compaction/agent.chatmd"] )
+        ; ( "any.json"
+          , [%blob "../chatml_extensibility_fixtures/x10-authoring-compaction/any.json"] )
         ]
       ~calls:
         [ ( !pending

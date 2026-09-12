@@ -1,5 +1,9 @@
 # Moderator-handled session helper
 
+The [complete bundle](bundle/README.md) provides both agent entrypoints, the
+assembled moderator, all companion schemas/scripts and a server configuration
+template. Build it with the documented Dune alias before copying it elsewhere.
+
 This fixture supplies a moderator-handled `manage_agent`
 tool accepting the version 1 session-management envelope. The moderator starts
 `session_request` as a background job, returns a pending job reference, then
@@ -31,5 +35,6 @@ are deterministic local fixtures.
 The sibling [X06 response watcher](../x06-response-watcher/README.md) composes this
 helper with polling jobs, timers and correlated notifications. Both backends
 exercise active-watch recovery; compiled-source tests cover the deadline and
-policy branches described in X06. Complete standalone example packaging remains
-separate from these executable integration fixtures.
+policy branches described in X06. The bundle uses these same sources; its test adds
+separate negative tools and an authored specialist without replacing the example's
+declarations.

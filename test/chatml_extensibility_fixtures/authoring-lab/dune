@@ -1,0 +1,11 @@
+(alias
+ (name bundle)
+ (deps README.md base.chatmd server.sexp
+  one-off.chatmd one-off.json standalone.chatmd standalone.json
+  moderator.chatmd moderator.json children.chatmd children.json
+  background.chatmd background.json
+  public/x01-aggregate.chatml public/x02-review.chatml public/x03-coordinator.chatml
+  public/x04-compare.chatml public/x04-async.chatml public/x05-create.json
+  public/x05-helper-child.chatmd public/x06-watcher.chatml public/x07-helper-request.chatml
+  public/x08-agent.chatmd public/x11-invalid-call.chatml
+  public/reports/report-a.json public/reports/report-b.json))

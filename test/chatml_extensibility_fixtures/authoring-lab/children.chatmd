@@ -1,0 +1,2 @@
+<import src="base.chatmd"/>
+<authoring_help tool="read_file" package="e10-children" tasks="child_agent" topics="custom.e10-children.guide" required_helpers="ochat_authoring_context ochat_validate"/>

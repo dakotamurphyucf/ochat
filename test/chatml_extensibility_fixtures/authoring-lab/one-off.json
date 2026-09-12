@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "help": {
+        "version": 1,
+        "package": "e10-one-off",
+        "tasks": [
+          "one_off_script"
+        ],
+        "topics": [
+          "custom.e10-one-off.guide"
+        ],
+        "required_helpers": [
+          "ochat_authoring_context",
+          "ochat_validate"
+        ]
+      },
+      "topics": [
+        {
+          "id": "custom.e10-one-off.guide",
+          "title": "E10 one-off composition guide",
+          "prerequisites": [
+            "runtime.invocations.one-off",
+            "chatml.syntax.calls",
+            "chatml.json"
+          ],
+          "surfaces": [
+            "one_off_v1"
+          ],
+          "source_name": "e10-one-off.md",
+          "text": "# One-off scripts: X01, X09 and X11\n\nUse one-off scripts to compute over selected tools without a conversation moderator. X01's x01-aggregate.chatml exports main input and returns a Task whose value is JSON. Call run_chatml with source, input (an array of report filenames), and tools [\"read_file\"]. The reader selects the reports root. read_file returns two metadata lines before its file body; the example removes those before JSON parsing. The fixtures retain duplicate failures and exclude passed checks.\n\nPrepare one_off_script before authoring. X09 demonstrates automatic discovery: read the primer's feature overview, then call prepare for the task and follow every next_cursor. A last page with complete=true terminates that query; it is not a complete replacement for earlier pages. After compaction, retrieve missing reference content again. These conventions augment the installed language/runtime reference; they are not audited compiler documentation.\n\nUse let* for dependent tasks and let+ to map the final result. Module calls use parentheses and comma-separated arguments: Task.pure(input), not OCaml's Task.pure input. See chatml.syntax.calls for the exact grammar, chatml.json for JSON constructors, and runtime.invocations.one-off for the execution envelope, limits and selected-tool admission. Direct shell/filesystem access is not part of this script surface.\n\nValidate source through ochat_validate with target one_off_script and the same tools before running it. X11's x11-invalid-call.chatml intentionally uses the invalid application form. Read diagnostic topic_ids, retrieve those topics for this task, repair, and validate again. Missing record fields and a Task returning an ordinary record instead of JSON are other useful failures (chatml.types and runtime.invocations.one-off). Validation is non-executing and its identity grants no execution authority.\n\nRun only against approved example data. A later read outside reports remains denied even after successful validation. The source bundle's tests execute this aggregation through the real script/tool boundary with offline providers; they do not prove model authoring quality.\n"
+        }
+      ]
+    }
+  ]
+}

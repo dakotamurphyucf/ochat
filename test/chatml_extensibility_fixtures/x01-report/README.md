@@ -1,7 +1,14 @@
 # X01: report aggregation
 
-This is an internal qualification fixture for the opt-in `run_chatml` path.
-General model-visible extension availability remains gated on A01.
+This example uses the explicitly declared `run_chatml` tool and default automatic
+authoring guidance.
+
+Build with `dune build @test/chatml_extensibility_fixtures/x01-report/bundle`.
+The complete directory under `_build/default/test/chatml_extensibility_fixtures/x01-report/`
+includes `reports/` in the layout the agent expects. Copy it to a new workspace,
+then run `chat-tui --no-config --local -file agent.chatmd` from that directory.
+Provide the script and inputs below in your request to the agent. This interactive
+command uses your configured model; the offline test command below does not.
 
 The agent declares `run_chatml` and a `read_file` capability confined to
 `${workspace}/reports`. Submit the contents of `aggregate.chatml` as `source`,

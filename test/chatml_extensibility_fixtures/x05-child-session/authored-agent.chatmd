@@ -1,0 +1,12 @@
+<config model="gpt-6-astra"/>
+<developer>
+AUTHORED_PARENT: use researcher for a one-off request or request persistence to
+continue with the same specialist. Retain its session ID and submission receipt.
+Use reviewer for a specialist that is always persistent. Each specialist's counter
+tool reads the approved value and maintains its own count in moderator state.
+Use the session lifecycle tools to inspect, send, wait, read and stop retained work.
+</developer>
+<tool name="researcher" agent="researcher.chatmd" local persistence="optional"/>
+<tool name="reviewer" agent="researcher.chatmd" local persistence="persistent"/>
+<tool name="agent_create"/><tool name="agent_status"/><tool name="agent_stop"/>
+<tool name="agent_send"/><tool name="agent_read"/><tool name="agent_wait"/>

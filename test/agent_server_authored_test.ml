@@ -85,34 +85,17 @@ let%expect_test
         in
         save
           "parent.chatmd"
-          {|<developer>AUTHORED_PARENT</developer>
-<tool name="researcher" agent="researcher.chatmd" local persistence="optional"/>
-<tool name="reviewer" agent="researcher.chatmd" local persistence="persistent"/>
-<tool name="agent_create"/><tool name="agent_status"/><tool name="agent_stop"/>|};
+          [%blob "chatml_extensibility_fixtures/x05-child-session/authored-agent.chatmd"];
         save
           "input.json"
-          {|{"type":"object","properties":{},"additionalProperties":false}|};
-        save "output.json" {|{"type":"string"}|};
+          [%blob "chatml_extensibility_fixtures/x05-child-session/input.json"];
+        save
+          "output.json"
+          [%blob "chatml_extensibility_fixtures/x05-child-session/output.json"];
         save "value.txt" "private-approved-content";
         save
           "researcher.chatmd"
-          {|<developer>AUTHORED_SPECIALIST</developer>
-<config model="authored-specialist" reasoning_effort="high"/>
-<tool name="read_file"><read id="private" path="${workspace}"/></tool>
-<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
-let initial_state = [0]
-let on_event ctx state event = match event with
-| `Tool_invoked(p) ->
-    let* result = Tool.call("read_file", `Object([{key = "root"; value = `String("private")}, {key = "file"; value = `String("value.txt")}])) in
-    (match result with
-     | `Ok(_) ->
-         let ignored = state[0] <- state[0] + 1 in
-         let* ignored = Invocation.resolve(p.context.invocation_id, `Complete(`String(String.concat("count-", to_string(state[0]))))) in
-         Task.pure(state)
-     | `Error(code) -> Task.fail(code))
-| _ -> Task.pure(state)
-</script>
-<tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>|};
+          [%blob "chatml_extensibility_fixtures/x05-child-session/researcher.chatmd"];
         let configuration = config root root (Filename.concat root "parent.chatmd") in
         let queued = ref None in
         let child_calls = ref 0 in

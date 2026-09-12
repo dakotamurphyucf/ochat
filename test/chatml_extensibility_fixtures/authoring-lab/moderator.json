@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "help": {
+        "version": 1,
+        "package": "e10-moderator",
+        "tasks": [
+          "moderator_tool"
+        ],
+        "topics": [
+          "custom.e10-moderator.guide"
+        ],
+        "required_helpers": [
+          "ochat_authoring_context",
+          "ochat_validate"
+        ]
+      },
+      "topics": [
+        {
+          "id": "custom.e10-moderator.guide",
+          "title": "E10 moderator composition guide",
+          "prerequisites": [
+            "runtime.invocations.moderator",
+            "runtime.invocations.contracts",
+            "chatmd.definitions"
+          ],
+          "surfaces": [
+            "moderator_v1"
+          ],
+          "source_name": "e10-moderator.md",
+          "text": "# Stateful moderator tools: X02\n\nUse moderator-handled tools when behavior needs state that belongs to the conversation. x02-review.chatml maintains a revision-to-review-reference array. A repeated begin_review for the same revision returns its original reference; a new revision appends a new mapping. State transitions are local to the owning session.\n\nDeclare kind=\"moderator\" api=\"extensibility-v1\" and either inline source or src. Export initial_state and on_event ctx state event; on_event returns a Task of the next state. A type=\"moderator\" tool names its moderator and supplies input/output schemas. Its `Tool_invoked event is distinct from an ordinary pre-tool-call interception. Resolve p.context.invocation_id through Invocation.resolve with the appropriate Complete/Pending outcome, then return the next state. The full X02 bundle contains the exact declarations and schemas.\n\nPrepare moderator_tool before making changes. runtime.invocations.moderator documents the event payload, transactional callback behavior and resolution rules. runtime.invocations.contracts covers result envelopes; chatml.tasks covers let* sequencing. Returning state directly instead of Task.pure(state) is invalid. A tool call that is left unhandled does not acquire an implicit successful result. X02's unhandled_review and double_resolve deliberately exercise missing and duplicate resolution. Use diagnostic topic_ids to retrieve the actual contract instead of guessing retry behavior.\n\nValidate as target moderator without evaluating its initializer. Loading/running the definition remains a separate admitted operation. Durable host restart can retain committed moderator state; a local process cannot continue work after it exits. Failed callbacks and interrupted external effects must not be described as globally exactly-once execution. Consult runtime.recovery.background before composing longer lived work.\n\nThe original tests compile this exact script and check reference reuse, state transitions and rejection paths. This package is authored example guidance, not a replacement for the installed audited semantics or evidence of independently generated model code.\n"
+        }
+      ]
+    }
+  ]
+}

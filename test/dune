@@ -937,6 +937,7 @@
  (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (preprocessor_deps
   (glob_files chatml_extensibility_fixtures/x07-helper-session/*)
+  (glob_files chatml_extensibility_fixtures/x07-helper-session/bundle/*)
   (glob_files chatml_extensibility_fixtures/x05-child-session/*)
   (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
  (action
@@ -978,7 +979,8 @@
  (modules agent_server_authored_test)
  (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+ (preprocessor_deps (glob_files chatml_extensibility_fixtures/x05-child-session/*))
+ (preprocess (pps ppx_jane ppx_blob ppx_expect)))
 
 (library
  (name agent_server_creator_test)
