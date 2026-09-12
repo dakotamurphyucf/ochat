@@ -16,6 +16,33 @@ type t =
   ; fingerprint : string
   }
 
+type reference_part =
+  { index : int
+  ; item_sha256 : string
+  }
+
+type reference_topic =
+  { topic : Agent_protocol.Authoring_guidance.topic
+  ; total_parts : int
+  ; parts : reference_part list
+  }
+
+type reference_receipt =
+  { query_identity : string
+  ; host_identity : string
+  ; capability_fingerprint : string
+  ; scope : string
+  ; surface_id : string
+  ; corpus_identity : string
+  ; response_sha256 : string
+  ; topics : reference_topic list
+  }
+
+type response =
+  { json : Jsonaf.t
+  ; receipt : reference_receipt option
+  }
+
 let fingerprint t = t.fingerprint
 let installed_corpus t = t.corpus
 let corpus_for_host t ~host = Option.value (V.corpus host) ~default:t.corpus
@@ -729,7 +756,57 @@ let resume t ~context encoded =
   | _ -> Error "invalid continuation cursor"
 ;;
 
-let query t ~host ~capabilities ~scope request =
+let reference_topics ~corpus ~installation_identity items ~offset ~count =
+  let groups =
+    List.mapi items ~f:(fun position item -> position, item)
+    |> List.fold ~init:String.Map.empty ~f:(fun groups (position, item) ->
+      match text item "topic_id" with
+      | "" -> groups
+      | id -> Map.add_multi groups ~key:id ~data:(position, item))
+  in
+  Map.to_alist groups
+  |> List.filter_map ~f:(fun (id, reversed) ->
+    let all = List.rev reversed in
+    let parts =
+      List.filter_mapi all ~f:(fun index (position, item) ->
+        match position >= offset && position < offset + count with
+        | false -> None
+        | true -> Some { index; item_sha256 = Digest.digest (Jsonaf.to_string item) })
+    in
+    match parts with
+    | [] -> None
+    | _ ->
+      let metadata =
+        match id with
+        | "reference.tools" | "reference.signatures" ->
+          Some
+            ( Digest.digest (Jsonaf.to_string (`Array (List.map all ~f:snd)))
+            , Agent_protocol.Authoring_guidance.Installed installation_identity )
+        | _ ->
+          (match Corpus.topic corpus ~id with
+           | Error _ -> None
+           | Ok topic ->
+             Some
+               ( topic.sha256
+               , match topic.origin with
+                 | Installed ->
+                   Agent_protocol.Authoring_guidance.Installed installation_identity
+                 | Authored owner -> Authored owner.package_sha256 ))
+      in
+      Option.map metadata ~f:(fun (document_sha256, source) ->
+        let total_parts = List.length all in
+        { topic =
+            { id; document_sha256; source; complete = List.length parts = total_parts }
+        ; total_parts
+        ; parts
+        }))
+;;
+
+let matches_response receipt json =
+  String.equal receipt.response_sha256 (Digest.digest (Jsonaf.to_string json))
+;;
+
+let query_with_receipt t ~host ~capabilities ~scope request =
   let run () =
     let open Result.Let_syntax in
     let%bind () =
@@ -740,6 +817,10 @@ let query t ~host ~capabilities ~scope request =
       | false -> Error "documentation request exceeds 16 KiB"
     in
     let%bind () = validate_operation request in
+    (* Guidance source identity names the host installation, as in materialized
+       primer/preload receipts. The response's corpus identity names the scoped
+       view; withdrawing authored packages must not relabel installed sources. *)
+    let installation_identity = Corpus.identity (corpus_for_host t ~host) in
     let%bind corpus = scoped_corpus ~host t ~capabilities in
     let t = { t with corpus } in
     let%bind requested_budget =
@@ -863,7 +944,7 @@ let query t ~host ~capabilities ~scope request =
       | [] ->
         let page, size = response (List.rev reversed) count None in
         (match size <= requested_budget with
-         | true -> Ok page
+         | true -> Ok (page, count)
          | false ->
            Error
              ("budget too small for response metadata; request at least "
@@ -880,20 +961,48 @@ let query t ~host ~capabilities ~scope request =
            in
            let page, page_size = response (List.rev reversed) count minimum in
            (match page_size <= requested_budget with
-            | true -> Ok page
+            | true -> Ok (page, count)
             | false ->
               Error
                 ("budget too small for response metadata; request at least "
                  ^ Int.to_string page_size)))
     in
-    pack [] 0 remaining
+    let%map json, count = pack [] 0 remaining in
+    let topics =
+      match operation with
+      | "search" -> []
+      | _ -> reference_topics ~corpus:t.corpus ~installation_identity items ~offset ~count
+    in
+    let receipt =
+      match topics with
+      | [] -> None
+      | _ ->
+        Some
+          { query_identity = t.fingerprint
+          ; host_identity = V.host_fingerprint host
+          ; capability_fingerprint = C.fingerprint capabilities
+          ; scope
+          ; surface_id
+          ; corpus_identity = Corpus.identity t.corpus
+          ; response_sha256 = Digest.digest (Jsonaf.to_string json)
+          ; topics
+          }
+    in
+    { json; receipt }
   in
   match run () with
   | Ok response -> response
   | Error message ->
-    `Object
-      [ "version", integer 1
-      ; "error", `String "authoring.query_rejected"
-      ; "message", `String message
-      ]
+    { json =
+        `Object
+          [ "version", integer 1
+          ; "error", `String "authoring.query_rejected"
+          ; "message", `String message
+          ]
+    ; receipt = None
+    }
+;;
+
+let query t ~host ~capabilities ~scope request =
+  (query_with_receipt t ~host ~capabilities ~scope request).json
 ;;

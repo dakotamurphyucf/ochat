@@ -2,6 +2,60 @@
     in-memory corpus; queries never invoke tools, providers or filesystem reads. *)
 type t
 
+(** Host-produced coverage of one exact response page. These records have no
+    model-input decoder or public constructor. Item hashes cover complete emitted
+    items, including their text/schema, and indexes refer to the full ordered
+    topic across all pages. *)
+type reference_part = private
+  { index : int
+  ; item_sha256 : string
+  }
+
+type reference_topic = private
+  { topic : Agent_protocol.Authoring_guidance.topic
+  ; total_parts : int
+  ; parts : reference_part list
+  }
+
+type reference_receipt = private
+  { query_identity : string
+  ; host_identity : string
+  ; capability_fingerprint : string
+  ; scope : string
+  ; surface_id : string
+  ; corpus_identity : string
+  ; response_sha256 : string
+  ; topics : reference_topic list
+  }
+
+type response = private
+  { json : Jsonaf.t
+  ; receipt : reference_receipt option
+  }
+
+(** Same strict JSON request/response contract as [query], with separate trusted
+    metadata for actual emitted topic items. Search excerpts, rejected queries,
+    orientation-only and empty pages produce no read receipt. A topic is complete
+    in this receipt only if every part is present on this one page; the final page
+    flag alone never implies that earlier pages remain in model context.
+
+    Native tool/signature references get hashes of their complete selected item
+    sequences, bound to actual host/capability/surface identities. Corpus topics
+    preserve installed/authored source identities. Nothing is persisted or marked
+    as delivered to a model by calling this function. The host must bind the
+    receipt to the final disclosed output and its real history occurrence. *)
+val query_with_receipt
+  :  t
+  -> host:Authoring_validation.host
+  -> capabilities:Tool_capability.t
+  -> scope:string
+  -> Jsonaf.t
+  -> response
+
+(** Exact emitted-response digest check. This neither authorizes an invocation
+    nor proves that the response was delivered, persisted or retained in context. *)
+val matches_response : reference_receipt -> Jsonaf.t -> bool
+
 (** [secret] is a host-generated unpredictable cursor signing key, never model
     input. The immutable service can be shared across callers. Cursors also bind
     each caller's scope, target host, capability selection and corpus revision.

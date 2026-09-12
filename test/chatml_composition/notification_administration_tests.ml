@@ -94,27 +94,27 @@ let%expect_test
             |> protocol_ok
             |> Option.value_exn
           in
-          let current = state () in
-          (match replacement with
-           | Reset_keep | Reset_drop ->
-             H.reset
-               handle
-               ~expected_revision:current.counters.revision
-               ~keep_history:
-                 (match replacement with
-                  | Reset_keep -> true
-                  | _ -> false)
-               ~keep_tasks:false
-               ~keep_cache:true
-               ~keep_workspace:true
-               ~keep_grants:true
-               ~keep_labels:true
-           | Rebuild ->
-             H.rebuild
-               handle
-               ~expected_revision:current.counters.revision
-               ~prompt_choice:Pinned)
-          |> protocol_ok
+          retry_runtime_busy env (fun () ->
+            let current = state () in
+            match replacement with
+            | Reset_keep | Reset_drop ->
+              H.reset
+                handle
+                ~expected_revision:current.counters.revision
+                ~keep_history:
+                  (match replacement with
+                   | Reset_keep -> true
+                   | _ -> false)
+                ~keep_tasks:false
+                ~keep_cache:true
+                ~keep_workspace:true
+                ~keep_grants:true
+                ~keep_labels:true
+            | Rebuild ->
+              H.rebuild
+                handle
+                ~expected_revision:current.counters.revision
+                ~prompt_choice:Pinned)
           |> ignore;
           let replaced = state () in
           [%test_eq: int] (before.identity.generation + 1) replaced.identity.generation;

@@ -83,10 +83,20 @@ topic prose or a complete retrieval audit. See the
 [index contract](../../lib/chat_response/authoring_reference_index.mli) and
 [pointer contract](../../lib/chat_response/authoring_rediscovery.mli).
 
-Live helper results still need trusted reference provenance, including paged
-content and generated tool/signature references. The complete post-compaction
-retrieve-and-author flow remains open; pointer and actor tests use offline
-fixtures and fake provider callbacks.
+The lookup service now offers `Authoring_context.query_with_receipt` to runtime
+integrators. It returns the unchanged strict JSON response plus separate,
+host-produced metadata for its exact emitted items: topic/source hashes, fragment
+indexes and totals, response digest, caller scope, host, surface and capabilities.
+Selected tool/schema and compiler-signature references have their own complete
+item-sequence hashes. Search excerpts and rejected or empty pages produce no
+read receipt. A final page is not marked as containing a complete topic unless
+all of that topic's fragments occur on that page.
+
+These records have no model-input decoder or public constructor. Their existence
+does not prove delivery to a model. Native/helper publication still needs to bind
+them to final disclosed output and real history identities; multi-page presence
+must check every retained fragment. The complete post-compaction retrieve-and-author
+flow remains open; pointer and actor tests use offline fixtures and fake providers.
 
 Public custom-package configuration and public qualification also remain open.
 Manual mode inserts no automatic documentation prose; it can preserve the compact
