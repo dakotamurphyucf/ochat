@@ -30,14 +30,41 @@ let close scope =
   | Open state -> state.receipts
 ;;
 
-let collect invocation f =
+let with_scope invocation f =
   let scope = { invocation; state = Atomic.make (Open { receipts = []; bytes = 0 }) } in
   Exn.protect
     ~finally:(fun () -> ignore (close scope : R.t list))
-    ~f:(fun () ->
-      Eio.Fiber.with_binding key scope (fun () ->
-        let result = f () in
-        result, close scope))
+    ~f:(fun () -> Eio.Fiber.with_binding key scope (fun () -> f scope))
+;;
+
+let collect invocation f =
+  with_scope invocation (fun scope ->
+    let result = f () in
+    result, close scope)
+;;
+
+let annotate scope invocation =
+  let open Result.Let_syntax in
+  let%bind references =
+    match Atomic.get scope.state with
+    | Closed -> invalid "authoring reference scope has expired"
+    | Open state -> Ok state.receipts
+  in
+  let%bind () =
+    match P.Invocation.equal_context scope.invocation invocation.P.Invocation.context with
+    | true -> Ok ()
+    | false -> invalid "authoring reference resolution belongs to another invocation"
+  in
+  let expected =
+    match invocation.status with
+    | Resolved (Complete value) ->
+      List.find references ~f:(fun reference -> R.matches_output reference value)
+    | _ -> None
+  in
+  match expected, invocation.authoring_reference with
+  | None, None -> Ok invocation
+  | None, Some _ -> invalid "resolution has no matching collected authoring reference"
+  | Some reference, _ -> P.Invocation.record_authoring_reference invocation reference
 ;;
 
 let record scope ~invocation_id ~capability_fingerprint response =

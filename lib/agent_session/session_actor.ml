@@ -5808,7 +5808,18 @@ let run_moderator_callback t borrow f =
     Agent_protocol.Invocation.Fail
       { code = "invocation.handler_failed"; message; retryable = false; details = `Null }
   in
-  match f ~dispatched:borrow.invocation ~commit with
+  let run () =
+    match borrow.kind with
+    | Observation -> f ~dispatched:borrow.invocation ~commit
+    | Invocation ->
+      Authoring_reference_scope.with_scope borrow.invocation.context (fun scope ->
+        let commit ~resolved ~snapshot =
+          let%bind resolved = Authoring_reference_scope.annotate scope resolved in
+          commit ~resolved ~snapshot
+        in
+        f ~dispatched:borrow.invocation ~commit)
+  in
+  match run () with
   | result ->
     let failure =
       match result with

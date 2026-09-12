@@ -101,6 +101,13 @@ invocation JSON uses schema 12 when one is present. Nested script reads retain
 their own invocation identity and do not mark the enclosing script's summary as
 read documentation. Retained helper borrows expire when their invocation ends.
 
+Moderator handlers use the same receipt rules at their earlier commit boundary:
+the disclosed result, receipt and proposed moderator checkpoint are committed
+together. Dispatchers retain the annotated value they submitted, including across
+execution-context handoffs. Replacing the response, returning a failure or losing
+the commit prevents a new receipt. Later observation preserves the original read
+and does not open a fresh documentation-read scope for the completed invocation.
+
 An invocation annotation does not prove delivery to a model. Provider-history
 publication still needs to bind it to real history identities; multi-page presence
 must check every retained fragment. The complete post-compaction retrieve-and-author

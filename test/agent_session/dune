@@ -38,6 +38,7 @@
   authoring_history_tests
   authoring_index_persistence_tests
   authoring_input_tests
+  authoring_moderator_reference_tests
   generated_definition_tests
   delegation_authority_tests
   delegated_moderation_tests

@@ -46,6 +46,9 @@ let create
   in
   let result =
     execute ~invocation (fun ~dispatched ~commit ->
+      let authoring_scope =
+        Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
+      in
       N.with_dispatched_scope
         ~execute:native_execute
         ~moderator_execute:execute
@@ -54,6 +57,10 @@ let create
         (fun () ->
            let save resolved snapshot =
              let open Result.Let_syntax in
+             let%bind resolved =
+               Option.value_map authoring_scope ~default:(Ok resolved) ~f:(fun scope ->
+                 Authoring_reference_scope.annotate scope resolved)
+             in
              let%map () = commit ~resolved ~snapshot in
              recorded := Some resolved
            in

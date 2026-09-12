@@ -137,8 +137,15 @@ let dispatch
         raise exn
     in
     capabilities.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
+      let authoring_scope =
+        Authoring_reference_scope.capture ~invocation_id:dispatched.I.context.id
+      in
       let save resolved snapshot =
         let open Result.Let_syntax in
+        let%bind resolved =
+          Option.value_map authoring_scope ~default:(Ok resolved) ~f:(fun scope ->
+            Authoring_reference_scope.annotate scope resolved)
+        in
         let%map () =
           checked
             (fail

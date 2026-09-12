@@ -523,6 +523,19 @@ let resolve ?authoring_reference t ~session_id ~generation outcome =
     | Resolved _ | Published _ -> failure Already_resolved "invocation already resolved")
 ;;
 
+let record_authoring_reference t reference =
+  match t.status, t.authoring_reference with
+  | Resolved (Complete _), None ->
+    let next = { t with authoring_reference = Some reference } in
+    Result.map (validate next) ~f:(fun () -> next)
+  | Resolved (Complete _), Some current when Authoring_reference.equal current reference
+    -> Result.map (validate t) ~f:(fun () -> t)
+  | _ ->
+    failure
+      Invalid_state
+      "authoring reference requires an uncommitted successful resolution"
+;;
+
 let cancel t ~reason =
   match t.status with
   | Admitted | Dispatching ->

@@ -202,6 +202,12 @@ val resolve
   -> outcome
   -> (t, Error.t) result
 
+(** Attach trusted query evidence while preparing a successful resolution for its
+    first commit. This does not mutate persisted state: [validate_transition]
+    rejects adding a receipt to an already committed resolution. An identical
+    prepared annotation is idempotent; replacing it or annotating publication fails. *)
+val record_authoring_reference : t -> Authoring_reference.t -> (t, Error.t) result
+
 (** Host cancellation may resolve admitted or dispatched work. It never
     replaces an already recorded outcome and does not cancel a pending job. *)
 val cancel : t -> reason:string -> (t, Error.t) result
