@@ -29,6 +29,10 @@ insertion. Documents retain their implementation and qualification notes; embedd
 them does not enable experimental features or mark their examples qualified on
 every host. Custom conventions must not replace official semantics.
 
+[Topic assembly](authoring-topic-corpus.md) builds source-pinned fragments and
+prerequisite closures on this bundle; complete task packages and service policy
+remain separate work.
+
 The [offline executable fixture](../../test/authoring_sources/offline.ml)
 runs from `/`, outside the checkout, and retrieves the embedded references and
 target-specific entrypoint signatures. The documentation gate compares every

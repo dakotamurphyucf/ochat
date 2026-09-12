@@ -164,6 +164,9 @@ let check_exn { id; expectation; source } =
 
 let run env root =
   let installed = Authoring_sources.installed () |> Result.ok_or_failwith in
+  let corpus =
+    Authoring_corpus.language_foundation ~sources:installed |> Result.ok_or_failwith
+  in
   List.iter (Authoring_sources.documents installed) ~f:(fun document ->
     let authored =
       Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / "docs-src" / document.path)
@@ -172,9 +175,26 @@ let run env root =
     | true -> ()
     | false ->
       fail document.path "installed source differs from shared human documentation");
-  let examples =
-    Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / fixture) |> examples_exn
+  let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / fixture) in
+  let topic_text =
+    Authoring_corpus.topics corpus
+    |> List.concat_map ~f:(fun topic -> topic.Authoring_corpus.fragments)
+    |> List.map ~f:(fun fragment ->
+      match String.substr_index text ~pattern:fragment.text with
+      | None -> fail "topic coverage" "language topic is outside the checked guide"
+      | Some position -> position, fragment.text)
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    |> List.map ~f:snd
+    |> String.concat
   in
+  (match String.equal text topic_text with
+   | true -> ()
+   | false ->
+     fail
+       "topic coverage"
+       "language topics must partition the entire checked guide without gaps or \
+        duplication");
+  let examples = examples_exn text in
   List.iter examples ~f:check_exn;
   Eio.Flow.copy_string
     (sprintf

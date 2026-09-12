@@ -2703,21 +2703,24 @@ wrong arity, incompatible inputs/results and shadowed final definitions reject.
 Shared type variables relate requirements such as moderator `initial_state` and
 `on_event`. Source-level type aliases cannot redefine the host's expected types.
 The synchronous function is an internal compiler facility. Hosts can use the
-domain compilation service described below; complete runtime admission remains
-unfinished.
+domain compilation service described below; runtime admission remains a separate
+check even after static compilation succeeds.
 
 `Chatml.Chatml_extension_surface` defines explicit version-1 compiler surfaces:
 
-- `one_off_v1` provides core computation, task composition, diagnostic logging and
-  `Tool.call`. `main(input)` must return `json task`.
+- `one_off_v1` provides core computation, task composition, diagnostic logging,
+  `Tool.call` and the qualified `Job` operations. `Tool.spawn` aliases
+  `Job.start_tool`. `main(input)` must return `json task`.
 - `tool_v1` adds typed invocation context and outcome aliases. `run(ctx, input)`
   must return `tool_outcome task`, with exactly two arguments.
 
 Neither surface provides stdout printing, direct model/process access, tool
-approval/rewriting, conversation mutation, session administration, spawning, timers
-or UI operations. Approved background operations will arrive with the job service.
-Compiling a `Tool.call` does not select or authorize a tool; the host still needs
-the exact admitted capability binding and per-call policy checks.
+approval/rewriting, conversation mutation, direct session administration, timers
+or UI operations. Job operations require a qualified owning host; their presence
+in the compiler does not install a worker or grant a tool capability. Starts stage
+transactional intent and execute only after the owning commit. Compiling a
+`Tool.call` does not select or authorize a tool; the host still needs the exact
+admitted capability binding and per-call policy checks.
 
 Tool outcomes are tagged ChatML variants, distinct from ordinary JSON:
 

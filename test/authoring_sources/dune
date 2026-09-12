@@ -1,3 +1,11 @@
 (test
  (name offline)
+ (modules offline)
  (libraries core core_unix ochat.authoring_sources ochat.chatmd_shell_spec))
+
+(library
+ (name topic_tests)
+ (modules topic_tests)
+ (libraries core ochat.authoring_corpus ochat.authoring_sources)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

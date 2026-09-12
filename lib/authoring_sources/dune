@@ -24,3 +24,10 @@
  (private_modules bundled_documents)
  (libraries core jsonaf ochat.chatml ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))
+
+(library
+ (name authoring_corpus)
+ (public_name ochat.authoring_corpus)
+ (modules authoring_corpus)
+ (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
+ (preprocess (pps ppx_jane)))
