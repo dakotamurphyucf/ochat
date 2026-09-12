@@ -102,6 +102,8 @@ let run env helper runner ~native_watch =
       Caml_unix.putenv "OCHAT_SHELL_RESOURCE_RUNNER" runner_path;
       List.iter
         [ "helper-request.chatml", helper_request
+        ; ( "authored-helper.chatmd"
+          , "<developer>HELPER_CHILD authored specialist.</developer>" )
         ; "helper-moderator.chatml", coordinator
         ; "helper-any.json", helper_schema
         ; "watch-probe.chatml", watch_probe
@@ -118,6 +120,7 @@ let run env helper runner ~native_watch =
         ~create:(`Exclusive 0o600)
         (path prompt)
         ({|<developer>HELPER_PARENT</developer>
+<tool name="specialist" agent="authored-helper.chatmd" local persistence="persistent"/>
 <tool name="run_chatml"/>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
 <shell_access id="helper" cwd="${workspace}">
@@ -480,7 +483,16 @@ let run env helper runner ~native_watch =
           in
           Agent_session.Notification_history.validate ~delivery entry |> protocol_ok)
       in
-      let parent_id, child_id, receipt =
+      let authored_bridge sw daemon client parent foreign caller =
+        let owner, name =
+          match caller with
+          | Agent_server_authored_helper_fixture.Owner -> parent, "session_bridge"
+          | Read_only -> parent, "session_view"
+          | Foreign -> foreign, "session_bridge"
+        in
+        bridge ~name sw daemon client owner
+      in
+      let parent_id, child_id, receipt, authored, foreign_id =
         with_daemon (fun sw daemon client ->
           let parent, _ = create_session ~start_immediately:true client in
           await (fun () -> Option.is_none (state daemon parent.id).active_operation);
@@ -778,8 +790,26 @@ let run env helper runner ~native_watch =
              |> complete);
           check_notification daemon parent.id child;
           check_watch_notifications daemon parent.id;
-          parent.id, child, receipt)
+          let named args =
+            match invoke_status sw daemon client parent.id "specialist" args with
+            | Published (Complete value) -> value
+            | status ->
+              raise_s
+                [%sexp
+                  "authored helper named call failed", (status : P.Invocation.status)]
+          in
+          let authored =
+            Agent_server_authored_helper_fixture.before_restart
+              ~state:(state daemon)
+              ~named
+              ~bridge:(authored_bridge sw daemon client parent.id foreign.id)
+          in
+          parent.id, child, receipt, authored, foreign.id)
       in
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        (path (Filename.concat root "authored-helper.chatmd"))
+        "<developer>Edited live authored specialist.</developer>";
       let cursor_watch, receipt_watch =
         with_daemon (fun sw daemon client ->
           let handle =
@@ -795,6 +825,12 @@ let run env helper runner ~native_watch =
           in
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           H.close handle;
+          let before = !child_calls in
+          Agent_server_authored_helper_fixture.after_restart
+            ~state:(state daemon)
+            ~bridge:(authored_bridge sw daemon client parent_id foreign_id)
+            authored;
+          [%test_eq: int] before !child_calls;
           let target = [ "session_id", P.Id.Session.to_json child_id ] in
           let replay =
             bridge sw daemon client parent_id "create" child_request |> complete

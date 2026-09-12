@@ -4754,6 +4754,15 @@ a submission. Cancelling a named caller after submission leaves its persistent
 child's accepted work unchanged. After releasing the simulated providers, all
 receipts complete with output from the correct child and remain readable across
 stop and daemon restart. Replaying the stop preserves stored history.
+The compiled shell-helper fixture also manages an authored child created by its
+named tool. It sends another request, waits for its receipt, reads the result and
+stops the same session through the confined helper, including a mode with all
+native lifecycle registrations absent. A read-only helper can inspect that child
+but cannot send work; a foreign caller cannot read it. Denials and retries leave
+child state unchanged. Results remain readable after editing the live specialist
+source and restarting the daemon, without restarting the stopped child or calling
+its provider. This qualifies interoperability at the internally enabled host
+scope; installed authoring guidance and public exposure remain separate work.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. The daemon
 fixture now exercises actual named-tool creation, continuation, separate instances,
