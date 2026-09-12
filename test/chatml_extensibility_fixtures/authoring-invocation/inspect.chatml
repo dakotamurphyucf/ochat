@@ -1,0 +1,44 @@
+let number value = Json.parse(to_string(value))
+let optional value = match value with | `None -> `Null | `Some(text) -> `String(text)
+let capability : tool_capability -> json = fun value ->
+  `Object([
+    {key = "id"; value = `String(value.id)},
+    {key = "name"; value = `String(value.name)},
+    {key = "implementation_revision"; value = `String(value.implementation_revision)},
+    {key = "fingerprint"; value = `String(value.fingerprint)},
+    {key = "input_schema"; value = value.input_schema}
+  ])
+let limits : tool_limits -> json = fun value ->
+  `Object([
+    {key = "fuel"; value = number(value.fuel)},
+    {key = "max_tasks"; value = number(value.max_tasks)},
+    {key = "max_value_bytes"; value = number(value.max_value_bytes)},
+    {key = "max_output_bytes"; value = number(value.max_output_bytes)},
+    {key = "max_array_items"; value = number(value.max_array_items)},
+    {key = "max_depth"; value = number(value.max_depth)},
+    {key = "max_nested_calls"; value = number(value.max_nested_calls)},
+    {key = "max_invocation_depth"; value = number(value.max_invocation_depth)}
+  ])
+let refusal : tool_error =
+  {code = "inspection.declined"; message = "Inspection declined"; retryable = false; details = `Null}
+let run : tool_context -> json -> tool_outcome task = fun ctx input ->
+  match input with
+  | `String("decline") -> Task.pure(`Fail(refusal))
+  | _ -> Task.pure(`Complete(`Object([
+    {key = "version"; value = number(ctx.version)},
+    {key = "invocation_id"; value = `String(ctx.invocation_id)},
+    {key = "provider_call_id"; value = optional(ctx.provider_call_id)},
+    {key = "session_id"; value = `String(ctx.session_id)},
+    {key = "generation"; value = number(ctx.generation)},
+    {key = "origin"; value = `String(variant_tag(ctx.origin))},
+    {key = "parent_invocation"; value = optional(ctx.parent_invocation)},
+    {key = "parent_event"; value = optional(ctx.parent_event)},
+    {key = "parent_job"; value = optional(ctx.parent_job)},
+    {key = "tool_name"; value = `String(ctx.tool_name)},
+    {key = "implementation_revision"; value = `String(ctx.implementation_revision)},
+    {key = "capability_fingerprint"; value = `String(ctx.capability_fingerprint)},
+    {key = "created_at_ms"; value = number(ctx.created_at_ms)},
+    {key = "deadline_ms"; value = (match ctx.deadline_ms with | `None -> `Null | `Some(ms) -> number(ms))},
+    {key = "limits"; value = limits(ctx.limits)},
+    {key = "available_tools"; value = `Array(Array.map(ctx.available_tools, capability))}
+  ])))

@@ -2301,6 +2301,81 @@ module Coverage = struct
           }))
   ;;
 
+  let invocation_context_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "e4f5bcd9afe43ba2f2600f00a574a8f661bcd50bfa30e867899681372add2ace"
+        , [ ( "module/Invocation"
+            , "534a62f3a88e211fb3c1ace77f59a5f33ea3634dfc9be30fcee7f7b636b1114c" )
+          ; ( "module_export/Invocation.resolve"
+            , "98f78b8e93b2b1eb70ab9860d85fc57c1f8f4ceafd0173b2f39d0e24d25e0d79" )
+          ; ( "type_alias/tool_context"
+            , "07eca40f56130f6ab7319b17575b99d6640e4caa69a1dd4dcd7a4c300792f09c" )
+          ; ( "type_alias/tool_capability"
+            , "eb9cac45cba0bd76b1aa3698504b16c261eb1b59617147beb52740eeb602f0dc" )
+          ; ( "type_alias/tool_limits"
+            , "8c79cbc7bb5df7b12772f8ee38c2265f48ba79746a5f347a77e28f55219dd058" )
+          ; ( "type_alias/tool_error"
+            , "f63875c543b7ebdf83b8d24d3f309de954586cbf20b270067f6f655a6c4d1cf6" )
+          ; ( "type_alias/tool_outcome"
+            , "d55ee94b666ae45ba66b095038264235abb58025ee2697bef048eb8381bf28a9" )
+          ; ( "type_alias/tool_invocation"
+            , "25500957a94f53549544734fa46af5f8c0c685456b6b45375541f2be359c023c" )
+          ; ( "type_alias/moderator_event"
+            , "95863a0b7fb7f97d93b244e89ce415a7137defe91f197fd4c0460113c797aed0" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "396c53f3047fe5d70287b1727b7b6e489d351da725f53767489c0b3534548c0e"
+        , [ ( "module/Invocation"
+            , "6ffc1b9ef3a698ebfcccfa15fc29eb607d7dc42f4df3ad2897be1668b6e306fe" )
+          ; ( "module_export/Invocation.resolve"
+            , "d3a6e39817d71c49e9edd1418244d490fe5f079623511b55ad00c2ff2772ec2a" )
+          ; ( "type_alias/tool_context"
+            , "afd8934b30b74f81e910fe3fe266a11dcd33e2a7059a355282c35d90e8bb8a6e" )
+          ; ( "type_alias/tool_capability"
+            , "ba95552564cb8b837ac81812c7a0c4d7b49a9be7a50984dfa80eff2508b83a53" )
+          ; ( "type_alias/tool_limits"
+            , "f87e2c8a5f21375c0c065784b55702b61ce40048f2b9788f9c98f43f199a9f3e" )
+          ; ( "type_alias/tool_error"
+            , "2555ffdf965adf3eb015488bafc91d3edb26ab560f7cb298d1fad8363d816be2" )
+          ; ( "type_alias/tool_outcome"
+            , "f9f2f12c3084066a4b5ccca95466e5a959a63d0e19f5e2d466ccde439b41be71" )
+          ; ( "type_alias/tool_invocation"
+            , "bb697da64001e3f3bf1ef55d58e7adffa049121a258ced838d1f3ba284937f21" )
+          ; ( "type_alias/moderator_event"
+            , "83d2a40e08bbd0ea31de2557b7b31b10d4f02e109c901b5ccacc17fd660810e9" )
+          ] )
+      ; ( "tool_v1"
+        , "b5dd1b9379238f9e5b8932f17e2d58040286c125c07529aa70514fcaefb6d5f3"
+        , [ ( "type_alias/tool_context"
+            , "d421f79be4f1dfcc48061eefacc070de904df8979685fbd237bb9a682577d05a" )
+          ; ( "type_alias/tool_capability"
+            , "cad05b263c95d117cbc9ccc31c24d6c1f7c60d402fec8dccce30a588d4d90985" )
+          ; ( "type_alias/tool_limits"
+            , "6c95c31f06f4f47b7a1bc30bc0ea38642e42a5b6f0c9a30e3926e7aa6a8c845c" )
+          ; ( "type_alias/tool_error"
+            , "8aab5eb5097af24bb4d16769c3c6cda0a19694452a44dcc7d7c5895cc2fe035f" )
+          ; ( "type_alias/tool_outcome"
+            , "737ea16bb2d1cc5536a2acf0b2002acd46769de9f27414e9dc4971a52993c003" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.invocation-context"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/chatml_composition/standalone_tests.ml"
+              ; "test/moderation/moderator_invocation_test.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ; "lib/chat_response/moderator_invocation.ml"
+              ; "lib/chat_response/moderator_manager.ml"
+              ; "lib/chatml/chatml_extension_surface.ml"
+              ]
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -2315,6 +2390,7 @@ module Coverage = struct
     @ host_effect_mappings
     @ runtime_control_mappings
     @ background_mappings
+    @ invocation_context_mappings
   ;;
 end
 
@@ -2854,6 +2930,32 @@ let runtime_foundation ~sources =
                    ; "test/agent_docs/docs_chatml_effects.ml"
                    ; "test/chatml_composition/moderator_job_tests.ml"
                    ; "test/moderation/chat_response_moderator_manager_test.ml"
+                   ]
+               }
+         }
+       ; { id = "runtime.invocation-context"
+         ; title = "Tool context, exact outcomes and moderator event payloads"
+         ; prerequisites =
+             [ "runtime.invocations.contracts"; "chatml.json"; "runtime.work-values" ]
+         ; surfaces = managed
+         ; excerpts =
+             [ { path = "guide/chatml-invocation-context.md"
+               ; heading = "# Invocation context and moderator events"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "bebf28a10930124d13be65955e1f2920faded0797bf999816511ee6f61efde28" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_extension_surface.ml"
+                   ; "lib/chat_response/moderator_invocation.ml"
+                   ; "lib/chat_response/moderator_manager.ml"
+                   ; "lib/chat_response/moderation.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ; "test/chatml_composition/standalone_tests.ml"
+                   ; "test/moderation/moderator_invocation_test.ml"
                    ]
                }
          }

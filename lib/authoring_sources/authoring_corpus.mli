@@ -243,8 +243,15 @@ module Coverage : sig
       and existing daemon/transaction integration tests. *)
   val background_mappings : mapping list
 
-  (** Maintained reviewed subset. Other compiler APIs and semantic inventories
-      still require coverage; this is not a complete public-feature manifest. *)
+  (** Invocation module and seven context/outcome/event aliases on their exact
+      managed surfaces. Evidence includes actual direct/nested daemon admission
+      and moderator resolution/rollback tests. *)
+  val invocation_context_mappings : mapping list
+
+  (** Reviewed mappings for all compiler bindings on the four extensibility
+      surfaces. The normal test gate requires that complete compiler inventory;
+      language semantics, ChatMD and native-contract inventories are separate.
+      This alone is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list
 end
 

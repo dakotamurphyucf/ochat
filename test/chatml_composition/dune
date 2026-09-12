@@ -6,6 +6,7 @@
   ochat.agent_transport_http)
  (inline_tests (deps ../../bin/ochat_agent_stdio.exe))
  (preprocessor_deps
+  (glob_files_rec ../chatml_extensibility_fixtures/authoring-invocation/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x01-report/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x03-background-shell/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x04-standalone/*)

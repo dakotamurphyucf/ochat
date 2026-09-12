@@ -278,6 +278,24 @@ let%expect_test "background operations and value aliases have exact surface cove
     |}]
 ;;
 
+let%expect_test "all four extensibility compiler inventories require reviewed coverage" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  let targets =
+    V.compiler_targets
+      ~sources
+      ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    |> ok
+  in
+  let report = V.audit corpus ~targets ~mappings:V.reviewed_mappings |> ok in
+  V.require_complete report |> ok;
+  print_endline
+    "all compiler bindings mapped; language semantics, ChatMD and native contracts \
+     require separate coverage";
+  [%expect
+    {| all compiler bindings mapped; language semantics, ChatMD and native contracts require separate coverage |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)
@@ -386,13 +404,12 @@ let%expect_test "coverage binds reviewed dependencies, surface and behavioral ev
   |}]
 ;;
 
-let%expect_test "maintained entrypoint manifest is complete without hiding other API gaps"
-  =
+let%expect_test "entrypoint-only coverage cannot establish complete compiler coverage" =
   let sources = Authoring_sources.installed () |> ok in
   let corpus = C.runtime_foundation ~sources |> ok in
   let surfaces = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
   let targets = V.compiler_targets ~sources ~surface_ids:surfaces |> ok in
-  let all = V.audit corpus ~targets ~mappings:V.reviewed_mappings |> ok in
+  let all = V.audit corpus ~targets ~mappings:V.entrypoint_mappings |> ok in
   assert (not (List.is_empty all.missing));
   let entrypoints =
     List.filter targets ~f:(fun target ->
@@ -407,13 +424,13 @@ let%expect_test "maintained entrypoint manifest is complete without hiding other
       (List.filter all.mapped ~f:(fun id ->
          String.is_substring id ~substring:"/entrypoint/")
        : string list)];
-  print_endline "other compiler APIs remain explicitly unmapped";
+  print_endline "entrypoints alone do not establish full compiler coverage";
   [%expect
     {|
     (delegated_moderator_v1/entrypoint/initial_state
      delegated_moderator_v1/entrypoint/on_event
      moderator_v1/entrypoint/initial_state moderator_v1/entrypoint/on_event
      one_off_v1/entrypoint/main tool_v1/entrypoint/run)
-    other compiler APIs remain explicitly unmapped
+    entrypoints alone do not establish full compiler coverage
     |}]
 ;;

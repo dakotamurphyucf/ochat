@@ -20,6 +20,7 @@
     guide/chatml-host-effects.md %{dep:../../docs-src/guide/chatml-host-effects.md}
     guide/chatml-runtime-control.md %{dep:../../docs-src/guide/chatml-runtime-control.md}
     guide/chatml-background-values.md %{dep:../../docs-src/guide/chatml-background-values.md}
+    guide/chatml-invocation-context.md %{dep:../../docs-src/guide/chatml-invocation-context.md}
     guide/chatml-authoring-primer.md %{dep:../../docs-src/guide/chatml-authoring-primer.md}
     guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
     guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}
