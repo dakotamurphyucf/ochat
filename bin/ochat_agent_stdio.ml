@@ -75,7 +75,8 @@ let local_options env ~prompt ~workspace ~data_root =
     }
 ;;
 
-let run_local env ~prompt ~workspace ~data_root ~authoring_package_files =
+let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~authoring_budget
+  =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
     let options = local_options env ~prompt ~workspace ~data_root in
@@ -83,7 +84,12 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files =
       List.map authoring_package_files ~f:(absolute (working_directory env))
     in
     let%map embedded =
-      Agent_server.Embedded.start ~sw ~env ~authoring_package_files options
+      Agent_server.Embedded.start
+        ~sw
+        ~env
+        ~authoring_package_files
+        ?authoring_budget
+        options
       |> Result.map_error ~f:protocol_error
     in
     Exn.protect
@@ -113,6 +119,7 @@ let run
       ~workspace
       ~data_root
       ~authoring_package_files
+      ~authoring_options
   =
   match local, connect with
   | true, None when Option.is_some bearer_token_file ->
@@ -121,18 +128,29 @@ let run
     (match prompt with
      | None -> Or_error.error_string "--local requires --prompt FILE"
      | Some prompt ->
+       let open Or_error.Let_syntax in
+       let%bind authoring_budget =
+         Agent_server.Authoring_options.resolve authoring_options
+       in
        Eio_main.run (fun env ->
-         run_local env ~prompt ~workspace ~data_root ~authoring_package_files))
+         run_local
+           env
+           ~prompt
+           ~workspace
+           ~data_root
+           ~authoring_package_files
+           ~authoring_budget))
   | false, Some uri ->
     if
       Option.is_some prompt
       || Option.is_some workspace
       || Option.is_some data_root
-      || not (List.is_empty authoring_package_files)
+      || (not (List.is_empty authoring_package_files))
+      || Agent_server.Authoring_options.is_configured authoring_options
     then
       Or_error.error_string
-        "--prompt, --workspace, --data-root, and --authoring-package are local-mode \
-         options"
+        "--prompt, --workspace, --data-root, authoring package and budget flags are \
+         local-mode options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -155,6 +173,7 @@ let command =
      and workspace = flag "--workspace" (optional string) ~doc:"DIR Local workspace."
      and data_root =
        flag "--data-root" (optional string) ~doc:"DIR Durable local data root."
+     and authoring_options = Agent_server.Authoring_options.param
      and authoring_package_files =
        flag
          "--authoring-package"
@@ -169,7 +188,8 @@ let command =
          ~prompt
          ~workspace
          ~data_root
-         ~authoring_package_files)
+         ~authoring_package_files
+         ~authoring_options)
 ;;
 
 let () = Command_unix.run command

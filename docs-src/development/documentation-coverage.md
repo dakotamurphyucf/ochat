@@ -192,6 +192,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/workspace.mli` | [contract](../../lib/agent_protocol/workspace.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_server/authenticator.mli` | [contract](../../lib/agent_server/authenticator.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/authored_resources.mli` | [contract](../../lib/agent_server/authored_resources.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/agent_server/authoring_options.mli` | [contract](../../lib/agent_server/authoring_options.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/authorization.mli` | [contract](../../lib/agent_server/authorization.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_builder.mli` | [contract](../../lib/agent_server/catalog_builder.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_identity.mli` | [contract](../../lib/agent_server/catalog_identity.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

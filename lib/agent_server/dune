@@ -4,6 +4,7 @@
  (modules
   config
   config_parser
+  authoring_options
   authenticator
   config_validator
   config_diff

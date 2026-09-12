@@ -484,8 +484,24 @@ host's budget; delegated sessions inherit it. A per-call materialization budget
 can lower an explicit host budget, but cannot raise it. Supplying conflicting
 budgets through both the daemon configuration and an explicit authoring host is
 an error. Changing server budgets requires a restart and invalidates old context
-identities and continuation cursors. Local TUI/stdio command-line budget flags
-are not exposed yet; the embedding API supports the same configuration.
+identities and continuation cursors.
+
+Local `chat-tui` sessions (default or explicit `--local`) and
+`ochat-agent-stdio --local` accept the same settings:
+
+```sh
+chat-tui --local --authoring-default-tokens 16000 --authoring-max-tokens 48000 \
+  --authoring-preload-tokens 48000 -file agent.chatmd
+ochat-agent-stdio --local --prompt agent.chatmd --authoring-default-tokens 16000 \
+  --authoring-max-tokens 48000 --authoring-preload-tokens 48000
+```
+
+Omitted fields use the host defaults shown above. For example, lowering only
+`--authoring-max-tokens` below 12,000 fails until the default is also lowered.
+With none of these flags, an embedding's existing host configuration is preserved.
+The flags are rejected in daemon connection and TUI legacy/administration modes;
+configure the daemon's `server.authoring_budget` instead. They do not enable
+extension tools or change the ChatMD authoring policy.
 
 When `complete` is false, pass `next_cursor` to `continue`, setting `task`, `query`,
 `topic_id` and `features` to null. If the next intact section cannot fit, the page
