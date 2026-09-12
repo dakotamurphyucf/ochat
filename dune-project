@@ -44,6 +44,7 @@
   owl
   eio_main
   cohttp-eio
+  (ca-certs :with-test)
   ezgzip
   lwt_eio
   base64

@@ -270,13 +270,58 @@ Consequently its overall threshold verdict remains `Incomplete`. Offline
 meet every numeric threshold. The two intentionally broken initial submissions
 produce a 0.75 first-pass rate in the scripted suite, not a model-quality estimate.
 
+## Optional authorized provider evaluation
+
+`evaluate_live.exe` uses the same task backend and driver with an OpenAI Responses
+adapter. It is a separate executable that does not link the private scripted
+answer library. Running paid/provider evaluations requires explicit applicable
+authorization; CI uses injected responses only. **No live evaluation has run.**
+
+After authorization, select an exact model and settings supported by that model:
+
+```sh
+opam exec -- dune exec test/authoring_evaluation/evaluate_live.exe -- \
+  --authorize-real-model --model "$EVALUATION_MODEL" \
+  --settings '{"max_output_tokens":8192}' --repetitions 2 \
+  > scratch/authoring-evaluation-live-private.json
+```
+
+The command uses `OPENAI_API_KEY` and the fixed HTTPS endpoint
+`https://api.openai.com/v1/responses`, with system certificate verification. It
+does not use `API_URL`, log bodies/credentials, automatically retry, or follow
+redirects. Missing authorization rejects before entering the adapter's credential
+and transport setup. Model/settings validation precedes transport construction.
+Existing linked library initialization is unchanged.
+
+`max_output_tokens` is required. Optional settings are `temperature`, `top_p`, and
+`reasoning` with an `effort` field; actual model support is provider-dependent.
+Unsupported keys are rejected, including overrides for input, tools, storage or
+output formatting. This adapter rejects non-null seeds rather than claiming to
+apply them: use repeated null-seed repetitions, paired by repetition index.
+Provider/case deadlines can be set with `--provider-timeout`/`--case-timeout`.
+
+Every request supplies a [strict structured-output schema](https://developers.openai.com/api/docs/guides/structured-outputs)
+with exactly `operation` and `payload`. Operations are `retrieve`, `submit`, or
+`decline`; payload is a JSON-encoded query/candidate object or a decline reason.
+This keeps one fixed action schema across different candidate shapes. The host
+decodes the payload and applies ordinary scoped query/validation/execution. The
+protocol text is part of the measured tool-description history, and all actual
+messages are sent without server-side truncation or conversation storage.
+Structured-output framing/schema overhead is excluded from the byte-based
+estimates but included in provider-reported input usage when available.
+
+Only a completed response containing one text action is accepted. Refusals,
+incomplete responses, unexpected tool execution outputs, ambiguous/extra action
+fields, invalid JSON and malformed usage produce infrastructure failures. Missing
+usage stays unknown. HTTP and body-size errors are sanitized; the complete body
+is limited to 2 MiB and cancellation propagates. Artifacts retain decoded actions
+and measured inputs; rejected raw bodies are not persisted. This deliberately
+does not preserve private reasoning output or resumable provider conversations.
+
 ## Remaining evaluation work
 
-Add the optional real-provider transport and qualify its strict action contract,
-settings propagation and error handling offline. `Driver.run` already rejects
-`Real_model` provenance before host/provider construction unless the caller passes
-explicit authorization; no real-model evaluation has occurred. Add measured
-capability-boundary observations appropriate to each execution host. A01.09/T15
-remain open. Actual production policy/daemon compaction behavior is qualified in
-the corresponding runtime tests; these three experimental conditions do not
-claim to compare those production policy implementations.
+Add measured capability-boundary observations appropriate to each execution host.
+A01.09/T15 remain open. Actual production policy/daemon compaction behavior is
+qualified in the corresponding runtime tests; these three experimental conditions
+do not claim to compare those production policy implementations. Real-model runs
+remain optional and separate from mandatory offline qualification.
