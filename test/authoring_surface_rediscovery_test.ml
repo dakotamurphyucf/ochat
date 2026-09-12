@@ -15,16 +15,8 @@ let request task topic =
     ]
 ;;
 
-let reference context host policy materialization ~sequence task topic =
-  let response =
-    Q.query_with_receipt
-      context
-      ~host
-      ~capabilities:(P.capabilities policy)
-      ~scope:(A.scope materialization)
-      (request task topic)
-  in
-  let receipt = Option.value_exn response.receipt in
+let entry_of_response policy materialization ~sequence response =
+  let receipt = Option.value_exn response.Q.receipt in
   let id = History_entry.Id.create ~namespace:"surface-read" ~sequence |> ok in
   let entry = Codec.user_text ~id (Jsonaf.to_string response.json) |> Codec.to_protocol in
   let guidance =
@@ -48,10 +40,246 @@ let reference context host policy materialization ~sequence task topic =
   { entry with provenance = Runtime_authoring guidance }
 ;;
 
+let reference context host policy materialization ~sequence task topic =
+  Q.query_with_receipt
+    context
+    ~host
+    ~capabilities:(P.capabilities policy)
+    ~scope:(A.scope materialization)
+    (request task topic)
+  |> entry_of_response policy materialization ~sequence
+;;
+
 let guidance entry =
   match entry.H.provenance with
   | Runtime_authoring guidance -> guidance
   | _ -> assert false
+;;
+
+let%expect_test
+    "X10 runtime, capability and compiler changes invalidate old pages and rediscover \
+     current contracts"
+  =
+  Eio_main.run (fun env ->
+    fixture (fun context host _ plan ->
+      let policy =
+        plan ~selected_names:[ "script"; "child"; "ochat_authoring_context" ] Manual
+      in
+      let original = Authoring_rediscovery_test.make context host policy in
+      let prepare =
+        `Object
+          [ "version", `Number "1"
+          ; "operation", `String "prepare"
+          ; "task", `String "background_workflow"
+          ; "query", `Null
+          ; "topic_id", `Null
+          ; "features", `Null
+          ; "cursor", `Null
+          ; "max_tokens", `Number "6000"
+          ]
+      in
+      let continue ?(budget = 6000) cursor =
+        `Object
+          [ "version", `Number "1"
+          ; "operation", `String "continue"
+          ; "task", `Null
+          ; "query", `Null
+          ; "topic_id", `Null
+          ; "features", `Null
+          ; "cursor", `String cursor
+          ; "max_tokens", `Number (Int.to_string budget)
+          ]
+      in
+      let query host policy request =
+        Q.query_with_receipt
+          context
+          ~host
+          ~capabilities:(P.capabilities policy)
+          ~scope:(A.scope original)
+          request
+      in
+      let rec collect remaining host policy response =
+        assert (remaining > 0);
+        match Jsonaf.member_exn "next_cursor" response.Q.json with
+        | `Null -> [ response ]
+        | `String cursor ->
+          let budget =
+            match
+              Jsonaf.member_exn "budget" response.json
+              |> Jsonaf.member_exn "minimum_next_tokens"
+            with
+            | `Number value -> Int.max 6000 (Int.of_string value)
+            | _ -> 6000
+          in
+          response
+          :: collect
+               (remaining - 1)
+               host
+               policy
+               (query host policy (continue ~budget cursor))
+        | _ -> assert false
+      in
+      let first = query host policy prepare in
+      let old_cursor = Jsonaf.member_exn "next_cursor" first.json |> Jsonaf.string_exn in
+      let pages = collect 100 host policy first in
+      let history =
+        List.filter pages ~f:(fun response -> Option.is_some response.Q.receipt)
+        |> List.mapi ~f:(fun sequence response ->
+          entry_of_response policy original ~sequence response)
+        |> restored
+      in
+      let known = Presence.remember ~previous:[] ~history |> protocol_ok in
+      let narrow = plan ~selected_names:[ "script"; "ochat_authoring_context" ] Manual in
+      let runtime = make_host ~runtime:"changed-runtime-v2" () in
+      List.iter
+        [ "runtime", runtime, policy, "moderator_v1"
+        ; "capabilities", host, narrow, "moderator_v1"
+        ; ( "surface-and-capabilities"
+          , V.for_delegated runtime
+          , narrow
+          , "delegated_moderator_v1" )
+        ; ( "execution-availability"
+          , V.without_persisted_children host
+          , policy
+          , "moderator_v1" )
+        ]
+        ~f:(fun (label, current_host, current_policy, expected_surface) ->
+          let current =
+            Authoring_rediscovery_test.make context current_host current_policy
+          in
+          let rejected = query current_host current_policy (continue old_cursor) in
+          assert (Option.is_none rejected.receipt);
+          assert (Option.is_some (Jsonaf.member "error" rejected.json));
+          let stale =
+            Presence.inspect
+              ~policy:current_policy
+              ~context_identity:(A.context_identity current)
+              ~known
+              ~effective:history
+            |> protocol_ok
+          in
+          assert (
+            List.for_all stale.observations ~f:(fun observation ->
+              Presence.equal_presence observation.presence Stale_context));
+          let compacted = A.refresh current ~known ~effective:[] |> protocol_ok in
+          let retained_stale =
+            A.refresh current ~known ~effective:history |> protocol_ok
+          in
+          List.iter [ compacted; retained_stale ] ~f:(fun messages ->
+            assert (not (List.is_empty messages));
+            assert (
+              List.for_all messages ~f:(fun message ->
+                G.equal_purpose message.A.guidance.purpose Rediscovery));
+            assert (
+              List.exists messages ~f:(fun message ->
+                List.exists message.A.guidance.topics ~f:(fun topic ->
+                  String.equal topic.G.id "runtime.jobs.acknowledgement"))));
+          let fresh =
+            collect
+              100
+              current_host
+              current_policy
+              (query current_host current_policy prepare)
+          in
+          List.iter fresh ~f:(fun response ->
+            assert (
+              String.equal
+                (Jsonaf.member_exn "surface" response.Q.json |> Jsonaf.string_exn)
+                expected_surface);
+            assert (
+              String.equal
+                (Jsonaf.member_exn "runtime_identity" response.json |> Jsonaf.string_exn)
+                (V.runtime_identity current_host)));
+          let text =
+            List.concat_map fresh ~f:(fun response ->
+              Jsonaf.member_exn "items" response.Q.json |> Jsonaf.list_exn)
+            |> List.filter_map ~f:(fun item ->
+              Jsonaf.member "text" item |> Option.bind ~f:Jsonaf.string)
+            |> String.concat ~sep:"\n"
+          in
+          assert (String.is_substring text ~substring:"background_job_completed");
+          assert (String.is_substring text ~substring:"Internal_event");
+          let candidate =
+            {|let initial_state = 0
+let on_event ctx state event = match event with
+| `Internal_event(payload) ->
+  (match Json.get_field(payload, "kind") with
+  | `Some(`String("background_job_completed")) -> Task.pure(state + 1)
+  | _ -> Task.pure(state))
+| _ -> Task.pure(state)|}
+          in
+          let report =
+            V.validate
+              ~env
+              ~host:current_host
+              ~capabilities:(P.capabilities current_policy)
+              (`Object
+                  [ "version", `Number "1"
+                  ; "target", `String "moderator"
+                  ; "source", `String candidate
+                  ; "tools", `Array []
+                  ])
+          in
+          assert (Jsonaf.member_exn "valid" (V.to_json report) |> Jsonaf.bool_exn);
+          assert (String.equal report.runtime_identity (V.runtime_identity current_host));
+          let fresh_history =
+            List.filter fresh ~f:(fun response -> Option.is_some response.Q.receipt)
+            |> List.mapi ~f:(fun sequence response ->
+              entry_of_response
+                current_policy
+                current
+                ~sequence:(sequence + 1000)
+                response)
+            |> restored
+          in
+          assert (
+            List.is_empty
+              (A.refresh current ~known ~effective:fresh_history |> protocol_ok));
+          let selected =
+            List.hd_exn fresh
+            |> fun response ->
+            Jsonaf.member_exn "items" response.Q.json
+            |> Jsonaf.list_exn
+            |> List.hd_exn
+            |> Jsonaf.member_exn "content"
+            |> Jsonaf.member_exn "selected_tools"
+            |> Jsonaf.list_exn
+            |> List.map ~f:(fun tool ->
+              Jsonaf.member_exn "name" tool |> Jsonaf.string_exn)
+          in
+          assert (
+            List.equal
+              String.equal
+              (List.sort selected ~compare:String.compare)
+              (P.capabilities current_policy
+               |> C.references
+               |> List.map ~f:(fun reference -> reference.C.name)
+               |> List.sort ~compare:String.compare));
+          print_endline
+            (label
+             ^ ": stale cursor rejected; old content not current; fresh full pages \
+                satisfy contracts"));
+      let unsupported = make_host ~targets:[ One_off_script ] () in
+      let rejected = query unsupported narrow prepare in
+      assert (Option.is_none rejected.receipt);
+      assert (Option.is_some (Jsonaf.member "error" rejected.json));
+      let current = Authoring_rediscovery_test.make context unsupported narrow in
+      let pointers = A.refresh current ~known ~effective:[] |> protocol_ok in
+      assert (
+        not
+          (List.exists pointers ~f:(fun message ->
+             List.exists message.A.guidance.topics ~f:(fun topic ->
+               String.equal topic.G.id "runtime.jobs.acknowledgement"))));
+      print_endline
+        "withdrawn background target rejects preparation and omits incompatible pointer"));
+  [%expect
+    {|
+    runtime: stale cursor rejected; old content not current; fresh full pages satisfy contracts
+    capabilities: stale cursor rejected; old content not current; fresh full pages satisfy contracts
+    surface-and-capabilities: stale cursor rejected; old content not current; fresh full pages satisfy contracts
+    execution-availability: stale cursor rejected; old content not current; fresh full pages satisfy contracts
+    withdrawn background target rejects preparation and omits incompatible pointer
+    |}]
 ;;
 
 let%expect_test

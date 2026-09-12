@@ -152,7 +152,20 @@ retrieves the coordinator example again, validates the retrieved moderator, and
 executes its completion parser through `run_chatml`. The fake provider supplies
 the transcript; the compactor uses its offline summary branch. This proves the
 runtime flow, not a model's independent ability to author correct code. The broader
-X10 changed-host and narrowed-child matrix remains open.
+X10 coverage also includes an actual narrowed generated child running that same
+flow on its delegated moderator surface. Parent-only tools and instructions stay
+out of the child's queries and context. Simulated runtime, capability and surface
+changes reject old continuation cursors, classify old pages as stale, and require
+fresh full-page coverage before another moderator authoring check.
+
+Transient embedded hosts explicitly report that persisted child execution is
+unavailable. Preparing a child-agent package or requesting the `child_sessions`
+feature returns that incompatibility; the feature map disables the suggestion and
+the selected creator description explains the limitation. Direct readonly topic
+retrieval and static ChatMD validation remain possible. Successful validation
+cannot make `agent_create` available: its normal execution check still rejects
+the operation. The limitation participates in host identity and survives
+compaction; it does not silently change manual policy.
 
 Public custom-package configuration and public qualification also remain open.
 Manual mode inserts no automatic documentation prose; it can preserve the compact

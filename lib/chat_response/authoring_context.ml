@@ -296,7 +296,15 @@ let orientation corpus ~host ~capabilities ~surface_id =
       ; "suggested_task", `String (Metadata.task_id task)
       ; ("readable_on_selected_surface", if readable_here then `True else `False)
       ; ( "suggested_task_enabled"
-        , if Result.is_ok (surface host task) then `True else `False )
+        , if
+            Result.is_ok (surface host task)
+            && Option.is_none (V.execution_unavailable_reason host task)
+          then `True
+          else `False )
+      ; ( "execution_unavailable_reason"
+        , match V.execution_unavailable_reason host task with
+          | None -> `Null
+          | Some reason -> `String reason )
       ]
   in
   let guides =
@@ -413,16 +421,18 @@ let orientation corpus ~host ~capabilities ~surface_id =
            for those contracts." )
     ; ( "availability"
       , `String
-          "Enabled authoring tasks describe host validation targets; readable topics \
-           describe compiler/reference compatibility. Neither proves a runtime effect \
-           service is installed. selected_tools lists only the invoking scope's \
-           bindings; execution still checks current permissions, tool selection and host \
-           services." )
+          "Enabled authoring tasks reflect compiler targets and known execution \
+           limitations; readable topics describe compiler/reference compatibility. \
+           Neither proves a runtime effect service is installed. selected_tools lists \
+           only the invoking scope's bindings; execution still checks current \
+           permissions, tool selection and host services." )
     ; ( "enabled_authoring_tasks"
       , strings
           (List.filter_map tasks ~f:(fun task ->
              match surface host task with
-             | Ok _ -> Some (Metadata.task_id task)
+             | Ok _ when Option.is_none (V.execution_unavailable_reason host task) ->
+               Some (Metadata.task_id task)
+             | Ok _ -> None
              | Error _ -> None)) )
     ; "selected_tools", `Array tools
     ; "reference_topics", strings [ "reference.signatures"; "reference.tools" ]
@@ -894,6 +904,23 @@ let query_with_receipt t ~host ~capabilities ~scope request =
     let%bind task = task_of_request base in
     let%bind surface_id = surface host task in
     let operation = text base "operation" in
+    let%bind () =
+      match operation with
+      | "prepare" ->
+        let child_feature =
+          match field base "features" with
+          | Some (`Array values) ->
+            List.exists values ~f:(function
+              | `String "child_sessions" -> true
+              | _ -> false)
+          | _ -> false
+        in
+        let checked_task = if child_feature then Metadata.Child_agent else task in
+        (match V.execution_unavailable_reason host checked_task with
+         | None -> Ok ()
+         | Some reason -> Error reason)
+      | _ -> Ok ()
+    in
     let%bind items, covered =
       match operation, text base "topic_id" with
       | "topic", "reference.signatures" ->

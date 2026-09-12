@@ -708,6 +708,12 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         ()
       |> Result.map_error ~f:Agent_protocol.Error.invalid_request
       |> Result.map ~f:(fun host ->
+        let host =
+          match options.extension_host with
+          | Embedded_transient ->
+            Chat_response.Authoring_validation.without_persisted_children host
+          | _ -> host
+        in
         { options with authoring_validation_host = Some host })
   in
   let%bind implementation = implementation options in

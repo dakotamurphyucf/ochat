@@ -17,7 +17,8 @@ let describe ~host ~capabilities ~name ~description =
      | Some help ->
        let tasks =
          List.filter help.tasks ~f:(fun task ->
-           Result.is_ok (Authoring_validation.task_surface host task))
+           Result.is_ok (Authoring_validation.task_surface host task)
+           && Option.is_none (Authoring_validation.execution_unavailable_reason host task))
        in
        let reference =
          match helper_available capabilities M.Reference, tasks with
@@ -43,7 +44,10 @@ let describe ~host ~capabilities ~name ~description =
          (String.concat
             ~sep:" "
             (List.filter_opt
-               [ description
+               [ List.find_map
+                   help.tasks
+                   ~f:(Authoring_validation.execution_unavailable_reason host)
+               ; description
                ; Some
                    ("Authoring reference package: "
                     ^ help.package

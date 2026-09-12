@@ -27,6 +27,7 @@ type host =
   ; catalog : Authoring_policy.catalog option
   ; delegated_catalog : Authoring_policy.catalog option
   ; corpus : Authoring_corpus.t option
+  ; persisted_children_unavailable : bool
   }
 
 let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
@@ -51,6 +52,7 @@ let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
       ; catalog = None
       ; delegated_catalog = None
       ; corpus = None
+      ; persisted_children_unavailable = false
       }
 ;;
 
@@ -69,6 +71,15 @@ let corpus host = host.corpus
 let runtime_identity host = host.runtime_identity
 let targets host = host.targets
 let moderator_surface host = host.moderator_surface
+let without_persisted_children host = { host with persisted_children_unavailable = true }
+
+let execution_unavailable_reason host = function
+  | Metadata.Child_agent when host.persisted_children_unavailable ->
+    Some
+      "Persisted child sessions are unavailable in this session. Use a daemon or a \
+       durable embedded session."
+  | _ -> None
+;;
 
 let task_surface host task =
   let target, surface =
@@ -467,15 +478,21 @@ let host_fingerprint (host : host) =
          target, Compiler.contract (compiler_target host target))
        : (target * Sexp.t) list)]
   in
-  (match host.corpus with
-   | None -> contract
-   | Some corpus ->
-     [%sexp
-       ("ochat.authoring.captured-host.v1" : string)
-     , (contract : Sexp.t)
-     , (Authoring_corpus.identity corpus : string)
-     , (Option.map host.delegated_catalog ~f:Authoring_policy.catalog_fingerprint
-        : string option)])
+  let contract =
+    match host.corpus with
+    | None -> contract
+    | Some corpus ->
+      [%sexp
+        ("ochat.authoring.captured-host.v1" : string)
+      , (contract : Sexp.t)
+      , (Authoring_corpus.identity corpus : string)
+      , (Option.map host.delegated_catalog ~f:Authoring_policy.catalog_fingerprint
+         : string option)]
+  in
+  (match host.persisted_children_unavailable with
+   | false -> contract
+   | true ->
+     [%sexp ("ochat.authoring.no-persisted-children.v1" : string), (contract : Sexp.t)])
   |> Sexp.to_string
   |> Source_ref.digest
 ;;

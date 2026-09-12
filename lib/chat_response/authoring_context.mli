@@ -141,7 +141,14 @@ val virtual_topics
     the signature legend distinguishes reference notation from ChatML source.
     Authoring tool descriptions use the same metadata-derived presentation as
     model requests: callable helper pointers reflect this query's selected
-    capabilities, without changing binding identities or schemas. *)
+    capabilities, without changing binding identities or schemas.
+
+    Known execution limitations are distinct from compiler support. A transient
+    host rejects persisted-child preparation (including the [child_sessions]
+    feature), disables that orientation suggestion and reports the reason.
+    Explicit readonly topic retrieval and static validation remain possible;
+    neither can enable the unavailable operation. Host restriction changes
+    invalidate continuation identity just like compiler/capability changes. *)
 val query
   :  t
   -> host:Authoring_validation.host

@@ -86,6 +86,17 @@ val runtime_identity : host -> string
 val targets : host -> target list
 val moderator_surface : host -> moderator_surface
 
+(** Record a known execution limitation without removing readonly compiler
+    validation targets. This affects host identity and authoring preparation;
+    it never changes the execution service's own admission checks. Hosts without
+    this restriction still require actual service/capability checks at execution. *)
+val without_persisted_children : host -> host
+
+val execution_unavailable_reason
+  :  host
+  -> Chatmd_shell_spec.Authoring_metadata.task
+  -> string option
+
 (** Shared task-to-compiler-surface resolution for retrieval, materialization and
     tool discovery. Unavailable host targets fail; a task request cannot enable
     another compiler surface. *)
