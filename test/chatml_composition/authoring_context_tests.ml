@@ -207,6 +207,26 @@ let%expect_test
         String.is_substring
           (field inference "text" |> Jsonaf.string_exn)
           ~substring:"Type inference and annotations");
+      (match task with
+       | "one_off_script" -> ()
+       | _ ->
+         let definitions =
+           items response
+           |> List.filter ~f:(fun item ->
+             match Jsonaf.member "topic_id" item with
+             | Some (`String "chatmd.definitions") -> true
+             | _ -> false)
+           |> List.map ~f:(fun item -> field item "text" |> Jsonaf.string_exn)
+           |> String.concat ~sep:"\n"
+         in
+         assert (
+           String.is_substring definitions ~substring:"Example chatmd.inherited-reader");
+         assert (
+           String.is_substring
+             definitions
+             ~substring:"<tool type=\"inherited\" name=\"read_file\"/>");
+         assert (
+           not (String.is_substring definitions ~substring:"ochat-authoring-example:")));
       require_json `False (field response "package_complete"));
   let orientation = List.hd_exn (items prepared) in
   require_json (`String "orientation") (field orientation "kind");

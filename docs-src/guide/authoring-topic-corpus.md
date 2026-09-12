@@ -150,6 +150,17 @@ the other runtime families; broader semantic qualification remains separate.
 
 ## Initial topic corpus
 
+`chatmd.definitions` is a flat agent-definition reference for instructions,
+generation settings, literal markup, captured sources, inherited tools and
+lifecycle moderation. It is directly prepared for standalone tools, moderators,
+child agents and background workflows. Generated-validation diagnostics link
+back to it. Nine complete XML examples pass through non-executing generated
+validation, including rejected configurations and a failing initializer that
+must remain unexecuted. The native repair fixture retrieves an actual XML
+example from this topic and uses it to repair an inherited-tool declaration.
+Broader ChatMD declaration accounting and native-tool semantic coverage remain
+separate qualification requirements.
+
 The flat `chatml.inference` and `chatml.evaluation` references explain annotation
 arity, structural types, generalization, lexical boundaries and execution order.
 They are included in every prepared authoring task and directly linked from the

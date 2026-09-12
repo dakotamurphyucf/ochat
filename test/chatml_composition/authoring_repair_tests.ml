@@ -5,7 +5,7 @@ module Flow = Authoring_compaction_tests
 
 (* Repairs deliberately come from the installed reference returned by the native
    query tool. This is a scripted provider transcript, not a model-quality test. *)
-let example text id =
+let example ?(language = "ocaml") text id =
   let marker = "Example " ^ id ^ " (" in
   let rec find = function
     | [] -> failwith ("reference did not contain example " ^ id)
@@ -14,7 +14,7 @@ let example text id =
        | false -> find rest
        | true -> fence rest)
   and fence = function
-    | "```ocaml" :: rest ->
+    | opening :: rest when String.equal opening ("```" ^ language) ->
       let code, closing =
         List.split_while rest ~f:(fun line -> not (String.equal line "```"))
       in
@@ -136,6 +136,15 @@ let on_event ctx state event = Task.pure(state)
             [ "child.chatmd", generated
             ; "tools.chatmd", {|<tool type="inherited" name="read_file"/>|}
             ])
+    }
+  ; { id = "inherited-declaration"
+    ; task = "child_agent"
+    ; topic = "chatmd.definitions"
+    ; invalid = bundle [ "child.chatmd", {|<tool name="read_file"/>|} ]
+    ; repair =
+        (fun text ->
+          bundle
+            [ "child.chatmd", example ~language:"xml" text "chatmd.inherited-reader" ])
     }
   ; { id = "import"
     ; task = "child_agent"
@@ -333,7 +342,7 @@ let main input =
               (Sexp.to_string (Agent_session.Session_state.sexp_of_t state))
               ~substring:"PRIVATE-REPORT-SENTINEL"));
        print_endline
-         "8 invalid candidates -> linked installed references -> 8 valid repairs";
+         "9 invalid candidates -> linked installed references -> 9 valid repairs";
        print_endline
          "4 documented programs executed; poison initializers and generated sessions \
           never executed";
@@ -349,7 +358,7 @@ let main input =
      ((code invocation.invalid_input)
       (message "The original tool arguments do not satisfy its input schema.")
       (retryable false) (details Null)))
-    8 invalid candidates -> linked installed references -> 8 valid repairs
+    9 invalid candidates -> linked installed references -> 9 valid repairs
     4 documented programs executed; poison initializers and generated sessions never executed
     source/selection change identities; tool/file denial and forged-receipt rejection remain enforced
     |}]

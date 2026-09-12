@@ -284,10 +284,11 @@ let roots task request =
     let base =
       match task with
       | Metadata.One_off_script -> [ "runtime.invocations.one-off" ]
-      | Standalone_tool -> [ "runtime.invocations.standalone" ]
-      | Moderator_tool -> [ "runtime.invocations.moderator" ]
-      | Child_agent -> [ "runtime.delegation.stop-helper" ]
-      | Background_workflow -> [ "runtime.jobs.timers"; "runtime.delivery.notifications" ]
+      | Standalone_tool -> [ "chatmd.definitions"; "runtime.invocations.standalone" ]
+      | Moderator_tool -> [ "chatmd.definitions"; "runtime.invocations.moderator" ]
+      | Child_agent -> [ "chatmd.definitions"; "runtime.delegation.stop-helper" ]
+      | Background_workflow ->
+        [ "chatmd.definitions"; "runtime.jobs.timers"; "runtime.delivery.notifications" ]
     in
     let requested =
       match field request "features" with
@@ -367,7 +368,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
          can call."
         "Defining an agent's extension declarations, handler contract or tool outcomes."
         Standalone_tool
-        [ "runtime.invocations.standalone" ]
+        [ "chatmd.definitions"; "runtime.invocations.standalone" ]
     ; guide
         "Stateful moderation and custom tools"
         "Handle session events and moderator-owned tool calls using retained state; \

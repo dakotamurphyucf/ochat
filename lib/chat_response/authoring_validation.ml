@@ -183,6 +183,7 @@ let topics =
   ; "chatml.inference", "guide/chatml-inference.md"
   ; "chatml.tasks", "guide/chatml-ocaml-differences.md"
   ; "chatmd.declarations.schemas", "guide/chatml-authoring-runtime.md"
+  ; "chatmd.definitions", "guide/chatmd-authoring-definitions.md"
   ; "runtime.invocations.one-off", "guide/chatml-authoring-runtime.md"
   ; "runtime.invocations.standalone", "guide/chatml-authoring-runtime.md"
   ; "runtime.invocations.moderator", "guide/chatml-authoring-runtime.md"
@@ -811,7 +812,11 @@ let validate_generated ~env ~(host : host) ~capabilities json =
     issue
       ?source
       ~path
-      ~topics:[ "runtime.delegation.generated"; "runtime.authority.tool-selection" ]
+      ~topics:
+        [ "runtime.delegation.generated"
+        ; "chatmd.definitions"
+        ; "runtime.authority.tool-selection"
+        ]
       code
       message
   in
@@ -910,6 +915,7 @@ let validate_generated ~env ~(host : host) ~capabilities json =
             ~path:error.path
             ~topics:
               [ "runtime.delegation.generated"
+              ; "chatmd.definitions"
               ; "chatmd.declarations.schemas"
               ; "chatml.syntax.calls"
               ; "chatml.types"

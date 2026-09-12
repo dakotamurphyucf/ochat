@@ -352,6 +352,7 @@ let () =
       Docs_chatml_effects.run env root;
       Docs_chatml_control.run env root;
       Docs_child_authoring.run env root;
+      Docs_chatmd_authoring.run env root;
       Docs_examples.run env root;
       check_examples env root executable;
       run_example env tools_example [];

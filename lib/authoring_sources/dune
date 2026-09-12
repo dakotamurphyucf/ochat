@@ -41,6 +41,7 @@
     guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
     guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
     guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
+    guide/chatmd-authoring-definitions.md %{dep:../../docs-src/guide/chatmd-authoring-definitions.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
     guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
     guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}

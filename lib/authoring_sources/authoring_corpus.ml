@@ -2690,7 +2690,30 @@ let runtime_foundation ~sources =
     }
   in
   let runtime =
-    [ make
+    [ { id = "chatmd.definitions"
+      ; title = "Agent definitions, captured sources and inherited capabilities"
+      ; prerequisites =
+          [ "runtime.invocations.contracts"; "runtime.authority.tool-selection" ]
+      ; surfaces = managed
+      ; excerpts =
+          [ { path = "guide/chatmd-authoring-definitions.md"
+            ; heading = "# Authoring ChatMD agent definitions"
+            ; include_children = true
+            }
+          ]
+      ; review =
+          Audited
+            { excerpt_sha256 =
+                [ "20a098f887398a049e61316111998db10fde601b2cfcaa2bd2a6232010d66999" ]
+            ; evidence =
+                [ "test/agent_docs/docs_chatmd_authoring.ml"
+                ; "lib/chatmd/prompt.ml"
+                ; "lib/chat_response/generated_admission.ml"
+                ; "lib/chatmd/chatmd_extension_declaration.ml"
+                ]
+            }
+      }
+    ; make
         "runtime.invocations.contracts"
         "Execution categories and entrypoints"
         shared

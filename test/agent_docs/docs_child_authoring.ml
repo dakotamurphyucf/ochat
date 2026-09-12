@@ -5,6 +5,30 @@ module C = Chat_response.Tool_capability
 let guide = "guide/chatml-authoring-children.md"
 let fixture = "test/chatml_extensibility_fixtures/x05-child-session/create.json"
 
+let fixture_capabilities () =
+  let module Definition = struct
+    type input = string
+
+    let name = "read_file"
+    let description = Some "Non-executing documentation capability"
+    let type_ = "function"
+    let parameters = `Object [ "type", `String "object" ]
+    let input_of_string input = input
+  end
+  in
+  let implementation =
+    Ochat_function.create_function
+      (module Definition)
+      (fun _ -> failwith "child documentation validation invoked a tool")
+  in
+  C.create
+    ~owner:"child-documentation"
+    ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "no-documentation-io")
+    [ Chatmd_shell_spec.Source_ref.digest "documentation-reader-v1", implementation ]
+  |> Result.map_error ~f:(fun error -> error.C.message)
+  |> Result.ok_or_failwith
+;;
+
 let run env root =
   let load path = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / path) in
   let sources = Authoring_sources.installed () |> Result.ok_or_failwith in
@@ -29,29 +53,7 @@ let run env root =
   in
   (* A named capability is needed for inherited-reference admission. This runner
      is deliberately unusable: documentation checks cannot read a user's files. *)
-  let module Definition = struct
-    type input = string
-
-    let name = "read_file"
-    let description = Some "Non-executing documentation capability"
-    let type_ = "function"
-    let parameters = `Object [ "type", `String "object" ]
-    let input_of_string input = input
-  end
-  in
-  let implementation =
-    Ochat_function.create_function
-      (module Definition)
-      (fun _ -> failwith "child documentation validation invoked a tool")
-  in
-  let capabilities =
-    C.create
-      ~owner:"child-documentation"
-      ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "no-documentation-io")
-      [ Chatmd_shell_spec.Source_ref.digest "documentation-reader-v1", implementation ]
-    |> Result.map_error ~f:(fun error -> error.C.message)
-    |> Result.ok_or_failwith
-  in
+  let capabilities = fixture_capabilities () in
   let host =
     V.create_host
       ~runtime_identity:"child-documentation-check-v1"

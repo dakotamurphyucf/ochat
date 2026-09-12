@@ -14,6 +14,7 @@ let () =
   let sources = Sources.installed () |> Result.ok_or_failwith in
   let expected =
     [ "agent-server/extensibility-foundations.md"
+    ; "guide/chatmd-authoring-definitions.md"
     ; "guide/chatmd-shell-extensions.md"
     ; "guide/chatml-authoring-background.md"
     ; "guide/chatml-authoring-children.md"

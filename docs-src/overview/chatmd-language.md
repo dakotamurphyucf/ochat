@@ -42,6 +42,8 @@ These are the tag names ChatMD recognises (lowercase, case-sensitive):
 
 - Message / transcript structure: `msg`, `user`, `assistant`, `system`, `developer`
 - Host-managed runtime declarations: `script`, `shell_access`, `moderator_runtime`
+- Authoring declarations: `authoring_context`, `authoring_help`; extension-tool
+  capability selection uses nested `uses`
 - Tools / tool trace: `tool`, `tool_call`, `tool_response`
 - Inline helpers: `doc`, `img`, `agent`, `import`
 - Reasoning: `reasoning`, `summary`
@@ -459,7 +461,9 @@ See the “Tool calls & tool responses” section for exact layouts.
 
 `<tool/>` declarations define what actions the assistant is allowed to take.
 
-ChatMD supports five tool “shapes”:
+ChatMD supports the following tool forms. The extension forms and generated
+child restrictions are covered in the [agent-definition authoring guide](../guide/chatmd-authoring-definitions.md)
+and [extension binding reference](../guide/chatml-authoring-runtime.md).
 
 ### 5.1 Built-in tools
 
