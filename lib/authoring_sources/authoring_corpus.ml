@@ -2744,7 +2744,29 @@ let runtime_foundation ~sources =
     }
   in
   let runtime =
-    [ { id = "chatmd.definitions"
+    [ { id = "chatmd.capabilities"
+      ; title = "Root tool implementations, file roots, MCP and message resources"
+      ; prerequisites = [ "chatmd.definitions" ]
+      ; surfaces = managed
+      ; excerpts =
+          [ { path = "guide/chatmd-authoring-capabilities.md"
+            ; heading = "# Authoring ChatMD capabilities and resource content"
+            ; include_children = true
+            }
+          ]
+      ; review =
+          Audited
+            { excerpt_sha256 =
+                [ "467099991d41d1e93499aa3bdde4928cbd8c644b36af1f5fc2cec87f9926923d" ]
+            ; evidence =
+                [ "lib/chatmd/prompt.ml"
+                ; "lib/chat_response/generated_admission.ml"
+                ; "lib/chat_response/tool.ml"
+                ; "test/agent_docs/docs_chatmd_capabilities.ml"
+                ]
+            }
+      }
+    ; { id = "chatmd.definitions"
       ; title = "Agent definitions, captured sources and inherited capabilities"
       ; prerequisites =
           [ "runtime.invocations.contracts"; "runtime.authority.tool-selection" ]

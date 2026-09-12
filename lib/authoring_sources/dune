@@ -78,7 +78,20 @@
     lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}
     lib/chat_response/one_off_request.ml %{dep:../chat_response/one_off_request.ml}
-    lib/chat_response/one_off_script.ml %{dep:../chat_response/one_off_script.ml}))))
+    lib/chat_response/one_off_script.ml %{dep:../chat_response/one_off_script.ml}
+    lib/chat_response/converter.ml %{dep:../chat_response/converter.ml}
+    lib/chat_response/fetch.ml %{dep:../chat_response/fetch.ml}
+    lib/chat_response/mcp_discovery_cache.ml %{dep:../chat_response/mcp_discovery_cache.ml}
+    lib/chat_response/shell_tool.ml %{dep:../chat_response/shell_tool.ml}
+    lib/chat_response/tool.ml %{dep:../chat_response/tool.ml}
+    lib/chatmd/chatmd_read_file_declaration.ml %{dep:../chatmd/chatmd_read_file_declaration.ml}
+    lib/chatmd/chatmd_read_file_spec.ml %{dep:../chatmd/chatmd_read_file_spec.ml}
+    lib/chatmd/chatmd_shell_declaration.ml %{dep:../chatmd/chatmd_shell_declaration.ml}
+    lib/chatmd_shell_spec/manifest_compiler.ml %{dep:../chatmd_shell_spec/manifest_compiler.ml}
+    lib/chatmd_shell_spec/path_expr.ml %{dep:../chatmd_shell_spec/path_expr.ml}
+    lib/chatmd_shell_spec/shell_tool_spec.ml %{dep:../chatmd_shell_spec/shell_tool_spec.ml}
+    lib/functions.ml %{dep:../functions.ml}
+    lib/mcp/mcp_tool.ml %{dep:../mcp/mcp_tool.ml}))))
 
 (rule
  (targets bundled_grammar.ml)
@@ -96,6 +109,7 @@
     guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
     guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
     guide/chatmd-authoring-definitions.md %{dep:../../docs-src/guide/chatmd-authoring-definitions.md}
+    guide/chatmd-authoring-capabilities.md %{dep:../../docs-src/guide/chatmd-authoring-capabilities.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
     guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
     guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}

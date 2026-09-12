@@ -365,10 +365,11 @@ let orientation corpus ~host ~capabilities ~surface_id =
     ; guide
         "ChatMD and reusable tools"
         "Bind a script and strict input/output schemas as a reusable tool that an agent \
-         can call."
+         can call. Understand root file, shell, agent and MCP bindings versus the \
+         inherited-only tools of generated children."
         "Defining an agent's extension declarations, handler contract or tool outcomes."
         Standalone_tool
-        [ "chatmd.definitions"; "runtime.invocations.standalone" ]
+        [ "chatmd.definitions"; "chatmd.capabilities"; "runtime.invocations.standalone" ]
     ; guide
         "Stateful moderation and custom tools"
         "Handle session events and moderator-owned tool calls using retained state; \

@@ -705,6 +705,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/authoring-topic-corpus.md) | `docs-src/guide/authoring-topic-corpus.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/build-troubleshooting.md) | `docs-src/guide/build-troubleshooting.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chat_tui.md) | `docs-src/guide/chat_tui.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatmd-authoring-capabilities.md) | `docs-src/guide/chatmd-authoring-capabilities.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-authoring-definitions.md) | `docs-src/guide/chatmd-authoring-definitions.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-shell-examples.md) | `docs-src/guide/chatmd-shell-examples.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-shell-extensions.md) | `docs-src/guide/chatmd-shell-extensions.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

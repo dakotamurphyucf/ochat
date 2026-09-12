@@ -228,7 +228,7 @@ let implementation_sources =
   ; ( "lib/agent_store/delegation_store.ml"
     , "525102be15fde1969281aba17e737e874d9d3d64f415a9538cba3793d6e4b2a7" )
   ; ( "lib/chat_response/authoring_context.ml"
-    , "b057e435c547353457fdf5d0c29273d2949bd05a64427fde40214a4af0071d87" )
+    , "11f583a7c23f870fab358795ec5b5f633f709fce306dfb7759dbd75288166763" )
   ; ( "lib/chat_response/authoring_validation.ml"
     , "50720d22460aca46887a47bd6b807356805155fbec6bbbd0020cff3bd06e4277" )
   ; ( "lib/chat_response/generated_admission.ml"

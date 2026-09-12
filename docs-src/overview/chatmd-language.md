@@ -22,11 +22,16 @@ Ochat tries hard to ensure the model sees exactly what’s in your ChatMD docume
 - **HTML comments are stripped**: `<!-- ... -->` is removed before parsing and never reaches the model.
 - **`<import/>` expands**: selected `<import src="..."/>` directives are replaced with the contents of the referenced file *at parse time*.
 - **Runtime declarations stay host-managed**: top-level `<script>`,
-  `<shell_access>`, and `<moderator_runtime>` declarations are parsed,
+  `<shell_access>`, `<moderator_runtime>`, `<authoring_context>` and
+  `<authoring_help>` declarations are parsed,
   validated, and executed by the host. They are not converted into
   model-visible request history.
 - **RAW blocks disable parsing**: `RAW| ... |RAW` is treated as literal text (no tag parsing inside).
 - **Optional meta-refine preprocessing**: if enabled, the prompt may be rewritten before parsing (see “Meta-refine” below).
+- **Authoring guidance is explicit policy**: automatic/preload authoring policy
+  can add reference guidance and required documentation helpers. Manual policy
+  avoids those automatic additions. See the
+  [authoring policy reference](../guide/chatmd-authoring-definitions.md).
 
 Everything else is intentionally boring: there are no hidden templates, implicit tool permissions, or “magic” side channels.
 
@@ -162,7 +167,7 @@ Hello.
 | `<tool_call ...>...</tool_call>` | Tool invocation record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<tool_response ...>...</tool_response>` | Tool output record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<reasoning ...>...</reasoning>` | Reasoning record | Typically written by reasoning-capable models; requires `id` if authored manually. |
-| `<script ...>...</script>` / `<script ... src="..." />` | Host-managed ChatML script | Top-level only. Supports moderator and shell extension kinds. |
+| `<script ...>...</script>` / `<script ... src="..." />` | Host-managed ChatML script | Top-level only. Supports standalone tool, moderator and shell extension kinds. |
 | `<shell_access ...>...</shell_access>` | Named shell runtime | Strict host-only configuration; never model history. |
 | `<moderator_runtime shell_runtime="..."/>` | Moderator process binding | Routes `Process.run` through a named shell runtime. |
 
@@ -183,10 +188,16 @@ These tags are recognised by the parser, but they are primarily meaningful **ins
 the typed prompt model, but it is not sent to the model as a message.
 
 Every script uses `language="chatml"` and a unique ID. Supported kinds are
-`moderator`, `shell_matcher`, `shell_reviewer`,
+`tool`, `moderator`, `shell_matcher`, `shell_reviewer`,
 `shell_before_interceptor`, `shell_after_interceptor`,
 `shell_effect_analyzer`, and `shell_audit_filter`. A prompt may contain many
 shell scripts, but at most one conversation moderator is selected.
+
+`kind="tool"` declares a standalone extension script. A lifecycle moderator uses
+`kind="moderator" api="extensibility-v1"`; omitting that API retains the legacy
+moderator contract. See the [extension invocation reference](../guide/chatml-authoring-runtime.md)
+for their entrypoints, tool bindings and distinct invocation events. The examples
+below omit the API and illustrate the legacy declaration form.
 
 Supported forms:
 
@@ -577,7 +588,7 @@ The runtime is compiled and authorized before the tool is exposed. See the
 - For MCP tools:
   - `name="..."` selects a single tool name, **or**
   - `include="a,b"` / `includes="a,b"` selects a comma-separated list, **or**
-  - neither means “no filter” (implementation-dependent; typically exposes the server’s tool catalog).
+  - neither exposes all tools returned by that declaration's catalog discovery.
 
 For a deeper tool reference (built-ins, schemas, and examples), see:
 [`docs-src/overview/tools.md`](tools.md).

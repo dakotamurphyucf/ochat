@@ -206,8 +206,10 @@ module Coverage : sig
   (** Reviewed ChatMD extension, generated-definition and authoring declarations.
       Surface IDs select documentation compatibility, not permission to execute
       every authored declaration in a generated child. The referenced guides
-      distinguish those contexts. Legacy shell/MCP details and native operation
-      semantics still require their separate feature accounting. *)
+      distinguish those contexts. Includes root file, shell, agent and MCP bindings,
+      resource-bearing messages and stored traces. Native operation semantics use
+      the separate native inventory; shell policy details retain their full shared
+      references. *)
   val declaration_features : semantic_feature list
 
   (** Requires nonempty unique selections from tool_v1, moderator_v1 and

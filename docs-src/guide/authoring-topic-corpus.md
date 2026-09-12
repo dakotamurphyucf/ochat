@@ -89,18 +89,22 @@ automatically discover a newly introduced semantic feature. Reviewing changes
 must include deciding whether to add or split rules. Full ChatMD and native-tool
 contract accounting remains separate from this language inventory.
 
-`Coverage.declaration_features` adds 14 groups for ChatMD markup/source capture,
+`Coverage.declaration_features` adds 20 groups for ChatMD markup/source capture,
 generated messages/configuration/tools, lifecycle scripts, extension bindings,
 schemas, selected dependencies, authoring policy/help and authored persistence.
-Its 42 mappings cover the three surfaces that use ChatMD declarations. Surface
+Its 60 mappings cover the three surfaces that use ChatMD declarations. Surface
 IDs select reference compatibility; they do not make authored tool declarations
 legal in a generated child. The guide explicitly distinguishes those contexts.
-Twenty implementation source pins and six topic-closure pins are maintained in
+Thirty-three implementation source pins and nine topic-closure pins are maintained in
 `declaration_coverage_data.ml`. Normal tests require complete mappings, and the
 docs checker verifies named XML evidence against the actual checked guide.
 File evidence names separately executed behavioral suites. This extends the
-maintained taxonomy; legacy shell/MCP details and native operation semantics
-still require their own coverage audit.
+maintained taxonomy with root file/shell/agent/MCP bindings, resource-bearing
+messages and stored traces, including their rejection in generated children.
+The six complete root examples use actual parser and generated-admission checks
+without instantiating any resource. File-reader, shell, MCP and authored-agent
+behavior remains qualified by the separately referenced suites. This does not
+claim that every existing shell security configuration is a new E09 feature.
 
 The runtime's [native extension catalog](../../lib/agent_session/extensibility_native_tools.mli)
 constructs the nine standard execution, child-session and authoring registrations.
@@ -123,7 +127,7 @@ Its 68 mappings cover readable guidance on the four extension surfaces, with
 actual native adapters, request decoders, delegation authority, receipt/output
 code and the shared session factory. Hashes detect changes to these sources;
 they do not automatically discover new semantics or prove all behavior correct.
-The source participation gate now covers 61 distinct language, declaration and
+The source participation gate now covers 74 distinct language, declaration and
 native implementation files. Query-service construction checks native mappings
 alongside the other maintained inventories before serving documentation.
 
@@ -198,6 +202,14 @@ on one-off/standalone targets. The complete binding inventory adds checks for
 the other runtime families; broader semantic qualification remains separate.
 
 ## Initial topic corpus
+
+`chatmd.capabilities` explains root declarations for file roots, shell runtimes,
+agent tools and MCP catalogs, plus resource-bearing messages and stored traces.
+It distinguishes what a user-authored root can request from a generated child's
+inherited-only selection. The flat feature orientation links to it; native
+retrieval returns the complete guide without activating the described resources.
+Its six complete root examples are checked in the shared
+[capability guide](chatmd-authoring-capabilities.md).
 
 `runtime.native.requests` explains native computation inputs and limit overrides,
 shared deadlines and outcome handling, plus the four validation request shapes

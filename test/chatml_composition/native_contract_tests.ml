@@ -208,7 +208,12 @@ let%expect_test "installed query examples and the native self-reference are usab
         , {|<developer>Learn the reference API.</developer><tool name="ochat_authoring_context"/>|}
         )
       ]
-    ~calls:[ "self-reference", "ochat_authoring_context", requested ]
+    ~calls:
+      [ "self-reference", "ochat_authoring_context", requested
+      ; ( "root-capabilities"
+        , "ochat_authoring_context"
+        , request ~task:"child_agent" ~topic_id:"chatmd.capabilities" "topic" )
+      ]
     (fun state ->
        let response =
          match Fixtures.result state "self-reference" with
@@ -224,11 +229,31 @@ let%expect_test "installed query examples and the native self-reference are usab
        in
        (* The service normalizes paragraph separators. Compare the source content,
           including both intact JSON examples, rather than its trailing whitespace. *)
-       assert (List.equal String.equal (lines source) (lines text)));
+       assert (List.equal String.equal (lines source) (lines text));
+       let root_response =
+         match Fixtures.result state "root-capabilities" with
+         | Agent_protocol.Invocation.Complete (`String text) -> Jsonaf.of_string text
+         | outcome -> raise_s [%sexp (outcome : Agent_protocol.Invocation.outcome)]
+       in
+       assert (not (has_error root_response));
+       require_json `True (field root_response "complete");
+       let root_text =
+         items root_response
+         |> List.filter_map ~f:(fun item ->
+           match Jsonaf.member "topic_id" item, Jsonaf.member "text" item with
+           | Some (`String "chatmd.capabilities"), Some (`String text) -> Some text
+           | _ -> None)
+         |> String.concat ~sep:"\n"
+       in
+       let root_source =
+         Authoring_sources.document sources ~path:"guide/chatmd-authoring-capabilities.md"
+         |> Result.ok_or_failwith
+       in
+       assert (List.equal String.equal (lines root_source.text) (lines root_text)));
   printf
     "%d installed strict request examples paginate successfully; native lookup returns \
-     all three reviewed sections without operator configuration\n"
+     all three reviewed sections and root capability guidance without resource execution\n"
     (List.length examples);
   [%expect
-    {| 2 installed strict request examples paginate successfully; native lookup returns all three reviewed sections without operator configuration |}]
+    {| 2 installed strict request examples paginate successfully; native lookup returns all three reviewed sections and root capability guidance without resource execution |}]
 ;;

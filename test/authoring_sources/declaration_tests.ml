@@ -36,5 +36,5 @@ let%expect_test "declaration coverage accounts for sources and rejects missing m
       (List.length V.declaration_features : int)
     , (List.length targets : int)
     , (List.length paths : int)];
-  [%expect {| (14 42 61) |}]
+  [%expect {| (20 60 74) |}]
 ;;
