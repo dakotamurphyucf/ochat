@@ -4715,9 +4715,17 @@ authored session adapter is installed. Internal foundations now include:
   persistent children. Generic output selection is shared with `agent_read`;
   failed submissions, missing or redacted output do not become successful answers.
 
-Public availability remains gated. Nested private persistent declarations,
-resource-only Independent ancestry reconstruction and
-the remaining approval, concurrency and fault-recovery qualification are unfinished.
+Nested private persistent declarations are prepared from leaves to root, retaining
+each declaration's captured source identity and separate private capability registry.
+The entire graph is checked for cycles and the host's delegation depth limit before
+native preparation can request shell admission or connect external resources.
+Cycles and excessive depth reject explicitly. Resource-only Independent ancestry
+reconstruction uses the same preparation path and selects authored or generated
+restoration from the private ledger origin. It verifies authored artifacts and
+private resource pins without restarting an ancestor's conversation or moderator.
+
+Public availability remains gated. The remaining approval, concurrency and
+fault-recovery qualification are unfinished.
 Partial-creation reconciliation now
 selects the authored artifact and private bindings, but its authored fault matrix
 is not yet qualified. Abrupt-crash recovery of an active one-off also needs a
@@ -4733,6 +4741,12 @@ changes during restoration.
 Default one-off calls through direct and inherited wrappers return assistant text,
 retain stopped children across restart, and reject continuation. Cancelling a
 parent call joins the simulated blocked child provider before returning.
+The nested graph daemon fixture exercises root-to-specialist-to-specialist native
+calls, checks that private tool names do not leak to ancestors, then creates an
+explicitly authorized Independent generated descendant inheriting the nested wrapper.
+It stops the Owned ancestors, creates a specialist through that descendant, restarts
+the daemon and continues the same specialist using captured sources despite a live
+file edit. The stopped ancestors remain unloaded throughout continuation.
 The separate authored
 runtime integration test uses real captured resources, artifact/ledger storage and
 a session actor with memory persistence: its own ghost tool performs native reads,

@@ -8,6 +8,75 @@ module Artifacts = Agent_store.Prompt_artifact_store
 module C = Chat_response.Tool_capability
 module Owned = Agent_server.Authored_resources
 
+let%expect_test
+    "authored graph preflight rejects later cyclic or deep branches before native setup"
+  =
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let root =
+        Eio.Path.(Eio.Stdenv.fs env / workspace_instance.canonical_root.native_path)
+      in
+      let save name text =
+        Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / name) text
+      in
+      save
+        "root.chatmd"
+        {|<tool name="first" agent="leaf.chatmd" local persistence="persistent"/><tool name="later" agent="middle.chatmd" local persistence="persistent"/>|};
+      save "leaf.chatmd" {|<developer>Leaf.</developer><tool name="read_file"/>|};
+      let definition =
+        Agent_session.Prompt_definition.create
+          ~id:prompt_id
+          ~config_name:"graph-preflight"
+          ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
+          ~allowed_workspaces:[ workspace_id ]
+          ~permission_profile:"interactive"
+          ~runtime_policy:None
+          ~enabled:true
+          ~description:None
+        |> store_ok
+      in
+      let artifact_store =
+        Artifacts.create ~env ~root:(Eio.Path.native_exn Eio.Path.(root / "artifacts"))
+        |> store_ok
+      in
+      let check ~max_depth contents =
+        save "middle.chatmd" contents;
+        let revision =
+          Agent_session.Prompt_revision_builder.build
+            ~env
+            ~artifact_store
+            ~transaction_id:(P.Id.Transaction.create ())
+            ~created_at:timestamp
+            definition
+          |> Authored_agent_source_tests.built
+        in
+        let result =
+          Owned.prepare
+            (Owned.create ())
+            ~sw
+            ~max_depth
+            ~revision
+            ~build:(fun ~parent_revision:_ ~tool_name:_ ~native_registrations:_ ->
+              failwith "native setup ran before full graph validation")
+            ~services:(fun _ _ -> failwith "graph preflight invoked an agent")
+        in
+        match result with
+        | Error { code = Permission_denied; message; _ } -> print_endline message
+        | _ -> failwith "invalid graph was admitted"
+      in
+      check
+        ~max_depth:8
+        {|<tool name="cycle" agent="root.chatmd" local persistence="persistent"/>|};
+      check
+        ~max_depth:1
+        {|<tool name="deep" agent="leaf.chatmd" local persistence="persistent"/>|}));
+  [%expect
+    {|
+    delegation.authored_graph: cyclic or excessive private ancestry
+    delegation.authored_graph: cyclic or excessive private ancestry
+    |}]
+;;
+
 let%expect_test "authored private resources use captured specialist source coordinates" =
   let owned = Owned.create () in
   let retained_public = ref None in

@@ -1929,6 +1929,45 @@ let install_moderator_if_changed actor moderator_snapshot =
     |> Result.map ~f:(fun _ -> ())
 ;;
 
+let prepare_authored_graph
+      t
+      ~sw
+      ~revision
+      ~paths
+      ~storage_paths
+      ~(state : Agent_session.Session_state.t)
+      ~profile
+      ~actor_ref
+      ~shell_state
+      ~native_service_revision
+      ~one_off_policy
+      ~authoring_validation_host
+  =
+  Authored_resources.prepare
+    t.authored_resources
+    ~sw
+    ~max_depth:t.limits.delegation_max_depth
+    ~revision
+    ~services:t.authored_services
+    ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
+      Agent_session.Runtime_builder.prepare_authored_resources
+        ~native_registrations
+        ~parent_revision
+        ~tool_name
+        ~native_service_revision
+        ~env:t.env
+        ~sw
+        ~paths
+        ~storage_paths
+        ~session_id:state.identity.session_id
+        ~one_off_policy
+        ~authoring_validation_host
+        ~manifest_authorizer:
+          (manifest_authorizer t profile revision state actor_ref shell_state)
+        ~approval_provider:(shell_approval_provider t profile actor_ref)
+        ~approval_store:(shell_approval_store state actor_ref shell_state))
+;;
+
 let independent_resource_host t =
   let module R = Independent_resources in
   let module B = Agent_session.Runtime_builder in
@@ -1996,23 +2035,51 @@ let independent_resource_host t =
           let%bind profile = restore_state_profile t state in
           let actor_ref = ref (Some parent.actor) in
           let shell_state = ref state.shell in
-          B.prepare_resources
-            ~native_registrations:[]
-            ~native_service_revision:
-              (Agent_session.Session_management_channel.policy_fingerprint
-                 t.session_helpers)
-            ~env:t.env
-            ~sw
-            ~paths
-            ~storage_paths:paths
-            ~revision
-            ~session_id:state.identity.session_id
-            ~one_off_policy:Chat_response.One_off_request.default_policy
-            ~authoring_validation_host:t.authoring_validation_host
-            ~manifest_authorizer:
-              (manifest_authorizer t profile revision state actor_ref shell_state)
-            ~approval_provider:(shell_approval_provider t profile actor_ref)
-            ~approval_store:(shell_approval_store state actor_ref shell_state))
+          let%bind prepared, native_registrations =
+            prepare_authored_graph
+              t
+              ~sw
+              ~revision
+              ~paths
+              ~storage_paths:paths
+              ~state
+              ~profile
+              ~actor_ref
+              ~shell_state
+              ~native_service_revision:
+                (Agent_session.Session_management_channel.policy_fingerprint
+                   t.session_helpers)
+              ~one_off_policy:Chat_response.One_off_request.default_policy
+              ~authoring_validation_host:t.authoring_validation_host
+          in
+          let%bind resources =
+            B.prepare_resources
+              ~native_registrations
+              ~native_service_revision:
+                (Agent_session.Session_management_channel.policy_fingerprint
+                   t.session_helpers)
+              ~env:t.env
+              ~sw
+              ~paths
+              ~storage_paths:paths
+              ~revision
+              ~session_id:state.identity.session_id
+              ~one_off_policy:Chat_response.One_off_request.default_policy
+              ~authoring_validation_host:t.authoring_validation_host
+              ~manifest_authorizer:
+                (manifest_authorizer t profile revision state actor_ref shell_state)
+              ~approval_provider:(shell_approval_provider t profile actor_ref)
+              ~approval_store:(shell_approval_store state actor_ref shell_state)
+          in
+          let%bind public =
+            Lazy.force resources.native.capabilities
+            |> Result.map_error ~f:(fun error ->
+              unavailable Permission_denied error.Chat_response.Tool_capability.message)
+          in
+          let%map () =
+            Authored_resources.install t.authored_resources ~sw ~public prepared
+          in
+          resources)
   ; build_generated =
       (fun ~sw:_ ~parent ancestor ->
         let state = ancestor.R.state in
@@ -2036,30 +2103,63 @@ let independent_resource_host t =
           |> Result.map_error ~f:(fun error ->
             unavailable Permission_denied error.Chat_response.Tool_capability.message)
         in
-        let%bind definition =
-          G.restore
-            ?limits:
-              (Option.map
-                 t.authoring_validation_host
-                 ~f:Chat_response.Authoring_validation.compilation_limits)
-            ?source_limits:
-              (Option.map
-                 t.authoring_validation_host
-                 ~f:Chat_response.Authoring_validation.bundle_limits)
-            ?catalog:
-              (Option.bind
-                 t.authoring_validation_host
-                 ~f:Chat_response.Authoring_validation.catalog)
-            ~env:t.env
-            ~artifact_store
-            ~revision_id:state.spec.prompt_revision_id
-            ~manifest_sha256:record.admission.manifest_sha256
-            ~current_capabilities:(fun () -> capabilities)
-            ~pins:record.admission.capability_pins
-            ()
-          |> Result.map_error ~f:diagnostics
-        in
-        B.inherit_resources ~parent ~definition)
+        match record.admission.authored_tool with
+        | Some origin ->
+          let%bind prepared =
+            Authored_resources.find
+              t.authored_resources
+              ~public:capabilities
+              ~name:origin.name
+          in
+          let%bind private_capabilities =
+            Authored_resources.resolve t.authored_resources record ~public:capabilities
+          in
+          let%bind _ =
+            Agent_session.Authored_agent_source.load_artifact
+              ~artifact_store
+              ~reservation:record
+          in
+          let%bind selected =
+            Chat_response.Background_request.rebind_capabilities
+              ~pins:record.admission.capability_pins
+              ~capabilities:private_capabilities
+          in
+          (match
+             String.equal
+               (Chat_response.Tool_capability.fingerprint selected)
+               (Chat_response.Tool_capability.fingerprint private_capabilities)
+           with
+           | true -> Ok prepared.resources
+           | false ->
+             Error
+               (unavailable
+                  Permission_denied
+                  "delegation.authored_resources_changed: private ancestor pins differ"))
+        | None ->
+          let%bind definition =
+            G.restore
+              ?limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.compilation_limits)
+              ?source_limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.bundle_limits)
+              ?catalog:
+                (Option.bind
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.catalog)
+              ~env:t.env
+              ~artifact_store
+              ~revision_id:state.spec.prompt_revision_id
+              ~manifest_sha256:record.admission.manifest_sha256
+              ~current_capabilities:(fun () -> capabilities)
+              ~pins:record.admission.capability_pins
+              ()
+            |> Result.map_error ~f:diagnostics
+          in
+          B.inherit_resources ~parent ~definition)
   }
 ;;
 
@@ -2456,45 +2556,20 @@ let prepare_runtime_at_paths
         | true ->
           let module B = Agent_session.Runtime_builder in
           let services = extension_services t profile actor_ref ~state in
-          let%bind prepared =
-            Agent_session.Prompt_revision.elements revision
-            |> List.filter_map ~f:(function
-              | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
-              | _ -> None)
-            |> List.map ~f:(fun tool_name ->
-              B.prepare_authored_resources
-                ~native_registrations:[]
-                ~parent_revision:revision
-                ~tool_name
-                ~native_service_revision:services.native_service_revision
-                ~env:t.env
-                ~sw
-                ~paths
-                ~storage_paths
-                ~session_id:state.identity.session_id
-                ~one_off_policy:services.one_off_policy
-                ~authoring_validation_host:services.authoring_validation_host
-                ~manifest_authorizer:
-                  (manifest_authorizer t profile revision state actor_ref shell_state)
-                ~approval_provider
-                ~approval_store)
-            |> Result.all
-          in
-          let%bind native_registrations =
-            List.map prepared ~f:(fun prepared ->
-              let%bind capabilities =
-                Lazy.force prepared.B.resources.native.capabilities
-                |> Result.map_error ~f:(fun error ->
-                  unavailable
-                    Permission_denied
-                    error.Chat_response.Tool_capability.message)
-              in
-              Agent_session.Authored_agent_call.registration
-                ~source:prepared.source
-                ~capabilities
-                ~services:(t.authored_services prepared)
-                ())
-            |> Result.all
+          let%bind prepared, native_registrations =
+            prepare_authored_graph
+              t
+              ~sw
+              ~revision
+              ~paths
+              ~storage_paths
+              ~state
+              ~profile
+              ~actor_ref
+              ~shell_state
+              ~native_service_revision:services.native_service_revision
+              ~one_off_policy:services.one_off_policy
+              ~authoring_validation_host:services.authoring_validation_host
           in
           let%bind runtime =
             construct
@@ -2502,12 +2577,15 @@ let prepare_runtime_at_paths
               (B.build_with_extensions ~native_registrations ~revision ~services)
               (manifest_authorizer t profile revision state actor_ref shell_state)
           in
-          let%bind public =
-            Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-            |> Result.map_error ~f:(fun error ->
-              unavailable Permission_denied error.Chat_response.Tool_capability.message)
+          let installed =
+            let%bind public =
+              Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+              |> Result.map_error ~f:(fun error ->
+                unavailable Permission_denied error.Chat_response.Tool_capability.message)
+            in
+            Authored_resources.install t.authored_resources ~sw ~public prepared
           in
-          (match Authored_resources.install t.authored_resources ~sw ~public prepared with
+          (match installed with
            | Ok () -> Ok runtime
            | Error error ->
              runtime.close ();

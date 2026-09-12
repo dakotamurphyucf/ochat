@@ -93,3 +93,64 @@ let resolve t (record : Agent_store.Delegation_store.record) ~public =
     let%bind current = capabilities entry.prepared in
     Binding.resolve entry.binding ~record ~public ~current
 ;;
+
+type plan =
+  { parent_revision : Agent_session.Prompt_revision.t
+  ; tool_name : string
+  ; children : plan list
+  }
+
+let prepare t ~sw ~max_depth ~revision ~build ~services =
+  let module Revision = Agent_session.Prompt_revision in
+  let open Result.Let_syntax in
+  (* Validate the entire captured graph before native preparation can connect an
+     MCP server or request shell admission. Paths are relative to one immutable
+     source closure, so a back edge cannot evade cycle detection by re-rooting. *)
+  let rec plan ancestors revision =
+    Revision.elements revision
+    |> List.filter_map ~f:(function
+      | Prompt.Chat_markdown.Tool (Persistent_agent (agent, _)) -> Some agent.name
+      | _ -> None)
+    |> List.map ~f:(fun tool_name ->
+      let%bind source = Source.capture ~parent:revision ~tool_name in
+      let path = (Source.identity source).root_relative_path in
+      match
+        List.length ancestors > max_depth || List.mem ancestors path ~equal:String.equal
+      with
+      | true -> denied "delegation.authored_graph: cyclic or excessive private ancestry"
+      | false ->
+        let%bind child_revision = Source.resource_revision ~parent:revision source in
+        let%map children = plan (path :: ancestors) child_revision in
+        { parent_revision = revision; tool_name; children })
+    |> Result.all
+  in
+  let%bind plans = plan [ Revision.root_relative_path revision ] revision in
+  let rec prepare plans =
+    let%bind prepared =
+      List.map plans ~f:(fun plan ->
+        let%bind children, native_registrations = prepare plan.children in
+        let%bind prepared =
+          build
+            ~parent_revision:plan.parent_revision
+            ~tool_name:plan.tool_name
+            ~native_registrations
+        in
+        let%bind public = capabilities prepared in
+        let%map () = install t ~sw ~public children in
+        prepared)
+      |> Result.all
+    in
+    let%map registrations =
+      List.map prepared ~f:(fun prepared ->
+        let%bind capabilities = capabilities prepared in
+        Agent_session.Authored_agent_call.registration
+          ~source:prepared.source
+          ~capabilities
+          ~services:(services prepared)
+          ())
+      |> Result.all
+    in
+    prepared, registrations
+  in
+  prepare plans
+;;

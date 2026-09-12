@@ -38,3 +38,36 @@ val resolve
   -> Agent_store.Delegation_store.record
   -> public:Chat_response.Tool_capability.t
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Prepare captured nested declarations from leaves to root. Validate all source
+    edges, cycles and [max_depth] before calling [build], which may perform native
+    setup effects. Siblings retain separate private bindings even when they name
+    the same file. Each child's wrappers are installed against its exact private
+    capability registry in [sw]. No session or moderator is started.
+
+    Returns the direct specialists and their native registrations; the caller must
+    build the public runtime with those registrations and [install] the direct
+    specialists in the same scope. Release [sw] on any preparation failure. *)
+val prepare
+  :  t
+  -> sw:Eio.Switch.t
+  -> max_depth:int
+  -> revision:Agent_session.Prompt_revision.t
+  -> build:
+       (parent_revision:Agent_session.Prompt_revision.t
+        -> tool_name:string
+        -> native_registrations:Chat_response.Agent_runtime.native_registration list
+        -> ( Agent_session.Runtime_builder.authored_resources
+             , Agent_protocol.Error.t )
+             result)
+  -> services:
+       (Agent_session.Runtime_builder.authored_resources
+        -> Agent_session.Native_tool_invocation.borrowed
+        -> ( Agent_session.Authored_agent_call.host
+             * Agent_session.Managed_session_service.t
+             , Agent_protocol.Invocation.tool_error )
+             result)
+  -> ( Agent_session.Runtime_builder.authored_resources list
+       * Chat_response.Agent_runtime.native_registration list
+       , Agent_protocol.Error.t )
+       result
