@@ -82,15 +82,15 @@ let entrypoint_topic = function
 ;;
 
 let topics =
-  [ "chatml.syntax.calls", "guide/chatml-language-spec.md"
-  ; "chatml.types", "guide/chatml-language-spec.md"
-  ; "chatml.tasks", "guide/chatml-language-spec.md"
-  ; "chatmd.declarations.schemas", "agent-server/extensibility-foundations.md"
-  ; "runtime.invocations.one-off", "agent-server/extensibility-foundations.md"
-  ; "runtime.invocations.standalone", "agent-server/extensibility-foundations.md"
-  ; "runtime.invocations.moderator", "agent-server/extensibility-foundations.md"
-  ; "runtime.invocations.validation", "agent-server/extensibility-foundations.md"
-  ; "runtime.authority.tool-selection", "agent-server/extensibility-foundations.md"
+  [ "chatml.syntax.calls", "guide/chatml-ocaml-differences.md"
+  ; "chatml.types", "guide/chatml-ocaml-differences.md"
+  ; "chatml.tasks", "guide/chatml-ocaml-differences.md"
+  ; "chatmd.declarations.schemas", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.one-off", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.standalone", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.moderator", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.validation", "guide/chatml-authoring-runtime.md"
+  ; "runtime.authority.tool-selection", "guide/chatml-authoring-runtime.md"
   ; "runtime.delegation.generated", "agent-server/extensibility-foundations.md"
   ]
 ;;

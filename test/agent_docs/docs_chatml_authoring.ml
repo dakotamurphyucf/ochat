@@ -5,10 +5,37 @@ module Codec = Chatml.Chatml_value_codec
 
 let fixture = "docs-src/guide/chatml-ocaml-differences.md"
 let marker = "<!-- ochat-authoring-example: "
-let fail id message = failwith (sprintf "%s [%s]: %s" fixture id message)
+let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
+let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
+
+type target =
+  | One_off
+  | Standalone
+  | Moderator
+  | Delegated
+[@@deriving compare]
+
+let target_exn id = function
+  | "one_off_v1" -> One_off
+  | "tool_v1" -> Standalone
+  | "moderator_v1" -> Moderator
+  | "delegated_moderator_v1" -> Delegated
+  | other -> fail id ("unsupported example surface: " ^ other)
+;;
+
+let contract = function
+  | One_off -> Surface.one_off_v1, Surface.one_off_entrypoints
+  | Standalone -> Surface.tool_v1, Surface.tool_entrypoints
+  | Moderator -> Surface.moderator_v1, Surface.moderator_entrypoints
+  | Delegated -> Surface.delegated_moderator_v1, Surface.moderator_entrypoints
+;;
 
 type expectation =
   | Result of Jsonaf.t
+  | Fixture of
+      { path : string
+      ; also_check : target list
+      }
   | Diagnostic of
       { stage : Runtime.compilation_stage
       ; contains : string
@@ -17,6 +44,7 @@ type expectation =
 
 type example =
   { id : string
+  ; target : target
   ; expectation : expectation
   ; source : string
   }
@@ -51,15 +79,40 @@ let metadata_exn line =
   in
   let fields = fields_exn "metadata" json in
   let id = string_exn "metadata" fields "id" in
-  (match string_exn id fields "surface" with
-   | "one_off_v1" -> ()
-   | other -> fail id ("unsupported example surface: " ^ other));
+  let target = target_exn id (string_exn id fields "surface") in
   let expectation =
-    match List.Assoc.find fields "result" ~equal:String.equal with
-    | Some result ->
+    match
+      ( List.Assoc.find fields "result" ~equal:String.equal
+      , List.Assoc.find fields "fixture" ~equal:String.equal )
+    with
+    | Some result, None ->
       exact_fields_exn id fields [ "id"; "surface"; "result" ];
+      (match target with
+       | One_off -> ()
+       | _ -> fail id "pure result fixtures must use the one-off contract");
       Result result
-    | None ->
+    | None, Some (`String path)
+      when String.is_prefix path ~prefix:"test/chatml_extensibility_fixtures/"
+           && String.is_suffix path ~suffix:".chatml"
+           && not (List.exists (String.split path ~on:'/') ~f:(String.equal "..")) ->
+      let also_check =
+        match List.Assoc.find fields "also_check" ~equal:String.equal with
+        | None ->
+          exact_fields_exn id fields [ "id"; "surface"; "fixture" ];
+          []
+        | Some (`Array (_ :: _ as values)) ->
+          exact_fields_exn id fields [ "id"; "surface"; "fixture"; "also_check" ];
+          List.map values ~f:(function
+            | `String name -> target_exn id name
+            | _ -> fail id "also_check must contain surface IDs")
+        | _ -> fail id "also_check must be a nonempty surface list"
+      in
+      (match List.find_a_dup (target :: also_check) ~compare:compare_target with
+       | None -> ()
+       | Some _ -> fail id "duplicate example surface");
+      Fixture { path; also_check }
+    | _, Some _ -> fail id "invalid or conflicting source fixture metadata"
+    | None, None ->
       exact_fields_exn id fields [ "id"; "surface"; "stage"; "contains"; "span" ];
       let stage =
         match string_exn id fields "stage" with
@@ -75,7 +128,7 @@ let metadata_exn line =
       in
       Diagnostic { stage; contains = string_exn id fields "contains"; has_span }
   in
-  id, expectation
+  id, target, expectation
 ;;
 
 let examples_exn text =
@@ -87,11 +140,11 @@ let examples_exn text =
   let rec scan reversed = function
     | [] -> List.rev reversed
     | line :: rest when String.is_prefix line ~prefix:marker ->
-      let id, expectation = metadata_exn line in
+      let id, target, expectation = metadata_exn line in
       (match rest with
        | "```ocaml" :: rest ->
          let source, rest = take_code id [] rest in
-         scan ({ id; expectation; source } :: reversed) rest
+         scan ({ id; target; expectation; source } :: reversed) rest
        | _ -> fail id "metadata must immediately precede an ocaml code fence")
     | line :: _ when String.is_prefix line ~prefix:"```" ->
       fail "metadata" "every code fence in this reference must have example metadata"
@@ -108,14 +161,20 @@ let examples_exn text =
   | _ -> examples
 ;;
 
-let check_exn { id; expectation; source } =
-  let compiled =
-    Runtime.compile_script_detailed
-      ~surface:Surface.one_off_v1
-      ~required_bindings:Surface.one_off_entrypoints
-      ~source
-      ()
-  in
+let check_exn env root { id; target; expectation; source } =
+  (match expectation with
+   | Fixture { path; also_check } ->
+     let original = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / path) in
+     if not (String.equal (String.rstrip original) (String.rstrip source))
+     then fail id ("displayed example differs from its integration fixture: " ^ path);
+     List.iter also_check ~f:(fun target ->
+       let surface, required_bindings = contract target in
+       match Runtime.compile_script_detailed ~surface ~required_bindings ~source () with
+       | Ok _ -> ()
+       | Error diagnostic -> fail id ("additional surface: " ^ diagnostic.formatted))
+   | Result _ | Diagnostic _ -> ());
+  let surface, required_bindings = contract target in
+  let compiled = Runtime.compile_script_detailed ~surface ~required_bindings ~source () in
   match expectation, compiled with
   | Diagnostic { stage; contains; has_span }, Error diagnostic ->
     (match
@@ -126,7 +185,8 @@ let check_exn { id; expectation; source } =
      | true -> ()
      | false -> fail id ("unexpected diagnostic:\n" ^ diagnostic.formatted))
   | Diagnostic _, Ok _ -> fail id "expected compilation to reject this example"
-  | Result _, Error diagnostic -> fail id diagnostic.formatted
+  | (Result _ | Fixture _), Error diagnostic -> fail id diagnostic.formatted
+  | Fixture _, Ok _ -> ()
   | Result expected, Ok compiled ->
     (* Deliberately install no operations. These are pure language examples;
        accidental host calls must fail, never access a tool or a provider. *)
@@ -162,11 +222,56 @@ let check_exn { id; expectation; source } =
                (Jsonaf.to_string actual))))
 ;;
 
+let check_topic_coverage corpus ~path ~text =
+  let topic_text =
+    Authoring_corpus.topics corpus
+    |> List.concat_map ~f:(fun topic -> topic.Authoring_corpus.fragments)
+    |> List.filter ~f:(fun fragment -> String.equal fragment.source.path path)
+    |> List.map ~f:(fun fragment ->
+      match String.substr_index text ~pattern:fragment.text with
+      | None -> fail "topic coverage" ("topic is outside its checked guide: " ^ path)
+      | Some position -> position, fragment.text)
+    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
+    |> List.map ~f:snd
+    |> String.concat
+  in
+  match String.equal text topic_text with
+  | true -> ()
+  | false ->
+    fail
+      "topic coverage"
+      ("topics must partition their entire checked guide without gaps or duplication: "
+       ^ path)
+;;
+
 let run env root =
   let installed = Authoring_sources.installed () |> Result.ok_or_failwith in
   let corpus =
-    Authoring_corpus.language_foundation ~sources:installed |> Result.ok_or_failwith
+    Authoring_corpus.runtime_foundation ~sources:installed |> Result.ok_or_failwith
   in
+  let unmapped =
+    List.filter_map Chat_response.Authoring_validation.topics ~f:(fun (id, path) ->
+      match Authoring_corpus.topic corpus ~id with
+      | Error _ -> Some id
+      | Ok topic ->
+        (match
+           List.exists topic.fragments ~f:(fun fragment ->
+             String.equal fragment.source.path path)
+         with
+         | true -> None
+         | false ->
+           fail
+             id
+             "validation topic points at a different source than the installed corpus"))
+  in
+  (* This explicit pending item keeps the partial foundation honest until the
+     generated-child package is audited; new routing gaps must fail the gate. *)
+  (match List.equal String.equal unmapped [ "runtime.delegation.generated" ] with
+   | true -> ()
+   | false ->
+     fail
+       "validation routing"
+       "review missing topic coverage; only generated-child guidance remains pending here");
   List.iter (Authoring_sources.documents installed) ~f:(fun document ->
     let authored =
       Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / "docs-src" / document.path)
@@ -176,29 +281,31 @@ let run env root =
     | false ->
       fail document.path "installed source differs from shared human documentation");
   let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / fixture) in
-  let topic_text =
-    Authoring_corpus.topics corpus
-    |> List.concat_map ~f:(fun topic -> topic.Authoring_corpus.fragments)
-    |> List.map ~f:(fun fragment ->
-      match String.substr_index text ~pattern:fragment.text with
-      | None -> fail "topic coverage" "language topic is outside the checked guide"
-      | Some position -> position, fragment.text)
-    |> List.sort ~compare:(fun (a, _) (b, _) -> Int.compare a b)
-    |> List.map ~f:snd
-    |> String.concat
+  check_topic_coverage corpus ~path:"guide/chatml-ocaml-differences.md" ~text;
+  let runtime_text =
+    Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / runtime_fixture)
   in
-  (match String.equal text topic_text with
-   | true -> ()
-   | false ->
-     fail
-       "topic coverage"
-       "language topics must partition the entire checked guide without gaps or \
-        duplication");
-  let examples = examples_exn text in
-  List.iter examples ~f:check_exn;
+  let examples = examples_exn text @ examples_exn runtime_text in
+  check_topic_coverage corpus ~path:"guide/chatml-authoring-runtime.md" ~text:runtime_text;
+  (match
+     List.find_a_dup
+       (List.map examples ~f:(fun example -> example.id))
+       ~compare:String.compare
+   with
+   | None -> ()
+   | Some id -> fail id "duplicate ID across authoring guides");
+  List.iter examples ~f:(check_exn env root);
+  let integration_count =
+    List.count examples ~f:(fun example ->
+      match example.expectation with
+      | Fixture _ -> true
+      | _ -> false)
+  in
   Eio.Flow.copy_string
     (sprintf
-       "ChatML authoring reference: %d compiler/behavior examples PASS\n"
-       (List.length examples))
+       "ChatML authoring reference: %d language checks, %d integration-source/contract \
+        checks PASS\n"
+       (List.length examples - integration_count)
+       integration_count)
     (Eio.Stdenv.stdout env)
 ;;

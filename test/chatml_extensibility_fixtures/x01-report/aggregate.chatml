@@ -25,10 +25,12 @@ let add_report groups report = match report with
 let rec read_reports files index groups =
   if index == Array.length(files) then Task.pure(groups)
   else match files[index] with
-    | `String(file) -> Task.bind(Tool.call("read_file", `Object([
+    | `String(file) ->
+      let* result = Tool.call("read_file", `Object([
         { key = "root"; value = `String("reports") },
         { key = "file"; value = `String(file) }
-      ])), fun result -> match result with
+      ])) in
+      (match result with
         | `Ok(`String(text)) ->
           let report = Json.parse(after_line(after_line(text))) in
           read_reports(files, index + 1, add_report(groups, report))
@@ -37,9 +39,10 @@ let rec read_reports files index groups =
     | _ -> Task.fail("expected report filenames")
 
 let main input = match input with
-  | `Array(files) -> Task.bind(read_reports(files, 0, []), fun groups ->
-      Task.pure(`Array(Array.map(groups, fun group -> `Object([
+  | `Array(files) ->
+      let+ groups = read_reports(files, 0, []) in
+      `Array(Array.map(groups, fun group -> `Object([
         { key = "check"; value = `String(group.check) },
         { key = "failures"; value = `Number(group.failures) }
-      ])))))
+      ])))
   | _ -> Task.fail("expected an array of report filenames")

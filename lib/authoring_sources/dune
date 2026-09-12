@@ -9,6 +9,7 @@
   (with-stdout-to %{targets}
    (run %{exe:embed_documents.exe}
     guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
+    guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
     guide/chatml-ocaml-differences.md %{dep:../../docs-src/guide/chatml-ocaml-differences.md}
     guide/chatml-match-semantics.md %{dep:../../docs-src/guide/chatml-match-semantics.md}
     guide/chatml-moderator-runtime.md %{dep:../../docs-src/guide/chatml-moderator-runtime.md}

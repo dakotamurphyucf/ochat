@@ -2626,10 +2626,11 @@ sources, instantiate ChatML modules, or invoke any tool.
 
 ## Parsed extension declarations
 
-The following declaration shapes are now parsed, serialized and captured in pinned
-prompt artifacts. Their runtime execution remains disabled while the invocation
-and authoring services are implemented. Nonexecuting handler, entrypoint, schema
-and effective-capability checks are available through the preparation APIs below.
+The following declaration shapes are parsed, serialized and captured in pinned
+prompt artifacts. Runtime execution is implemented on internally qualified hosts;
+public authoring/helper rollout remains incomplete. Nonexecuting handler,
+entrypoint, schema and effective-capability checks run through the preparation
+APIs below before the owning host exposes a matching dispatcher.
 
 ```xml
 <script id="worker" language="chatml" kind="tool" src="worker.chatml"/>
@@ -2641,8 +2642,9 @@ and effective-capability checks are available through the preparation APIs below
 
 Standalone scripts require an explicit ID. `uses` names exact registered tools,
 without changing their configuration. Omission selects zero tools. Duplicate names
-and cyclic dependencies between declared extension tools are rejected. Resolving
-these references against the final authorized tool manifest is still pending.
+and cyclic dependencies between declared extension tools are rejected. Preparation
+resolves them against the actual admitted manifest and pins their identities;
+execution revalidates those bindings after authority-changing waits.
 
 ```xml
 <script id="coordinator" language="chatml" kind="moderator"
@@ -2667,9 +2669,9 @@ An authoring policy is a single top-level declaration:
 
 `auto` and `manual` reject a `topics` attribute. `preload` requires a nonempty,
 unique whitespace-separated topic list. The admission planner described below
-checks topic existence and helper dependencies; context injection and runtime
-registration remain unfinished. Hosts explicitly reject execution
-with these new declarations instead of silently ignoring them. Ordinary inline
+checks topic existence and helper dependencies; full context insertion and public
+helper exposure remain unfinished. Hosts without extension qualification reject
+these declarations instead of silently ignoring them. Ordinary inline
 `uses`/`authoring_context` markup remains text outside its declaration scope.
 
 Schema and script dependencies must be relative local paths within the prompt's

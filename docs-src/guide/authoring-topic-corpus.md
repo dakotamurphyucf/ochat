@@ -54,9 +54,32 @@ topics partition that guide, not the full language specification or runtime API.
 They do not yet provide complete task packages, native tool schemas, feature
 coverage, token budgeting, pagination or model-context insertion.
 
+`runtime_foundation` includes those seven language topics and seven topics from
+the [execution-contract reference](chatml-authoring-runtime.md):
+
+| Topic | Available authoring targets |
+|---|---|
+| `runtime.invocations.contracts` | All four versioned script surfaces |
+| `chatmd.declarations.schemas` | Standalone tools and ordinary/delegated moderators |
+| `runtime.authority.tool-selection` | All four versioned script surfaces |
+| `runtime.invocations.validation` | All four versioned script surfaces |
+| `runtime.invocations.one-off` | One-off scripts |
+| `runtime.invocations.standalone` | Standalone tools |
+| `runtime.invocations.moderator` | Ordinary/delegated moderators |
+
+The target-specific topics include their language, authority, validation and,
+where applicable, declaration/schema prerequisites. Requesting the standalone
+entrypoint topic on a one-off target fails with the requested topic's identity.
+These are reviewed runtime foundations, not complete background-workflow or
+generated-child packages. The complete feature/native-tool inventory, lifecycle
+topics and public helper remain separate requirements.
+
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
-coverage and the 18 actual compiler/behavior examples. Review pin updates must be
+coverage, the 18 language examples and exact source/entrypoint checks for the
+three runtime integration fixtures. The moderator fixture also compiles against
+the delegated surface. Their actual tool/state/restart behavior is checked by the
+linked integration tests. Review pin updates must be
 accompanied by semantic review and the relevant checks, rather than automatically
 accepting new hashes after a failure.

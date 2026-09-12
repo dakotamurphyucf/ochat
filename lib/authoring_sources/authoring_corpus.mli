@@ -87,3 +87,10 @@ val pending : t -> string list
     This is the compact language foundation, not full language/runtime coverage
     or any of the five complete task packages. *)
 val language_foundation : sources:Authoring_sources.t -> (t, string) result
+
+(** Language topics plus seven reviewed runtime topics: execution contracts,
+    extension declarations/schemas, one-off/standalone/moderator invocations,
+    authority and non-executing validation. Target-specific entrypoint topics
+    cannot be assembled for other targets. This remains a foundation, not full
+    background/delegation guidance, native schemas or complete task packages. *)
+val runtime_foundation : sources:Authoring_sources.t -> (t, string) result

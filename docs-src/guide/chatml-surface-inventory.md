@@ -42,6 +42,7 @@ the model-facing authoring reference service require their own maintained covera
 The inventories are a source for that work, not a complete authoring corpus.
 
 See the [checked OCaml differences](chatml-ocaml-differences.md),
+[authoring execution contracts](chatml-authoring-runtime.md),
 [language specification](chatml-language-spec.md),
 [moderator runtime](chatml-moderator-runtime.md), and
 [extensibility foundations](../agent-server/extensibility-foundations.md) for those

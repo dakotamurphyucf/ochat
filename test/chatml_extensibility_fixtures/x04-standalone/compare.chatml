@@ -19,7 +19,8 @@ let run ctx input =
   }))
   else
     let ignored = calls[0] <- calls[0] +. 1.0 in
-    Task.bind(read(left), fun first -> Task.bind(read(right), fun second ->
+    let* first = read(left) in
+    let* second = read(right) in
       match first with
       | `Error(code) -> Task.fail(code)
       | `Ok(left_text) -> (match second with
@@ -28,4 +29,4 @@ let run ctx input =
               { key = "invocation_count"; value = `Number(calls[0]) },
               { key = "left"; value = left_text },
               { key = "right"; value = right_text }
-            ]))))))
+            ]))))

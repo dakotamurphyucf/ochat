@@ -267,14 +267,17 @@ let assemble t ~surface_id ~roots =
     | true, _ when unique roots -> Ok ()
     | _ -> Error "duplicate authoring topic root"
   in
-  let%bind topics = closure t.topics roots in
-  match
-    List.find topics ~f:(fun topic ->
-      not (List.mem topic.specification.surfaces surface_id ~equal:String.equal))
-  with
-  | None -> Ok topics
-  | Some topic ->
-    Error ("authoring topic unavailable on " ^ surface_id ^ ": " ^ topic.specification.id)
+  let%bind () =
+    List.map roots ~f:(fun id ->
+      let%bind requested = topic t ~id in
+      match List.mem requested.specification.surfaces surface_id ~equal:String.equal with
+      | true -> Ok ()
+      | false -> Error ("authoring topic unavailable on " ^ surface_id ^ ": " ^ id))
+    |> Result.all_unit
+  in
+  (* Construction already proved every dependency supports its dependent's
+     surfaces. Report an incompatible requested root before traversing its graph. *)
+  closure t.topics roots
 ;;
 
 let pending t =
@@ -367,4 +370,114 @@ let language_foundation ~sources =
           , "3e9ec46d97c490b33b4894755df3d0addd8023e7ea95fab91c02bc6a6bfe1d04" )
         ]
     ]
+;;
+
+let runtime_foundation ~sources =
+  let open Result.Let_syntax in
+  let%bind language = language_foundation ~sources in
+  let shared = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
+  let managed = [ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
+  let make id title surfaces prerequisites sections =
+    { id
+    ; title
+    ; prerequisites
+    ; surfaces
+    ; excerpts =
+        List.map sections ~f:(fun (heading, _) ->
+          { path = "guide/chatml-authoring-runtime.md"
+          ; heading
+          ; include_children = false
+          })
+    ; review =
+        Audited
+          { excerpt_sha256 = List.map sections ~f:snd
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_authoring.ml"
+              ; "test/chatml_composition/one_off_tests.ml"
+              ; "test/chatml_composition/standalone_tests.ml"
+              ; "test/agent_server_restart_test.ml"
+              ; "lib/chatml/chatml_extension_surface.mli"
+              ; "lib/chat_response/moderator_invocation.mli"
+              ; "lib/chat_response/managed_tool_registry.mli"
+              ; "lib/chatmd_shell_spec/tool_schema.ml"
+              ]
+          }
+    }
+  in
+  let runtime =
+    [ make
+        "runtime.invocations.contracts"
+        "Execution categories and entrypoints"
+        shared
+        [ "chatml.introduction" ]
+        [ ( "# ChatML authoring: execution and invocation contracts"
+          , "cbc5f77d3ba722e09f7e77655c7a9253d1717f64159212b0ddd026c519ebbd9d" )
+        ; ( "## Choose the execution contract"
+          , "f5a91ea0ac03dd83274f223c1f838975d53438b6b1a80319f4bd6981b930ff2f" )
+        ]
+    ; make
+        "chatmd.declarations.schemas"
+        "Extension bindings and schema dialect"
+        managed
+        [ "runtime.invocations.contracts"; "runtime.authority.tool-selection" ]
+        [ ( "## Bind scripts and schemas in ChatMD"
+          , "7202fa9d2c52f73204d61a26ca2267e526bf84b916c78144c1839095f4e60b88" )
+        ]
+    ; make
+        "runtime.authority.tool-selection"
+        "Selected tools and target authority"
+        shared
+        [ "runtime.invocations.contracts" ]
+        [ ( "## Authority and target surfaces"
+          , "0b13a35c7e4faf79b31e02be822c931b449893521651c5860681928ad742a635" )
+        ]
+    ; make
+        "runtime.invocations.validation"
+        "Static checks versus execution admission"
+        shared
+        [ "runtime.authority.tool-selection" ]
+        [ ( "## Non-executing validation"
+          , "ec87fc05c16551292822f460a8e051525b8c8762bc4bf7ed7e37dec87d6ea2d0" )
+        ]
+    ; make
+        "runtime.invocations.one-off"
+        "One-off tool-using computations"
+        [ "one_off_v1" ]
+        [ "runtime.invocations.contracts"
+        ; "chatml.tasks"
+        ; "runtime.authority.tool-selection"
+        ; "runtime.invocations.validation"
+        ]
+        [ ( "## One-off tool-using computations"
+          , "4bcbe559d74a660b742b4d5a5479071d8d060664dc76c8b0fb329b296ec7bf57" )
+        ]
+    ; make
+        "runtime.invocations.standalone"
+        "Standalone tools and outcomes"
+        [ "tool_v1" ]
+        [ "runtime.invocations.contracts"
+        ; "chatml.tasks"
+        ; "chatmd.declarations.schemas"
+        ; "runtime.invocations.validation"
+        ]
+        [ ( "## Standalone tools and explicit outcomes"
+          , "26842dcf524875eb6a6f542406d089049512b4fd951fd2c3804a4afe56f7841c" )
+        ]
+    ; make
+        "runtime.invocations.moderator"
+        "Moderator resolution and retained state"
+        [ "moderator_v1"; "delegated_moderator_v1" ]
+        [ "runtime.invocations.contracts"
+        ; "chatml.tasks"
+        ; "chatmd.declarations.schemas"
+        ; "runtime.invocations.validation"
+        ]
+        [ ( "## Moderator tools and session-owned state"
+          , "65364456f6d94b00a5f4b0cf028ceecc08b2b4b7f31bb3b95d3ff7300edd63dd" )
+        ]
+    ]
+  in
+  create
+    ~sources
+    (List.map (topics language) ~f:(fun topic -> topic.specification) @ runtime)
 ;;

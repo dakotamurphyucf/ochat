@@ -102,7 +102,7 @@ let%expect_test "shared prerequisite closure, surface checks and source-pinned r
     {|
     (base left right root)
     true
-    unavailable: authoring topic unavailable on moderator_v1: base
+    unavailable: authoring topic unavailable on moderator_v1: root
     duplicate root: duplicate authoring topic root
     ((left right root) true)
     stale review: base: audited excerpt hashes changed; review the topic again
@@ -174,5 +174,51 @@ let%expect_test "installed language topics preserve example context and audited 
      chatml.types chatml.operators chatml.tasks chatml.modules)
     ()
     true
+    |}]
+;;
+
+let%expect_test "runtime topics include execution prerequisites without changing targets" =
+  let corpus = C.runtime_foundation ~sources:(sources ()) |> Result.ok_or_failwith in
+  List.iter
+    [ "one_off_v1", "runtime.invocations.one-off"
+    ; "tool_v1", "runtime.invocations.standalone"
+    ; "delegated_moderator_v1", "runtime.invocations.moderator"
+    ]
+    ~f:(fun (surface_id, root) ->
+      let topics =
+        C.assemble corpus ~surface_id ~roots:[ root ] |> Result.ok_or_failwith
+      in
+      let runtime =
+        List.filter_map topics ~f:(fun topic ->
+          let id = topic.C.specification.id in
+          if
+            String.is_prefix id ~prefix:"runtime."
+            || String.is_prefix id ~prefix:"chatmd."
+          then Some id
+          else None)
+      in
+      print_s [%sexp (surface_id : string), (runtime : string list)]);
+  report
+    "wrong entrypoint"
+    (C.assemble
+       corpus
+       ~surface_id:"one_off_v1"
+       ~roots:[ "runtime.invocations.standalone" ]);
+  print_s [%sexp (C.pending corpus : string list)];
+  [%expect
+    {|
+    (one_off_v1
+     (runtime.invocations.contracts runtime.authority.tool-selection
+      runtime.invocations.validation runtime.invocations.one-off))
+    (tool_v1
+     (runtime.invocations.contracts runtime.authority.tool-selection
+      chatmd.declarations.schemas runtime.invocations.validation
+      runtime.invocations.standalone))
+    (delegated_moderator_v1
+     (runtime.invocations.contracts runtime.authority.tool-selection
+      chatmd.declarations.schemas runtime.invocations.validation
+      runtime.invocations.moderator))
+    wrong entrypoint: authoring topic unavailable on one_off_v1: runtime.invocations.standalone
+    ()
     |}]
 ;;
