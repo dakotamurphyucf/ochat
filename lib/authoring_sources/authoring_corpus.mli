@@ -234,6 +234,22 @@ module Coverage : sig
 
   val native_mappings : mapping list
 
+  (** Runtime transaction, work, delivery and recovery contracts. This maintained
+      taxonomy supplements compiler bindings and native request semantics; it
+      does not automatically discover new runtime behavior. *)
+  val runtime_features : semantic_feature list
+
+  (** Requires nonempty unique selections from the four extensibility surfaces.
+      Jobs have mappings on all four; moderator control, subscriptions, timers,
+      notifications and ingress have mappings only on the two moderator surfaces.
+      Readable guidance does not install or authorize any operation. *)
+  val runtime_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  val runtime_mappings : mapping list
+
   (** Digest the complete prerequisite-first topic closure for this surface.
       Every topic must be audited; a prerequisite change invalidates the pin
       even if the root topic's excerpts remain unchanged. *)

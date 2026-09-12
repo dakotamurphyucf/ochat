@@ -539,6 +539,9 @@ module Coverage = struct
   let semantic_features = features Semantic_coverage_data.features
   let declaration_features = features Declaration_coverage_data.features
   let native_features = features Native_coverage_data.features
+  let runtime_shared_features = features Runtime_coverage_data.shared_features
+  let runtime_moderator_features = features Runtime_coverage_data.moderator_features
+  let runtime_features = runtime_shared_features @ runtime_moderator_features
 
   let semantic_contract ~surface_id ~implementation_sources feature =
     let open Result.Let_syntax in
@@ -634,6 +637,21 @@ module Coverage = struct
 
   let native_targets = feature_targets ~namespace:"native" ~features:native_features
 
+  let runtime_targets ~sources ~surface_ids =
+    let open Result.Let_syntax in
+    let%bind _ = compiler_targets ~sources ~surface_ids in
+    List.map surface_ids ~f:(fun surface_id ->
+      let%bind features =
+        match surface_id with
+        | "one_off_v1" | "tool_v1" -> Ok runtime_shared_features
+        | "moderator_v1" | "delegated_moderator_v1" -> Ok runtime_features
+        | _ -> Error "runtime coverage requires an extensibility surface"
+      in
+      feature_targets ~namespace:"runtime" ~features ~sources ~surface_ids:[ surface_id ])
+    |> Result.all
+    |> Result.map ~f:List.concat
+  ;;
+
   let feature_mappings
         ~namespace
         ~features
@@ -684,6 +702,21 @@ module Coverage = struct
       ~implementation_sources:Native_coverage_data.implementation_sources
       ~topic_contracts:Native_coverage_data.topic_contracts
       ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+  ;;
+
+  let runtime_mappings =
+    let map features surface_ids =
+      feature_mappings
+        ~namespace:"runtime"
+        ~features
+        ~implementation_sources:Runtime_coverage_data.implementation_sources
+        ~topic_contracts:Runtime_coverage_data.topic_contracts
+        ~surface_ids
+    in
+    map
+      runtime_shared_features
+      [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    @ map runtime_moderator_features [ "moderator_v1"; "delegated_moderator_v1" ]
   ;;
 
   let grammar_targets ~sources ~surface_ids =

@@ -32,7 +32,7 @@ type implementation_source = private
   ; sha256 : string
   }
 
-(** Build-time hashes of language, declaration and native implementation sources used for semantic
+(** Build-time hashes of language, declaration, native and runtime implementation sources used for semantic
     review. Source bodies are not embedded or opened at runtime. A hash is a
     drift detector, not proof of complete behavioral coverage. *)
 val implementation_sources : t -> implementation_source list

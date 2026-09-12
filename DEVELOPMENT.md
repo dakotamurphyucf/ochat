@@ -19,6 +19,54 @@ prose, use `docs-src` rather than only `docs-src/lib`; indexing may call an embe
 provider and is not part of offline docs validation. The API/odoc indexing workflow
 below is separate. Core is the standard library; new application I/O uses Eio.
 
+## Maintaining the installed authoring reference
+
+The authoring corpus embeds selected `docs-src` guides and compiler-owned
+signatures, so a running agent can retrieve the installed version without this
+checkout or network access. `lib/authoring_sources/dune` also embeds hashes of
+reviewed implementation files; it does not embed their source bodies. Runtime
+reference assembly lives in `lib/authoring_sources/authoring_corpus.ml`.
+
+There are six separate coverage inventories: compiler bindings, grammar
+productions, language semantics, ChatMD declarations, native operations and
+runtime transactions/recovery. Runtime mappings distinguish shared job APIs from
+moderator-only control, subscriptions, timers, notifications and ingress. A topic
+being readable on a surface does not grant its described capabilities.
+
+When changing an inventoried implementation or its documentation:
+
+1. Review the behavior and all affected reference topics, including prerequisites.
+   Add a feature entry when behavior is new; source hashes cannot discover new
+   features. Add the implementation path to the source bundle if necessary.
+2. Update the shared guide and its checked examples. Run the relevant behavior
+   suites named by the mappings; an evidence path is not evidence of a passing run.
+3. Build the maintainer exporter and inspect candidate pins. For runtime contracts:
+
+   ```bash
+   dune build test/authoring_sources/review_coverage.exe
+   _build/default/test/authoring_sources/review_coverage.exe --runtime
+   ```
+
+   `--semantics`, `--declarations`, `--native` and `--grammar` select the other
+   maintained taxonomies. Compiler binding candidates use `MODULE TOPIC_ID`,
+   `--globals TOPIC_ID` or `--alias NAME TOPIC_ID`. An optional list of exact
+   surface IDs limits the report. Output contains candidate hashes for review;
+   the exporter never rewrites approved mappings.
+4. Update only the reviewed source/topic pins in the corresponding coverage data
+   module (compiler bindings are maintained in `authoring_corpus.ml`). A topic pin
+   includes its entire prerequisite closure. After source pins match, use
+   `review_coverage.exe --changed-docs` to identify changed topic closures across
+   all six inventories. Do not regenerate pins automatically in CI.
+5. Run `dune build @test/authoring_sources/runtest @agent-docs-check` and the affected
+   runtime suites. The authoring query service also checks the installed inventories
+   before serving guidance. A stale mapping therefore needs an explicit review.
+
+Inventory tests prove completeness against the maintained feature lists, not
+against every possible runtime behavior. The corpus still reports foundation
+coverage and incomplete prepared packages until the full authoring qualification
+is complete. Offline example checks and the authoring evaluation harness do not
+establish model-quality results; optional provider evaluation is separate.
+
 
 This document explains how to set up a development environment in which
 **all installed libraries in the current opam switch** and this project’s

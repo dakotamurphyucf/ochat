@@ -107,6 +107,7 @@ let create
       ; Coverage.grammar_targets, Coverage.grammar_mappings, shared
       ; Coverage.semantic_targets, Coverage.semantic_mappings, shared
       ; Coverage.native_targets, Coverage.native_mappings, shared
+      ; Coverage.runtime_targets, Coverage.runtime_mappings, shared
       ; ( Coverage.declaration_targets
         , Coverage.declaration_mappings
         , [ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] )

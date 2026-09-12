@@ -13,6 +13,7 @@ type request =
   | Semantics
   | Declarations
   | Native
+  | Runtime
   | Changed_docs
   | Candidates of selection * string
 
@@ -24,6 +25,7 @@ let () =
     | _ :: "--semantics" :: surfaces -> Semantics, surfaces
     | _ :: "--declarations" :: surfaces -> Declarations, surfaces
     | _ :: "--native" :: surfaces -> Native, surfaces
+    | _ :: "--runtime" :: surfaces -> Runtime, surfaces
     | _ :: "--changed-docs" :: surfaces -> Changed_docs, surfaces
     | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
     | _ :: "--alias" :: name :: topic :: surfaces ->
@@ -33,7 +35,7 @@ let () =
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
          ...] | (--missing | --grammar | --semantics | --declarations | --native | \
-         --changed-docs) [SURFACE ...]"
+         --runtime | --changed-docs) [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -105,12 +107,13 @@ let () =
                    ; "contract_sha256", `String target.contract_sha256
                    ])) )
         ]
-    | Semantics | Declarations | Native ->
+    | Semantics | Declarations | Native | Runtime ->
       let module C = Authoring_corpus.Coverage in
       let features, inventory =
         match request with
         | Declarations -> C.declaration_features, C.declaration_targets
         | Native -> C.native_features, C.native_targets
+        | Runtime -> C.runtime_features, C.runtime_targets
         | _ -> C.semantic_features, C.semantic_targets
       in
       let targets = inventory ~sources ~surface_ids:surfaces |> Result.ok_or_failwith in
@@ -151,6 +154,12 @@ let () =
           , `Array
               (List.concat_map surfaces ~f:(fun surface ->
                  features
+                 |> List.filter ~f:(fun feature ->
+                   match request with
+                   | Runtime ->
+                     List.exists targets ~f:(fun target ->
+                       String.equal target.C.id (surface ^ "/runtime/" ^ feature.C.id))
+                   | _ -> true)
                  |> List.map ~f:(fun feature -> feature.topic_id)
                  |> List.dedup_and_sort ~compare:String.compare
                  |> List.map ~f:(fun topic ->
@@ -181,6 +190,7 @@ let () =
         @ (C.grammar_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ (C.semantic_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ (C.native_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
+        @ (C.runtime_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ declaration_targets
         |> List.map ~f:(fun target -> target.C.id, target)
         |> String.Map.of_alist_exn
@@ -191,6 +201,7 @@ let () =
         @ C.semantic_mappings
         @ C.declaration_mappings
         @ C.native_mappings
+        @ C.runtime_mappings
         |> List.filter_map ~f:(fun mapping ->
           match Map.find targets mapping.C.target_id with
           | None ->
