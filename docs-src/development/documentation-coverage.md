@@ -700,6 +700,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatmd-shell-security.md) | `docs-src/guide/chatmd-shell-security.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-background.md) | `docs-src/guide/chatml-authoring-background.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-children.md) | `docs-src/guide/chatml-authoring-children.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-authoring-language.md) | `docs-src/guide/chatml-authoring-language.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-runtime.md) | `docs-src/guide/chatml-authoring-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-implementation-architecture.md) | `docs-src/guide/chatml-implementation-architecture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-language-spec.md) | `docs-src/guide/chatml-language-spec.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

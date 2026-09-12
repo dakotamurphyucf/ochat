@@ -81,8 +81,10 @@ val assemble : t -> surface_id:string -> roots:string list -> (topic list, strin
     this manifest's entries are audited; it does not prove full feature coverage. *)
 val pending : t -> string list
 
-(** Initial seven source-pinned topics from the checked OCaml-differences guide,
+(** Seven source-pinned topics from the checked OCaml-differences guide,
     including the existing chatml.syntax.calls/chatml.types/chatml.tasks IDs.
+    The broad [chatml.programs] topic adds the checked program-writing guide:
+    source/operators, control flow, matching/types, data utilities and effects.
     Shared prerequisite context identifies the examples as one-off candidates.
     This is the compact language foundation, not full language/runtime coverage
     or any of the five complete task packages. *)
@@ -99,5 +101,6 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     subscriptions, timers, notifications, ingress and a checked shell coordinator.
     Notification/example prerequisites include acknowledgement and recovery
     boundaries. This remains a foundation, not complete feature/native-schema
-    coverage, task packages or a model-facing retrieval service. *)
+    coverage or complete task packages. The separate Authoring_context service
+    adds retrieval and selected compiler/tool inventories. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result

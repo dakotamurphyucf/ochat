@@ -289,17 +289,14 @@ let pending t =
 ;;
 
 let language_foundation ~sources =
-  let make id title prerequisites sections =
+  let make ?(path = "guide/chatml-ocaml-differences.md") id title prerequisites sections =
     { id
     ; title
     ; prerequisites
     ; surfaces = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
     ; excerpts =
         List.map sections ~f:(fun (heading, _) ->
-          { path = "guide/chatml-ocaml-differences.md"
-          ; heading
-          ; include_children = false
-          })
+          { path; heading; include_children = false })
     ; review =
         Audited
           { excerpt_sha256 = List.map sections ~f:snd
@@ -368,6 +365,24 @@ let language_foundation ~sources =
         [ "chatml.types"; "chatml.operators" ]
         [ ( "## Tasks are values; the host runs the returned task"
           , "3e9ec46d97c490b33b4894755df3d0addd8023e7ea95fab91c02bc6a6bfe1d04" )
+        ]
+    ; make
+        ~path:"guide/chatml-authoring-language.md"
+        "chatml.programs"
+        "Writing programs: source, control flow, matching and structured data"
+        [ "chatml.tasks"; "chatml.modules" ]
+        [ ( "# Writing ChatML programs"
+          , "6a630398a3512067a4bf364a12a27e4fcd7e66ca1b6aa3a908f1ba6ec9a6f3b2" )
+        ; ( "## Source text and operators"
+          , "e27196e5dfde0d4be194493d8a3c74cfc75154edfa793b25e29b7806cde3b03f" )
+        ; ( "## Functions, loops and modules"
+          , "0fb2be402c3218392e48d5db0e0b31ca4321ccc033c4b643df1df203a4b42290" )
+        ; ( "## Matching and explicit data types"
+          , "edb7f09d1277d7e1c3aed88669efebd7efaddf375eccd1b383a5aae8506b89e0" )
+        ; ( "## Standard library for structured data"
+          , "7096551fff9d2f77779a577d846c44e4bfecfcfa3ba8fad171e0160d3c7ad640" )
+        ; ( "## Effects, errors and execution boundaries"
+          , "00f02e2fb345cd50ba3f9ab75dc834f3d95e8f62895ce214faa63cd74d0d0f8a" )
         ]
     ]
 ;;

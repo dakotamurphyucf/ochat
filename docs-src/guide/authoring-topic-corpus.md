@@ -56,7 +56,16 @@ coverage or model-context insertion. The separate
 [authoring query tool](authoring-context-tool.md) adds flat feature orientation,
 retrieval budgets and pagination over this foundation.
 
-`runtime_foundation` includes those seven language topics and seven topics from
+The additional broad `chatml.programs` topic covers the complete
+[program-writing guide](chatml-authoring-language.md): source/operators,
+functions/loops/modules, matching/types, structured-data utilities and effect
+boundaries. It includes the differences/tasks/modules prerequisites and is
+included in every `prepare` package. Its four complete examples run with no host
+operations: nested comments/precedence, lexical captures and iteration, recursive
+data with open record matching, and a string/array/table/JSON pipeline. This is
+one flat guide, with whole sections preserved during pagination.
+
+`runtime_foundation` includes those eight language topics and seven topics from
 the [execution-contract reference](chatml-authoring-runtime.md):
 
 | Topic | Available authoring targets |

@@ -27,6 +27,10 @@ The map encourages the author to consider capabilities useful to its task, then
 retrieve their contracts. It links directly to substantial sections; prerequisites
 are included automatically. It does not require navigating a deep documentation
 tree. Whole sections and complete examples remain intact when paged.
+Every task package includes the broad `chatml.programs` guide and its checked
+OCaml-differences prerequisites, covering source syntax, control flow, matching,
+types, structured-data utilities and effect boundaries before the task's runtime
+contract. Read all pages when the expanded package needs continuation.
 
 The `agent_create` tool description also explains why to create a persisted
 specialist, reviewer or ongoing worker, describes the follow-up management tools,

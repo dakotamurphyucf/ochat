@@ -195,7 +195,7 @@ let roots task request =
         | `String name -> List.Assoc.find features name ~equal:String.equal
         | _ -> None)
     in
-    Ok (List.dedup_and_sort (base @ extra) ~compare:String.compare)
+    Ok (List.dedup_and_sort (("chatml.programs" :: base) @ extra) ~compare:String.compare)
   | _ -> Error "operation has no topic roots"
 ;;
 
@@ -229,7 +229,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
         "Writing ChatML: OCaml familiarity helps, but call syntax, containers, \
          inference, operators and task execution differ."
         Metadata.One_off_script
-        [ "chatml.tasks"; "chatml.modules" ]
+        [ "chatml.programs" ]
     ; guide
         "One-off scripts"
         "Combine selected tools with filtering, transformation and branching in one \
