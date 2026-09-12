@@ -699,6 +699,27 @@ let close_store_on_error store result =
 
 let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built prompts =
   let open Result.Let_syntax in
+  let%bind configured_helpers =
+    Session_helper_policy.grants
+      ~env
+      ~protected_paths:
+        ([ config.source_file; config.server.data_dir; config.server.unix_socket ]
+         @ Option.to_list config.server.http.static_tokens_file)
+      config.server.session_helpers
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    match configured_helpers, options.session_helpers with
+    | _ :: _, _ :: _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "configure session helpers through either server configuration or host \
+            callbacks")
+    | _ -> Ok ()
+  in
+  let options =
+    { options with session_helpers = configured_helpers @ options.session_helpers }
+  in
   let%bind options =
     match options.qualify_chatml_extensions with
     | false -> Ok options

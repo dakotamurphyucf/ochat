@@ -95,6 +95,7 @@ let run env helper ~native_watch =
     ~f:(fun () ->
       let public = Filename.concat root "public" in
       Eio.Path.mkdir ~perm:0o700 (path public);
+      Eio.Path.symlink ~link_to:root (path (Filename.concat public "escape"));
       let helper_path = Filename.concat public "helper" in
       List.iter
         [ helper, helper_path ]
@@ -136,7 +137,18 @@ let run env helper ~native_watch =
   <audit format="none"/>
 </shell_access>
 <tool name="session_bridge" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
-<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>|}
+<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<tool name="bad_helper_digest" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<tool name="bad_helper_environment" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<tool name="bad_helper_arguments" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<shell_access id="helper_escape" cwd="${workspace}">
+  <capabilities sandbox="required" network="false" child_processes="true" arbitrary_code="true" privilege_change="false"><read path="${workspace}/escape"/></capabilities>
+  <environment inherit="selected"><set name="PATH" value="/usr/bin:/bin"/></environment>
+  <policy default="allow"/>
+  <limits wall_time="30s" idle_time="none"/>
+  <audit format="none"/>
+</shell_access>
+<tool name="bad_helper_roots" type="shell" mode="fixed" runtime="helper_escape" command="./helper" stdin="required" result="stdout"/>|}
          ^ helper_tools
          ^ watch_tools
          ^
@@ -160,44 +172,41 @@ let run env helper ~native_watch =
               })
         }
       in
-      let authorization_times = ref [] in
       let grant name allowed =
-        Agent_session.Session_management_channel.grant
-          ~policy_revision:"helper-fixture-v1"
-          ~tool_name:name
-          ~allowed
-          ~limits:Shell_access.Request_channel.default_limits
-          ~authorize:(fun context ->
-            authorization_times
-            := (name, Eio.Time.now (Eio.Stdenv.clock env)) :: !authorization_times;
-            let caps = context.Shell_access.Context.capabilities in
-            match
-              String.equal context.executable.canonical_path helper_path
-              && List.equal
-                   String.equal
-                   (List.map caps.read_roots ~f:(String.rstrip ~drop:(Char.equal '/')))
-                   [ public ]
-              && List.is_empty caps.write_roots
-              && Array.for_all context.environment ~f:(fun entry ->
-                List.mem
-                  [ "PATH=/bin:/usr/bin"
-                  ; "PAGER=cat"
-                  ; "GIT_PAGER=cat"
-                  ; "TERM=dumb"
-                  ; "NO_COLOR=1"
-                  ]
-                  entry
-                  ~equal:String.equal)
-            with
-            | true -> Ok ()
-            | false -> Error "helper must retain the exact public-only fixture boundary")
-        |> Result.ok_or_failwith
+        let limits = Shell_access.Request_channel.default_limits in
+        Agent_server.Session_helper_policy.
+          { tool_name = name
+          ; executable = helper_path
+          ; executable_sha256 =
+              Eio.Path.load (path helper_path) |> Chatmd_shell_spec.Source_ref.digest
+          ; arguments = []
+          ; operations =
+              List.map allowed ~f:Agent_session.Session_management.operation_to_string
+          ; read_roots = [ public ]
+          ; environment =
+              [ "PATH=/bin:/usr/bin"
+              ; "PAGER=cat"
+              ; "GIT_PAGER=cat"
+              ; "TERM=dumb"
+              ; "NO_COLOR=1"
+              ]
+          ; private_paths = [ Filename.concat root "private-fixture.txt" ]
+          ; max_request_bytes = limits.max_request_bytes
+          ; max_response_bytes = limits.max_response_bytes
+          ; max_requests = limits.max_requests
+          }
       in
       let grants =
         [ grant
             "session_bridge"
             [ Create; Send; Read; Status; Wait; Stop; Reference; Validate ]
         ; grant "session_view" [ Read; Status; Wait ]
+        ; { (grant "bad_helper_digest" [ Create ]) with
+            executable_sha256 = String.make 64 '0'
+          }
+        ; { (grant "bad_helper_environment" [ Create ]) with environment = [] }
+        ; { (grant "bad_helper_arguments" [ Create ]) with arguments = [ "unexpected" ] }
+        ; grant "bad_helper_roots" [ Create ]
         ]
       in
       let authoring_host =
@@ -296,14 +305,16 @@ let run env helper ~native_watch =
             D.start
               ~sw
               ~env
-              ~config:configuration
+              ~config:
+                { configuration with
+                  server = { configuration.server with session_helpers = grants }
+                }
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
               ~options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; session_helpers = grants
                 ; authoring_validation_host = Some authoring_host
                 ; model_post_stream = Some provider
                 }
@@ -584,8 +595,40 @@ let run env helper ~native_watch =
               ; "arguments", child_request
               ]
           in
+          List.iter
+            [ "bad_helper_digest"
+            ; "bad_helper_environment"
+            ; "bad_helper_arguments"
+            ; "bad_helper_roots"
+            ]
+            ~f:(fun name ->
+              let before =
+                List.length (Agent_store.Session_store.list_sessions (D.store daemon))
+              in
+              (match
+                 invoke_status
+                   sw
+                   daemon
+                   client
+                   parent.id
+                   name
+                   (`Object [ "stdin", `String (Jsonaf.to_string create_envelope) ])
+               with
+               | Published (Complete (`String source)) ->
+                 let error = Jsonaf.of_string source |> field "error" in
+                 [%test_eq: string] "denied" (text error "code");
+                 [%test_eq: string]
+                   "command denied: session helper execution differs from its operator \
+                    grant"
+                   (text error "message")
+               | status ->
+                 raise_s
+                   [%sexp
+                     "unsafe helper was not rejected", (status : P.Invocation.status)]);
+              [%test_eq: int]
+                before
+                (List.length (Agent_store.Session_store.list_sessions (D.store daemon))));
           let created =
-            authorization_times := [];
             let creation_started = Eio.Time.now (Eio.Stdenv.clock env) in
             let job_id =
               match
@@ -601,15 +644,10 @@ let run env helper ~native_watch =
               List.iter current.jobs ~f:(fun job ->
                 match job.status with
                 | Failed _ | Cancelled | Interrupted _ ->
-                  let authorization_checkpoints =
-                    List.rev_map !authorization_times ~f:(fun (name, time) ->
-                      name, time -. creation_started)
-                  in
+                  let elapsed = Eio.Time.now (Eio.Stdenv.clock env) -. creation_started in
                   raise_s
                     [%sexp
-                      "asynchronous helper failed"
-                    , (authorization_checkpoints : (string * float) list)
-                    , (job : P.Job.t)]
+                      "asynchronous helper failed", (elapsed : float), (job : P.Job.t)]
                 | _ -> ());
               Option.is_none current.active_operation
               && List.exists current.deliveries ~f:(fun delivery ->
@@ -853,10 +891,19 @@ let run env helper ~native_watch =
           in
           assert (Jsonaf.bool_exn (field "caught_up" snapshot));
           let cursor_query = target @ [ "cursor", field "next_cursor" snapshot ] in
+          let cursor_started = Eio.Time.now (Eio.Stdenv.clock env) in
+          let cursor_steps = ref [] in
+          let cursor_step name =
+            cursor_steps
+            := (name, Eio.Time.now (Eio.Stdenv.clock env) -. cursor_started)
+               :: !cursor_steps
+          in
           let cursor_watch = start_watch sw daemon client parent.id cursor_query in
           await_timer daemon parent.id cursor_watch;
+          cursor_step "watch armed";
           let cancelled_watch = start_watch sw daemon client parent.id cursor_query in
           await_timer daemon parent.id cancelled_watch;
+          cursor_step "cancellation watch armed";
           let calls_before_cancel = !child_calls in
           [%test_eq: string]
             "cancelled"
@@ -872,6 +919,7 @@ let run env helper ~native_watch =
            | result ->
              raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
           [%test_eq: int] calls_before_cancel !child_calls;
+          cursor_step "second watch cancelled";
           assert (
             P.Session.equal_desired_state (state daemon child).lifecycle.desired Running);
           ignore
@@ -887,6 +935,7 @@ let run env helper ~native_watch =
                       ; "idempotency_key", `String "cursor-message"
                       ]))
              |> complete);
+          cursor_step "future output sent";
           (match await_watch daemon parent.id cursor_watch with
            | Succeeded page ->
              assert (
@@ -895,7 +944,12 @@ let run env helper ~native_watch =
                  ~substring:"persisted helper answer");
              assert (
                not (String.equal (text page "next_cursor") (text snapshot "next_cursor")))
-           | result -> raise_s [%sexp "cursor watch failed", (result : P.Completion.t)]);
+           | result ->
+             raise_s
+               [%sexp
+                 "cursor watch failed"
+               , (result : P.Completion.t)
+               , (List.rev !cursor_steps : (string * float) list)]);
           check_watch_notifications daemon parent.id;
           let foreign, _ =
             create_session ~start_immediately:true ~key:"foreign-parent" client

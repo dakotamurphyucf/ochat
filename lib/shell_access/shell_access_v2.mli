@@ -526,6 +526,12 @@ module Backend : sig
   val macos_seatbelt : t
   val linux_bubblewrap : ?executable:string -> unit -> t
 
+  (** Conservative union of implicit readable paths for both request-channel
+      backends, including their device/process namespaces. Host helper policies
+      must account for these paths in addition to explicit capability roots.
+      These are not grants for an unsandboxed process. *)
+  val request_channel_implicit_read_roots : string list
+
   val external_
     :  name:string
     -> wrapper:Executable.t

@@ -66,6 +66,10 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; session_helpers : Session_helper_policy.t list [@sexp.list]
+      (** Explicit operator grants for optional external helpers. Changes require
+          restart. The helpers still require declared shell tools and normal
+          execution authorization. *)
     ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
       (** Captured host conventions loaded during configuration validation.
           Changes require restart; package presence never enables extensions. *)

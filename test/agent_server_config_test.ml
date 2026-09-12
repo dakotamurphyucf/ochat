@@ -144,6 +144,96 @@ let%expect_test "authoring budgets validate as a captured server configuration" 
     |}]
 ;;
 
+let%expect_test
+    "helper configuration pins its public boundary and rejects credential exposure"
+  =
+  with_fixture (fun env temporary workspace prompt token_file ->
+    let source_file = Filename.concat temporary "server.sexp" in
+    let helper = Filename.concat workspace "helper" in
+    Eio.Path.save
+      ~create:(`Exclusive 0o700)
+      Eio.Path.(Eio.Stdenv.fs env / helper)
+      "fixture";
+    let sha = Chatmd_shell_spec.Source_ref.digest "fixture" in
+    let policy =
+      sprintf
+        "((tool_name session_bridge) (executable %S) (executable_sha256 %s) (operations \
+         (read status reference validate)) (read_roots (%S)) (environment \
+         (\"PATH=/bin:/usr/bin\")) (private_paths (%S)))"
+        helper
+        sha
+        workspace
+        token_file
+    in
+    let text policies =
+      String.substr_replace_first
+        (config_text ~workspace ~prompt ~http:"((enabled false))")
+        ~pattern:"(shutdown_grace_ms 30000)"
+        ~with_:("(session_helpers (" ^ policies ^ "))")
+    in
+    let configured = validated_exn env source_file (text policy) in
+    let captured = List.hd_exn configured.server.session_helpers in
+    [%test_eq: string list]
+      [ "read"; "status"; "reference"; "validate" ]
+      captured.operations;
+    assert (String.equal captured.executable helper);
+    let revised =
+      { configured with server = { configured.server with session_helpers = [] } }
+    in
+    assert
+      (Agent_server.Config_diff.between ~previous:configured ~current:revised)
+        .server_changed;
+    let reject label value =
+      match validate env source_file (text value) with
+      | Error _ -> print_endline (label ^ ": rejected")
+      | Ok _ -> failwith (label ^ " unexpectedly admitted")
+    in
+    reject "duplicate tool grants" (policy ^ " " ^ policy);
+    List.iter
+      [ "unknown operation", "(read status reference validate)", "(read approve)"
+      ; "invalid digest", sha, "no-digest"
+      ; ( "broader read root"
+        , sprintf "(read_roots (%S))" workspace
+        , sprintf "(read_roots (%S))" temporary )
+      ; ( "implicit platform credential"
+        , sprintf "(private_paths (%S))" token_file
+        , "(private_paths (/etc/ochat/private-token))" )
+      ; ( "duplicate environment key"
+        , "(environment (\"PATH=/bin:/usr/bin\"))"
+        , "(environment (\"PATH=/bin\" \"PATH=/usr/bin\"))" )
+      ; ( "zero frame budget"
+        , "(tool_name session_bridge)"
+        , "(tool_name session_bridge) (max_request_bytes 0)" )
+      ]
+      ~f:(fun (label, pattern, with_) ->
+        reject label (String.substr_replace_first policy ~pattern ~with_));
+    let alias = Filename.concat temporary "public-link" in
+    Eio.Path.symlink ~link_to:workspace Eio.Path.(Eio.Stdenv.fs env / alias);
+    let linked =
+      String.substr_replace_first
+        policy
+        ~pattern:(sprintf "(read_roots (%S))" workspace)
+        ~with_:(sprintf "(read_roots (%S))" alias)
+    in
+    ignore (validated_exn env source_file (text linked) : Agent_server.Config.t);
+    Eio.Path.unlink Eio.Path.(Eio.Stdenv.fs env / alias);
+    Eio.Path.symlink ~link_to:temporary Eio.Path.(Eio.Stdenv.fs env / alias);
+    reject "symlink to private ancestor" linked;
+    print_endline "explicit operations captured; helper policy changes require restart");
+  [%expect
+    {|
+    duplicate tool grants: rejected
+    unknown operation: rejected
+    invalid digest: rejected
+    broader read root: rejected
+    implicit platform credential: rejected
+    duplicate environment key: rejected
+    zero frame budget: rejected
+    symlink to private ancestor: rejected
+    explicit operations captured; helper policy changes require restart
+  |}]
+;;
+
 let%expect_test "configuration normalizes paths and preflights ChatMD" =
   with_fixture (fun env temporary workspace prompt token_file ->
     let source_file = Filename.concat temporary "server.sexp" in

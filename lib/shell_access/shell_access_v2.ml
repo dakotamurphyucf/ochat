@@ -1852,6 +1852,15 @@ module Backend = struct
     Printf.sprintf "(allow %s (subpath \"%s\"))" operation (seatbelt_escape path)
   ;;
 
+  let macos_read_roots = [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
+  let linux_read_roots = [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
+
+  let request_channel_implicit_read_roots =
+    List.dedup_and_sort
+      ~compare:String.compare
+      (macos_read_roots @ linux_read_roots @ [ "/dev"; "/proc" ])
+  ;;
+
   let macos_seatbelt =
     { name = "macos-seatbelt"
     ; request_channel_supported = true
@@ -1868,7 +1877,7 @@ module Backend = struct
           let context = plan.Execution_plan.context in
           let executable = context.executable.canonical_path in
           let read_roots =
-            [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
+            macos_read_roots
             @ context.capabilities.read_roots
             @ context.capabilities.write_roots
           in
@@ -1920,9 +1929,7 @@ module Backend = struct
           let target = context.executable.canonical_path in
           let bind flag path = [ flag; path; path ] in
           let system_roots =
-            List.filter
-              [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
-              ~f:(Path_util.file_exists ~fs)
+            List.filter linux_read_roots ~f:(Path_util.file_exists ~fs)
           in
           let argv =
             [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]

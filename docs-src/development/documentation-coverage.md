@@ -225,6 +225,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/schedule_scheduler.mli` | [contract](../../lib/agent_server/schedule_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/session_capacity.mli` | [contract](../../lib/agent_server/session_capacity.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_factory.mli` | [contract](../../lib/agent_server/session_factory.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_server/session_helper_policy.mli` | [contract](../../lib/agent_server/session_helper_policy.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/session_registry.mli` | [contract](../../lib/agent_server/session_registry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_server/start_scheduler.mli` | [contract](../../lib/agent_server/start_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/active_calls.mli` | [contract](../../lib/agent_session/active_calls.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

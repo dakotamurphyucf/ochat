@@ -79,6 +79,7 @@ let data_root env options =
 let server_config data_root =
   Config.Server.
     { data_dir = data_root
+    ; session_helpers = []
     ; authoring_packages = []
     ; authoring_budget = None
     ; unix_socket = Filename.concat data_root "agent.sock"

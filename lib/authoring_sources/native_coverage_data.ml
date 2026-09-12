@@ -158,9 +158,13 @@ let features =
     , [ "lib/agent_session/session_management.ml"
       ; "lib/agent_session/session_management_native.ml"
       ; "lib/agent_session/authoring_services.ml"
+      ; "lib/agent_session/session_management_channel.ml"
+      ; "lib/agent_server/session_helper_policy.ml"
+      ; "lib/shell_access/shell_access_v2.ml"
       ]
     , "runtime.delegation.stop-helper"
     , [ "test/agent_server_helper_test.ml"
+      ; "test/agent_server_config_test.ml"
       ; "test/chatml_composition/authoring_reference_scope_tests.ml"
       ] )
   ]
@@ -169,6 +173,12 @@ let features =
 let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
     , "3badd86d40e4ae6546132c664944bb851b42b40a14aa9fab9c916d4c10d6a5a0" )
+  ; ( "lib/agent_session/session_management_channel.ml"
+    , "500d45a8cbe760a50bc256df47255dc6fa5e1305f74a543d49c9c2e02e36de51" )
+  ; ( "lib/agent_server/session_helper_policy.ml"
+    , "e88605f0d6f0fc512589ccd9546e5f8e741216dfa321ec66919b64c88d2958e1" )
+  ; ( "lib/shell_access/shell_access_v2.ml"
+    , "e7ad6759056fc468c162e4bd800555218db9bf45048392ec0f33552f9fea3504" )
   ; ( "lib/agent_server/delegated_runtime.ml"
     , "b2f4ae578f7dddd08bb5503f16af4a9c86c5b87c2c5250f318a425103297c374" )
   ; ( "lib/agent_server/delegation_lifecycle.ml"

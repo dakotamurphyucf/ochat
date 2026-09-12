@@ -112,6 +112,9 @@
     lib/agent_session/script_tool_calls.ml %{dep:../agent_session/script_tool_calls.ml}
     lib/agent_session/session_management.ml %{dep:../agent_session/session_management.ml}
     lib/agent_session/session_management_native.ml %{dep:../agent_session/session_management_native.ml}
+    lib/agent_session/session_management_channel.ml %{dep:../agent_session/session_management_channel.ml}
+    lib/agent_server/session_helper_policy.ml %{dep:../agent_server/session_helper_policy.ml}
+    lib/shell_access/shell_access_v2.ml %{dep:../shell_access/shell_access_v2.ml}
     lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
     lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
     lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}

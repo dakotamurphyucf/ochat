@@ -111,6 +111,71 @@ when filenames remain the same. The active snapshot stays unchanged on failure.
 This configuration path is implemented for internally qualified authoring hosts;
 general extension exposure remains gated.
 
+### Scoped external session helpers
+
+`server.session_helpers` optionally grants a named shell tool access to the same
+caller-scoped session services used by the native session tools. It defaults to
+`[]`; declaring a shell tool alone grants no management channel. This configuration
+path is qualified internally; the general extension rollout is still gated.
+
+For example, add the following field to `server`. The paths and digest are
+deployment placeholders. Keep the daemon configuration itself, store, socket and
+credentials outside the public helper directory and platform support directories.
+
+```lisp
+(session_helpers
+ (((tool_name session_bridge)
+   (executable /srv/ochat-helper-public/ochat-agent-helper)
+   (executable_sha256 REPLACE_WITH_EXECUTABLE_SHA256)
+   (arguments ())
+   (operations (create send read status wait stop reference validate))
+   (read_roots (/srv/ochat-helper-public))
+   (environment
+    ("PATH=/bin:/usr/bin" "PAGER=cat" "GIT_PAGER=cat" "TERM=dumb" "NO_COLOR=1"))
+   (private_paths (/srv/ochat-private/provider-credentials))
+   (max_request_bytes 16777216)
+   (max_response_bytes 1048576)
+   (max_requests 128))))
+```
+
+The tool must separately declare a fixed shell command, supplied stdin, a required
+verified sandbox, no networking or privilege changes, and read-only capabilities
+within these roots. The normal manifest, shell policy and approval rules still
+apply. This field neither adds the tool to an agent nor expands its inherited
+tool/file authority. Native session tool registrations are unnecessary.
+
+The optional `ochat-agent-helper` executable accepts one compact JSON envelope on
+stdin: `{"version":1,"operation":"status","arguments":{"session_id":"…"}}`.
+Its stdout is the shared JSON invocation outcome; diagnostics go to stderr. It
+uses only the private request/response pipes lent to that shell invocation, with
+no daemon socket discovery or credential fallback. Persisted children survive
+normal helper exit. Ochat does not launch this executable unless the author
+chooses this external extension route; native tools use in-process services.
+
+Every helper policy requires the tool name, executable path and SHA-256, nonempty
+operation list, nonempty read roots and exact permitted `NAME=value` environment
+entries. `arguments` and `private_paths` default to empty lists. The three frame
+limits default to the values above; they are positive, and request/response byte
+limits must leave room for framing. `reference` and `validate` grant read-only
+authoring assistance separately from lifecycle mutation. Operation names,
+unknown/duplicate fields and duplicate tool grants are validated at configuration
+load. Policy changes require restart and invalidate old authored resource bindings.
+
+The final executable digest and argv, cwd, resolved read roots and every actual
+environment entry are checked at dispatch and before disclosure. No write roots
+are allowed. Configured directory symlinks are resolved and rechecked. The policy
+rejects overlap with the daemon configuration, data directory, control socket,
+HTTP token file and additional `private_paths`, including through either supported
+sandbox's implicit platform roots. For this extension route, credentials or the
+daemon config under `/etc`, `/usr` or another implicit readable platform directory
+must move to a private location. The operator remains responsible for keeping
+other secrets out of the explicitly shared directories and environment values.
+Unavailable confinement or a changed boundary fails closed; no unconfined fallback
+is provided. Trusted OCaml hosts may instead supply callback grants, but cannot
+combine them with configured grants in the same daemon.
+
+### Other server settings
+
 `unix_socket` is always enabled. Its parent directory must already be private,
 owned by the effective user, and not writable by other users. Startup probes
 an existing socket before removing a stale node. Unix clients authenticate

@@ -5,6 +5,7 @@
   config
   config_parser
   authoring_options
+  session_helper_policy
   authenticator
   config_validator
   config_diff
