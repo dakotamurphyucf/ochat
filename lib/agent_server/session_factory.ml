@@ -6992,6 +6992,17 @@ let create
       ~durability
       ~limits
   =
+  let authoring_validation_host =
+    match qualify_chatml_extensions with
+    | false -> authoring_validation_host
+    | true ->
+      Agent_session.Authoring_runtime.configure_host
+        ?host:authoring_validation_host
+        ~policy:Chat_response.One_off_request.default_policy
+        ()
+      |> Result.ok_or_failwith
+      |> Option.some
+  in
   let profiles =
     List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
       Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)

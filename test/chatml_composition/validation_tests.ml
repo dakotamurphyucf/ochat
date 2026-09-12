@@ -59,25 +59,26 @@ let%expect_test
              Option.is_some
                (Jsonaf.member "validation_id" report |> Option.bind ~f:Jsonaf.string));
            print_s [%sexp (id : string), (valid : bool)]));
-  let unavailable =
-    Result.try_with (fun () ->
-      with_daemon
-        ~sources:[ "agent.chatmd", agent ]
-        ~calls:[]
-        (fun _ -> failwith "unconfigured validator was exposed"))
-  in
-  let rejected =
-    match unavailable with
-    | Error exn ->
-      String.is_substring (Exn.to_string exn) ~substring:"authoring.unavailable"
-    | Ok () -> false
-  in
-  assert rejected;
-  print_endline "unconfigured helper is rejected before session execution";
+  with_daemon
+    ~sources:[ "agent.chatmd", agent ]
+    ~calls:[ "default", "ochat_validate", request good ]
+    (fun state ->
+       assert (List.is_empty (native_reads state));
+       let report =
+         match result state "default" with
+         | Complete (`String text) -> Jsonaf.of_string text
+         | other -> raise_s [%sexp (other : I.outcome)]
+       in
+       assert (Jsonaf.member_exn "valid" report |> Jsonaf.bool_exn);
+       assert (
+         String.equal
+           (Jsonaf.member_exn "runtime_identity" report |> Jsonaf.string_exn)
+           "ochat.extensibility.v1"));
+  print_endline "qualified host supplies default readonly validation";
   [%expect
     {|
     (good true)
     (bad false)
-    unconfigured helper is rejected before session execution
+    qualified host supplies default readonly validation
     |}]
 ;;

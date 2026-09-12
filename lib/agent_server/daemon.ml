@@ -698,6 +698,18 @@ let close_store_on_error store result =
 
 let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built prompts =
   let open Result.Let_syntax in
+  let%bind options =
+    match options.qualify_chatml_extensions with
+    | false -> Ok options
+    | true ->
+      Agent_session.Authoring_runtime.configure_host
+        ?host:options.authoring_validation_host
+        ~policy:Chat_response.One_off_request.default_policy
+        ()
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      |> Result.map ~f:(fun host ->
+        { options with authoring_validation_host = Some host })
+  in
   let%bind implementation = implementation options in
   let%bind http_authenticator = http_authenticator ~env config.server in
   let%bind oauth_bearer_validator = oauth_bearer_validator options config.server in

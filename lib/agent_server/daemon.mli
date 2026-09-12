@@ -41,8 +41,10 @@ type options =
     (** Initial policy for newly qualified runtimes. Existing sessions retain
         their recorded policy across reload/restart. No CLI/configuration flag. *)
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
-    (** Explicit target identity/policy for readonly helper qualification. None
-        by default; no model-supplied context or automatic public exposure. *)
+    (** Optional target identity/policy for readonly helper qualification. With
+        the internal extension gate enabled, None selects the installed native
+        targets/catalog. An explicit host retains its target/compiler/source
+        restrictions. This does not enable public extensions or effect grants. *)
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 

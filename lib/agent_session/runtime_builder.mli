@@ -22,6 +22,7 @@ type resources = private
   { native : Chat_response.Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
+  ; authoring : Authoring_runtime.t option
   }
 
 (** Reconstruct an authored revision's resources using the same native/extension
@@ -137,9 +138,9 @@ type extension_services =
     (** Host ceiling for explicitly declared run_chatml. Supplying policy never
         adds the tool to a document that did not declare it. *)
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
-    (** Explicit readonly-helper target identity/policy. None leaves the helper
-        unavailable. A01 supplies the compatible installed runtime/corpus host;
-        internal qualification may supply its known target identity. *)
+    (** Optional readonly-helper target identity/policy. Qualified construction
+        supplies installed defaults when omitted. An explicit host retains its
+        target/compiler/source restrictions; retrieval grants no effect authority. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool

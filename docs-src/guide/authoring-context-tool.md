@@ -1,11 +1,21 @@
 # Query authoring documentation from an agent
 
 `ochat_authoring_context` retrieves installed ChatML, ChatMD and runtime reference
-text without network access or model calls. On an internally qualified extension
-host with an authoring validation target, explicitly declare
-`<tool name="ochat_authoring_context"/>` to expose the native tool. General public
-enablement, automatic helper installation and primer/preload insertion are still
-pending. The current corpus is a reviewed foundation, not complete feature coverage.
+text without network access or model calls. Internally qualified extension hosts
+now supply this helper and `ochat_validate` automatically for declared authoring
+tools such as `run_chatml` and `agent_create`. You can also explicitly declare
+`<tool name="ochat_authoring_context"/>`. General public enablement remains pending;
+the current corpus is a reviewed foundation, not complete feature coverage.
+
+The default `auto` policy inserts one shared primer before the first model request
+that can author code, with deeper retrieval available through the helpers.
+`<authoring_context policy="manual"/>` adds neither prose nor helper tools; declare
+the helpers yourself when wanted. `preload` adds complete requested topic closures,
+for example `<authoring_context policy="preload" topics="chatml.tasks"/>` alongside
+`<tool name="run_chatml"/>`. Shared prerequisites appear once, and incompatible or
+over-budget preloads fail admission. Agents without authoring tools gain no
+automatic tools or prose. Intent comes from explicit implementation/help metadata,
+not from a tool name containing “script.”
 
 The shared [authoring primer](chatml-authoring-primer.md) is now included in the
 installed corpus as `authoring.primer`. Its `let*` example is compiled and run by
@@ -35,10 +45,17 @@ Successful additions enter both canonical history and provider input, without a
 new user-submission event or a second append by the stream callback. They are
 inspectable through history/export and survive persistence. Provider retries do
 not repeat insertion, and legacy fork calls do not inherit the root hook.
-Root/generated registration must still select and install these factories;
-automatic helper exposure, bounded receipt retention and public auto/preload
-enablement remain open. Manual and ordinary-tool policies produce no automatic
-messages. The current complete serialized primer payload
+Root registration now installs these factories after resolving the actual native
+and managed tool registry. Generated agents use their admitted policy and their
+own session scope. Automatic helper selection stays within the parent's requested
+delegation ceiling: omitting required helper bindings rejects admission rather
+than widening the child's authority. A child merely consuming an ordinary tool
+does not inherit implementation-authoring prose. Runtime reload rechecks the
+effective history before inserting anything again.
+
+Complete custom-package/description integration, bounded context retention and
+public qualification remain open. Manual and ordinary-tool policies produce no
+automatic messages. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
 this exceeds the initial 800-token engineering target and is not a tokenizer or
 model-quality measurement.

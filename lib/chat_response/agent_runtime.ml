@@ -533,7 +533,8 @@ let create_native
   if
     List.exists prompt_elements ~f:(function
       | CM.Extension_script _ | Tool (Extension _) -> not extension_resources
-      | Tool (Inherited _) | Authoring_context _ | Authoring_help _ -> true
+      | Tool (Inherited _) -> true
+      | Authoring_context _ | Authoring_help _ -> not extension_resources
       | _ -> false)
   then
     Error
@@ -641,7 +642,12 @@ let create_native
                             function_name value.implementation, value.result_contract))
                        ~declarations:
                          (List.filter_map prompt_elements ~f:(function
-                            | CM.Authoring_help help -> Some help
+                            | CM.Authoring_help help
+                              when not
+                                     (List.exists declarations.tools ~f:(function
+                                        | CM.Extension tool ->
+                                          String.equal tool.name help.tool
+                                        | _ -> false)) -> Some help
                             | _ -> None))
                        ~owner:host.session_id
                        ~resource_fingerprint

@@ -559,12 +559,16 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     | _ -> None)
                 in
                 [%test_eq: string list]
-                  (List.sort
-                     (match mode with
-                      | `Standalone_one_off -> [ tool_name; "read_file"; "run_chatml" ]
-                      | `One_off_managed | `One_off_moderator ->
-                        [ "counter"; "read_file"; "run_chatml" ]
-                      | _ -> [ tool_name; "read_file" ])
+                  ((match mode with
+                    | `Standalone_one_off -> [ tool_name; "read_file"; "run_chatml" ]
+                    | `One_off_managed | `One_off_moderator ->
+                      [ "counter"; "read_file"; "run_chatml" ]
+                    | _ -> [ tool_name; "read_file" ])
+                   |> fun expected ->
+                   List.sort
+                     (if List.mem expected "run_chatml" ~equal:String.equal
+                      then expected @ [ "ochat_authoring_context"; "ochat_validate" ]
+                      else expected)
                      ~compare:String.compare)
                   (List.sort names ~compare:String.compare);
                 let writer, _ =

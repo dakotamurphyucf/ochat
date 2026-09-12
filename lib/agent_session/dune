@@ -71,6 +71,7 @@
   authoring_validation_tool
   authoring_context_tool
   authoring_services
+  authoring_runtime
   moderator_observation
   moderator_event
   observation_follow_up

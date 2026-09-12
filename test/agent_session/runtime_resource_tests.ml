@@ -110,7 +110,14 @@ let run ctx input =
         |> List.map ~f:(fun r -> r.C.name)
         |> List.sort ~compare:String.compare
       in
-      [%test_eq: string list] [ "read_file"; "reader"; "run_chatml" ] (names original);
+      [%test_eq: string list]
+        [ "ochat_authoring_context"
+        ; "ochat_validate"
+        ; "read_file"
+        ; "reader"
+        ; "run_chatml"
+        ]
+        (names original);
       let helper = C.find (capabilities original) ~name:"run_chatml" |> capability_ok in
       assert (C.equal_result_contract (C.result_contract helper) Invocation_v1);
       let child_definition parent =

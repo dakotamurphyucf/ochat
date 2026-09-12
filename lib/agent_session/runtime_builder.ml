@@ -23,6 +23,7 @@ type resources =
   { native : Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
   ; managed : Chat_response.Managed_tool_registry.t option
+  ; authoring : Authoring_runtime.t option
   }
 
 type prepare_enqueue =
@@ -279,7 +280,7 @@ let declares_native elements name =
     | _ -> false)
 ;;
 
-let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host =
+let build_native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host =
   let registrations =
     match declares_native elements Run_chatml_tool.name, one_off_policy with
     | true, Some policy ->
@@ -396,10 +397,54 @@ let create_authored_resources
     | false -> Ok ()
     | true -> Error (failure "authored delegation requires an extensibility-v1 moderator")
   in
+  let%bind authoring_validation_host =
+    match one_off_policy with
+    | None -> Ok authoring_validation_host
+    | Some policy ->
+      Authoring_runtime.configure_host ?host:authoring_validation_host ~policy ()
+      |> Result.map ~f:(fun host ->
+        Some
+          (if delegated_moderator
+           then Chat_response.Authoring_validation.for_delegated host
+           else host))
+      |> Result.map_error ~f:failure
+  in
   let%bind native_registrations =
-    native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
+    build_native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
   in
   let native_registrations = native_registrations @ additional_native_registrations in
+  let source_elements = elements in
+  let%bind elements =
+    match authoring_validation_host with
+    | None -> Ok elements
+    | Some _ ->
+      Authoring_runtime.augment ~registrations:native_registrations elements
+      |> Result.map_error ~f:failure
+  in
+  let%bind helpers =
+    let elements =
+      List.filter elements ~f:(function
+        | Prompt.Chat_markdown.Tool (Builtin name) ->
+          not
+            (List.exists native_registrations ~f:(fun current ->
+               String.equal current.Agent_runtime.implementation.info.function_.name name))
+        | _ -> false)
+    in
+    build_native_registrations
+      ~env
+      ~elements
+      ~one_off_policy:None
+      ~authoring_validation_host
+  in
+  let native_registrations =
+    native_registrations
+    @ List.filter helpers ~f:(fun helper ->
+      not
+        (List.exists native_registrations ~f:(fun current ->
+           String.equal
+             current.Agent_runtime.implementation.info.function_.name
+             helper.implementation.info.function_.name)))
+  in
   let extensions =
     delegated_moderator
     || (not (List.is_empty additional_native_registrations))
@@ -414,10 +459,12 @@ let create_authored_resources
             || declares_native elements Authoring_validation_tool.name
             || declares_native elements Authoring_context_tool.name
             || List.exists elements ~f:(function
-              | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+              | Prompt.Chat_markdown.Extension_script _
+              | Tool (Extension _)
+              | Authoring_context _ | Authoring_help _ -> true
               | _ -> false)))
   in
-  let%map native, definition, managed =
+  let%bind native, definition, managed =
     create_agent_runtime
       ~extensions
       ~delegated_moderator
@@ -432,7 +479,19 @@ let create_authored_resources
       ~approval_store
       ~response_dir
   in
-  { native; definition; managed }
+  let%map authoring =
+    match authoring_validation_host with
+    | None -> Ok None
+    | Some host ->
+      let%bind capabilities =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      Authoring_runtime.prepare ~host ~elements:source_elements ~capabilities ()
+      |> Result.map_error ~f:failure
+  in
+  { native; definition; managed; authoring }
 ;;
 
 let prepare_resources_internal
@@ -549,6 +608,7 @@ let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
     |> map_diagnostics
   in
   { native
+  ; authoring = None
   ; definition = Some (Chat_response.Generated_admission.definition admission)
   ; managed =
       Option.map
@@ -1181,24 +1241,35 @@ let build_with_services
       Some (guarded_services authority services)
     | _, services -> services
   in
-  let extension_services =
-    Option.map extension_services ~f:(fun services ->
-      let host =
-        Option.map services.authoring_validation_host ~f:(fun host ->
-          match source with
-          | Authored _ -> host
-          | Generated _ | Authored_child _ ->
-            Chat_response.Authoring_validation.for_delegated host)
+  let%bind extension_services =
+    match extension_services with
+    | None -> Ok None
+    | Some services ->
+      let%bind host =
+        Authoring_runtime.configure_host
+          ?host:services.authoring_validation_host
+          ~policy:services.one_off_policy
+          ()
+        |> Result.map_error ~f:failure
       in
-      { services with
-        authoring_validation_host = host
-      ; script_tools =
-          (fun native ->
-            Script_tool_calls.with_authoring_validation_host
-              ~env
-              (services.script_tools native)
-              host)
-      })
+      let host =
+        Some
+          (match source with
+           | Authored _ -> host
+           | Generated _ | Authored_child _ ->
+             Chat_response.Authoring_validation.for_delegated host)
+      in
+      Ok
+        (Some
+           { services with
+             authoring_validation_host = host
+           ; script_tools =
+               (fun native ->
+                 Script_tool_calls.with_authoring_validation_host
+                   ~env
+                   (services.script_tools native)
+                   host)
+           })
   in
   let elements, artifact, materialized_tree, delegated =
     match source with
@@ -1239,11 +1310,11 @@ let build_with_services
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
   let declares_one_off = declares_native elements Run_chatml_tool.name in
-  let%bind agent_runtime, definition, managed =
+  let%bind agent_runtime, definition, managed, authoring =
     match source with
     | Authored_child { prepared; _ } ->
       let resources = prepared.resources in
-      Ok (resources.native, resources.definition, resources.managed)
+      Ok (resources.native, resources.definition, resources.managed, resources.authoring)
     | Generated { definition; parent_runtime; inherited_managed; _ } ->
       let%map resources =
         inherit_prepared_resources
@@ -1252,7 +1323,7 @@ let build_with_services
           ~parent_runtime
           ~definition
       in
-      resources.native, resources.definition, resources.managed
+      resources.native, resources.definition, resources.managed, resources.authoring
     | Authored _ ->
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
@@ -1277,7 +1348,33 @@ let build_with_services
           ~approval_store
           ~response_dir
       in
-      resources.native, resources.definition, resources.managed
+      resources.native, resources.definition, resources.managed, resources.authoring
+  in
+  let%bind authoring =
+    match source with
+    | Authored _ | Authored_child _ -> Ok authoring
+    | Generated { definition; _ } ->
+      let%bind host =
+        Authoring_runtime.configure_host
+          ?host:
+            (Option.bind extension_services ~f:(fun services ->
+               services.authoring_validation_host))
+          ~policy:
+            (Option.value_map
+               extension_services
+               ~default:Chat_response.One_off_request.default_policy
+               ~f:(fun services -> services.one_off_policy))
+          ()
+        |> Result.map_error ~f:failure
+      in
+      let admission = Generated_definition.admission definition in
+      Authoring_runtime.prepare
+        ~admitted:(Chat_response.Generated_admission.authoring admission)
+        ~host:(Chat_response.Authoring_validation.for_delegated host)
+        ~elements
+        ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+        ()
+      |> Result.map_error ~f:failure
   in
   let%bind () =
     match definition with
@@ -1648,6 +1745,7 @@ let build_with_services
   in
   let worker =
     Turn_worker.create
+      ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
       ?runtime_policy:
         (Option.map extension_services ~f:(fun services -> services.runtime_policy))
       ?dispatch_tool
