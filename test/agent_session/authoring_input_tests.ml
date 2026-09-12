@@ -163,6 +163,16 @@ let%expect_test "provider input contains committed guidance once across foregrou
          |> store_ok
        in
        assert (List.equal H.equal_entry (guidance first) (guidance restored));
+       let references =
+         Agent_session.Session_state.authoring_references restored
+         |> protocol_ok
+         |> Chat_response.Authoring_reference_index.receipts
+       in
+       assert (
+         List.equal
+           H.Id.equal
+           (List.map (guidance restored) ~f:(fun entry -> entry.H.id))
+           (List.map references ~f:(fun receipt -> receipt.entry_id)));
        let id =
          History_entry.Id.create ~namespace:"user" ~sequence:1 |> Result.ok_or_failwith
        in
@@ -206,6 +216,11 @@ let%expect_test
            H.equal_entry
            before.conversation.canonical_history
            final.conversation.canonical_history);
+       assert (
+         Option.equal
+           Jsonaf.exactly_equal
+           before.conversation.authoring_reference_index
+           final.conversation.authoring_reference_index);
        print_s [%sexp (!requests : int), (List.length (guidance final) : int)]);
   [%expect {| (0 0) |}]
 ;;

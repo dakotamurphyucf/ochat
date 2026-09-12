@@ -53,8 +53,24 @@ than widening the child's authority. A child merely consuming an ordinary tool
 does not inherit implementation-authoring prose. Runtime reload rechecks the
 effective history before inserting anything again.
 
-Public custom-package configuration, bounded context retention and
-public qualification remain open. Manual and ordinary-tool policies produce no
+Durable session schema 18 retains a bounded reference index alongside history:
+at most 64 recent receipts and 64 KiB of encoded metadata with the current host
+defaults. The index records history IDs, topic hashes and source provenance,
+without retaining topic prose. History appends and compaction update it in the
+same transaction as the history change. Compaction also captures references from
+older snapshots that had no index; restore validates its version and owning
+session/generation. Eviction is explicit through a sticky truncation flag.
+Explicit history deletion forgets the deleted occurrences, and generation resets
+clear the index. Rediscovery pointers do not count as new documentation reads.
+
+The model-input boundary uses these receipts for presence checks, but a receipt
+never satisfies missing, modified or stale documentation. This persistence work
+does not yet supply a visible rediscovery pointer or label live helper results as
+reference receipts; those integrations and the complete post-compaction authoring
+flow remain open. See the [index contract](../../lib/chat_response/authoring_reference_index.mli).
+
+Public custom-package configuration and public qualification also remain open.
+Manual and ordinary-tool policies produce no
 automatic messages. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
 this exceeds the initial 800-token engineering target and is not a tokenizer or

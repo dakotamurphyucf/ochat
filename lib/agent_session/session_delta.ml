@@ -10,6 +10,7 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
@@ -76,6 +77,24 @@ let nonexecuting_intent_transition
     | _ -> false
   in
   observation && handler
+;;
+
+let retained_authoring index =
+  let module R = Chat_response.Authoring_reference_index in
+  match List.is_empty (R.receipts index) && not (R.truncated index) with
+  | true -> None
+  | false -> Some (R.to_json index)
+;;
+
+let remember_authoring state batches =
+  let module R = Chat_response.Authoring_reference_index in
+  let open Result.Let_syntax in
+  let%bind index = Session_state.authoring_references state in
+  let%map index =
+    List.fold_result batches ~init:index ~f:(fun index history ->
+      R.remember index ~history)
+  in
+  retained_authoring index
 ;;
 
 let rec apply state = function
@@ -148,15 +167,34 @@ let rec apply state = function
     in
     Ok { state with spec = { state.spec with workspace_instance; quota_key } }
   | Canonical_entries_appended entries ->
-    Ok
-      { state with
-        conversation =
-          { state.conversation with
-            canonical_history = state.conversation.canonical_history @ entries
-          }
-      }
+    let open Result.Let_syntax in
+    let%map authoring_reference_index = remember_authoring state [ entries ] in
+    { state with
+      conversation =
+        { state.conversation with
+          canonical_history = state.conversation.canonical_history @ entries
+        ; authoring_reference_index
+        }
+    }
   | Canonical_history_replaced canonical_history ->
-    Ok { state with conversation = { state.conversation with canonical_history } }
+    let open Result.Let_syntax in
+    (* Observe the outgoing history at the replacement boundary as well. This
+       bootstraps legacy snapshots without scanning archives or every old entry
+       on each ordinary append. Both changes are part of the same transaction. *)
+    let%map authoring_reference_index =
+      remember_authoring state [ state.conversation.canonical_history; canonical_history ]
+    in
+    { state with
+      conversation =
+        { state.conversation with canonical_history; authoring_reference_index }
+    }
+  | Authoring_references_forgotten ids ->
+    let open Result.Let_syntax in
+    let%map index = Session_state.authoring_references state in
+    let authoring_reference_index =
+      Chat_response.Authoring_reference_index.forget index ids |> retained_authoring
+    in
+    { state with conversation = { state.conversation with authoring_reference_index } }
   | Initial_prompt_count_changed initial_prompt_entry_count ->
     Ok
       { state with conversation = { state.conversation with initial_prompt_entry_count } }
@@ -831,5 +869,6 @@ let rec apply state = function
         { state with
           identity = { state.identity with generation }
         ; pending_initial_start = false
+        ; conversation = { state.conversation with authoring_reference_index = None }
         }
 ;;

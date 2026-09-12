@@ -70,6 +70,10 @@ module Conversation : sig
     ; kv_store : (string * string) list
     ; compaction_generation : int
     ; compaction_archives : Compaction_archive.t list [@sexp.list]
+    ; authoring_reference_index : Jsonaf.t option [@sexp.option]
+      (** Bounded, trusted receipt metadata retained through compaction. No topic
+          prose or authority is stored here. Absent in legacy/ordinary sessions;
+          cleared on generation replacement. Validated with the owning scope. *)
     }
   [@@deriving sexp]
 end
@@ -150,6 +154,13 @@ val create
   -> t
 
 val validate : t -> (unit, Agent_protocol.Error.t) result
+
+(** Decode the bounded receipt index under this session/generation. Absence is an
+    empty index; it does not scan archives or infer that topic prose is present. *)
+val authoring_references
+  :  t
+  -> (Chat_response.Authoring_reference_index.t, Agent_protocol.Error.t) result
+
 val summary : t -> Agent_protocol.Session.t
 val snapshot : now:Agent_protocol.Timestamp.t -> t -> Agent_protocol.Snapshot.t
 val history_window : Agent_protocol.History.entry list -> Agent_protocol.History.Window.t

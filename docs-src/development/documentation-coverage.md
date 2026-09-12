@@ -231,6 +231,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/authored_agent_call.mli` | [contract](../../lib/agent_session/authored_agent_call.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authored_agent_source.mli` | [contract](../../lib/agent_session/authored_agent_source.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_context_tool.mli` | [contract](../../lib/agent_session/authoring_context_tool.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
+| `lib/agent_session/authoring_runtime.mli` | [contract](../../lib/agent_session/authoring_runtime.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_services.mli` | [contract](../../lib/agent_session/authoring_services.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_validation_tool.mli` | [contract](../../lib/agent_session/authoring_validation_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/automatic_turn_budget.mli` | [contract](../../lib/agent_session/automatic_turn_budget.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -376,7 +377,9 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/authoring_materialization.mli` | [contract](../../lib/chat_response/authoring_materialization.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_presence.mli` | [contract](../../lib/chat_response/authoring_presence.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_reference_index.mli` | [contract](../../lib/chat_response/authoring_reference_index.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_tool_description.mli` | [contract](../../lib/chat_response/authoring_tool_description.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_validation.mli` | [contract](../../lib/chat_response/authoring_validation.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/automatic_turn_policy.mli` | [contract](../../lib/chat_response/automatic_turn_policy.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/background_delivery.mli` | [contract](../../lib/chat_response/background_delivery.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -705,13 +708,23 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-authoring-language.md) | `docs-src/guide/chatml-authoring-language.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-primer.md) | `docs-src/guide/chatml-authoring-primer.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-runtime.md) | `docs-src/guide/chatml-authoring-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-background-values.md) | `docs-src/guide/chatml-background-values.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-collections.md) | `docs-src/guide/chatml-collections.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-global-helpers.md) | `docs-src/guide/chatml-global-helpers.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-host-effects.md) | `docs-src/guide/chatml-host-effects.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-implementation-architecture.md) | `docs-src/guide/chatml-implementation-architecture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-invocation-context.md) | `docs-src/guide/chatml-invocation-context.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-json.md) | `docs-src/guide/chatml-json.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-language-spec.md) | `docs-src/guide/chatml-language-spec.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-match-semantics.md) | `docs-src/guide/chatml-match-semantics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-moderator-data.md) | `docs-src/guide/chatml-moderator-data.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-moderator-runtime.md) | `docs-src/guide/chatml-moderator-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-ocaml-differences.md) | `docs-src/guide/chatml-ocaml-differences.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-parsing-and-diagnostics.md) | `docs-src/guide/chatml-parsing-and-diagnostics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-runtime-control.md) | `docs-src/guide/chatml-runtime-control.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-strings.md) | `docs-src/guide/chatml-strings.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-surface-inventory.md) | `docs-src/guide/chatml-surface-inventory.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-tables.md) | `docs-src/guide/chatml-tables.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-task-effects.md) | `docs-src/guide/chatml-task-effects.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/general-agent-workflow.md) | `docs-src/guide/general-agent-workflow.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/search-and-indexing.md) | `docs-src/guide/search-and-indexing.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

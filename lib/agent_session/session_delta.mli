@@ -12,6 +12,7 @@ type t =
   | Workspace_changed of Workspace_instance.t
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
+  | Authoring_references_forgotten of Agent_protocol.History.Id.t list
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted

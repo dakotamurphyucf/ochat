@@ -65,6 +65,7 @@ module Conversation = struct
     ; kv_store : (string * string) list
     ; compaction_generation : int
     ; compaction_archives : Compaction_archive.t list [@sexp.list]
+    ; authoring_reference_index : Jsonaf.t option [@sexp.option]
     }
   [@@deriving sexp]
 end
@@ -119,11 +120,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 17
+let current_schema_version = 18
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if Option.is_some t.conversation.authoring_reference_index
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring reference index requires session schema 18"
+         ~retryable:false
+         ())
+  else if t.schema_version = 17
+  then Ok { t with schema_version = current_schema_version }
   else if not (List.is_empty t.managed_stops)
   then
     Error
@@ -312,6 +323,7 @@ let create ~identity ~spec ~initial_history =
       ; kv_store = []
       ; compaction_generation = 0
       ; compaction_archives = []
+      ; authoring_reference_index = None
       }
   ; active_operation = None
   ; automatic_turn_budget = None
@@ -339,6 +351,18 @@ let create ~identity ~spec ~initial_history =
       ; owner_lease_generation = 0L
       }
   }
+;;
+
+let authoring_references t =
+  let module R = Chat_response.Authoring_reference_index in
+  let scope =
+    Chat_response.Authoring_materialization.session_scope
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+  in
+  match t.conversation.authoring_reference_index with
+  | None -> R.empty ~scope ()
+  | Some json -> R.of_json ~scope json
 ;;
 
 let nonnegative name value =
@@ -703,6 +727,12 @@ let validate t =
   in
   let%bind () =
     nonnegative "next history sequence" t.conversation.next_history_sequence
+  in
+  let%bind references = authoring_references t in
+  let%bind _ =
+    Chat_response.Authoring_presence.remember
+      ~previous:(Chat_response.Authoring_reference_index.receipts references)
+      ~history:t.conversation.canonical_history
   in
   if t.schema_version <> current_schema_version
   then

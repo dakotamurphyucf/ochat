@@ -7,6 +7,8 @@ module Policy = Chat_response.Authoring_policy
 module State = Agent_session.Session_state
 module A = Agent_session.Session_actor
 module Codec = Agent_session.History_codec
+module Index = Chat_response.Authoring_reference_index
+module Delta = Agent_session.Session_delta
 
 let digest = Chatmd_shell_spec.Source_ref.digest
 
@@ -164,6 +166,10 @@ let%expect_test
     in
     assert (List.equal Presence.equal_receipt known index);
     let compacted = restore compacted in
+    let retained =
+      State.authoring_references compacted |> protocol_ok |> Index.receipts
+    in
+    assert (List.equal Presence.equal_receipt index retained);
     let snapshot = projected compacted in
     let effective =
       Option.value_map
@@ -171,7 +177,7 @@ let%expect_test
         ~default:snapshot.canonical_history
         ~f:Fn.id
     in
-    let absent = report policy index effective.entries in
+    let absent = report policy retained effective.entries in
     [%test_eq: Presence.presence list] [ Absent ] (statuses absent);
     assert ((not absent.refresh_primer) && List.is_empty absent.missing_preload);
     assert (Chatmd_shell_spec.Extension_spec.equal_policy (Policy.policy policy) Manual);

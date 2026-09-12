@@ -4270,7 +4270,13 @@ let prepare_authoring_input t operation_id materialization history effective =
       | Moderator_replacement { target_id; _ } ->
         History_codec.to_protocol ~provenance:(Moderator_replaced target_id) value.entry)
   in
-  let%bind messages = M.refresh materialization ~known:[] ~effective in
+  let%bind references = Session_state.authoring_references t.state in
+  let%bind messages =
+    M.refresh
+      materialization
+      ~known:(Chat_response.Authoring_reference_index.receipts references)
+      ~effective
+  in
   match messages with
   | [] -> Ok []
   | _ ->
@@ -5287,11 +5293,21 @@ let delete_history_internal t attachment_id revision history_id =
   let%bind _ = write_attachment t attachment_id in
   let%bind () = history_edit_precondition t revision in
   let%bind history, initial_count = history_deletion t history_id in
+  let retained_ids =
+    Hash_set.of_list
+      (module Agent_protocol.History.Id)
+      (List.map history ~f:(fun entry -> entry.Agent_protocol.History.id))
+  in
+  let forgotten =
+    List.filter_map t.state.conversation.canonical_history ~f:(fun entry ->
+      Option.some_if (not (Hash_set.mem retained_ids entry.id)) entry.id)
+  in
   transition
     t
     ~delta:
       (Session_delta.Batch
          [ Canonical_history_replaced history
+         ; Authoring_references_forgotten forgotten
          ; Initial_prompt_count_changed initial_count
          ])
     ~payloads:

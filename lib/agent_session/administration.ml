@@ -18,6 +18,7 @@ let conversation state options =
   ; deferred_user_entries = []
   ; tasks = (if options.keep_tasks then previous.tasks else [])
   ; kv_store = (if options.keep_tasks then previous.kv_store else [])
+  ; authoring_reference_index = None
   }
 ;;
 
