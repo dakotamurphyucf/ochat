@@ -71,7 +71,7 @@ let%expect_test
       ~sources:(sources mode)
       ~expect_moderator:true
       ~calls:[ "watch-call", "watch", `Null ]
-      ~after_turn:(fun _ handle entry ->
+      ~after_turn:(fun env handle entry ->
         let state = A.state entry.actor |> protocol_ok in
         [%test_eq: int] 1 (List.length state.ingress_registrations);
         let registration = List.hd_exn state.ingress_registrations in
@@ -83,7 +83,7 @@ let%expect_test
             (Option.value_exn state.identity.creating_principal));
         assert (Result.is_error (submit entry registration (P.Id.Principal.create ())));
         H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-        Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+        unload_idle_runtime env entry.runtime;
         H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
         receipt
         := Some (submit entry registration registration.context.producer |> protocol_ok);

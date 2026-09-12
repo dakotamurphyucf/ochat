@@ -81,6 +81,70 @@ val assemble : t -> surface_id:string -> roots:string list -> (topic list, strin
     this manifest's entries are audited; it does not prove full feature coverage. *)
 val pending : t -> string list
 
+(** Documentation coverage is separate from topic review. The compiler inventory
+    detects added/removed bindings; explicit mappings bind a reviewed contract and
+    topic version to named behavioral evidence. Evidence references are metadata,
+    not a claim that a test ran. Semantic/ChatMD/native-tool feature inventories
+    must also be supplied before claiming complete public-feature coverage. *)
+module Coverage : sig
+  type target =
+    { id : string
+    ; surface_id : string
+    ; contract_sha256 : string
+    }
+  [@@deriving sexp]
+
+  type mapping =
+    { target_id : string
+    ; contract_sha256 : string
+    ; topic_id : string
+    ; topic_closure_sha256 : string
+    ; evidence : string list
+    }
+  [@@deriving sexp]
+
+  type report =
+    { mapped : string list
+    ; missing : target list
+    }
+  [@@deriving sexp]
+
+  (** Every module, global, export, type alias and entrypoint on the exact selected
+      compiler surfaces. Stable IDs distinguish identical names across surfaces;
+      hashes preserve the structural type scheme. Empty/duplicate/unknown surface
+      selections fail. No builtin or candidate program is executed. *)
+  val compiler_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  (** Digest the complete prerequisite-first topic closure for this surface.
+      Every topic must be audited; a prerequisite change invalidates the pin
+      even if the root topic's excerpts remain unchanged. *)
+  val topic_contract
+    :  t
+    -> surface_id:string
+    -> topic_id:string
+    -> (string, string) result
+
+  (** Reject duplicate/obsolete mappings, changed contracts/topics, missing topics,
+      unaudited or incompatible topics and absent evidence. Unmapped targets are
+      reported explicitly, never mapped by a wildcard/module-prefix fallback.
+      Callers must supply a trusted exhaustive inventory and reviewed literal
+      pins; regenerating mapping pins on every run defeats drift detection. *)
+  val audit : t -> targets:target list -> mappings:mapping list -> (report, string) result
+
+  (** Fail unless every supplied target has a validated mapping. This proves only
+      coverage of that inventory, not completeness of a caller-selected subset. *)
+  val require_complete : report -> (unit, string) result
+
+  (** Initial maintained coverage for the six entrypoint contracts on the four
+      extensibility surfaces. Literal pins require review when compiler schemes,
+      topic prose or prerequisite topics change. Other APIs remain unmapped;
+      this list alone is not the full public-feature coverage manifest. *)
+  val entrypoint_mappings : mapping list
+end
+
 (** Seven source-pinned topics from the checked OCaml-differences guide,
     including the existing chatml.syntax.calls/chatml.types/chatml.tasks IDs.
     The broad [chatml.programs] topic adds the checked program-writing guide:

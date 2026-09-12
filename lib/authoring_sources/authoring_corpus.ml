@@ -288,6 +288,201 @@ let pending t =
     | Audited _ -> None)
 ;;
 
+module Coverage = struct
+  type target =
+    { id : string
+    ; surface_id : string
+    ; contract_sha256 : string
+    }
+  [@@deriving sexp]
+
+  type mapping =
+    { target_id : string
+    ; contract_sha256 : string
+    ; topic_id : string
+    ; topic_closure_sha256 : string
+    ; evidence : string list
+    }
+  [@@deriving sexp]
+
+  type report =
+    { mapped : string list
+    ; missing : target list
+    }
+  [@@deriving sexp]
+
+  let compiler_targets ~sources ~surface_ids =
+    let open Result.Let_syntax in
+    let%bind () =
+      match surface_ids with
+      | [] -> Error "coverage requires explicit compiler surfaces"
+      | _ when not (unique surface_ids) -> Error "duplicate coverage surface"
+      | _ -> Ok ()
+    in
+    let%map inventories =
+      List.map surface_ids ~f:(fun surface_id ->
+        Authoring_sources.signatures sources ~surface_id)
+      |> Result.all
+    in
+    List.concat_map inventories ~f:(fun inventory ->
+      let module I = Chatml.Chatml_surface_inventory in
+      let surface_id = inventory.I.surface_id in
+      let make kind name contract =
+        let id = surface_id ^ "/" ^ kind ^ "/" ^ name in
+        { id; surface_id; contract_sha256 = digest (id ^ "\n" ^ contract) }
+      in
+      List.map inventory.modules ~f:(fun name -> make "module" name name)
+      @ List.map inventory.items ~f:(fun item ->
+        let kind =
+          match item.I.kind with
+          | Global -> "global"
+          | Module_export -> "module_export"
+          | Type_alias -> "type_alias"
+          | Entrypoint -> "entrypoint"
+        in
+        make
+          kind
+          item.name
+          (Chatml.Chatml_builtin_spec.sexp_of_ty item.scheme |> Sexp.to_string_mach)))
+    |> List.sort ~compare:(fun a b -> String.compare a.id b.id)
+  ;;
+
+  let topic_contract corpus ~surface_id ~topic_id =
+    let open Result.Let_syntax in
+    let%bind closure = assemble corpus ~surface_id ~roots:[ topic_id ] in
+    let%map reviewed =
+      List.map closure ~f:(fun topic ->
+        match topic.specification.review with
+        | Pending ->
+          Error ("coverage topic has not been audited: " ^ topic.specification.id)
+        | Audited _ -> Ok (topic.specification.id, topic.sha256))
+      |> Result.all
+    in
+    [%sexp (surface_id : string), (reviewed : (string * string) list)]
+    |> Sexp.to_string_mach
+    |> digest
+  ;;
+
+  let audit corpus ~targets ~mappings =
+    let open Result.Let_syntax in
+    let%bind () =
+      match targets with
+      | [] -> Error "coverage requires a nonempty feature inventory"
+      | _ -> Ok ()
+    in
+    let%bind targets_by_id =
+      match
+        String.Map.of_alist (List.map targets ~f:(fun target -> target.id, target))
+      with
+      | `Duplicate_key id -> Error ("duplicate coverage target: " ^ id)
+      | `Ok targets -> Ok targets
+    in
+    let%bind () =
+      match
+        List.find_a_dup
+          (List.map mappings ~f:(fun mapping -> mapping.target_id))
+          ~compare:String.compare
+      with
+      | Some id -> Error ("duplicate coverage mapping: " ^ id)
+      | None -> Ok ()
+    in
+    let%map mapped =
+      List.map mappings ~f:(fun mapping ->
+        let fail message = Error (mapping.target_id ^ ": " ^ message) in
+        let%bind target =
+          match Map.find targets_by_id mapping.target_id with
+          | Some target -> Ok target
+          | None -> fail "mapping has no inventory target"
+        in
+        let%bind () =
+          match String.equal mapping.contract_sha256 target.contract_sha256 with
+          | true -> Ok ()
+          | false -> fail "compiler contract changed; review documentation coverage"
+        in
+        let%bind topic_closure_sha256 =
+          topic_contract corpus ~surface_id:target.surface_id ~topic_id:mapping.topic_id
+        in
+        let%bind () =
+          match String.equal mapping.topic_closure_sha256 topic_closure_sha256 with
+          | true -> Ok ()
+          | false -> fail "topic changed; review documentation coverage"
+        in
+        let%map () =
+          match mapping.evidence with
+          | [] -> fail "coverage requires example or behavioral test evidence"
+          | references
+            when List.exists references ~f:(fun reference ->
+                   String.is_empty (String.strip reference)) ->
+            fail "coverage contains empty evidence"
+          | _ -> Ok ()
+        in
+        target.id)
+      |> Result.all
+    in
+    let mapped = List.sort mapped ~compare:String.compare in
+    let covered = String.Set.of_list mapped in
+    { mapped
+    ; missing =
+        Map.data targets_by_id
+        |> List.filter ~f:(fun target -> not (Set.mem covered target.id))
+    }
+  ;;
+
+  let require_complete report =
+    match report.missing with
+    | [] -> Ok ()
+    | missing ->
+      Error
+        ("unmapped authoring features: "
+         ^ String.concat ~sep:", " (List.map missing ~f:(fun target -> target.id)))
+  ;;
+
+  let entrypoint_mappings =
+    let make target_id contract_sha256 topic_id topic_closure_sha256 =
+      { target_id
+      ; contract_sha256
+      ; topic_id
+      ; topic_closure_sha256
+      ; evidence =
+          [ "test/agent_docs/docs_chatml_authoring.ml"
+          ; "test/chatml_composition/authoring_context_tests.ml"
+          ]
+      }
+    in
+    [ make
+        "one_off_v1/entrypoint/main"
+        "23c3696f85a3a6c1e947b8e65c12066294eb57f9b7ea5668b23fcd6fe5d46273"
+        "runtime.invocations.one-off"
+        "b1bd3b4204bc034f37ebeb05afb34a2fdf7a89d34267845b9ce1a394ee057161"
+    ; make
+        "tool_v1/entrypoint/run"
+        "776c8a90b01720d82560e9ad51ff7d507d904cc82ddae1f46b9f9388658e6a9f"
+        "runtime.invocations.standalone"
+        "8652b88c2cf4a91ed5974d049bd206c976ed0190d7de69c3992db8de06d21e4c"
+    ; make
+        "moderator_v1/entrypoint/initial_state"
+        "83c4550d994027c5d2347ec8fe8b1efe366e48105a2d8563b8b17293b534807b"
+        "runtime.invocations.moderator"
+        "f58992cc9c62f7bfec65e3381309595e527c2e94c008f0b62a79180082230071"
+    ; make
+        "moderator_v1/entrypoint/on_event"
+        "dae4c9cf7e731d167b4088108fa0dded53478857a436e69163fe4c8215ba5775"
+        "runtime.invocations.moderator"
+        "f58992cc9c62f7bfec65e3381309595e527c2e94c008f0b62a79180082230071"
+    ; make
+        "delegated_moderator_v1/entrypoint/initial_state"
+        "c179907ea7bf651414fa4400607c3f75beb87fa748e048e10abb1e8feaff7f8f"
+        "runtime.invocations.moderator"
+        "4f6e6c33e84bef5b5f8a01906c9c87d51f6a80df28e40181666545c3f1dd4257"
+    ; make
+        "delegated_moderator_v1/entrypoint/on_event"
+        "5d25a5033754052c6e715e2dffa44385a922c922c41639eb52c1e9baf235c93e"
+        "runtime.invocations.moderator"
+        "4f6e6c33e84bef5b5f8a01906c9c87d51f6a80df28e40181666545c3f1dd4257"
+    ]
+  ;;
+end
+
 let language_foundation ~sources =
   let make ?(path = "guide/chatml-ocaml-differences.md") id title prerequisites sections =
     { id

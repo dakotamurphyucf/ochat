@@ -34,6 +34,42 @@ by model requests, and is not itself proof of a full-feature audit. An empty
 pending list says only that the entries in that manifest were reviewed. Missing
 public features still require a separate coverage manifest and CI checks.
 
+## Checking feature coverage
+
+`Authoring_corpus.Coverage.compiler_targets` enumerates every module, global,
+export, type alias and required entrypoint on explicitly selected compiler
+surfaces. Identifiers include the surface and namespace, so identically named
+operations on different targets remain distinct. Structural type schemes produce
+contract hashes without executing a builtin or candidate script.
+
+A reviewed mapping names one exact target, its contract hash, a topic, the hash
+of that topic's complete prerequisite closure, and example or behavioral test
+references. `Coverage.audit` rejects duplicate or obsolete mappings, changed
+contracts, missing or incompatible topics, unaudited prerequisites and missing
+evidence. A prerequisite change invalidates the mapping even if the root topic's
+own text did not change. There is no wildcard that automatically considers new
+module members documented.
+
+The report lists mapped and missing targets. `Coverage.require_complete` fails
+if any supplied target lacks a valid mapping. It establishes coverage only for
+the supplied inventory: maintainers must also inventory language constructs,
+ChatMD declarations, native tools and semantic boundaries before claiming full
+public-feature coverage. Evidence references do not substitute for running tests
+or reviewing explanations.
+
+The initial maintained `Coverage.entrypoint_mappings` covers `main` on
+`one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
+and delegated moderator surfaces. The normal offline tests compare these literal
+reviewed pins to the current compiler and source-derived topics. Other compiler
+APIs remain explicitly unmapped. To update a pin, review the changed contract or
+topic closure and its relevant behavior tests first; regenerating pins on each
+build would defeat this check. Authoring-context service construction also audits
+this maintained subset against the installed compiler and corpus; incompatible
+entrypoint guidance fails before queries are served. Packages remain labelled
+incomplete while the other required feature mappings are missing.
+
+## Initial topic corpus
+
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):
 

@@ -32,6 +32,16 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   in
   let%bind sources = Sources.installed () in
   let%bind corpus = Corpus.runtime_foundation ~sources in
+  let%bind targets =
+    Corpus.Coverage.compiler_targets
+      ~sources
+      ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+  in
+  (* Validate the maintained subset without claiming that all features have
+     semantic coverage. The query still labels its packages incomplete. *)
+  let%bind _ =
+    Corpus.Coverage.audit corpus ~targets ~mappings:Corpus.Coverage.entrypoint_mappings
+  in
   let fingerprint =
     [%sexp
       ("ochat.authoring-query.v2" : string)
