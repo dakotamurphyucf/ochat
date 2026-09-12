@@ -48,8 +48,13 @@ let all =
         "Author a moderator workflow that starts the selected probe tool as a background \
          job, acknowledges immediately, and delivers its eventual result once. It must \
          survive duplicate completion delivery, terminate cleanly on cancellation, and \
-         not request a model turn before completion. Supply the tool binding and source, \
-         using the host's actual contracts."
+         not request a model turn before completion. Preserve the complete probe result \
+         and request one model turn after successful delivery; notify cancellation \
+         without a wake. Submit source, binding, input_schema and output_schema fields. \
+         The binding names begin_work, belongs to moderator observer and references \
+         input.json/output.json. Input is an empty object. Acknowledge Pending Job with \
+         an object containing job_id and status accepted. The host supplies the probe \
+         binding and observer script declaration; moderator tools do not declare uses."
     ; preload_topics = [ "runtime.jobs.owned"; "runtime.delivery.notifications" ]
     ; compaction_after_step = None
     }

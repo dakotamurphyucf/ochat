@@ -124,9 +124,36 @@ conditions. Attempting to add a native reader is rejected before runtime creatio
 The clarified task prompt specifies the call/result/error and binding contract;
 the suite manifest fingerprint changes accordingly.
 
-Add execution oracles/transcripts for background and generated-child families,
-plus the extra repair/capability/compaction tasks.
-Integrate ledger scoring with the invoking host's actual read capability metadata.
+`Background_cases` checks immediate acknowledgement of one running probe job,
+then releases the probe or cancels it through the public job protocol. It requires
+one retained notification whose work ID and full completion match the retained
+job, exactly one success wake, no cancellation wake, and process exit before the
+embedded host closes. A failed moderator or extra job/notification/model request
+fails the scenario. The fixed shell probe uses an isolated `direct_unsafe` test
+policy; this is not a production sandbox recommendation.
+
+The background envelope has the same four fields as the quota envelope, with
+`begin_work` owned by `observer`. Captured parsing admits no additional native
+declarations. The candidate moderator is statically checked with only the actual
+host probe selected. A fixture replays the completion payload with updated handler
+state and produces no second publication; a conflicting publication, missing
+acknowledgement and added reader are rejected. This tests application callback
+replay, not daemon journal replay or restart recovery. Two publication attempts in
+one callback transaction are rejected by the runtime, including repeated keys;
+the fixture removes completed work from its state before handling a replay.
+
+Ledger and background scoring now run through all three guidance conditions with
+metadata from actual native registrations. `Execution_host.with_capabilities`
+constructs the fixed evaluator-owned declarations using `Agent_runtime`, retains
+their descriptors, schemas and metadata, and closes resources on scope exit.
+It runs no candidate/tool/model code. Execution hosts independently admit those
+same fixed declarations under their own temporary roots; their capability IDs
+are distinct and validation does not transfer authority between hosts. The
+background integration requires both release and cancellation to pass.
+
+Add execution oracles/transcripts for the generated-child family and the extra
+repair/capability/compaction tasks. Generalize replay scoring beyond the private
+background fixture so arbitrary submitted handlers receive the same stimulus.
 Add the reproducible optional
 provider driver, fixed model settings/seeds/repetitions and deadlines, transcript
 and metric artifacts, execution-oracle revision identity, and threshold evaluation.

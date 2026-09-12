@@ -128,14 +128,18 @@ let one_off =
   ]
 ;;
 
+let read_declaration =
+  {|<tool name="read_file"><read id="ledgers" path="${workspace}"/></tool>|}
+;;
+
 let execute_one_off ~env candidate =
   let sources =
     [ ( "agent.chatmd"
       , {|<developer>Run the ledger evaluation.</developer>
 <authoring_context policy="manual"/>
 <tool name="run_chatml"/>
-<tool name="read_file"><read id="ledgers" path="${workspace}"/></tool>|}
-      )
+|}
+        ^ read_declaration )
     ; "private.json", "PRIVATE-EVALUATION-SENTINEL"
     ]
   in
