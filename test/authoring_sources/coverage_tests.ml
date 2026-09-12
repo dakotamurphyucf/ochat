@@ -12,6 +12,8 @@ let%expect_test "reviewed module coverage includes every export on each exact su
     ; "String", V.string_mappings
     ; "Array", V.array_mappings
     ; "Option", V.option_mappings
+    ; "Json", V.json_mappings
+    ; "Hashtbl", V.hashtbl_mappings
     ]
     ~f:(fun (name, mappings) ->
       List.iter
@@ -50,7 +52,59 @@ let%expect_test "reviewed module coverage includes every export on each exact su
     (Option tool_v1 6)
     (Option moderator_v1 6)
     (Option delegated_moderator_v1 6)
+    (Json one_off_v1 17)
+    (Json tool_v1 17)
+    (Json moderator_v1 17)
+    (Json delegated_moderator_v1 17)
+    (Hashtbl one_off_v1 6)
+    (Hashtbl tool_v1 6)
+    (Hashtbl moderator_v1 6)
+    (Hashtbl delegated_moderator_v1 6)
   |}]
+;;
+
+let%expect_test "shared core inventory is fully mapped with exact print availability" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  let core_names =
+    V.compiler_targets ~sources ~surface_ids:[ "core" ]
+    |> ok
+    |> List.map ~f:(fun target -> String.chop_prefix_exn target.V.id ~prefix:"core/")
+    |> String.Set.of_list
+  in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface ->
+      let prefix = surface ^ "/" in
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface ] |> ok in
+      let selected =
+        List.filter targets ~f:(fun target ->
+          Set.mem core_names (String.chop_prefix_exn target.V.id ~prefix))
+      in
+      let expected =
+        match String.equal surface "moderator_v1" with
+        | true -> core_names
+        | false -> Set.remove core_names "global/print"
+      in
+      let actual =
+        List.map selected ~f:(fun target -> String.chop_prefix_exn target.V.id ~prefix)
+        |> String.Set.of_list
+      in
+      assert (Set.equal expected actual);
+      let ids = List.map selected ~f:(fun target -> target.V.id) |> String.Set.of_list in
+      let mappings =
+        List.filter V.reviewed_mappings ~f:(fun mapping ->
+          Set.mem ids mapping.V.target_id)
+      in
+      V.audit corpus ~targets:selected ~mappings |> ok |> V.require_complete |> ok;
+      print_s [%sexp (surface : string), (List.length selected : int)]);
+  [%expect
+    {|
+    (one_off_v1 84)
+    (tool_v1 84)
+    (moderator_v1 85)
+    (delegated_moderator_v1 84)
+    |}]
 ;;
 
 let report label = function

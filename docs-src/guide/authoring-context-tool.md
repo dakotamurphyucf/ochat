@@ -95,6 +95,11 @@ export requires reviewing both the contract and documentation pins.
 The [collections reference](chatml-collections.md), topic `chatml.collections`,
 covers all twenty-two `Array` exports and five `Option` exports, including shallow
 aliasing, short-circuit searches, eager defaults and explicit task sequencing.
+The [JSON reference](chatml-json.md), topic `chatml.json`, distinguishes syntax
+validation, schema checks, missing/null values, duplicate keys, shared payloads and
+floating-point export. [Mutable tables](chatml-tables.md), topic `chatml.tables`,
+cover string-keyed lookup and mutation; [global helpers](chatml-global-helpers.md),
+topic `chatml.globals`, cover rendering, reflection and exact `print` availability.
 Every task package includes the broad `chatml.programs` guide and its checked
 OCaml-differences prerequisites, covering source syntax, control flow, matching,
 types, structured-data utilities and effect boundaries before the task's runtime

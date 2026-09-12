@@ -1198,12 +1198,406 @@ module Coverage = struct
           }))
   ;;
 
+  let json_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "9598e35b5722b27e3d9e0fd0b8a79c6069aab8252ac06fd9931d26a8d61fddfd"
+        , [ ( "module/Json"
+            , "8276161ec095028a7648fb61044eca879e3255f69d1280b8ad20b13c350235c1" )
+          ; ( "module_export/Json.as_array"
+            , "acb9138f4f2dc5fc8c5dd3c00cdddd4d904a36ec35dfa381db73354707983015" )
+          ; ( "module_export/Json.as_bool"
+            , "3208189b3d4bff9f57a7a1f3e7074d696c22c482ea5d3aa46b5199bd5709c2f6" )
+          ; ( "module_export/Json.as_number"
+            , "1381277412a3982e3efe0ea48a33dd18af6cd22e81fdcf865fc9fffba51f20e3" )
+          ; ( "module_export/Json.as_object"
+            , "c9d8866bf84395ffe566cf32835808400d0b428d07dc6a2ceadcd814dc7430e2" )
+          ; ( "module_export/Json.as_string"
+            , "5c011d6c14a946301316cde608eb9bab337973e054eb2073320da5d45e7755cc" )
+          ; ( "module_export/Json.get_field"
+            , "e9b748cb126e65ed07ad6a12b78f09c5ea1c2d14d28ccbe888cb10a355538b54" )
+          ; ( "module_export/Json.get_path"
+            , "8809f1b560a810f2640c6d6a46f21777514499754bedb50fedc09d7e78ff35c0" )
+          ; ( "module_export/Json.object_keys"
+            , "641eb85495b4bd5c0822528732873edc8fbf282fb0d7e54e16f24cb1343b2e9a" )
+          ; ( "module_export/Json.parse"
+            , "898d914d7003ada6aa1a598ce9d1ef88fd6d078d26dbc9ed52d99b3081e9e0d2" )
+          ; ( "module_export/Json.parse_opt"
+            , "db919ef6abcdb7a1a8b020477dafc7ec164911080b41dffd883e25f096bdfaa1" )
+          ; ( "module_export/Json.pretty"
+            , "fec1ce2eda4b84f520fd5c57819128aa9ccf1e2fe1b0655e30bf5ea0e9c7b50f" )
+          ; ( "module_export/Json.remove_field"
+            , "fc66ef9a047a92c9d94425cce2a76a4e93e5ef0db9307e2588fea0c96d109756" )
+          ; ( "module_export/Json.set_field"
+            , "9a41b05c4f1e6f1b76479adb4e8cfbe7f0dbd611f9e201dbcd85e42146070f56" )
+          ; ( "module_export/Json.stringify"
+            , "df1e0c7734299ebee37ebf1e0f0a23302c1aed33684c1777eb2d15f7fd395bf9" )
+          ; ( "module_export/Json.tag"
+            , "da5713de082beb3f4e662ddab1978aeebdfb32828c7e050c05ff7192d3f81064" )
+          ; ( "module_export/Json.validate"
+            , "775f180b4c48e9955bb980993420ca28ba4a832139e5905eb31edb35b940369b" )
+          ] )
+      ; ( "tool_v1"
+        , "0598fd72875d8502f88d4152d83666f7d10edecc175b39a63f7bfbc519ef967b"
+        , [ ( "module/Json"
+            , "f594a3d6bedb39aa513044c62ffa6eccab150fdc787b030a370c47b61b9038d0" )
+          ; ( "module_export/Json.as_array"
+            , "830c7e8ebafd97b25569d1f141574b2eead88a05ee66a93b3db4996859920242" )
+          ; ( "module_export/Json.as_bool"
+            , "3b49f28d7d9c3bcd733dfdc055484905e9caca96d63e8f382eb2cef967f630ef" )
+          ; ( "module_export/Json.as_number"
+            , "a814ede555a4997f60a026ce5596195343e26cca881f943806eb4b00322a6d21" )
+          ; ( "module_export/Json.as_object"
+            , "7adc77634396be5e26b235891bdf2c01b5bacf3970092bb45522972260276daa" )
+          ; ( "module_export/Json.as_string"
+            , "737615f66ab5debaaca79eadd065882a689cdbcfafa92755c94990d9cb2a478d" )
+          ; ( "module_export/Json.get_field"
+            , "db8c8826c1f21fee9289d6379ac0c0adc2ee6de10d74e53f882e63ecd8944903" )
+          ; ( "module_export/Json.get_path"
+            , "7a602e410751fec4d10b27bf4d0a66ef31ccca1d3a23bc57e1ad038a0122c9ee" )
+          ; ( "module_export/Json.object_keys"
+            , "ae36feba847f9845d7bc62fa439655799e0434484b3ac6df9ec518bf0aef5f16" )
+          ; ( "module_export/Json.parse"
+            , "57dfd9bfcfca70689c47c0b40f6c00b86e5ec8188ab0bea5d4398a2b313182b5" )
+          ; ( "module_export/Json.parse_opt"
+            , "cb910f7cba2f2c63f6642a3d67d04a99c186073d95db9f2ed543e79b22d2e418" )
+          ; ( "module_export/Json.pretty"
+            , "76de2cf6b7b3fe7339f73d38a9503abf240d023cdcc07b588d228ddff281b10b" )
+          ; ( "module_export/Json.remove_field"
+            , "85ddff4f6bfc4ecf10aff9566f0043be81643bea45107974db24a53718da772b" )
+          ; ( "module_export/Json.set_field"
+            , "c88620a3e775c91577133be0a1048c84f15aac477c40f591963b22e512566a59" )
+          ; ( "module_export/Json.stringify"
+            , "0921a4e77f524bc421206f66c0e7693a3d3b71972a6b80a1bf1530bbe8ba7a46" )
+          ; ( "module_export/Json.tag"
+            , "768c6d0bacbfee179befcc8f01cb2d15e5c0c74b8f370416a988d11745d4e77d" )
+          ; ( "module_export/Json.validate"
+            , "91a455c705c41b4b046e84ad03f0125533c4872d94745e1f0a67c9e334eeaf3d" )
+          ] )
+      ; ( "moderator_v1"
+        , "7666e108b1139830fea1f55c5858064e945093f96929db3d8253778f2715ae66"
+        , [ ( "module/Json"
+            , "5693ccaf8653d32a31d1f478d215fbb447bac00435cfc10c3df8caee1ad85670" )
+          ; ( "module_export/Json.as_array"
+            , "7d54f626a3438ca3c1a1ed4591337a4f1d63cb73b5c64aaa1850af9d5ccbc4be" )
+          ; ( "module_export/Json.as_bool"
+            , "00f8f1f23c8257eb3818363e963c23aa8cf3c95addcb1c4fbc3072c100f0fb95" )
+          ; ( "module_export/Json.as_number"
+            , "1fb240ff3ab1f7f1d2fddd09df5db3e5c3356c4f086e072c3e646774ea70baca" )
+          ; ( "module_export/Json.as_object"
+            , "b729e45268bed9e64755ba351d4d5e5ed0f4a62a4fdd161925564325ce169297" )
+          ; ( "module_export/Json.as_string"
+            , "3dca1502dc3c13f11d72a1000480e8ea384033bce523d8454fd0cd1ed8d5a5d1" )
+          ; ( "module_export/Json.get_field"
+            , "a2f3801a42a6b3f0216bf62ef2b5d39e29e62550adb2d4c8c57fe852f2bceb03" )
+          ; ( "module_export/Json.get_path"
+            , "d0007da2ca77a56c3e8eb8055b8b05348595c59649d0993e0293285a47dd9e58" )
+          ; ( "module_export/Json.object_keys"
+            , "887eb0c300397770278e55ca49f5d63acbbbabb5fca0a23a364e438a54a5aa9b" )
+          ; ( "module_export/Json.parse"
+            , "7ee8770e07837980813c83d1b773ff71b1ec75da3b7b2389f1b6558a2c54473e" )
+          ; ( "module_export/Json.parse_opt"
+            , "10bfa1639e0dcaff9044e687c3eb90dbf8a096e449a80fc61bb8d1d41acf5d5e" )
+          ; ( "module_export/Json.pretty"
+            , "9632e92997d6d4aee55fe3672142f0dd9d02e4b946a095aa59f1b6e22c962ee2" )
+          ; ( "module_export/Json.remove_field"
+            , "f6f1daf56b819ece76d7d33bf0200ca16d7c148bb874e577700056d8c34bb550" )
+          ; ( "module_export/Json.set_field"
+            , "3c81042fb9219af0e0c81753a826af0604410f4b22a5ce3e2b933a9b1695b29b" )
+          ; ( "module_export/Json.stringify"
+            , "9057f43bc5984c237b2433e09c1d93f5fb3e194dd9ddc87225a67a91e95780a5" )
+          ; ( "module_export/Json.tag"
+            , "83724c4fc80b6d37e34840e955b2e38d366b7ec518168f264a99815705b3de79" )
+          ; ( "module_export/Json.validate"
+            , "fd94d4e57a65a4381f7c6c87a98cc99f5b1c080b4eea5f9a6f20da11bd20b988" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "1525675290f78af03c14e06661a0d8389ca4e039b16ec5e1cb5b23a3b00501d5"
+        , [ ( "module/Json"
+            , "dd36cafbd30b3b4396d4d7b02394ed09a988f3d818cf4626c2fe7da26cefc457" )
+          ; ( "module_export/Json.as_array"
+            , "9ed75c04bf045f0b7035bfe3217d111e4f40c5ce5b93ee6b5b603b51577fa715" )
+          ; ( "module_export/Json.as_bool"
+            , "721442474c0056df4e531b19bcbe328199510bf28d238cf35e9f9c63b607c3d4" )
+          ; ( "module_export/Json.as_number"
+            , "215760d1a53014b0fdb630f7b5032ed6b5b87354c3da0bc038c07d427a4c151b" )
+          ; ( "module_export/Json.as_object"
+            , "bb28b2c70ef3b93c59375e83bc7736564d8c7a8802b94d64a79c158c0c131fa0" )
+          ; ( "module_export/Json.as_string"
+            , "f65d73eb603fe23c074b8631df302e9b811e7f87ad2a9444a0e707c7dd1e0729" )
+          ; ( "module_export/Json.get_field"
+            , "d88f230597506ceebf2feb35052d46e0804dcce4fa86f7c471ccd4c5590171ad" )
+          ; ( "module_export/Json.get_path"
+            , "9e6f69a7597e5576f814f1d36c730cd0ab16d0d584547c2fe29d8a95eff9a4a7" )
+          ; ( "module_export/Json.object_keys"
+            , "768abce10c876981ade1c5048eec781e077b494e3afd6d0d2c0bea465bafac65" )
+          ; ( "module_export/Json.parse"
+            , "2473b066ffce99284e2e2093a1a136eb3e21033ae747b6a0e1bd0e894d46d0a8" )
+          ; ( "module_export/Json.parse_opt"
+            , "a720b67a46adfacb2c0cdd5f5fa9a1a138068817edc429275c69937464bcbc43" )
+          ; ( "module_export/Json.pretty"
+            , "f9809da3480ca335a7f538380b96490eeb52f8b2c88d4dbd534a040a0381cc10" )
+          ; ( "module_export/Json.remove_field"
+            , "c1afdc54a714014c005c208cd5d069ae6e2d9d56acfb912d75ed2ba3f9ea1cb1" )
+          ; ( "module_export/Json.set_field"
+            , "b2d59b8987a476a5b496d9f9e7dfed9c70bfd0134f2113ea7f5ab241e787bd82" )
+          ; ( "module_export/Json.stringify"
+            , "f9d390aeffd1c5b15ee318a642abd5cca184da0cb616a575d2e6739852e48e4d" )
+          ; ( "module_export/Json.tag"
+            , "085c7596379a6ad0087d35dac11a3ef1831ebfbd2eb3c2cdfc4a70e466a39bf0" )
+          ; ( "module_export/Json.validate"
+            , "ceda17f4f76502ab6e64c33d8b307fae18a055da08ed5d3287c4d0e750ea8f11" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.json"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "lib/chatml/chatml_value_codec.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
+  let hashtbl_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "2fc1d29574db1d5fe819b36d879cb2232e1c96f6dce3778292a7daeb12c8f045"
+        , [ ( "module/Hashtbl"
+            , "44d97e5d36cbf23bb3b2e234a045a2f976bbc486da1bdcb2cf65c69b37d188e7" )
+          ; ( "module_export/Hashtbl.create"
+            , "1213527868f4fe7ebdda853ed034372dd4179fd3e2036ffeafe34145d0af4152" )
+          ; ( "module_export/Hashtbl.get"
+            , "820c0a1f61afe2d5558912cd693817af4eac2956f491f3fd557107d1855eff70" )
+          ; ( "module_export/Hashtbl.mem"
+            , "776c3ae80fddf50e10db2835e2b8ee84a1b5e8869f0d061b1e3a1e72fdfa5917" )
+          ; ( "module_export/Hashtbl.remove"
+            , "d78dfb76b213b6520389c43d36adb73e2bf9587fe59b0f2de5e5a0d2f98ebd65" )
+          ; ( "module_export/Hashtbl.set"
+            , "b1c0b7ec1710258f0df03ca217b9ee7a0a4696aaeed773439f5c920d3555c11b" )
+          ] )
+      ; ( "tool_v1"
+        , "e6eeb78a70551334e9424d937d4428c899a2304832eca55511a31a1237795bce"
+        , [ ( "module/Hashtbl"
+            , "866a8d298a7e56dbdb498517254086e88873c396a4595d494a8a05a26e8d3414" )
+          ; ( "module_export/Hashtbl.create"
+            , "a4d73c58e8d5fbb11a8d152fd6ced4a181342cbeec5977f4e4e8338431660fa8" )
+          ; ( "module_export/Hashtbl.get"
+            , "7bfa8adb4df12a16710b29dd6e433ea03cbc3ce3a002c70e598d635192c9c6dc" )
+          ; ( "module_export/Hashtbl.mem"
+            , "287de86a7494590e25cb3d3ea473fc0012fa6996518b6cd074324970f7f1fc10" )
+          ; ( "module_export/Hashtbl.remove"
+            , "fef23aca6a955ca9f9cb7fccbfdfa909e4432a17ff351264a913d2a229ecaee4" )
+          ; ( "module_export/Hashtbl.set"
+            , "a8aed9d5f05a6de5b81289f27bf5b5828d13abb93e2dd1635ba4249c83774f27" )
+          ] )
+      ; ( "moderator_v1"
+        , "e518ac351ede12e897d4616abca9790adaf3588bdca89773a7732e77c0bf93db"
+        , [ ( "module/Hashtbl"
+            , "d3de0228abd1f243c2d62e30fee6d770908c8db4724e639bd1cef1200bcbcfdc" )
+          ; ( "module_export/Hashtbl.create"
+            , "4918800b94fe6812967df0847b9efe2ba2bb69c94f4a056e9fb5094da3f8ac07" )
+          ; ( "module_export/Hashtbl.get"
+            , "5a833eb3c9fc49af48d9ddd801ed6cd1f1c78aab993f4541734e50c942312349" )
+          ; ( "module_export/Hashtbl.mem"
+            , "2783288d3fa1e31f7a884deefadd4559ab223e6edd1fb087a08d7150fc674f0f" )
+          ; ( "module_export/Hashtbl.remove"
+            , "2ec781e9883f73b471980084be795eadb0d15f117712134a565267b7cdb9eb97" )
+          ; ( "module_export/Hashtbl.set"
+            , "37a78e5e2cfd9c7b5258d1d360cf3450ef66cf4bb0040b5356b5d95c18b9d407" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "e92ed0332f90ca8663517d269bfb4e671b481a5d72de4044bdbd6ebf556d9be1"
+        , [ ( "module/Hashtbl"
+            , "8460da183ee7f58302eed019d338422946e327f2522208d193c50ee7c80dabe0" )
+          ; ( "module_export/Hashtbl.create"
+            , "b8ccd94c7f31132b76d8aad33fadf709b3214bf7eeb5b83285d3c96fa56f0259" )
+          ; ( "module_export/Hashtbl.get"
+            , "112dbe3d725b1b8c525bf7d2f9457e7c73ff6fa83d0afde70b6972eed68ce2ee" )
+          ; ( "module_export/Hashtbl.mem"
+            , "0334be1e766167ca50ac23386019a7199d4104b920eee4a2b3fb709d8e38a177" )
+          ; ( "module_export/Hashtbl.remove"
+            , "02cd071b617ccc445c91c470f618d105e5966d094edea323efc3a03134942e7d" )
+          ; ( "module_export/Hashtbl.set"
+            , "727b76361304424162a6d4429b81e4109b719ab0e00ba79735a4c91a32dbbf95" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.tables"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
+  let global_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "9b0979dfe9ea5e136b26a324ab4c0cbf35107501919de75d01c072a050f0d825"
+        , [ ( "global/array_copy"
+            , "326c36574ab0637860405f83de93ae1cc46de5d4773bb6c5ae899820b9847b98" )
+          ; ( "global/fail"
+            , "0cb59f2292447d4ef3be1a2ea4ddeed8b13982e43df7afd2b5469ce76a356c27" )
+          ; ( "global/hash_md5"
+            , "41da44cf55bae0214bfc1246fe0894cafd88b18528f1c09e7443542306d4c031" )
+          ; ( "global/length"
+            , "aeace1ff131b4ee17d25261203e769409faead1f8ceb016c5146c55c7ecada4a" )
+          ; ( "global/record_keys"
+            , "efbbb1e24fb1713576736aa91c2beba8836307770cbec3ae430f9eee4dcd703a" )
+          ; ( "global/string_is_empty"
+            , "aa275489b18cef598b4a907ca70ba380ab894b1beb72c895bfe536b8149d2655" )
+          ; ( "global/string_length"
+            , "8fa44df51298bdbe02e5101299945fc7aaa66ff43c7d002ed99ee1aaf5dc21b7" )
+          ; ( "global/swap_ref"
+            , "49f6064a50ce43b7554c6bd7104703ef296ac78227ac420543349ec1db5a7c54" )
+          ; ( "global/to_string"
+            , "4edf84ecbeeb1233ed58c0c79bc6456e841d5a060fa8b56880b47de2f177909c" )
+          ; ( "global/variant_tag"
+            , "8531aaf9c5bb13b869bf64a5a6e1e6fc765ce939f286963144ff94bdc2017858" )
+          ] )
+      ; ( "tool_v1"
+        , "09dc54ef4d5fe5464cd0d06333ae758e14f27c3af30d7c5a9ff995781a5cf84d"
+        , [ ( "global/array_copy"
+            , "a853a83afa1c9f7446e785af3bc34d652573e62e51a7350bbf7b4a197cf11893" )
+          ; ( "global/fail"
+            , "82c4d09469ba872e37f953906236530f127e1debb245b2b4207cdaa4b041741d" )
+          ; ( "global/hash_md5"
+            , "c3eb0f36573d265dacd55ca075ff34ceff33d302a2b0b067cebb5ab520b33be2" )
+          ; ( "global/length"
+            , "8368904b15fc8a4b40f90b8e0e67cdbb0da831d38b651abc092820d21d84b93d" )
+          ; ( "global/record_keys"
+            , "5b2cdb4712a64f62e1dd063565c048bdd948aecf5a0eb3b6aef7277170bc0a40" )
+          ; ( "global/string_is_empty"
+            , "8f24aa783e6637561c7d6a617ef244388296781ba97e2ca605f77ba49b087253" )
+          ; ( "global/string_length"
+            , "7c98966606f5bd97aa5baeb1347dfed587e3eef3db267f81ed8c88ea86e448da" )
+          ; ( "global/swap_ref"
+            , "70a8a3eedcf4d82f7918170d70036bd7ee0a641aa00ce023ebbede032f7b1d08" )
+          ; ( "global/to_string"
+            , "d168492b867408fd316135febc077c75d6a27322f051eab516a85cf60919ab33" )
+          ; ( "global/variant_tag"
+            , "97c0ae9a490897032699bc49604a53667792ab832e52fa28595fbd62b865515f" )
+          ] )
+      ; ( "moderator_v1"
+        , "dd7588489044aa53d0c907bc2722971c6b67e70d8e7b0ea8b38df27fd41cb76d"
+        , [ ( "global/array_copy"
+            , "593a99eb4072c3be8aa8fa8485efc2fca4b4efe65740568b0454e222e55a4e20" )
+          ; ( "global/fail"
+            , "6bdd6583bbfdbf38e1cec2862613405f3599f8351c9aef5e24a1c55efdf23e25" )
+          ; ( "global/hash_md5"
+            , "a8b2476f2e41d243b677e73e73cb7453c9315855b6de49e03a977a5d1ee52afd" )
+          ; ( "global/length"
+            , "ee54b176bca408726a4f54814625ff46d1e453c26b3acee8b2f7de97fcdefdf4" )
+          ; ( "global/print"
+            , "4c92a831438876c9857cae474b51af4bb6804574d605f6f4b190f8d4f8a5a80b" )
+          ; ( "global/record_keys"
+            , "3b18c065f56fe4c9701711f2082ba2e9cf661323e3b1ca839c189fbe1ac79bd0" )
+          ; ( "global/string_is_empty"
+            , "298e95885e51043d3fef9428f55e52fff5bff2aa0c7393d48081e89f5a801909" )
+          ; ( "global/string_length"
+            , "b17096c250edd2bbc0ebbfe84fbdd33df14e630f47f692be8647d6da26e8c733" )
+          ; ( "global/swap_ref"
+            , "676f3d3e98659e6c48288437d9865f7dcca9412d18b7c93d19e750ebfa537f89" )
+          ; ( "global/to_string"
+            , "f8c225211e90e3e883f1741f4734930ae23fc096c8ef823c4cce086d9d5392bc" )
+          ; ( "global/variant_tag"
+            , "56997194476c168676fbe8bf5a1a471f170beb71dfb13583aa64191f86d4056f" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "43e5d45dd05197a255e9fbe7c767bcb1b30f60c74ee970e5a3226ebac34a21d0"
+        , [ ( "global/array_copy"
+            , "aa75d71c337e070bee24369a8d14eb038601e57c106751310299f9890875b5e4" )
+          ; ( "global/fail"
+            , "221b75a5f71e51114075d7ff0344bb96e711bdb4ff4848dd0cef501b9acb9605" )
+          ; ( "global/hash_md5"
+            , "aafec401a51ce3c607238bf3a3b8854f88db55dc6f9ff64cf585c27a47f87468" )
+          ; ( "global/length"
+            , "ddac7a36eb0b29756c08c9bbe22ce78df37ee3f3a53384057b309bd40cd10241" )
+          ; ( "global/record_keys"
+            , "6b0ef823850e8b4b2b1c6da89dc66af42ebf05ce603f7e7a037bdc188dda56a8" )
+          ; ( "global/string_is_empty"
+            , "0646ea2618ee94ed73cbafe60631d9404d6186bea2f2dc8b88017527e0c780f1" )
+          ; ( "global/string_length"
+            , "6b9a1bb68fc5e33064099d52c4e83fdb9896f973eebc2804cd8d6d45f1e10c86" )
+          ; ( "global/swap_ref"
+            , "28868319f208e4940446d8aa0e8053811247438e3f509f74b404b310184f5b24" )
+          ; ( "global/to_string"
+            , "20d56853e18b107288211b460fa40f234924a9045a27d49abafe27f563860247" )
+          ; ( "global/variant_tag"
+            , "2b376c415c701069e6333dee9de5de2f93f141fef408f6b8f9d2ea32866aafd5" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.globals"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "lib/chatml/chatml_extension_surface.ml"
+              ; "test/chatml_runtime_test.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
+  let json_alias_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "9598e35b5722b27e3d9e0fd0b8a79c6069aab8252ac06fd9931d26a8d61fddfd"
+        , [ ( "type_alias/json"
+            , "de373e490c4ffee533ebbe5ca820e68a85731092a8fbf19a7205108d6ab26a0e" )
+          ] )
+      ; ( "tool_v1"
+        , "0598fd72875d8502f88d4152d83666f7d10edecc175b39a63f7bfbc519ef967b"
+        , [ ( "type_alias/json"
+            , "fc0bb666163b3ce1934c8ac08c558fb9eaa90c41f08407271b55b76b7c8c226f" )
+          ] )
+      ; ( "moderator_v1"
+        , "7666e108b1139830fea1f55c5858064e945093f96929db3d8253778f2715ae66"
+        , [ ( "type_alias/json"
+            , "5b5af3a1b53bbccfdfc3ffc34996a6c0e061f45809b1689b0a29fc24a138755a" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "1525675290f78af03c14e06661a0d8389ca4e039b16ec5e1cb5b23a3b00501d5"
+        , [ ( "type_alias/json"
+            , "701bb077522f52d7894c6560b985a967f478a0f343e55f704186a1f32224295f" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.json"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "lib/chatml/chatml_value_codec.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
     @ string_mappings
     @ array_mappings
     @ option_mappings
+    @ json_mappings
+    @ hashtbl_mappings
+    @ global_mappings
+    @ json_alias_mappings
   ;;
 end
 
@@ -1628,6 +2022,69 @@ let runtime_foundation ~sources =
                    [ "6a6d720f71c08569629b640b4f13158683453c7cc0a7c71dd02b3c43c596a804" ]
                ; evidence =
                    [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.json"
+         ; title = "JSON conversion, missing values, duplicate keys and shared payloads"
+         ; prerequisites = [ "chatml.programs"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-json.md"
+               ; heading = "# JSON values, access and conversion"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "7fb6ad97910adb04e42e441f47aec76109e2a938c346cd8313740aeb0f03ca04" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "lib/chatml/chatml_value_codec.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.tables"
+         ; title = "String-keyed tables, mutable aliases and recovery boundaries"
+         ; prerequisites = [ "chatml.programs"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-tables.md"
+               ; heading = "# String-keyed mutable tables"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "b0fc09f0f4247b576a29c878c684c8d552edebf09f97ee6ea3edb765320568a9" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.globals"
+         ; title = "Global helpers, reflection, rendering and surface-specific print"
+         ; prerequisites = [ "chatml.programs"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-global-helpers.md"
+               ; heading = "# Global helpers and language-value rendering"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "b8444f16bd85803d8aa64ee8c85c38903e6b7cd53bf12f658a429e3f767c15ce" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "lib/chatml/chatml_extension_surface.ml"
+                   ; "test/chatml_runtime_test.ml"
                    ; "test/agent_docs/docs_chatml_authoring.ml"
                    ]
                }

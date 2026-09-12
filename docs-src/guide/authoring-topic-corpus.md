@@ -63,10 +63,13 @@ and delegated moderator surfaces. The normal offline tests compare these literal
 reviewed pins to the current compiler and source-derived topics.
 `Coverage.task_mappings` adds the Task module and its five exports on each surface,
 with the complete [task semantics guide](chatml-task-effects.md) and checked examples.
-`Coverage.string_mappings`, `array_mappings` and `option_mappings` add all exports
-of those modules with the checked [String](chatml-strings.md) and
-[collections](chatml-collections.md) references. `Coverage.reviewed_mappings`
-combines these 206 exact targets across the four surfaces. Other compiler
+`Coverage.string_mappings`, `array_mappings`, `option_mappings`, `json_mappings`
+and `hashtbl_mappings` add all exports with the checked [String](chatml-strings.md),
+[collections](chatml-collections.md), [JSON](chatml-json.md) and
+[table](chatml-tables.md) references. `global_mappings` covers the ten shared
+globals plus ordinary moderator `print`; `json_alias_mappings` covers the common
+recursive type. `Coverage.reviewed_mappings` combines these 343 exact targets
+across the four surfaces. Other compiler
 APIs remain explicitly unmapped. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
 build would defeat this check. Authoring-context service construction also audits
@@ -88,6 +91,13 @@ The module coverage test compares each reviewed module against its full current
 export inventory on every surface, so a new export cannot silently remain outside
 that module's documentation check.
 
+Use `--globals TOPIC_ID` or `--alias NAME TOPIC_ID` to inspect those candidate
+families. A separate completeness test derives the core API from the compiler's
+actual core inventory, checks that each extensibility surface includes that API
+with its explicit `print` exclusion, and requires every resulting target to have
+a reviewed mapping. That test covers core modules, globals and the shared `json`
+alias; it does not claim coverage of all syntax constructs or runtime extensions.
+
 ## Initial topic corpus
 
 The flat `chatml.task-effects` topic explains sequencing, repeated interpretation,
@@ -101,6 +111,12 @@ replacement, UTF-8 boundaries and immediate errors. `chatml.collections` adds
 arrays and options: transformations, shallow mutation, callback ordering, searches,
 eager defaults and explicit interpretation of task arrays. Both are flat topics
 available on every extensibility surface with shared language/task prerequisites.
+
+`chatml.json` covers all JSON operations and the recursive type, including borrowed
+mutable payloads, duplicate-key policies, syntax-only validation and nonfinite
+export failures. `chatml.tables` covers every Hashtbl operation and local mutation
+recovery boundaries. `chatml.globals` explains value rendering, reflection and
+surface availability. Eleven further checked examples accompany these guides.
 
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):
@@ -193,7 +209,7 @@ materialization services. Public enablement awaits complete qualification.
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
-coverage, 40 executable language examples and exact source/entrypoint checks for the
+coverage, 51 language examples (including expected errors) and exact source/entrypoint checks for the
 four runtime integration fixtures. The invocation and background moderator fixtures
 also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be

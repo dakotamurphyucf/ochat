@@ -1,12 +1,19 @@
 open Core
 
-(* Maintainer aid only: emit candidate pins after reviewing a module's semantics
+(* Maintainer aid only: emit candidate pins after reviewing the selected semantics
    and checking its reference examples. CI never regenerates maintained pins. *)
+type selection =
+  | Module of string
+  | Globals
+  | Alias of string
+
 let () =
-  let name, topic =
+  let selection, topic =
     match Array.to_list (Sys.get_argv ()) with
-    | [ _; name; topic ] -> name, topic
-    | _ -> failwith "usage: review_coverage MODULE TOPIC_ID"
+    | [ _; "--globals"; topic ] -> Globals, topic
+    | [ _; "--alias"; name; topic ] -> Alias name, topic
+    | [ _; name; topic ] -> Module name, topic
+    | _ -> failwith "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID"
   in
   let sources = Authoring_sources.installed () |> Result.ok_or_failwith in
   let corpus = Authoring_corpus.runtime_foundation ~sources |> Result.ok_or_failwith in
@@ -20,13 +27,15 @@ let () =
         in
         let selected =
           List.filter targets ~f:(fun target ->
-            String.equal target.Authoring_corpus.Coverage.id (surface ^ "/module/" ^ name)
-            || String.is_prefix
-                 target.id
-                 ~prefix:(surface ^ "/module_export/" ^ name ^ "."))
+            let id = target.Authoring_corpus.Coverage.id in
+            match selection with
+            | Globals -> String.is_prefix id ~prefix:(surface ^ "/global/")
+            | Alias name -> String.equal id (surface ^ "/type_alias/" ^ name)
+            | Module name ->
+              String.equal id (surface ^ "/module/" ^ name)
+              || String.is_prefix id ~prefix:(surface ^ "/module_export/" ^ name ^ "."))
         in
-        if List.is_empty selected
-        then failwith ("module unavailable: " ^ surface ^ "/" ^ name);
+        if List.is_empty selected then failwith ("no selected targets on " ^ surface);
         let closure =
           Authoring_corpus.Coverage.topic_contract
             corpus

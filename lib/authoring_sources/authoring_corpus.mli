@@ -209,6 +209,19 @@ module Coverage : sig
       including eager defaults and structural variants. *)
   val option_mappings : mapping list
 
+  (** Reviewed Json module and all sixteen exports on each extensibility surface,
+      including duplicates, payload aliasing and numeric export boundaries. *)
+  val json_mappings : mapping list
+
+  (** Reviewed string-keyed Hashtbl module and its five exports on each surface. *)
+  val hashtbl_mappings : mapping list
+
+  (** All ten shared globals, plus print only on the ordinary moderator surface. *)
+  val global_mappings : mapping list
+
+  (** Shared recursive json alias, with checked constructor/access/codec examples. *)
+  val json_alias_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list
@@ -233,8 +246,9 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     jobs/recovery on all four surfaces, with moderator-only acknowledgements,
     subscriptions, timers, notifications, ingress and a checked shell coordinator.
     Notification/example prerequisites include acknowledgement and recovery
-    boundaries. Flat String and Array/Option topics cover all their exports with
-    executable semantic examples. This remains a foundation, not complete feature/native-schema
+    boundaries. Flat String, Array/Option, Json, Hashtbl and global-helper topics
+    cover the entire shared core API with executable semantic examples and exact
+    surface availability. This remains a foundation, not complete feature/native-schema
     coverage or complete task packages. The separate Authoring_context service
     adds retrieval and selected compiler/tool inventories. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result
