@@ -35,13 +35,62 @@ type fragment = private
   ; text : string
   }
 
+type origin =
+  | Installed
+  | Authored of
+      { package : string
+      ; package_sha256 : string
+      }
+[@@deriving sexp, equal]
+
 type topic = private
   { specification : specification
   ; fragments : fragment list
   ; sha256 : string
+  ; origin : origin
   }
 
 type t
+
+(** Captured author conventions, distinct from official runtime semantics.
+    [source_name] labels provenance only; construction never opens it. *)
+type authored_topic =
+  { id : string
+  ; title : string
+  ; prerequisites : string list
+  ; surfaces : string list
+  ; source_name : string
+  ; text : string
+  }
+[@@deriving sexp]
+
+type authored_package =
+  { help : Chatmd_shell_spec.Authoring_metadata.help
+  ; topics : authored_topic list
+  }
+[@@deriving sexp]
+
+(** Add captured packages without replacing installed topics or existing packages.
+    Every authored ID uses [custom.<package>.]; package roots belong to that
+    package. Existing dependency/cycle/surface checks also apply to authored
+    topics. Cross-package dependencies are allowed but must remain available
+    when scoping. The default aggregate authored text budget is 4 MB; [max_bytes]
+    can override it. At most 128 packages/512 total topics fit catalog admission.
+
+    Authored origins and complete package digests are assigned by construction;
+    authored input cannot claim an audited compiler contract. Official topic
+    hashes remain unchanged. Identity is independent of package insertion order.
+    Neither prose nor embedded snippets are executed or implicitly audited. *)
+val extend_authored : ?max_bytes:int -> t -> authored_package list -> (t, string) result
+
+val authored_packages : t -> Chatmd_shell_spec.Authoring_metadata.help list
+
+(** Keep installed references and exactly the named authored packages. The host
+    must derive this list from actual selected tool metadata. Missing/duplicate
+    names and unavailable cross-package dependencies reject, never silently
+    restore an omitted package. Selecting none recovers the installed corpus
+    identity and cannot retain private authored prose. *)
+val scope_authored : t -> packages:string list -> (t, string) result
 
 (** Extract a unique exact ATX heading and its body from maintained Markdown.
     Ignore headings inside backtick/tilde fences; preserve original source bytes.

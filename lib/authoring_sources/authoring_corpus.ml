@@ -33,21 +33,49 @@ type fragment =
   ; text : string
   }
 
+type origin =
+  | Installed
+  | Authored of
+      { package : string
+      ; package_sha256 : string
+      }
+[@@deriving sexp, equal]
+
 type topic =
   { specification : specification
   ; fragments : fragment list
   ; sha256 : string
+  ; origin : origin
   }
 
 type t =
   { identity : string
+  ; installed_identity : string
   ; topics : topic String.Map.t
   ; surface_ids : string list
+  ; packages : Metadata.help String.Map.t
   }
+
+type authored_topic =
+  { id : string
+  ; title : string
+  ; prerequisites : string list
+  ; surfaces : string list
+  ; source_name : string
+  ; text : string
+  }
+[@@deriving sexp]
+
+type authored_package =
+  { help : Metadata.help
+  ; topics : authored_topic list
+  }
+[@@deriving sexp]
 
 let digest = Chatmd_shell_spec.Source_ref.digest
 let identity t = t.identity
-let topics t = Map.data t.topics
+let topics (t : t) = Map.data t.topics
+let authored_packages t = Map.data t.packages
 let unique strings = Option.is_none (List.find_a_dup strings ~compare:String.compare)
 
 let heading_depth line =
@@ -122,7 +150,7 @@ let section ~text ~heading ~include_children =
     Ok (String.sub text ~pos:start ~len:(finish - start))
 ;;
 
-let topic t ~id =
+let topic (t : t) ~id =
   match Map.find t.topics id with
   | Some topic -> Ok topic
   | None -> Error ("authoring topic is not installed: " ^ id)
@@ -154,11 +182,33 @@ let closure topics roots =
   List.fold_result roots ~init:[] ~f:(visit []) |> Result.map ~f:List.rev
 ;;
 
+let validate_graph topics =
+  let open Result.Let_syntax in
+  let%bind _ = closure topics (Map.keys topics) in
+  Map.data topics
+  |> List.map ~f:(fun topic ->
+    List.map topic.specification.prerequisites ~f:(fun id ->
+      let dependency = Map.find_exn topics id in
+      match
+        List.for_all
+          topic.specification.surfaces
+          ~f:(List.mem dependency.specification.surfaces ~equal:String.equal)
+      with
+      | true -> Ok ()
+      | false ->
+        Error
+          (topic.specification.id
+           ^ ": prerequisite unavailable on a declared surface: "
+           ^ id))
+    |> Result.all_unit)
+  |> Result.all_unit
+;;
+
 let create ~sources specifications =
   let open Result.Let_syntax in
   let surface_ids = Authoring_sources.surface_ids sources in
   let%bind resolved =
-    List.map specifications ~f:(fun specification ->
+    List.map specifications ~f:(fun (specification : specification) ->
       let fail message = Error (specification.id ^ ": " ^ message) in
       let%bind () =
         match
@@ -218,7 +268,7 @@ let create ~sources specifications =
         |> Sexp.to_string_mach
         |> digest
       in
-      Ok (specification.id, { specification; fragments; sha256 }))
+      Ok (specification.id, { specification; fragments; sha256; origin = Installed }))
     |> Result.all
   in
   let%bind topics =
@@ -227,26 +277,7 @@ let create ~sources specifications =
     | `Ok topics when Map.is_empty topics -> Error "empty authoring corpus"
     | `Ok topics -> Ok topics
   in
-  let%bind _ = closure topics (Map.keys topics) in
-  let%bind () =
-    Map.data topics
-    |> List.map ~f:(fun topic ->
-      List.map topic.specification.prerequisites ~f:(fun id ->
-        let dependency = Map.find_exn topics id in
-        match
-          List.for_all
-            topic.specification.surfaces
-            ~f:(List.mem dependency.specification.surfaces ~equal:String.equal)
-        with
-        | true -> Ok ()
-        | false ->
-          Error
-            (topic.specification.id
-             ^ ": prerequisite unavailable on a declared surface: "
-             ^ id))
-      |> Result.all_unit)
-    |> Result.all_unit
-  in
+  let%bind () = validate_graph topics in
   let identity =
     [%sexp
       (Authoring_sources.identity sources : string)
@@ -255,7 +286,180 @@ let create ~sources specifications =
     |> Sexp.to_string_mach
     |> digest
   in
-  Ok { identity; topics; surface_ids }
+  Ok
+    { identity
+    ; installed_identity = identity
+    ; topics
+    ; surface_ids
+    ; packages = String.Map.empty
+    }
+;;
+
+let with_authored_topics t ~topics ~packages =
+  let identity =
+    match Map.is_empty packages with
+    | true -> t.installed_identity
+    | false ->
+      [%sexp
+        ("ochat.authored-reference.v1" : string)
+      , (t.installed_identity : string)
+      , (Map.to_alist (Map.map topics ~f:(fun topic -> topic.sha256))
+         : (string * string) list)
+      , (Map.data packages : Metadata.help list)]
+      |> Sexp.to_string_mach
+      |> digest
+  in
+  { t with identity; topics; packages }
+;;
+
+let extend_authored ?(max_bytes = 4_000_000) (t : t) additions =
+  let open Result.Let_syntax in
+  let%bind () =
+    let existing =
+      Map.data t.topics
+      |> List.sum
+           (module Int)
+           ~f:(fun topic ->
+             match topic.origin with
+             | Installed -> 0
+             | Authored _ ->
+               List.sum
+                 (module Int)
+                 topic.fragments
+                 ~f:(fun fragment -> String.length fragment.text))
+    in
+    let bytes =
+      List.sum
+        (module Int)
+        additions
+        ~f:(fun (package : authored_package) ->
+          List.sum (module Int) package.topics ~f:(fun topic -> String.length topic.text))
+    in
+    let count =
+      List.sum (module Int) additions ~f:(fun package -> List.length package.topics)
+    in
+    match
+      max_bytes > 0
+      && existing <= max_bytes
+      && bytes <= max_bytes - existing
+      && Map.length t.packages + List.length additions <= 128
+      && Map.length t.topics + count <= 512
+    with
+    | true -> Ok ()
+    | false -> Error "authored reference package budget exceeded"
+  in
+  let%bind packages, topics =
+    List.fold_result
+      additions
+      ~init:(t.packages, t.topics)
+      ~f:(fun (packages, topics) (addition : authored_package) ->
+        let%bind () = Metadata.validate_help addition.help in
+        let package = addition.help.package in
+        let%bind () =
+          match Map.mem packages package, addition.topics with
+          | true, _ -> Error ("duplicate authored package: " ^ package)
+          | _, [] -> Error ("empty authored package: " ^ package)
+          | false, _ -> Ok ()
+        in
+        let package_sha256 =
+          let sorted =
+            { addition with
+              topics =
+                List.sort addition.topics ~compare:(fun a b -> String.compare a.id b.id)
+            }
+          in
+          [%sexp (sorted : authored_package)] |> Sexp.to_string_mach |> digest
+        in
+        let%bind topics =
+          List.fold_result addition.topics ~init:topics ~f:(fun topics authored ->
+            let%bind () =
+              match
+                Metadata.valid_topic authored.id
+                && String.is_prefix authored.id ~prefix:("custom." ^ package ^ ".")
+                && (not (String.is_empty (String.strip authored.title)))
+                && Stdlib.String.is_valid_utf_8 authored.title
+                && (not (String.is_empty (String.strip authored.text)))
+                && Stdlib.String.is_valid_utf_8 authored.text
+                && (not (String.is_empty authored.source_name))
+                && Stdlib.String.is_valid_utf_8 authored.source_name
+                && (not
+                      (String.exists authored.source_name ~f:(function
+                         | '\000' .. '\031' | '\127' -> true
+                         | _ -> false)))
+                && unique authored.prerequisites
+                && List.for_all authored.prerequisites ~f:Metadata.valid_topic
+                && (not (List.is_empty authored.surfaces))
+                && unique authored.surfaces
+                && List.for_all
+                     authored.surfaces
+                     ~f:(List.mem t.surface_ids ~equal:String.equal)
+              with
+              | true -> Ok ()
+              | false -> Error ("invalid authored topic: " ^ authored.id)
+            in
+            let source =
+              { path = authored.source_name
+              ; heading = authored.title
+              ; include_children = true
+              }
+            in
+            let text_sha256 = digest authored.text in
+            let specification =
+              { id = authored.id
+              ; title = authored.title
+              ; prerequisites = authored.prerequisites
+              ; surfaces = authored.surfaces
+              ; excerpts = [ source ]
+              ; review = Pending
+              }
+            in
+            let topic =
+              { specification
+              ; fragments =
+                  [ { source
+                    ; document_sha256 = text_sha256
+                    ; sha256 = text_sha256
+                    ; text = authored.text
+                    }
+                  ]
+              ; sha256 = digest (package_sha256 ^ ":" ^ authored.id)
+              ; origin = Authored { package; package_sha256 }
+              }
+            in
+            match Map.add topics ~key:authored.id ~data:topic with
+            | `Duplicate -> Error ("duplicate authoring topic: " ^ authored.id)
+            | `Ok topics -> Ok topics)
+        in
+        let%map () =
+          List.map addition.help.topics ~f:(fun id ->
+            match Map.find topics id with
+            | Some { origin = Authored owner; _ } when String.equal owner.package package
+              -> Ok ()
+            | _ -> Error ("authored package root is not owned by its package: " ^ id))
+          |> Result.all_unit
+        in
+        Map.set packages ~key:package ~data:addition.help, topics)
+  in
+  let%map () = validate_graph topics in
+  with_authored_topics t ~topics ~packages
+;;
+
+let scope_authored t ~packages:selected =
+  let open Result.Let_syntax in
+  let%bind () =
+    match unique selected && List.for_all selected ~f:(Map.mem t.packages) with
+    | true -> Ok ()
+    | false -> Error "invalid authored package selection"
+  in
+  let packages = Map.filter_keys t.packages ~f:(List.mem selected ~equal:String.equal) in
+  let topics =
+    Map.filter t.topics ~f:(fun topic ->
+      match topic.origin with
+      | Installed -> true
+      | Authored owner -> Map.mem packages owner.package)
+  in
+  let%map () = validate_graph topics in
+  with_authored_topics t ~topics ~packages
 ;;
 
 let assemble t ~surface_id ~roots =

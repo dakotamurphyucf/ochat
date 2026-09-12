@@ -19,7 +19,14 @@ type t =
 let fingerprint t = t.fingerprint
 let installed_corpus t = t.corpus
 
-let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
+let create
+      ?(default_tokens = 12000)
+      ?(max_tokens = 32000)
+      ?(authored_packages = [])
+      ?authored_max_bytes
+      ~secret
+      ()
+  =
   let open Result.Let_syntax in
   let%bind () =
     match
@@ -33,6 +40,9 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   in
   let%bind sources = Sources.installed () in
   let%bind corpus = Corpus.runtime_foundation ~sources in
+  let%bind corpus =
+    Corpus.extend_authored ?max_bytes:authored_max_bytes corpus authored_packages
+  in
   let%bind targets =
     Corpus.Coverage.compiler_targets
       ~sources
@@ -45,7 +55,7 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   in
   let fingerprint =
     [%sexp
-      ("ochat.authoring-query.v2" : string)
+      ("ochat.authoring-query.v3" : string)
     , (Corpus.identity corpus : string)
     , (default_tokens : int)
     , (max_tokens : int)]
@@ -53,6 +63,42 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
     |> Digest.digest
   in
   Ok { corpus; sources; secret; default_tokens; max_tokens; fingerprint }
+;;
+
+let scoped_corpus t ~capabilities =
+  let installed = Corpus.authored_packages t.corpus in
+  let packages =
+    C.references capabilities
+    |> List.filter_map ~f:(fun reference ->
+      match C.find capabilities ~name:reference.name with
+      | Error _ -> None
+      | Ok binding ->
+        Option.bind (C.metadata binding).authoring ~f:(fun help ->
+          Option.some_if
+            (List.exists installed ~f:(fun package ->
+               String.equal help.package package.Metadata.package))
+            help.package))
+    |> List.dedup_and_sort ~compare:String.compare
+  in
+  Corpus.scope_authored t.corpus ~packages
+  |> Result.map_error ~f:(fun _ ->
+    "selected authored packages have an unavailable dependency")
+;;
+
+let authored_roots corpus ~capabilities ~task =
+  let installed = Corpus.authored_packages corpus in
+  C.references capabilities
+  |> List.concat_map ~f:(fun reference ->
+    match C.find capabilities ~name:reference.name with
+    | Error _ -> []
+    | Ok binding ->
+      (match (C.metadata binding).authoring with
+       | Some help
+         when List.mem help.tasks task ~equal:Metadata.equal_task
+              && List.exists installed ~f:(fun package ->
+                String.equal help.package package.Metadata.package) -> help.topics
+       | _ -> []))
+  |> List.dedup_and_sort ~compare:String.compare
 ;;
 
 let tasks =
@@ -167,23 +213,7 @@ let task_of_request request =
   |> Result.of_option ~error:"unknown authoring task"
 ;;
 
-let surface host task =
-  let target, surface =
-    match task with
-    | Metadata.One_off_script -> V.One_off_script, "one_off_v1"
-    | Standalone_tool -> V.Standalone_tool, "tool_v1"
-    | Child_agent -> V.Generated_chatmd, "delegated_moderator_v1"
-    | Moderator_tool | Background_workflow ->
-      ( V.Moderator
-      , (match V.moderator_surface host with
-         | Ordinary -> "moderator_v1"
-         | Delegated -> "delegated_moderator_v1") )
-  in
-  match List.mem (V.targets host) target ~equal:V.equal_target with
-  | true -> Ok surface
-  | false -> Error "authoring task is unavailable on the invoking host"
-;;
-
+let surface = V.task_surface
 let task_surface = surface
 
 let roots task request =
@@ -328,6 +358,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
         | Ok binding ->
           (match
              Authoring_tool_description.describe
+               ~host
                ~capabilities
                ~name:reference.name
                ~description:(C.descriptor binding).function_.description
@@ -409,7 +440,7 @@ let signature_items t ~surface_id =
       ])
 ;;
 
-let tool_items capabilities =
+let tool_items ~host capabilities =
   let open Result.Let_syntax in
   C.references capabilities
   |> List.map ~f:(fun reference ->
@@ -425,6 +456,7 @@ let tool_items capabilities =
       ; ( "description"
         , match
             Authoring_tool_description.describe
+              ~host
               ~capabilities
               ~name:reference.name
               ~description:descriptor.description
@@ -491,20 +523,39 @@ let blocks source =
   loop [] [] None (String.split_lines source)
 ;;
 
+let origin_fields (topic : Corpus.topic) =
+  match topic.origin with
+  | Installed -> [ "source_kind", `String "installed" ]
+  | Authored { package; package_sha256 } ->
+    [ "source_kind", `String "authored_conventions"
+    ; "author_package", `String package
+    ; "author_package_sha256", `String package_sha256
+    ; ( "authority"
+      , `String
+          "Author-supplied conventions; not authoritative compiler or runtime semantics."
+      )
+    ]
+;;
+
 let topic_items topic =
   List.mapi topic.Corpus.fragments ~f:(fun part fragment ->
-    let text = blocks fragment.text |> String.concat ~sep:"\n\n" in
+    let text =
+      match topic.origin with
+      | Installed -> blocks fragment.text |> String.concat ~sep:"\n\n"
+      | Authored _ -> fragment.text
+    in
     `Object
-      [ "topic_id", `String topic.specification.id
-      ; "title", `String topic.specification.title
-      ; "topic_sha256", `String topic.sha256
-      ; "source", `String fragment.source.path
-      ; "source_sha256", `String fragment.document_sha256
-      ; "section", `String fragment.source.heading
-      ; "part", integer part
-      ; "content_sha256", `String (Digest.digest text)
-      ; "text", `String text
-      ])
+      ([ "topic_id", `String topic.specification.id
+       ; "title", `String topic.specification.title
+       ; "topic_sha256", `String topic.sha256
+       ; "source", `String fragment.source.path
+       ; "source_sha256", `String fragment.document_sha256
+       ; "section", `String fragment.source.heading
+       ; "part", integer part
+       ; "content_sha256", `String (Digest.digest text)
+       ; "text", `String text
+       ]
+       @ origin_fields topic))
 ;;
 
 let utf8_prefix text max_bytes =
@@ -569,12 +620,13 @@ let search corpus ~surface_id query =
            ( score
            , topic.specification.id
            , `Object
-               [ "topic_id", `String topic.specification.id
-               ; "title", `String topic.specification.title
-               ; "excerpt", `String excerpt
-               ; "topic_sha256", `String topic.sha256
-               ; "prerequisites", strings topic.specification.prerequisites
-               ] )))
+               ([ "topic_id", `String topic.specification.id
+                ; "title", `String topic.specification.title
+                ; "excerpt", `String excerpt
+                ; "topic_sha256", `String topic.sha256
+                ; "prerequisites", strings topic.specification.prerequisites
+                ]
+                @ origin_fields topic) )))
   |> List.sort ~compare:(fun (a, aid, _) (b, bid, _) ->
     match Int.compare b a with
     | 0 -> String.compare aid bid
@@ -582,7 +634,7 @@ let search corpus ~surface_id query =
   |> List.map ~f:(fun (_, _, item) -> item)
 ;;
 
-let reference_search t ~capabilities ~surface_id query =
+let reference_search t ~host ~capabilities ~surface_id query =
   let open Result.Let_syntax in
   let terms = search_terms query in
   let matches value =
@@ -617,7 +669,7 @@ let reference_search t ~capabilities ~surface_id query =
     Chatml.Chatml_surface_inventory.reference_items inventory
     |> List.map ~f:(fun item -> text item "name", text item "signature")
   in
-  let%map tools = tool_items capabilities in
+  let%map tools = tool_items ~host capabilities in
   List.filter_opt
     [ result
         "reference.signatures"
@@ -682,6 +734,8 @@ let query t ~host ~capabilities ~scope request =
       | false -> Error "documentation request exceeds 16 KiB"
     in
     let%bind () = validate_operation request in
+    let%bind corpus = scoped_corpus t ~capabilities in
+    let t = { t with corpus } in
     let%bind requested_budget =
       match field request "max_tokens" with
       | Some (`Number n) ->
@@ -722,14 +776,21 @@ let query t ~host ~capabilities ~scope request =
         let%map items = signature_items t ~surface_id in
         items, [ "reference.signatures" ]
       | "topic", "reference.tools" ->
-        let%map items = tool_items capabilities in
+        let%map items = tool_items ~host capabilities in
         items, [ "reference.tools" ]
       | "search", _ ->
         let query = text base "query" in
-        let%map references = reference_search t ~capabilities ~surface_id query in
+        let%map references = reference_search t ~host ~capabilities ~surface_id query in
         search t.corpus ~surface_id query @ references, []
       | ("topic" | "prepare"), _ ->
         let%bind roots = roots task base in
+        let roots =
+          match operation with
+          | "prepare" ->
+            roots @ authored_roots t.corpus ~capabilities ~task
+            |> List.dedup_and_sort ~compare:String.compare
+          | _ -> roots
+        in
         let%map topics = Corpus.assemble t.corpus ~surface_id ~roots in
         ( List.concat_map topics ~f:topic_items
         , List.map topics ~f:(fun topic -> topic.specification.id) )
@@ -738,7 +799,7 @@ let query t ~host ~capabilities ~scope request =
     let%bind items, covered =
       match operation with
       | "prepare" ->
-        let%bind tools = tool_items capabilities in
+        let%bind tools = tool_items ~host capabilities in
         let%map signatures = signature_items t ~surface_id in
         ( `Object
             [ "kind", `String "orientation"

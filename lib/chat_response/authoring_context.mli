@@ -11,6 +11,8 @@ type t
 val create
   :  ?default_tokens:int
   -> ?max_tokens:int
+  -> ?authored_packages:Authoring_corpus.authored_package list
+  -> ?authored_max_bytes:int
   -> secret:string
   -> unit
   -> (t, string) result
@@ -20,6 +22,17 @@ val fingerprint : t -> string
 (** Trusted host access to the same immutable, checked corpus used by queries.
     This does not grant model-facing access without target/policy checks. *)
 val installed_corpus : t -> Authoring_corpus.t
+
+(** Captured custom packages are host input to [create], never query parameters.
+    Select their visibility from actual tool help metadata. Missing dependencies
+    fail rather than restoring an omitted package or exposing its private name.
+    Custom sources retain authored provenance and cannot redefine installed topics.
+    Query prepare adds selected custom roots and their prerequisites; topic/search/
+    continuation apply the same scope and configured response budgets. *)
+val scoped_corpus
+  :  t
+  -> capabilities:Tool_capability.t
+  -> (Authoring_corpus.t, string) result
 
 (** Resolve a task against the host's actual enabled compiler targets. Shared by
     retrieval and automatic guidance; failure cannot enable another surface. *)

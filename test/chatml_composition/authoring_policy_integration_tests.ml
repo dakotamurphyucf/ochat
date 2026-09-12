@@ -236,7 +236,7 @@ let%expect_test
               ()
             |> Result.ok_or_failwith
           in
-          let references capabilities =
+          let references ?(host = host) capabilities =
             Q.query
               service
               ~host
@@ -255,6 +255,15 @@ let%expect_test
             |> Result.ok_or_failwith
           in
           let narrowed_descriptions = references narrowed in
+          let restricted_host =
+            Chat_response.Authoring_validation.create_host
+              ~runtime_identity:"one-off-reference-only"
+              ~targets:[ One_off_script ]
+              ~moderator_surface:Ordinary
+              ~compilation:Chatml_compilation.default_limits
+            |> Result.ok_or_failwith
+          in
+          let restricted_descriptions = references ~host:restricted_host capabilities in
           List.iter [ "agent_create"; "run_chatml" ] ~f:(fun name ->
             let tool = List.find_exn tools ~f:(fun tool -> String.equal name tool.name) in
             let description = Option.value_exn tool.description in
@@ -286,7 +295,18 @@ let%expect_test
             let text = Jsonaf.member_exn "description" restricted |> Jsonaf.string_exn in
             assert (String.is_substring text ~substring:"Authoring reference package:");
             List.iter [ "ochat_authoring_context"; "ochat_validate" ] ~f:(fun helper ->
-              assert (not (String.is_substring text ~substring:helper)))))
+              assert (not (String.is_substring text ~substring:helper)));
+            let restricted_target = item restricted_descriptions in
+            let text =
+              Jsonaf.member_exn "description" restricted_target |> Jsonaf.string_exn
+            in
+            assert (String.is_substring text ~substring:"Authoring reference package:");
+            List.iter [ "ochat_authoring_context"; "ochat_validate" ] ~f:(fun helper ->
+              assert (
+                Bool.equal
+                  (String.is_substring text ~substring:helper)
+                  (String.equal name "run_chatml"
+                   && List.mem names helper ~equal:String.equal)))))
         (fun state ->
            (match result state "script" with
             | Complete (`String "ok") -> ()

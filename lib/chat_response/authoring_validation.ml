@@ -58,6 +58,23 @@ let runtime_identity host = host.runtime_identity
 let targets host = host.targets
 let moderator_surface host = host.moderator_surface
 
+let task_surface host task =
+  let target, surface =
+    match task with
+    | Metadata.One_off_script -> One_off_script, "one_off_v1"
+    | Standalone_tool -> Standalone_tool, "tool_v1"
+    | Child_agent -> Generated_chatmd, "delegated_moderator_v1"
+    | Moderator_tool | Background_workflow ->
+      ( Moderator
+      , (match host.moderator_surface with
+         | Ordinary -> "moderator_v1"
+         | Delegated -> "delegated_moderator_v1") )
+  in
+  match List.mem host.targets target ~equal:equal_target with
+  | true -> Ok surface
+  | false -> Error "authoring task is unavailable on the invoking host"
+;;
+
 let configure_generated host ~limits ~catalog =
   let open Result.Let_syntax in
   let%map _ =

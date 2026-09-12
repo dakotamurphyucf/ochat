@@ -99,13 +99,33 @@ and points to `prepare` with `task: "child_agent"` when the reference helper is
 available. This gives the model a reason to discover the authoring guides before
 it attempts an unfamiliar ChatMD definition or moderator.
 
-These discovery pointers are derived from the actual selected capability metadata.
+These discovery pointers are derived from the actual selected capability metadata
+and supported host targets, using the same task-to-surface resolver as retrieval.
 Automatic/preload configurations expose both helpers; manual configurations mention
 only the helpers explicitly exposed. With neither helper, the authoring tool keeps
 its entrypoint description and stable package/topic identifiers. Selecting a narrower
 tool set recomputes those pointers. Model tool descriptions and retrieved tool
 inventories use the same presentation, without changing schemas, capability IDs or
 the implementations behind them. Custom authored description text is preserved.
+
+Custom conventions can now be captured through the host library API:
+`Authoring_context.create ~authored_packages`. Each package includes explicit help
+metadata and captured topic text with source labels, supported compiler surfaces
+and prerequisites. Topic IDs use `custom.<package>.<topic>` and cannot overwrite
+installed topics. Lookup performs no file reads or execution of embedded snippets.
+
+The query service scopes these packages to the invoking tools' actual help
+metadata. `prepare` includes selected custom roots and their dependencies;
+`topic`, `search` and continuation use the same scope. Omitting a package cannot
+silently restore it through another package's dependency. Changing captured text,
+metadata or authority invalidates continuation. Responses label custom text as
+`authored_conventions`, with package and source hashes; these conventions cannot
+count as audited compiler/runtime documentation. The aggregate captured-text
+budget defaults to 4 MB and can be configured independently from response budgets.
+
+This is the corpus/query library path. Daemon/TUI host configuration and automatic
+preload materialization of custom conventions remain to be integrated; declaring
+`authoring_help` alone does not install a custom package's text.
 
 ## One strict request schema
 

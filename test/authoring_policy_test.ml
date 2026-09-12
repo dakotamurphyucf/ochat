@@ -356,8 +356,17 @@ let%test_unit "child auto cannot restore helpers removed by its parent" =
       |> get
     in
     assert (List.is_empty (P.helper_pointers plan));
+    let host =
+      Chat_response.Authoring_validation.create_host
+        ~runtime_identity:"description-fixture"
+        ~targets:[ One_off_script ]
+        ~moderator_surface:Ordinary
+        ~compilation:Chatml_compilation.default_limits
+      |> Result.ok_or_failwith
+    in
     let description =
       Chat_response.Authoring_tool_description.describe
+        ~host
         ~capabilities:(P.capabilities plan)
         ~name:"author"
         ~description:(Some "Custom authoring entrypoint.")

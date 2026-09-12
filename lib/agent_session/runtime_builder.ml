@@ -1434,9 +1434,12 @@ let build_with_services
              })))
   in
   let%bind tools =
-    match extension_services with
+    match
+      Option.bind extension_services ~f:(fun services ->
+        services.authoring_validation_host)
+    with
     | None -> Ok tools
-    | Some _ ->
+    | Some host ->
       let%map capabilities =
         Lazy.force agent_runtime.capabilities
         |> Result.map_error ~f:(fun error ->
@@ -1448,6 +1451,7 @@ let build_with_services
             { tool with
               description =
                 Chat_response.Authoring_tool_description.describe
+                  ~host
                   ~capabilities
                   ~name:tool.name
                   ~description:tool.description

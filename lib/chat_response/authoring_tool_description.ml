@@ -8,15 +8,19 @@ let helper_available capabilities helper =
   | Error _ -> false
 ;;
 
-let describe ~capabilities ~name ~description =
+let describe ~host ~capabilities ~name ~description =
   match C.find capabilities ~name with
   | Error _ -> description
   | Ok binding ->
     (match (C.metadata binding).authoring with
      | None -> description
      | Some help ->
+       let tasks =
+         List.filter help.tasks ~f:(fun task ->
+           Result.is_ok (Authoring_validation.task_surface host task))
+       in
        let reference =
-         match helper_available capabilities M.Reference, help.tasks with
+         match helper_available capabilities M.Reference, tasks with
          | true, task :: _ ->
            Some
              ("Before authoring unfamiliar syntax or behavior, call "
@@ -30,7 +34,7 @@ let describe ~capabilities ~name ~description =
        in
        let validation =
          Option.some_if
-           (helper_available capabilities M.Validation)
+           (helper_available capabilities M.Validation && not (List.is_empty tasks))
            ("Check the completed source with "
             ^ M.helper_name Validation
             ^ " before execution; validation does not run the source.")

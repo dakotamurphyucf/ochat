@@ -62,6 +62,14 @@ val runtime_identity : host -> string
 val targets : host -> target list
 val moderator_surface : host -> moderator_surface
 
+(** Shared task-to-compiler-surface resolution for retrieval, materialization and
+    tool discovery. Unavailable host targets fail; a task request cannot enable
+    another compiler surface. *)
+val task_surface
+  :  host
+  -> Chatmd_shell_spec.Authoring_metadata.task
+  -> (string, string) result
+
 type diagnostic =
   { diagnostic : Chatmd_shell_spec.Diagnostic.t
   ; topic_ids : string list
