@@ -110,6 +110,17 @@ val task_surface
 
 val parameters : Jsonaf.t
 
+(** Current metadata for [reference.signatures] and [reference.tools], derived
+    from the exact query item builders and complete ordered topic hashes. The
+    actual host must enable [task]; tool schemas use only [capabilities]. This
+    produces no query receipt and does not imply that any content was read. *)
+val virtual_topics
+  :  t
+  -> host:Authoring_validation.host
+  -> capabilities:Tool_capability.t
+  -> task:Chatmd_shell_spec.Authoring_metadata.task
+  -> (Agent_protocol.Authoring_guidance.topic list, string) result
+
 (** The host supplies the actual calling session/generation scope and narrowed
     capabilities. Task selection cannot enable an unavailable host target.
     Search returns ranked topic metadata/excerpts. Topic/prepare assemble stable

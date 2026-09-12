@@ -806,6 +806,22 @@ let matches_response receipt json =
   String.equal receipt.response_sha256 (Digest.digest (Jsonaf.to_string json))
 ;;
 
+let virtual_topics t ~host ~capabilities ~task =
+  let open Result.Let_syntax in
+  let%bind surface_id = task_surface host task in
+  let%bind signatures = signature_items t ~surface_id in
+  let%map tools = tool_items ~host capabilities in
+  let corpus = corpus_for_host t ~host in
+  let items = signatures @ tools in
+  reference_topics
+    ~corpus
+    ~installation_identity:(Corpus.identity corpus)
+    items
+    ~offset:0
+    ~count:(List.length items)
+  |> List.map ~f:(fun reference -> { reference.topic with complete = false })
+;;
+
 let reference_to_protocol (receipt : reference_receipt) =
   let module R = Agent_protocol.Authoring_reference in
   R.create

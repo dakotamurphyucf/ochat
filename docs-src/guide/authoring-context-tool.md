@@ -108,7 +108,7 @@ execution-context handoffs. Replacing the response, returning a failure or losin
 the commit prevents a new receipt. Later observation preserves the original read
 and does not open a fresh documentation-read scope for the completed invocation.
 
-Effective-history checks support version-2 reference provenance with bounded part
+Effective-history checks support version-2/3 reference provenance with bounded part
 indexes, hashes and total counts. A topic counts as present only when all parts
 remain under matching source/version, context and policy identities. Duplicate
 pages do not fill gaps; conflicting hashes or counts prevent combining the pages.
@@ -118,9 +118,19 @@ integration test exercises real query pages through history restore, missing and
 altered pages, changed context/source versions, and conflicting fragment evidence.
 
 An invocation annotation alone does not prove delivery to a model. Publication
-now attaches version-2 provenance to the actual model tool-output occurrence when
+now attaches version-3 provenance to the actual model tool-output occurrence when
 the verified lookup matches its owning authoring context. The result and its
 history/index update commit together. Internal script reads remain internal.
+
+Version 3 also preserves the queried compiler surface. After compaction,
+`reference.signatures` and `reference.tools` pointers name a currently enabled
+query task and carry hashes from the same compiler/schema inventories as real
+lookups. Different compiler surfaces remain separate; all pointers share the
+topic/byte allowance. Narrowing tools recomputes the selected schema hash, and
+withdrawing a target removes its pointer. Explicit reference-only configurations
+can rediscover documentation without acquiring execution tools or a primer.
+Older version-1/2 provenance remains readable, but virtual references without a
+recorded surface are omitted from rediscovery rather than assigned a guessed target.
 
 Session schema 20 retains a compact authoring policy/context binding established
 before the model request, including for explicitly declared helper-only tools.

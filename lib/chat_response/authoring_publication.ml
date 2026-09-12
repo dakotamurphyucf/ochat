@@ -37,7 +37,7 @@ let validate_context context ~session_id ~generation =
     Error (P.Error.invalid_request "invalid or foreign authoring publication context")
 ;;
 
-let reference_guidance reference ~identity ~policy ~payload =
+let reference_guidance reference ~version ~identity ~policy ~payload =
   let fragments =
     List.map reference.P.Authoring_reference.topics ~f:(fun topic ->
       G.
@@ -48,7 +48,12 @@ let reference_guidance reference ~identity ~policy ~payload =
               { index = part.P.Authoring_reference.index; item_sha256 = part.item_sha256 })
         })
   in
-  G.create_reference
+  let create =
+    match version with
+    | 2 -> G.create_reference
+    | _ -> G.create_surface_reference ~surface_id:reference.surface_id
+  in
+  create
     ~context_identity:identity
     ~policy_fingerprint:policy
     ~topics:
@@ -86,6 +91,7 @@ let encode ~context invocation entry =
        let%map guidance =
          reference_guidance
            reference
+           ~version:3
            ~identity
            ~policy:context.policy
            ~payload:entry.P.History.payload
@@ -114,6 +120,7 @@ let validate_output invocation entry =
        let%bind expected =
          reference_guidance
            reference
+           ~version:guidance.version
            ~identity
            ~policy:guidance.policy_fingerprint
            ~payload:entry.payload

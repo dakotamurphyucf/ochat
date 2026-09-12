@@ -28,6 +28,7 @@ type t =
   ; purpose : purpose
   ; topics : topic list
   ; fragments : fragment list [@sexp.list]
+  ; surface_id : string option [@sexp.option]
   }
 
 and part =
@@ -77,13 +78,22 @@ let valid_topic topic =
 let validate t =
   let open Result.Let_syntax in
   let%bind () =
+    match t.version, t.surface_id with
+    | (1 | 2), None -> Ok ()
+    | 3, Some ("one_off_v1" | "tool_v1" | "moderator_v1" | "delegated_moderator_v1") ->
+      Ok ()
+    | _ -> invalid "invalid authoring guidance surface"
+  in
+  let%bind () =
     match t.version with
-    | (1 | 2)
+    | (1 | 2 | 3)
       when valid_hash t.context_identity
            && valid_hash t.policy_fingerprint
            && valid_hash t.payload_sha256
            && (not (List.is_empty t.topics))
-           && (List.length t.topics <= if t.version = 2 then 1024 else 128)
+           && (List.length t.topics
+               <=
+               if t.version >= 2 && equal_purpose t.purpose Reference then 1024 else 128)
            && List.for_all t.topics ~f:valid_topic
            && Option.is_none
                 (List.find_a_dup
@@ -95,8 +105,9 @@ let validate t =
   in
   match t.version, t.fragments, t.purpose with
   | 1, [], _ -> Ok ()
-  | 2, (_ :: _ as fragments), Reference when List.length fragments = List.length t.topics
-    ->
+  | 3, [], Rediscovery -> Ok ()
+  | (2 | 3), (_ :: _ as fragments), Reference
+    when List.length fragments = List.length t.topics ->
     let%bind () =
       match
         List.find_a_dup fragments ~compare:(fun a b ->
@@ -138,7 +149,7 @@ let validate t =
         used + count)
     in
     ()
-  | _ -> invalid "authoring fragments require version-2 reference provenance"
+  | _ -> invalid "invalid authoring fragment purpose or version"
 ;;
 
 let create ~context_identity ~policy_fingerprint ~purpose ~topics ~payload =
@@ -151,6 +162,7 @@ let create ~context_identity ~policy_fingerprint ~purpose ~topics ~payload =
     ; purpose
     ; topics
     ; fragments = []
+    ; surface_id = None
     }
   in
   let%map () = validate t in
@@ -166,9 +178,43 @@ let create_reference ~context_identity ~policy_fingerprint ~topics ~fragments ~p
     ; purpose = Reference
     ; topics
     ; fragments
+    ; surface_id = None
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
+;;
+
+let create_surface_reference
+      ~surface_id
+      ~context_identity
+      ~policy_fingerprint
+      ~topics
+      ~fragments
+      ~payload
+  =
+  let open Result.Let_syntax in
+  let%bind t =
+    create_reference ~context_identity ~policy_fingerprint ~topics ~fragments ~payload
+  in
+  let t = { t with version = 3; surface_id = Some surface_id } in
+  let%map () = validate t in
+  t
+;;
+
+let create_surface_rediscovery
+      ~surface_id
+      ~context_identity
+      ~policy_fingerprint
+      ~topics
+      ~payload
+  =
+  let open Result.Let_syntax in
+  let%bind t =
+    create ~context_identity ~policy_fingerprint ~purpose:Rediscovery ~topics ~payload
+  in
+  let t = { t with version = 3; surface_id = Some surface_id } in
+  let%map () = validate t in
+  t
 ;;
 
 let source_to_json source =
@@ -240,9 +286,10 @@ let to_json t =
      ; "purpose", `String (purpose_name t.purpose)
      ; "topics", `Array (List.map t.topics ~f:topic_to_json)
      ]
+     @ Option.to_list (Option.map t.surface_id ~f:(fun id -> "surface_id", `String id))
      @
      match t.fragments with
-     | [] -> []
+     | [] when t.version = 1 -> []
      | fragments ->
        [ ( "fragments"
          , `Array
@@ -265,7 +312,7 @@ let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind version =
-    Json_codec.required_as fields "version" (Json_codec.bounded_int ~min:1 ~max:2)
+    Json_codec.required_as fields "version" (Json_codec.bounded_int ~min:1 ~max:3)
   in
   let%bind () =
     Extension_codec.closed
@@ -277,7 +324,15 @@ let of_json json =
        ; "purpose"
        ; "topics"
        ]
-       @ if version = 2 then [ "fragments" ] else [])
+       @ (if version >= 2 then [ "fragments" ] else [])
+       @ if version = 3 then [ "surface_id" ] else [])
+  in
+  let%bind surface_id =
+    match version with
+    | 3 ->
+      Json_codec.required_as fields "surface_id" Json_codec.string
+      |> Result.map ~f:Option.some
+    | _ -> Ok None
   in
   let%bind context_identity =
     Json_codec.required_as fields "context_identity" Json_codec.string
@@ -348,6 +403,7 @@ let of_json json =
     ; purpose
     ; topics
     ; fragments
+    ; surface_id
     }
   in
   let%map () = validate t in

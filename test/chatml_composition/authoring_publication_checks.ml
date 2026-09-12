@@ -154,6 +154,40 @@ let verify (state : State.t) =
       ~payload:output.payload
     |> protocol_ok
   in
+  let legacy_guidance =
+    G.create_reference
+      ~context_identity:original_guidance.context_identity
+      ~policy_fingerprint:original_guidance.policy_fingerprint
+      ~topics:original_guidance.topics
+      ~fragments:original_guidance.fragments
+      ~payload:output.payload
+    |> protocol_ok
+  in
+  let legacy_state =
+    change_output { output with provenance = Runtime_authoring legacy_guidance }
+    |> restore
+  in
+  assert (List.is_empty (plan legacy_state).deltas);
+  let wrong_surface =
+    match original_guidance.surface_id with
+    | Some "one_off_v1" -> "tool_v1"
+    | _ -> "one_off_v1"
+  in
+  let wrong_surface_guidance =
+    G.create_surface_reference
+      ~surface_id:wrong_surface
+      ~context_identity:original_guidance.context_identity
+      ~policy_fingerprint:original_guidance.policy_fingerprint
+      ~topics:original_guidance.topics
+      ~fragments:original_guidance.fragments
+      ~payload:output.payload
+    |> protocol_ok
+  in
+  assert (
+    Result.is_error
+      (State.validate
+         (change_output
+            { output with provenance = Runtime_authoring wrong_surface_guidance })));
   assert (
     Result.is_error
       (State.validate

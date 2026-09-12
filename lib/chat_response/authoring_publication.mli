@@ -26,6 +26,8 @@ val encode
   -> (Agent_protocol.History.entry, Agent_protocol.Error.t) result
 
 (** Validate retained output provenance against its immutable invocation receipt.
+    Legacy version-2 output annotations remain valid; new publication preserves
+    the receipt's compiler surface in version-3 provenance.
     This does not authorize a model call; call occurrences must remain Canonical.
     Normal output/outcome and call-pair checks remain mandatory. *)
 val validate_output

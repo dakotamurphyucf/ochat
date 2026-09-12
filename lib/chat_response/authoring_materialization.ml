@@ -263,8 +263,8 @@ let refresh t ~known ~effective =
         (List.for_all message.guidance.topics ~f:(fun topic ->
            List.mem available topic ~equal:G.equal_topic)))
   in
-  let%bind pointer =
-    Authoring_rediscovery.render
+  let%bind pointers =
+    Authoring_rediscovery.render_all
       t.rediscovery
       ~context_identity:t.context_identity
       ~known:remembered
@@ -272,25 +272,32 @@ let refresh t ~known ~effective =
       ~inserting:(List.concat_map missing ~f:(fun message -> message.guidance.topics))
       ()
   in
-  match pointer with
-  | None -> Ok missing
-  | Some pointer ->
-    let module R = Openai.Responses in
-    let payload =
-      R.Item.Input_message
-        { role = User
-        ; content = [ R.Input_message.Text { text = pointer.text; _type = "input_text" } ]
-        ; _type = "message"
-        }
-      |> R.Item.jsonaf_of_t
-    in
-    let%map guidance =
-      G.create
-        ~context_identity:t.context_identity
-        ~policy_fingerprint:(P.fingerprint t.policy)
-        ~purpose:Rediscovery
-        ~payload
-        ~topics:pointer.topics
-    in
-    missing @ [ { payload; guidance } ]
+  let%map pointers =
+    List.map pointers ~f:(fun pointer ->
+      let module R = Openai.Responses in
+      let payload =
+        R.Item.Input_message
+          { role = User
+          ; content =
+              [ R.Input_message.Text { text = pointer.text; _type = "input_text" } ]
+          ; _type = "message"
+          }
+        |> R.Item.jsonaf_of_t
+      in
+      let create =
+        match pointer.surface_id with
+        | None -> G.create ~purpose:Rediscovery
+        | Some surface_id -> G.create_surface_rediscovery ~surface_id
+      in
+      let%map guidance =
+        create
+          ~context_identity:t.context_identity
+          ~policy_fingerprint:(P.fingerprint t.policy)
+          ~payload
+          ~topics:pointer.topics
+      in
+      { payload; guidance })
+    |> Result.all
+  in
+  missing @ pointers
 ;;

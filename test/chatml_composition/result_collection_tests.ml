@@ -185,11 +185,21 @@ let%expect_test "maintenance reloads a stopped indexed session to collect prepar
     A.detach entry.actor attachment.P.Session.Attachment.id |> protocol_ok;
     let sessions = Agent_server.Daemon.store daemon in
     let registry = Agent_server.Daemon.registry daemon in
-    [%test_eq: int]
-      1
-      (Agent_server.Session_registry.unload_inactive
-         registry
-         ~index_entries:(S.Session_store.list_sessions sessions));
+    let rec unload_ready () =
+      match
+        Agent_server.Session_registry.unload_inactive
+          registry
+          ~index_entries:(S.Session_store.list_sessions sessions)
+      with
+      | 0 ->
+        (* As with collection above, stopped-runtime retirement can temporarily
+           hold the owner reservation. Wait for the actual unload under the
+           fixture's existing timeout, retaining the exact count assertion. *)
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        unload_ready ()
+      | count -> count
+    in
+    [%test_eq: int] 1 (unload_ready ());
     assert (
       Option.is_none (Agent_server.Session_registry.find registry reference.session_id));
     (* Expiry uses an empty ledger here; the reconstructed entry's collector still

@@ -11,11 +11,18 @@ type t =
   { policy : P.t
   ; topics : G.topic String.Map.t
   ; entrypoints : string list
+  ; surfaces : (M.task * G.topic String.Map.t) String.Map.t
   }
 
 type pointer =
   { text : string
   ; topics : G.topic list
+  ; surface_id : string option
+  }
+
+type rendered =
+  { pointer : pointer
+  ; text_with_truncation : truncated:bool -> string
   }
 
 let create ~context ~host ~policy =
@@ -24,10 +31,11 @@ let create ~context ~host ~policy =
   let entrypoints =
     List.map tools ~f:(fun (reference, _) -> reference.Tool_capability.name)
   in
-  match tools with
-  | [] -> Ok { policy; topics = String.Map.empty; entrypoints }
+  match tools, P.helper_pointers policy with
+  | [], [] ->
+    Ok { policy; topics = String.Map.empty; entrypoints; surfaces = String.Map.empty }
   | _ ->
-    let%map available =
+    let%bind available =
       match
         ( Q.scoped_corpus ~host context ~capabilities:(P.capabilities policy)
         , P.policy policy )
@@ -37,17 +45,47 @@ let create ~context ~host ~policy =
       | Error message, (Auto | Preload _) -> Error message
     in
     let identity = C.identity (Q.corpus_for_host context ~host) in
+    let tasks =
+      match available, tools with
+      | None, _ -> []
+      | Some _, [] ->
+        M.
+          [ One_off_script
+          ; Standalone_tool
+          ; Moderator_tool
+          ; Child_agent
+          ; Background_workflow
+          ]
+      | Some _, _ -> List.concat_map tools ~f:(fun (_, help) -> help.M.tasks)
+    in
     let surfaces =
-      List.concat_map tools ~f:(fun (_, help) -> help.M.tasks)
-      |> List.filter_map ~f:(fun task -> Q.task_surface host task |> Result.ok)
-      |> List.dedup_and_sort ~compare:String.compare
+      List.fold tasks ~init:String.Map.empty ~f:(fun surfaces task ->
+        match Q.task_surface host task with
+        | Error _ -> surfaces
+        | Ok surface ->
+          Map.change surfaces surface ~f:(function
+            | None -> Some task
+            | Some _ as previous -> previous))
+    in
+    let%map surfaces =
+      Map.to_alist surfaces
+      |> List.map ~f:(fun (surface, task) ->
+        let%map topics =
+          Q.virtual_topics context ~host ~capabilities:(P.capabilities policy) ~task
+        in
+        ( surface
+        , ( task
+          , String.Map.of_alist_exn (List.map topics ~f:(fun topic -> topic.G.id, topic))
+          ) ))
+      |> Result.all
+      |> Result.map ~f:String.Map.of_alist_exn
     in
     let topics =
       Option.to_list available
       |> List.concat_map ~f:(fun corpus ->
         C.topics corpus
         |> List.filter ~f:(fun topic ->
-          List.exists surfaces ~f:(fun surface_id ->
+          List.exists (Map.keys surfaces) ~f:(fun surface_id ->
             Result.is_ok (C.assemble corpus ~surface_id ~roots:[ topic.specification.id ]))))
       |> List.map ~f:(fun topic ->
         let source =
@@ -64,7 +102,7 @@ let create ~context ~host ~policy =
             } ))
       |> String.Map.of_alist_exn
     in
-    { policy; topics; entrypoints }
+    { policy; topics; entrypoints; surfaces }
 ;;
 
 let same_version a b =
@@ -77,22 +115,31 @@ let source_json = function
   | Authored digest -> `Object [ "kind", `String "authored"; "sha256", `String digest ]
 ;;
 
-let render
+let validate_limits ~max_topics ~max_bytes =
+  match max_topics > 0 && max_topics <= 128 && max_bytes > 0 with
+  | true -> Ok ()
+  | false ->
+    Error (Agent_protocol.Error.invalid_request "invalid rediscovery pointer limits")
+;;
+
+let render_for
       ?(max_topics = 32)
       ?(max_bytes = 8192)
-      t
+      (t : t)
       ~context_identity
       ~known
       ~effective
       ~inserting
+      ~surface
+      ~already_emitted
       ()
   =
   let open Result.Let_syntax in
-  let%bind () =
-    match max_topics > 0 && max_topics <= 128 && max_bytes > 0 with
-    | true -> Ok ()
-    | false ->
-      Error (Agent_protocol.Error.invalid_request "invalid rediscovery pointer limits")
+  let surface_id = Option.map surface ~f:fst in
+  let topics =
+    match surface with
+    | None -> t.topics
+    | Some (_, (_, topics)) -> topics
   in
   let%bind report =
     Presence.inspect ~policy:t.policy ~context_identity ~known ~effective
@@ -145,10 +192,16 @@ let render
       | Primer | Preload | Reference ->
         (match Map.find observations (H.Id.to_string receipt.entry_id) with
          | Some (Absent | Modified | Stale_context | Stale_policy) ->
-           receipt.guidance.topics
+           (match surface_id with
+            | None -> receipt.guidance.topics
+            | Some id ->
+              (match receipt.guidance.surface_id with
+               | Some remembered when String.equal remembered id ->
+                 receipt.guidance.topics
+               | None | Some _ -> []))
          | Some (Present | Redacted) | None -> []))
     |> List.filter_map ~f:(fun remembered ->
-      match Map.find t.topics remembered.G.id with
+      match Map.find topics remembered.G.id with
       | None -> None
       | Some current ->
         let same_origin =
@@ -176,11 +229,16 @@ let render
     let references =
       List.map pairs ~f:(fun (remembered, current) ->
         `Object
-          [ "topic_id", `String current.G.id
-          ; "remembered_sha256", `String remembered.G.document_sha256
-          ; "current_sha256", `String current.document_sha256
-          ; "source", source_json current.source
-          ])
+          ([ "topic_id", `String current.G.id
+           ; "remembered_sha256", `String remembered.G.document_sha256
+           ; "current_sha256", `String current.document_sha256
+           ; "source", source_json current.source
+           ]
+           @
+           match surface with
+           | None -> []
+           | Some (id, (task, _)) ->
+             [ "surface_id", `String id; "task", `String (M.task_id task) ]))
     in
     let metadata =
       `Object
@@ -200,8 +258,8 @@ let render
     ^ Jsonaf.to_string metadata
   in
   match candidates with
-  | [] -> Ok None
-  | _ when remaining_topics <= 0 || remaining_bytes <= 0 -> Ok None
+  | [] -> Ok (None, false)
+  | _ when remaining_topics <= 0 || remaining_bytes <= 0 -> Ok (None, true)
   | _ ->
     let retained, _, dropped =
       List.fold candidates ~init:([], 0, false) ~f:(fun (retained, count, dropped) pair ->
@@ -215,16 +273,96 @@ let render
         | false -> retained, count, true)
     in
     (match retained with
-     | [] when not (List.is_empty pointers) -> Ok None
+     | [] when already_emitted || not (List.is_empty pointers) -> Ok (None, true)
      | [] ->
        Error
          (Agent_protocol.Error.invalid_request
             "rediscovery pointer budget cannot fit one reference")
      | _ ->
        let pairs = List.rev retained in
+       let text_with_truncation ~truncated =
+         render_text pairs ~truncated:(dropped || truncated)
+       in
        Ok
-         (Some
-            { text = render_text pairs ~truncated:dropped
-            ; topics = List.map pairs ~f:snd
-            }))
+         ( Some
+             { pointer =
+                 { text = text_with_truncation ~truncated:false
+                 ; topics = List.map pairs ~f:snd
+                 ; surface_id
+                 }
+             ; text_with_truncation
+             }
+         , dropped ))
+;;
+
+let render
+      ?(max_topics = 32)
+      ?(max_bytes = 8192)
+      t
+      ~context_identity
+      ~known
+      ~effective
+      ~inserting
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_limits ~max_topics ~max_bytes in
+  let%map result, _ =
+    render_for
+      ~max_topics
+      ~max_bytes
+      t
+      ~context_identity
+      ~known
+      ~effective
+      ~inserting
+      ~surface:None
+      ~already_emitted:false
+      ()
+  in
+  Option.map result ~f:(fun result -> result.pointer)
+;;
+
+let render_all
+      ?(max_topics = 32)
+      ?(max_bytes = 8192)
+      t
+      ~context_identity
+      ~known
+      ~effective
+      ~inserting
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_limits ~max_topics ~max_bytes in
+  let%map pointers, _, _, truncated =
+    List.fold_result
+      (None :: List.map (Map.to_alist t.surfaces) ~f:Option.some)
+      ~init:([], max_topics, max_bytes, false)
+      ~f:(fun (pointers, remaining_topics, remaining_bytes, truncated) surface ->
+        let%map pointer, dropped =
+          render_for
+            ~max_topics:remaining_topics
+            ~max_bytes:remaining_bytes
+            t
+            ~context_identity
+            ~known
+            ~effective
+            ~inserting:
+              (inserting
+               @ List.concat_map pointers ~f:(fun rendered -> rendered.pointer.topics))
+            ~surface
+            ~already_emitted:(not (List.is_empty pointers))
+            ()
+        in
+        match pointer with
+        | None -> pointers, remaining_topics, remaining_bytes, truncated || dropped
+        | Some rendered ->
+          ( rendered :: pointers
+          , remaining_topics - List.length rendered.pointer.topics
+          , remaining_bytes - String.length rendered.pointer.text
+          , truncated || dropped ))
+  in
+  List.rev_map pointers ~f:(fun rendered ->
+    { rendered.pointer with text = rendered.text_with_truncation ~truncated })
 ;;

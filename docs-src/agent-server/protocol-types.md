@@ -83,6 +83,7 @@ type t = private
   ; purpose : purpose
   ; topics : topic list
   ; fragments : fragment list [@sexp.list]
+  ; surface_id : string option [@sexp.option]
   }
 
 and part =
@@ -121,6 +122,26 @@ val create_reference
   -> policy_fingerprint:string
   -> topics:topic list
   -> fragments:fragment list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** Version-3 references preserve the queried compiler surface. Version-1/2
+    records remain readable without inventing a surface for legacy evidence. *)
+val create_surface_reference
+  :  surface_id:string
+  -> context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
+  -> fragments:fragment list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** A surface-specific pointer contains no topic content or fragment coverage. *)
+val create_surface_rediscovery
+  :  surface_id:string
+  -> context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
   -> payload:Jsonaf.t
   -> (t, Error.t) result
 

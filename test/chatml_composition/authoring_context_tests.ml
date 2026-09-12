@@ -401,7 +401,9 @@ let%expect_test
          in
          (match output.provenance with
           | Runtime_authoring guidance ->
-            assert (guidance.version = 2);
+            assert (guidance.version = 3);
+            assert (
+              Option.equal String.equal guidance.surface_id (Some reference.surface_id));
             assert (
               Agent_protocol.Authoring_guidance.equal_purpose guidance.purpose Reference);
             assert (

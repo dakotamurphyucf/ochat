@@ -16,6 +16,7 @@ val create
 type pointer = private
   { text : string
   ; topics : Agent_protocol.Authoring_guidance.topic list
+  ; surface_id : string option
   }
 
 (** Render missing historical references only. [known] must come from the owning
@@ -31,7 +32,8 @@ type pointer = private
     aggregate topic/byte allowance, so repeated turns cannot grow a truncated
     index without bound. Their serialized payload bytes are charged conservatively.
     Manual policy lists only selected helper bindings.
-    Agents without authoring tools receive no pointer. *)
+    This compatibility entry point renders corpus topics only. Agents without
+    authoring tools or explicitly selected helpers receive no pointer. *)
 val render
   :  ?max_topics:int
   -> ?max_bytes:int
@@ -42,3 +44,18 @@ val render
   -> inserting:Agent_protocol.Authoring_guidance.topic list
   -> unit
   -> (pointer option, Agent_protocol.Error.t) result
+
+(** Also render compiler/tool inventory pointers using remembered query surfaces
+    and current selected inventories. Each virtual pointer names a valid query
+    task. Legacy references without a surface are not assigned a guessed target.
+    All emitted pointers share the same aggregate limits and deduplication. *)
+val render_all
+  :  ?max_topics:int
+  -> ?max_bytes:int
+  -> t
+  -> context_identity:string
+  -> known:Authoring_presence.receipt list
+  -> effective:Agent_protocol.History.entry list
+  -> inserting:Agent_protocol.Authoring_guidance.topic list
+  -> unit
+  -> (pointer list, Agent_protocol.Error.t) result
