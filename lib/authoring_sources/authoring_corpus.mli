@@ -197,6 +197,18 @@ module Coverage : sig
       four extensibility surfaces, including checked recovery/error boundaries. *)
   val task_mappings : mapping list
 
+  (** Reviewed String module and all fourteen exports on each extensibility
+      surface, with byte offsets, literal matching and immediate error examples. *)
+  val string_mappings : mapping list
+
+  (** Reviewed Array module and all twenty-two exports on each extensibility
+      surface, including shallow aliases and explicit task sequencing. *)
+  val array_mappings : mapping list
+
+  (** Reviewed Option module and its five exports on each extensibility surface,
+      including eager defaults and structural variants. *)
+  val option_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list
@@ -221,7 +233,8 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     jobs/recovery on all four surfaces, with moderator-only acknowledgements,
     subscriptions, timers, notifications, ingress and a checked shell coordinator.
     Notification/example prerequisites include acknowledgement and recovery
-    boundaries. This remains a foundation, not complete feature/native-schema
+    boundaries. Flat String and Array/Option topics cover all their exports with
+    executable semantic examples. This remains a foundation, not complete feature/native-schema
     coverage or complete task packages. The separate Authoring_context service
     adds retrieval and selected compiler/tool inventories. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result

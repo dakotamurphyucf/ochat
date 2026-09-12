@@ -4,31 +4,52 @@ module V = C.Coverage
 
 let ok = Result.ok_or_failwith
 
-let%expect_test "Task semantic coverage includes every export on each exact surface" =
+let%expect_test "reviewed module coverage includes every export on each exact surface" =
   let sources = Authoring_sources.installed () |> ok in
   let corpus = C.runtime_foundation ~sources |> ok in
   List.iter
-    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
-    ~f:(fun surface_id ->
-      let targets = V.compiler_targets ~sources ~surface_ids:[ surface_id ] |> ok in
-      let selected =
-        List.filter targets ~f:(fun target ->
-          String.is_suffix target.V.id ~suffix:"/module/Task"
-          || String.is_substring target.id ~substring:"/module_export/Task.")
-      in
-      let mappings =
-        List.filter V.task_mappings ~f:(fun mapping ->
-          String.is_prefix mapping.target_id ~prefix:(surface_id ^ "/"))
-      in
-      let coverage = V.audit corpus ~targets:selected ~mappings |> ok in
-      V.require_complete coverage |> ok;
-      print_s [%sexp (surface_id : string), (List.length coverage.mapped : int)]);
+    [ "Task", V.task_mappings
+    ; "String", V.string_mappings
+    ; "Array", V.array_mappings
+    ; "Option", V.option_mappings
+    ]
+    ~f:(fun (name, mappings) ->
+      List.iter
+        [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+        ~f:(fun surface_id ->
+          let targets = V.compiler_targets ~sources ~surface_ids:[ surface_id ] |> ok in
+          let selected =
+            List.filter targets ~f:(fun target ->
+              String.is_suffix target.V.id ~suffix:("/module/" ^ name)
+              || String.is_substring target.id ~substring:("/module_export/" ^ name ^ "."))
+          in
+          let mappings =
+            List.filter mappings ~f:(fun mapping ->
+              String.is_prefix mapping.target_id ~prefix:(surface_id ^ "/"))
+          in
+          let coverage = V.audit corpus ~targets:selected ~mappings |> ok in
+          V.require_complete coverage |> ok;
+          print_s
+            [%sexp
+              (name : string), (surface_id : string), (List.length coverage.mapped : int)]));
   [%expect
     {|
-    (one_off_v1 6)
-    (tool_v1 6)
-    (moderator_v1 6)
-    (delegated_moderator_v1 6)
+    (Task one_off_v1 6)
+    (Task tool_v1 6)
+    (Task moderator_v1 6)
+    (Task delegated_moderator_v1 6)
+    (String one_off_v1 15)
+    (String tool_v1 15)
+    (String moderator_v1 15)
+    (String delegated_moderator_v1 15)
+    (Array one_off_v1 23)
+    (Array tool_v1 23)
+    (Array moderator_v1 23)
+    (Array delegated_moderator_v1 23)
+    (Option one_off_v1 6)
+    (Option tool_v1 6)
+    (Option moderator_v1 6)
+    (Option delegated_moderator_v1 6)
   |}]
 ;;
 

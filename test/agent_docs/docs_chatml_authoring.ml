@@ -10,6 +10,8 @@ let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let language_fixture = "docs-src/guide/chatml-authoring-language.md"
 let task_fixture = "docs-src/guide/chatml-task-effects.md"
 let primer_fixture = "docs-src/guide/chatml-authoring-primer.md"
+let strings_fixture = "docs-src/guide/chatml-strings.md"
+let collections_fixture = "docs-src/guide/chatml-collections.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -305,6 +307,8 @@ let run env root =
       ; language_fixture
       ; task_fixture
       ; primer_fixture
+      ; strings_fixture
+      ; collections_fixture
       ]
       ~f:(fun file ->
         let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in

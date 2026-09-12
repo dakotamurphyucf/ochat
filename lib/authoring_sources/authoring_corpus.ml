@@ -762,7 +762,449 @@ module Coverage = struct
           }))
   ;;
 
-  let reviewed_mappings = entrypoint_mappings @ task_mappings
+  let string_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "8929a779461f25385ec1580d736eea0c628373811577e9306c2faf8cc3738a43"
+        , [ ( "module/String"
+            , "f83f103698597607463a72b4760e05febc850b6e61f0784c78206b293f112b50" )
+          ; ( "module_export/String.concat"
+            , "3dbcf1fdea08e50428f1772c90186e7ea4e940b56729c5b68cbc515b22bcac1d" )
+          ; ( "module_export/String.contains"
+            , "afc3a21c399a56bc9866df76abcfa7ea3f4c9e630026364190c96dea802d335a" )
+          ; ( "module_export/String.ends_with"
+            , "7c0222a60e29ba6128e24258926be91b23b9fa58e49debe4db34d4d1f0b42099" )
+          ; ( "module_export/String.equal"
+            , "49277dc0e0bac283fc5a6b6a55103bcd343c49cedc547f74fbdae9ebd473c79a" )
+          ; ( "module_export/String.find"
+            , "18b4c30dba9b41bfb7dfbd190e7c42610f588c1f716553515ba7729354f00e85" )
+          ; ( "module_export/String.is_empty"
+            , "ac6ccfc3b741e5138e1914cbd0ad80da21714df80d139cadaa060d98dee459df" )
+          ; ( "module_export/String.length"
+            , "7834074271044259445e24822407a0f1e983b58e462583059261de7b9bfedfb7" )
+          ; ( "module_export/String.replace_all"
+            , "63d43bb435d1c7cd67d6dd4ac56f219f0bda96210a7b6e82e7ab68fa06c4a646" )
+          ; ( "module_export/String.slice"
+            , "5c16f67d2f96e07703f0de4e617a035906a164892d9ddd9a716917fe3780c93c" )
+          ; ( "module_export/String.split"
+            , "359439cb01e781c8e7b4921f37f90990494ad5bc1f551006ed345764f3b36dcb" )
+          ; ( "module_export/String.starts_with"
+            , "b249946b6ed22f55d000d2037ffa2e23aee30fc6c68264d37330d6fd518d9f86" )
+          ; ( "module_export/String.to_lower"
+            , "dde7bc2ccdab808c9c2a72cb8de746316d92f0a6038d417a6ce45e0dbe4d54bd" )
+          ; ( "module_export/String.to_upper"
+            , "46d748f77991005958a5827fc5c1b2d71103c817a84c715993f2728b94eea36c" )
+          ; ( "module_export/String.trim"
+            , "d3de248c6c57b40dc591609f2c150b7f252d4e4e1d16618cd50e4d5e8365224c" )
+          ] )
+      ; ( "tool_v1"
+        , "8e6445c29792c36284332aba6ac7b4cfdddf7b44d0ae378041c71784a0c53dfa"
+        , [ ( "module/String"
+            , "83fe32513e2d6a2f499cf26764e89aa8664f4d9fe79e59842a41eba900d63027" )
+          ; ( "module_export/String.concat"
+            , "d48ced3d07737fad10f6fdf95c2d955a8abbb1c53d1bfadfb51cae0206d5aa0d" )
+          ; ( "module_export/String.contains"
+            , "838214df2c3baa91cb3be28cd2c8490951d789b3f15f026e27f23b45ce656aa2" )
+          ; ( "module_export/String.ends_with"
+            , "2c7361077b8aa48b6c68e2028376f0bd5d28e8e240c7eeb0419c0cf8bd5c85b4" )
+          ; ( "module_export/String.equal"
+            , "44ee63c4d91bdf88341384d9ae7a9bc140c62f29a5cce6a7075a91810bfde6f5" )
+          ; ( "module_export/String.find"
+            , "43ce98e62bd5765390a55f412e0ed19a331e66459033c249ae9b524e8146d59f" )
+          ; ( "module_export/String.is_empty"
+            , "ab4213fda11ac67241b53039c4b4dea80f84b8c4769376d37c2e3c597337b363" )
+          ; ( "module_export/String.length"
+            , "c4423210f14f759453c34dd85a65ec28fe6999696ed909f95ed668dedab1bf43" )
+          ; ( "module_export/String.replace_all"
+            , "5c2bdbfb66db3b4ce397443c67339937f8015d8a742f71574d554bdb67244c1a" )
+          ; ( "module_export/String.slice"
+            , "7dae10253229a8e9e9a5b114c5b5c599f5da97f921daeeaeaaa87df503d40bd9" )
+          ; ( "module_export/String.split"
+            , "a4d6d0f21013ca54bbbd489e5fb7052b446b68ff0e91e2e5c48e99912f5cea17" )
+          ; ( "module_export/String.starts_with"
+            , "8af0d9c38ac7b1966a62d969daf486b43ddc60a35a47501d8efbf63689c4ea5e" )
+          ; ( "module_export/String.to_lower"
+            , "ecce4ceafe5a4e31c6f1a84918cf3d99489ee6a30a256c6ccd1bf865908e562c" )
+          ; ( "module_export/String.to_upper"
+            , "aa02e4c6b23eae1c3b4fe77fe6512292ae2c02e8b1056a20b7ee4a628ac16f81" )
+          ; ( "module_export/String.trim"
+            , "22dab6846df6dc37ac7e5079f113b6166ae4d5b980ef3e37b7adf99df0b2990a" )
+          ] )
+      ; ( "moderator_v1"
+        , "7c89096edc2d8b14fd11d9cf95d28d0f2823e334f02af83c6f35ba0b3c337519"
+        , [ ( "module/String"
+            , "509fb6b69a90ce2af0f64b3bbc6a42cac7f6fec12163f7b6f03bbfdd41017989" )
+          ; ( "module_export/String.concat"
+            , "b6deab74ac6b53a96977bc1dec63ca862fc905b583c16961daafbc5a1a9b14a7" )
+          ; ( "module_export/String.contains"
+            , "56943a3d4799d2e422af3b5a8d53877de81d295c11c0ccc6f9a1185c1bf31463" )
+          ; ( "module_export/String.ends_with"
+            , "ce4abc624c6025f7e542fc474932bc7e5997c9e8fd43b44e47a901d0bda130c0" )
+          ; ( "module_export/String.equal"
+            , "196616f9bcf3cb1831fc7c71db80440b97b26a15127a1ba71a1de6712b8077b8" )
+          ; ( "module_export/String.find"
+            , "db04d0437065161403ab0e7cff4b75d5b9060e585ebb32e2bb5456005e4e5a24" )
+          ; ( "module_export/String.is_empty"
+            , "191e44b9deb73f79c09eb423d5b2999b0871b8ba9b66604ad0fb5103305d7d27" )
+          ; ( "module_export/String.length"
+            , "06dce9731ebb9237913c186184a70acc8b5bb6ede681f64b2bcff742d51277f1" )
+          ; ( "module_export/String.replace_all"
+            , "cd9accc75a948ea5f72eecf799bc69bb7f06ed748bb25425707bcbab9020ba7d" )
+          ; ( "module_export/String.slice"
+            , "0a4e1909e70838b22d64533e9cd55815fbedacd86e7f2a01faf529681e7921f8" )
+          ; ( "module_export/String.split"
+            , "533c262a119ebfa480c5bcad5472dddbb45dedcba74e78e1f6dcb9ef48093746" )
+          ; ( "module_export/String.starts_with"
+            , "fe2f45543de0fd36f63cc9ed1da3bab161b7c960ee1cccd0548fc3695202fef8" )
+          ; ( "module_export/String.to_lower"
+            , "095c1d3b70a6b6f8aafc3a237070ba445d0622b94da3cc73f1a0b0e77391995b" )
+          ; ( "module_export/String.to_upper"
+            , "73e70dc1d7d7e77d3672f1cec9f0275d6b1fccfd87356459661c510c37a2edc4" )
+          ; ( "module_export/String.trim"
+            , "05ac7d5684a1fcc693b1d04afb9439137a0bb7e6e17eb5e5bf83e4ea0d8be80a" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "b28fe686da0c259e769bba79f166bf4a6284cf18463c7428c32bd611cd05deb7"
+        , [ ( "module/String"
+            , "a9aea91e0022011ed771f94ef74061eab1d235bf0b56c94d8135546424cada59" )
+          ; ( "module_export/String.concat"
+            , "591ea0dee3999ca8e64c501bb07c7cff2ceaba8c599e9e508dfbc2b5a25a82e4" )
+          ; ( "module_export/String.contains"
+            , "efec110cfd86815e080e3336ae448908eacdae38719bbdc761d4c14a06eb5f3d" )
+          ; ( "module_export/String.ends_with"
+            , "6e2569cca05ddd90b69c3e7a8e149ed3be13486d1064df92b2132e8d1fee7b38" )
+          ; ( "module_export/String.equal"
+            , "c5559b9d2acde927bf359894c23bcb0d7d054f5598d248c8611155116668c022" )
+          ; ( "module_export/String.find"
+            , "b924f1227208975805401d72a457e554222ecb6d3c63f83ea0ffe7a4ea192d85" )
+          ; ( "module_export/String.is_empty"
+            , "f71a0522a5623c607b3c04eaff069f72bb633b1c61eb4ecabb057730af422cdf" )
+          ; ( "module_export/String.length"
+            , "c8e0f28d32c6eed56055d7b7f5670a2c3046fa7918df23f018dd84c8d21e4dfd" )
+          ; ( "module_export/String.replace_all"
+            , "eb101975d47255d378bfd3da2a89521fd04b98cd37512614fb0bda491d6b9dd7" )
+          ; ( "module_export/String.slice"
+            , "bc01f0c5687682c796d43c4f63b9a023a22a2c67ec7b75e9cfacc3813be0079f" )
+          ; ( "module_export/String.split"
+            , "2ab2468cac6fc0d5d86104b2db1d58f75890393cde5887319943caea2c4ec2af" )
+          ; ( "module_export/String.starts_with"
+            , "ca5a0174363c4c5a0d14d92579724e298f108513e1301321e27d1118beed8761" )
+          ; ( "module_export/String.to_lower"
+            , "dc2781c8102b557928974a3407469c12a3b1795001f1a233597f66124820da4c" )
+          ; ( "module_export/String.to_upper"
+            , "332f1505bfd654f5ff1f954821d7efa2bd61e4b89b226e1eaf7918f24a2be586" )
+          ; ( "module_export/String.trim"
+            , "4fa4fb048f66dcc1f7c83f8756c6e126dc809f7f1e158a1b550f660c88c4a2a5" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, bindings) ->
+        List.map bindings ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.strings"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_authoring.ml"
+              ; "lib/chatml/chatml_builtin_spec.ml"
+              ]
+          }))
+  ;;
+
+  let array_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "dfff5a377f9451cf3ecb4a156ebea0cc64a8c90e34899de6d38e43364510e441"
+        , [ ( "module/Array"
+            , "78131df6b3d97fc91f2ea988d48ea28aa0dd8cab44858ebb72cbae22f036e25b" )
+          ; ( "module_export/Array.append"
+            , "bd0b45a0676986702047fbed74e60a40ef5d24c6afdff21b22035acd0f80ff64" )
+          ; ( "module_export/Array.copy"
+            , "6be9b94172c620f4ba598b952bd30025d9ba5757e4f33352fa8a0334eff0971b" )
+          ; ( "module_export/Array.exists"
+            , "afc0f747c74eea1ffe5a7c7e2a24a6032b465ae2542e98e9cf2fa83f13b6c728" )
+          ; ( "module_export/Array.fill"
+            , "67229bf885b93abb7157df5c6cd52ecc4ffb0254533fd57a8c9894cffba9e012" )
+          ; ( "module_export/Array.filter"
+            , "c7b347e0ec2e10921af69b567f160c7b95644efd28dee1f352327603cf6e3647" )
+          ; ( "module_export/Array.find"
+            , "4ba8cc93160f643c6aa4a3d197adb00b821d886871fdb4c9dc6077907e7fee5e" )
+          ; ( "module_export/Array.find_map"
+            , "cc9708690b2d190552316b57b6915335832191fb58a2558d47d4215ca30c9f0a" )
+          ; ( "module_export/Array.fold"
+            , "58bd9ac6be6d4c70f865771adac3a4ef071dae0b23c6a5668f9e838f48d6d981" )
+          ; ( "module_export/Array.for_all"
+            , "966e21cc8046bc8a2b9e4a458c284574174cb12b9a5f065018effde6ebaa0321" )
+          ; ( "module_export/Array.get"
+            , "9e81c29ec389e012e874a8eae10bb614743576c435533803792a285b65a4c000" )
+          ; ( "module_export/Array.init"
+            , "578d48b3730128a37fbdd74afd4a292bcc2edc6c60035b6048b5870d647736ec" )
+          ; ( "module_export/Array.iter"
+            , "ee508fda3c7c06f069f3e4ea31288026269cc8c9bfd246231496e3decd31f466" )
+          ; ( "module_export/Array.iteri"
+            , "3a5ed080b7b3bfd7a020c8256b1c0fab871a7f83136be47be2f2ecdf78c7a8b5" )
+          ; ( "module_export/Array.length"
+            , "fdd452df2ce0e9a6be960ad3668707a6ec126e7f83ba3880674828ae95fd7ccb" )
+          ; ( "module_export/Array.make"
+            , "f373bb52fa00b9ef21f4e642577d56e1d0aec3bfbd0341ad6299586993504b0a" )
+          ; ( "module_export/Array.map"
+            , "aa7601eeedc29f8c69330d66f9480c3982076389709938f456fff39ed454304c" )
+          ; ( "module_export/Array.mapi"
+            , "d2bfe5f6b6b3c87a18ed8463ad14d98db032b419f592e61e5c90f843b7b3efeb" )
+          ; ( "module_export/Array.reverse"
+            , "cf380ff0ea4bfcf979a4babac0f7af59e72b45a4323aedec4194ba72f486eb1b" )
+          ; ( "module_export/Array.reverse_in_place"
+            , "7bf98c3f54065c47d96402755291c04ab2387d36ddfb3bf6e99363b324cea52a" )
+          ; ( "module_export/Array.set"
+            , "8c89c8680caa44a78a0a8498f5679df76a8cb422cc39ba2fbba7b5628dc318db" )
+          ; ( "module_export/Array.sub"
+            , "574dc7bd64345b0935b84aff3da31c27e7491cadb800c4227560ec9d73058fb6" )
+          ; ( "module_export/Array.swap"
+            , "492ac0862c0a81e7a1a8fab69fbbdbd4e771eba1d3648ef8515e2d73b878a02c" )
+          ] )
+      ; ( "tool_v1"
+        , "7a8c4ce3a13e58d43d656273c217f39f6425b95049ca7a416f9bf125e3d1ddf5"
+        , [ ( "module/Array"
+            , "d2f0bd5b3888593ea1aa60b15d5011c322d547ff9d289715209acd0cb200be6c" )
+          ; ( "module_export/Array.append"
+            , "1957e127f0b02a0a172a0c1da2ef6e06eb11c43fcd4302900c639d2a3f825e1d" )
+          ; ( "module_export/Array.copy"
+            , "740bd9457271bddbd32183dd40abfda816fc96abdae8fc0d4eaa66ebf9acea0c" )
+          ; ( "module_export/Array.exists"
+            , "dd2937f39d64e9b50e28369925e656ddda2eeda7c322af6958552fa4bf5e8672" )
+          ; ( "module_export/Array.fill"
+            , "1a01881b0e409aceb8f7d0204c121574055ecfbbb65d9da9b5b03e08b2a9c826" )
+          ; ( "module_export/Array.filter"
+            , "6a6fed4d1ec5c63dddfcc82af4d959c0ce30a676bf023d447efa0a3c46836d8f" )
+          ; ( "module_export/Array.find"
+            , "5be83cacfa738ac8ab412471243f862be25b65e22eeaa047708ae1c1b16896f6" )
+          ; ( "module_export/Array.find_map"
+            , "70df0066e4ddce1d2339fcbdd601f1e286b5672900032fcf1779dca3737c0ea9" )
+          ; ( "module_export/Array.fold"
+            , "5cfe8ad969e475b3c2ccfaba712651d4f2904fdb70990e204bb2058a07316605" )
+          ; ( "module_export/Array.for_all"
+            , "17b688b80d83016ca9a36d52eaaa583c997a951250aca90bfc33a6ddafc67dde" )
+          ; ( "module_export/Array.get"
+            , "b56d1e79865417b92e84448f65ce236b6d486cf90bc06ecb0699efb9f8ea7f7a" )
+          ; ( "module_export/Array.init"
+            , "82356e7ccf3bfb5b750b5ff6b4d95fc1d1e551705edfaf110b38b61ac41177fc" )
+          ; ( "module_export/Array.iter"
+            , "5eebf8a6a828cc60982fb1d5c40964a25b9dd75656e7ab30c8c3222e1f86dcce" )
+          ; ( "module_export/Array.iteri"
+            , "f14ea79fda8655ec65fbe898fd176284ffdaa8b217d19fcfbdc36418fe99a7be" )
+          ; ( "module_export/Array.length"
+            , "a7601153d56b1245f8862216ba70065e5a7b78808e2652a6595a508bfac4d2e2" )
+          ; ( "module_export/Array.make"
+            , "76479efd2889b51063b0068779b2daca54852f0caf9dcf4ce7958fe8656e5263" )
+          ; ( "module_export/Array.map"
+            , "a227881af11bf7f2c4be1202e523f12bc7b4374b2ebd0d2a3c7343581b3d83ab" )
+          ; ( "module_export/Array.mapi"
+            , "af9d53b093396a585c7d2541b31aa2f6ed848cecfb917582f94c284012857260" )
+          ; ( "module_export/Array.reverse"
+            , "983f7f861faf15c7236dd18b7b77b81b5479367c3757db0fc7dc6694304571d0" )
+          ; ( "module_export/Array.reverse_in_place"
+            , "1967fe00a9d0122ddd38ceb2f33f4af5077130152d8713088c796ed040514a8f" )
+          ; ( "module_export/Array.set"
+            , "b7225617db17bd902eac59ab019638984179554cc601cd94c4d0b6fff372f2d2" )
+          ; ( "module_export/Array.sub"
+            , "e3747471b58f9ae92b55e9c2c27cce38852aac64be696667282d56d5736b8acd" )
+          ; ( "module_export/Array.swap"
+            , "7107c4e1ba79f9df4d33b816245b6821b9e6ccfc2cb9ae017ff1db85097415cc" )
+          ] )
+      ; ( "moderator_v1"
+        , "2f46d515b7bb75760db1b771f37332eb8b79e009e308554fc5096e7360527859"
+        , [ ( "module/Array"
+            , "6c0cb819069d3ce215a3fadcbd2ef3b53e038b29ded5aef027ebe125ee3ff7b8" )
+          ; ( "module_export/Array.append"
+            , "8477fff23a1cb9e0ae5ca1e67cd319e7ab6ec45f98155b8a875786cd189d2db7" )
+          ; ( "module_export/Array.copy"
+            , "53ad39377bc50b9ac16b78589fece7aeaa93d340e51cd7a03d9c4e87421e3e5f" )
+          ; ( "module_export/Array.exists"
+            , "290a43b7750e6c6a0cbb21234eb11e8722d1772195736e8e739e6bc11e0e043b" )
+          ; ( "module_export/Array.fill"
+            , "832376a7f2b6b01e5a9014bacbe5750a6c360f074f99a74ea2d4907707760a02" )
+          ; ( "module_export/Array.filter"
+            , "4cc3317a7ef26f3b9809129356074e21354fbf4f57548c3f6b02128fb75505ae" )
+          ; ( "module_export/Array.find"
+            , "ccd09f629de239eb748d5881cf7aabb17a5d9676d7554e6efca835f42774709d" )
+          ; ( "module_export/Array.find_map"
+            , "31756a051cdb48dc45706665f59d24a2297f7f81003162952b1217bcab1280b9" )
+          ; ( "module_export/Array.fold"
+            , "e91e6f6ee1a707c30fe4075e04f504ed3222ab07f04b421a6e704d6082ff2aed" )
+          ; ( "module_export/Array.for_all"
+            , "454f70da2f58765eec3bed27c23b52109c3bb9e1d96537b2f50a2d07a5a58dc4" )
+          ; ( "module_export/Array.get"
+            , "f081e182dbaf3d859755fafefd227fce10724de1386a404cfe4d53fc2c0cce04" )
+          ; ( "module_export/Array.init"
+            , "952962a59ded4116ae164a5a2b40033470ef006916212fa13d67932753c3542e" )
+          ; ( "module_export/Array.iter"
+            , "0a8c691fb4db7e6de25f5388ffd14903c6cecb0de726fa85ae7d9374e3d532ac" )
+          ; ( "module_export/Array.iteri"
+            , "87d9a9f1cacfe5099bcb1372efdfab465973eb8cb871a9d786e416fbe7d1b548" )
+          ; ( "module_export/Array.length"
+            , "d8299f8b07b7d257e6ce4a54f87984fd89da53d38e5d7aeb53b15611be6dd972" )
+          ; ( "module_export/Array.make"
+            , "98f38dcc4da172f30454f78bd488ff5fe383ece13a1f9daced6cdacb7e960f78" )
+          ; ( "module_export/Array.map"
+            , "d03d127018b5e5abbca6818ccdc444a9b23333dc5e55be11cc112a9f3ea776b5" )
+          ; ( "module_export/Array.mapi"
+            , "5c7cb0f5f91595eee532a2871319c1c5926367322443ee9218b62bb92514c26f" )
+          ; ( "module_export/Array.reverse"
+            , "575bfc0b9158718ac4c4faadd4e76d5c41c26390ed72392aea59e716d8bf9aee" )
+          ; ( "module_export/Array.reverse_in_place"
+            , "35ce3486b365e477659b6d0e252a2ee4d740ea350fbd4a0e15bc5cccc4e19e91" )
+          ; ( "module_export/Array.set"
+            , "a539a5c51b95edbc9e8cb3ad27f381c6dd1fddf2a6c8a1ad4c91045254631c4d" )
+          ; ( "module_export/Array.sub"
+            , "2313346512abe782a0a059ed16af21c0d33ed697dbb258466ee69c94ad0cc862" )
+          ; ( "module_export/Array.swap"
+            , "4fafa016b2d0bfbb6567494be00b463f8cb76cf48953e0e99084d8003d146c5b" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "a7c5e60e6dd2eba1dc6c2d63c56cbb3e2dc273cffad332dc297ce4ddef3d0528"
+        , [ ( "module/Array"
+            , "40b9b5d09333d558fc36cc99caf8bebcbc3e76f73726caf81d67a1ff1bb39d00" )
+          ; ( "module_export/Array.append"
+            , "18a2b7e3b60112ed2c1e443ed87e6ffba434f9b71a486d107bcc3ed583bb2e04" )
+          ; ( "module_export/Array.copy"
+            , "bc478e9ceeff1f1946100513186cf3e74572673199919e29d22eed1198e3aa27" )
+          ; ( "module_export/Array.exists"
+            , "c7920c821f16c0666ca4c77d2e74c98c579d84097892df4b7cbfe4c50286741f" )
+          ; ( "module_export/Array.fill"
+            , "dd8a0a0564bc07d55eadad1ab3aa3b3d93efbfa7f859a328a60cbcf922b48d3c" )
+          ; ( "module_export/Array.filter"
+            , "a66e13f2d212434c6ee2e6c0f97b18e1505edf8b508e19762dfe5d680182ed4a" )
+          ; ( "module_export/Array.find"
+            , "3ac6675f0a342b1899bf6898811262055cc76f2030731d02d0708c4a57ec30d2" )
+          ; ( "module_export/Array.find_map"
+            , "98b89596322203d3149f3f2308f01009e29b5cad110841fdbd35dd7ca40c7dce" )
+          ; ( "module_export/Array.fold"
+            , "2c191ec8e80fb1f88ac8fa59560c59082a206ca748b66f596de9c7e9e27562ee" )
+          ; ( "module_export/Array.for_all"
+            , "adb5a403e411a883bf1db63929c7ed86ca10e8d12189db0e5bae9083675d983e" )
+          ; ( "module_export/Array.get"
+            , "5d24ec02d938812ea426a53c3d81e3aac3dd0d5778eebdd25979197512fa58d0" )
+          ; ( "module_export/Array.init"
+            , "64faf4a9839637dd6d28c0bc737033cc66de6a0a08169e20507afdd5ad8ab7a0" )
+          ; ( "module_export/Array.iter"
+            , "f434c7552d8a9752baecdd52d3ecfdeab5b5f13813489170050bd03913ff221d" )
+          ; ( "module_export/Array.iteri"
+            , "04420e675167477e88aa03d40953ed2849741d13e282d89a74bb68696c94b78f" )
+          ; ( "module_export/Array.length"
+            , "113bd0c26fe99dcf635daffe280b83fb686dc49c62af3759de4300baf79dfafe" )
+          ; ( "module_export/Array.make"
+            , "ffd56b96f1771c6f0e02efc89d1bb7ac71c39d01bed2084e46116346dc8fe0d9" )
+          ; ( "module_export/Array.map"
+            , "f8555375daab594b6ba19913268d3a52c3646a786893276f82596870cabda49d" )
+          ; ( "module_export/Array.mapi"
+            , "39423b894f51d85bf70050b15e32aca8576d2831757984eac9ea254179904c81" )
+          ; ( "module_export/Array.reverse"
+            , "4d55c58a1c40efa975823ebde6a9b0db8e27fa803044506cf2824a04dd6b6bc5" )
+          ; ( "module_export/Array.reverse_in_place"
+            , "7d09177b6c9656700cf77002103d2ac3ee1d664b9508d33d22f3f0d8d0b86178" )
+          ; ( "module_export/Array.set"
+            , "05a52ac46e8937292a4d5e289da790d10c6924afdbf2d7091116025880536f49" )
+          ; ( "module_export/Array.sub"
+            , "a8ec33311681b727e558e7b81e6046ceb6f706f12fb599a4ded2b5f3ff76bf2b" )
+          ; ( "module_export/Array.swap"
+            , "e7447cd1971cdec89625cc67a23d7144952623298578baee4ea4b206d854e35a" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.collections"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
+  let option_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "dfff5a377f9451cf3ecb4a156ebea0cc64a8c90e34899de6d38e43364510e441"
+        , [ ( "module/Option"
+            , "35625c7916a5431fdcef89a05a6f24dfe4154b12e3076e6a38db17e8dc484b96" )
+          ; ( "module_export/Option.get_or"
+            , "0abc06c13404ebd2ddbf702b5232c0db81dd6b2cf70b071a8c52716d2872acae" )
+          ; ( "module_export/Option.is_none"
+            , "6c6964a6eac1916c7f5d9e6bf94b8477296a9a2f4fcd4891739b13e7f76b9234" )
+          ; ( "module_export/Option.is_some"
+            , "c54300490f4d5e6fd98aefce8d782e37c4ac0d98927dc7b75be5316ebbeab4c7" )
+          ; ( "module_export/Option.none"
+            , "d66487403fa7b0c00358e9f6a907cd16c5bbea4dd6c20a78b0a18a399ab2e574" )
+          ; ( "module_export/Option.some"
+            , "af6d3e053171d385c9315f96394ad854b84e2d6d5a7c8af8090dcb9a4b2bacfb" )
+          ] )
+      ; ( "tool_v1"
+        , "7a8c4ce3a13e58d43d656273c217f39f6425b95049ca7a416f9bf125e3d1ddf5"
+        , [ ( "module/Option"
+            , "8139706127f4fb46b6b7d2c8f8951efe78e58e59452de6cf2c5a78e552a489f8" )
+          ; ( "module_export/Option.get_or"
+            , "8e11881fb0df7f31a7090fdf89f4bb2eabac437f627695803dadeaebdfb1f257" )
+          ; ( "module_export/Option.is_none"
+            , "208dc46fc81ffe56960800c5973603d8f2273261cd8652974913a3f607753a51" )
+          ; ( "module_export/Option.is_some"
+            , "78f0688ad13fc626f451beb98655507315ee224684a4ef3875ef9f8bf3600993" )
+          ; ( "module_export/Option.none"
+            , "e3177d43a8525e9361f64fa810c60a964b56994c15487774686a95e17aa263d7" )
+          ; ( "module_export/Option.some"
+            , "9800ca939bd5dd2a790a94f29faca30ca578942749ce4aebccb8dd671b3a9f28" )
+          ] )
+      ; ( "moderator_v1"
+        , "2f46d515b7bb75760db1b771f37332eb8b79e009e308554fc5096e7360527859"
+        , [ ( "module/Option"
+            , "eed8a04643315785f17a45f6ff41a87b0936217c1205317613c9aefbd8375690" )
+          ; ( "module_export/Option.get_or"
+            , "6e0a346b981d05e61420c1d7eb7ebda14f88351ae748408062544d9f59b25146" )
+          ; ( "module_export/Option.is_none"
+            , "acb5174812a5e45076da81f79d77c0c0daab34b68f878876db7818e061bb2a2f" )
+          ; ( "module_export/Option.is_some"
+            , "aa242496799284da2832b2c29fcc888432c46c60a751ce5810073e5fbc7b256e" )
+          ; ( "module_export/Option.none"
+            , "41281aeee1ac78155785e553c3db78a35ff757cae49c6bbbe36a82745bd3693e" )
+          ; ( "module_export/Option.some"
+            , "38d8c3c4754e9da41c9d4fcecb4deaceedcda41aaa5200d8bcc037cfea004d92" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "a7c5e60e6dd2eba1dc6c2d63c56cbb3e2dc273cffad332dc297ce4ddef3d0528"
+        , [ ( "module/Option"
+            , "eb0a6714a9d24b6c7e72a1c0e54a424080e40e700fd464aaa8e8bd672fab7d53" )
+          ; ( "module_export/Option.get_or"
+            , "70e7edb127ddeec0c3794f0af81a7e9cb245a33480aacd5033a428723f481301" )
+          ; ( "module_export/Option.is_none"
+            , "8941d3d78e609baee63d6c5cd4ae70c7fc1d71c4913d645fe2291f51cdf91258" )
+          ; ( "module_export/Option.is_some"
+            , "5a01f4d4d605dcad2f0a50e052258e2460230be0b93111cf498f7059f5d88640" )
+          ; ( "module_export/Option.none"
+            , "f0ad57be8cc8a8ababddab73cb6dd318661df8f75085dab0df554153d05a90f7" )
+          ; ( "module_export/Option.some"
+            , "f8d8f7d47d3f0b9abd83683752d373b0ca7bb5388c7bb83dd0235cf1b2523e06" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.collections"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "lib/chatml/chatml_builtin_spec.ml"
+              ; "test/agent_docs/docs_chatml_authoring.ml"
+              ]
+          }))
+  ;;
+
+  let reviewed_mappings =
+    entrypoint_mappings
+    @ task_mappings
+    @ string_mappings
+    @ array_mappings
+    @ option_mappings
+  ;;
 end
 
 let language_foundation ~sources =
@@ -1149,7 +1591,48 @@ let runtime_foundation ~sources =
   create
     ~sources
     (List.map (topics language) ~f:(fun topic -> topic.specification)
-     @ [ { id = "authoring.primer"
+     @ [ { id = "chatml.strings"
+         ; title = "String operations, literal search and UTF-8 byte boundaries"
+         ; prerequisites = [ "chatml.programs"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-strings.md"
+               ; heading = "# String operations and byte boundaries"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "c782e47dd2da47b9460abfaf2c8edb11433934473c8106a4c6408acae9f9ca83" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.collections"
+         ; title =
+             "Array transformations, shared mutation, task iteration and optional values"
+         ; prerequisites = [ "chatml.programs"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-collections.md"
+               ; heading = "# Arrays and optional values"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "6a6d720f71c08569629b640b4f13158683453c7cc0a7c71dd02b3c43c596a804" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ]
+               }
+         }
+       ; { id = "authoring.primer"
          ; title = "Shared ChatML and ChatMD authoring orientation"
          ; prerequisites = []
          ; surfaces = shared

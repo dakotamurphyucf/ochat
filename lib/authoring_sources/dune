@@ -11,6 +11,8 @@
     guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
     guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
+    guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
+    guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}
     guide/chatml-authoring-primer.md %{dep:../../docs-src/guide/chatml-authoring-primer.md}
     guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
     guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}

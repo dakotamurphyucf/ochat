@@ -63,6 +63,7 @@ let with_daemon
       ?after_turn_with_daemon
       ?(connect = fun ~sw:_ ~env:_ ~root:_ daemon -> connection daemon (principal ()))
       ?(inspect_request = fun _ _ -> ())
+      ?(followup_calls = fun _ -> [])
       ?(expected_requests = 2)
       ?(initial_requests = 2)
       ?(expected_schedules = 0)
@@ -101,7 +102,8 @@ let with_daemon
           inspect_request !requests inputs;
           match !requests with
           | 1 -> call_events calls
-          | request when request <= expected_requests -> Stdlib.Seq.empty
+          | request when request <= expected_requests ->
+            call_events (followup_calls request)
           | _ -> failwith "tool execution requested an unexpected model turn"
         in
         Eio.Switch.run (fun sw ->

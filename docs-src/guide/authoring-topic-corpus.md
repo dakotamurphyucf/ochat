@@ -63,13 +63,30 @@ and delegated moderator surfaces. The normal offline tests compare these literal
 reviewed pins to the current compiler and source-derived topics.
 `Coverage.task_mappings` adds the Task module and its five exports on each surface,
 with the complete [task semantics guide](chatml-task-effects.md) and checked examples.
-`Coverage.reviewed_mappings` combines these thirty exact targets. Other compiler
+`Coverage.string_mappings`, `array_mappings` and `option_mappings` add all exports
+of those modules with the checked [String](chatml-strings.md) and
+[collections](chatml-collections.md) references. `Coverage.reviewed_mappings`
+combines these 206 exact targets across the four surfaces. Other compiler
 APIs remain explicitly unmapped. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
 build would defeat this check. Authoring-context service construction also audits
 this maintained subset against the installed compiler and corpus; incompatible
-entrypoint or Task guidance fails before queries are served. Packages remain labelled
+reviewed guidance fails before queries are served. Packages remain labelled
 incomplete while the other required feature mappings are missing.
+
+After reviewing a module's implementation, writing its full reference, and running
+the checked examples, maintainers can inspect candidate pins with:
+
+```sh
+opam exec -- dune exec test/authoring_sources/review_coverage.exe -- Array chatml.collections
+```
+
+The utility prints candidates and `review_required: true`; it does not edit the
+maintained mappings. Review every emitted export against the guide before copying
+literal pins into `Coverage`. Normal CI never regenerates those expectations.
+The module coverage test compares each reviewed module against its full current
+export inventory on every surface, so a new export cannot silently remain outside
+that module's documentation check.
 
 ## Initial topic corpus
 
@@ -78,6 +95,12 @@ nested tasks, task versus pure failures and local/external rollback boundaries.
 It is included in every prepared task package and in the language orientation's
 direct reading routes. Six examples are executed offline, including two expected
 runtime failures; those failures are tested rather than advertised as recoverable.
+
+`chatml.strings` adds complete byte-oriented string operations, literal search and
+replacement, UTF-8 boundaries and immediate errors. `chatml.collections` adds
+arrays and options: transformations, shallow mutation, callback ordering, searches,
+eager defaults and explicit interpretation of task arrays. Both are flat topics
+available on every extensibility surface with shared language/task prerequisites.
 
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):
@@ -96,8 +119,8 @@ All use the shared introduction as a prerequisite. The examples remain labelled
 as one-off candidates even when retrieved for an author writing a standalone tool
 or moderator; each target still needs its own entrypoint guidance. The seven
 topics partition that guide, not the full language specification or runtime API.
-They do not yet provide complete task packages, native tool schemas, full feature
-coverage or model-context insertion. The separate
+The topic corpus alone does not provide complete task packages, native tool
+schemas, full feature coverage or model-context insertion. The separate
 [authoring query tool](authoring-context-tool.md) adds flat feature orientation,
 retrieval budgets and pagination over this foundation.
 
@@ -163,13 +186,14 @@ Eight additional topics partition the
 Job guidance includes transaction/recovery prerequisites. Notification guidance
 includes acknowledgement rules, and the shell example depends on that full
 notification context. Moderator-only topics reject assembly for one-off or
-standalone surfaces. These 27 topics still do not cover every language/native
-schema construct or implement the five task packages and public retrieval service.
+standalone surfaces. The corpus still does not cover every language/native schema
+construct; retrieval and model-context integration use the separate query and
+materialization services. Public enablement awaits complete qualification.
 
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
-coverage, the 18 language examples and exact source/entrypoint checks for the
+coverage, 40 executable language examples and exact source/entrypoint checks for the
 four runtime integration fixtures. The invocation and background moderator fixtures
 also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be

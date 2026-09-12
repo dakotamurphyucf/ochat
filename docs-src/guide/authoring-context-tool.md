@@ -88,6 +88,13 @@ The map encourages the author to consider capabilities useful to its task, then
 retrieve their contracts. It links directly to substantial sections; prerequisites
 are included automatically. It does not require navigating a deep documentation
 tree. Whole sections and complete examples remain intact when paged.
+The [String reference](chatml-strings.md), topic `chatml.strings`, covers all
+fourteen `String` exports with checked normalization, UTF-8 byte-offset and error
+examples. Its per-surface compiler mappings are audited; adding or changing an
+export requires reviewing both the contract and documentation pins.
+The [collections reference](chatml-collections.md), topic `chatml.collections`,
+covers all twenty-two `Array` exports and five `Option` exports, including shallow
+aliasing, short-circuit searches, eager defaults and explicit task sequencing.
 Every task package includes the broad `chatml.programs` guide and its checked
 OCaml-differences prerequisites, covering source syntax, control flow, matching,
 types, structured-data utilities and effect boundaries before the task's runtime
@@ -139,6 +146,13 @@ delegated catalogs, and child creation/restoration use the delegated catalog.
 An ordinary-only moderator package cannot be presented as valid child guidance.
 Replacing captured sources rebuilds both catalogs and changes host identity;
 their catalog metadata cannot be replaced independently of the captured source.
+
+Offline composition checks create a persisted child with one selected custom
+package. Its native helper reads that package and denies the parent's other
+package. After stopping, unloading and restarting the child runtime, its guidance
+deduplicates, its helper reads the same captured text, and its inherited managed
+handler still works. This qualifies runtime reload; the fixture does not simulate
+a whole daemon process restart.
 
 ## One strict request schema
 

@@ -3,6 +3,11 @@
  (modules offline)
  (libraries core core_unix ochat.authoring_sources ochat.chatmd_shell_spec))
 
+(executable
+ (name review_coverage)
+ (modules review_coverage)
+ (libraries core jsonaf ochat.authoring_corpus ochat.authoring_sources))
+
 (library
  (name topic_tests)
  (modules topic_tests coverage_tests authored_tests)
