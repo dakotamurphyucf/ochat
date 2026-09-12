@@ -22,3 +22,7 @@ val load : env:Eio_unix.Stdenv.base -> path:string -> (t, string) result
     At most 128 files and 4 MiB of encoded JSON are accepted, in addition to the
     corpus's package/topic/text bounds. No filesystem access occurs here. *)
 val packages : t list -> (Authoring_corpus.authored_package list, string) result
+
+(** Capture and validate a set of absolute file paths under the aggregate bounds.
+    Empty selection performs no reads. Duplicate paths fail before opening files. *)
+val load_many : env:Eio_unix.Stdenv.base -> paths:string list -> (t list, string) result

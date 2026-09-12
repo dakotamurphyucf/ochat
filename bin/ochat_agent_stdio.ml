@@ -75,12 +75,16 @@ let local_options env ~prompt ~workspace ~data_root =
     }
 ;;
 
-let run_local env ~prompt ~workspace ~data_root =
+let run_local env ~prompt ~workspace ~data_root ~authoring_package_files =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
     let options = local_options env ~prompt ~workspace ~data_root in
+    let authoring_package_files =
+      List.map authoring_package_files ~f:(absolute (working_directory env))
+    in
     let%map embedded =
-      Agent_server.Embedded.start ~sw ~env options |> Result.map_error ~f:protocol_error
+      Agent_server.Embedded.start ~sw ~env ~authoring_package_files options
+      |> Result.map_error ~f:protocol_error
     in
     Exn.protect
       ~f:(fun () ->
@@ -101,7 +105,15 @@ let run_local env ~prompt ~workspace ~data_root =
       ~finally:(fun () -> Agent_server.Embedded.close embedded))
 ;;
 
-let run ~local ~connect ~bearer_token_file ~prompt ~workspace ~data_root =
+let run
+      ~local
+      ~connect
+      ~bearer_token_file
+      ~prompt
+      ~workspace
+      ~data_root
+      ~authoring_package_files
+  =
   match local, connect with
   | true, None when Option.is_some bearer_token_file ->
     Or_error.error_string "--bearer-token-file is only valid with --connect"
@@ -109,12 +121,18 @@ let run ~local ~connect ~bearer_token_file ~prompt ~workspace ~data_root =
     (match prompt with
      | None -> Or_error.error_string "--local requires --prompt FILE"
      | Some prompt ->
-       Eio_main.run (fun env -> run_local env ~prompt ~workspace ~data_root))
+       Eio_main.run (fun env ->
+         run_local env ~prompt ~workspace ~data_root ~authoring_package_files))
   | false, Some uri ->
-    if Option.is_some prompt || Option.is_some workspace || Option.is_some data_root
+    if
+      Option.is_some prompt
+      || Option.is_some workspace
+      || Option.is_some data_root
+      || not (List.is_empty authoring_package_files)
     then
       Or_error.error_string
-        "--prompt, --workspace, and --data-root are local-mode options"
+        "--prompt, --workspace, --data-root, and --authoring-package are local-mode \
+         options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -137,8 +155,21 @@ let command =
      and workspace = flag "--workspace" (optional string) ~doc:"DIR Local workspace."
      and data_root =
        flag "--data-root" (optional string) ~doc:"DIR Durable local data root."
+     and authoring_package_files =
+       flag
+         "--authoring-package"
+         (listed string)
+         ~doc:"FILE Capture custom documentation for the local host (repeatable)."
      in
-     fun () -> run ~local ~connect ~bearer_token_file ~prompt ~workspace ~data_root)
+     fun () ->
+       run
+         ~local
+         ~connect
+         ~bearer_token_file
+         ~prompt
+         ~workspace
+         ~data_root
+         ~authoring_package_files)
 ;;
 
 let () = Command_unix.run command

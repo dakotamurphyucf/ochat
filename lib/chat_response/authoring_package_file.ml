@@ -152,3 +152,34 @@ let packages files =
   let%map (_ : C.t) = C.extend_authored corpus packages in
   packages
 ;;
+
+let load_many ~env ~paths =
+  let open Result.Let_syntax in
+  let%bind () =
+    match List.length paths <= 128 with
+    | false -> Error "at most 128 authoring package files may be configured"
+    | true ->
+      (match List.find_a_dup paths ~compare:String.compare with
+       | Some _ -> Error "duplicate authoring package file path"
+       | None ->
+         (match List.for_all paths ~f:Filename.is_absolute with
+          | true -> Ok ()
+          | false -> Error "authoring package file paths must be absolute"))
+  in
+  match paths with
+  | [] -> Ok []
+  | _ ->
+    let%bind _, reversed =
+      List.fold_result paths ~init:(0, []) ~f:(fun (bytes, files) path ->
+        let%bind file =
+          load ~env ~path |> Result.map_error ~f:(fun message -> path ^ ": " ^ message)
+        in
+        let bytes = bytes + String.length file.contents in
+        match bytes <= 4 * 1024 * 1024 with
+        | true -> Ok (bytes, file :: files)
+        | false -> Error "authoring package files exceed the 4 MiB aggregate bound")
+    in
+    let files = List.rev reversed in
+    let%map _ = packages files in
+    files
+;;

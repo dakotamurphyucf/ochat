@@ -287,10 +287,22 @@ let close_partial env temporary_root daemon connection =
   cleanup_root env temporary_root
 ;;
 
-let start ~sw ~env ?(daemon_options = Daemon.default_options) options =
+let start
+      ~sw
+      ~env
+      ?(daemon_options = Daemon.default_options)
+      ?(authoring_package_files = [])
+      options
+  =
   Mirage_crypto_rng_unix.use_default ();
   let open Result.Let_syntax in
+  let%bind authoring_packages =
+    Chat_response.Authoring_package_file.load_many ~env ~paths:authoring_package_files
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
   let%bind data_root, temporary_root = data_root env options in
+  let config = config options data_root in
+  let config = { config with server = { config.server with authoring_packages } } in
   let daemon_result =
     Daemon.start
       ~sw
@@ -302,7 +314,7 @@ let start ~sw ~env ?(daemon_options = Daemon.default_options) options =
              then Embedded_durable
              else Embedded_transient)
         }
-      ~config:(config options data_root)
+      ~config
       ~tool_dir:options.tool_dir
       ~home:options.home
       ~process_start_identity:None

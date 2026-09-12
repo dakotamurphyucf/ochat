@@ -17,7 +17,7 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/chat_tui.ml).
 
-`--archive`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
+`--archive`, `--authoring-package`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
 
 ## ochat_agent_server.ml flag inventory
 
@@ -29,7 +29,7 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/ochat_agent_stdio.ml).
 
-`--bearer-token-file`, `--connect`, `--data-root`, `--local`, `--prompt`, `--workspace`
+`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--local`, `--prompt`, `--workspace`
 
 ## HTTP route inventory
 

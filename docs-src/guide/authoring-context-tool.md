@@ -167,7 +167,7 @@ cannot make `agent_create` available: its normal execution check still rejects
 the operation. The limitation participates in host identity and survives
 compaction; it does not silently change manual policy.
 
-Local CLI package configuration and public extension qualification remain open.
+General public extension qualification remains open.
 Manual mode inserts no automatic documentation prose; it can preserve the compact
 metadata above for earlier reads. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
@@ -279,8 +279,9 @@ the actual calling host snapshot, including when a helper is inherited by a chil
 Custom preloads remain labelled authored conventions and deduplicate by their
 actual payload/source identity. Declaring `authoring_help` alone does not install
 a custom package's text. The daemon's normal configuration loader can capture
-package files with `server.authoring_packages`, as described below. Local CLI
-package flags and general extension exposure remain pending qualification.
+package files with `server.authoring_packages`, as described below. Local TUI and
+stdio hosts accept the same files through `--authoring-package`. General extension
+exposure remains pending qualification.
 
 For a configured daemon, add the file list inside its `server` record:
 
@@ -332,6 +333,22 @@ either server configuration or an explicitly configured host's corpus; combining
 both is rejected to avoid silently replacing either source of conventions.
 Loading packages does not register tools, grant permissions, change manual policy
 or enable the currently gated extension rollout.
+
+For local hosts, `chat-tui --local -file agent.chatmd --authoring-package conventions.json`
+and `ochat-agent-stdio --local --prompt agent.chatmd --authoring-package conventions.json`
+use the same bounded loader. Repeat the flag to supply multiple files. Relative
+paths resolve against the process working directory. The default embedded TUI
+mode also accepts it without `--local`; daemon connections, legacy file-backed
+sessions and one-shot administration modes reject the flag instead of ignoring it.
+Configure a connected daemon through its own server configuration.
+
+Embeddings can pass absolute paths as `Embedded.start ~authoring_package_files`.
+The entire set is captured and validated before creating the local store, then
+installed through the same daemon composition. Transient and durable local hosts
+retain their existing execution/lifetime differences. Neither rereads package
+files during queries, and private packages still require matching selected tool
+metadata. These flags supply configuration; they do not bypass the current
+extension qualification gate.
 
 Admission checks the authored owners of every requested topic's full dependency
 closure. A preload cannot access a private package merely because its topic

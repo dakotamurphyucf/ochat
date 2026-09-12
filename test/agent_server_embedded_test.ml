@@ -62,6 +62,39 @@ let with_fixture f =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)))
 ;;
 
+let%expect_test "invalid authoring files fail before creating an embedded durable store" =
+  with_fixture (fun env root workspace prompt_file ->
+    let file = Filename.concat root "invalid-package.json" in
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / file)
+      {|{"version":1,"packages":[],"grant":"all"}|};
+    let data_root = Filename.concat root "uncreated-store" in
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = Some data_root
+        ; start_immediately = true
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      (match
+         Agent_server.Embedded.start ~sw ~env ~authoring_package_files:[ file ] options
+       with
+       | Error error -> [%test_eq: Agent_protocol.Error.code] Invalid_request error.code
+       | Ok host ->
+         Agent_server.Embedded.close host;
+         failwith "invalid package started a host");
+      assert (not (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / data_root)))));
+  print_endline "package rejected; durable store not created";
+  [%expect {| package rejected; durable store not created |}]
+;;
+
 let%expect_test "embedded host uses the shared protocol and process-bound session" =
   with_fixture (fun env root workspace prompt_file ->
     Eio.Switch.run (fun sw ->

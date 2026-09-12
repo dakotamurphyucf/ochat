@@ -6,6 +6,13 @@ ownership. The installed libraries are `ochat.agent_protocol`, `agent_session`,
 `agent_transport_stdio`, `agent_transport_http` and `agent_transport_client`
 with the `ochat.` prefix on each public library name.
 
+`Agent_server.Embedded.start` accepts optional `~authoring_package_files` containing
+absolute paths to [custom authoring packages](../guide/authoring-context-tool.md).
+It validates and captures the complete set before creating a store, using the
+same loader and host configuration as a daemon. Package text stays immutable for
+the host's lifetime and is visible only through matching selected tool metadata.
+This configuration does not grant tools or enable the gated extension rollout.
+
 ## Client integration
 
 The complete [compiled client](../examples/agent-server/clients/docs_example.ml)

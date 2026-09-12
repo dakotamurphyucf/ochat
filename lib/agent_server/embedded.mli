@@ -30,6 +30,10 @@ val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> ?daemon_options:Daemon.options
+  -> ?authoring_package_files:string list
+       (** Absolute paths captured through the shared bounded loader before store
+         creation. Packages configure the same host as daemon configuration;
+         they do not enable extensions or widen selected tool authority. *)
   -> options
   -> (t, Agent_protocol.Error.t) result
 
