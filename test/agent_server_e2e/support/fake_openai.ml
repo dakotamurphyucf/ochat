@@ -61,9 +61,10 @@ let completed_event =
 
 let sse_event json = "data: " ^ Jsonaf.to_string json ^ "\n\n"
 
-let response_body marker =
-  List.map (output_event marker) ~f:(fun event ->
-    Res.Response_stream.jsonaf_of_t event |> sse_event)
+let response_body marker ~completed =
+  List.map
+    (if completed then [] else output_event marker)
+    ~f:(fun event -> Res.Response_stream.jsonaf_of_t event |> sse_event)
   |> fun events ->
   String.concat (events @ [ sse_event completed_event; "data: [DONE]\n\n" ])
 ;;
@@ -71,9 +72,33 @@ let response_body marker =
 let handler marker release ({ Piaf.Server.request; _ } : _ Piaf.Server.ctx) =
   match Piaf.Request.meth request, Piaf.Request.target request with
   | `POST, "/v1/responses" ->
+    let body =
+      Piaf.Body.to_string (Piaf.Request.body request)
+      |> Result.map_error ~f:Piaf.Error.to_string
+      |> Result.ok_or_failwith
+      |> Jsonaf.of_string
+    in
+    let completed =
+      match body with
+      | `Object fields ->
+        (match List.Assoc.find fields "input" ~equal:String.equal with
+         | Some (`Array inputs) ->
+           List.exists inputs ~f:(function
+             | `Object fields ->
+               let field key value =
+                 match List.Assoc.find fields key ~equal:String.equal with
+                 | Some (`String actual) -> String.equal actual value
+                 | _ -> false
+               in
+               field "type" "function_call_output"
+               && field "call_id" "stock-permission-call"
+             | _ -> false)
+         | _ -> failwith "permission fixture requires a Responses input array")
+      | _ -> failwith "permission fixture requires a Responses request"
+    in
     Eio.Promise.await release;
     let headers = Piaf.Headers.of_list [ "content-type", "text/event-stream" ] in
-    Piaf.Response.of_string ~headers ~body:(response_body marker) `OK
+    Piaf.Response.of_string ~headers ~body:(response_body marker ~completed) `OK
   | _ -> Piaf.Server.Handler.not_found ()
 ;;
 

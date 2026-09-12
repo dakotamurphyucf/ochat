@@ -312,7 +312,8 @@ let validate t =
       in
       let%bind () =
         match t.context.origin, t.context.parent_invocation, t.parent_event with
-        | (Moderator | Script), Some _, None | Moderator, None, Some _ -> Ok ()
+        | (Moderator | Script | Delegated_agent), Some _, None | Moderator, None, Some _
+          -> Ok ()
         | _ ->
           invalid "deferred observation requires a nested script or moderator invocation"
       in

@@ -172,7 +172,7 @@ let features =
 
 let implementation_sources =
   [ ( "lib/agent_protocol/invocation.ml"
-    , "3badd86d40e4ae6546132c664944bb851b42b40a14aa9fab9c916d4c10d6a5a0" )
+    , "c3b3bdbd8bea666da4028cc96cfeab2e664ceb079b127f7fbead3903016dcf04" )
   ; ( "lib/agent_session/session_management_channel.ml"
     , "500d45a8cbe760a50bc256df47255dc6fa5e1305f74a543d49c9c2e02e36de51" )
   ; ( "lib/agent_server/session_helper_policy.ml"
@@ -224,13 +224,13 @@ let implementation_sources =
   ; ( "lib/agent_session/managed_wait_tool.ml"
     , "5cfa00cf26188815090cc4e9549cc4eb64c7e841aa9d883dabd67ac613375a27" )
   ; ( "lib/agent_session/native_tool_invocation.ml"
-    , "83f1335d116c18a671ec7dc303bae0564c88705ca08c759145c81d591ba047a1" )
+    , "e53c89afa87268c4db847583e4e77f285535abc4a827e04398b1edd25cdd6a90" )
   ; ( "lib/agent_session/one_off_execution.ml"
     , "946bf1eb9dc6c2da12f46d94f973a9ec7a4c11873b6ffab1424dedaeed8c6e7a" )
   ; ( "lib/agent_session/run_chatml_tool.ml"
     , "228d10f6edfb0a5568692332653ac8136d10588eebebbafc827226a6c122a079" )
   ; ( "lib/agent_session/script_tool_calls.ml"
-    , "6f06f3bc9c161bbef819b66ece0e9aa973427f4ecc97cde90971d946639c1760" )
+    , "5833a0b3237977d9338b78eae322dd8d2f77bdd85b6297ce071a7ea142921ab8" )
   ; ( "lib/agent_session/session_management.ml"
     , "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86" )
   ; ( "lib/agent_session/session_management_native.ml"

@@ -56,8 +56,21 @@ dune build @agent-e2e-pr
 
 Normal `runtest` does not require the opt-in E2E runner, live provider, manual TUI,
 load, or soak scenarios. `@agent-docs-check` validates the documentation/examples
-separately. `@agent-e2e-pr` selects smoke, transports, workspaces and multi-client
-checks. Read [the alias definitions](../../test/agent_server_e2e/dune) before
+separately. `@agent-e2e-pr` selects smoke, transports, workspaces, multi-client
+checks and `@agent-e2e-extensibility-pr`. The focused extensibility subset checks
+retained child provider settings across restart, invocation admission/publication
+without replaying an external effect, and recovery of a committed native child
+creation outcome. It also checks that native tool-start and nested trace events
+reach clients with secret arguments redacted. Recursive fork coverage exercises
+native, standalone ChatML and moderator-handled child tools, parent rejection
+before execution, and separation of child history from the root conversation.
+These use offline providers, production hosts and retained E2E artifacts. The
+required framework CI runs this alias in its E2E tier alongside the separate
+forced normal-test tier.
+
+The subset does not replace full runtime, permission, security, persistence and
+crash qualification. Use the affected aliases or `@agent-e2e-safe` for that wider
+matrix. Read [the alias definitions](../../test/agent_server_e2e/dune) before
 selecting a larger tier.
 
 The docs check covers local inline links and heading anchors throughout

@@ -251,6 +251,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/extension_invariants.mli` | [contract](../../lib/agent_session/extension_invariants.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/extension_stop.mli` | [contract](../../lib/agent_session/extension_stop.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/external_ingress.mli` | [contract](../../lib/agent_session/external_ingress.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/fork_tool_dispatch.mli` | [contract](../../lib/agent_session/fork_tool_dispatch.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/generated_definition.mli` | [contract](../../lib/agent_session/generated_definition.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/generated_session_request.mli` | [contract](../../lib/agent_session/generated_session_request.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/generated_session_tool.mli` | [contract](../../lib/agent_session/generated_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

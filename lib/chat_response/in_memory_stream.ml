@@ -11,6 +11,8 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch = struct
+  type native_runner = Ochat_function.t -> payload:string -> Output.t
+
   type rejection =
     | Invalid_input
     | Pre_tool
@@ -37,22 +39,31 @@ module Tool_dispatch = struct
     }
 
   type t =
-    { commit_call : request -> bool
+    { for_fork : (source:string -> parent_call_id:string -> t) option
+    ; commit_call : request -> bool
     ; prepare_call :
         (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
     ; validate_original :
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
-    ; run : request -> authorize:(unit -> unit) -> result option
+    ; run :
+        ?run_native:native_runner -> request -> authorize:(unit -> unit) -> result option
     }
 
   let chain services =
+    let for_fork =
+      match List.filter_map services ~f:(fun service -> service.for_fork) with
+      | [] -> None
+      | [ fork ] -> Some fork
+      | _ -> invalid_arg "tool dispatch requires a single fork owner"
+    in
     let prepare_call =
       match List.filter_map services ~f:(fun service -> service.prepare_call) with
       | [] -> None
       | [ prepare ] -> Some prepare
       | _ -> invalid_arg "tool dispatch requires a single host preparation policy"
     in
-    { prepare_call
+    { for_fork
+    ; prepare_call
     ; commit_call =
         (fun request ->
           List.exists services ~f:(fun service -> service.commit_call request))
@@ -61,8 +72,9 @@ module Tool_dispatch = struct
           List.fold_result services ~init:() ~f:(fun () service ->
             service.validate_original ~kind ~name ~payload))
     ; run =
-        (fun request ~authorize ->
-          List.find_map services ~f:(fun service -> service.run request ~authorize))
+        (fun ?run_native request ~authorize ->
+          List.find_map services ~f:(fun service ->
+            service.run ?run_native request ~authorize))
     }
   ;;
 
@@ -1225,6 +1237,14 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
     ; registry = child_registry
     ; source = Some (Fork.Invocation_id.to_string invocation_id)
     ; parent_call_id = Some call_id
+    ; dispatch_tool =
+        Option.map ctx.dispatch_tool ~f:(fun dispatch ->
+          match dispatch.for_fork with
+          | None -> dispatch
+          | Some fork ->
+            fork
+              ~source:(Fork.Invocation_id.to_string invocation_id)
+              ~parent_call_id:call_id)
     ; moderator = None
     ; before_model_call = (fun () -> ())
     ; prepare_model_input = None
@@ -1288,7 +1308,7 @@ let dispatch_tool
       ~synthetic_result
       ~rejection
       ~runtime_requests
-      run_native
+      (run_native : ?runner:Ochat_function.runner -> payload:string -> unit -> Output.t)
   =
   let halted () =
     Option.value_map c.moderator ~default:false ~f:(fun moderator ->
@@ -1319,6 +1339,8 @@ let dispatch_tool
           History_entry.Id.equal (History_entry.id entry) call_id)
       in
       dispatch.run
+        ~run_native:(fun implementation ~payload ->
+          run_native ~runner:implementation.Ochat_function.run_with_progress ~payload ())
         Tool_dispatch.
           { kind
           ; original_name
@@ -1346,7 +1368,9 @@ let dispatch_tool
         | Some output -> output
         | None ->
           authorize ();
-          if halted () then Output.Text "The session has ended." else run_native ()
+          if halted ()
+          then Output.Text "The session has ended."
+          else run_native ~payload ()
       in
       Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
   in
@@ -1446,12 +1470,9 @@ let prepare_host_tool_entry
         }
     in
     let decision =
-      match request.source, request.parent_call_id with
-      | Some _, _ | _, Some _ -> Error "host preparation requires its persisted owner"
-      | None, None ->
-        (try prepare request with
-         | Eio.Cancel.Cancelled _ as exn -> raise exn
-         | _ -> Error "host preparation failed")
+      try prepare request with
+      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | _ -> Error "host preparation failed"
     in
     let moderated, rejection =
       match decision with
@@ -1623,11 +1644,12 @@ let schedule_function_done
         ~synthetic_result:moderated.synthetic_result
         ~rejection
         ~runtime_requests:moderated.runtime_requests
-        (fun () ->
+        (fun ?runner ~payload () ->
            Tool_call.run_tool
              ~kind:Tool_call.Kind.Function
              ~name
-             ~payload:arguments
+             ~payload
+             ?runner
              ~call_id
              ~tool_tbl:c.tool_tbl
              ?on_tool_execution:c.on_tool_execution
@@ -1743,11 +1765,12 @@ let schedule_custom_done
         ~synthetic_result:moderated.synthetic_result
         ~rejection
         ~runtime_requests:moderated.runtime_requests
-        (fun () ->
+        (fun ?runner ~payload () ->
            Tool_call.run_tool
              ~kind:Tool_call.Kind.Custom
              ~name
-             ~payload:input
+             ~payload
+             ?runner
              ~call_id
              ~tool_tbl:c.tool_tbl
              ~on_fork:None

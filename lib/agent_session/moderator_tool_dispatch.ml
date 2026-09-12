@@ -91,6 +91,7 @@ let dispatch
       ~validate_work
       ~admit
       ~prepare_outcome
+      ?run_native:_
       (request : Stream.Tool_dispatch.request)
       ~authorize
   =
@@ -405,7 +406,8 @@ let create
         |> Result.map_error ~f:(fun _ -> "invalid original tool input"))
   in
   Stream.Tool_dispatch.
-    { commit_call
+    { for_fork = None
+    ; commit_call
     ; prepare_call = None
     ; validate_original
     ; run =

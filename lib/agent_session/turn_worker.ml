@@ -529,7 +529,10 @@ let create
     with
     | outcome -> outcome
     | exception Worker_failure failure -> Operation_worker.Failed failure
-    | exception Moderator_tool_dispatch.Dispatch_error failure ->
+    | exception
+        ( Moderator_tool_dispatch.Dispatch_error failure
+        | Native_tool_dispatch.Dispatch_error failure
+        | Standalone_tool_dispatch.Dispatch_error failure ) ->
       Operation_worker.Failed failure
     | exception Chat_response.In_memory_stream.Post_tool_moderation_failed (entry, _) ->
       Operation_worker.Failed

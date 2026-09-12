@@ -41,6 +41,12 @@ type borrowed
     binding has expired. Never falls back to a different foreground operation. *)
 val borrow : unit -> (borrowed, Agent_protocol.Error.t) result
 
+(** Trusted streaming driver only: capture the active built-in fork's exact
+    capability ceiling, actor executors and expiring lifetime. Direct children
+    of this borrow use Delegated_agent origin without provider/history bindings.
+    A same-name replacement or an unrelated native callback cannot acquire it. *)
+val borrow_for_fork : unit -> (borrowed, Agent_protocol.Error.t) result
+
 val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
 
 (** Budget ancestry captured at native dispatch, including across a host domain
@@ -72,7 +78,8 @@ val select_tools
   -> (borrowed, Agent_protocol.Error.t) result
 
 (** Admit a direct child with the scope's origin (Script for a native borrow,
-    Moderator only for a verified managed moderator handler), the same session/generation and a
+    Moderator for a verified managed moderator handler, Delegated_agent for a
+    verified driver fork), the same session/generation and a
     deadline no later than its parent's and the selected ceiling's fingerprint.
     Uses the lending scope's actor executor,
     rechecking expiration both before admission and before the callback. The child
@@ -85,7 +92,7 @@ val select_tools
 val execute_borrowed : borrowed -> executor
 
 (** Optional moderator handoff inherited from the actual foreground actor scope.
-    The returned adapter requires the same direct Script child, selected ceiling,
+    The returned adapter requires the same direct Script or verified fork child, selected ceiling,
     deadline and lifetime checks as [execute_borrowed], before waiting and again
     on entry. It never performs ordinary native admission first. Permission,
     source identity, reentrancy and schema checks remain the dispatcher's job.
@@ -163,6 +170,27 @@ val run_scoped_with_managed
         -> (Jsonaf.t, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
+(** Child conversation variant with the same managed/native validation and
+    owned executor requirements. The driver preserves native events and fork
+    execution only after the final binding is revalidated and authorized. *)
+val run_scoped_in_driver
+  :  run_native:Chat_response.In_memory_stream.Tool_dispatch.native_runner
+  -> managed:managed_dispatch option
+  -> moderator_execute:moderator_executor option
+  -> execute:executor
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
 (** Common native dispatch for a host-owned scope. Performs the same current
     capability, policy, input and output checks as [run]. In particular, [execute]
     must be a real actor-backed scope, not a direct call to the supplied callback.
@@ -207,6 +235,27 @@ val run_scoped
     This internal path does not enable model tools or install Tool.call by itself. *)
 val run
   :  capabilities:Operation_worker.Capabilities.t
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Foreground driver variant of [run]. The trusted adapter receives only the
+    native implementation revalidated after authorization and its validated
+    payload. It preserves driver-specific execution and live tool events inside
+    the same expiring invocation scope. Script/background callers use [run_scoped]
+    and cannot supply a driver or acquire foreground/history authority. *)
+val run_in_driver
+  :  run_native:Chat_response.In_memory_stream.Tool_dispatch.native_runner
+  -> capabilities:Operation_worker.Capabilities.t
   -> registry:(unit -> Chat_response.Tool_capability.t)
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Invocation.t

@@ -117,7 +117,7 @@ let create
     | None -> Ok ()
     | Some prepared -> validate prepared ~kind ~payload
   in
-  let run (request : D.request) ~authorize =
+  let run ?run_native:_ (request : D.request) ~authorize =
     match find request.name with
     | None -> None
     | Some prepared ->
@@ -319,5 +319,5 @@ let create
                   |> require)
           }
   in
-  D.{ commit_call; prepare_call = None; validate_original; run }
+  D.{ for_fork = None; commit_call; prepare_call = None; validate_original; run }
 ;;

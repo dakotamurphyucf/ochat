@@ -731,7 +731,7 @@ let live_options env nested =
 ;;
 
 let live_prompt () =
-  prompt live_secret
+  prompt live_secret ^ "\n<tool name=\"fork\"/>\n"
   |> String.substr_replace_all
        ~pattern:{|<policy default="ask"/>|}
        ~with_:{|<policy default="allow"/>|}
@@ -805,7 +805,7 @@ let rec collect_live env stream ~nested remaining frames =
     (match event.kind with
      | Operation_completed -> List.rev frames
      | Operation_failed | Operation_cancelled | Operation_interrupted ->
-       fail "live probe operation failed"
+       raise_s [%sexp "live probe operation failed", (event.payload : Jsonaf.t)]
      | _ -> collect_live env stream ~nested (remaining - 1) frames)
   | _ -> fail "unexpected SSE frame in live redaction probe"
 ;;

@@ -92,6 +92,25 @@ let select_tools scope ~names =
   { scope with ceiling = Some selected }
 ;;
 
+let borrow_for_fork () =
+  let open Result.Let_syntax in
+  let%bind scope = borrow () in
+  let%bind selected = borrowed_capabilities scope in
+  let%bind binding =
+    C.find selected ~name:scope.invocation.context.tool_name
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  in
+  match C.implementation binding with
+  | Native implementation
+    when phys_equal implementation.run_with_progress Functions.fork.run_with_progress ->
+    Ok { scope with child_origin = I.Delegated_agent }
+  | Native _ | Managed _ ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "fork requires its active built-in invocation")
+;;
+
 let record_authoring_reference scope response =
   let open Result.Let_syntax in
   let%bind selected = borrowed_capabilities scope in
@@ -231,10 +250,10 @@ let execute_moderator_borrowed scope ~invocation f =
   let open Result.Let_syntax in
   let%bind () =
     match invocation.I.context.origin with
-    | Script -> Ok ()
+    | Script | Delegated_agent -> Ok ()
     | _ ->
       Error
-        (Agent_protocol.Error.invalid_request "moderator handoff requires a Script child")
+        (Agent_protocol.Error.invalid_request "moderator handoff requires a scoped child")
   in
   let%bind ceiling = check_child scope invocation in
   let%bind execute =
@@ -343,7 +362,8 @@ let with_selected_capabilities selected f =
     with_scope ~ceiling:selected ~execute:scope.execute scope.invocation f
 ;;
 
-let run_scoped_with_managed
+let run_with_native
+      ~run_native
       ~on_progress
       ~managed
       ~moderator_execute
@@ -504,19 +524,22 @@ let run_scoped_with_managed
           in
           let%bind output =
             checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-              let active = Atomic.make true in
-              let invocation =
-                match on_progress with
-                | None -> Ochat_function.Invocation.silent
-                | Some emit ->
-                  Ochat_function.Invocation.create (fun update ->
-                    match Atomic.get active with
-                    | true -> emit dispatched update
-                    | false -> ())
-              in
-              Exn.protect
-                ~finally:(fun () -> Atomic.set active false)
-                ~f:(fun () -> Ok (implementation.run_with_progress ~invocation payload)))
+              match run_native with
+              | Some run_native -> Ok (run_native implementation ~payload)
+              | None ->
+                let active = Atomic.make true in
+                let invocation =
+                  match on_progress with
+                  | None -> Ochat_function.Invocation.silent
+                  | Some emit ->
+                    Ochat_function.Invocation.create (fun update ->
+                      match Atomic.get active with
+                      | true -> emit dispatched update
+                      | false -> ())
+                in
+                Exn.protect
+                  ~finally:(fun () -> Atomic.set active false)
+                  ~f:(fun () -> Ok (implementation.run_with_progress ~invocation payload)))
           in
           validate_output
             ~validate_work:(fun _ ->
@@ -554,12 +577,28 @@ let run_scoped_with_managed
            | Ok outcome | Error outcome -> outcome)))
 ;;
 
+let run_scoped_with_managed = run_with_native ~run_native:None
+
+let run_scoped_in_driver ~run_native =
+  run_with_native ~run_native:(Some run_native) ~on_progress:None
+;;
+
 let run_scoped =
   run_scoped_with_managed ~on_progress:None ~managed:None ~moderator_execute:None
 ;;
 
 let run ~capabilities =
   run_scoped_with_managed
+    ~on_progress:None
+    ~managed:None
+    ~moderator_execute:
+      (Some capabilities.Operation_worker.Capabilities.with_moderator_invocation)
+    ~execute:capabilities.Operation_worker.Capabilities.with_invocation
+;;
+
+let run_in_driver ~run_native ~capabilities =
+  run_with_native
+    ~run_native:(Some run_native)
     ~on_progress:None
     ~managed:None
     ~moderator_execute:

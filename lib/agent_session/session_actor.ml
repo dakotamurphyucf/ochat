@@ -2279,7 +2279,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
             | Invocation_moderator _ | Event_moderator _ | Background_job _ -> false)
         in
         (match invocation.context.origin, parent with
-         | Script, Some parent
+         | (Script | Delegated_agent), Some parent
            when Option.is_none invocation.context.parent_job
                 && Option.is_none invocation.context.provider_call_id
                 && Option.is_none invocation.context.call_entry_id ->
@@ -2289,7 +2289,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
               when Agent_protocol.Timestamp.compare child parent <= 0 -> Ok ()
             | _ ->
               Error (error Conflict "nested moderator cannot extend its parent deadline"))
-         | _ -> Error (error Conflict "nested moderator requires an active script caller"))
+         | _ -> Error (error Conflict "nested moderator requires an active scoped caller"))
       | None ->
         Error (error Conflict "foreground moderator cannot borrow background ownership")
     in

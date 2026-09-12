@@ -77,9 +77,30 @@ let assert_idle daemon session =
 let assert_suspended daemon session (permission : Agent_protocol.Permission.t) =
   let state = state daemon session in
   let operation = Option.value_exn state.active_operation in
-  require
-    (Agent_protocol.Permission.equal_owner permission.owner (Operation operation.id))
-    "suspended foreground operation changed before maintenance";
+  (match permission.owner with
+   | Operation id ->
+     require
+       (Agent_protocol.Id.Operation.equal id operation.id)
+       "suspended foreground operation changed before maintenance"
+   | Invocation id ->
+     let invocation =
+       List.find_exn state.invocations ~f:(fun invocation ->
+         Agent_protocol.Id.Invocation.equal invocation.context.id id)
+     in
+     require
+       (match invocation.status, invocation.context.origin with
+        | Dispatching, Model ->
+          Option.equal
+            String.equal
+            invocation.context.provider_call_id
+            (Some permission.call_id)
+          && String.equal invocation.context.tool_name permission.tool_name
+          && Agent_protocol.Timestamp.compare
+               invocation.context.created_at
+               operation.started_at
+             >= 0
+        | _ -> false)
+       "permission does not own the suspended foreground model invocation");
   require
     (List.exists state.permissions ~f:(fun candidate ->
        Agent_protocol.Id.Permission.compare candidate.id permission.id = 0
@@ -95,8 +116,9 @@ let suspend env daemon client session =
   in
   require
     (Option.exists sent.operation_id ~f:(fun id ->
-       Agent_protocol.Permission.equal_owner permission.owner (Operation id)))
-    "permission belongs to another operation";
+       Option.exists (state daemon session).active_operation ~f:(fun operation ->
+         Agent_protocol.Id.Operation.equal operation.id id)))
+    "suspended operation differs from the submitted turn";
   assert_suspended daemon session permission;
   permission
 ;;

@@ -47,6 +47,12 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch : sig
+  (** Trusted driver adapter. Invoke only after revalidating the selected native
+      binding and authorizing its effects. Executes that binding with the driver's
+      progress/trace observer and legacy fork handler; it performs no admission. *)
+  type native_runner =
+    Ochat_function.t -> payload:string -> Openai.Responses.Tool_output.Output.t
+
   type rejection =
     | Invalid_input
     | Pre_tool
@@ -93,11 +99,18 @@ module Tool_dispatch : sig
       suppress further moderator hooks and follow-up turns after pending outputs
       are handled. Other requests participate in the normal turn-end decision. *)
   type t =
-    { commit_call : request -> bool
-      (** Runs before appending a canonical call or observing it. A claiming
-          service atomically saves the call and its invocation intent and returns
-          true. False uses the ordinary history append. Failure saves neither and
-          aborts the turn. No policy/implementation callback runs here. *)
+    { for_fork : (source:string -> parent_call_id:string -> t) option
+      (** Called inside the executing built-in fork to capture its actual owner.
+          The returned service owns child tool admission, not root provider
+          history. It must validate the branch identity and expiring parent
+          authority on each call. Recursive forks acquire their own parent scope. *)
+    ; commit_call : request -> bool
+      (** Runs before appending a canonical call or observing it. A root service
+          atomically saves the call and invocation intent. A fork service claims
+          its temporary child entry without appending root history; [run] admits
+          its child invocation before effects. Both return true. False uses the
+          ordinary history append. Failure aborts the turn. No policy or
+          implementation callback runs here. *)
     ; prepare_call :
         (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
       (** Optional host policy after the canonical history identity is allocated,
@@ -113,7 +126,8 @@ module Tool_dispatch : sig
           moderation. Unknown targets may pass to another host service. An error
           skips pre moderation and reaches [run] as [Invalid_input], with the
           original canonical call retained. Diagnostic text is not published. *)
-    ; run : request -> authorize:(unit -> unit) -> result option
+    ; run :
+        ?run_native:native_runner -> request -> authorize:(unit -> unit) -> result option
     }
 
   (** Compose host services with disjoint registered names. Every original-input

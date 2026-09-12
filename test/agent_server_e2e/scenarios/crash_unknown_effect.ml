@@ -178,14 +178,47 @@ let test env environment =
       F.kill env child;
       snapshot)
   in
+  let recovered_history = ref None in
   for _ = 1 to 2 do
     with_host env environment fixture marker (fun child client ->
       let recovered = assert_no_replay env child client before.session.id marker in
+      let prefix, appended =
+        List.split_n
+          recovered.canonical_history.entries
+          (List.length before.canonical_history.entries)
+      in
       F.require_equal
-        "unknown-effect canonical history"
+        "unknown-effect original canonical history"
         [%sexp_of: Agent_protocol.History.Window.t]
         before.canonical_history
-        recovered.canonical_history;
+        { recovered.canonical_history with entries = prefix };
+      (* Recovery closes the persisted invocation without replaying its uncertain
+         effect. The cancellation acknowledgement is appended once, never a
+         fabricated successful result or a replacement for the original call. *)
+      (match Agent_session.History_codec.all_of_protocol appended |> F.protocol_ok with
+       | [ entry ] ->
+         (match History_entry.item entry with
+          | Function_call_output
+              { call_id = "crash-unknown-call"; output = Text encoded; _ } ->
+            (match
+               Agent_protocol.Invocation.outcome_of_json (Jsonaf.of_string encoded)
+               |> F.protocol_ok
+             with
+             | Cancelled reason ->
+               F.require
+                 (not (String.is_empty reason))
+                 "unknown invocation cancellation has no explanation"
+             | _ -> F.fail "unknown invocation recovery fabricated a tool result")
+          | _ -> F.fail "recovery output belongs to another tool call")
+       | _ -> F.fail "recovery must append exactly one invocation interruption");
+      (match !recovered_history with
+       | None -> recovered_history := Some recovered.canonical_history
+       | Some history ->
+         F.require_equal
+           "unknown-effect repeated recovery history"
+           [%sexp_of: Agent_protocol.History.Window.t]
+           history
+           recovered.canonical_history);
       F.kill env child);
     assert_interrupted env fixture before
   done

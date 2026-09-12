@@ -97,7 +97,7 @@ let create
       S.validate schema value
       |> Result.map_error ~f:(fun _ -> "invalid native tool input")
   in
-  let run (request : D.request) ~authorize =
+  let run ?run_native (request : D.request) ~authorize =
     match find request.name with
     | None -> None
     | Some reference ->
@@ -122,7 +122,9 @@ let create
               Ok invalid_input)
             |> require
           else
-            Native_tool_invocation.run
+            (match run_native with
+             | None -> Native_tool_invocation.run
+             | Some run_native -> Native_tool_invocation.run_in_driver ~run_native)
               ~capabilities
               ~registry
               ~reference
@@ -153,5 +155,5 @@ let create
                   |> require)
           }
   in
-  D.{ commit_call; prepare_call = None; validate_original; run }
+  D.{ for_fork = None; commit_call; prepare_call = None; validate_original; run }
 ;;

@@ -1560,7 +1560,7 @@ let build_with_services
       let native =
         { native with
           run =
-            (fun request ~authorize ->
+            (fun ?run_native request ~authorize ->
               Native_tool_moderation.with_handler
                 ~observer
                 ~prepare:(fun call ->
@@ -1578,7 +1578,7 @@ let build_with_services
                      | Some _ ->
                        Some (Moderation.Tool_moderation.Reject "The session has ended.")
                      | None -> outcome.tool_moderation))
-                (fun () -> native.run request ~authorize))
+                (fun () -> native.run ?run_native request ~authorize))
         }
       in
       let standalone =

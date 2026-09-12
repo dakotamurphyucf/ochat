@@ -53,6 +53,7 @@ let run_scenario env ~case = function
   | "replay-backpressure" -> Replay_scenario.run env ~case
   | "recovery-migration" -> Recovery_scenario.run env ~case
   | "shell-grants-redaction" -> Shell_security_scenario.run env ~case
+  | "fork-children" -> Scenarios.Fork_children_scenario.run env ~case
   | "daemon-smoke" -> Smoke_scenario.run env ~case
   | "stdio-modes" -> Stdio_scenario.run env ~case
   | "unix-transport" -> Unix_scenario.run env ~case

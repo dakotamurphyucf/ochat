@@ -16,7 +16,54 @@
   (alias agent-e2e-smoke)
   (alias agent-e2e-transports)
   (alias agent-e2e-workspaces)
-  (alias agent-e2e-multiclient)))
+  (alias agent-e2e-multiclient)
+  (alias agent-e2e-extensibility-pr)))
+
+;; Keep process-boundary extensibility regressions in required PR CI. The normal
+;; tier covers the full in-process contract/composition matrix; the safe alias
+;; retains the wider crash, permission and runtime qualification.
+
+(rule
+ (alias agent-e2e-extensibility-pr)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (progn
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      runtime-integrity
+      --case
+      generated.provider-settings-restart)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      crash-matrix
+      --case
+      invocation.admission-publication-no-replay)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      crash-matrix
+      --case
+      generated.creator-outcome-recovery)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      shell-grants-redaction
+      --case
+      redaction.live-started)
+     (run
+      %{exe:agent_server_e2e.exe}
+      --scenario
+      shell-grants-redaction
+      --case
+      redaction.live-trace)
+     (run %{exe:agent_server_e2e.exe} --scenario fork-children))))))
 
 (alias
  (name agent-e2e-safe)

@@ -401,7 +401,7 @@ let delegated_invocation_dependencies delegation invocation =
                 delegation.selected
                 ~id:reference.id
                 ~fingerprint:reference.fingerprint)
-      | Script | Moderator ->
+      | Script | Moderator | Delegated_agent ->
         String.equal context.implementation_revision reference.implementation_revision
       | _ -> false
     in

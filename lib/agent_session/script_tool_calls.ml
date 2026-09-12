@@ -221,7 +221,7 @@ let with_preparation t ~prepare =
   | Some _ -> invalid_arg "script tools already have a preparation policy"
 ;;
 
-let native_dispatch t ~declared ~input ~capabilities =
+let native_dispatch_base t ~declared ~input ~capabilities =
   let registry () =
     C.select
       (t.registry ())
@@ -242,12 +242,12 @@ let native_dispatch t ~declared ~input ~capabilities =
   in
   { dispatch with
     run =
-      (fun request ~authorize ->
+      (fun ?run_native request ~authorize ->
         with_native_services
           t
           ~session_id:input.session_id
           ~generation:input.session_generation
-          (fun () -> dispatch.run request ~authorize))
+          (fun () -> dispatch.run ?run_native request ~authorize))
   }
 ;;
 
@@ -409,7 +409,16 @@ let call_payload kind input =
   | Function, _ | Custom, _ -> Jsonaf.to_string input
 ;;
 
-let prepare_host_call t ~selected ~session_id ~generation ~owner ~id prepared =
+let prepare_host_call
+      ?(native_origin = "script")
+      t
+      ~selected
+      ~session_id
+      ~generation
+      ~owner
+      ~id
+      prepared
+  =
   match t.preparation, prepared.rejection with
   | None, _ | _, Some _ -> Ok prepared
   | Some prepare, None ->
@@ -473,7 +482,7 @@ let prepare_host_call t ~selected ~session_id ~generation ~owner ~id prepared =
              ]
          | Native_call parent ->
            `Object
-             [ "origin", `String "script"
+             [ "origin", `String native_origin
              ; "parent_invocation", Agent_protocol.Id.Invocation.to_json parent
              ]
          | Moderator_event parent ->
@@ -1451,4 +1460,169 @@ let with_event t ~definition ~execute ~(executing : E.t) f =
         && I.equal_observer executing.context.source observer
       | Completed _ | Failed _ | Interrupted _ -> false)
     f
+;;
+
+let native_dispatch t ~declared ~input ~capabilities =
+  let module N = Native_tool_invocation in
+  let module D = Chat_response.In_memory_stream.Tool_dispatch in
+  let rec for_fork ~source ~parent_call_id =
+    let borrowed =
+      match N.borrow_for_fork () with
+      | Ok borrowed -> borrowed
+      | Error error -> raise (Native_tool_dispatch.Dispatch_error error)
+    in
+    let prepare ~selected ~(parent : I.t) ~id (request : D.request) =
+      let open Result.Let_syntax in
+      let%bind reference =
+        C.find selected ~name:request.name
+        |> Result.map ~f:C.reference
+        |> Result.map_error ~f:(fun error -> error.C.message)
+      in
+      let%bind value =
+        Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
+      in
+      let prepare tools prepared =
+        prepare_host_call
+          ~native_origin:"delegated_agent"
+          tools
+          ~selected
+          ~session_id:parent.context.session_id
+          ~generation:parent.context.generation
+          ~owner:(Native_call parent.context.id)
+          ~id
+          prepared
+        |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+      in
+      let%bind moderated =
+        match Native_tool_moderation.current () with
+        | Error error -> Error error
+        | Ok handler ->
+          prepare
+            { t with
+              preparation =
+                Some
+                  (fun request ->
+                    Native_tool_moderation.prepare handler request.call
+                    |> Result.map_error ~f:Agent_protocol.Error.invalid_request)
+            }
+            { reference; input = value; routing = None; rejection = None }
+      in
+      let%bind prepared = prepare t moderated in
+      match prepared.rejection with
+      | Some (I.Fail { code = "invocation.pre_tool_failed"; _ }) ->
+        Error "fork tool preparation failed"
+      | Some _ ->
+        Ok
+          (Some
+             (Chat_response.Moderation.Tool_moderation.Reject
+                "Host policy rejected the call."))
+      | None ->
+        (match call_kind selected reference, call_kind selected prepared.reference with
+         | Function, Custom | Custom, Function ->
+           Error "fork preparation cannot change tool kind"
+         | Function, Function | Custom, Custom ->
+           (match
+              ( String.equal reference.name prepared.reference.name
+              , Jsonaf.exactly_equal value prepared.input )
+            with
+            | false, _ -> Ok (Some (Redirect (prepared.reference.name, prepared.input)))
+            | true, false -> Ok (Some (Rewrite_args prepared.input))
+            | true, true -> Ok None))
+    in
+    let execute ~borrowed ~selected ~reference ~(invocation : I.t) ~run_native ~authorize =
+      let open Result.Let_syntax in
+      let%bind run_native =
+        Result.of_option
+          run_native
+          ~error:(Agent_protocol.Error.invalid_request "fork requires its native driver")
+      in
+      let registry () =
+        C.select
+          (t.registry ())
+          ~names:(List.map (C.references selected) ~f:(fun r -> r.C.name))
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let moderation = Native_tool_moderation.capture () in
+      let execute ~invocation f =
+        N.execute_borrowed borrowed ~invocation (fun ~dispatched ->
+          Native_tool_moderation.with_context moderation (fun () ->
+            with_native_services
+              t
+              ~session_id:dispatched.context.session_id
+              ~generation:dispatched.context.generation
+              (fun () -> f ~dispatched)))
+      in
+      let moderator_execute = N.moderator_executor borrowed in
+      let%bind binding =
+        C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request error.C.message)
+      in
+      let reentrant =
+        Set.mem t.moderator_names reference.name
+        ||
+        match Native_tool_moderation.active_moderator (), C.implementation binding with
+        | Some owner, Managed (Moderator script) -> String.equal script owner.script_id
+        | _ -> false
+      in
+      let%bind resolved =
+        let rejection =
+          Option.bind invocation.routing ~f:(fun routing ->
+            Stream_invocation.rejection_outcome routing.preparation)
+        in
+        match
+          rejection, reentrant, C.implementation binding, t.moderator, moderator_execute
+        with
+        | Some outcome, _, _, _, _ ->
+          execute ~invocation (fun ~dispatched:_ -> Ok outcome)
+        | None, true, _, _, _ ->
+          execute ~invocation (fun ~dispatched:_ ->
+            Ok
+              (fail
+                 "moderator_reentrancy"
+                 "Tool execution would re-enter the active moderator."))
+        | None, false, Managed (Moderator _), Some install, Some moderator_execute ->
+          install
+            t
+            ~execute:moderator_execute
+            ~native_execute:execute
+            ~selected
+            ~reference
+            ~invocation
+            ~prepare_output:t.prepare_output
+        | _ ->
+          N.run_scoped_in_driver
+            ~run_native
+            ~managed:(Option.map t.managed ~f:(fun install -> install t))
+            ~moderator_execute
+            ~execute
+            ~registry
+            ~reference
+            ~invocation
+            ~is_halted:t.is_halted
+            ~authorize:(fun dispatched binding ->
+              let%map () = t.authorize dispatched binding in
+              authorize ())
+            ~prepare_output:t.prepare_output
+      in
+      let%map () =
+        match resolved.observation with
+        | None -> Ok ()
+        | Some _ -> t.defer_observation resolved
+      in
+      resolved
+    in
+    Fork_tool_dispatch.create
+      ~input
+      ~borrowed
+      ~source
+      ~parent_call_id
+      ~now:t.now
+      ~prepare
+      ~execute
+      ~for_fork
+  in
+  let dispatch = native_dispatch_base t ~declared ~input ~capabilities in
+  { dispatch with for_fork = Some for_fork }
 ;;
