@@ -1,0 +1,17 @@
+(* ChatML has integer ordering but no String.compare. Construct an ordered
+   alphabet of bytes that occur in UTF-8, then compare strings lexicographically.
+   Continuations and leading bytes are sliced from valid Unicode literals. *)
+let ascii = match Json.parse("\"\\u0000\\u0001\\u0002\\u0003\\u0004\\u0005\\u0006\\u0007\\b\\t\\n\\u000b\\f\\r\\u000e\\u000f\\u0010\\u0011\\u0012\\u0013\\u0014\\u0015\\u0016\\u0017\\u0018\\u0019\\u001a\\u001b\\u001c\\u001d\\u001e\\u001f !\\\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\\\]^_`abcdefghijklmnopqrstuvwxyz{|}~\"") with | `String(text) -> text | _ -> fail("alphabet")
+let continuations = Array.fold(["", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", " ", "¡", "¢", "£", "¤", "¥", "¦", "§", "¨", "©", "ª", "«", "¬", "­", "®", "¯", "°", "±", "²", "³", "´", "µ", "¶", "·", "¸", "¹", "º", "»", "¼", "½", "¾", "¿"], "", fun acc text -> acc ++ String.slice(text, 1, 1))
+let leaders = Array.fold(["", "À", "Ā", "ŀ", "ƀ", "ǀ", "Ȁ", "ɀ", "ʀ", "ˀ", "̀", "̀", "΀", "π", "Ѐ", "р", "Ҁ", "Ӏ", "Ԁ", "Հ", "ր", "׀", "؀", "ـ", "ڀ", "ۀ", "܀", "݀", "ހ", "߀", "ࠀ", "က", " ", "　", "䀀", "倀", "怀", "瀀", "耀", "退", "ꀀ", "뀀", "쀀", "퀀", "", "", "𐀀", "񀀀", "򀀀", "󀀀", "􀀀"], "", fun acc text -> acc ++ String.slice(text, 0, 1))
+let alphabet = ascii ++ continuations ++ leaders
+let rank text index = match String.find(alphabet, String.slice(text, index, 1)) with
+  | `Some(value) -> value
+  | `None -> fail("invalid UTF-8 byte")
+let rec less_at left right index =
+  if index == String.length(left) then index < String.length(right)
+  else if index == String.length(right) then false
+  else let a = rank(left, index) in
+       let b = rank(right, index) in
+       if a == b then less_at(left, right, index + 1) else a < b
+let less left right = less_at(left, right, 0)

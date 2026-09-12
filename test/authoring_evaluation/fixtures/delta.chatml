@@ -1,0 +1,26 @@
+let names : json -> string -> string array = fun input key -> match Json.get_field(input, key) with
+  | `Some(`Array(values)) -> Array.map(values, fun value -> match value with
+      | `String(name) -> name
+      | _ -> fail("expected string"))
+  | _ -> fail("expected array")
+
+let insert sorted name =
+  let before = Array.filter(sorted, fun value -> less(value, name)) in
+  let after = Array.filter(sorted, fun value -> less(name, value)) in
+  Array.append(Array.append(before, [name]), after)
+
+let unique values = Array.fold(values, [], fun acc name -> insert(acc, name))
+
+let difference left right = Array.filter(left, fun name ->
+  Array.exists(right, fun other -> name == other) == false)
+
+let json_names : string array -> json = fun values ->
+  `Array(Array.map(values, fun name -> `String(name)))
+
+let run ctx input =
+  let before = unique(names(input, "before")) in
+  let after = unique(names(input, "after")) in
+  Task.pure(`Complete(`Object([
+    { key = "added"; value = json_names(difference(after, before)) },
+    { key = "removed"; value = json_names(difference(before, after)) }
+  ])))

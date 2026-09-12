@@ -82,11 +82,37 @@ comparisons. These fixtures do not solve or score the held-out task suite.
 
 ## Required work remaining
 
-Add task-specific execution oracles and separately stored deterministic provider
-transcripts for all five families, including background lifecycle and generated
-children through public authorized runtime paths. Add the reproducible optional
+`Execution_cases` now implements the one-off ledger and standalone delta task
+oracles. They create an actual embedded session, serialize fake-provider tool
+calls, and inspect outcomes returned through the public session protocol. The
+candidate source runs through ordinary admission, invocation dispatch, and file/
+schema enforcement. No new tool implementation is accepted from candidate ChatMD:
+the harness fixes the root definition and allowed file roots itself. Every host
+uses a temporary workspace and closes before its directory is removed.
+
+The ledger cases cover duplicate accounts, cancellation of zero balances, order
+independence, empty input, missing/malformed files and root escape. The standalone
+cases cover sorted set differences, duplicates, empty inputs, Unicode/prefix
+ordering and input rejection. Mutations that return a plausible wrong value,
+weaken the input schema, contradict the output schema or omit the read binding
+fail the oracle. The standalone task is also run through all three guidance arms
+with the actual validator and execution oracle. These scripted scores are offline
+pipeline qualification, not real-model performance.
+
+Solutions live only in `fixtures/`, outside installed documentation. The runtime
+currently has integer ordering but no `String.compare`; the scripts compose a
+UTF-8 byte comparator from existing string/JSON operations. Standalone array
+results use explicit `json` annotations to retain the full recursive result type.
+The scripts do not add host primitives, shell access, or native dependencies.
+
+Add execution oracles/transcripts for the remaining moderator, background and
+generated-child families, plus the extra repair/capability/compaction tasks.
+Integrate ledger scoring with the invoking host's actual read capability metadata.
+Add the reproducible optional
 provider driver, fixed model settings/seeds/repetitions and deadlines, transcript
-and metric artifacts, and threshold evaluation. Bind that driver to actual runtime
+and metric artifacts, execution-oracle revision identity, and threshold evaluation.
+Adapt host startup/timeout failures into reported infrastructure outcomes while
+preserving cancellation. Bind that driver to actual runtime
 guidance/compaction when comparing production policies. Report safety violations
 independently of compile/runtime rates. An explicitly authorized real-model run is
 optional; none has occurred here. A01.09/T15 remain incomplete until the required
