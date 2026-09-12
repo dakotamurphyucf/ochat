@@ -71,6 +71,23 @@ does not prove that every production is reachable or executable, nor that lexer
 rules, precedence, inference or runtime semantics are completely documented.
 Those remain separate requirements of the full public-feature manifest.
 
+`Coverage.semantic_features` maintains 30 language-rule groups covering lexical
+boundaries, delimiters, inference, scope, evaluation and representation. Each
+names its implementation sources, a reference topic and evidence.
+`semantic_targets` scopes these groups to the four extension surfaces (120
+targets). `semantic_mappings` binds literal reviewed source hashes and topic
+closures, so an implementation or prerequisite change requires documentation
+review. The normal offline gate requires every inventoried rule to have a valid
+mapping and every embedded implementation source to participate in the inventory.
+The docs checker also requires each named example to run and appear in the
+mapped topic's prerequisite closure. File references identify separate behavior
+suites; their existence does not mean the docs checker ran those suites.
+
+This is a maintained taxonomy with coarse source drift detection. It cannot
+automatically discover a newly introduced semantic feature. Reviewing changes
+must include deciding whether to add or split rules. Full ChatMD and native-tool
+contract accounting remains separate from this language inventory.
+
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
 and delegated moderator surfaces. The normal offline tests compare these literal
@@ -85,13 +102,15 @@ globals plus ordinary moderator `print`; `json_alias_mappings` covers the common
 recursive type. `moderator_data_mappings` adds Item, Context and Tool_call plus
 their five data aliases on the two moderator surfaces.
 `host_effect_mappings` adds Log, Turn and each surface's exact Tool exports.
-`Coverage.reviewed_mappings` combines these 493 exact targets
-across the four surfaces. Other compiler
-APIs remain explicitly unmapped. To update a pin, review the changed contract or
+Runtime control, background work and invocation-context mappings complete
+`Coverage.reviewed_mappings`: all 609 compiler-binding targets across the four
+extension surfaces. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
 build would defeat this check. Authoring-context service construction also audits
 this maintained subset against the installed compiler and corpus; incompatible
-reviewed guidance fails before queries are served. Packages remain labelled
+reviewed guidance fails before queries are served. Service construction now
+requires complete mappings for all three maintained inventories: bindings,
+grammar productions and the language semantic taxonomy. Packages remain labelled
 incomplete while the other required feature mappings are missing.
 
 After reviewing a module's implementation, writing its full reference, and running
@@ -109,7 +128,11 @@ export inventory on every surface, so a new export cannot silently remain outsid
 that module's documentation check.
 
 Use `--globals TOPIC_ID` or `--alias NAME TOPIC_ID` to inspect those candidate
-families. Optional trailing surface IDs select a narrower exact set; for example:
+families. `--semantics` prints the maintained language rules, source hashes and
+candidate topic contracts. `--changed-docs` lists changed topic closures only
+after verifying that reviewed binding, grammar and semantic implementation contracts still match;
+it never updates pins. Optional trailing surface IDs select a narrower exact set;
+for example:
 
 ```sh
 opam exec -- dune exec test/authoring_sources/review_coverage.exe -- Item chatml.moderator-data moderator_v1 delegated_moderator_v1
@@ -122,9 +145,16 @@ a reviewed mapping. That test covers core modules, globals and the shared `json`
 alias; it does not claim coverage of all syntax constructs or runtime extensions.
 The moderator data test requires every export of those three modules and the
 five documented aliases, and checks that both the APIs and topic are unavailable
-on one-off/standalone targets. Other runtime families still need audited coverage.
+on one-off/standalone targets. The complete binding inventory adds checks for
+the other runtime families; broader semantic qualification remains separate.
 
 ## Initial topic corpus
+
+The flat `chatml.inference` and `chatml.evaluation` references explain annotation
+arity, structural types, generalization, lexical boundaries and execution order.
+They are included in every prepared authoring task and directly linked from the
+language orientation. Checked examples include expected diagnostics and eager
+runtime failures, including the documented generic-equality limitation.
 
 The flat `chatml.task-effects` topic explains sequencing, repeated interpretation,
 nested tasks, task versus pure failures and local/external rollback boundaries.
@@ -250,9 +280,9 @@ materialization services. Public enablement awaits complete qualification.
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
-coverage, 54 language examples (including expected errors), three additional
+coverage, language examples (including expected errors), additional
 moderator surface executions, and exact source/entrypoint checks for the
-five runtime integration fixtures. The invocation and background moderator fixtures
+runtime integration fixtures. The invocation and background moderator fixtures
 also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be
 accompanied by semantic review and the relevant checks, rather than automatically

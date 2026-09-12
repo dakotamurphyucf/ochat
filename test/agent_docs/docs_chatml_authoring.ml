@@ -9,6 +9,7 @@ let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
 let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let language_fixture = "docs-src/guide/chatml-authoring-language.md"
 let inference_fixture = "docs-src/guide/chatml-inference.md"
+let evaluation_fixture = "docs-src/guide/chatml-evaluation.md"
 let task_fixture = "docs-src/guide/chatml-task-effects.md"
 let primer_fixture = "docs-src/guide/chatml-authoring-primer.md"
 let strings_fixture = "docs-src/guide/chatml-strings.md"
@@ -356,6 +357,7 @@ let run env root =
       ; background_fixture
       ; language_fixture
       ; inference_fixture
+      ; evaluation_fixture
       ; task_fixture
       ; primer_fixture
       ; strings_fixture
@@ -383,6 +385,38 @@ let run env root =
    | None -> ()
    | Some id -> fail id "duplicate ID across authoring guides");
   List.iter examples ~f:(check_exn env root);
+  (* Named example evidence must actually run above and belong to the mapped
+     topic's prerequisite closure. Test-file references are source links only;
+     those suites run separately, and reading them does not claim execution. *)
+  List.iter Authoring_corpus.Coverage.semantic_features ~f:(fun feature ->
+    let closure =
+      Authoring_corpus.assemble
+        corpus
+        ~surface_id:"one_off_v1"
+        ~roots:[ feature.topic_id ]
+      |> Result.ok_or_failwith
+      |> List.concat_map ~f:(fun topic -> topic.Authoring_corpus.fragments)
+      |> List.concat_map ~f:(fun fragment -> String.split_lines fragment.text)
+      |> List.filter_map ~f:(fun line ->
+        match String.is_prefix line ~prefix:marker with
+        | false -> None
+        | true ->
+          let id, _, _, _ = metadata_exn line in
+          Some id)
+    in
+    List.iter feature.evidence ~f:(fun reference ->
+      match String.is_prefix reference ~prefix:"test/" with
+      | true ->
+        let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / reference) in
+        if String.is_empty text then fail feature.id ("empty evidence: " ^ reference)
+      | false ->
+        (match
+           List.mem closure reference ~equal:String.equal
+           && List.exists examples ~f:(fun example -> String.equal example.id reference)
+         with
+         | true -> ()
+         | false ->
+           fail feature.id ("evidence is not a checked example in its topic: " ^ reference))));
   let integration_count =
     List.count examples ~f:(fun example ->
       match example.expectation with

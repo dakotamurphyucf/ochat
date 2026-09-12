@@ -27,6 +27,16 @@ type grammar_production = private
     are excluded. This does not inventory lexer rules or inference semantics. *)
 val grammar : t -> grammar_production list
 
+type implementation_source = private
+  { path : string
+  ; sha256 : string
+  }
+
+(** Build-time hashes of the language implementation sources used for semantic
+    review. Source bodies are not embedded or opened at runtime. A hash is a
+    drift detector, not proof of complete behavioral coverage. *)
+val implementation_sources : t -> implementation_source list
+
 (** Materialize the embedded documents and compiler-owned signature inventory.
     Fails on invalid or ambiguous source identities rather than omitting material.
     No compiler builtin implementation is invoked. *)
@@ -35,7 +45,8 @@ val installed : unit -> (t, string) result
 val format_version : int
 
 (** Digest of the format version, sorted document paths/content hashes and all
-    separate signature inventories and parser production contracts. It changes
+    separate signature inventories, parser production contracts and language
+    implementation source hashes. It changes
     when those sources change; it is
     not the runtime build identity, an execution grant or a completeness claim. *)
 val identity : t -> string
@@ -56,7 +67,7 @@ val signatures
   -> (Chatml.Chatml_surface_inventory.t, string) result
 
 (** Structural source manifest: format, bundle identity, document hashes/byte
-    lengths, grammar production contracts and separate surface hashes. Excludes
+    lengths, grammar production contracts, implementation hashes and separate surface hashes. Excludes
     document bodies and does not
     mark unaudited topics or packages complete. *)
 val manifest : t -> Jsonaf.t

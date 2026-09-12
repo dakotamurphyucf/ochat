@@ -96,15 +96,26 @@ let create
   let%bind corpus =
     Corpus.extend_authored ?max_bytes:authored_max_bytes corpus authored_packages
   in
-  let%bind targets =
-    Corpus.Coverage.compiler_targets
-      ~sources
-      ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
-  in
-  (* Validate the maintained subset without claiming that all features have
-     semantic coverage. The query still labels its packages incomplete. *)
-  let%bind _ =
-    Corpus.Coverage.audit corpus ~targets ~mappings:Corpus.Coverage.reviewed_mappings
+  (* Require the maintained inventories to match the installed implementation
+     before serving guidance. They do not automatically discover every public
+     feature; packages remain incomplete until the full authoring audit. *)
+  let%bind () =
+    let module Coverage = Corpus.Coverage in
+    List.map
+      [ Coverage.compiler_targets, Coverage.reviewed_mappings
+      ; Coverage.grammar_targets, Coverage.grammar_mappings
+      ; Coverage.semantic_targets, Coverage.semantic_mappings
+      ]
+      ~f:(fun (inventory, mappings) ->
+        let%bind targets =
+          inventory
+            ~sources
+            ~surface_ids:
+              [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+        in
+        let%bind report = Coverage.audit corpus ~targets ~mappings in
+        Coverage.require_complete report)
+    |> Result.all_unit
   in
   let fingerprint = query_fingerprint corpus ~default_tokens ~max_tokens in
   Ok { corpus; sources; secret; default_tokens; max_tokens; fingerprint }
@@ -290,7 +301,11 @@ let roots task request =
     in
     Ok
       (List.dedup_and_sort
-         (("chatml.inference" :: "chatml.programs" :: "chatml.task-effects" :: base)
+         (("chatml.evaluation"
+           :: "chatml.inference"
+           :: "chatml.programs"
+           :: "chatml.task-effects"
+           :: base)
           @ extra)
          ~compare:String.compare)
   | _ -> Error "operation has no topic roots"
@@ -334,7 +349,11 @@ let orientation corpus ~host ~capabilities ~surface_id =
         "Writing ChatML: OCaml familiarity helps, but call syntax, containers, \
          inference, operators and task execution differ."
         Metadata.One_off_script
-        [ "chatml.programs"; "chatml.inference"; "chatml.task-effects" ]
+        [ "chatml.programs"
+        ; "chatml.inference"
+        ; "chatml.evaluation"
+        ; "chatml.task-effects"
+        ]
     ; guide
         "One-off scripts"
         "Combine selected tools with filtering, transformation and branching in one \

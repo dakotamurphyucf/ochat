@@ -182,6 +182,27 @@ module Coverage : sig
       proof of lexical, precedence, inference or runtime semantic coverage. *)
   val grammar_mappings : mapping list
 
+  type semantic_feature = private
+    { id : string
+    ; description : string
+    ; implementation_paths : string list
+    ; topic_id : string
+    ; evidence : string list
+    }
+  [@@deriving sexp]
+
+  (** Reviewed lexical, inference, evaluation and codec taxonomy. Source hashes
+      detect implementation drift but do not automatically discover new behavior.
+      This inventory is separate from grammar, bindings and host/native features. *)
+  val semantic_features : semantic_feature list
+
+  val semantic_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  val semantic_mappings : mapping list
+
   (** Digest the complete prerequisite-first topic closure for this surface.
       Every topic must be audited; a prerequisite change invalidates the pin
       even if the root topic's excerpts remain unchanged. *)

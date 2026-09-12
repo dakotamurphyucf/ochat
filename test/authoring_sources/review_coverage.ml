@@ -10,6 +10,7 @@ type selection =
 type request =
   | Missing
   | Grammar
+  | Semantics
   | Changed_docs
   | Candidates of selection * string
 
@@ -18,6 +19,7 @@ let () =
     match Array.to_list (Sys.get_argv ()) with
     | _ :: "--missing" :: surfaces -> Missing, surfaces
     | _ :: "--grammar" :: surfaces -> Grammar, surfaces
+    | _ :: "--semantics" :: surfaces -> Semantics, surfaces
     | _ :: "--changed-docs" :: surfaces -> Changed_docs, surfaces
     | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
     | _ :: "--alias" :: name :: topic :: surfaces ->
@@ -26,7 +28,7 @@ let () =
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...] | (--missing | --grammar | --changed-docs) [SURFACE ...]"
+         ...] | (--missing | --grammar | --semantics | --changed-docs) [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -95,16 +97,72 @@ let () =
                    ; "contract_sha256", `String target.contract_sha256
                    ])) )
         ]
+    | Semantics ->
+      let module C = Authoring_corpus.Coverage in
+      let targets =
+        C.semantic_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith
+      in
+      `Object
+        [ "review_required", `True
+        ; "scope", `String "maintained language taxonomy; not automatic feature discovery"
+        ; ( "implementation_sources"
+          , `Array
+              (List.map
+                 (Authoring_sources.implementation_sources sources)
+                 ~f:(fun source ->
+                   `Object
+                     [ "path", `String source.path; "sha256", `String source.sha256 ])) )
+        ; ( "features"
+          , `Array
+              (List.map C.semantic_features ~f:(fun feature ->
+                 `Object
+                   [ "id", `String feature.id
+                   ; "description", `String feature.description
+                   ; "topic", `String feature.topic_id
+                   ; ( "implementation_paths"
+                     , `Array
+                         (List.map feature.implementation_paths ~f:(fun path ->
+                            `String path)) )
+                   ; ( "evidence"
+                     , `Array
+                         (List.map feature.evidence ~f:(fun reference ->
+                            `String reference)) )
+                   ])) )
+        ; ( "targets"
+          , `Array
+              (List.map targets ~f:(fun target ->
+                 `Object
+                   [ "id", `String target.id
+                   ; "contract_sha256", `String target.contract_sha256
+                   ])) )
+        ; ( "topic_contracts"
+          , `Array
+              (List.concat_map surfaces ~f:(fun surface ->
+                 C.semantic_features
+                 |> List.map ~f:(fun feature -> feature.topic_id)
+                 |> List.dedup_and_sort ~compare:String.compare
+                 |> List.map ~f:(fun topic ->
+                   let sha256 =
+                     C.topic_contract corpus ~surface_id:surface ~topic_id:topic
+                     |> Result.ok_or_failwith
+                   in
+                   `Object
+                     [ "surface", `String surface
+                     ; "topic", `String topic
+                     ; "sha256", `String sha256
+                     ]))) )
+        ]
     | Changed_docs ->
       let module C = Authoring_corpus.Coverage in
       let targets =
         (C.compiler_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         @ (C.grammar_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
+        @ (C.semantic_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
         |> List.map ~f:(fun target -> target.C.id, target)
         |> String.Map.of_alist_exn
       in
       let changes =
-        C.reviewed_mappings @ C.grammar_mappings
+        C.reviewed_mappings @ C.grammar_mappings @ C.semantic_mappings
         |> List.filter_map ~f:(fun mapping ->
           match Map.find targets mapping.C.target_id with
           | None ->

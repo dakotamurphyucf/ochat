@@ -515,6 +515,45 @@ module Coverage = struct
     }
   [@@deriving sexp]
 
+  type semantic_feature =
+    { id : string
+    ; description : string
+    ; implementation_paths : string list
+    ; topic_id : string
+    ; evidence : string list
+    }
+  [@@deriving sexp]
+
+  let semantic_features =
+    List.map
+      Semantic_coverage_data.features
+      ~f:(fun (id, description, implementation_paths, topic_id, evidence) ->
+        { id
+        ; description
+        ; implementation_paths
+        ; topic_id
+        ; evidence = List.dedup_and_sort evidence ~compare:String.compare
+        })
+  ;;
+
+  let semantic_contract ~surface_id ~implementation_sources feature =
+    let open Result.Let_syntax in
+    let%map implementations =
+      List.map feature.implementation_paths ~f:(fun path ->
+        List.Assoc.find implementation_sources path ~equal:String.equal
+        |> Result.of_option ~error:("missing semantic implementation source: " ^ path)
+        |> Result.map ~f:(fun sha256 -> path, sha256))
+      |> Result.all
+    in
+    [%sexp
+      ("ochat.language-semantics.v1" : string)
+    , (surface_id : string)
+    , (feature : semantic_feature)
+    , (implementations : (string * string) list)]
+    |> Sexp.to_string_mach
+    |> digest
+  ;;
+
   let compiler_targets ~sources ~surface_ids =
     let open Result.Let_syntax in
     let%bind () =
@@ -549,6 +588,48 @@ module Coverage = struct
           item.name
           (Chatml.Chatml_builtin_spec.sexp_of_ty item.scheme |> Sexp.to_string_mach)))
     |> List.sort ~compare:(fun a b -> String.compare a.id b.id)
+  ;;
+
+  let semantic_targets ~sources ~surface_ids =
+    let open Result.Let_syntax in
+    let%bind _ = compiler_targets ~sources ~surface_ids in
+    let implementation_sources =
+      Authoring_sources.implementation_sources sources
+      |> List.map ~f:(fun source -> source.Authoring_sources.path, source.sha256)
+    in
+    List.concat_map surface_ids ~f:(fun surface_id ->
+      List.map semantic_features ~f:(fun feature ->
+        let%map contract_sha256 =
+          semantic_contract ~surface_id ~implementation_sources feature
+        in
+        { id = surface_id ^ "/semantics/" ^ feature.id; surface_id; contract_sha256 }))
+    |> Result.all
+  ;;
+
+  let semantic_mappings =
+    List.concat_map
+      [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+      ~f:(fun surface_id ->
+        List.map semantic_features ~f:(fun feature ->
+          let contract_sha256 =
+            semantic_contract
+              ~surface_id
+              ~implementation_sources:Semantic_coverage_data.implementation_sources
+              feature
+            |> Result.ok_or_failwith
+          in
+          let _, _, topic_closure_sha256 =
+            List.find_exn
+              Semantic_coverage_data.topic_contracts
+              ~f:(fun (surface, topic, _) ->
+                String.equal surface surface_id && String.equal topic feature.topic_id)
+          in
+          { target_id = surface_id ^ "/semantics/" ^ feature.id
+          ; contract_sha256
+          ; topic_id = feature.topic_id
+          ; topic_closure_sha256
+          ; evidence = feature.evidence
+          }))
   ;;
 
   let grammar_targets ~sources ~surface_ids =
@@ -607,7 +688,7 @@ module Coverage = struct
     |> digest
   ;;
 
-  let audit corpus ~targets ~mappings =
+  let audit corpus ~(targets : target list) ~(mappings : mapping list) =
     let open Result.Let_syntax in
     let%bind () =
       match targets with
@@ -2547,6 +2628,28 @@ let language_foundation ~sources =
             ; evidence =
                 [ "lib/chatml/chatml_typechecker.ml"
                 ; "test/chatml_typechecker_test.ml"
+                ; "test/agent_docs/docs_chatml_authoring.ml"
+                ]
+            }
+      }
+    ; { id = "chatml.evaluation"
+      ; title = "Lexical boundaries, evaluation order and failures"
+      ; prerequisites = [ "chatml.inference" ]
+      ; surfaces = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+      ; excerpts =
+          [ { path = "guide/chatml-evaluation.md"
+            ; heading = "# Source text and evaluation order"
+            ; include_children = true
+            }
+          ]
+      ; review =
+          Audited
+            { excerpt_sha256 =
+                [ "8baf6476f567e770f5c8298d433a44c9e081a930da4d849c03c6b255c0218ac7" ]
+            ; evidence =
+                [ "lib/chatml/chatml_lexer.mll"
+                ; "lib/chatml/chatml_parser.mly"
+                ; "lib/chatml/chatml_eval.ml"
                 ; "test/agent_docs/docs_chatml_authoring.ml"
                 ]
             }

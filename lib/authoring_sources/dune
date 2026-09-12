@@ -8,6 +8,24 @@
  (modules embed_grammar)
  (libraries core menhirSdk digestif))
 
+(executable
+ (name embed_contracts)
+ (modules embed_contracts)
+ (libraries core digestif))
+
+(rule
+ (targets bundled_implementation.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_contracts.exe}
+    lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
+    lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
+    lib/chatml/chatml_typechecker.ml %{dep:../chatml/chatml_typechecker.ml}
+    lib/chatml/chatml_resolver.ml %{dep:../chatml/chatml_resolver.ml}
+    lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
+    lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}
+    lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}))))
+
 (rule
  (targets bundled_grammar.ml)
  (action
@@ -22,6 +40,7 @@
     guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
     guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
     guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
+    guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
     guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
     guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}
@@ -48,15 +67,15 @@
 (library
  (name authoring_sources)
  (public_name ochat.authoring_sources)
- (modules authoring_sources bundled_documents bundled_grammar)
- (private_modules bundled_documents bundled_grammar)
+ (modules authoring_sources bundled_documents bundled_grammar bundled_implementation)
+ (private_modules bundled_documents bundled_grammar bundled_implementation)
  (libraries core jsonaf ochat.chatml ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))
 
 (library
  (name authoring_corpus)
  (public_name ochat.authoring_corpus)
- (modules authoring_corpus grammar_coverage_data)
- (private_modules grammar_coverage_data)
+ (modules authoring_corpus grammar_coverage_data semantic_coverage_data)
+ (private_modules grammar_coverage_data semantic_coverage_data)
  (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))

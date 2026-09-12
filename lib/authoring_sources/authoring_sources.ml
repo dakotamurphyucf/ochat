@@ -12,20 +12,27 @@ type grammar_production =
   ; contract_sha256 : string
   }
 
+type implementation_source =
+  { path : string
+  ; sha256 : string
+  }
+
 type t =
   { identity : string
   ; documents : document String.Map.t
   ; surfaces : Inventory.t String.Map.t
   ; surface_hashes : string String.Map.t
   ; grammar : grammar_production list
+  ; implementation_sources : implementation_source list
   }
 
-let format_version = 2
+let format_version = 3
 let digest = Chatmd_shell_spec.Source_ref.digest
 let identity t = t.identity
 let documents t = Map.data t.documents
 let surface_ids t = Map.keys t.surfaces
 let grammar t = t.grammar
+let implementation_sources t = t.implementation_sources
 
 let document t ~path =
   match Map.find t.documents path with
@@ -81,6 +88,9 @@ let installed () =
     List.map Bundled_grammar.productions ~f:(fun (id, contract_sha256) ->
       { id; contract_sha256 })
   in
+  let implementation_sources =
+    List.map Bundled_implementation.sources ~f:(fun (path, sha256) -> { path; sha256 })
+  in
   let identity =
     [%sexp
       (format_version : int)
@@ -88,17 +98,22 @@ let installed () =
        : (string * string) list)
     , (Map.to_alist surface_hashes : (string * string) list)
     , (List.map grammar ~f:(fun production -> production.id, production.contract_sha256)
-       : (string * string) list)]
+       : (string * string) list)
+    , (Bundled_implementation.sources : (string * string) list)]
     |> Sexp.to_string_mach
     |> digest
   in
-  Ok { identity; documents; surfaces; surface_hashes; grammar }
+  Ok { identity; documents; surfaces; surface_hashes; grammar; implementation_sources }
 ;;
 
 let manifest t =
   `Object
     [ "format_version", `Number (Int.to_string format_version)
     ; "identity", `String t.identity
+    ; ( "implementation_sources"
+      , `Array
+          (List.map t.implementation_sources ~f:(fun source ->
+             `Object [ "path", `String source.path; "sha256", `String source.sha256 ])) )
     ; ( "grammar"
       , `Array
           (List.map t.grammar ~f:(fun production ->
