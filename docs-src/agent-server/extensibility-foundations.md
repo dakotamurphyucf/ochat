@@ -4724,8 +4724,8 @@ reconstruction uses the same preparation path and selects authored or generated
 restoration from the private ledger origin. It verifies authored artifacts and
 private resource pins without restarting an ancestor's conversation or moderator.
 
-Public availability remains gated. Concurrent creation/retry, pending-response and
-broader lifecycle/bridge qualification remain unfinished.
+Public availability remains gated. Broader lifecycle/bridge qualification and
+authoring guidance remain unfinished.
 Partial-creation reconciliation selects the authored artifact and private bindings.
 The offline crash matrix now interrupts actual native authored calls at reservation,
 partial artifact write, artifact admission, partial child snapshot, child admission,
@@ -4742,6 +4742,18 @@ persistence failure without submitting child work. A fully admitted persistent c
 can remain available, while a one-off cannot retain loaded execution resources after
 the failed invocation. Both cases preserve the failure and creation identity across
 two restarts. These tests do not yet qualify concurrent retries of the same call.
+The pending-response daemon fixture issues two native specialist calls in the same
+turn and verifies that both children start before either call completes. Each
+call returns its own durable session ID, receipt and pending output page at the
+normal response deadline. Duplicate provider completion events do not duplicate
+invocations or children. Two simultaneous continuations on one instance retain
+distinct deferred receipts and coalesce into the same child operation.
+Generic session tools can send, inspect, wait, read and stop those same instances;
+the fixture also uses them through `run_chatml`. Replaying a send key does not add
+a submission. Cancelling a named caller after submission leaves its persistent
+child's accepted work unchanged. After releasing the simulated providers, all
+receipts complete with output from the correct child and remain readable across
+stop and daemon restart. Replaying the stop preserves stored history.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. The daemon
 fixture now exercises actual named-tool creation, continuation, separate instances,
