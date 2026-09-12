@@ -44,7 +44,7 @@ let function_call name arguments =
 
 let%expect_test
     "managed send uses actual caller, retains admission across restart, and never \
-     resumes stopped children"
+     resumes stopped children through the stdio gateway"
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -168,7 +168,13 @@ let%expect_test
                      including durable I/O under a parallel full build. Individual
                      agent_wait deadlines and cancellation assertions stay below. *)
                   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 90. (fun () ->
-                    let client = connection daemon (principal ()) in
+                    let client =
+                      Agent_server_wire_fixture.connect_stdio
+                        ~sw
+                        ~env
+                        ~daemon
+                        ~socket_path:(Filename.concat root "managed.sock")
+                    in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)
                       ~f:(fun () ->

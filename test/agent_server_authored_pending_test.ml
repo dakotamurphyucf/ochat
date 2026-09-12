@@ -164,7 +164,12 @@ let%expect_test
                 try
                   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
                     let connect =
-                      Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root
+                      Agent_server_wire_fixture.http_connector
+                        ~sw
+                        ~env
+                        ~daemon
+                        ~root
+                        ~principal:(principal ())
                     in
                     let client = ref (connect ()) in
                     let disconnect () = Agent_client.Connection.close !client in

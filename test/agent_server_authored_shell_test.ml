@@ -67,7 +67,9 @@ let with_daemon env root configuration principal provider f =
       ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
       ~f:(fun () ->
         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-          let client = connection daemon principal in
+          let client =
+            Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal ()
+          in
           Exn.protect
             ~finally:(fun () -> Agent_client.Connection.close client)
             ~f:(fun () ->
@@ -112,7 +114,7 @@ let function_call serial name arguments =
 ;;
 
 let%expect_test
-    "authored shell approval belongs to the child and cannot borrow a parent's responder"
+    "authored shell approval over HTTP belongs to the child and respects client scopes"
   =
   with_sources (fun env root ->
     let profile = { permission_profile with tool_default = Ask } in
@@ -257,12 +259,69 @@ let%expect_test
              P.Id.Invocation.equal invocation.context.id id))
        | _ -> failwith "authored approval lost invocation ownership");
       [%test_eq: int] 1 (List.length (state parent_entry).permissions);
+      let reader_principal =
+        principal_with_scopes
+          (P.Id.Principal.to_string principal.id)
+          (P.Scope.Set.of_list [ View_session_transcript; View_security_state ])
+      in
+      let connect_reader =
+        Agent_server_wire_fixture.http_connector
+          ~sw
+          ~env
+          ~daemon
+          ~root
+          ~principal:reader_principal
+      in
+      let reader_client = connect_reader () in
+      initialize reader_client;
+      let reader =
+        H.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection:reader_client
+          ~session_id:child_id
+          ~mode:Read_only
+          ~subscribe:true
+          ()
+        |> protocol_ok
+      in
+      let before_denials = state child in
+      let reader_projection = H.projection reader in
+      let snapshot = reader_projection |> Agent_client.Projection.snapshot in
+      assert (P.Id.Session.equal snapshot.session.id child_id);
+      assert (
+        List.exists snapshot.permissions ~f:(fun observed ->
+          P.Id.Permission.equal observed.P.Permission.id permission.id));
+      let denied = function
+        | Error { P.Error.code = Permission_denied; _ } -> ()
+        | _ -> failwith "read-only HTTP client acquired mutation authority"
+      in
+      H.send_message
+        reader
+        { kind = Plain_text; text = "Must not be submitted."; attachments = [] }
+      |> denied;
+      H.cancel_operation reader (Option.value_exn before_denials.active_operation).id
+      |> denied;
+      approve reader permission Approve_once |> denied;
+      [%test_eq: Sexp.t]
+        (Agent_session.Session_state.sexp_of_t before_denials)
+        (Agent_session.Session_state.sexp_of_t (state child));
+      H.close reader;
+      Agent_client.Connection.close reader_client;
       let limited =
         principal_with_scopes
           (P.Id.Principal.to_string principal.id)
           (Set.remove scopes Answer_approvals)
       in
-      let limited_client = connection daemon limited in
+      let limited_client =
+        Agent_server_wire_fixture.http_connector
+          ~sw
+          ~env
+          ~daemon
+          ~root
+          ~principal:limited
+          ()
+      in
       initialize limited_client;
       let limited_handle = attach limited_client child_id in
       (match approve limited_handle permission Approve_once with
@@ -270,7 +329,27 @@ let%expect_test
        | _ -> failwith "management authority granted shell approval authority");
       H.close limited_handle;
       Agent_client.Connection.close limited_client;
-      approve handle permission Approve_session |> protocol_ok |> ignore;
+      let peer_client =
+        Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal ()
+      in
+      initialize peer_client;
+      let peer = attach peer_client child_id in
+      let first, second =
+        Eio.Fiber.pair
+          (fun () -> approve handle permission Approve_session)
+          (fun () -> approve peer permission Approve_session)
+      in
+      (match first, second with
+       | Ok _, Error { code = Already_resolved; _ }
+       | Error { code = Already_resolved; _ }, Ok _ -> ()
+       | results ->
+         raise_s
+           [%sexp
+             "concurrent HTTP approvals did not resolve once"
+           , (results
+              : (P.Permission.t, P.Error.t) result * (P.Permission.t, P.Error.t) result)]);
+      H.close peer;
+      Agent_client.Connection.close peer_client;
       let completed = idle child in
       ignore (idle parent_entry : Agent_session.Session_state.t);
       let outcome =
@@ -283,6 +362,53 @@ let%expect_test
        | status -> raise_s [%sexp "authored shell failed", (status : P.Invocation.status)]);
       [%test_eq: int] 1 (List.length completed.shell.approval_grants);
       assert (List.is_empty (state parent_entry).shell.approval_grants);
+      let resumed_client = connect_reader () in
+      let replay_seen = ref false in
+      let resumed_client =
+        Agent_client.Transport.create
+          ~request:(fun command ->
+            let result = Agent_client.Connection.request resumed_client command in
+            (match command, result with
+             | ( Session_attach { after_sequence = Some _; _ }
+               , Ok (Session_attach { replay = Events events; _ }) ) ->
+               assert (not (List.is_empty events));
+               replay_seen := true
+             | Session_attach _, _ ->
+               failwith "HTTP reconnect did not return event replay"
+             | _ -> ());
+            result)
+          ~next_notification:(fun () ->
+            Agent_client.Connection.next_notification resumed_client)
+          ~close:(fun () -> Agent_client.Connection.close resumed_client)
+        |> Agent_client.Connection.create
+      in
+      initialize resumed_client;
+      let resumed_reader =
+        H.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection:resumed_client
+          ~session_id:child_id
+          ~mode:Read_only
+          ~subscribe:true
+          ~after_sequence:snapshot.latest_event_sequence
+          ~previous_projection:reader_projection
+          ()
+        |> protocol_ok
+      in
+      assert !replay_seen;
+      let replayed = H.projection resumed_reader |> Agent_client.Projection.snapshot in
+      assert (Int64.(replayed.latest_event_sequence > snapshot.latest_event_sequence));
+      let resolved =
+        List.find_exn replayed.permissions ~f:(fun observed ->
+          P.Id.Permission.equal observed.P.Permission.id permission.id)
+      in
+      assert (not (P.Permission.equal_state resolved.state Pending));
+      [%test_eq: Sexp.t]
+        ([%sexp_of: P.History.entry list] (state child).conversation.canonical_history)
+        ([%sexp_of: P.History.entry list] replayed.canonical_history.entries);
+      H.close resumed_reader;
+      Agent_client.Connection.close resumed_client;
       send handle;
       let repeated = idle child in
       [%test_eq: int] 1 (List.length repeated.permissions);
@@ -319,9 +445,18 @@ let%expect_test
       H.close parent_handle;
       print_endline
         "child approval/grant; management cannot approve; exact grant reuse; unattended \
-         child denial"));
+         child denial";
+      print_endline
+        "HTTP reader sees pending approval; send/cancel/approve leave child unchanged";
+      print_endline
+        "concurrent HTTP approvals resolve once; reader reconnect replays child \
+         completion"));
   [%expect
-    {| child approval/grant; management cannot approve; exact grant reuse; unattended child denial |}]
+    {|
+    child approval/grant; management cannot approve; exact grant reuse; unattended child denial
+    HTTP reader sees pending approval; send/cancel/approve leave child unchanged
+    concurrent HTTP approvals resolve once; reader reconnect replays child completion
+    |}]
 ;;
 
 let%expect_test "private authored shell manifests need an exact operator grant" =
