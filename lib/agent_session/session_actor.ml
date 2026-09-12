@@ -4282,8 +4282,19 @@ let prepare_authoring_input t operation_id materialization history effective =
       ~known:(Chat_response.Authoring_reference_index.receipts references)
       ~effective
   in
-  match messages with
-  | [] -> Ok []
+  let publication = Chat_response.Authoring_publication.capture materialization in
+  let context_deltas =
+    match
+      Option.equal
+        Chat_response.Authoring_publication.equal_context
+        t.state.conversation.authoring_publication
+        (Some publication)
+    with
+    | true -> []
+    | false -> [ Session_delta.Authoring_publication_changed publication ]
+  in
+  match messages, context_deltas with
+  | [], [] -> Ok []
   | _ ->
     let first =
       Int64.max
@@ -4311,10 +4322,18 @@ let prepare_authoring_input t operation_id materialization history effective =
         t
         ~delta:
           (Session_delta.Batch
-             [ History_block_reserved Int64.(first + of_int count)
-             ; Canonical_entries_appended entries
-             ])
-        ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+             (context_deltas
+              @
+              match entries with
+              | [] -> []
+              | _ ->
+                [ History_block_reserved Int64.(first + of_int count)
+                ; Canonical_entries_appended entries
+                ]))
+        ~payloads:
+          (match entries with
+           | [] -> []
+           | _ -> [ Agent_protocol.Event.Durable.Payload.History_appended entries ])
     in
     returned
 ;;
@@ -4343,20 +4362,30 @@ let publish_invocation_output t operation_id invocation_id entry =
       invocation
       ~output_entry_id:(History_entry.id entry)
   in
-  let protocol_entry = History_codec.to_protocol entry in
+  let raw_entry = History_codec.to_protocol entry in
   let existing =
     List.find t.state.conversation.canonical_history ~f:(fun e ->
-      History_entry.Id.equal e.id protocol_entry.id)
+      History_entry.Id.equal e.id raw_entry.id)
   in
-  let%bind () =
+  let%bind protocol_entry =
     match existing with
-    | Some e
-      when not
-             (Sexp.equal
-                ([%sexp_of: Agent_protocol.History.entry] e)
-                ([%sexp_of: Agent_protocol.History.entry] protocol_entry)) ->
-      Error (error Conflict "output occurrence has a different canonical payload")
-    | _ -> Ok ()
+    | Some entry ->
+      let%bind () =
+        Chat_response.Authoring_publication.validate_output invocation entry
+      in
+      (match
+         Agent_protocol.History.equal_entry
+           entry
+           { raw_entry with provenance = entry.provenance }
+       with
+       | true -> Ok entry
+       | false ->
+         Error (error Conflict "output occurrence has a different canonical payload"))
+    | None ->
+      Chat_response.Authoring_publication.encode
+        ~context:t.state.conversation.authoring_publication
+        invocation
+        raw_entry
   in
   match invocation.status with
   | Published _ -> Ok ()

@@ -28,6 +28,16 @@ let canonical entry =
   | _ -> invalid "invocation history must be canonical and usable as model input"
 ;;
 
+let retained_output invocation entry =
+  let open Result.Let_syntax in
+  let%bind () =
+    match Chat_response.Authoring_publication.validate_output invocation entry with
+    | Ok () -> Ok ()
+    | Error error -> invalid error.message
+  in
+  History_codec.of_protocol entry
+;;
+
 let validate_routing (invocation : P.Invocation.t) item =
   match invocation.routing with
   | None -> Ok ()
@@ -117,7 +127,7 @@ let validate_publication ~history (invocation : P.Invocation.t) =
         let%bind decoded = History_codec.of_protocol entry in
         if P.History.Id.compare entry.id id = 0
         then (
-          let%bind _ = canonical entry in
+          let%bind _ = retained_output invocation entry in
           let%bind () = validate_output invocation decoded in
           match output (History_entry.item decoded) with
           | Some (actual_kind, _, _) when equal_call_kind kind actual_kind -> Ok ()
@@ -145,7 +155,7 @@ let recover_output ~history invocation =
       then (
         match output (History_entry.item decoded) with
         | Some _ ->
-          let%bind _ = canonical entry in
+          let%bind _ = retained_output invocation entry in
           let%map () = validate_output invocation decoded in
           `Existing decoded
         | None -> invalid "cannot recover an output across reuse of its provider call ID")
@@ -182,7 +192,7 @@ let validate_retained ~history (invocation : P.Invocation.t) =
      with
      | None -> Ok ()
      | Some entry ->
-       let%bind decoded = canonical entry in
+       let%bind decoded = retained_output invocation entry in
        let%bind () = validate_output invocation decoded in
        if
          List.exists history ~f:(fun (e : P.History.entry) ->

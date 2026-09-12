@@ -83,7 +83,7 @@ let validate t =
            && valid_hash t.policy_fingerprint
            && valid_hash t.payload_sha256
            && (not (List.is_empty t.topics))
-           && List.length t.topics <= 128
+           && (List.length t.topics <= if t.version = 2 then 1024 else 128)
            && List.for_all t.topics ~f:valid_topic
            && Option.is_none
                 (List.find_a_dup

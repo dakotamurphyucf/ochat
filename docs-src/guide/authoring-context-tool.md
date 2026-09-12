@@ -96,7 +96,7 @@ These fresh query records have no model-input decoder or public constructor.
 Native and helper lookups record them through an expiring invocation scope. The
 actor retains a validated annotation atomically with the final successful outcome
 only when its response digest matches the disclosed value. Failed, cancelled or
-replaced results receive no annotation. Session schema 19 persists these annotations;
+replaced results receive no annotation. Session schema 19 introduced these annotations;
 invocation JSON uses schema 12 when one is present. Nested script reads retain
 their own invocation identity and do not mark the enclosing script's summary as
 read documentation. Retained helper borrows expire when their invocation ends.
@@ -117,9 +117,20 @@ remains readable, and metadata-only pointers never supply topic content. The off
 integration test exercises real query pages through history restore, missing and
 altered pages, changed context/source versions, and conflicting fragment evidence.
 
-An invocation annotation does not prove delivery to a model. Provider-history
-publication still needs to create this provenance from actual published results;
-the coverage algorithm does not automatically promote invocation annotations.
+An invocation annotation alone does not prove delivery to a model. Publication
+now attaches version-2 provenance to the actual model tool-output occurrence when
+the verified lookup matches its owning authoring context. The result and its
+history/index update commit together. Internal script reads remain internal.
+
+Session schema 20 retains a compact authoring policy/context binding established
+before the model request, including for explicitly declared helper-only tools.
+Manual mode adds no documentation prose for this bookkeeping. Crash recovery can
+publish a saved outcome with the same provenance without rebuilding a runtime or
+rerunning tools. Existing output occurrences are validated and reused. Legacy or
+different-context outcomes remain ordinary outputs when no matching binding is
+available; the runtime does not invent author-policy metadata. Annotated outputs
+must match their original receipt, and model call occurrences remain canonical.
+
 The complete post-compaction retrieve-and-author
 flow remains open; pointer and actor tests use offline fixtures and fake providers.
 

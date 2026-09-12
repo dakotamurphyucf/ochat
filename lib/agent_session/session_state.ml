@@ -66,6 +66,8 @@ module Conversation = struct
     ; compaction_generation : int
     ; compaction_archives : Compaction_archive.t list [@sexp.list]
     ; authoring_reference_index : Jsonaf.t option [@sexp.option]
+    ; authoring_publication : Chat_response.Authoring_publication.context option
+          [@sexp.option]
     }
   [@@deriving sexp]
 end
@@ -120,11 +122,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 19
+let current_schema_version = 20
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if Option.is_some t.conversation.authoring_publication
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring publication context requires session schema 20"
+         ~retryable:false
+         ())
+  else if t.schema_version = 19
+  then Ok { t with schema_version = current_schema_version }
   else if
     List.exists t.invocations ~f:(fun invocation ->
       Option.is_some invocation.Agent_protocol.Invocation.authoring_reference)
@@ -336,6 +348,7 @@ let create ~identity ~spec ~initial_history =
       ; compaction_generation = 0
       ; compaction_archives = []
       ; authoring_reference_index = None
+      ; authoring_publication = None
       }
   ; active_operation = None
   ; automatic_turn_budget = None
@@ -741,6 +754,15 @@ let validate t =
     nonnegative "next history sequence" t.conversation.next_history_sequence
   in
   let%bind references = authoring_references t in
+  let%bind () =
+    match t.conversation.authoring_publication with
+    | None -> Ok ()
+    | Some context ->
+      Chat_response.Authoring_publication.validate_context
+        context
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+  in
   let%bind _ =
     Chat_response.Authoring_presence.remember
       ~previous:(Chat_response.Authoring_reference_index.receipts references)

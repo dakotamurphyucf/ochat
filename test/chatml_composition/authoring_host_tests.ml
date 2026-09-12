@@ -219,7 +219,7 @@ let%expect_test
        let custom =
          List.filter_map entries ~f:(fun entry ->
            match entry.Agent_protocol.History.provenance with
-           | Runtime_authoring guidance ->
+           | Runtime_authoring guidance when G.equal_purpose guidance.purpose Preload ->
              List.find guidance.topics ~f:(fun topic ->
                String.equal topic.G.id "custom.reports.rules")
            | _ -> None)

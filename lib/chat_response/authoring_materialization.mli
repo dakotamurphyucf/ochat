@@ -41,6 +41,15 @@ val create
 
 val context_identity : t -> string
 val scope : t -> string
+val policy_fingerprint : t -> string
+
+(** Reconstruct the query's exact materialization identity, checking its owning
+    session/generation first. This supplies no author policy or publication grant. *)
+val reference_identity
+  :  Agent_protocol.Authoring_reference.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> generation:int
+  -> string option
 
 (** Canonical durable-session scope, shared by worker construction and the
     actor's final ownership check. *)

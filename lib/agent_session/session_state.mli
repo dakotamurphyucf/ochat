@@ -74,6 +74,10 @@ module Conversation : sig
       (** Bounded, trusted receipt metadata retained through compaction. No topic
           prose or authority is stored here. Absent in legacy/ordinary sessions;
           cleared on generation replacement. Validated with the owning scope. *)
+    ; authoring_publication : Chat_response.Authoring_publication.context option
+          [@sexp.option]
+      (** Schema20. Last trusted model-input authoring policy/context, retained
+          for publication recovery and cleared on generation replacement. *)
     }
   [@@deriving sexp]
 end

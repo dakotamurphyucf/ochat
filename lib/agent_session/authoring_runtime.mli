@@ -26,7 +26,9 @@ val augment
     before tools can be exposed. [elements] is the original source, before helper
     augmentation, so the policy retains which helpers it added. Manual authoring
     retains a factory for metadata-only rediscovery after earlier reads; it adds
-    no primer or helpers. Ordinary tools need no factory. *)
+    no primer or helpers. Explicit helper-only selections also retain a factory
+    for publication policy metadata, without adding primer prose. Ordinary tools
+    need no factory. *)
 val prepare
   :  ?admitted:Chat_response.Authoring_policy.t
   -> host:Chat_response.Authoring_validation.host

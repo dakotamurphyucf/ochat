@@ -56,7 +56,8 @@ val create
 
 (** Version-2 reference provenance. Every topic has exactly one coverage record;
     indexes are ordered and unique, and per-page [complete] requires every part.
-    At most 4096 parts are recorded. Version-1 primer/preload/reference/pointer
+    At most 1024 topics and 4096 parts are recorded, matching query-receipt bounds.
+    Version-1 primer/preload/reference/pointer
     records remain readable and do not acquire fragment metadata. The host must
     derive this evidence from a verified query receipt and the actual provider
     item; model-supplied labels are not an authority to create provenance. *)

@@ -23,6 +23,7 @@ type t =
 
 let context_identity t = t.context_identity
 let scope t = t.scope
+let policy_fingerprint t = P.fingerprint t.policy
 
 let session_scope ~session_id ~generation =
   [%sexp (session_id : Agent_protocol.Id.Session.t), (generation : int)]
@@ -31,6 +32,37 @@ let session_scope ~session_id ~generation =
 
 let initial t = t.initial
 let digest = Chatmd_shell_spec.Source_ref.digest
+
+let identity ~query ~host ~capabilities ~scope =
+  [%sexp
+    ("ochat.authoring-materialization.v1" : string)
+  , (query : string)
+  , (host : string)
+  , (capabilities : string)
+  , (scope : string)]
+  |> Sexp.to_string
+  |> digest
+;;
+
+let reference_identity
+      (reference : Agent_protocol.Authoring_reference.t)
+      ~session_id
+      ~generation
+  =
+  match
+    String.equal
+      reference.scope
+      (Agent_protocol.Authoring_reference.scope_for ~session_id ~generation)
+  with
+  | false -> None
+  | true ->
+    Some
+      (identity
+         ~query:reference.query_identity
+         ~host:reference.host_identity
+         ~capabilities:reference.capability_fingerprint
+         ~scope:(session_scope ~session_id ~generation))
+;;
 
 let task_surfaces host =
   List.filter_map
@@ -81,14 +113,11 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
     | false -> Error "invalid authoring materialization scope, budget or capabilities"
   in
   let context_identity =
-    [%sexp
-      ("ochat.authoring-materialization.v1" : string)
-    , (Q.fingerprint context : string)
-    , (V.host_fingerprint host : string)
-    , (C.fingerprint capabilities : string)
-    , (scope : string)]
-    |> Sexp.to_string
-    |> digest
+    identity
+      ~query:(Q.fingerprint context)
+      ~host:(V.host_fingerprint host)
+      ~capabilities:(C.fingerprint capabilities)
+      ~scope
   in
   let%bind rediscovery = Authoring_rediscovery.create ~context ~host ~policy in
   match P.inject_primer policy with

@@ -11,6 +11,7 @@ type t =
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
+  | Authoring_publication_changed of Chat_response.Authoring_publication.context
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
@@ -166,6 +167,17 @@ let rec apply state = function
         { quota_key with Quota_key.conflict_domain = workspace_instance.conflict_domain })
     in
     Ok { state with spec = { state.spec with workspace_instance; quota_key } }
+  | Authoring_publication_changed context ->
+    let open Result.Let_syntax in
+    let%map () =
+      Chat_response.Authoring_publication.validate_context
+        context
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+    in
+    { state with
+      conversation = { state.conversation with authoring_publication = Some context }
+    }
   | Canonical_entries_appended entries ->
     let open Result.Let_syntax in
     let%map authoring_reference_index = remember_authoring state [ entries ] in
@@ -869,6 +881,10 @@ let rec apply state = function
         { state with
           identity = { state.identity with generation }
         ; pending_initial_start = false
-        ; conversation = { state.conversation with authoring_reference_index = None }
+        ; conversation =
+            { state.conversation with
+              authoring_reference_index = None
+            ; authoring_publication = None
+            }
         }
 ;;

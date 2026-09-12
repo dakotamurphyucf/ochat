@@ -13,6 +13,9 @@ type t =
   | Canonical_entries_appended of Agent_protocol.History.entry list
   | Canonical_history_replaced of Agent_protocol.History.entry list
   | Authoring_references_forgotten of Agent_protocol.History.Id.t list
+  | Authoring_publication_changed of Chat_response.Authoring_publication.context
+  (** Trusted model-input policy/context binding, retained for result publication
+      recovery without constructing a runtime. It grants no execution authority. *)
   | Initial_prompt_count_changed of int
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted

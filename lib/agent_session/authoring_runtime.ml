@@ -112,8 +112,8 @@ let prepare ?admitted ~host ~elements ~capabilities () =
   let%bind _ =
     M.create ~context ~host ~policy ~capabilities ~scope:"host-preparation" ()
   in
-  match P.authoring_tools policy with
-  | [] -> Ok None
+  match P.authoring_tools policy, P.helper_pointers policy with
+  | [], [] -> Ok None
   | _ -> Ok (Some { context; host; policy; capabilities })
 ;;
 

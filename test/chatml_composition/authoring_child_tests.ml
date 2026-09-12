@@ -158,8 +158,23 @@ let%expect_test
             send ();
             check "before";
             assert (Authoring_context_tests.has_error (report "private"));
-            let guidance () = Authoring_policy_integration_tests.guidance (state ()) in
+            let guidance () =
+              Authoring_policy_integration_tests.guidance (state ())
+              |> List.filter ~f:(fun entry ->
+                match entry.P.History.provenance with
+                | Runtime_authoring { purpose = Primer | Preload; _ } -> true
+                | _ -> false)
+            in
             let original = guidance () in
+            let reads () =
+              Authoring_policy_integration_tests.guidance (state ())
+              |> List.filter ~f:(fun entry ->
+                match entry.P.History.provenance with
+                | Runtime_authoring { purpose = Reference; _ } -> true
+                | _ -> false)
+            in
+            let original_reads = reads () in
+            assert (List.length original_reads = 1);
             assert (
               List.exists original ~f:(fun entry ->
                 match entry.P.History.provenance with
@@ -185,6 +200,10 @@ let%expect_test
                      (P.History.entry_to_json b))
                 original
                 (guidance ()));
+            let later_reads = reads () in
+            assert (List.length later_reads = 2);
+            List.iter original_reads ~f:(fun original ->
+              assert (List.mem later_reads original ~equal:P.History.equal_entry));
             H.close handle)))
     (fun _ ->
        assert (List.length !child_inputs = 4);

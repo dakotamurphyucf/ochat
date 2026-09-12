@@ -394,6 +394,24 @@ let%expect_test
        let without_reference invocation = alter invocation "authoring_reference" None in
        List.iter state.invocations ~f:(fun invocation ->
          let reference = Option.value_exn invocation.I.authoring_reference in
+         let output_id = Option.value_exn invocation.output_entry_id in
+         let output =
+           List.find_exn state.conversation.canonical_history ~f:(fun entry ->
+             Agent_protocol.History.Id.equal entry.id output_id)
+         in
+         (match output.provenance with
+          | Runtime_authoring guidance ->
+            assert (guidance.version = 2);
+            assert (
+              Agent_protocol.Authoring_guidance.equal_purpose guidance.purpose Reference);
+            assert (
+              Agent_protocol.Authoring_guidance.matches_payload guidance output.payload);
+            assert (
+              List.equal
+                Agent_protocol.Authoring_guidance.equal_topic
+                guidance.topics
+                (List.map reference.topics ~f:(fun topic -> topic.R.topic)))
+          | _ -> failwith "published reference has no trusted history provenance");
          let value =
            match invocation.status with
            | Published (Complete value) -> value
@@ -434,6 +452,14 @@ let%expect_test
          |> Result.ok_or_failwith
        in
        State.validate restored |> protocol_ok;
+       Authoring_publication_checks.verify restored;
+       assert (Option.is_some restored.conversation.authoring_publication);
+       let index = State.authoring_references restored |> protocol_ok in
+       assert (
+         List.length (Chat_response.Authoring_reference_index.receipts index)
+         = List.length state.invocations);
+       assert (
+         Result.is_error (State.upgrade_schema { restored with schema_version = 19 }));
        assert (List.equal I.equal state.invocations restored.invocations);
        assert (
          Result.is_error (State.upgrade_schema { restored with schema_version = 18 }));
@@ -441,6 +467,7 @@ let%expect_test
          { restored with
            schema_version = 18
          ; invocations = List.map restored.invocations ~f:without_reference
+         ; conversation = { restored.conversation with authoring_publication = None }
          }
        in
        assert (

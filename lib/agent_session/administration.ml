@@ -19,6 +19,7 @@ let conversation state options =
   ; tasks = (if options.keep_tasks then previous.tasks else [])
   ; kv_store = (if options.keep_tasks then previous.kv_store else [])
   ; authoring_reference_index = None
+  ; authoring_publication = None
   }
 ;;
 

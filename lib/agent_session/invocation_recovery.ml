@@ -141,7 +141,12 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
                       { call_id; output; _type = "custom_tool_call_output"; id = None }
                 in
                 let entry = History_entry.create_with_id ~id item in
-                let encoded = History_codec.to_protocol entry in
+                let%bind encoded =
+                  History_codec.to_protocol entry
+                  |> Chat_response.Authoring_publication.encode
+                       ~context:!working.conversation.authoring_publication
+                       invocation
+                in
                 let%map () = apply (Canonical_entries_appended [ encoded ]) in
                 appended := encoded :: !appended;
                 entry)
