@@ -880,7 +880,7 @@ let manifest_now_ns t () =
   |> Int63.to_int64
 ;;
 
-let operator_manifest_authorizer t revision state =
+let operator_manifest_authorizer t ~manifest_sha256 revision state =
   let artifact = Agent_session.Prompt_revision.artifact revision in
   fun request ->
     let open Shell_runtime.Manifest_authorizer in
@@ -888,7 +888,7 @@ let operator_manifest_authorizer t revision state =
       ( state.Agent_session.Session_state.spec.prompt_definition_id
       , state.spec.workspace_instance.definition_id
       , state.identity.creating_principal
-      , artifact.shell_manifest_sha256 )
+      , manifest_sha256 )
     with
     | ( Some prompt_definition_id
       , Some workspace_definition_id
@@ -912,7 +912,7 @@ let operator_manifest_authorizer t revision state =
     | _ -> Reject "shell manifest cannot be bound to a complete session identity"
 ;;
 
-let manifest_authorizer t profile revision state actor_ref shell_state =
+let manifest_authorizer ?manifest_sha256 t profile revision state actor_ref shell_state =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.manifest_grants
@@ -932,7 +932,13 @@ let manifest_authorizer t profile revision state actor_ref shell_state =
   in
   let fallback =
     match profile.Agent_session.Permission_policy.manifest_authorization with
-    | Require_grant -> operator_manifest_authorizer t revision state
+    | Require_grant ->
+      let manifest_sha256 =
+        match manifest_sha256 with
+        | Some hash -> Some hash
+        | None -> (Agent_session.Prompt_revision.artifact revision).shell_manifest_sha256
+      in
+      operator_manifest_authorizer t ~manifest_sha256 revision state
     | Deny_manifest -> Shell_runtime.Manifest_authorizer.deny
     | Assume_authorized -> Shell_runtime.Manifest_authorizer.assume_authorized
   in
@@ -1962,8 +1968,26 @@ let prepare_authored_graph
         ~session_id:state.identity.session_id
         ~one_off_policy
         ~authoring_validation_host
-        ~manifest_authorizer:
-          (manifest_authorizer t profile revision state actor_ref shell_state)
+        ~manifest_authorizer:(fun specialist ->
+          match
+            Chat_response.Agent_runtime.inspect_shell
+              ~env:t.env
+              ~platform:(Chat_response.Agent_runtime.platform ())
+              ~prompt_elements:(Agent_session.Prompt_revision.elements specialist)
+          with
+          | Error _ ->
+            fun _ ->
+              Shell_runtime.Manifest_authorizer.Reject
+                "captured specialist shell manifest cannot be verified"
+          | Ok inspection ->
+            manifest_authorizer
+              ~manifest_sha256:inspection.manifest.sha256
+              t
+              profile
+              revision
+              state
+              actor_ref
+              shell_state)
         ~approval_provider:(shell_approval_provider t profile actor_ref)
         ~approval_store:(shell_approval_store state actor_ref shell_state))
 ;;

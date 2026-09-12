@@ -93,11 +93,19 @@ let prepare env sw daemon entry text =
   |> store_ok
 ;;
 
-let show entry =
-  print_s
-    [%sexp
-      (entry.Agent_server.Session_registry.collect_results () |> protocol_ok
-       : Results.Publisher.collection_stats option)]
+let show result =
+  print_s [%sexp (result |> protocol_ok : Results.Publisher.collection_stats option)]
+;;
+
+let rec collect_ready env entry =
+  match entry.Agent_server.Session_registry.collect_results () with
+  | Ok None ->
+    (* Stopped-runtime retirement can briefly own the scope after explicit unload.
+       None means defer, not a completed sweep. The fixture's outer timeout bounds
+       this wait; retain all exact collection counts and file assertions below. *)
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+    collect_ready env entry
+  | result -> result
 ;;
 
 let%expect_test
@@ -124,9 +132,9 @@ let%expect_test
        ^ String.drop_prefix id 1
        ^ "\"}\n\n");
     Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
-    show entry;
+    show (entry.collect_results ());
     Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
-    show entry;
+    show (collect_ready env entry);
     assert (
       Result.is_ok
         (Results.load
@@ -144,7 +152,7 @@ let%expect_test
            ~max_bytes:4096
            second_ref));
     Eio.Path.save ~create:(`Or_truncate 0o600) response "data: {\"result\":\"unfinished";
-    assert (Result.is_error (entry.collect_results ()));
+    assert (Result.is_error (collect_ready env entry));
     assert (
       Result.is_ok
         (Results.load
@@ -154,7 +162,7 @@ let%expect_test
            ~max_bytes:4096
            first_ref));
     Eio.Path.unlink response;
-    show entry;
+    show (collect_ready env entry);
     print_endline
       "loaded runtime deferred; escaped response retained its result; unrelated orphan \
        removed";

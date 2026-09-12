@@ -4747,6 +4747,17 @@ explicitly authorized Independent generated descendant inheriting the nested wra
 It stops the Owned ancestors, creates a specialist through that descendant, restarts
 the daemon and continues the same specialist using captured sources despite a live
 file edit. The stopped ancestors remain unloaded throughout continuation.
+Private authored shell preparation uses the captured specialist's canonical shell
+manifest for exact operator admission. The grant remains bound to the original root
+prompt source, workspace and principal; a root-only shell-manifest grant does not
+authorize a different private manifest. Stored manifest admission is separate from
+command execution approval. Native calls use the actual child's invocation context:
+shell permissions and exact-session execution grants belong to that child, and a
+connected parent cannot supply an unattended child's approval responder. A client
+with session-management access still needs `permission.respond` to approve a request.
+The authored shell fixture covers those boundaries, grant reuse, private manifest
+admission across restart, and unattended denial in persistent and one-off modes.
+The one-off child is stopped and joined after the denied call.
 The separate authored
 runtime integration test uses real captured resources, artifact/ledger storage and
 a session actor with memory persistence: its own ghost tool performs native reads,

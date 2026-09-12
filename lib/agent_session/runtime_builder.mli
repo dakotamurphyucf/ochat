@@ -76,7 +76,11 @@ type authored_resources = private
     handlers compile against the delegated tool-mediated surface; legacy scripts
     and direct Process/Model recipes reject before any initializer runs.
     [native_registrations] can supply already admitted nested authored wrappers;
-    it does not prepare their resources or authorize recursive delegation. *)
+    it does not prepare their resources or authorize recursive delegation.
+    [manifest_authorizer] receives the captured specialist revision so the host
+    can bind admission to its private shell manifest, while retaining the original
+    root's operator/workspace/principal authority. It must not grant execution
+    approvals or derive authority from model-supplied arguments. *)
 val prepare_authored_resources
   :  native_registrations:Chat_response.Agent_runtime.native_registration list
   -> parent_revision:Prompt_revision.t
@@ -89,7 +93,7 @@ val prepare_authored_resources
   -> session_id:Agent_protocol.Id.Session.t
   -> one_off_policy:Chat_response.One_off_request.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
-  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> manifest_authorizer:(Prompt_revision.t -> Shell_runtime.Manifest_authorizer.t)
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
   -> (authored_resources, Agent_protocol.Error.t) result

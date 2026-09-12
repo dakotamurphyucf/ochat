@@ -121,7 +121,8 @@ let on_event ctx state event = match event with
               ~session_id
               ~one_off_policy:Chat_response.One_off_request.default_policy
               ~authoring_validation_host:None
-              ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+              ~manifest_authorizer:(fun _ ->
+                Shell_runtime.Manifest_authorizer.assume_authorized)
               ~approval_provider:Shell_runtime.Approval_broker.None_available
               ~approval_store:(Shell_access.Approval.create_store ())
             |> protocol_ok

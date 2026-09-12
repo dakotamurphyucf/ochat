@@ -516,7 +516,7 @@ let prepare_authored_resources
       ~session_id
       ~one_off_policy
       ~authoring_validation_host
-      ~manifest_authorizer
+      ~manifest_authorizer:(manifest_authorizer revision)
       ~approval_provider
       ~approval_store
   in
