@@ -36,6 +36,7 @@
   tool_capability
   authoring_policy
   authoring_presence
+  authoring_materialization
   authoring_validation
   authoring_context
   generated_admission

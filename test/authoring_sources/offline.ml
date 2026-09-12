@@ -18,6 +18,7 @@ let () =
     ; "guide/chatml-authoring-background.md"
     ; "guide/chatml-authoring-children.md"
     ; "guide/chatml-authoring-language.md"
+    ; "guide/chatml-authoring-primer.md"
     ; "guide/chatml-authoring-runtime.md"
     ; "guide/chatml-language-spec.md"
     ; "guide/chatml-match-semantics.md"

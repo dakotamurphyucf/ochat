@@ -7,6 +7,29 @@ host with an authoring validation target, explicitly declare
 enablement, automatic helper installation and primer/preload insertion are still
 pending. The current corpus is a reviewed foundation, not complete feature coverage.
 
+The shared [authoring primer](chatml-authoring-primer.md) is now included in the
+installed corpus as `authoring.primer`. Its `let*` example is compiled and run by
+the offline documentation checks. It introduces the language, entrypoint kinds,
+effect boundaries and a flat map of useful features; references to deeper topics
+do not claim that their complete contents have already been supplied.
+
+For runtime integration, [Authoring_materialization](../../lib/chat_response/authoring_materialization.mli)
+turns an admitted policy into source-labelled user-role reference messages. It
+uses the same installed corpus and task/surface resolver as retrieval, deduplicates
+preload prerequisites and rejects a batch that exceeds its configured budget.
+It binds messages to the corpus, runtime, selected capabilities, policy and owning
+session/generation scope. Refresh checks actual effective history rather than a
+cached claim that guidance was once sent. Protocol and provider-history roundtrips,
+edited/redacted context and cross-session invalidation are covered offline.
+
+This assembler does not itself install tools, reserve history IDs or commit model
+input. Those actor-boundary operations, bounded receipt retention and public
+auto/preload enablement remain integration work. Manual and ordinary-tool policies
+produce no automatic messages. The current complete serialized primer payload
+measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
+this exceeds the initial 800-token engineering target and is not a tokenizer or
+model-quality measurement.
+
 An explicitly authorized shell helper can query the same service using
 `operation: "reference"` in the [private helper envelope](../bin/ochat_agent_helper.doc.md#authoring-requests),
 with the strict request below as `arguments`. This lets a ChatML moderator implement

@@ -17,6 +17,7 @@ type t =
   }
 
 let fingerprint t = t.fingerprint
+let installed_corpus t = t.corpus
 
 let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   let open Result.Let_syntax in
@@ -182,6 +183,8 @@ let surface host task =
   | true -> Ok surface
   | false -> Error "authoring task is unavailable on the invoking host"
 ;;
+
+let task_surface = surface
 
 let roots task request =
   match text request "operation" with

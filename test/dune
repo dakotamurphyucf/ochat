@@ -1198,6 +1198,13 @@
  (inline_tests)
  (preprocess (pps ppx_jane)))
 
+(library
+ (name authoring_materialization_test)
+ (modules authoring_materialization_test)
+ (libraries core jsonaf chat_response agent_protocol ochat.agent_session ochat.history_entry chatmd_shell_spec ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (name generated_admission_test)
  (modules generated_admission_test)

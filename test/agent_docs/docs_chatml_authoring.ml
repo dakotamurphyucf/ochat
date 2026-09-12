@@ -9,6 +9,7 @@ let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
 let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let language_fixture = "docs-src/guide/chatml-authoring-language.md"
 let task_fixture = "docs-src/guide/chatml-task-effects.md"
+let primer_fixture = "docs-src/guide/chatml-authoring-primer.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -298,7 +299,13 @@ let run env root =
       fail document.path "installed source differs from shared human documentation");
   let examples =
     List.concat_map
-      [ fixture; runtime_fixture; background_fixture; language_fixture; task_fixture ]
+      [ fixture
+      ; runtime_fixture
+      ; background_fixture
+      ; language_fixture
+      ; task_fixture
+      ; primer_fixture
+      ]
       ~f:(fun file ->
         let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
         let path = String.chop_prefix_exn file ~prefix:"docs-src/" in

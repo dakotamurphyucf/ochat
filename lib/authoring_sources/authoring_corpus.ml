@@ -945,7 +945,27 @@ let runtime_foundation ~sources =
   create
     ~sources
     (List.map (topics language) ~f:(fun topic -> topic.specification)
-     @ [ { id = "chatml.task-effects"
+     @ [ { id = "authoring.primer"
+         ; title = "Shared ChatML and ChatMD authoring orientation"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-authoring-primer.md"
+               ; heading = "# ChatML authoring primer"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "0fddbca3861ef32cd8498810e38147c1fdbd5519bc59b0c4d08f8849965e65fb" ]
+               ; evidence =
+                   [ "test/agent_docs/docs_chatml_authoring.ml"
+                   ; "test/authoring_materialization_test.ml"
+                   ]
+               }
+         }
+       ; { id = "chatml.task-effects"
          ; title = "Task sequencing, reuse, error recovery and effect boundaries"
          ; prerequisites = [ "chatml.tasks" ]
          ; surfaces = shared

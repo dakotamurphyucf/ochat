@@ -16,6 +16,18 @@ val create
   -> (t, string) result
 
 val fingerprint : t -> string
+
+(** Trusted host access to the same immutable, checked corpus used by queries.
+    This does not grant model-facing access without target/policy checks. *)
+val installed_corpus : t -> Authoring_corpus.t
+
+(** Resolve a task against the host's actual enabled compiler targets. Shared by
+    retrieval and automatic guidance; failure cannot enable another surface. *)
+val task_surface
+  :  Authoring_validation.host
+  -> Chatmd_shell_spec.Authoring_metadata.task
+  -> (string, string) result
+
 val parameters : Jsonaf.t
 
 (** The host supplies the actual calling session/generation scope and narrowed
