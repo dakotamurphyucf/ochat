@@ -31,7 +31,11 @@ val parameters : Jsonaf.t
 
     [complete] concerns pagination of this query, not full feature coverage.
     Prepared packages remain labelled foundation-only until A01's full coverage
-    audit and signature/tool-schema package integration are completed. *)
+    audit is completed. Prepare includes exact selected tool schemas and the
+    actual target compiler's readable signatures. Direct topic IDs
+    [reference.tools] and [reference.signatures] retrieve these inventories with
+    the same scope/budget/continuation checks. Read all pages for alias definitions;
+    the signature legend distinguishes reference notation from ChatML source. *)
 val query
   :  t
   -> host:Authoring_validation.host

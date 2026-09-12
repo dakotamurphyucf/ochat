@@ -9,6 +9,7 @@ module Digest = Chatmd_shell_spec.Source_ref
 
 type t =
   { corpus : Corpus.t
+  ; sources : Sources.t
   ; secret : string
   ; default_tokens : int
   ; max_tokens : int
@@ -33,14 +34,14 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   let%bind corpus = Corpus.runtime_foundation ~sources in
   let fingerprint =
     [%sexp
-      ("ochat.authoring-query.v1" : string)
+      ("ochat.authoring-query.v2" : string)
     , (Corpus.identity corpus : string)
     , (default_tokens : int)
     , (max_tokens : int)]
     |> Sexp.to_string
     |> Digest.digest
   in
-  Ok { corpus; secret; default_tokens; max_tokens; fingerprint }
+  Ok { corpus; sources; secret; default_tokens; max_tokens; fingerprint }
 ;;
 
 let tasks =
@@ -339,8 +340,81 @@ let orientation corpus ~host ~capabilities ~surface_id =
              | Ok _ -> Some (Metadata.task_id task)
              | Error _ -> None)) )
     ; "selected_tools", `Array tools
+    ; "reference_topics", strings [ "reference.signatures"; "reference.tools" ]
     ; "guides", `Array guides
     ]
+;;
+
+let signature_items t ~surface_id =
+  let module Inventory = Chatml.Chatml_surface_inventory in
+  let open Result.Let_syntax in
+  let%map inventory = Sources.signatures t.sources ~surface_id in
+  let source_identity =
+    Inventory.to_json inventory |> Jsonaf.to_string |> Digest.digest
+  in
+  let groups =
+    Inventory.reference_items inventory
+    |> List.fold ~init:String.Map.empty ~f:(fun groups item ->
+      let group =
+        match text item "kind" with
+        | "entrypoint" -> "0:entrypoints"
+        | "type_alias" -> "1:type aliases"
+        | "global" -> "2:globals"
+        | _ ->
+          let name = text item "name" in
+          let module_name =
+            String.lsplit2 name ~on:'.' |> Option.value_map ~default:name ~f:fst
+          in
+          "3:" ^ module_name
+      in
+      Map.add_multi groups ~key:group ~data:item)
+    |> Map.to_alist
+  in
+  `Object
+    [ "kind", `String "signature_legend"
+    ; "topic_id", `String "reference.signatures"
+    ; "surface", `String surface_id
+    ; "source_sha256", `String source_identity
+    ; "notation", `String Inventory.reference_notation
+    ]
+  :: List.map groups ~f:(fun (group, reversed) ->
+    `Object
+      [ "kind", `String "compiler_signatures"
+      ; "topic_id", `String "reference.signatures"
+      ; "surface", `String surface_id
+      ; "source_sha256", `String source_identity
+      ; "group", `String (String.drop_prefix group 2)
+      ; "declarations", `Array (List.rev reversed)
+      ])
+;;
+
+let tool_items capabilities =
+  let open Result.Let_syntax in
+  C.references capabilities
+  |> List.map ~f:(fun reference ->
+    let%map binding =
+      C.find capabilities ~name:reference.name
+      |> Result.map_error ~f:(fun error -> error.C.message)
+    in
+    let descriptor = (C.descriptor binding).function_ in
+    `Object
+      [ "kind", `String "selected_tool"
+      ; "topic_id", `String "reference.tools"
+      ; "name", `String reference.name
+      ; ( "description"
+        , match descriptor.description with
+          | None -> `Null
+          | Some text -> `String text )
+      ; "input_schema", descriptor.parameters
+      ; ("strict", if descriptor.strict then `True else `False)
+      ; "binding_fingerprint", `String reference.fingerprint
+      ; ( "result_contract"
+        , `String
+            (match C.result_contract binding with
+             | Native_output -> "native_output"
+             | Invocation_v1 -> "invocation_v1") )
+      ])
+  |> Result.all
 ;;
 
 let strip_metadata line = String.is_prefix line ~prefix:"<!-- ochat-authoring-example: "
@@ -417,18 +491,21 @@ let utf8_prefix text max_bytes =
   take (Int.min (String.length text) max_bytes)
 ;;
 
+let search_terms query =
+  String.lowercase query
+  |> String.split_on_chars ~on:[ ' '; '\t'; '\n'; '`'; '('; ')'; ',' ]
+  |> List.filter ~f:(fun term ->
+    not
+      (List.mem
+         [ ""; "and"; "or"; "the"; "a"; "an"; "to"; "for"; "with"; "how" ]
+         term
+         ~equal:String.equal))
+  |> List.dedup_and_sort ~compare:String.compare
+;;
+
 let search corpus ~surface_id query =
   let query = String.lowercase (String.strip query) in
-  let terms =
-    String.split_on_chars query ~on:[ ' '; '\t'; '\n'; '`'; '('; ')'; ',' ]
-    |> List.filter ~f:(fun term ->
-      not
-        (List.mem
-           [ ""; "and"; "or"; "the"; "a"; "an"; "to"; "for"; "with"; "how" ]
-           term
-           ~equal:String.equal))
-    |> List.dedup_and_sort ~compare:String.compare
-  in
+  let terms = search_terms query in
   Corpus.topics corpus
   |> List.filter_map ~f:(fun topic ->
     match List.mem topic.specification.surfaces surface_id ~equal:String.equal with
@@ -477,6 +554,54 @@ let search corpus ~surface_id query =
     | 0 -> String.compare aid bid
     | other -> other)
   |> List.map ~f:(fun (_, _, item) -> item)
+;;
+
+let reference_search t ~capabilities ~surface_id query =
+  let open Result.Let_syntax in
+  let terms = search_terms query in
+  let matches value =
+    let value = String.lowercase value in
+    List.exists terms ~f:(fun term -> String.is_substring value ~substring:term)
+  in
+  let result id title declarations =
+    let selected =
+      List.filter declarations ~f:(fun (name, description) ->
+        matches name || matches description)
+    in
+    match selected, String.equal (String.lowercase (String.strip query)) id with
+    | [], false -> None
+    | _ ->
+      Some
+        (`Object
+            [ "topic_id", `String id
+            ; "title", `String title
+            ; ( "excerpt"
+              , `String
+                  (List.take selected 3
+                   |> List.map ~f:(fun (name, description) -> name ^ ": " ^ description)
+                   |> String.concat ~sep:"\n"
+                   |> fun text -> utf8_prefix text 600) )
+            ; "matching_symbols", strings (List.take selected 8 |> List.map ~f:fst)
+            ; "matching_count", integer (List.length selected)
+            ; "prerequisites", `Array []
+            ])
+  in
+  let%bind inventory = Sources.signatures t.sources ~surface_id in
+  let signatures =
+    Chatml.Chatml_surface_inventory.reference_items inventory
+    |> List.map ~f:(fun item -> text item "name", text item "signature")
+  in
+  let%map tools = tool_items capabilities in
+  List.filter_opt
+    [ result
+        "reference.signatures"
+        "Compiler signatures for the selected target"
+        signatures
+    ; result
+        "reference.tools"
+        "Selected tool schemas and calling contracts"
+        (List.map tools ~f:(fun item -> text item "name", text item "description"))
+    ]
 ;;
 
 let sign t payload = Digestif.SHA256.(hmac_string ~key:t.secret payload |> to_hex)
@@ -566,24 +691,36 @@ let query t ~host ~capabilities ~scope request =
     let%bind surface_id = surface host task in
     let operation = text base "operation" in
     let%bind items, covered =
-      match operation with
-      | "search" -> Ok (search t.corpus ~surface_id (text base "query"), [])
-      | "topic" | "prepare" ->
+      match operation, text base "topic_id" with
+      | "topic", "reference.signatures" ->
+        let%map items = signature_items t ~surface_id in
+        items, [ "reference.signatures" ]
+      | "topic", "reference.tools" ->
+        let%map items = tool_items capabilities in
+        items, [ "reference.tools" ]
+      | "search", _ ->
+        let query = text base "query" in
+        let%map references = reference_search t ~capabilities ~surface_id query in
+        search t.corpus ~surface_id query @ references, []
+      | ("topic" | "prepare"), _ ->
         let%bind roots = roots task base in
         let%map topics = Corpus.assemble t.corpus ~surface_id ~roots in
         ( List.concat_map topics ~f:topic_items
         , List.map topics ~f:(fun topic -> topic.specification.id) )
       | _ -> Error "invalid continuation operation"
     in
-    let items =
+    let%bind items, covered =
       match operation with
       | "prepare" ->
-        `Object
-          [ "kind", `String "orientation"
-          ; "content", orientation t.corpus ~host ~capabilities ~surface_id
-          ]
-        :: items
-      | _ -> items
+        let%bind tools = tool_items capabilities in
+        let%map signatures = signature_items t ~surface_id in
+        ( `Object
+            [ "kind", `String "orientation"
+            ; "content", orientation t.corpus ~host ~capabilities ~surface_id
+            ]
+          :: (items @ tools @ signatures)
+        , covered @ [ "reference.tools"; "reference.signatures" ] )
+      | _ -> Ok (items, covered)
     in
     let remaining = List.drop items offset in
     let response page count minimum =

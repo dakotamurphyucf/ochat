@@ -84,6 +84,25 @@ For example, read timer semantics and their prerequisites:
 topics. Results contain stable IDs, titles, excerpts, hashes and prerequisites.
 Fetch a result with `topic` to read the actual reference; an excerpt is not a
 replacement for its contract. No semantic model or vector service is involved.
+Search also matches compiler symbol names/signatures and selected tool names and
+descriptions. These matches point to the corresponding flat reference topic;
+results identify matching symbols and a bounded excerpt. Prose matches appear
+first to retain their semantic guidance, followed by matching reference inventories.
+
+Two direct reference topics complement the prose guides:
+
+- `reference.signatures` returns the selected compiler surface's globals, module
+  exports, aliases and required entrypoints. Its first item explains the readable
+  signature notation. Fetch all continuation pages so alias definitions are included.
+- `reference.tools` returns the invoking scope's exact selected tool descriptions,
+  input schemas, strictness and output contract. It does not discover or grant tools
+  outside that selection. `native_output` means native output remains opaque;
+  `invocation_v1` identifies the runtime's structured invocation outcome contract.
+
+Both are also included after the prose in `prepare`, using the same budget and
+continuation mechanism. Schemas and signature declarations are never truncated.
+Signatures are grouped into whole sections for entrypoints, aliases, globals and
+each module, keeping navigation flat and avoiding a separate page per function.
 
 ## Interpret availability and completeness
 
@@ -96,9 +115,9 @@ permission to use a tool. Execution still checks current bindings and authority.
 
 Responses identify the runtime, surface, corpus and capability fingerprint.
 `coverage` currently reports `reviewed_foundation_not_full_feature_coverage`, and
-`prepare` reports `package_complete: false`. Complete native schemas/signature
-packages, broader language/ChatMD coverage and context lifecycle integration remain
-unfinished. `topic_sequence` identifies the assembled reference topics, including
+`prepare` reports `package_complete: false`. Selected native schemas and compiler
+signatures are included, but broader language/ChatMD/runtime semantic coverage and
+context lifecycle integration remain unfinished. `topic_sequence` identifies the assembled reference topics, including
 ones on later pages; `items` contains only this page. `complete` describes pagination
 of this query, not completion of the full authoring reference.
 

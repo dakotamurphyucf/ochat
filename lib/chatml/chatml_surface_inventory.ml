@@ -122,3 +122,100 @@ let to_json t =
                ])) )
     ]
 ;;
+
+let reference_notation =
+  "Reference notation, not copyable ChatML type annotations: (a, b) -> c is one \
+   two-argument function called f(x, y); () -> c is a zero-argument function. 'a is a \
+   shared type variable within a signature; ..'r is an open row tail. array<t>, ref<t> \
+   and name<t> describe type constructors. mu r. body binds a recursive type; r refers \
+   to that binder. A variant `Tag(a, b) has two payload arguments; payload(a, b) \
+   elsewhere describes internal payload structure, not arbitrary tuple expressions. \
+   Named aliases are defined in type_alias entries. Entrypoints are definitions your \
+   script supplies. Builtin signatures describe compiler support, not permission to \
+   execute effects."
+;;
+
+let reference_items t =
+  let key ty = B.sexp_of_ty ty |> Sexp.to_string_mach in
+  let aliases =
+    List.filter_map t.items ~f:(fun item ->
+      match item.kind with
+      | Type_alias -> Some (key item.scheme, item.name)
+      | Global | Module_export | Entrypoint -> None)
+    |> String.Map.of_alist_reduce ~f:(fun a b ->
+      match Int.compare (String.length a) (String.length b) with
+      | 0 -> String.min a b
+      | n when n < 0 -> a
+      | _ -> b)
+  in
+  let rec render ~binders ~expand ty =
+    let alias =
+      match expand with
+      | true -> None
+      | false -> Map.find aliases (key ty)
+    in
+    match alias with
+    | Some name -> name
+    | None ->
+      let nested = render ~binders ~expand:false in
+      let args xs = String.concat ~sep:", " (List.map xs ~f:nested) in
+      (match ty with
+       | B.TVar name -> "'" ^ name
+       | TCon (name, []) -> name
+       | TCon (name, xs) -> name ^ "<" ^ args xs ^ ">"
+       | TInt -> "int"
+       | TFloat -> "float"
+       | TBool -> "bool"
+       | TString -> "string"
+       | TUnit -> "unit"
+       | TArray item -> "array<" ^ nested item ^ ">"
+       | TRef item -> "ref<" ^ nested item ^ ">"
+       | TTuple xs -> "payload(" ^ args xs ^ ")"
+       | TFun (xs, result) -> "(" ^ args xs ^ ") -> " ^ nested result
+       | TRecord row -> "{ " ^ render_row ~binders ~variant:false row ^ " }"
+       | TVariant row -> "[ " ^ render_row ~binders ~variant:true row ^ " ]"
+       | TMu (name, body) ->
+         let display = "rec" ^ Int.to_string (List.length binders) in
+         "mu "
+         ^ display
+         ^ ". "
+         ^ render ~binders:((name, display) :: binders) ~expand:false body
+       | TRec_var name ->
+         List.Assoc.find binders name ~equal:String.equal |> Option.value ~default:name)
+  and render_row ~binders ~variant row =
+    let rec flatten fields = function
+      | B.TRow_empty -> List.rev fields, None
+      | TRow_var name -> List.rev fields, Some name
+      | TRow_extend (next, tail) -> flatten (List.rev_append next fields) tail
+    in
+    let fields, tail = flatten [] row in
+    let nested = render ~binders ~expand:false in
+    let fields =
+      List.map fields ~f:(fun (name, ty) ->
+        match variant, ty with
+        | false, _ -> name ^ ": " ^ nested ty
+        | true, B.TUnit -> "`" ^ name
+        | true, TTuple args ->
+          "`" ^ name ^ "(" ^ String.concat ~sep:", " (List.map args ~f:nested) ^ ")"
+        | true, _ -> "`" ^ name ^ "(" ^ nested ty ^ ")")
+    in
+    let parts = fields @ Option.to_list (Option.map tail ~f:(fun name -> "..'" ^ name)) in
+    String.concat
+      ~sep:
+        (match variant with
+         | true -> " | "
+         | false -> "; ")
+      parts
+  in
+  List.map t.items ~f:(fun item ->
+    let expand =
+      match item.kind with
+      | Type_alias -> true
+      | _ -> false
+    in
+    `Object
+      [ "kind", `String (kind_name item.kind)
+      ; "name", `String item.name
+      ; "signature", `String (render ~binders:[] ~expand item.scheme)
+      ])
+;;

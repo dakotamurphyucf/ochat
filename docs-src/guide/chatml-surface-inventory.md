@@ -35,6 +35,21 @@ open/closed row structure, recursive binders and constructor payloads. In
 particular, `TTuple` in this representation does not advertise arbitrary tuple
 expressions in the language.
 
+`reference_items` renders the same schemes into readable reference signatures.
+Include `reference_notation` with them: this is descriptive notation, not source
+annotations to paste into ChatML. For example, `(a, b) -> c` describes a single
+two-argument function called `f(x, y)`; it does not describe curried calls or a
+tuple argument. `() -> c` preserves zero arity. `array<t>`, `ref<t>` and `task<t>`
+show type constructors, `'a` names a type variable, and `..'r` marks an open row.
+Variant payloads retain their argument count, and `mu rec0. ...` binds a recursive
+type. Named aliases shorten repeated structures; their definitions are included
+as `type_alias` entries in the same inventory. This keeps recursive JSON readable
+without discarding its structure or expanding it repeatedly in every signature.
+
+The [reference query tool](authoring-context-tool.md) provides the actual selected
+surface's complete inventory through `topic_id: "reference.signatures"` and includes
+it in `prepare`. Whole declarations remain atomic across continuation pages.
+
 Signature inventories describe compile-time availability. They do not install a
 host operation, select a tool, supply permission, or enable an experimental
 runtime feature. Semantic prose, operation phases, failure behavior, examples and

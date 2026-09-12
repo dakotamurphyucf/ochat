@@ -70,6 +70,39 @@ let%expect_test
     |}]
 ;;
 
+let%expect_test "readable signatures preserve recursive JSON, call arity and row tails" =
+  let inventory =
+    I.of_surface
+      ~surface_id:"reference-fixture"
+      ~entrypoints:
+        [ ( "inspect"
+          , B.TFun
+              ( [ B.TRecord (B.TRow_extend ([ "value", B.TVar "a" ], B.TRow_var "fields"))
+                ; B.TFun ([], B.TVar "a")
+                ]
+              , B.TVariant
+                  (B.TRow_extend
+                     ( [ "Pair", B.TTuple [ B.TVar "a"; B.json_ty ]; "Done", B.TUnit ]
+                     , B.TRow_var "cases" )) ) )
+        ]
+      S.core_surface
+    |> Result.ok_or_failwith
+  in
+  I.reference_items inventory
+  |> List.iter ~f:(fun item ->
+    let name = Jsonaf.member_exn "name" item |> Jsonaf.string_exn in
+    match name with
+    | "inspect" | "json" | "Task.bind" ->
+      printf "%s: %s\n" name (Jsonaf.member_exn "signature" item |> Jsonaf.string_exn)
+    | _ -> ());
+  [%expect
+    {|
+    inspect: ({ value: 'a; ..'fields }, () -> 'a) -> [ `Pair('a, json) | `Done | ..'cases ]
+    Task.bind: (task<'a>, ('a) -> task<'b>) -> task<'b>
+    json: mu rec0. [ `Null | `Bool(bool) | `Number(float) | `String(string) | `Array(array<rec0>) | `Object(array<{ key: string; value: rec0 }>) ]
+    |}]
+;;
+
 let%expect_test "inventory ignores declaration ordering but rejects ambiguous namespaces" =
   let snapshot surface = I.of_surface ~surface_id:"fixture" ~entrypoints:[] surface in
   let original = snapshot S.moderator_surface |> Result.ok_or_failwith in

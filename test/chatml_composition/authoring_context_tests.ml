@@ -227,6 +227,42 @@ let%expect_test
   require_json
     (`String "runtime.jobs.subscriptions")
     (field (List.hd_exn (items symbol)) "topic_id");
+  let signatures =
+    query
+      (request
+         ~task:"one_off_script"
+         ~topic_id:"reference.signatures"
+         ~max_tokens:1_000_000
+         "topic")
+  in
+  assert (not (has_error signatures));
+  require_json `True (field signatures "complete");
+  require_json
+    (`String "signature_legend")
+    (field (List.hd_exn (items signatures)) "kind");
+  let declarations =
+    List.tl_exn (items signatures)
+    |> List.concat_map ~f:(fun item -> field item "declarations" |> Jsonaf.list_exn)
+  in
+  let names =
+    List.map declarations ~f:(fun item -> field item "name" |> Jsonaf.string_exn)
+  in
+  assert (List.mem names "main" ~equal:String.equal);
+  assert (List.mem names "json" ~equal:String.equal);
+  assert (not (List.mem names "Process.run" ~equal:String.equal));
+  assert (not (List.mem names "Notification.publish" ~equal:String.equal));
+  let language_symbol =
+    query (request ~task:"one_off_script" ~query:"Array.map" "search")
+  in
+  let reference_hit =
+    List.find_exn (items language_symbol) ~f:(fun item ->
+      Jsonaf.exactly_equal (field item "topic_id") (`String "reference.signatures"))
+  in
+  assert (
+    List.mem
+      (field reference_hit "matching_symbols" |> Jsonaf.list_exn)
+      (`String "Array.map")
+      ~equal:Jsonaf.exactly_equal);
   let restricted =
     query
       (request ~task:"one_off_script" ~query:"Subscription.arm" ~max_tokens:6000 "search")
@@ -261,6 +297,7 @@ let%expect_test
          ~equal:String.equal));
   let requested = request ~task:"child_agent" "prepare" in
   let received = ref None in
+  let schema_response = ref None in
   Fixtures.with_daemon
     ~validation_host:host
     ~sources:
@@ -268,7 +305,12 @@ let%expect_test
         , {|<developer>Use the documentation query tool to learn ChatML.</developer><tool name="ochat_authoring_context"/>|}
         )
       ]
-    ~calls:[ "documentation", "ochat_authoring_context", requested ]
+    ~calls:
+      [ "documentation", "ochat_authoring_context", requested
+      ; ( "schemas"
+        , "ochat_authoring_context"
+        , request ~task:"child_agent" ~topic_id:"reference.tools" "topic" )
+      ]
     ~inspect_request:(fun number inputs ->
       match number with
       | 2 ->
@@ -276,6 +318,9 @@ let%expect_test
           | Openai.Responses.Item.Function_call_output
               { call_id = "documentation"; output = Text text; _ } ->
             received := Some text
+          | Openai.Responses.Item.Function_call_output
+              { call_id = "schemas"; output = Text text; _ } ->
+            schema_response := Some text
           | _ -> ())
       | _ -> ())
     (fun state ->
@@ -298,6 +343,20 @@ let%expect_test
          (`Array [ `String "ochat_authoring_context" ])
          (`Array (List.map selected ~f:(fun tool -> field tool "name")));
        require_json (`String "child_agent") (field response "task");
+       let schemas =
+         Option.value_exn !schema_response
+         |> Jsonaf.of_string
+         |> Agent_protocol.Invocation.outcome_of_json
+         |> protocol_ok
+         |> function
+         | Agent_protocol.Invocation.Complete (`String text) -> Jsonaf.of_string text
+         | other -> raise_s [%sexp (other : Agent_protocol.Invocation.outcome)]
+       in
+       let schema_item = List.hd_exn (items schemas) in
+       [%test_eq: int] 1 (List.length (items schemas));
+       require_json Q.parameters (field schema_item "input_schema");
+       require_json `True (field schema_item "strict");
+       require_json (`String "native_output") (field schema_item "result_contract");
        match Fixtures.result state "documentation" with
        | Complete (`String text) -> assert (not (has_error (Jsonaf.of_string text)))
        | other -> raise_s [%sexp (other : Agent_protocol.Invocation.outcome)]);

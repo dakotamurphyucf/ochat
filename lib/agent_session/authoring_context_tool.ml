@@ -25,7 +25,9 @@ let registration ~host =
          prepare for a flat feature map explaining what each feature enables, when to \
          use it, and direct guides to read before implementing it. Use this to discover \
          useful capabilities beyond the first approach you considered. Search returns \
-         topic IDs/excerpts; topic includes prerequisites. Follow next_cursor when \
+         topic IDs/excerpts; topic includes prerequisites. Prepare also includes exact \
+         selected tool schemas and compiler signatures; retrieve these directly with \
+         topic_id=reference.tools or reference.signatures. Follow next_cursor when \
          complete is false, increasing max_tokens when minimum_next_tokens is returned. \
          Prepared packages are currently reviewed foundations, not full feature \
          coverage. All fields are required; set fields unused by the chosen operation to \

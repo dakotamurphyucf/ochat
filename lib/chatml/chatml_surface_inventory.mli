@@ -44,3 +44,13 @@ val standard : unit -> (t list, string) result
     ChatML type syntax. In particular TTuple describes internal payload structure
     and is not a claim that arbitrary tuple expressions are supported. *)
 val to_json : t -> Jsonaf.t
+
+(** Human-readable notation generated from the same schemes. Preserves explicit
+    function arity, constructor payloads, open rows and recursive binders. It is
+    reference notation, not executable ChatML annotation syntax. Named aliases
+    shorten repeated structures; the returned inventory includes their definitions.
+    Each object contains kind, name and signature. No builtin is invoked. *)
+val reference_items : t -> Jsonaf.t list
+
+(** Include this legend whenever presenting reference_items to an author. *)
+val reference_notation : string
