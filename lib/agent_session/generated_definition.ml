@@ -52,55 +52,7 @@ let with_identity t ~revision_id ~created_at =
 ;;
 
 let initial_history t ~session_id =
-  let module CM = Prompt.Chat_markdown in
-  let module R = Openai.Responses in
-  let open Result.Let_syntax in
-  let%bind allocator =
-    History_entry.Allocator.create
-      ~namespace:(Agent_protocol.Id.Session.to_string session_id)
-      ~next_sequence:0
-    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-  in
-  let items =
-    List.filter_map (G.elements t.admission) ~f:(function
-      | CM.Msg message
-      | System message
-      | Developer message
-      | User message
-      | Assistant message ->
-        let role =
-          match message.role with
-          | "system" -> R.Input_message.System
-          | "developer" -> Developer
-          | "user" -> User
-          | "assistant" -> Assistant
-          | _ -> assert false
-        in
-        let texts =
-          match message.content with
-          | None -> []
-          | Some (CM.Text text) -> [ text ]
-          | Some (Items items) ->
-            List.map items ~f:(function
-              | Basic item -> Option.value item.text ~default:""
-              | Agent _ -> assert false)
-        in
-        Some
-          (R.Item.Input_message
-             { role
-             ; content =
-                 List.map texts ~f:(fun text ->
-                   R.Input_message.Text { text; _type = "input_text" })
-             ; _type = "message"
-             })
-      | _ -> None)
-  in
-  let%map history =
-    List.map items ~f:(History_entry.create ~allocator)
-    |> Result.all
-    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-  in
-  history, History_entry.Allocator.next_sequence allocator
+  Chat_response.Initial_prompt_history.create ~session_id (G.elements t.admission)
 ;;
 
 let select ~capabilities references =

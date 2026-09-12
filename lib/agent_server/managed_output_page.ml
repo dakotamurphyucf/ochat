@@ -50,26 +50,8 @@ let utf8_boundary text index =
   before index
 ;;
 
-let read
-      signer
-      ~(state : Agent_session.Session_state.t)
-      ~receipt_id
-      ~cursor
-      ~history_epoch
-      ~limit
-      ~max_bytes
-  =
+let selected_output ~(state : Agent_session.Session_state.t) ~receipt_id =
   let open Result.Let_syntax in
-  let%bind () =
-    match limit > 0 && limit <= 128 && max_bytes > 0 with
-    | true -> Ok ()
-    | false -> Error (P.Error.invalid_request "invalid output page limits")
-  in
-  let%bind relationship =
-    Result.of_option
-      state.spec.delegation
-      ~error:(P.Error.invalid_request "output reading requires a managed child")
-  in
   let%bind receipt =
     match receipt_id with
     | None -> Ok None
@@ -123,6 +105,67 @@ let read
       let ids = Hash_set.of_list (module P.History.Id) receipt.output_ids in
       List.filter retained ~f:(fun entry -> Hash_set.mem ids entry.P.History.id)
   in
+  Ok (receipt, selected)
+;;
+
+let completed_answer ~state ~receipt_id =
+  let open Result.Let_syntax in
+  let%bind receipt, entries = selected_output ~state ~receipt_id:(Some receipt_id) in
+  let%bind () =
+    match receipt with
+    | Some { status = Terminal (_, Completed); _ } -> Ok ()
+    | _ ->
+      Error (P.Error.invalid_request "one-off submission did not complete successfully")
+  in
+  let%map messages =
+    List.map entries ~f:(fun entry ->
+      match entry.P.History.redacted with
+      | true -> Error (P.Error.invalid_request "one-off answer was redacted")
+      | false ->
+        let%bind entry = Agent_session.History_codec.of_protocol entry in
+        (match History_entry.item entry with
+         | Openai.Responses.Item.Output_message message ->
+           Ok
+             (List.map message.content ~f:(fun part -> part.text)
+              |> String.concat ~sep:" ")
+         | Input_message { role = Assistant; content; _ } ->
+           let%map parts =
+             List.map content ~f:(function
+               | Text { text; _ } -> Ok text
+               | _ ->
+                 Error
+                   (P.Error.invalid_request "one-off answer contains non-text content"))
+             |> Result.all
+           in
+           String.concat ~sep:" " parts
+         | _ ->
+           Error (P.Error.invalid_request "one-off output is not an assistant response")))
+    |> Result.all
+  in
+  String.concat ~sep:"\n" messages
+;;
+
+let read
+      signer
+      ~(state : Agent_session.Session_state.t)
+      ~receipt_id
+      ~cursor
+      ~history_epoch
+      ~limit
+      ~max_bytes
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    match limit > 0 && limit <= 128 && max_bytes > 0 with
+    | true -> Ok ()
+    | false -> Error (P.Error.invalid_request "invalid output page limits")
+  in
+  let%bind relationship =
+    Result.of_option
+      state.spec.delegation
+      ~error:(P.Error.invalid_request "output reading requires a managed child")
+  in
+  let%bind receipt, selected = selected_output ~state ~receipt_id in
   let index = correlations state in
   let records = List.map selected ~f:(output index) in
   let entries = List.map records ~f:Jsonaf.to_string in

@@ -133,7 +133,12 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
           let root =
             ref { base with lifecycle = { desired = Running; observed = Idle } }
           in
-          let reserve (parent : State.t) label authored_tool =
+          let reserve
+                ?(lifetime = D.Admission.Owned)
+                (parent : State.t)
+                label
+                authored_tool
+            =
             let child_session_id = P.Id.Session.create () in
             let revision_id = P.Id.Prompt_revision.create () in
             let admission : D.Admission.t =
@@ -148,7 +153,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
               ; capability_pins =
                   Chat_response.Background_request.capability_pins private_caps
                   |> protocol_ok
-              ; lifetime = Owned
+              ; lifetime
               ; created_at = timestamp
               }
             in
@@ -194,6 +199,30 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
           let wrong, _ =
             reserve !root "wrong-specialist" (Some { origin with name = "reviewer" })
           in
+          let invoking = invocation_fixture () |> P.Invocation.dispatch |> protocol_ok in
+          root := { !root with invocations = [ invoking ] };
+          let scoped, scoped_parent =
+            reserve
+              ~lifetime:(Invocation_owned { invocation_id = invoking.context.id })
+              !root
+              "one-off"
+              (Some origin)
+          in
+          let scoped_descendant, _ =
+            reserve
+              ~lifetime:(Independent { authorization_sha256 = digest "trusted policy" })
+              scoped_parent
+              "one-off-descendant"
+              None
+          in
+          let end_invocation_during_lookup = ref false in
+          let end_invocation () =
+            root
+            := { !root with
+                 invocations =
+                   [ P.Invocation.cancel invoking ~reason:"caller ended" |> protocol_ok ]
+               }
+          in
           let grant = ref true in
           let revoke_during_lookup = ref false in
           let adapter_calls = ref 0 in
@@ -203,6 +232,8 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
                   Eio.Fiber.yield ();
                   if P.Id.Session.equal id !root.identity.session_id
                   then Ok !root
+                  else if P.Id.Session.equal id scoped_parent.identity.session_id
+                  then Ok scoped_parent
                   else (
                     assert (P.Id.Session.equal id middle.identity.session_id);
                     Ok middle))
@@ -213,6 +244,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
             ; capabilities =
                 (fun id ->
                   Eio.Fiber.yield ();
+                  if !end_invocation_during_lookup then end_invocation ();
                   Ok
                     (if P.Id.Session.equal id !root.identity.session_id
                      then !public
@@ -240,6 +272,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
           let guard ?(with_adapter = true) record =
             Authority.create
               ~host
+              ~authorize_independent:(fun _ -> Ok ())
               ~reference:(D.reference record)
               ~capabilities:!private_current
               ?authored_capabilities:
@@ -251,6 +284,17 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
             | Error { code = Permission_denied; _ } -> ()
             | _ -> failwith "authority unexpectedly allowed private resources"
           in
+          Authority.check_execution (guard scoped) |> protocol_ok;
+          Authority.check_execution (guard scoped_descendant) |> protocol_ok;
+          end_invocation_during_lookup := true;
+          Authority.check_execution (guard scoped) |> denied;
+          end_invocation_during_lookup := false;
+          Authority.check_execution (guard scoped_descendant) |> denied;
+          root := { !root with invocations = [] };
+          Authority.check_execution (guard scoped) |> denied;
+          print_endline
+            "one-off ownership is rechecked after yielding and cannot be escaped by an \
+             independent descendant";
           Authority.check_execution (guard generated) |> protocol_ok;
           Authority.check_execution (guard ~with_adapter:false generated) |> denied;
           Authority.check_execution (guard wrong) |> denied;
@@ -298,6 +342,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
      tool executed";
   [%expect
     {|
+    one-off ownership is rechecked after yielding and cannot be escaped by an independent descendant
     authored private tools support generated descendants without entering the root public selection
     missing adapter, wrong specialist, narrowed wrapper, private-root changes and quiet revocation deny
     fresh bindings require fresh guards; stop and ancestor revocation still deny; no tool executed

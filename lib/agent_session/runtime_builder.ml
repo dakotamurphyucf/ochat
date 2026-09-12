@@ -357,6 +357,7 @@ let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_ho
 ;;
 
 let create_authored_resources
+      ~additional_native_registrations
       ~native_service_revision
       ~delegated_moderator
       ~env
@@ -385,8 +386,10 @@ let create_authored_resources
   let%bind native_registrations =
     native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
   in
+  let native_registrations = native_registrations @ additional_native_registrations in
   let extensions =
     delegated_moderator
+    || (not (List.is_empty additional_native_registrations))
     || (Option.is_some one_off_policy
         && (declares_native elements Run_chatml_tool.name
             || declares_native elements Generated_session_tool.name
@@ -419,6 +422,7 @@ let create_authored_resources
 ;;
 
 let prepare_resources_internal
+      ~native_registrations
       ~delegated_moderator
       ~native_service_revision
       ~env
@@ -446,6 +450,7 @@ let prepare_resources_internal
   let ctx = context ~env paths (cache storage_paths) in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
+    ~additional_native_registrations:native_registrations
     ~native_service_revision
     ~delegated_moderator
     ~env
@@ -470,6 +475,7 @@ type authored_resources =
   }
 
 let prepare_authored_resources
+      ~native_registrations
       ~parent_revision
       ~tool_name
       ~native_service_revision
@@ -499,6 +505,7 @@ let prepare_authored_resources
   in
   let%map resources =
     prepare_resources_internal
+      ~native_registrations
       ~delegated_moderator:true
       ~native_service_revision
       ~env
@@ -1083,6 +1090,7 @@ let guarded_services authority (services : extension_services) =
 ;;
 
 let build_with_services
+      ~native_registrations
       ~extension_services
       ~sw
       ~env
@@ -1234,6 +1242,7 @@ let build_with_services
       let%bind host = host ~env ~paths ~session_id ~elements in
       let%map resources =
         create_authored_resources
+          ~additional_native_registrations:native_registrations
           ~delegated_moderator:false
           ~native_service_revision:
             (Option.bind extension_services ~f:(fun services ->
@@ -1856,6 +1865,7 @@ let build_with_services
 
 let build ~sw ~env ~paths ~storage_paths ~revision =
   build_with_services
+    ~native_registrations:[]
     ~sw
     ~env
     ~paths
@@ -1864,8 +1874,17 @@ let build ~sw ~env ~paths ~storage_paths ~revision =
     ~extension_services:None
 ;;
 
-let build_with_extensions ~services ~sw ~env ~paths ~storage_paths ~revision =
+let build_with_extensions
+      ~native_registrations
+      ~services
+      ~sw
+      ~env
+      ~paths
+      ~storage_paths
+      ~revision
+  =
   build_with_services
+    ~native_registrations
     ~sw
     ~env
     ~paths
@@ -1883,6 +1902,7 @@ let build_generated
       ~authority
   =
   build_with_services
+    ~native_registrations:[]
     ~source:
       (Generated
          { definition; artifact_store; parent_runtime; inherited_managed; authority })
@@ -1891,6 +1911,7 @@ let build_generated
 
 let build_authored_child ~services ~revision ~prepared ~authority ~history =
   build_with_services
+    ~native_registrations:[]
     ~source:(Authored_child { revision; prepared; authority })
     ~existing_history:(Some history)
     ~extension_services:(Some services)

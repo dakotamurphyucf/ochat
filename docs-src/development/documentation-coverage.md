@@ -190,6 +190,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/version.mli` | [contract](../../lib/agent_protocol/version.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/workspace.mli` | [contract](../../lib/agent_protocol/workspace.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_server/authenticator.mli` | [contract](../../lib/agent_server/authenticator.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/agent_server/authored_resources.mli` | [contract](../../lib/agent_server/authored_resources.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/authorization.mli` | [contract](../../lib/agent_server/authorization.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_builder.mli` | [contract](../../lib/agent_server/catalog_builder.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/catalog_identity.mli` | [contract](../../lib/agent_server/catalog_identity.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -390,6 +391,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/in_memory_stream.mli` | [contract](../../lib/chat_response/in_memory_stream.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/ingress_delivery.mli` | [contract](../../lib/chat_response/ingress_delivery.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/ingress_operations.mli` | [contract](../../lib/chat_response/ingress_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/initial_prompt_history.mli` | [contract](../../lib/chat_response/initial_prompt_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chat_response/managed_tool_registry.mli` | [contract](../../lib/chat_response/managed_tool_registry.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/mcp_discovery_cache.mli` | [contract](../../lib/chat_response/mcp_discovery_cache.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/model_executor.mli` | [contract](../../lib/chat_response/model_executor.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

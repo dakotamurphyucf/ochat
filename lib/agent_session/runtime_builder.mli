@@ -36,9 +36,13 @@ type resources = private
     selection, current authority and owner-aware parent policy remain required.
     Inherited stateful managed tools must still reject unavailable delegation.
     Caller supplies the ancestor's original admitted paths, not a child's broader
-    roots. Independent generated-ancestor reconstruction remains a separate step. *)
+    roots. Independent generated-ancestor reconstruction remains a separate step.
+    [native_registrations] supplies host-admitted authored wrappers alongside the
+    standard helpers. Explicit declarations select them; duplicate/mismatched
+    registrations reject. An empty list supplies no additional implementations. *)
 val prepare_resources
-  :  native_service_revision:string option
+  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
   -> sw:Eio.Switch.t
   -> paths:Runtime_paths.t
@@ -70,9 +74,12 @@ type authored_resources = private
     is not a persisted child identity. Invocation mediation, wrapper binding and
     durable creation still belong to the owning service. Moderators and their
     handlers compile against the delegated tool-mediated surface; legacy scripts
-    and direct Process/Model recipes reject before any initializer runs. *)
+    and direct Process/Model recipes reject before any initializer runs.
+    [native_registrations] can supply already admitted nested authored wrappers;
+    it does not prepare their resources or authorize recursive delegation. *)
 val prepare_authored_resources
-  :  parent_revision:Prompt_revision.t
+  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> parent_revision:Prompt_revision.t
   -> tool_name:string
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
@@ -328,7 +335,8 @@ val build
     delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
-  :  services:extension_services
+  :  native_registrations:Chat_response.Agent_runtime.native_registration list
+  -> services:extension_services
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> paths:Runtime_paths.t

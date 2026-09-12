@@ -20,6 +20,7 @@ module Admission = struct
 
   type lifetime =
     | Owned
+    | Invocation_owned of { invocation_id : P.Id.Invocation.t }
     | Independent of { authorization_sha256 : string }
   [@@deriving equal, sexp]
 
@@ -158,9 +159,13 @@ let validate (record : record) =
     protocol (P.Id.Transaction.of_string (P.Id.Transaction.to_string a.transaction_id))
   in
   let%bind _ = protocol (P.Timestamp.of_string (P.Timestamp.to_string a.created_at)) in
-  let independent_valid =
+  let lifetime_valid =
     match a.lifetime with
     | Owned -> true
+    | Invocation_owned { invocation_id } ->
+      Option.is_some a.authored_tool
+      && Result.is_ok
+           (P.Id.Invocation.of_string (P.Id.Invocation.to_string invocation_id))
     | Independent { authorization_sha256 } -> sha256 authorization_sha256
   in
   let authored_valid =
@@ -179,7 +184,7 @@ let validate (record : record) =
     && sha256 a.manifest_sha256
     && sha256 a.authority_sha256
     && Option.for_all a.parent_stop_epoch ~f:(fun epoch -> Int64.(epoch >= 0L))
-    && independent_valid
+    && lifetime_valid
     && authored_valid
     && (match record.artifact_collection, record.stage, record.revocation with
         | None, _, _ -> true
@@ -237,10 +242,15 @@ let encode record =
     ~flags:0
     (Persisted.sexp_of_t
        { version =
-           (match record.admission.authored_tool, record.artifact_collection with
-            | Some _, _ -> 4
-            | None, Some _ -> 3
-            | None, None -> 2)
+           (match
+              ( record.admission.lifetime
+              , record.admission.authored_tool
+              , record.artifact_collection )
+            with
+            | Invocation_owned _, _, _ -> 5
+            | _, Some _, _ -> 4
+            | _, None, Some _ -> 3
+            | _, None, None -> 2)
        ; record
        }
      |> Sexp.to_string_mach)
@@ -260,15 +270,20 @@ let decode ~name contents =
         Store_error.Corrupt "invalid delegation intent payload")
     in
     let%bind () =
-      match persisted.version, persisted.record.admission.authored_tool with
-      | 1, None
-        when Option.is_none persisted.record.admission.parent_stop_epoch
-             && Option.is_none persisted.record.artifact_collection -> Ok ()
-      | 2, None when Option.is_none persisted.record.artifact_collection -> Ok ()
-      | 3, None when Option.is_some persisted.record.artifact_collection -> Ok ()
-      | 4, Some _ -> Ok ()
-      | version, _ when version > 4 -> Error (Store_error.Schema_too_new version)
-      | _ -> corrupt "invalid delegation intent version"
+      match persisted.version, persisted.record.admission.lifetime with
+      | version, _ when version > 5 -> Error (Store_error.Schema_too_new version)
+      | 5, Invocation_owned _ -> Ok ()
+      | _, Invocation_owned _ -> corrupt "invocation-owned delegation requires version 5"
+      | 5, _ -> corrupt "version 5 requires invocation ownership"
+      | _, (Owned | Independent _) ->
+        (match persisted.version, persisted.record.admission.authored_tool with
+         | 1, None
+           when Option.is_none persisted.record.admission.parent_stop_epoch
+                && Option.is_none persisted.record.artifact_collection -> Ok ()
+         | 2, None when Option.is_none persisted.record.artifact_collection -> Ok ()
+         | 3, None when Option.is_some persisted.record.artifact_collection -> Ok ()
+         | 4, Some _ -> Ok ()
+         | _ -> corrupt "invalid delegation intent version")
     in
     let%bind () = validate persisted.record in
     (match String.equal name (filename persisted.record.key) with
@@ -507,6 +522,14 @@ let with_artifact_retention
     f (retained @ List.map records ~f:(fun record -> record.admission.parent_revision_id)))
 ;;
 
+let same_invocation_scope left right =
+  match left, right with
+  | Admission.Invocation_owned a, Admission.Invocation_owned b ->
+    P.Id.Invocation.equal a.invocation_id b.invocation_id
+  | Invocation_owned _, _ | _, Invocation_owned _ -> false
+  | (Owned | Independent _), (Owned | Independent _) -> true
+;;
+
 let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
   locked t (fun () ->
     let open Result.Let_syntax in
@@ -527,7 +550,8 @@ let reserve t ~key ~request_sha256 ~admission ~max_records ~max_bytes =
            && Option.equal
                 Admission.equal_authored_tool
                 admission.authored_tool
-                record.admission.authored_tool ->
+                record.admission.authored_tool
+           && same_invocation_scope admission.lifetime record.admission.lifetime ->
       let%map () = save t record in
       Replay record
     | Some record -> Ok (Conflict record)

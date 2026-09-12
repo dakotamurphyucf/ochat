@@ -529,7 +529,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
              assert (Int.equal !requests 0);
              assert (Int.equal !authorized 0)
            | _ -> ());
-          let runtime = build (B.build_with_extensions ~services) |> protocol_ok in
+          let runtime =
+            build (B.build_with_extensions ~native_registrations:[] ~services)
+            |> protocol_ok
+          in
           let owner =
             Agent_server.Runtime_owner.create
               ~actor

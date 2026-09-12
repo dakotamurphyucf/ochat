@@ -11,3 +11,12 @@ val read
   -> limit:int
   -> max_bytes:int
   -> (Jsonaf.t, Agent_protocol.Error.t) result
+
+(** Full assistant text for one successfully completed, already authorized
+    submission. Uses the same retained output selection as [read]; missing,
+    redacted or malformed output fails instead of disclosing or silently losing
+    data. The caller must recheck relationship and authority before disclosure. *)
+val completed_answer
+  :  state:Agent_session.Session_state.t
+  -> receipt_id:Agent_protocol.History.Id.t
+  -> (string, Agent_protocol.Error.t) result

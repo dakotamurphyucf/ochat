@@ -38,6 +38,7 @@
   authoring_presence
   authoring_validation
   generated_admission
+  initial_prompt_history
   authoring_registration
   extension_compiler
   managed_tool_registry

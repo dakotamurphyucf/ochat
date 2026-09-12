@@ -25,9 +25,18 @@ type host =
     including current authority and revocation. Generic child ownership alone is
     insufficient. Both callbacks must recheck authority after yielding.
 
-    [one_off] must use an admitted adapter with actual caller policy/approvals;
-    it must not fall back to the unrestricted legacy runner. These callbacks are
+    [one_off] must use an admitted adapter with actual caller policy/approvals,
+    invocation-owned execution and cleanup before returning or propagating
+    cancellation; it must not fall back to the unrestricted legacy runner. These callbacks are
     host services, never values supplied by model arguments. *)
+
+(** Stable retry key scoped to the actual invocation and a host-selected operation
+    name. Shared by persistent composition and the admitted one-off adapter;
+    arguments or definition edits never silently choose a fresh retry identity. *)
+val invocation_key
+  :  Native_tool_invocation.borrowed
+  -> string
+  -> (Agent_protocol.Idempotency_key.t, Agent_protocol.Invocation.tool_error) result
 
 (** Compose create/validate/send/wait/read outside actor locks. Uses one durable
     creation key and one send key per actual invocation, independent of input and
@@ -40,8 +49,9 @@ type host =
     first output page with its continuation cursor, not unowned Invocation.Pending
     work. Terminal failed/cancelled submissions are not called successful answers.
     The returned output page retains the normal disclosure and fragmentation
-    contract; callers use agent_read for remaining pages. Never stops or resumes
-    a child, retries effects on a new key, or swallows caller cancellation.
+    contract; callers use agent_read for remaining pages. Persistent mode never
+    stops or resumes a child. Neither mode retries effects on a new key or swallows
+    caller cancellation.
 
     This internal composition is not registered publicly until the authored
     admission adapter and source-bound restoration have been qualified. *)

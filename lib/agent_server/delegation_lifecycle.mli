@@ -3,7 +3,7 @@
     endpoint. The caller must hold the parent's creation/lifetime coordination
     and retain any borrowed parent runtime until this operation succeeds. *)
 
-(** Resolve the current private relationship, require Owned lifetime, and
+(** Resolve the current private relationship, require Owned or Invocation_owned lifetime, and
     atomically match the child's persisted reference before cancellation. Revoked
     and not-yet-linked admissions may still require cleanup; neither disposition
     prevents stopping their exact child. Independent children are not stopped.

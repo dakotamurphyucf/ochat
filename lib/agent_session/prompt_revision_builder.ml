@@ -149,12 +149,38 @@ let inspection_diagnostics diagnostics =
 ;;
 
 let install artifact_store ~transaction_id artifact =
-  if
-    Agent_store.Prompt_artifact_store.exists
-      artifact_store
-      artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id
-  then Ok ()
-  else Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id artifact
+  let module Store = Agent_store.Prompt_artifact_store in
+  let open Result.Let_syntax in
+  let%bind () =
+    match Store.exists artifact_store artifact.Store.Artifact.revision_id with
+    | true -> Ok ()
+    | false -> Store.install artifact_store ~transaction_id artifact
+  in
+  let%bind retained = Store.load artifact_store artifact.revision_id in
+  (* Revision IDs are content-derived, while the manifest includes the original
+     creation timestamp. Catalog rebuilds must return the installed manifest,
+     not a candidate with a new timestamp under the same revision ID. Verify all
+     other candidate metadata before reusing that immutable artifact. *)
+  let%bind candidate =
+    Store.Artifact.create
+      ~revision_id:artifact.revision_id
+      ?prompt_definition_id:artifact.prompt_definition_id
+      ?canonical_source:artifact.canonical_source
+      ~root_relative_path:artifact.root_relative_path
+      ~root_chatmd:artifact.root_chatmd
+      ~sources:artifact.sources
+      ~parser_schema_version:artifact.parser_schema_version
+      ~runtime_schema_version:artifact.runtime_schema_version
+      ?shell_manifest_sha256:artifact.shell_manifest_sha256
+      ~created_at:retained.created_at
+      ()
+  in
+  match String.equal candidate.manifest_sha256 retained.manifest_sha256 with
+  | true -> Ok retained
+  | false ->
+    Error
+      (Agent_store.Store_error.Corrupt
+         "existing prompt revision differs from captured source")
 ;;
 
 (* Use the same declaration/import semantics as restoration, without starting
@@ -298,11 +324,7 @@ let build
             ()
           |> Result.map_error ~f:(fun error -> [ error ])
         in
-        let%bind () =
-          install artifact_store ~transaction_id artifact
-          |> Result.map_error ~f:List.return
-        in
-        Ok artifact
+        install artifact_store ~transaction_id artifact |> Result.map_error ~f:List.return
       in
       (match result with
        | Error errors -> Error (List.map errors ~f:store_error)

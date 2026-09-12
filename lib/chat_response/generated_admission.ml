@@ -21,32 +21,7 @@ let moderators t = Extension_compiler.compiled_scripts t.definition
 let source_fingerprint t = t.source_fingerprint
 let fingerprint t = t.fingerprint
 let error ?source code message = Error [ D.error ?source ~code message ]
-
-let plain_message (message : CM.msg) =
-  let plain (item : CM.content_item) =
-    match item with
-    | CM.Agent _ -> false
-    | Basic item ->
-      String.equal item.type_ "text"
-      && Option.is_none item.image_url
-      && Option.is_none item.document_url
-  in
-  List.mem [ "user"; "assistant"; "developer"; "system" ] message.role ~equal:String.equal
-  && Option.is_none message.function_call
-  && Option.is_none message.tool_call
-  && Option.is_none message.tool_call_id
-  && Option.is_none message.ochat_history_id
-  && Option.is_none message.id
-  && Option.is_none message.status
-  && Option.is_none message.phase
-  && (match message.type_ with
-      | None | Some "message" -> true
-      | _ -> false)
-  &&
-  match message.content with
-  | None | Some (Text _) -> true
-  | Some (Items items) -> List.for_all items ~f:plain
-;;
+let plain_message = Initial_prompt_history.plain_message
 
 let inspect elements =
   let open Result.Let_syntax in

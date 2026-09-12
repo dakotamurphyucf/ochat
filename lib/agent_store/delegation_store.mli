@@ -25,6 +25,10 @@ module Admission : sig
 
   type lifetime =
     | Owned
+    | Invocation_owned of { invocation_id : Agent_protocol.Id.Invocation.t }
+    (** Host-admitted one-off authored child. Execution additionally requires
+          this exact parent invocation to remain Dispatching. The immutable scope
+          survives restart; ledger v5 distinguishes it from reusable children. *)
     | Independent of { authorization_sha256 : string }
   [@@deriving equal, sexp_of]
 

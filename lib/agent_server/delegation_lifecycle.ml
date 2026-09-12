@@ -14,7 +14,7 @@ let stop_owned ?parent_stop_epoch ~clock ~delegations ~reference ~actor ~runtime
     in
     let%bind () =
       match record.admission.lifetime with
-      | Owned -> Ok ()
+      | Owned | Invocation_owned _ -> Ok ()
       | Independent _ ->
         Error
           (P.Error.create

@@ -120,6 +120,20 @@ let%expect_test "authored delegation identity survives restart and cannot change
         };
       let retry = { (admission ()) with authored_tool = Some origin } in
       assert (D.equal_record authored (reserve ledger authored_key retry |> record));
+      let scoped_key = key "one-off" in
+      let scope : D.Admission.lifetime =
+        Invocation_owned { invocation_id = P.Id.Invocation.create () }
+      in
+      let scoped_candidate =
+        { (admission ()) with authored_tool = Some origin; lifetime = scope }
+      in
+      let scoped = reserve ledger scoped_key scoped_candidate |> record in
+      conflict scoped_key candidate;
+      conflict
+        scoped_key
+        { scoped_candidate with
+          lifetime = Invocation_owned { invocation_id = P.Id.Invocation.create () }
+        };
       let forged_reference =
         match D.Reference.sexp_of_t reference with
         | Sexp.List fields ->
@@ -137,50 +151,63 @@ let%expect_test "authored delegation identity survives restart and cannot change
         | _ -> failwith "expected reference record"
       in
       assert (Result.is_error (D.resolve ledger forged_reference));
-      let filename =
-        digest (D.Key.sexp_of_t authored_key |> Sexp.to_string_mach) ^ ".frame"
-      in
-      let path =
-        Eio.Path.(Eio.Stdenv.fs env / Filename.concat root ("delegations/" ^ filename))
-      in
-      let original = Eio.Path.load path in
-      let payload =
-        match
-          Agent_store.Frame.decode ~max_payload_length:262144 ~contents:original ~offset:0
-        with
-        | Ok (Complete { frame; next_offset }) when next_offset = String.length original
-          -> Agent_store.Frame.payload frame |> Sexp.of_string
-        | _ -> failwith "expected complete delegation frame"
-      in
-      let fields =
-        match payload with
-        | Sexp.List fields -> fields
-        | _ -> failwith "expected frame record"
-      in
-      assert (
-        List.exists fields ~f:(function
-          | List [ Atom "version"; Atom "4" ] -> true
-          | _ -> false));
-      List.iter [ "1"; "2"; "3" ] ~f:(fun version ->
-        let forged =
-          List.map fields ~f:(function
-            | Sexp.List [ Atom "version"; _ ] ->
-              Sexp.List [ Atom "version"; Atom version ]
-            | field -> field)
-          |> fun fields -> Sexp.List fields |> Sexp.to_string_mach
+      let verify_version tested_key expected rejected =
+        let filename =
+          digest (D.Key.sexp_of_t tested_key |> Sexp.to_string_mach) ^ ".frame"
         in
-        let bytes =
-          Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0 forged |> frame_ok
+        let path =
+          Eio.Path.(Eio.Stdenv.fs env / Filename.concat root ("delegations/" ^ filename))
         in
-        Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
-        assert (Result.is_error (D.find ledger authored_key)));
-      Eio.Path.save ~create:(`Or_truncate 0o600) path original;
+        let original = Eio.Path.load path in
+        let payload =
+          match
+            Agent_store.Frame.decode
+              ~max_payload_length:262144
+              ~contents:original
+              ~offset:0
+          with
+          | Ok (Complete { frame; next_offset }) when next_offset = String.length original
+            -> Agent_store.Frame.payload frame |> Sexp.of_string
+          | _ -> failwith "expected complete delegation frame"
+        in
+        let fields =
+          match payload with
+          | Sexp.List fields -> fields
+          | _ -> failwith "expected frame record"
+        in
+        assert (
+          List.exists fields ~f:(function
+            | List [ Atom "version"; Atom actual ] -> String.equal actual expected
+            | _ -> false));
+        List.iter rejected ~f:(fun version ->
+          let forged =
+            List.map fields ~f:(function
+              | Sexp.List [ Atom "version"; _ ] ->
+                Sexp.List [ Atom "version"; Atom version ]
+              | field -> field)
+            |> fun fields -> Sexp.List fields |> Sexp.to_string_mach
+          in
+          let bytes =
+            Agent_store.Frame.encode ~max_payload_length:262144 ~flags:0 forged
+            |> frame_ok
+          in
+          Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
+          assert (Result.is_error (D.find ledger tested_key)));
+        Eio.Path.save ~create:(`Or_truncate 0o600) path original
+      in
+      verify_version authored_key "4" [ "1"; "2"; "3"; "5" ];
+      verify_version scoped_key "5" [ "1"; "2"; "3"; "4" ];
       S.close store |> store_ok;
       let store = reopen env sw root in
       let ledger = S.delegations store in
       assert (D.equal_record authored (D.resolve ledger reference |> store_ok));
       assert (D.equal_record generated (D.resolve ledger generated_reference |> store_ok));
       assert (D.equal_record authored (reserve ledger authored_key retry |> record));
+      assert (D.equal_record scoped (D.resolve ledger (D.reference scoped) |> store_ok));
+      assert (
+        D.equal_record
+          scoped
+          (reserve ledger scoped_key { retry with lifetime = scope } |> record));
       let revoked = D.revoke ledger authored Parent_stopped |> store_ok in
       assert (
         Option.equal
@@ -211,11 +238,15 @@ let%expect_test "authored delegation identity survives restart and cannot change
     "changed name/source, generated/authored substitution and forged references reject";
   print_endline
     "downgraded frames and malformed origins reject; generated reference unchanged";
+  print_endline
+    "v5 retains one-off invocation ownership; scope changes and version substitution \
+     reject";
   [%expect
     {|
     v4 retains authored name/source and original instance across retry/restart/revocation
     changed name/source, generated/authored substitution and forged references reject
     downgraded frames and malformed origins reject; generated reference unchanged
+    v5 retains one-off invocation ownership; scope changes and version substitution reject
     |}]
 ;;
 

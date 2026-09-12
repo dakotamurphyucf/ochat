@@ -109,3 +109,11 @@ val check_authored_preparation
     rejecting cycles and depth excess (configurable, default32). Checks do not consume approval grants;
     the child's actual invocation/permission service still performs authorization. *)
 val check_execution : t -> (unit, Agent_protocol.Error.t) result
+
+(** Check only the extra one-off invocation lifetime against an actual parent
+    actor snapshot. Does not replace source, relationship, capability or policy
+    authorization. Recovery uses this to stop a child whose invocation ended. *)
+val check_invocation_owner
+  :  Agent_store.Delegation_store.record
+  -> Session_state.t
+  -> (unit, Agent_protocol.Error.t) result

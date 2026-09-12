@@ -111,11 +111,25 @@ let active (parent : Session_state.t) =
 
 let independent_authorized t (record : D.record) =
   match record.admission.lifetime, t.authorize_independent with
-  | Owned, _ -> Ok ()
+  | (Owned | Invocation_owned _), _ -> Ok ()
   | Independent _, Some authorize -> authorize record
   | Independent _, None ->
     unavailable
       "delegation.lifetime_unavailable: independent resource ownership is not installed"
+;;
+
+let check_invocation_owner (record : D.record) (parent : Session_state.t) =
+  match record.admission.lifetime with
+  | Owned | Independent _ -> Ok ()
+  | Invocation_owned { invocation_id } ->
+    (match
+       ( P.Id.Session.equal parent.identity.session_id record.key.parent_session_id
+         && Int.equal parent.identity.generation record.key.parent_generation
+       , List.find parent.invocations ~f:(fun invocation ->
+           P.Id.Invocation.equal invocation.P.Invocation.context.id invocation_id) )
+     with
+     | true, Some { status = Dispatching; _ } -> Ok ()
+     | _ -> denied "delegation.invocation_ended: one-off caller is no longer executing")
 ;;
 
 let selected_bindings t record ~public ~expected =
@@ -163,14 +177,16 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
     | false, _, _ ->
       denied "delegation.identity_changed: private admission does not match"
     | _, Some _, _ -> denied "delegation.revoked: child execution authority was revoked"
-    | true, None, (Owned | Independent _) -> independent_authorized t record
+    | true, None, (Owned | Invocation_owned _ | Independent _) ->
+      independent_authorized t record
   in
   let require_execution =
     match record.admission.lifetime with
-    | Owned -> require_execution
+    | Owned | Invocation_owned _ -> require_execution
     | Independent _ -> false
   in
   let%bind parent = t.host.state record.key.parent_session_id in
+  let%bind () = check_invocation_owner record parent in
   let check_active parent = if require_execution then active parent else Ok () in
   let%bind () = check_active parent in
   let%bind () =
@@ -250,6 +266,7 @@ let rec read_chain t ~visited ~depth ~expected ~require_execution reference =
       selected_bindings t record ~public:current ~expected
   in
   let%bind latest = t.host.state parent.identity.session_id in
+  let%bind () = check_invocation_owner record latest in
   let%bind () = check_active latest in
   let%bind latest_moderator = t.moderation latest.identity.session_id in
   let%bind latest_fingerprint = fingerprint ?moderator:latest_moderator latest in

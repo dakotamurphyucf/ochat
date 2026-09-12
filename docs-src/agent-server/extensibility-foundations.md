@@ -4662,11 +4662,27 @@ authored session adapter is installed. Internal foundations now include:
   against the delegated tool-mediated contract, excluding direct Process/Model
   recipes and legacy scripts. The same inherited authority, activity cancellation
   and plain-text input restrictions apply as for generated children.
+  `Authored_resources` binds those private closures to exact live public wrapper
+  capabilities and removes the entries when their owning resource scope closes.
+  An inherited wrapper can select its original resources; another same-name tool
+  cannot. This is a resource index, not a session registry or creation retry map.
+  Factory runtime restoration now distinguishes authored ledger origins and uses
+  that index with the shared child runtime and parent-policy checks. Internally
+  qualified roots install the wrappers and their private resources in the same
+  owned scope. Creation uses the common durable reservation, artifact installation,
+  session publication and activation transaction, with source-specific admission.
+  Literal initial messages use `Initial_prompt_history`, shared with generated
+  definitions; resource-loading messages and provider results need separate
+  admission and are currently rejected before creation.
 - Delegation ledger v4 can retain the authored tool name and source fingerprint
   in its immutable admission/reference. Changed names or source identities conflict
   on a retry, including attempts to relabel a generated reservation. Older generated
   records keep their original admission hashes. The generated artifact installer
   rejects authored reservations.
+  Ledger v5 adds `Invocation_owned` for internally admitted one-off authored calls.
+  It retains the actual parent invocation ID, and a retry cannot change that scope
+  or convert it into reusable ownership. Earlier records keep their original
+  versions and admission hashes.
 - `Authored_agent_call` composes admitted creation and exact-instance validation
   with shared send/wait/read services outside actor locks. Stable invocation keys
   retain retry identity. Results contain session ID, receipt and a bounded output
@@ -4684,15 +4700,40 @@ authored session adapter is installed. Internal foundations now include:
   An explicit persistence-enabled declaration selects it; absent declarations do
   not expose it. The declared policy must match the wrapper schema/result contract.
   Each invocation resolves services through its actual actor borrow, after semantic
-  argument validation. This constructor does not supply a durable factory adapter.
+  argument validation. The qualified factory supplies the persistent adapter and
+  verifies the exact authored declaration and actual caller on continuation.
+- Optional tools default to the admitted one-off adapter. It uses the same durable
+  creation and submission services, returns correlated assistant text, then stops
+  and joins the child and its owned descendants before returning. Cancellation
+  follows the same cleanup path. Internal session/audit records remain stored and
+  stopped; no reusable session ID is returned. Ordinary `Agent` declarations retain
+  their existing behavior.
+  The one-off child's execution requires the exact invoking call to remain
+  `Dispatching`. Authority checks repeat that requirement after yielding, even
+  through Independent descendant edges. Recovery stops children whose invocation
+  ended; explicit restart or another native invocation cannot turn them into
+  persistent children. Generic output selection is shared with `agent_read`;
+  failed submissions, missing or redacted output do not become successful answers.
 
-These components are not yet exposed as persisted authored-agent sessions. Actual
-host private-resource ownership/approval routing, durable factory admission and
-source-bound restoration, factory-installed registration and end-to-end
-interoperability still require integration.
+Public availability remains gated. Nested private persistent declarations,
+resource-only Independent ancestry reconstruction and
+the remaining approval, concurrency and fault-recovery qualification are unfinished.
+Partial-creation reconciliation now
+selects the authored artifact and private bindings, but its authored fault matrix
+is not yet qualified. Abrupt-crash recovery of an active one-off also needs a
+dedicated integration test; orderly restart and active cancellation are covered.
 The composition tests use real actor scopes with recording service callbacks;
-source and ledger tests use actual artifact and ledger persistence. They do not
-prove complete factory-created authored child-session execution. The authored
+source and ledger tests use actual artifact and ledger persistence. The daemon
+fixture now exercises actual named-tool creation, continuation, separate instances,
+fixed/optional persistent policies, generic status, inherited wrappers and foreign
+caller/declaration rejection. It verifies private native file reads and moderator
+state across durable daemon restart. Catalog rebuilds retain the installed manifest
+and original creation timestamp for unchanged revision IDs, preventing false source
+changes during restoration.
+Default one-off calls through direct and inherited wrappers return assistant text,
+retain stopped children across restart, and reject continuation. Cancelling a
+parent call joins the simulated blocked child provider before returning.
+The separate authored
 runtime integration test uses real captured resources, artifact/ledger storage and
 a session actor with memory persistence: its own ghost tool performs native reads,
 state survives repeated calls, fresh managers isolate state, checkpoints restore,

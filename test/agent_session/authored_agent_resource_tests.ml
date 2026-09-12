@@ -6,8 +6,11 @@ module R = Agent_session.Prompt_revision
 module Source = Agent_session.Authored_agent_source
 module Artifacts = Agent_store.Prompt_artifact_store
 module C = Chat_response.Tool_capability
+module Owned = Agent_server.Authored_resources
 
 let%expect_test "authored private resources use captured specialist source coordinates" =
+  let owned = Owned.create () in
+  let retained_public = ref None in
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let root =
@@ -83,6 +86,7 @@ let run ctx input =
       in
       let prepare ?(parent_revision = parent) () =
         B.prepare_authored_resources
+          ~native_registrations:[]
           ~parent_revision
           ~tool_name:"researcher"
           ~native_service_revision:None
@@ -99,6 +103,71 @@ let run ctx input =
       in
       let original = prepare () |> protocol_ok in
       let caps prepared = Runtime_resource_tests.capabilities prepared.B.resources in
+      let registration =
+        Agent_session.Authored_agent_call.registration
+          ~source:original.source
+          ~capabilities:(caps original)
+          ~services:(fun _ -> failwith "resource preparation must not invoke an agent")
+          ()
+        |> protocol_ok
+      in
+      let prepare_root native_registrations =
+        B.prepare_resources
+          ~native_registrations
+          ~native_service_revision:None
+          ~env
+          ~sw
+          ~paths
+          ~storage_paths:paths
+          ~revision:parent
+          ~session_id
+          ~one_off_policy:Chat_response.One_off_request.default_policy
+          ~authoring_validation_host:None
+          ~manifest_authorizer:(fun _ -> failwith "unexpected root shell authorization")
+          ~approval_provider:Shell_runtime.Approval_broker.None_available
+          ~approval_store:(Shell_access.Approval.create_store ())
+      in
+      assert (Result.is_error (prepare_root []));
+      let public =
+        prepare_root [ registration ]
+        |> protocol_ok
+        |> Runtime_resource_tests.capabilities
+      in
+      [%test_eq: string list]
+        [ "apply_patch"; "researcher" ]
+        (C.references public
+         |> List.map ~f:(fun reference -> reference.C.name)
+         |> List.sort ~compare:String.compare);
+      let wrapper =
+        C.find public ~name:"researcher" |> Runtime_resource_tests.capability_ok
+      in
+      Agent_session.Authored_agent_binding.bind
+        ~source:original.source
+        ~public
+        ~reference:(C.reference wrapper)
+        ~capabilities:(caps original)
+      |> protocol_ok
+      |> ignore;
+      Owned.install owned ~sw ~public [ original ] |> protocol_ok;
+      retained_public := Some public;
+      let inherited =
+        C.select public ~names:[ "researcher" ] |> Authored_agent_authority_tests.caps_ok
+      in
+      let found = Owned.find owned ~public:inherited ~name:"researcher" |> protocol_ok in
+      [%test_eq: string] (C.fingerprint (caps original)) (C.fingerprint (caps found));
+      assert (Result.is_error (Owned.install owned ~sw ~public [ original ]));
+      let other_public =
+        prepare_root [ registration ]
+        |> protocol_ok
+        |> Runtime_resource_tests.capabilities
+      in
+      assert (Result.is_error (Owned.find owned ~public:other_public ~name:"researcher"));
+      assert (
+        Result.is_error
+          (Owned.install owned ~sw ~public:other_public [ original; original ]));
+      assert (Result.is_error (Owned.find owned ~public:other_public ~name:"researcher"));
+      Owned.install owned ~sw ~public:other_public [ original ] |> protocol_ok;
+      Owned.find owned ~public:other_public ~name:"researcher" |> protocol_ok |> ignore;
       [%test_eq: string list]
         [ "read_file"; "reader" ]
         (C.references (caps original)
@@ -177,6 +246,9 @@ let on_event ctx state event = Task.pure(state)
         "private captured declarations and source-relative read roots; no public tools, \
          speculative artifact or initializers; stable pins across live edits; fresh \
          bindings and source-owner/tamper checks PASS"));
+  assert (
+    Result.is_error
+      (Owned.find owned ~public:(Option.value_exn !retained_public) ~name:"researcher"));
   [%expect
     {| private captured declarations and source-relative read roots; no public tools, speculative artifact or initializers; stable pins across live edits; fresh bindings and source-owner/tamper checks PASS |}]
 ;;

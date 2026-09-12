@@ -84,6 +84,9 @@ let%expect_test
          }
        in
        State.validate state |> protocol_ok;
+       [%test_eq: string]
+         "first answer\nsecond answer"
+         (Page.completed_answer ~state ~receipt_id:input.id |> protocol_ok);
        let signer = Agent_server.Managed_output_cursor.create () in
        let read ?(max_bytes = 4096) state receipt_id cursor =
          Page.read
@@ -145,6 +148,8 @@ let%expect_test
           [%test_eq: string] "snapshot_required" (P.Error.code_to_string error.code)
         | Ok _ -> failwith "lost output was reported complete");
        let fresh = read compacted None None |> protocol_ok in
+       assert (
+         Result.is_error (Page.completed_answer ~state:compacted ~receipt_id:input.id));
        assert (Jsonaf.exactly_equal (field fresh "history_compacted") `True);
        [%test_eq: int] 1 (field fresh "items" |> Jsonaf.list_exn |> List.length);
        let changed_role =
@@ -165,6 +170,8 @@ let%expect_test
          }
        in
        let hidden = read redacted (Some input.id) None |> protocol_ok in
+       assert (
+         Result.is_error (Page.completed_answer ~state:redacted ~receipt_id:input.id));
        assert (
          not (String.is_substring (Jsonaf.to_string hidden) ~substring:"first answer"));
        assert (Result.is_error (read ~max_bytes:128 state (Some input.id) None));

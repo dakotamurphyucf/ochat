@@ -275,6 +275,26 @@ let%expect_test
       |> get
     in
     let revision_id = Agent_session.Prompt_revision.id revision in
+    let rebuilt =
+      Agent_session.Prompt_revision_builder.build
+        ~env
+        ~artifact_store
+        ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+        ~created_at:(Agent_protocol.Timestamp.add_ms timestamp 1000 |> protocol_ok)
+        definition
+      |> get
+    in
+    assert (
+      Agent_protocol.Id.Prompt_revision.equal
+        revision_id
+        (Agent_session.Prompt_revision.id rebuilt));
+    let original_artifact = Agent_session.Prompt_revision.artifact revision in
+    let rebuilt_artifact = Agent_session.Prompt_revision.artifact rebuilt in
+    [%test_eq: string] original_artifact.manifest_sha256 rebuilt_artifact.manifest_sha256;
+    assert (
+      Agent_protocol.Timestamp.equal
+        original_artifact.created_at
+        rebuilt_artifact.created_at);
     Eio.Path.rmtree directory;
     let restored =
       Agent_session.Prompt_revision_builder.restore ~artifact_store definition revision_id

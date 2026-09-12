@@ -27,7 +27,7 @@ let live borrowed =
     failure "agent.authored.denied" "The authored agent invocation has expired.")
 ;;
 
-let key borrowed operation =
+let invocation_key borrowed operation =
   let context = (N.borrowed_invocation borrowed).context in
   let digest =
     [%sexp
@@ -125,7 +125,7 @@ let run_call
       match call.session_id with
       | Some session_id -> Ok session_id
       | None ->
-        let%bind key = key borrowed "create" in
+        let%bind key = invocation_key borrowed "create" in
         host.create borrowed ~key
     in
     let validate () =
@@ -133,7 +133,7 @@ let run_call
       host.validate borrowed session_id
     in
     let%bind () = validate () in
-    let%bind key = key borrowed "send" in
+    let%bind key = invocation_key borrowed "send" in
     let%bind receipt = sessions.send borrowed session_id ~key ~message:call.input in
     let%bind receipt_id = receipt_id ~session_id receipt |> contract in
     let%bind () = validate () in

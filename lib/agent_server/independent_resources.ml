@@ -140,7 +140,7 @@ let with_chain ~max_depth ~host ~reference ~f =
   let%bind () =
     match record.admission.lifetime with
     | Independent _ -> Ok ()
-    | Owned ->
+    | Owned | Invocation_owned _ ->
       denied
         "delegation.lifetime_denied: independent resources require explicit lifetime \
          authority"

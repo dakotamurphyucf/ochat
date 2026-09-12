@@ -5,7 +5,6 @@ module A = Agent_session.Session_actor
 module B = Agent_session.Runtime_builder
 module R = Agent_session.Prompt_revision
 module Source = Agent_session.Authored_agent_source
-module Binding = Agent_session.Authored_agent_binding
 module Authority = Agent_session.Delegation_authority
 module C = Chat_response.Tool_capability
 module D = Agent_store.Delegation_store
@@ -111,6 +110,7 @@ let on_event ctx state event = match event with
           in
           let prepared =
             B.prepare_authored_resources
+              ~native_registrations:[]
               ~parent_revision
               ~tool_name:"researcher"
               ~native_service_revision:None
@@ -143,14 +143,9 @@ let on_event ctx state event = match event with
               [ registration.implementation_revision, registration.implementation ]
             |> Authored_agent_authority_tests.caps_ok
           in
-          let binding =
-            Binding.bind
-              ~source:prepared.source
-              ~public
-              ~reference:(List.hd_exn (C.references public))
-              ~capabilities:private_caps
-            |> protocol_ok
-          in
+          let owned = Agent_server.Authored_resources.create () in
+          Agent_server.Authored_resources.install owned ~sw ~public [ prepared ]
+          |> protocol_ok;
           let profile =
             permission_policy
               ~tool_default:Allow
@@ -252,8 +247,7 @@ let on_event ctx state event = match event with
                       assert (P.Id.Session.equal id third_session_id);
                       Ok public)
                 }
-              ~authored_capabilities:(fun record ~public ->
-                Binding.resolve binding ~record ~public ~current:private_caps)
+              ~authored_capabilities:(Agent_server.Authored_resources.resolve owned)
               ~reference:(D.reference reserved)
               ~capabilities:private_caps
               ()
