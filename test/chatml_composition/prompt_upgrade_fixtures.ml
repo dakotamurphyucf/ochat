@@ -28,16 +28,21 @@ let replace env ~root ~daemon ~client ~handle ~entry ~filename ~source ~allow_mi
   in
   let before = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
   assert (not (P.Id.Prompt_revision.equal before.spec.prompt_revision_id target));
-  Agent_client.Connection.request
-    client
-    (Session_upgrade_prompt
-       { session_id = before.identity.session_id
-       ; attachment_id = (H.attachment handle).id
-       ; expected_revision = before.counters.revision
-       ; target_revision = target
-       ; allow_migration
-       ; idempotency_key = P.Idempotency_key.of_string "upgrade-publisher" |> protocol_ok
-       })
-  |> protocol_ok
+  let attempt = ref 0 in
+  retry_runtime_busy env (fun () ->
+    incr attempt;
+    let current = A.state entry.actor |> protocol_ok in
+    Agent_client.Connection.request
+      client
+      (Session_upgrade_prompt
+         { session_id = before.identity.session_id
+         ; attachment_id = (H.attachment handle).id
+         ; expected_revision = current.counters.revision
+         ; target_revision = target
+         ; allow_migration
+         ; idempotency_key =
+             P.Idempotency_key.of_string (sprintf "upgrade-publisher-%d" !attempt)
+             |> protocol_ok
+         }))
   |> ignore
 ;;

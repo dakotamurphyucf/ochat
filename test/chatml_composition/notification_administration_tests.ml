@@ -160,7 +160,10 @@ let%expect_test
           in
           assert (P.Completion.equal original exported_completion);
           unload_idle_runtime env entry.runtime;
-          assert (Option.is_some (entry.collect_results () |> protocol_ok));
+          (* Stopped-runtime retirement may briefly reserve this unloaded owner.
+             Collection must actually run after that reservation is released. *)
+          Background_shell_tests.wait env (fun () ->
+            Option.is_some (entry.collect_results () |> protocol_ok));
           Option.iter reference.artifact ~f:(fun reference ->
             let reread =
               Background_artifact_tests.read_artifact (Option.value_exn !client) reference

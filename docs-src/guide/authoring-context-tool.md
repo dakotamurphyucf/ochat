@@ -182,6 +182,21 @@ request non-executing validation with `operation: "validate"`. Each operation ne
 its own host grant and a configured authoring target; neither requires a native
 authoring tool in the agent's tool list.
 
+For a repair loop, submit the candidate to `ochat_validate` with its intended
+target and explicit tool selection. Each diagnostic includes `topic_ids`: retrieve
+those topics with the same authoring task, follow any continuation, and use the
+documented syntax and entrypoint contract to revise the candidate. Submit the
+revision for validation again. Reference responses include prerequisites and
+label complete examples by name and compiler surface; rejected examples are
+explicitly marked as expected rejections.
+
+The `validation_id` identifies the checked source and context. Editing the source
+or changing the selected tools produces a different identity. It is not a token
+to pass to `run_chatml`, and it cannot authorize execution. A script can pass
+static validation yet fail when it calls an unselected tool or supplies a path
+outside the tool's allowed roots. Validation does not evaluate initializers,
+run the submitted tool calls or create a session from a submitted ChatMD bundle.
+
 Start with `prepare`. Its first item is a flat feature map explaining what each
 feature enables, when to use it and the guides to read before implementing it:
 

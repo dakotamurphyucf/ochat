@@ -103,14 +103,25 @@ let with_daemon
         save (Filename.concat workspace "secret.json") "PRIVATE-REPORT-SENTINEL";
         let configuration = config root workspace (Filename.concat root "agent.chatmd") in
         let requests = ref 0 in
+        let provider_failure = ref None in
         let post_stream ~sw:_ ~inputs =
-          incr requests;
-          inspect_request !requests inputs;
-          match !requests with
-          | 1 -> call_events calls
-          | request when request <= snd (request_counts ()) ->
-            call_events (followup_calls request)
-          | _ -> failwith "tool execution requested an unexpected model turn"
+          match
+            let () =
+              incr requests;
+              inspect_request !requests inputs
+            in
+            match !requests with
+            | 1 -> call_events calls
+            | request when request <= snd (request_counts ()) ->
+              call_events (followup_calls request)
+            | _ -> failwith "tool execution requested an unexpected model turn"
+          with
+          | events -> events
+          | exception error ->
+            (* The runtime handles provider errors. Preserve fixture assertions
+               so a bad transcript fails directly instead of timing out idle. *)
+            provider_failure := Some error;
+            raise error
         in
         Eio.Switch.run (fun sw ->
           let daemon =
@@ -178,6 +189,7 @@ let with_daemon
               let final =
                 Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                   let rec wait () =
+                    Option.iter !provider_failure ~f:raise;
                     let state = A.state entry.actor |> protocol_ok in
                     Option.iter state.failure ~f:(fun error ->
                       raise_s [%sexp (error : Agent_protocol.Error.t)]);
