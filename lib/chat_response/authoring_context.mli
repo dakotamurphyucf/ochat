@@ -56,6 +56,13 @@ val query_with_receipt
     nor proves that the response was delivered, persisted or retained in context. *)
 val matches_response : reference_receipt -> Jsonaf.t -> bool
 
+(** Export an actual host-produced receipt for trusted persistence, applying the
+    protocol metadata bounds. There is deliberately no inverse that turns decoded
+    JSON into a newly produced query receipt. *)
+val reference_to_protocol
+  :  reference_receipt
+  -> (Agent_protocol.Authoring_reference.t, Agent_protocol.Error.t) result
+
 (** [secret] is a host-generated unpredictable cursor signing key, never model
     input. The immutable service can be shared across callers. Cursors also bind
     each caller's scope, target host, capability selection and corpus revision.

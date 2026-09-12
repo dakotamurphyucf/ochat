@@ -120,11 +120,23 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 18
+let current_schema_version = 19
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    List.exists t.invocations ~f:(fun invocation ->
+      Option.is_some invocation.Agent_protocol.Invocation.authoring_reference)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"invocation authoring references require session schema 19"
+         ~retryable:false
+         ())
+  else if t.schema_version = 18
+  then Ok { t with schema_version = current_schema_version }
   else if Option.is_some t.conversation.authoring_reference_index
   then
     Error

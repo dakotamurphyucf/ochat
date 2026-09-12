@@ -78,6 +78,7 @@
   stream_invocation
   native_tool_dispatch
   native_tool_invocation
+  authoring_reference_scope
   native_tool_moderation
   script_tool_calls
   compaction_archive

@@ -35,6 +35,7 @@ type borrowed =
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
+  ; authoring_reference_context : Authoring_reference_scope.t option
   }
 
 type managed_dispatch =
@@ -91,6 +92,19 @@ let select_tools scope ~names =
   { scope with ceiling = Some selected }
 ;;
 
+let record_authoring_reference scope response =
+  let open Result.Let_syntax in
+  let%bind selected = borrowed_capabilities scope in
+  match scope.authoring_reference_context with
+  | None -> Ok ()
+  | Some collector ->
+    Authoring_reference_scope.record
+      collector
+      ~invocation_id:scope.invocation.context.id
+      ~capability_fingerprint:(C.fingerprint selected)
+      response
+;;
+
 let with_scope
       ?ceiling
       ?moderator_execute
@@ -102,7 +116,7 @@ let with_scope
       invocation
       f
   =
-  let execute, moderator_execute, ceiling, execution_context =
+  let execute, moderator_execute, ceiling, execution_context, authoring_reference_context =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
       (* Preserve the real actor executor rather than inheriting a direct-child
@@ -110,13 +124,15 @@ let with_scope
       ( scope.execute
       , Option.first_some scope.moderator_execute moderator_execute
       , Option.first_some ceiling scope.ceiling
-      , Option.value execution_context ~default:scope.execution_context )
+      , Option.value execution_context ~default:scope.execution_context
+      , scope.authoring_reference_context )
     | None | Some _ ->
       ( execute
       , moderator_execute
       , ceiling
       , Option.value_or_thunk execution_context ~default:(fun () ->
-          Chatml_execution.capture_context ()) )
+          Chatml_execution.capture_context ())
+      , Authoring_reference_scope.capture ~invocation_id:invocation.context.id )
   in
   let execution_context =
     Chatml_execution.capture_context ~inherited:execution_context ()
@@ -147,6 +163,7 @@ let with_scope
             ; execution_context
             ; runtime_context
             ; moderation_context
+            ; authoring_reference_context
             }
             f)))
 ;;

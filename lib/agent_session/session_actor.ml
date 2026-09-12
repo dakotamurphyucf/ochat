@@ -296,6 +296,7 @@ type _ request =
       * Agent_protocol.Invocation.outcome
       * Agent_protocol.Invocation.follow_up option
       * bool
+      * Agent_protocol.Authoring_reference.t option
       -> Agent_protocol.Invocation.t request
   | Claim_moderator_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
@@ -2134,7 +2135,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
-let finish_invocation t execution outcome requests commit_starts =
+let finish_invocation t execution outcome requests commit_starts authoring_reference =
   let open Result.Let_syntax in
   let owner = Agent_protocol.Job.Invocation execution.dispatched.context.id in
   let%bind cancelled =
@@ -2212,6 +2213,10 @@ let finish_invocation t execution outcome requests commit_starts =
    | false, _ | true, Cancelled _ -> abort_staged_work t ~owner);
   let%bind resolved =
     Agent_protocol.Invocation.resolve
+      ?authoring_reference:
+        (match outcome with
+         | Complete _ -> authoring_reference
+         | Fail _ | Pending _ | Cancelled _ -> None)
       execution.dispatched
       ~session_id:t.state.identity.session_id
       ~generation:t.state.identity.generation
@@ -5648,9 +5653,12 @@ let with_invocation_claim t claim f =
   let open Result.Let_syntax in
   Eio.Fiber.yield ();
   let%bind execution = Eio.Cancel.protect (fun () -> call t claim) in
-  let finish ?requests ?(commit_starts = false) outcome =
+  let finish ?requests ?(commit_starts = false) ?authoring_reference outcome =
     Eio.Cancel.protect (fun () ->
-      call t (Finish_invocation (execution, outcome, requests, commit_starts)))
+      call
+        t
+        (Finish_invocation
+           (execution, outcome, requests, commit_starts, authoring_reference)))
   in
   let failed =
     Agent_protocol.Invocation.Fail
@@ -5668,8 +5676,8 @@ let with_invocation_claim t claim f =
     | Foreground _ | Invocation_moderator _ | Event_moderator _ ->
       f ~dispatched:execution.dispatched, []
   in
-  match run () with
-  | Ok outcome, collected ->
+  match Authoring_reference_scope.collect execution.dispatched.context run with
+  | (Ok outcome, collected), references ->
     let outcome, collected, commit_starts =
       match Agent_protocol.Invocation.validate_outcome outcome with
       | Ok () -> outcome, collected, true
@@ -5689,8 +5697,15 @@ let with_invocation_claim t claim f =
       ; end_session = Chat_response.Runtime_semantics.should_end_session collected
       }
     in
-    finish ~requests ~commit_starts outcome
-  | Error failure, _ ->
+    let authoring_reference =
+      match outcome with
+      | Complete value ->
+        List.find references ~f:(fun reference ->
+          Agent_protocol.Authoring_reference.matches_output reference value)
+      | Fail _ | Pending _ | Cancelled _ -> None
+    in
+    finish ~requests ~commit_starts ?authoring_reference outcome
+  | (Error failure, _), _ ->
     let%bind _ = finish failed in
     Error failure
   | exception exn ->
@@ -8946,7 +8961,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let open Result.Let_syntax in
     let%map () = job_scope_can_execute t scope in
     scope.cancel <- Some cancel
-  | Finish_invocation (execution, outcome, requests, commit_starts) ->
+  | Finish_invocation (execution, outcome, requests, commit_starts, authoring_reference)
+    ->
     let open Result.Let_syntax in
     let%bind () =
       match List.mem t.invocation_executions execution ~equal:phys_equal with
@@ -8954,7 +8970,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
       | false -> Error (error Conflict "invocation callback no longer owns its result")
     in
     with_staged_transaction t (Invocation execution.dispatched.context.id) (fun () ->
-      finish_invocation t execution outcome requests commit_starts)
+      finish_invocation t execution outcome requests commit_starts authoring_reference)
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
   | Claim_moderator_observation (operation_id, invocation_id) ->

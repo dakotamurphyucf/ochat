@@ -92,9 +92,17 @@ item-sequence hashes. Search excerpts and rejected or empty pages produce no
 read receipt. A final page is not marked as containing a complete topic unless
 all of that topic's fragments occur on that page.
 
-These records have no model-input decoder or public constructor. Their existence
-does not prove delivery to a model. Native/helper publication still needs to bind
-them to final disclosed output and real history identities; multi-page presence
+These fresh query records have no model-input decoder or public constructor.
+Native and helper lookups record them through an expiring invocation scope. The
+actor retains a validated annotation atomically with the final successful outcome
+only when its response digest matches the disclosed value. Failed, cancelled or
+replaced results receive no annotation. Session schema 19 persists these annotations;
+invocation JSON uses schema 12 when one is present. Nested script reads retain
+their own invocation identity and do not mark the enclosing script's summary as
+read documentation. Retained helper borrows expire when their invocation ends.
+
+An invocation annotation does not prove delivery to a model. Provider-history
+publication still needs to bind it to real history identities; multi-page presence
 must check every retained fragment. The complete post-compaction retrieve-and-author
 flow remains open; pointer and actor tests use offline fixtures and fake providers.
 

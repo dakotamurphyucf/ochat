@@ -44,7 +44,7 @@ let with_capabilities borrowed f =
 let reference t borrowed request =
   with_capabilities borrowed (fun capabilities ->
     let open Result.Let_syntax in
-    let%map service =
+    let%bind service =
       Lazy.force t.reference |> Result.map_error ~f:(failure "authoring.unavailable")
     in
     let invocation = N.borrowed_invocation borrowed in
@@ -54,7 +54,15 @@ let reference t borrowed request =
       , (invocation.context.generation : int)]
       |> Sexp.to_string
     in
-    Q.query service ~host:t.host ~capabilities ~scope request)
+    let response =
+      Q.query_with_receipt service ~host:t.host ~capabilities ~scope request
+    in
+    let%map () =
+      N.record_authoring_reference borrowed response
+      |> Result.map_error ~f:(fun error ->
+        failure "authoring.denied" error.P.Error.message)
+    in
+    response.json)
 ;;
 
 let validate t borrowed request =

@@ -55,6 +55,14 @@ val borrowed_capabilities
   :  borrowed
   -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
 
+(** Record only the actual readonly query service's private response. This checks
+    the live borrow and scope/selection; final output matching and atomic outcome
+    persistence belong to the actor. Recording alone creates no model history. *)
+val record_authoring_reference
+  :  borrowed
+  -> Chat_response.Authoring_context.response
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Narrow this borrow to exact names already in its verified ceiling. The new
     borrow shares the same lifetime; it cannot restore previously removed tools.
     Its direct child's context must use the narrowed registry fingerprint. *)

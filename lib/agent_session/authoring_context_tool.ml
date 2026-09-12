@@ -67,7 +67,7 @@ let registration ~host =
            |> Sexp.to_string
          in
          let response =
-           Query.query service ~host:caller_host ~capabilities ~scope request
+           Query.query_with_receipt service ~host:caller_host ~capabilities ~scope request
          in
          let current = require (N.borrowed_capabilities borrowed) in
          (match
@@ -79,7 +79,8 @@ let registration ~host =
           | true -> ()
           | false ->
             failwith "authoring.unavailable: invoking authority changed during retrieval");
-         Openai.Responses.Tool_output.Output.Text (Jsonaf.to_string response))
+         require (N.record_authoring_reference borrowed response);
+         Openai.Responses.Tool_output.Output.Text (Jsonaf.to_string response.json))
   in
   let implementation_revision =
     Chatmd_shell_spec.Source_ref.digest

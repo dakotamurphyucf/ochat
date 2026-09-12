@@ -806,6 +806,27 @@ let matches_response receipt json =
   String.equal receipt.response_sha256 (Digest.digest (Jsonaf.to_string json))
 ;;
 
+let reference_to_protocol (receipt : reference_receipt) =
+  let module R = Agent_protocol.Authoring_reference in
+  R.create
+    ~query_identity:receipt.query_identity
+    ~host_identity:receipt.host_identity
+    ~capability_fingerprint:receipt.capability_fingerprint
+    ~scope:receipt.scope
+    ~surface_id:receipt.surface_id
+    ~corpus_identity:receipt.corpus_identity
+    ~response_sha256:receipt.response_sha256
+    ~topics:
+      (List.map receipt.topics ~f:(fun topic ->
+         R.
+           { topic = topic.topic
+           ; total_parts = topic.total_parts
+           ; parts =
+               List.map topic.parts ~f:(fun part ->
+                 { index = part.index; item_sha256 = part.item_sha256 })
+           }))
+;;
+
 let query_with_receipt t ~host ~capabilities ~scope request =
   let run () =
     let open Result.Let_syntax in

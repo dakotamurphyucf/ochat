@@ -98,9 +98,73 @@ val create
   -> (t, Error.t) result
 
 val validate : t -> (unit, Error.t) result
+val valid_topic : topic -> bool
+val topic_to_json : topic -> Jsonaf.t
+val topic_of_json : Jsonaf.t -> (topic, Error.t) result
 val matches_payload : t -> Jsonaf.t -> bool
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## authoring_reference
+
+[JSON codec](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
+
+```ocaml
+(** Persisted evidence of an exact documentation response, not an execution grant
+    or proof of model delivery. Decode only as part of trusted persisted state. *)
+type part =
+  { index : int
+  ; item_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+type topic =
+  { topic : Authoring_guidance.topic
+  ; total_parts : int
+  ; parts : part list
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { version : int
+  ; query_identity : string
+  ; host_identity : string
+  ; capability_fingerprint : string
+  ; scope : string
+  ; surface_id : string
+  ; corpus_identity : string
+  ; response_sha256 : string
+  ; topics : topic list
+  }
+[@@deriving equal, sexp]
+
+val create
+  :  query_identity:string
+  -> host_identity:string
+  -> capability_fingerprint:string
+  -> scope:string
+  -> surface_id:string
+  -> corpus_identity:string
+  -> response_sha256:string
+  -> topics:topic list
+  -> (t, Error.t) result
+
+(** Version/closed-shape, identity and coverage validation. At most 1024 topics,
+    4096 total recorded parts and 1 MiB encoded metadata. Per-topic indexes must
+    be strictly increasing and within the declared total. Complete means all
+    parts occur in this response, never just that this is the last query page. *)
+val validate : t -> (unit, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Digest of the actual response JSON. Neither comparison nor decoding gives a
+    caller permission to attach the receipt to an invocation/history entry. *)
+val matches_response : t -> Jsonaf.t -> bool
+
+val matches_output : t -> Jsonaf.t -> bool
+val scope_for : session_id:Id.Session.t -> generation:int -> string
 ```
 
 ## blob
@@ -1409,6 +1473,9 @@ type t = private
   ; completion_contract : Completion_contract.t option [@sexp.option]
     (** Schema11. Immutable eventual-result policy captured from a standalone
         model tool at admission. Presence alone never requests a delivery. *)
+  ; authoring_reference : Authoring_reference.t option [@sexp.option]
+    (** Host-produced receipt bound to the successful disclosed output. Its
+        existence alone does not mean documentation reached provider history. *)
   }
 [@@deriving equal, sexp]
 
@@ -1438,7 +1505,8 @@ val dispatch : t -> (t, Error.t) result
     and generation. A duplicate resolution fails, even for identical output.
     Referenced job/subscription ownership requires actor service validation. *)
 val resolve
-  :  t
+  :  ?authoring_reference:Authoring_reference.t
+  -> t
   -> session_id:Id.Session.t
   -> generation:int
   -> outcome

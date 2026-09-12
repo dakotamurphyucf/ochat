@@ -43,6 +43,9 @@ val create
   -> (t, Error.t) result
 
 val validate : t -> (unit, Error.t) result
+val valid_topic : topic -> bool
+val topic_to_json : topic -> Jsonaf.t
+val topic_of_json : Jsonaf.t -> (topic, Error.t) result
 val matches_payload : t -> Jsonaf.t -> bool
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result

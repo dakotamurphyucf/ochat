@@ -163,6 +163,9 @@ type t = private
   ; completion_contract : Completion_contract.t option [@sexp.option]
     (** Schema11. Immutable eventual-result policy captured from a standalone
         model tool at admission. Presence alone never requests a delivery. *)
+  ; authoring_reference : Authoring_reference.t option [@sexp.option]
+    (** Host-produced receipt bound to the successful disclosed output. Its
+        existence alone does not mean documentation reached provider history. *)
   }
 [@@deriving equal, sexp]
 
@@ -192,7 +195,8 @@ val dispatch : t -> (t, Error.t) result
     and generation. A duplicate resolution fails, even for identical output.
     Referenced job/subscription ownership requires actor service validation. *)
 val resolve
-  :  t
+  :  ?authoring_reference:Authoring_reference.t
+  -> t
   -> session_id:Id.Session.t
   -> generation:int
   -> outcome

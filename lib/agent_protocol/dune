@@ -15,6 +15,7 @@
   mutation_result
   blob
   authoring_guidance
+  authoring_reference
   history
   permission
   grant

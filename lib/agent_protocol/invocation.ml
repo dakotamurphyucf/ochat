@@ -142,6 +142,7 @@ type t =
   ; parent_event : Id.Moderator_execution.t option [@sexp.option]
   ; handler_intent : handler_intent option [@sexp.option]
   ; completion_contract : Completion_contract.t option [@sexp.option]
+  ; authoring_reference : Authoring_reference.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -457,6 +458,22 @@ let validate t =
        | Model, Some _ when String.equal t.context.tool_name contract.tool_name -> Ok ()
        | _ -> invalid "completion contract requires its model tool call")
   in
+  let%bind () =
+    match t.authoring_reference with
+    | None -> Ok ()
+    | Some reference ->
+      let%bind () = Authoring_reference.validate reference in
+      (match t.status with
+       | (Resolved (Complete value) | Published (Complete value))
+         when String.equal
+                reference.scope
+                (Authoring_reference.scope_for
+                   ~session_id:t.context.session_id
+                   ~generation:t.context.generation)
+              && Authoring_reference.matches_output reference value -> Ok ()
+       | _ ->
+         invalid "authoring reference requires its exact successful invocation output")
+  in
   match t.status with
   | Admitted | Dispatching -> Ok ()
   | Resolved outcome | Published outcome -> validate_outcome outcome
@@ -471,6 +488,7 @@ let create ?routing ?observer ?completion_contract ?parent_event context =
     ; parent_event
     ; handler_intent = None
     ; completion_contract
+    ; authoring_reference = None
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -491,7 +509,7 @@ let dispatch t =
     failure Invalid_state "invocation has already been dispatched or resolved"
 ;;
 
-let resolve t ~session_id ~generation outcome =
+let resolve ?authoring_reference t ~session_id ~generation outcome =
   if Id.Session.compare session_id t.context.session_id <> 0
   then failure Permission_denied "invocation belongs to another session"
   else if generation <> t.context.generation
@@ -499,7 +517,7 @@ let resolve t ~session_id ~generation outcome =
   else (
     match t.status with
     | Dispatching ->
-      let next = { t with status = Resolved outcome } in
+      let next = { t with status = Resolved outcome; authoring_reference } in
       Result.map (validate next) ~f:(fun () -> next)
     | Admitted -> failure Invalid_state "invocation has not been dispatched"
     | Resolved _ | Published _ -> failure Already_resolved "invocation already resolved")
@@ -814,6 +832,19 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     let%bind () = validate_observation_transition previous next in
     let%bind () = validate_handler_transition previous next in
+    let%bind () =
+      match
+        ( previous.authoring_reference
+        , next.authoring_reference
+        , previous.status
+        , next.status )
+      with
+      | None, Some _, Dispatching, Resolved (Complete _) -> Ok ()
+      | before, after, _, _ when Option.equal Authoring_reference.equal before after ->
+        Ok ()
+      | _ ->
+        failure Conflict "authoring reference must be committed with its original outcome"
+    in
     let%bind () =
       match
         Option.equal
@@ -1315,7 +1346,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.completion_contract
+           (if Option.is_some t.authoring_reference
+            then "12"
+            else if Option.is_some t.completion_contract
             then "11"
             else if Option.is_some t.handler_intent
             then "10"
@@ -1354,7 +1387,8 @@ let to_json t =
      @ optional "observation" t.observation observation_to_json
      @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json
      @ optional "handler_intent" t.handler_intent handler_intent_to_json
-     @ optional "completion_contract" t.completion_contract Completion_contract.to_json)
+     @ optional "completion_contract" t.completion_contract Completion_contract.to_json
+     @ optional "authoring_reference" t.authoring_reference Authoring_reference.to_json)
 ;;
 
 let of_json json =
@@ -1369,7 +1403,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1382,7 +1416,8 @@ let of_json json =
        @ (if version >= 5 then [ "observation" ] else [])
        @ (if version >= 9 then [ "parent_event" ] else [])
        @ (if version >= 10 then [ "handler_intent" ] else [])
-       @ if version >= 11 then [ "completion_contract" ] else [])
+       @ (if version >= 11 then [ "completion_contract" ] else [])
+       @ if version >= 12 then [ "authoring_reference" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1425,8 +1460,17 @@ let of_json json =
   in
   let%bind completion_contract =
     match version with
+    | 12 ->
+      Json_codec.optional_as fields "completion_contract" Completion_contract.of_json
     | 11 ->
       Json_codec.required_as fields "completion_contract" Completion_contract.of_json
+      |> Result.map ~f:Option.some
+    | _ -> Ok None
+  in
+  let%bind authoring_reference =
+    match version with
+    | 12 ->
+      Json_codec.required_as fields "authoring_reference" Authoring_reference.of_json
       |> Result.map ~f:Option.some
     | _ -> Ok None
   in
@@ -1440,11 +1484,12 @@ let of_json json =
     ; parent_event = None
     ; handler_intent
     ; completion_contract
+    ; authoring_reference
     }
   in
   let%bind t =
     match version with
-    | 10 | 11 ->
+    | 10 | 11 | 12 ->
       Json_codec.optional_as fields "parent_event" Id.Moderator_execution.of_json
       |> Result.map ~f:(fun parent_event -> { t with parent_event })
     | 9 ->

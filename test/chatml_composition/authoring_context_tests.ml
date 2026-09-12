@@ -377,6 +377,75 @@ let%expect_test
        require_json Q.parameters (field schema_item "input_schema");
        require_json `True (field schema_item "strict");
        require_json (`String "native_output") (field schema_item "result_contract");
+       let module R = Agent_protocol.Authoring_reference in
+       let module I = Agent_protocol.Invocation in
+       let module State = Agent_session.Session_state in
+       let alter invocation name replacement =
+         match I.sexp_of_t invocation with
+         | Sexp.List fields ->
+           let fields =
+             List.filter fields ~f:(function
+               | Sexp.List (Sexp.Atom key :: _) -> not (String.equal key name)
+               | _ -> true)
+           in
+           I.t_of_sexp (Sexp.List (fields @ Option.to_list replacement))
+         | _ -> assert false
+       in
+       let without_reference invocation = alter invocation "authoring_reference" None in
+       List.iter state.invocations ~f:(fun invocation ->
+         let reference = Option.value_exn invocation.I.authoring_reference in
+         let value =
+           match invocation.status with
+           | Published (Complete value) -> value
+           | _ -> failwith "reference invocation was not published"
+         in
+         assert (R.matches_output reference value);
+         assert (
+           not (R.matches_output reference (`String "disclosure replaced the result")));
+         assert (
+           String.equal
+             reference.scope
+             (R.scope_for
+                ~session_id:state.identity.session_id
+                ~generation:state.identity.generation));
+         assert (I.equal invocation (I.of_json (I.to_json invocation) |> protocol_ok));
+         assert (
+           Result.is_error
+             (I.validate
+                (alter
+                   invocation
+                   "status"
+                   (Some
+                      (Sexp.List
+                         [ Sexp.Atom "status"
+                         ; I.sexp_of_status (Published (Complete `Null))
+                         ])))));
+         assert (
+           Result.is_error
+             (I.validate_transition
+                ~previous:(Some invocation)
+                (without_reference invocation))));
+       let restored =
+         State.sexp_of_t state
+         |> Sexp.to_string_mach
+         |> Agent_session.Session_persistence.restore_snapshot
+         |> Result.map_error ~f:(fun error ->
+           Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error))
+         |> Result.ok_or_failwith
+       in
+       State.validate restored |> protocol_ok;
+       assert (List.equal I.equal state.invocations restored.invocations);
+       assert (
+         Result.is_error (State.upgrade_schema { restored with schema_version = 18 }));
+       let legacy =
+         { restored with
+           schema_version = 18
+         ; invocations = List.map restored.invocations ~f:without_reference
+         }
+       in
+       assert (
+         (State.upgrade_schema legacy |> protocol_ok).schema_version
+         = State.current_schema_version);
        match Fixtures.result state "documentation" with
        | Complete (`String text) -> assert (not (has_error (Jsonaf.of_string text)))
        | other -> raise_s [%sexp (other : Agent_protocol.Invocation.outcome)]);
