@@ -47,7 +47,10 @@ val parameters : Jsonaf.t
     actual target compiler's readable signatures. Direct topic IDs
     [reference.tools] and [reference.signatures] retrieve these inventories with
     the same scope/budget/continuation checks. Read all pages for alias definitions;
-    the signature legend distinguishes reference notation from ChatML source. *)
+    the signature legend distinguishes reference notation from ChatML source.
+    Authoring tool descriptions use the same metadata-derived presentation as
+    model requests: callable helper pointers reflect this query's selected
+    capabilities, without changing binding identities or schemas. *)
 val query
   :  t
   -> host:Authoring_validation.host

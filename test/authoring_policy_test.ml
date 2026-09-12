@@ -355,7 +355,17 @@ let%test_unit "child auto cannot restore helpers removed by its parent" =
         ()
       |> get
     in
-    assert (List.is_empty (P.helper_pointers plan)))
+    assert (List.is_empty (P.helper_pointers plan));
+    let description =
+      Chat_response.Authoring_tool_description.describe
+        ~capabilities:(P.capabilities plan)
+        ~name:"author"
+        ~description:(Some "Custom authoring entrypoint.")
+      |> Option.value_exn
+    in
+    assert (String.is_prefix description ~prefix:"Custom authoring entrypoint.");
+    assert (String.is_substring description ~substring:"chatml/basics");
+    assert (not (String.is_substring description ~substring:(M.helper_name Reference))))
 ;;
 
 let%test_unit "preload validates packages topics tasks and explicit ordering" =

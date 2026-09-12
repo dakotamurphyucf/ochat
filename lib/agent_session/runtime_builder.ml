@@ -1433,6 +1433,27 @@ let build_with_services
              ; type_ = "function"
              })))
   in
+  let%bind tools =
+    match extension_services with
+    | None -> Ok tools
+    | Some _ ->
+      let%map capabilities =
+        Lazy.force agent_runtime.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      List.map tools ~f:(function
+        | Request.Tool.Function tool ->
+          Request.Tool.Function
+            { tool with
+              description =
+                Chat_response.Authoring_tool_description.describe
+                  ~capabilities
+                  ~name:tool.name
+                  ~description:tool.description
+            }
+        | tool -> tool)
+  in
   let%bind initial_history, initial_end =
     match existing_history with
     | Some history -> Ok (history, next_history_sequence)

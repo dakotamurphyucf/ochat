@@ -160,17 +160,28 @@ let%expect_test
     "qualified root registration applies automatic, manual and preload guidance"
   =
   List.iter
-    [ "auto", "", true
-    ; "manual", {|<authoring_context policy="manual"/>|}, false
-    ; "preload", {|<authoring_context policy="preload" topics="chatml.tasks"/>|}, true
+    [ "auto", "", true, []
+    ; "manual", {|<authoring_context policy="manual"/>|}, false, []
+    ; ( "manual-reference"
+      , {|<authoring_context policy="manual"/>|}
+      , false
+      , [ "ochat_authoring_context" ] )
+    ; ( "manual-validation"
+      , {|<authoring_context policy="manual"/>|}
+      , false
+      , [ "ochat_validate" ] )
+    ; "preload", {|<authoring_context policy="preload" topics="chatml.tasks"/>|}, true, []
     ]
-    ~f:(fun (label, policy, automatic) ->
+    ~f:(fun (label, policy, automatic, explicit_helpers) ->
       let initial = ref [] in
       with_daemon
         ~sources:
           [ ( "agent.chatmd"
             , policy
-              ^ {|<developer>Return the input.</developer><tool name="run_chatml"/>|} )
+              ^ {|<developer>Return the input.</developer><tool name="run_chatml"/><tool name="agent_create"/>|}
+              ^ String.concat
+                  (List.map explicit_helpers ~f:(fun name ->
+                     sprintf "<tool name=%S/>" name)) )
           ]
         ~calls:
           [ ( "script"
@@ -183,25 +194,99 @@ let%expect_test
           ]
         ~inspect_request:(fun number inputs -> if number = 1 then initial := inputs)
         ~after_turn:(fun _ _ entry ->
-          let names =
+          let tools, capabilities =
             Agent_server.Runtime_owner.with_background_runtime
               entry.runtime
               (fun runtime ->
-                 Ok
-                   (List.filter_map
-                      runtime.Agent_session.Runtime_builder.moderator_tools
-                      ~f:(function
-                      | Openai.Responses.Request.Tool.Function tool -> Some tool.name
-                      | _ -> None)))
+                 let tools =
+                   List.filter_map
+                     runtime.Agent_session.Runtime_builder.moderator_tools
+                     ~f:(function
+                     | Openai.Responses.Request.Tool.Function tool -> Some tool
+                     | _ -> None)
+                 in
+                 let capabilities =
+                   Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                   |> Result.map_error ~f:(fun error ->
+                     P.Error.invalid_request error.Chat_response.Tool_capability.message)
+                 in
+                 Result.map capabilities ~f:(fun capabilities -> tools, capabilities))
             |> protocol_ok
-            |> List.sort ~compare:String.compare
+          in
+          let names =
+            List.map tools ~f:(fun tool -> tool.name) |> List.sort ~compare:String.compare
           in
           let expected =
-            if automatic
-            then [ "ochat_authoring_context"; "ochat_validate"; "run_chatml" ]
-            else [ "run_chatml" ]
+            ([ "agent_create"; "run_chatml" ]
+             @
+             if automatic
+             then [ "ochat_authoring_context"; "ochat_validate" ]
+             else explicit_helpers)
+            |> List.sort ~compare:String.compare
           in
-          assert (List.equal String.equal names expected))
+          assert (List.equal String.equal names expected);
+          let module C = Chat_response.Tool_capability in
+          let module Q = Chat_response.Authoring_context in
+          let service =
+            Q.create ~secret:"description-integration" () |> Result.ok_or_failwith
+          in
+          let host =
+            Agent_session.Authoring_runtime.configure_host
+              ~policy:Chat_response.One_off_request.default_policy
+              ()
+            |> Result.ok_or_failwith
+          in
+          let references capabilities =
+            Q.query
+              service
+              ~host
+              ~capabilities
+              ~scope:label
+              (Authoring_context_tests.request
+                 ~task:"one_off_script"
+                 ~topic_id:"reference.tools"
+                 "topic")
+            |> Authoring_context_tests.items
+          in
+          let described = references capabilities in
+          let narrowed =
+            C.select capabilities ~names:[ "agent_create"; "run_chatml" ]
+            |> Result.map_error ~f:(fun error -> error.C.message)
+            |> Result.ok_or_failwith
+          in
+          let narrowed_descriptions = references narrowed in
+          List.iter [ "agent_create"; "run_chatml" ] ~f:(fun name ->
+            let tool = List.find_exn tools ~f:(fun tool -> String.equal name tool.name) in
+            let description = Option.value_exn tool.description in
+            assert (
+              String.is_substring description ~substring:"Authoring reference package:");
+            List.iter [ "ochat_authoring_context"; "ochat_validate" ] ~f:(fun helper ->
+              assert (
+                Bool.equal
+                  (String.is_substring description ~substring:helper)
+                  (List.mem names helper ~equal:String.equal)));
+            let item items =
+              List.find_exn items ~f:(fun item ->
+                String.equal name (Jsonaf.member_exn "name" item |> Jsonaf.string_exn))
+            in
+            let reference = item described in
+            assert (
+              String.equal
+                description
+                (Jsonaf.member_exn "description" reference |> Jsonaf.string_exn));
+            assert (
+              Jsonaf.exactly_equal
+                tool.parameters
+                (Jsonaf.member_exn "input_schema" reference));
+            let restricted = item narrowed_descriptions in
+            assert (
+              Jsonaf.exactly_equal
+                (Jsonaf.member_exn "binding_fingerprint" restricted)
+                (Jsonaf.member_exn "binding_fingerprint" reference));
+            let text = Jsonaf.member_exn "description" restricted |> Jsonaf.string_exn in
+            assert (String.is_substring text ~substring:"Authoring reference package:");
+            List.iter [ "ochat_authoring_context"; "ochat_validate" ] ~f:(fun helper ->
+              assert (not (String.is_substring text ~substring:helper)))))
         (fun state ->
            (match result state "script" with
             | Complete (`String "ok") -> ()
@@ -226,6 +311,8 @@ let%expect_test
     {|
     (auto (authoring.primer))
     (manual ())
+    (manual-reference ())
+    (manual-validation ())
     (preload
      (authoring.primer chatml.introduction chatml.syntax.calls
       chatml.syntax.containers chatml.types chatml.operators chatml.tasks))

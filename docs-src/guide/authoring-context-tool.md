@@ -53,7 +53,7 @@ than widening the child's authority. A child merely consuming an ordinary tool
 does not inherit implementation-authoring prose. Runtime reload rechecks the
 effective history before inserting anything again.
 
-Complete custom-package/description integration, bounded context retention and
+Complete custom-package integration, bounded context retention and
 public qualification remain open. Manual and ordinary-tool policies produce no
 automatic messages. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
@@ -98,6 +98,14 @@ specialist, reviewer or ongoing worker, describes the follow-up management tools
 and points to `prepare` with `task: "child_agent"` when the reference helper is
 available. This gives the model a reason to discover the authoring guides before
 it attempts an unfamiliar ChatMD definition or moderator.
+
+These discovery pointers are derived from the actual selected capability metadata.
+Automatic/preload configurations expose both helpers; manual configurations mention
+only the helpers explicitly exposed. With neither helper, the authoring tool keeps
+its entrypoint description and stable package/topic identifiers. Selecting a narrower
+tool set recomputes those pointers. Model tool descriptions and retrieved tool
+inventories use the same presentation, without changing schemas, capability IDs or
+the implementations behind them. Custom authored description text is preserved.
 
 ## One strict request schema
 

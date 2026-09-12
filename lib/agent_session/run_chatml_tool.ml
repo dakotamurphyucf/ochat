@@ -186,8 +186,7 @@ let registration ~env ~policy ~services =
       Some
         "Execute a one-off ChatML main : json -> json task using an explicit tool \
          subset. Calls use f(x, y). Returns one structured outcome without creating a \
-         session. Authoring topics: chatml.syntax.calls, runtime.invocations.one-off, \
-         runtime.invocations.validation."
+         session."
     ;;
 
     let type_ = "function"

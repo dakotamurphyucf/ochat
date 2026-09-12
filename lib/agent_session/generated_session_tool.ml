@@ -22,13 +22,7 @@ let registration () =
          agent_stop tools to submit work, track it, retrieve outputs and end the \
          session. Default lifetime is owned and default start is stopped; choose \
          start_immediately=true when the child should start. Reuse the idempotency key \
-         for retries. Before authoring an unfamiliar definition or moderator, use \
-         ochat_authoring_context when available: operation=prepare, task=child_agent, \
-         version=1, and query/topic_id/features/cursor/max_tokens all null. Its feature \
-         map and guides explain definition syntax, inherited authority, moderation and \
-         the persisted-session lifecycle; then use ochat_validate when available before \
-         creation. Direct reference topic: runtime.delegation.stop-helper (includes \
-         definition and lifecycle prerequisites)."
+         for retries."
     ;;
 
     let type_ = "function"

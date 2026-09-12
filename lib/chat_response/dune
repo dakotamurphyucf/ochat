@@ -35,6 +35,7 @@
   agent_tool_contract
   tool_capability
   authoring_policy
+  authoring_tool_description
   authoring_presence
   authoring_materialization
   authoring_validation

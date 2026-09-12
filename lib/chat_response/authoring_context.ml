@@ -326,7 +326,12 @@ let orientation corpus ~host ~capabilities ~surface_id =
         match C.find capabilities ~name:reference.name with
         | Error _ -> `Null
         | Ok binding ->
-          (match (C.descriptor binding).function_.description with
+          (match
+             Authoring_tool_description.describe
+               ~capabilities
+               ~name:reference.name
+               ~description:(C.descriptor binding).function_.description
+           with
            | None -> `Null
            | Some description -> `String description)
       in
@@ -418,7 +423,12 @@ let tool_items capabilities =
       ; "topic_id", `String "reference.tools"
       ; "name", `String reference.name
       ; ( "description"
-        , match descriptor.description with
+        , match
+            Authoring_tool_description.describe
+              ~capabilities
+              ~name:reference.name
+              ~description:descriptor.description
+          with
           | None -> `Null
           | Some text -> `String text )
       ; "input_schema", descriptor.parameters
