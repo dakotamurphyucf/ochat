@@ -1,0 +1,10 @@
+<config model="o4-mini" reasoning_effort="high"/>
+<authoring_context policy="manual"/>
+<developer>HELPER_CHILD: read the report requested by your parent through the inherited file tool.</developer>
+<tool type="inherited" name="read_file"/>
+<script id="review-lifecycle" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Pre_tool_call(call) -> Task.pure(state + 1)
+| _ -> Task.pure(state)
+</script>

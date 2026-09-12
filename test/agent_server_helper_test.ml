@@ -20,6 +20,11 @@ let helper_moderator =
 
 let helper_tools = [%blob "chatml_extensibility_fixtures/x07-helper-session/tools.chatmd"]
 let helper_schema = [%blob "chatml_extensibility_fixtures/x07-helper-session/any.json"]
+
+let child_source =
+  [%blob "chatml_extensibility_fixtures/x05-child-session/helper-child.chatmd"]
+;;
+
 let watcher = [%blob "chatml_extensibility_fixtures/x06-response-watcher/watcher.chatml"]
 
 let watch_probe =
@@ -117,7 +122,8 @@ let run env helper ~native_watch =
       Eio.Path.save
         ~create:(`Exclusive 0o600)
         (path prompt)
-        ({|<developer>HELPER_PARENT</developer>
+        ({|<config model="gpt-4.1" reasoning_effort="low"/>
+<developer>HELPER_PARENT</developer>
 <tool name="specialist" agent="authored-helper.chatmd" local persistence="persistent"/>
 <tool name="run_chatml"/>
 <tool name="read_file"><read id="data" path="${workspace}"/></tool>
@@ -210,6 +216,8 @@ let run env helper ~native_watch =
         ~create:(`Exclusive 0o600)
         (path private_file)
         "HELPER_PRIVATE_FIXTURE_CONTENT";
+      let report_file = Filename.concat public "report.txt" in
+      Eio.Path.save ~create:(`Exclusive 0o600) (path report_file) "X05_REPORT_DATA";
       let provider ~sw:_ ~inputs =
         let child =
           List.exists inputs ~f:(function
@@ -236,7 +244,17 @@ let run env helper ~native_watch =
           child_tool := None;
           function_call "read_file" arguments
         | true ->
-          let answer = "persisted helper answer" in
+          let resumed =
+            List.exists inputs ~f:(fun item ->
+              String.is_substring
+                (Res.Item.jsonaf_of_t item |> Jsonaf.to_string)
+                ~substring:"X05 resumed report")
+          in
+          let answer =
+            match resumed with
+            | true -> "persisted helper answer after restart"
+            | false -> "persisted helper answer"
+          in
           let message : Res.Output_message.t =
             { role = Assistant
             ; id = "helper-answer"
@@ -402,18 +420,39 @@ let run env helper ~native_watch =
           ; "root_file", `String "child.chatmd"
           ; ( "sources"
             , `Array
-                [ `Object
-                    [ "path", `String "child.chatmd"
-                    ; ( "text"
-                      , `String
-                          {|<authoring_context policy="manual"/><developer>HELPER_CHILD</developer><tool type="inherited" name="read_file"/>|}
-                      )
-                    ]
+                [ `Object [ "path", `String "child.chatmd"; "text", `String child_source ]
                 ] )
           ; "tools", `Array [ `String "read_file" ]
           ; "start_immediately", `True
           ; "idempotency_key", `String "helper-child"
           ]
+      in
+      let checkpoint daemon child expected =
+        let snapshot =
+          Agent_session.Moderator_checkpoint.decode (state daemon child).moderator
+          |> protocol_ok
+          |> Option.value_exn
+        in
+        [%test_eq: Session.Snapshot.t] (Int expected) snapshot.current_state;
+        snapshot.script_source_hash
+      in
+      let check_child_tools daemon child =
+        let entry = R.load (D.registry daemon) child |> protocol_ok in
+        Agent_server.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
+          let native = Option.value_exn runtime.native_runtime in
+          let capabilities =
+            Lazy.force native.capabilities
+            |> Result.map_error ~f:(fun error ->
+              error.Chat_response.Tool_capability.message)
+            |> Result.ok_or_failwith
+          in
+          let names =
+            Chat_response.Tool_capability.references capabilities
+            |> List.map ~f:(fun reference -> reference.Chat_response.Tool_capability.name)
+          in
+          [%test_eq: string list] [ "read_file" ] names;
+          Ok ())
+        |> protocol_ok
       in
       let watch_subscription daemon parent subscription_id =
         List.find_exn (state daemon parent).subscriptions ~f:(fun subscription ->
@@ -501,7 +540,7 @@ let run env helper ~native_watch =
         in
         bridge ~name sw daemon client owner
       in
-      let parent_id, child_id, receipt, authored, foreign_id =
+      let parent_id, child_id, receipt, authored, foreign_id, moderator_hash =
         with_daemon (fun sw daemon client ->
           let parent, _ = create_session ~start_immediately:true client in
           await (fun () -> Option.is_none (state daemon parent.id).active_operation);
@@ -615,6 +654,7 @@ let run env helper ~native_watch =
           in
           let child = id created in
           assert (P.Id.Session.equal child (id one_off_replay));
+          check_child_tools daemon child;
           let docs_request =
             `Object
               [ "version", `Number "1"
@@ -902,7 +942,7 @@ let run env helper ~native_watch =
               ~named
               ~bridge:(authored_bridge sw daemon client parent.id foreign.id)
           in
-          parent.id, child, receipt, authored, foreign.id)
+          parent.id, child, receipt, authored, foreign.id, checkpoint daemon child 1)
       in
       Eio.Path.save
         ~create:(`Or_truncate 0o600)
@@ -930,6 +970,7 @@ let run env helper ~native_watch =
             authored;
           [%test_eq: int] before !child_calls;
           let target = [ "session_id", P.Id.Session.to_json child_id ] in
+          [%test_eq: string] moderator_hash (checkpoint daemon child_id 1);
           let replay =
             bridge sw daemon client parent_id "create" child_request |> complete
           in
@@ -961,10 +1002,86 @@ let run env helper ~native_watch =
           in
           H.start child_handle ~queue_if_limited:false |> protocol_ok |> ignore;
           await (fun () -> Option.is_none (state daemon child_id).active_operation);
+          check_child_tools daemon child_id;
           let snapshot =
             bridge sw daemon client parent_id "read" (`Object target) |> complete
           in
           assert (Jsonaf.bool_exn (field "caught_up" snapshot));
+          child_tool := Some (`Object [ "file", `String report_file ]);
+          let resumed =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "send"
+              (`Object
+                  (target
+                   @ [ "message", `String "X05 resumed report"
+                     ; "idempotency_key", `String "x05-resumed"
+                     ]))
+            |> complete
+          in
+          let resumed_query = target @ [ "receipt_id", field "receipt_id" resumed ] in
+          let waited =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "wait"
+              (`Object (resumed_query @ [ "timeout_ms", `Number "10000" ]))
+            |> complete
+          in
+          [%test_eq: string] "receipt_terminal" (text waited "reason");
+          let resumed_page =
+            bridge sw daemon client parent_id "read" (`Object resumed_query) |> complete
+          in
+          assert (
+            String.is_substring
+              (Jsonaf.to_string resumed_page)
+              ~substring:"persisted helper answer after restart");
+          let new_output =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "read"
+              (`Object (target @ [ "cursor", field "next_cursor" snapshot ]))
+            |> complete
+          in
+          assert (
+            String.is_substring
+              (Jsonaf.to_string new_output)
+              ~substring:"persisted helper answer after restart");
+          [%test_eq: string] moderator_hash (checkpoint daemon child_id 2);
+          assert (
+            List.exists (state daemon child_id).invocations ~f:(fun invocation ->
+              match invocation.status with
+              | Published (Complete value)
+                when String.equal invocation.context.tool_name "read_file" ->
+                String.is_substring (Jsonaf.to_string value) ~substring:"X05_REPORT_DATA"
+              | _ -> false));
+          let old_output =
+            bridge
+              sw
+              daemon
+              client
+              parent_id
+              "read"
+              (`Object (target @ [ "receipt_id", `String receipt ]))
+            |> complete
+          in
+          assert (
+            not
+              (String.is_substring
+                 (Jsonaf.to_string old_output)
+                 ~substring:"persisted helper answer after restart"));
+          print_endline
+            "generated moderator state and receipt-scoped exchanges survive daemon \
+             restart";
+          let snapshot = new_output in
           let paused, _release = Eio.Promise.create () in
           child_pause := Some paused;
           let sent =
