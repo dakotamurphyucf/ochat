@@ -15,6 +15,7 @@ let () =
   let expected =
     [ "agent-server/extensibility-foundations.md"
     ; "guide/chatmd-shell-extensions.md"
+    ; "guide/chatml-authoring-children.md"
     ; "guide/chatml-authoring-runtime.md"
     ; "guide/chatml-language-spec.md"
     ; "guide/chatml-match-semantics.md"

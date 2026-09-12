@@ -91,7 +91,7 @@ let topics =
   ; "runtime.invocations.moderator", "guide/chatml-authoring-runtime.md"
   ; "runtime.invocations.validation", "guide/chatml-authoring-runtime.md"
   ; "runtime.authority.tool-selection", "guide/chatml-authoring-runtime.md"
-  ; "runtime.delegation.generated", "agent-server/extensibility-foundations.md"
+  ; "runtime.delegation.generated", "guide/chatml-authoring-children.md"
   ]
 ;;
 

@@ -477,7 +477,80 @@ let runtime_foundation ~sources =
         ]
     ]
   in
+  let make_child id title prerequisites sections =
+    { id
+    ; title
+    ; prerequisites
+    ; surfaces = shared
+    ; excerpts =
+        List.map sections ~f:(fun (heading, _) ->
+          { path = "guide/chatml-authoring-children.md"
+          ; heading
+          ; include_children = false
+          })
+    ; review =
+        Audited
+          { excerpt_sha256 = List.map sections ~f:snd
+          ; evidence =
+              [ "test/agent_docs/docs_child_authoring.ml"
+              ; "test/authoring_validation_test.ml"
+              ; "test/agent_server_generated_test.ml"
+              ; "test/agent_server_generated_shell_test.ml"
+              ; "test/agent_server_helper_test.ml"
+              ; "lib/agent_session/generated_session_request.ml"
+              ; "lib/agent_session/session_management.ml"
+              ; "lib/agent_session/managed_session_service.mli"
+              ; "lib/agent_session/native_tool_invocation.ml"
+              ; "lib/agent_session/script_tool_calls.ml"
+              ; "lib/chat_response/generated_admission.ml"
+              ]
+          }
+    }
+  in
+  let children =
+    [ make_child
+        "runtime.delegation.generated"
+        "Captured child definitions and static validation"
+        [ "runtime.authority.tool-selection"
+        ; "runtime.invocations.validation"
+        ; "chatml.tasks"
+        ]
+        [ ( "# ChatML authoring: persisted child sessions"
+          , "928f6305d1a1276069889a94f78439cb75b1a20e1ca24e8c32ed1bdfd7fb67a5" )
+        ; ( "## Capture and validate a generated definition"
+          , "f9d854a4e0b53f824bb4c20197c3432fe4854dfa02a70db1e5eae5c45197af6a" )
+        ]
+    ; make_child
+        "runtime.delegation.creation"
+        "Creation retries, lifetimes and inherited authority"
+        [ "runtime.delegation.generated" ]
+        [ ( "## Create, retry and retain authority"
+          , "1fe4d0034367286bcfbb781acf2a01eac7fdf5f72a416143cd04c60fd1033f83" )
+        ]
+    ; make_child
+        "runtime.delegation.submissions"
+        "Durable submissions and terminal receipt waits"
+        [ "runtime.delegation.creation" ]
+        [ ( "## Submit work and track completion"
+          , "ae01ce63d8baeb96aa426655003c1ed82d864ae20583102414e28ef6952ea0b2" )
+        ]
+    ; make_child
+        "runtime.delegation.output"
+        "Output pages, fragments and cursor recovery"
+        [ "runtime.delegation.submissions" ]
+        [ ( "## Read output and recover cursors"
+          , "9fe135857a2020bbafbe080538233609db986ca86f683b09bc1d8a04cba6c3d1" )
+        ]
+    ; make_child
+        "runtime.delegation.stop-helper"
+        "Stop receipts and shared helper authority"
+        [ "runtime.delegation.output" ]
+        [ ( "## Stop and use the shared helper path"
+          , "df76e24e3c872f2f6ebb04dec7b2a550ead1ea92b338caa3ae2473a754250c08" )
+        ]
+    ]
+  in
   create
     ~sources
-    (List.map (topics language) ~f:(fun topic -> topic.specification) @ runtime)
+    (List.map (topics language) ~f:(fun topic -> topic.specification) @ runtime @ children)
 ;;

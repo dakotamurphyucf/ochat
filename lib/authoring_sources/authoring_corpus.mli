@@ -88,9 +88,12 @@ val pending : t -> string list
     or any of the five complete task packages. *)
 val language_foundation : sources:Authoring_sources.t -> (t, string) result
 
-(** Language topics plus seven reviewed runtime topics: execution contracts,
+(** Language topics plus seven reviewed invocation topics: execution contracts,
     extension declarations/schemas, one-off/standalone/moderator invocations,
     authority and non-executing validation. Target-specific entrypoint topics
-    cannot be assembled for other targets. This remains a foundation, not full
-    background/delegation guidance, native schemas or complete task packages. *)
+    cannot be assembled for other targets. Five additional child-session topics
+    cover captured definitions, creation/authority, receipts, output/cursor recovery
+    and stop/helper semantics. Child guidance is reference context on all four
+    surfaces, not a grant of the described tools. This remains a foundation, not
+    full background guidance, native schemas or complete task packages. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result

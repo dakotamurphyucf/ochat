@@ -70,9 +70,25 @@ the [execution-contract reference](chatml-authoring-runtime.md):
 The target-specific topics include their language, authority, validation and,
 where applicable, declaration/schema prerequisites. Requesting the standalone
 entrypoint topic on a one-off target fails with the requested topic's identity.
-These are reviewed runtime foundations, not complete background-workflow or
-generated-child packages. The complete feature/native-tool inventory, lifecycle
-topics and public helper remain separate requirements.
+The same corpus adds five topics from the
+[persisted-child reference](chatml-authoring-children.md), available as reference
+context on all four script surfaces:
+
+| Topic | Contents |
+|---|---|
+| `runtime.delegation.generated` | Captured ChatMD, inherited declarations and validation |
+| `runtime.delegation.creation` | Retry identity, stopped default, lifetimes and authority |
+| `runtime.delegation.submissions` | Message receipts, status and terminal waits |
+| `runtime.delegation.output` | Non-consuming reads, output waits, fragments and cursor recovery |
+| `runtime.delegation.stop-helper` | Stop receipts, outcome decoding and scoped helper access |
+
+These form a prerequisite chain after shared language/authority/validation
+context. A surface's ability to assemble this reference does not establish that
+its host has installed any lifecycle tool. All ten validation routing IDs now
+resolve to installed topics with matching human-document sources. These are
+reviewed foundations, not complete background-workflow or child-agent packages.
+The full feature/native-schema inventory, policy filtering and public helper
+remain separate requirements.
 
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
@@ -82,4 +98,8 @@ three runtime integration fixtures. The moderator fixture also compiles against
 the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be
 accompanied by semantic review and the relevant checks, rather than automatically
-accepting new hashes after a failure.
+accepting new hashes after a failure. The child reference separately checks its
+complete JSON creation request against the source fixture, actual creation
+decoder and non-executing generated-definition validator with an unusable file
+tool fixture. This checks captured imports and delegated moderator compilation;
+it does not claim session creation, provider execution or the full lifecycle matrix.

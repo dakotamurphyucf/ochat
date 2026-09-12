@@ -264,14 +264,12 @@ let run env root =
              id
              "validation topic points at a different source than the installed corpus"))
   in
-  (* This explicit pending item keeps the partial foundation honest until the
-     generated-child package is audited; new routing gaps must fail the gate. *)
-  (match List.equal String.equal unmapped [ "runtime.delegation.generated" ] with
-   | true -> ()
-   | false ->
+  (match unmapped with
+   | [] -> ()
+   | _ ->
      fail
        "validation routing"
-       "review missing topic coverage; only generated-child guidance remains pending here");
+       ("missing installed validation topics: " ^ String.concat ~sep:", " unmapped));
   List.iter (Authoring_sources.documents installed) ~f:(fun document ->
     let authored =
       Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / "docs-src" / document.path)

@@ -38,5 +38,8 @@ runs from `/`, outside the checkout, and retrieves the embedded references and
 target-specific entrypoint signatures. The documentation gate compares every
 embedded body with its maintained source and checks the
 [OCaml-differences examples](chatml-ocaml-differences.md) against the real compiler
-and interpreter. Broader semantic coverage and authoring-service qualification
+and interpreter. The [child-session reference](chatml-authoring-children.md)
+also checks a complete captured creation request against the real request decoder
+and generated-definition validator, without creating a session. Broader semantic
+coverage and authoring-service qualification
 remain separate from this source-packaging check.

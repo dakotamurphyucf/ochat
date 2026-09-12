@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "root_file": "child.chatmd",
+  "sources": [
+    {
+      "path": "child.chatmd",
+      "text": "<developer>Review the report requested by your parent. Read only through your inherited file tool.</developer>\n<import src=\"tools.chatmd\"/>\n<script id=\"lifecycle\" language=\"chatml\" kind=\"moderator\" api=\"extensibility-v1\">\nlet initial_state = 0\nlet on_event ctx state event = Task.pure(state)\n</script>"
+    },
+    {
+      "path": "tools.chatmd",
+      "text": "<tool type=\"inherited\" name=\"read_file\"/>"
+    }
+  ],
+  "tools": ["read_file"],
+  "start_immediately": true,
+  "lifetime": "owned",
+  "idempotency_key": "report-review-child-1"
+}
