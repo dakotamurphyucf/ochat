@@ -27,7 +27,8 @@ let registration ~host =
          useful capabilities beyond the first approach you considered. Search returns \
          topic IDs/excerpts; topic includes prerequisites. Prepare also includes exact \
          selected tool schemas and compiler signatures; retrieve these directly with \
-         topic_id=reference.tools or reference.signatures. Follow next_cursor when \
+         topic_id=reference.tools or reference.signatures. Read authoring.reference for \
+         request fields, task/feature IDs and pagination rules. Follow next_cursor when \
          complete is false, increasing max_tokens when minimum_next_tokens is returned. \
          Prepared packages are currently reviewed foundations, not full feature \
          coverage. All fields are required; set fields unused by the chosen operation to \

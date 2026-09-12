@@ -102,6 +102,19 @@ File evidence names separately executed behavioral suites. This extends the
 maintained taxonomy; legacy shell/MCP details and native operation semantics
 still require their own coverage audit.
 
+The runtime's [native extension catalog](../../lib/agent_session/extensibility_native_tools.mli)
+constructs the nine standard execution, child-session and authoring registrations.
+Runtime construction and the [native contract test](../../test/chatml_composition/native_contract_tests.ml)
+use that same exhaustive catalog. The test pins each actual description, input
+schema, strictness and result convention together with its reviewed reference
+closure. New catalog entries need an explicit reference mapping; changed tool
+contracts or prerequisite text require reviewing the corresponding expectation.
+Host-dependent implementation revisions and private reference keys are excluded
+from this public API snapshot. Registration inspection does not invoke tools or
+borrow a session. This check detects API/reference drift; it does not replace
+native lifecycle, authority, persistence or failure-behavior qualification, and
+does not yet add a native semantic inventory to the service-start coverage audit.
+
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
 and delegated moderator surfaces. The normal offline tests compare these literal
@@ -164,6 +177,16 @@ on one-off/standalone targets. The complete binding inventory adds checks for
 the other runtime families; broader semantic qualification remains separate.
 
 ## Initial topic corpus
+
+`authoring.reference` explains the query helper itself: its single strict request
+shape, task and feature IDs, search versus full-topic retrieval, selected schema
+and signature references, completeness flags, budgets and continuation recovery.
+It is readable on all four extension surfaces. The native tool description links
+directly to it. Its three source-pinned sections come from the
+[query guide](authoring-context-tool.md); operator configuration stays outside
+these model-facing excerpts. Offline integration checks run both installed JSON
+requests through pagination and retrieve the complete topic through the native
+tool in a persisted session using a fake provider.
 
 `chatmd.definitions` is a flat agent-definition reference for instructions,
 generation settings, literal markup, captured sources, inherited tools and

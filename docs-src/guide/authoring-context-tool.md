@@ -447,8 +447,10 @@ permission to use a tool. Execution still checks current bindings and authority.
 Responses identify the runtime, surface, corpus and capability fingerprint.
 `coverage` currently reports `reviewed_foundation_not_full_feature_coverage`, and
 `prepare` reports `package_complete: false`. Selected native schemas and compiler
-signatures are included, but broader language/ChatMD/runtime semantic coverage and
-context lifecycle integration remain unfinished. `topic_sequence` identifies the assembled reference topics, including
+signatures are included, but full language/ChatMD/runtime semantic qualification
+remains unfinished. Context tracking supports compaction and rediscovery; retained
+reference identities do not imply that all previously read prose remains in the
+model's current context. `topic_sequence` identifies the assembled reference topics, including
 ones on later pages; `items` contains only this page. `complete` describes pagination
 of this query, not completion of the full authoring reference.
 
@@ -459,6 +461,18 @@ ceiling. `max_tokens: null` selects the default. The current estimate is
 `ceil(UTF-8 bytes of the full JSON response / 3)` and is labelled
 `utf8_bytes_div_3_estimate`. It is not an exact tokenizer, a token upper bound or a
 provider billing measurement. The host rejects requests above its ceiling.
+
+When `complete` is false, pass `next_cursor` to `continue`, setting `task`, `query`,
+`topic_id` and `features` to null. If the next intact section cannot fit, the page
+may be empty and `budget.minimum_next_tokens` reports the estimated space needed.
+Increase the budget within the host ceiling; no source text is silently truncated.
+
+Cursors are signed and bound to the original query, corpus, host target, selected
+capabilities and invoking session/generation. Changing that context or the host's
+signing key invalidates them; repeat the original query. A continuation can change
+its response budget, but cannot switch to another session's authority or corpus.
+
+## Configure host documentation budgets
 
 Configure a daemon's immutable authoring budgets in its `server` record:
 
@@ -502,16 +516,6 @@ With none of these flags, an embedding's existing host configuration is preserve
 The flags are rejected in daemon connection and TUI legacy/administration modes;
 configure the daemon's `server.authoring_budget` instead. They do not enable
 extension tools or change the ChatMD authoring policy.
-
-When `complete` is false, pass `next_cursor` to `continue`, setting `task`, `query`,
-`topic_id` and `features` to null. If the next intact section cannot fit, the page
-may be empty and `budget.minimum_next_tokens` reports the estimated space needed.
-Increase the budget within the host ceiling; no source text is silently truncated.
-
-Cursors are signed and bound to the original query, corpus, host target, selected
-capabilities and invoking session/generation. Changing that context or the host's
-signing key invalidates them; repeat the original query. A continuation can change
-its response budget, but cannot switch to another session's authority or corpus.
 
 See the [corpus reference](authoring-topic-corpus.md),
 [query interface](../../lib/chat_response/authoring_context.mli) and

@@ -274,101 +274,8 @@ let create_agent_runtime
       resources.Agent_runtime.native, Some resources.definition, Some resources.managed)
 ;;
 
-let declares_native elements name =
-  List.exists elements ~f:(function
-    | Prompt.Chat_markdown.Tool (Builtin declared) -> String.equal declared name
-    | _ -> false)
-;;
-
-let build_native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host =
-  let registrations =
-    match declares_native elements Run_chatml_tool.name, one_off_policy with
-    | true, Some policy ->
-      [ Run_chatml_tool.registration ~env ~policy ~services:(fun () ->
-          let open Result.Let_syntax in
-          let%bind script_tools = Script_tool_calls.current_native_services () in
-          let%map moderation = Native_tool_moderation.current () in
-          Run_chatml_tool.
-            { script_tools
-            ; observer = Native_tool_moderation.observer moderation
-            ; now =
-                (fun () ->
-                  Eio.Time.now (Eio.Stdenv.clock env)
-                  |> Time_ns.Span.of_sec
-                  |> Time_ns.of_span_since_epoch
-                  |> Agent_protocol.Timestamp.of_time_ns)
-            ; moderate_tool =
-                (fun _ call ->
-                  Native_tool_moderation.prepare moderation call
-                  |> Result.map ~f:(fun tool_moderation ->
-                    Some { Moderation.Outcome.empty with tool_moderation }))
-            ; prepare_outcome =
-                (fun outcome ->
-                  Agent_protocol.Invocation.validate_outcome outcome
-                  |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
-            })
-      ]
-    | _ -> []
-  in
-  let registrations =
-    match declares_native elements Generated_session_tool.name, one_off_policy with
-    | true, Some _ -> registrations @ [ Generated_session_tool.registration () ]
-    | _ -> registrations
-  in
-  let registrations =
-    match declares_native elements Managed_session_tool.status_name, one_off_policy with
-    | true, Some _ -> registrations @ [ Managed_session_tool.status_registration () ]
-    | _ -> registrations
-  in
-  let registrations =
-    match declares_native elements Managed_send_tool.name, one_off_policy with
-    | true, Some _ -> registrations @ [ Managed_send_tool.registration () ]
-    | _ -> registrations
-  in
-  let registrations =
-    match declares_native elements Managed_read_tool.name, one_off_policy with
-    | true, Some _ -> registrations @ [ Managed_read_tool.registration () ]
-    | _ -> registrations
-  in
-  let registrations =
-    match declares_native elements Managed_wait_tool.name, one_off_policy with
-    | true, Some _ -> registrations @ [ Managed_wait_tool.registration () ]
-    | _ -> registrations
-  in
-  let registrations =
-    match declares_native elements Managed_stop_tool.name, one_off_policy with
-    | true, Some _ -> registrations @ [ Managed_stop_tool.registration () ]
-    | _ -> registrations
-  in
-  let open Result.Let_syntax in
-  let unavailable message =
-    Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
-  in
-  let%bind registrations =
-    match
-      declares_native elements Authoring_validation_tool.name, authoring_validation_host
-    with
-    | false, _ -> Ok registrations
-    | true, Some host ->
-      Ok (registrations @ [ Authoring_validation_tool.registration ~env ~host ])
-    | true, None ->
-      Error
-        (unavailable
-           "authoring.unavailable: readonly validation needs an explicit host target")
-  in
-  match
-    declares_native elements Authoring_context_tool.name, authoring_validation_host
-  with
-  | false, _ -> Ok registrations
-  | true, Some host ->
-    Authoring_context_tool.registration ~host
-    |> Result.map_error ~f:unavailable
-    |> Result.map ~f:(fun registration -> registrations @ [ registration ])
-  | true, None ->
-    Error
-      (unavailable
-         "authoring.unavailable: documentation queries need an explicit host target")
-;;
+let build_native_registrations = Extensibility_native_tools.registrations
+let declares_native = Extensibility_native_tools.declares
 
 let create_authored_resources
       ~additional_native_registrations
@@ -449,15 +356,7 @@ let create_authored_resources
     delegated_moderator
     || (not (List.is_empty additional_native_registrations))
     || (Option.is_some one_off_policy
-        && (declares_native elements Run_chatml_tool.name
-            || declares_native elements Generated_session_tool.name
-            || declares_native elements Managed_session_tool.status_name
-            || declares_native elements Managed_send_tool.name
-            || declares_native elements Managed_read_tool.name
-            || declares_native elements Managed_wait_tool.name
-            || declares_native elements Managed_stop_tool.name
-            || declares_native elements Authoring_validation_tool.name
-            || declares_native elements Authoring_context_tool.name
+        && (Extensibility_native_tools.declares_any elements
             || List.exists elements ~f:(function
               | Prompt.Chat_markdown.Extension_script _
               | Tool (Extension _)

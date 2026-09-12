@@ -74,6 +74,7 @@
     guide/chatml-background-values.md %{dep:../../docs-src/guide/chatml-background-values.md}
     guide/chatml-invocation-context.md %{dep:../../docs-src/guide/chatml-invocation-context.md}
     guide/chatml-authoring-primer.md %{dep:../../docs-src/guide/chatml-authoring-primer.md}
+    guide/authoring-context-tool.md %{dep:../../docs-src/guide/authoring-context-tool.md}
     guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
     guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}
     guide/chatml-authoring-background.md %{dep:../../docs-src/guide/chatml-authoring-background.md}

@@ -15,6 +15,7 @@
   generated_definition
   generated_session_request
   generated_session_tool
+  extensibility_native_tools
   managed_session_service
   authored_agent_call
   authored_agent_source

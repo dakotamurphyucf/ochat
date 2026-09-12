@@ -3249,6 +3249,36 @@ let runtime_foundation ~sources =
                    ]
                }
          }
+       ; { id = "authoring.reference"
+         ; title = "Documentation requests, feature discovery and continuation pages"
+         ; prerequisites = []
+         ; surfaces = shared
+         ; excerpts =
+             List.map
+               [ "## One strict request schema"
+               ; "## Interpret availability and completeness"
+               ; "## Budgets and continuation"
+               ]
+               ~f:(fun heading ->
+                 { path = "guide/authoring-context-tool.md"
+                 ; heading
+                 ; include_children = false
+                 })
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "854c730bd39b61ed4339ea9c625d1259583f32fcd9168c6798f66c00d00fe3ef"
+                   ; "454117d50b9013d59207fff0c38b004202afb63a8339c7de4fb9c5a9d15f7a04"
+                   ; "94d2d6461640995f15b97e69675fa0133b46f79bdfc7216f321751a73a5a149c"
+                   ]
+               ; evidence =
+                   [ "lib/chat_response/authoring_context.ml"
+                   ; "lib/agent_session/authoring_context_tool.ml"
+                   ; "test/chatml_composition/native_contract_tests.ml"
+                   ; "test/chatml_composition/authoring_context_tests.ml"
+                   ]
+               }
+         }
        ; { id = "authoring.primer"
          ; title = "Shared ChatML and ChatMD authoring orientation"
          ; prerequisites = []
