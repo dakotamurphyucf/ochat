@@ -334,7 +334,6 @@ let live_host env root =
   ; source_dirs = String.Map.singleton "agent.chatmd" root
   ; process_environment = [| "PATH=/usr/bin:/bin"; "TOKEN=super-private-value" |]
   ; session_id = "session-live"
-  ; resource_runner = None
   }
 ;;
 

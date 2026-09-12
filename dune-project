@@ -27,7 +27,7 @@
  (depends
   (ocaml
    (>= 5.1.0))
-  eio
+  (eio (>= 1.3))
   dune
   omd
   lambdasoup
@@ -42,7 +42,6 @@
   optint
   textmate-language
   owl
-  eio
   eio_main
   cohttp-eio
   ezgzip

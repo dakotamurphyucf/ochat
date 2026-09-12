@@ -145,7 +145,6 @@ let external_backend_boundaries env =
       ; limits
       ; environment = context.environment
       ; cwd = context.cwd
-      ; resource_runner = None
       ; request_channel = false
       }
   in

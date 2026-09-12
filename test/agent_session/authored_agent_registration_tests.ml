@@ -148,7 +148,6 @@ let%expect_test
             ~cache_dir:dir
             ~home:dir
             ~session_id:(P.Id.Session.to_string session_id)
-            ~resource_runner:None
             ~prompt_elements:elements
           |> runtime_ok
         in

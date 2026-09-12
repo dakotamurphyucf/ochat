@@ -67,7 +67,6 @@ let registry env sw root =
     ; source_dirs = String.Map.singleton "agent.chatmd" root
     ; process_environment = [| "PATH=/usr/bin:/bin" |]
     ; session_id = "shell-tool-test"
-    ; resource_runner = None
     }
   in
   Shell_runtime.Registry.instantiate
@@ -152,7 +151,6 @@ let with_agent_runtime_input env root source f =
       ~cache_dir:root
       ~home:root
       ~session_id:"agent-runtime-test"
-      ~resource_runner:None
       ~prompt_elements:elements
     |> agent_runtime_or_fail
   in
@@ -679,7 +677,6 @@ let%expect_test "phase2 shell modes execute through ChatMD and return structured
     ; source_dirs = String.Map.singleton "agent.chatmd" root
     ; process_environment = [| "PATH=/usr/bin:/bin" |]
     ; session_id = "shell-tool-phase2"
-    ; resource_runner = None
     }
   in
   let registry =

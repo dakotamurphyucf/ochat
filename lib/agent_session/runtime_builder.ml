@@ -193,7 +193,6 @@ let host ~env ~paths ~session_id ~elements =
     ~cache_dir:paths.cache_dir
     ~home:paths.home
     ~session_id:(Agent_protocol.Id.Session.to_string session_id)
-    ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
     ~prompt_elements:elements
   |> map_diagnostics
 ;;

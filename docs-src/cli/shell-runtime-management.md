@@ -105,7 +105,6 @@ commands that do not run the interactive UI.
 | `OCHAT_SHELL_MANIFEST_SIGNATURE` | Canonical manifest signature path. |
 | `OCHAT_SHELL_MANIFEST_PUBLIC_KEYS` | Ed25519 public key set. |
 | `OCHAT_SHELL_SIGNATURE_AUDIENCE` | Signature audience, default `ochat`. |
-| `OCHAT_SHELL_RESOURCE_RUNNER` | Optional structured OS-resource-limit helper. |
 
 Missing required security material is a startup error. Values are loaded with
 Eio and are never silently ignored when policy requires them.

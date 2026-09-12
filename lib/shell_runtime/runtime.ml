@@ -1218,7 +1218,6 @@ let config
       ~cwd
       ~process_env:environment.values
       ~limits
-      ?resource_runner:host.resource_runner
       ~secret_filter
       ~audit
       ~audit_sequence

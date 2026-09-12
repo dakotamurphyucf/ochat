@@ -11,8 +11,9 @@ and [shell declaration/compiler](../chatmd_shell_spec/architecture.doc.md).
 
 For daemon/local host ownership, authorization bootstrap and all seven path
 variables, start with [shell host integration](../../guide/chatmd-shell-host-integration.md).
-The [resource runner](../../bin/ochat_shell_resource_runner.doc.md) enforces selected
-OS process limits; it is not a transport or an independent sandbox. Session actor
+The linked [child process setup](process_spawn.doc.md) enforces selected OS
+process limits before the sandbox backend executes. It is not a transport or an
+independent sandbox. Session actor
 lifetime owns runtime cancellation; disconnecting a detached client does not
 cancel its processes. Restart does not resurrect a running process.
 

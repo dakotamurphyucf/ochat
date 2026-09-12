@@ -195,13 +195,6 @@
 
 (executable
  (package ochat)
- (name ochat_shell_resource_runner)
- (public_name ochat-shell-resource-runner)
- (modules ochat_shell_resource_runner)
- (libraries core core_unix))
-
-(executable
- (package ochat)
  (name ochat_agent_server)
  (public_name ochat-agent-server)
  (modules ochat_agent_server)

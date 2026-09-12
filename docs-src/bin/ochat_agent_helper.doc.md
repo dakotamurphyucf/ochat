@@ -27,7 +27,7 @@ callers must inspect the application result.
 handler. `Executor.with_request_channel` lends that handler to a single-process
 execution. The executor requires built-in verified Seatbelt or bubblewrap
 confinement, required sandbox mode, disabled network and privilege changes, and
-the trusted [resource runner](ochat_shell_resource_runner.doc.md). Direct,
+linked [child descriptor cleanup](../lib/shell_access/process_spawn.doc.md). Direct,
 external, simulated and pipeline execution cannot host this channel.
 
 The host authorizes the final execution context after ordinary authorization and
@@ -37,8 +37,8 @@ private credentials and control endpoints. The transport cannot infer where
 those resources reside. A required sandbox by itself is not proof that a
 particular host's credentials are inaccessible.
 
-The resource runner closes unrelated inherited descriptors before loading the
-helper. The host checks channel authority before each request and again before
+Linked child setup closes unrelated inherited descriptors before loading the
+sandbox backend and helper. The host checks channel authority before each request and again before
 disclosing the handler's response. Invocation cancellation or helper exit cancels
 and joins a suspended handler. The handler must implement its own durable
 operation semantics: losing a reply does not imply that an admitted operation

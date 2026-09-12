@@ -99,5 +99,6 @@ access. Interrupted work after restart may have unknown external effects: inspec
 before retrying. See [persistence/audit](chatmd-shell-persistence-and-audit.md).
 
 The [shell tutorial](../agent-server/tutorials/shell-agent.md) separates a narrow
-tool declaration from its host authorization. The [resource runner](../bin/ochat_shell_resource_runner.doc.md)
-must be available when requested limits require it.
+tool declaration from its host authorization. Optional OS limits use linked
+[child process setup](../lib/shell_access/process_spawn.doc.md); they require no
+companion executable or Ochat self-execution.

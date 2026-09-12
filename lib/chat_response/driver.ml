@@ -670,7 +670,6 @@ let rec run_agent
       ~cache_dir:response_dir
       ~home:(Agent_runtime.default_home (Ctx.env ctx))
       ~session_id:runtime_session_id
-      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
       ~prompt_elements:elements
     |> Result.map_error ~f:(fun diagnostics ->
       List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
@@ -1207,7 +1206,6 @@ let run_completion_stream
       ~cache_dir:datadir
       ~home:(Agent_runtime.default_home env)
       ~session_id:runtime_session_id
-      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
       ~prompt_elements:elements
     |> Result.map_error ~f:(fun diagnostics ->
       List.map diagnostics ~f:Agent_runtime.diagnostic_to_string

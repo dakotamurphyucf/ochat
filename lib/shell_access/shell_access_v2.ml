@@ -1744,7 +1744,6 @@ module Execution_plan = struct
     ; limits : Limits.t
     ; environment : string array
     ; cwd : string
-    ; resource_runner : Executable.t option
     ; request_channel : bool
     }
 end
@@ -1825,37 +1824,6 @@ module Backend = struct
     || Option.is_some limits.open_files
   ;;
 
-  let resource_args limits =
-    List.concat
-      [ Option.value_map limits.Limits.cpu_seconds ~default:[] ~f:(fun value ->
-          [ "--cpu"; Int.to_string value ])
-      ; Option.value_map limits.memory_bytes ~default:[] ~f:(fun value ->
-          [ "--memory"; Int.to_string value ])
-      ; Option.value_map limits.file_size_bytes ~default:[] ~f:(fun value ->
-          [ "--file-size"; Int.to_string value ])
-      ; Option.value_map limits.open_files ~default:[] ~f:(fun value ->
-          [ "--open-files"; Int.to_string value ])
-      ]
-  ;;
-
-  let apply_resource_runner plan ~executable ~argv =
-    if (not (has_os_limits plan.Execution_plan.limits)) && not plan.request_channel
-    then Ok (executable, argv)
-    else (
-      match plan.resource_runner with
-      | None ->
-        Error
-          "OS resource limits or a private request channel require a configured resource \
-           runner"
-      | Some runner ->
-        Ok
-          ( runner.Executable.canonical_path
-          , (runner.canonical_path :: resource_args plan.limits)
-            @ (if plan.request_channel then [ "--close-extra-fds" ] else [])
-            @ [ "--"; executable ]
-            @ List.tl_exn argv ))
-  ;;
-
   let direct =
     { name = "direct-unsafe"
     ; available_fn = (fun _fs -> true)
@@ -1866,13 +1834,11 @@ module Backend = struct
     ; prepare_fn =
         (fun _fs plan ->
           let executable = plan.Execution_plan.context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable
-               ~argv:(executable :: plan.context.command.arguments))
-            ~f:(fun (executable, argv) ->
-              { executable; argv; environment = plan.environment }))
+          Ok
+            { executable
+            ; argv = executable :: plan.context.command.arguments
+            ; environment = plan.environment
+            })
     }
   ;;
 
@@ -1901,50 +1867,40 @@ module Backend = struct
         (fun _fs plan ->
           let context = plan.Execution_plan.context in
           let executable = context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable
-               ~argv:(executable :: context.command.arguments))
-            ~f:(fun (limited_executable, limited_argv) ->
-              let read_roots =
-                [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
-                @ context.capabilities.read_roots
-                @ context.capabilities.write_roots
-              in
-              let exec_paths =
-                List.dedup_and_sort
-                  [ executable; limited_executable ]
-                  ~compare:String.compare
-                |> List.map ~f:(fun path ->
-                  Printf.sprintf
-                    "(allow process-exec (literal \"%s\"))"
-                    (seatbelt_escape path))
-              in
-              let profile =
-                String.concat
-                  ~sep:"\n"
-                  ([ "(version 1)"
-                   ; "(deny default)"
-                   ; "(allow file-read-metadata)"
-                   ; "(allow file-read-data (literal \"/\"))"
-                   ; "(allow sysctl-read)"
-                   ; "(allow mach-lookup)"
-                   ]
-                   @ exec_paths
-                   @ (if context.capabilities.allow_child_processes
-                      then [ "(allow process-fork)" ]
-                      else [])
-                   @ List.map read_roots ~f:(seatbelt_rule "file-read*")
-                   @ List.map
-                       context.capabilities.write_roots
-                       ~f:(seatbelt_rule "file-write*")
-                   @ if context.capabilities.network then [ "(allow network*)" ] else [])
-              in
-              { executable = "/usr/bin/sandbox-exec"
-              ; argv = "/usr/bin/sandbox-exec" :: "-p" :: profile :: "--" :: limited_argv
-              ; environment = plan.environment
-              }))
+          let read_roots =
+            [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
+            @ context.capabilities.read_roots
+            @ context.capabilities.write_roots
+          in
+          let profile =
+            String.concat
+              ~sep:"\n"
+              ([ "(version 1)"
+               ; "(deny default)"
+               ; "(allow file-read-metadata)"
+               ; "(allow file-read-data (literal \"/\"))"
+               ; "(allow sysctl-read)"
+               ; "(allow mach-lookup)"
+               ; Printf.sprintf
+                   "(allow process-exec (literal \"%s\"))"
+                   (seatbelt_escape executable)
+               ]
+               @ (if context.capabilities.allow_child_processes
+                  then [ "(allow process-fork)" ]
+                  else [])
+               @ List.map read_roots ~f:(seatbelt_rule "file-read*")
+               @ List.map
+                   context.capabilities.write_roots
+                   ~f:(seatbelt_rule "file-write*")
+               @ if context.capabilities.network then [ "(allow network*)" ] else [])
+          in
+          Ok
+            { executable = "/usr/bin/sandbox-exec"
+            ; argv =
+                [ "/usr/bin/sandbox-exec"; "-p"; profile; "--"; executable ]
+                @ context.command.arguments
+            ; environment = plan.environment
+            })
     }
   ;;
 
@@ -1962,29 +1918,24 @@ module Backend = struct
         (fun fs plan ->
           let context = plan.Execution_plan.context in
           let target = context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable:target
-               ~argv:(target :: context.command.arguments))
-            ~f:(fun (limited_executable, limited_argv) ->
-              let bind flag path = [ flag; path; path ] in
-              let system_roots =
-                List.filter
-                  [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
-                  ~f:(Path_util.file_exists ~fs)
-              in
-              let args =
-                [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
-                @ (if context.capabilities.network then [ "--share-net" ] else [])
-                @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
-                @ List.concat_map system_roots ~f:(bind "--ro-bind")
-                @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
-                @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
-                @ [ "--chdir"; plan.cwd; "--" ]
-                @ limited_argv
-              in
-              { executable; argv = args; environment = plan.environment }))
+          let bind flag path = [ flag; path; path ] in
+          let system_roots =
+            List.filter
+              [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
+              ~f:(Path_util.file_exists ~fs)
+          in
+          let argv =
+            [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
+            @ (if context.capabilities.network then [ "--share-net" ] else [])
+            @ (if plan.request_channel then [ "--preserve-fds"; "2" ] else [])
+            @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
+            @ List.concat_map system_roots ~f:(bind "--ro-bind")
+            @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
+            @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
+            @ [ "--chdir"; plan.cwd; "--"; target ]
+            @ context.command.arguments
+          in
+          Ok { executable; argv; environment = plan.environment })
     }
   ;;
 
@@ -2000,6 +1951,21 @@ module Backend = struct
   ;;
 
   let repeated { flag } values = List.concat_map values ~f:(fun value -> [ flag; value ])
+
+  (* External backend templates may still forward limits to their own wrapper.
+     The native spawn path enforces these bounds before that wrapper executes. *)
+  let resource_args limits =
+    List.concat
+      [ Option.value_map limits.Limits.cpu_seconds ~default:[] ~f:(fun value ->
+          [ "--cpu"; Int.to_string value ])
+      ; Option.value_map limits.memory_bytes ~default:[] ~f:(fun value ->
+          [ "--memory"; Int.to_string value ])
+      ; Option.value_map limits.file_size_bytes ~default:[] ~f:(fun value ->
+          [ "--file-size"; Int.to_string value ])
+      ; Option.value_map limits.open_files ~default:[] ~f:(fun value ->
+          [ "--open-files"; Int.to_string value ])
+      ]
+  ;;
 
   let expand_atom plan target_argv = function
     | Literal value -> [ value ]
@@ -2146,7 +2112,6 @@ module Executor = struct
     ; cwd : string
     ; process_env : string array
     ; limits : Limits.t
-    ; resource_runner_path : string option
     ; secret_filter : Secret_filter.t
     ; audit : Audit.t
     ; audit_sequence : int Atomic.t
@@ -2334,7 +2299,6 @@ module Executor = struct
         ?cwd
         ?process_env
         ?(limits = Limits.default)
-        ?resource_runner
         ?(secret_filter = Secret_filter.empty)
         ?(audit = Audit.ignore)
         ?(audit_sequence = Atomic.make 0)
@@ -2373,7 +2337,6 @@ module Executor = struct
     ; cwd
     ; process_env
     ; limits
-    ; resource_runner_path = resource_runner
     ; secret_filter
     ; audit
     ; audit_sequence
@@ -2671,28 +2634,6 @@ module Executor = struct
       raise (Execution_error (Script_changed "script file changed after authorization"))
   ;;
 
-  let resolve_resource_runner config =
-    if
-      (not (Backend.has_os_limits config.limits)) && Option.is_none config.request_channel
-    then None
-    else (
-      match config.resource_runner_path with
-      | None -> None
-      | Some runner ->
-        let command = Command.create runner [] in
-        (match
-           Resolver.resolve
-             config.resolver
-             ~fs:config.fs
-             ~cwd:config.cwd
-             ~environment:config.process_env
-             command
-         with
-         | Ok executable -> Some executable
-         | Error error ->
-           raise (Execution_error (Resolution_error ("resource runner: " ^ error)))))
-  ;;
-
   let rec prepare_command_inner
             config
             ~request_id
@@ -2896,7 +2837,6 @@ module Executor = struct
         | Ok backend -> backend
         | Error error -> raise (Execution_error error)
       in
-      let resource_runner = resolve_resource_runner config in
       authorize_request_channel config backend context;
       let plan =
         Execution_plan.
@@ -2905,7 +2845,6 @@ module Executor = struct
           ; limits = config.limits
           ; environment = config.process_env
           ; cwd = config.cwd
-          ; resource_runner
           ; request_channel = Option.is_some config.request_channel
           }
       in
@@ -3007,8 +2946,7 @@ module Executor = struct
   ;;
 
   let verify_plan config plan =
-    verify_executable config plan.Execution_plan.context.executable;
-    Option.iter plan.resource_runner ~f:(verify_executable config)
+    verify_executable config plan.Execution_plan.context.executable
   ;;
 
   let rec audit_termination config = function
@@ -3071,6 +3009,19 @@ module Executor = struct
             check_execution config;
             authorize_request_channel config stage.backend stage.plan.context;
             verify_plan config stage.plan;
+            let manager =
+              match
+                Backend.has_os_limits stage.plan.limits || stage.plan.request_channel
+              with
+              | false -> (manager :> Eio_unix.Process.mgr_ty Eio.Resource.t)
+              | true ->
+                Process_spawn.manager
+                  ~cpu_seconds:stage.plan.limits.cpu_seconds
+                  ~memory_bytes:stage.plan.limits.memory_bytes
+                  ~file_size_bytes:stage.plan.limits.file_size_bytes
+                  ~open_files:stage.plan.limits.open_files
+                  ~close_extra_fds:stage.plan.request_channel
+            in
             let child =
               match List.nth_exn channels index with
               | Some (_, (_, request_sink), (response_source, _)) ->

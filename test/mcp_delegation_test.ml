@@ -61,7 +61,6 @@ let%expect_test "inherited MCP identity and live catalog cannot silently change"
                       ~cache_dir:path
                       ~home:path
                       ~session_id:"parent"
-                      ~resource_runner:None
                       ~prompt_elements
                     |> runtime
                   in

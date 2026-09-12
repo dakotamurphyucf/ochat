@@ -231,6 +231,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/authored_agent_call.mli` | [contract](../../lib/agent_session/authored_agent_call.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authored_agent_source.mli` | [contract](../../lib/agent_session/authored_agent_source.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_context_tool.mli` | [contract](../../lib/agent_session/authoring_context_tool.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
+| `lib/agent_session/authoring_services.mli` | [contract](../../lib/agent_session/authoring_services.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_validation_tool.mli` | [contract](../../lib/agent_session/authoring_validation_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/automatic_turn_budget.mli` | [contract](../../lib/agent_session/automatic_turn_budget.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/background_execution.mli` | [contract](../../lib/agent_session/background_execution.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -549,6 +550,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/openai/responses.mli` | [contract](../../lib/openai/responses.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/shell_access/process_spawn.mli` | [contract](../../lib/shell_access/process_spawn.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/request_channel.mli` | [contract](../../lib/shell_access/request_channel.mli) | [integration](../bin/ochat_agent_helper.doc.md) | Public interface + current host guide. |
 | `lib/shell_access/shell_access.mli` | [contract](../../lib/shell_access/shell_access.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/shell_access_v2.mli` | [contract](../../lib/shell_access/shell_access_v2.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -648,7 +650,6 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../bin/ochat_agent_helper.doc.md) | `docs-src/bin/ochat_agent_helper.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/ochat_agent_server.doc.md) | `docs-src/bin/ochat_agent_server.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/ochat_agent_stdio.doc.md) | `docs-src/bin/ochat_agent_stdio.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
-| [page](../bin/ochat_shell_resource_runner.doc.md) | `docs-src/bin/ochat_shell_resource_runner.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/odoc_index.doc.md) | `docs-src/bin/odoc_index.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/odoc_search.doc.md) | `docs-src/bin/odoc_search.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../chat_tui/app.doc.md) | `docs-src/chat_tui/app.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -888,6 +889,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/session.doc.md) | `docs-src/lib/session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session_store.doc.md) | `docs-src/lib/session_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/shell_access/architecture.doc.md) | `docs-src/lib/shell_access/architecture.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/shell_access/process_spawn.doc.md) | `docs-src/lib/shell_access/process_spawn.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/shell_runtime/architecture.doc.md) | `docs-src/lib/shell_runtime/architecture.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/source.doc.md) | `docs-src/lib/source.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/template.doc.md) | `docs-src/lib/template.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

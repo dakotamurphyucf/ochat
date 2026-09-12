@@ -52,7 +52,6 @@ let host env root : Shell_runtime.Host.t =
   ; source_dirs = String.Map.singleton "stream.chatmd" root
   ; process_environment = [| "PATH=/usr/bin:/bin" |]
   ; session_id = "stream-test"
-  ; resource_runner = None
   }
 ;;
 

@@ -175,7 +175,6 @@ let host
       ~cache_dir
       ~home
       ~session_id
-      ~resource_runner
       ~prompt_elements
   =
   let declarations = declarations prompt_elements in
@@ -192,7 +191,6 @@ let host
       ; source_dirs
       ; process_environment = Core_unix.environment ()
       ; session_id
-      ; resource_runner
       })
 ;;
 
@@ -580,7 +578,7 @@ let create_native
                      let resource_fingerprint =
                        let path value = Eio.Path.native_exn value in
                        [%sexp
-                         ("ochat.tool-resources.v1" : string)
+                         ("ochat.tool-resources.v2" : string)
                        , ([ path (Ctx.dir ctx)
                           ; path (Ctx.tool_dir ctx)
                           ; path host.workspace
@@ -595,7 +593,6 @@ let create_native
                           |> List.map ~f:(fun (name, value) -> name, path value)
                           : (string * string) list)
                        , (host.process_environment : string array)
-                       , (host.resource_runner : string option)
                        , (Option.map shell_manifest ~f:(fun manifest ->
                             manifest.Chatmd_shell_spec.Manifest.sha256)
                           : string option)

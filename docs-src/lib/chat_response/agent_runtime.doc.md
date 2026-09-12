@@ -82,7 +82,7 @@ val moderator_process_handler
        option
 
 (** [host ~env ~workspace ~tool_dir ~prompt_dir ~session_dir ~cache_dir ~home
-    ~session_id ~resource_runner ~prompt_elements] creates the explicit host
+    ~session_id ~prompt_elements] creates the explicit host
     capabilities used by shell runtime instantiation. Source-relative roots
     are derived only from declaration provenance retained by the ChatMD
     parser. *)
@@ -95,7 +95,6 @@ val host
   -> cache_dir:Eio.Fs.dir_ty Eio.Path.t
   -> home:Eio.Fs.dir_ty Eio.Path.t
   -> session_id:string
-  -> resource_runner:string option
   -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
   -> (Shell_runtime.Host.t, diagnostic list) result
 

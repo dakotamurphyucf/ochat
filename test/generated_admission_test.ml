@@ -91,7 +91,6 @@ let () =
               ~cache_dir:root
               ~home:root
               ~session_id:"parent"
-              ~resource_runner:None
               ~prompt_elements
             |> runtime
           in

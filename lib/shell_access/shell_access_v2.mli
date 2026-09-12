@@ -482,7 +482,6 @@ module Execution_plan : sig
     ; limits : Limits.t
     ; environment : string array
     ; cwd : string
-    ; resource_runner : Executable.t option
     ; request_channel : bool
     }
 end
@@ -641,7 +640,6 @@ module Executor : sig
     -> ?cwd:Eio.Fs.dir_ty Eio.Path.t
     -> ?process_env:string array
     -> ?limits:Limits.t
-    -> ?resource_runner:string
     -> ?secret_filter:Secret_filter.t
     -> ?audit:Audit.t
     -> ?audit_sequence:int Atomic.t
@@ -675,8 +673,8 @@ module Executor : sig
       environment and filesystem roots (including implicit platform roots),
       excluding broader host credentials/control sockets. It runs after normal
       authorization and again immediately before
-      spawn. A verified resource runner is required to close inherited descriptors
-      above 4 in the child before executing the helper. The channel's own live check
+      spawn. Linked child setup closes inherited descriptors above 4 before
+      executing the sandbox backend and helper. The channel's own live check
       must validate its admitting caller.
       Existing channels cannot be replaced by nested configuration. *)
   val with_request_channel

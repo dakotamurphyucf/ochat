@@ -81,7 +81,7 @@ let function_call name arguments =
   |> Stdlib.List.to_seq
 ;;
 
-let run env helper runner ~native_watch =
+let run env helper ~native_watch =
   Mirage_crypto_rng_unix.use_default ();
   let root = temporary_root env |> Caml_unix.realpath in
   let path file = Eio.Path.(Eio.Stdenv.fs env / file) in
@@ -91,15 +91,13 @@ let run env helper runner ~native_watch =
       let public = Filename.concat root "public" in
       Eio.Path.mkdir ~perm:0o700 (path public);
       let helper_path = Filename.concat public "helper" in
-      let runner_path = Filename.concat public "runner" in
       List.iter
-        [ helper, helper_path; runner, runner_path ]
+        [ helper, helper_path ]
         ~f:(fun (source, target) ->
           Eio.Path.save
             ~create:(`Exclusive 0o700)
             (path target)
             (Eio.Path.load (path source)));
-      Caml_unix.putenv "OCHAT_SHELL_RESOURCE_RUNNER" runner_path;
       List.iter
         [ "helper-request.chatml", helper_request
         ; ( "authored-helper.chatmd"
@@ -1144,5 +1142,5 @@ let () =
   let args = Sys.get_argv () in
   Eio_main.run (fun env ->
     List.iter [ false; true ] ~f:(fun native_watch ->
-      run env (Caml_unix.realpath args.(1)) (Caml_unix.realpath args.(2)) ~native_watch))
+      run env (Caml_unix.realpath args.(1)) ~native_watch))
 ;;

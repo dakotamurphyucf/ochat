@@ -1,7 +1,7 @@
 open Core
 module S = Shell_access
 
-let run env helper probe runner =
+let run env helper probe =
   let root =
     Core_unix.mkdtemp "/tmp/ochat-request-channel.XXXXXX" |> Caml_unix.realpath
   in
@@ -13,7 +13,6 @@ let run env helper probe runner =
       Eio.Path.mkdir ~perm:0o700 (path public);
       let helper_path = Filename.concat public "helper" in
       let probe_path = Filename.concat public "probe" in
-      let runner_path = Filename.concat public "runner" in
       Eio.Path.save
         ~create:(`Exclusive 0o700)
         (path helper_path)
@@ -22,10 +21,6 @@ let run env helper probe runner =
         ~create:(`Exclusive 0o700)
         (path probe_path)
         (Eio.Path.load (path probe));
-      Eio.Path.save
-        ~create:(`Exclusive 0o700)
-        (path runner_path)
-        (Eio.Path.load (path runner));
       let resolver = S.Resolver.create ~trusted_roots:[ public ] () in
       let calls = ref 0 in
       let authorized = ref true in
@@ -47,7 +42,13 @@ let run env helper probe runner =
         ; sandbox = Required
         }
       in
-      let config ?(capabilities = capabilities) ?backends () =
+      let config
+            ?(capabilities = capabilities)
+            ?backends
+            ?(limits =
+              { S.Limits.default with wall_time_seconds = 30.; idle_time_seconds = None })
+            ()
+        =
         S.Executor.config
           ~env
           ~runtime_id:"request-channel"
@@ -59,9 +60,7 @@ let run env helper probe runner =
           ~cwd:(path public)
           ~process_env:[||]
           ~audit
-          ~resource_runner:runner_path
-          ~limits:
-            { S.Limits.default with wall_time_seconds = 30.; idle_time_seconds = None }
+          ~limits
           ()
       in
       let channel ?(limits = S.Request_channel.default_limits) handle =
@@ -219,12 +218,19 @@ let run env helper probe runner =
       let socket_path = Filename.concat root "control.sock" in
       Eio.Path.save ~create:(`Exclusive 0o600) (path secret) "fixture-private-token";
       let secret_fd = Core_unix.openfile secret ~mode:[ O_RDONLY ] in
+      let inherited = ref [ secret_fd ] in
       let listener = Caml_unix.socket PF_UNIX SOCK_STREAM 0 in
       Exn.protect
         ~finally:(fun () ->
-          Core_unix.close secret_fd;
+          List.iter !inherited ~f:Core_unix.close;
           Caml_unix.close listener)
         ~f:(fun () ->
+          (* Exceed the native cleanup batch size. Explicitly inheritable handles
+             ensure close-on-exec defaults cannot hide incomplete cleanup. *)
+          Core_unix.clear_close_on_exec secret_fd;
+          for _ = 1 to 160 do
+            inherited := Core_unix.dup ~close_on_exec:false secret_fd :: !inherited
+          done;
           Caml_unix.bind listener (ADDR_UNIX socket_path);
           Caml_unix.listen listener 1;
           Caml_unix.putenv "CHANNEL_PARENT_ONLY" "fixture-parent-value";
@@ -236,13 +242,17 @@ let run env helper probe runner =
               ~arguments:
                 [ secret
                 ; socket_path
-                ; Int.to_string descriptor
+                ; List.map !inherited ~f:(fun fd ->
+                    Core_unix.File_descr.to_int fd |> Int.to_string)
+                  |> String.concat ~sep:","
                 ; Int.to_string (Core_unix.fstat secret_fd).st_ino
                 ]
               (attach (config ()) echo)
               "{}"
             |> success
           in
+          List.iter !inherited ~f:(fun fd ->
+            [%test_eq: int] (Core_unix.fstat secret_fd).st_ino (Core_unix.fstat fd).st_ino);
           let flags = Jsonaf.of_string isolated.stdout in
           List.iter
             [ "file_access"; "socket_access"; "descriptor_access"; "parent_environment" ]
@@ -252,6 +262,179 @@ let run env helper probe runner =
               | false ->
                 failwith
                   ("helper isolation failed: " ^ name ^ " " ^ Jsonaf.to_string flags)));
+      let module R = Core_unix.RLimit in
+      let parent_limits () =
+        [ R.cpu_seconds; R.file_size; R.num_file_descriptors ]
+        @ Option.to_list (Result.ok R.virtual_memory)
+        |> List.map ~f:R.get
+        |> [%sexp_of: R.t list]
+      in
+      let original_parent_limits = parent_limits () in
+      let bound resource ceiling =
+        match (R.get resource).max with
+        | Infinity -> ceiling
+        | Limit inherited ->
+          Int64.min inherited (Int64.of_int ceiling) |> Int64.to_int_exn
+      in
+      let cpu = bound R.cpu_seconds 30 in
+      let file_size = bound R.file_size 8192 in
+      let open_files = bound R.num_file_descriptors 128 in
+      let memory =
+        Result.ok R.virtual_memory
+        |> Option.map ~f:(fun resource -> bound resource 1_099_511_627_776)
+      in
+      let limited =
+        { S.Limits.default with
+          wall_time_seconds = 30.
+        ; idle_time_seconds = None
+        ; cpu_seconds = Some cpu
+        ; file_size_bytes = Some file_size
+        ; open_files = Some open_files
+        ; memory_bytes = memory
+        }
+      in
+      let applied =
+        invoke
+          ~program:probe_path
+          ~arguments:[ "--limits" ]
+          (attach (config ~limits:limited ()) echo)
+          "{}"
+        |> success
+      in
+      let actual = Jsonaf.of_string applied.stdout in
+      List.iter
+        ([ "cpu", cpu; "file_size", file_size; "open_files", open_files ]
+         @ Option.to_list (Option.map memory ~f:(fun n -> "memory", n)))
+        ~f:(fun (name, expected) ->
+          let limits = Jsonaf.member_exn name actual in
+          List.iter [ "soft"; "hard" ] ~f:(fun field ->
+            let actual = Jsonaf.member_exn field limits |> Jsonaf.int_exn in
+            [%test_eq: int] expected actual));
+      print_endline "resource limits survive confined exec with exact soft/hard bounds";
+      let before = !calls in
+      (match
+         invoke
+           (attach (config ~limits:{ limited with file_size_bytes = Some (-1) } ()) echo)
+           "{}"
+       with
+       | Error (Spawn_error message)
+         when String.is_substring message ~substring:"resource limit must be nonnegative"
+         -> ()
+       | _ -> failwith "negative OS limit did not reject before target execution");
+      [%test_eq: int] before !calls;
+      let first_ready, mark_first_ready = Eio.Promise.create () in
+      let second_ready, mark_second_ready = Eio.Promise.create () in
+      let cancel_first, request_cancel_first = Eio.Promise.create () in
+      let first_done, mark_first_done = Eio.Promise.create () in
+      let release_second, finish_second = Eio.Promise.create () in
+      let second_finished = ref false in
+      let alternate_file_size = Int.max 0 (file_size / 2) in
+      let alternate = { limited with file_size_bytes = Some alternate_file_size } in
+      let check_file_size expected request =
+        let reported = Jsonaf.of_string request |> Jsonaf.member_exn "file_size" in
+        List.iter [ "soft"; "hard" ] ~f:(fun key ->
+          [%test_eq: int] expected (Jsonaf.member_exn key reported |> Jsonaf.int_exn))
+      in
+      Eio.Fiber.all
+        [ (fun () ->
+            Eio.Fiber.first
+              (fun () ->
+                 let first =
+                   channel (fun request ->
+                     check_file_size file_size request;
+                     Eio.Promise.resolve mark_first_ready ();
+                     Eio.Fiber.await_cancel ())
+                 in
+                 ignore
+                   (invoke
+                      ~program:probe_path
+                      ~arguments:[ "--limits" ]
+                      (attach (config ~limits:limited ()) first)
+                      "{}");
+                 failwith "first child should remain active until cancelled")
+              (fun () -> Eio.Promise.await cancel_first);
+            Eio.Promise.resolve mark_first_done ())
+        ; (fun () ->
+            let second =
+              channel (fun request ->
+                check_file_size alternate_file_size request;
+                Eio.Promise.resolve mark_second_ready ();
+                Eio.Promise.await release_second;
+                request)
+            in
+            let result =
+              invoke
+                ~program:probe_path
+                ~arguments:[ "--limits" ]
+                (attach (config ~limits:alternate ()) second)
+                "{}"
+              |> success
+            in
+            check_file_size alternate_file_size result.stdout;
+            second_finished := true)
+        ; (fun () ->
+            Eio.Promise.await first_ready;
+            Eio.Promise.await second_ready;
+            assert (Sexp.equal original_parent_limits (parent_limits ()));
+            Eio.Promise.resolve request_cancel_first ();
+            Eio.Promise.await first_done;
+            assert (not !second_finished);
+            assert (Sexp.equal original_parent_limits (parent_limits ()));
+            Eio.Promise.resolve finish_second ())
+        ];
+      assert !second_finished;
+      assert (Sexp.equal original_parent_limits (parent_limits ()));
+      print_endline
+        "concurrent child limits are independent; cancellation is isolated; parent \
+         limits unchanged";
+      let domain_manager = Eio.Stdenv.domain_mgr env in
+      let first_entered, enter_first = Eio.Promise.create () in
+      let second_entered, enter_second = Eio.Promise.create () in
+      let domain_child payload entered other_entered =
+        Eio.Domain_manager.run domain_manager (fun () ->
+          (* Keep per-invocation policy/audit state local to each domain. Only
+             immutable paths and thread-safe synchronization are shared. *)
+          let config =
+            S.Executor.config
+              ~env
+              ~runtime_id:"domain-request-channel"
+              ~manifest_sha256:"domain-channel-fixture"
+              ~policy:(S.Policy.create ~default:Allow [])
+              ~capabilities
+              ~resolver:(S.Resolver.create ~trusted_roots:[ public ] ())
+              ~cwd:(path public)
+              ~process_env:[||]
+              ~limits:limited
+              ()
+          in
+          let channel =
+            S.Request_channel.create
+              ~limits:S.Request_channel.default_limits
+              ~check:(fun () -> true)
+              ~handle:(fun request ->
+                Eio.Promise.resolve entered ();
+                Eio.Promise.await other_entered;
+                request)
+            |> Result.ok_or_failwith
+          in
+          let result =
+            S.Executor.run
+              (attach config channel)
+              { request = S.Request.command (S.Command.create helper_path [])
+              ; input = S.Input.Text payload
+              ; rationale = None
+              ; origin = S.Context.Host "domain-request-channel-test"
+              }
+            |> success
+          in
+          [%test_eq: string] (payload ^ "\n") result.stdout)
+      in
+      Eio.Fiber.both
+        (fun () -> domain_child "\"first-domain\"" enter_first second_entered)
+        (fun () -> domain_child "\"second-domain\"" enter_second first_entered);
+      assert (Sexp.equal original_parent_limits (parent_limits ()));
+      print_endline
+        "confined helper children exchange and reap across concurrent Eio domains";
       print_endline
         "real confined helper exchange, backend denial, byte limits, revocation and \
          cancellation passed")
@@ -260,6 +443,5 @@ let run env helper probe runner =
 let () =
   let helper = (Sys.get_argv ()).(1) |> Caml_unix.realpath in
   let probe = (Sys.get_argv ()).(2) |> Caml_unix.realpath in
-  let runner = (Sys.get_argv ()).(3) |> Caml_unix.realpath in
-  Eio_main.run (fun env -> run env helper probe runner)
+  Eio_main.run (fun env -> run env helper probe)
 ;;

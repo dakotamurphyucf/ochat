@@ -119,8 +119,7 @@
   (run
    %{test}
    %{exe:../bin/ochat_agent_helper.exe}
-   %{exe:request_channel_probe.exe}
-   %{exe:../bin/ochat_shell_resource_runner.exe}))
+   %{exe:request_channel_probe.exe}))
  (preprocess
   (pps ppx_jane)))
 
@@ -942,8 +941,7 @@
  (action
   (run
    %{test}
-   %{exe:../bin/ochat_agent_helper.exe}
-   %{exe:../bin/ochat_shell_resource_runner.exe}))
+   %{exe:../bin/ochat_agent_helper.exe}))
  (preprocess
   (pps ppx_jane ppx_blob)))
 

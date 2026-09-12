@@ -56,7 +56,7 @@ For a specific declaration, go directly to the
 - [Persistence and audit](guide/chatmd-shell-persistence-and-audit.md)
 - [Examples](guide/chatmd-shell-examples.md)
 - [Management CLI](cli/shell-runtime-management.md)
-- [Resource-limit helper](bin/ochat_shell_resource_runner.doc.md)
+- [Child process setup](lib/shell_access/process_spawn.doc.md)
 - [Complete shell-agent walkthrough](agent-server/tutorials/shell-agent.md)
 
 ## Operate and develop

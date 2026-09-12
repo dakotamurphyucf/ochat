@@ -78,7 +78,6 @@ let parent_runtime ~env ~sw ~root =
       ~cache_dir:root
       ~home:root
       ~session_id:(P.Id.Session.to_string third_session_id)
-      ~resource_runner:None
       ~prompt_elements:elements
     |> Result.map_error ~f:(fun errors ->
       String.concat ~sep:"; " (List.map errors ~f:AR.diagnostic_to_string))

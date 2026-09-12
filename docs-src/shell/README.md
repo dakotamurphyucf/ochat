@@ -45,8 +45,8 @@ of the commands they can run.
 - [TUI guide](../guide/chat_tui.md): security views, approvals, and navigation.
 - [Server permission profiles](../agent-server/permissions-and-security.md):
   session and client permissions alongside tool policy.
-- [Resource-limit helper](../bin/ochat_shell_resource_runner.doc.md): deployment
-  requirements for the helper process.
+- [Child process setup](../lib/shell_access/process_spawn.doc.md): optional OS
+  limits and descriptor isolation.
 - [Runtime internals](../guide/chatmd-shell-runtime-internals.md): implementation
   details for contributors.
 

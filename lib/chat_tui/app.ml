@@ -173,7 +173,6 @@ module Setup = struct
       ~cache_dir:response_dir
       ~home:(Agent_runtime.default_home (Ctx.env ctx))
       ~session_id
-      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
       ~prompt_elements
     |> Result.map_error ~f:(fun diagnostics ->
       List.map diagnostics ~f:Agent_runtime.diagnostic_to_string

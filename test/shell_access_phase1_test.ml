@@ -689,9 +689,7 @@ let%expect_test "audit failure policy is explicit" =
         ()
     in
     match
-      S.Executor.run
-        config
-        (invocation (S.Request.command (S.Command.create "echo" [])))
+      S.Executor.run config (invocation (S.Request.command (S.Command.create "echo" [])))
     with
     | Ok _ -> "ok"
     | Error (Audit_unavailable _) -> "audit-unavailable"
@@ -725,7 +723,9 @@ let%expect_test "rewrite depth is bounded" =
         ~backends:[ fake_backend () ]
         ()
     in
-    match S.Executor.run config (invocation (S.Request.command (S.Command.create "echo" []))) with
+    match
+      S.Executor.run config (invocation (S.Request.command (S.Command.create "echo" [])))
+    with
     | Ok _ -> print_endline "unexpected"
     | Error error -> print_endline (S.Executor.error_to_string error));
   [%expect {| command denied: too many command rewrites |}]
@@ -765,7 +765,9 @@ let%expect_test "reviewer metadata is emitted without hidden reasoning" =
         ~backends:[ fake_backend () ]
         ()
     in
-    ignore (run_exn config (S.Request.command (S.Command.create "echo" [])) : S.Executor.result);
+    ignore
+      (run_exn config (S.Request.command (S.Command.create "echo" []))
+       : S.Executor.result);
     List.rev !events
     |> List.iter ~f:(function
       | S.Audit.Reviewer_completed (_, metadata, action) ->
@@ -819,15 +821,15 @@ let%expect_test "backend confinement and availability are inspectable" =
     |}]
 ;;
 
-let%expect_test "resource runner identity is verified before spawn" =
+let%expect_test "constrained executable identity is verified immediately before spawn" =
   Eio_main.run
   @@ fun env ->
   let fs = Eio.Stdenv.fs env in
-  let directory = Core_unix.mkdtemp "/tmp/shell-access-runner.XXXXXX" in
-  let runner = Filename.concat directory "runner" in
+  let directory = Core_unix.mkdtemp "/tmp/shell-access-constrained.XXXXXX" in
+  let executable = Filename.concat directory "command" in
   Eio.Path.save
     ~create:(`Exclusive 0o755)
-    Eio.Path.(fs / runner)
+    Eio.Path.(fs / executable)
     "#!/bin/sh\nexec \"$@\"\n";
   let audit =
     S.Audit.create ~failure_policy:Ignore_failure (fun envelope ->
@@ -835,7 +837,7 @@ let%expect_test "resource runner identity is verified before spawn" =
        | Plan_created _ ->
          Eio.Path.save
            ~create:(`Or_truncate 0o755)
-           Eio.Path.(fs / runner)
+           Eio.Path.(fs / executable)
            "#!/bin/sh\nexit 99\n"
        | _ -> ());
       Ok ())
@@ -849,7 +851,6 @@ let%expect_test "resource runner identity is verified before spawn" =
       ~policy:allow_all
       ~capabilities:(dev_caps ~sandbox:Direct_unsafe env)
       ~limits
-      ~resource_runner:runner
       ~audit
       ~backends:[ S.Backend.direct ]
       ()
@@ -857,7 +858,7 @@ let%expect_test "resource runner identity is verified before spawn" =
   let result =
     S.Executor.run
       config
-      (invocation (S.Request.command (S.Command.create "echo" [])))
+      (invocation (S.Request.command (S.Command.create executable [])))
   in
   print_endline
     (match result with
