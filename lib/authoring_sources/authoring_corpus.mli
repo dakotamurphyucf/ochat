@@ -240,7 +240,7 @@ module Coverage : sig
   val runtime_features : semantic_feature list
 
   (** Requires nonempty unique selections from the four extensibility surfaces.
-      Compilation/execution policy and jobs have mappings on all four; moderator
+      Compilation/execution policy, lifecycle and jobs have mappings on all four; moderator
       state/control, subscriptions, timers,
       notifications and ingress have mappings only on the two moderator surfaces.
       Readable guidance does not install or authorize any operation. *)

@@ -3255,6 +3255,36 @@ let runtime_foundation ~sources =
                    ]
                }
          }
+       ; { id = "runtime.lifecycle"
+         ; title = "Stop, compaction, reset, source replacement and workflow recovery"
+         ; prerequisites = [ "runtime.recovery.background" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-session-lifecycle.md"
+               ; heading = "# Session lifecycle and workflow recovery"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "a98281f44e0119f40b75e98a8c15fb8d6d70d18a0b132dbcdadf00731530c61b" ]
+               ; evidence =
+                   [ "lib/agent_session/administration.ml"
+                   ; "lib/agent_session/session_actor.ml"
+                   ; "lib/agent_server/command_handler.ml"
+                   ; "lib/agent_server/runtime_owner.ml"
+                   ; "lib/agent_session/managed_submission_tracking.ml"
+                   ; "lib/agent_server/managed_output_cursor.ml"
+                   ; "test/chatml_composition/notification_administration_tests.ml"
+                   ; "test/agent_session/notification_compaction_tests.ml"
+                   ; "test/agent_session/managed_submission_recovery_tests.ml"
+                   ; "test/agent_session/extension_stop_tests.ml"
+                   ; "test/chatml_composition/moderator_upgrade_tests.ml"
+                   ; "test/chatml_composition/timer_upgrade_tests.ml"
+                   ]
+               }
+         }
        ; { id = "runtime.execution"
          ; title = "Execution budgets, cancellation, nested scope and persisted state"
          ; prerequisites = [ "chatml.evaluation"; "chatml.task-effects" ]

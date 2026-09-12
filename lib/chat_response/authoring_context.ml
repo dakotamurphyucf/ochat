@@ -308,6 +308,7 @@ let roots task request =
            :: "chatml.programs"
            :: "chatml.task-effects"
            :: "runtime.execution"
+           :: "runtime.lifecycle"
            :: base)
           @ extra)
          ~compare:String.compare)
@@ -428,7 +429,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
         "Retrying work, cancelling existing jobs, or relying on a task or moderator \
          state to survive a process restart."
         Background_workflow
-        [ "runtime.recovery.background" ]
+        [ "runtime.recovery.background"; "runtime.lifecycle" ]
     ]
   in
   let tools =

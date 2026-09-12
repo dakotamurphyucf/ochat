@@ -736,6 +736,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-ocaml-differences.md) | `docs-src/guide/chatml-ocaml-differences.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-parsing-and-diagnostics.md) | `docs-src/guide/chatml-parsing-and-diagnostics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-runtime-control.md) | `docs-src/guide/chatml-runtime-control.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-session-lifecycle.md) | `docs-src/guide/chatml-session-lifecycle.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-strings.md) | `docs-src/guide/chatml-strings.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-surface-inventory.md) | `docs-src/guide/chatml-surface-inventory.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-tables.md) | `docs-src/guide/chatml-tables.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

@@ -39,6 +39,7 @@ let () =
     ; "guide/chatml-native-requests.md"
     ; "guide/chatml-ocaml-differences.md"
     ; "guide/chatml-runtime-control.md"
+    ; "guide/chatml-session-lifecycle.md"
     ; "guide/chatml-strings.md"
     ; "guide/chatml-surface-inventory.md"
     ; "guide/chatml-tables.md"

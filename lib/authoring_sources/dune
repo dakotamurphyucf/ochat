@@ -46,6 +46,9 @@
     lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
     lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
     lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/administration.ml %{dep:../agent_session/administration.ml}
+    lib/agent_server/command_handler.ml %{dep:../agent_server/command_handler.ml}
+    lib/agent_server/runtime_owner.ml %{dep:../agent_server/runtime_owner.ml}
     lib/agent_session/staged_jobs.ml %{dep:../agent_session/staged_jobs.ml}
     lib/agent_session/staged_notifications.ml %{dep:../agent_session/staged_notifications.ml}
     lib/agent_session/staged_subscriptions.ml %{dep:../agent_session/staged_subscriptions.ml}
@@ -144,6 +147,7 @@
     guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
     guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
     guide/chatml-execution-limits.md %{dep:../../docs-src/guide/chatml-execution-limits.md}
+    guide/chatml-session-lifecycle.md %{dep:../../docs-src/guide/chatml-session-lifecycle.md}
     guide/chatmd-authoring-definitions.md %{dep:../../docs-src/guide/chatmd-authoring-definitions.md}
     guide/chatmd-authoring-capabilities.md %{dep:../../docs-src/guide/chatmd-authoring-capabilities.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}

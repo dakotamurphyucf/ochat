@@ -43,6 +43,7 @@ For a specific declaration, go directly to the
 - [ChatML moderator runtime](guide/chatml-moderator-runtime.md)
 - [ChatML language](guide/chatml-language-spec.md)
 - [ChatML execution limits, cancellation and state](guide/chatml-execution-limits.md)
+- [Session lifecycle and workflow recovery](guide/chatml-session-lifecycle.md)
 - [Background agent tutorial](agent-server/tutorials/background-agent.md)
 - [Interactive TUI keys and views](guide/chat_tui.md)
 - [File-backed completion CLI](cli/chat-completion.md)

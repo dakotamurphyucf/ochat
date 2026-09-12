@@ -3,7 +3,48 @@
    to separately executed behavior suites. Surface mappings describe readable
    contracts, never an authority grant. *)
 let shared_features =
-  [ ( "compilation.policy"
+  [ ( "lifecycle.history"
+    , "Compaction retains work; generation reset retires live authority and preserves \
+       receipt identity"
+    , [ "lib/agent_session/administration.ml"
+      ; "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/managed_submission_tracking.ml"
+      ; "lib/agent_server/managed_output_cursor.ml"
+      ; "lib/agent_session/notification_delivery.ml"
+      ]
+    , "runtime.lifecycle"
+    , [ "test/chatml_composition/notification_administration_tests.ml"
+      ; "test/agent_session/notification_compaction_tests.ml"
+      ; "test/agent_session/managed_submission_recovery_tests.ml"
+      ; "test/agent_session/managed_output_cursor_tests.ml"
+      ] )
+  ; ( "lifecycle.source_replacement"
+    , "Stopped revision admission, source-owned retirement and no automatic state or \
+       event migration"
+    , [ "lib/agent_server/command_handler.ml"
+      ; "lib/agent_server/runtime_owner.ml"
+      ; "lib/chat_response/background_delivery.ml"
+      ; "lib/agent_session/script_schedule_service.ml"
+      ; "lib/agent_session/external_ingress.ml"
+      ]
+    , "runtime.lifecycle"
+    , [ "test/chatml_composition/moderator_upgrade_tests.ml"
+      ; "test/chatml_composition/background_upgrade_tests.ml"
+      ; "test/chatml_composition/timer_upgrade_tests.ml"
+      ] )
+  ; ( "lifecycle.stop"
+    , "Graceful and cancel dispositions, joined cleanup and independent child lifetimes"
+    , [ "lib/agent_session/session_actor.ml"
+      ; "lib/agent_session/background_execution.ml"
+      ; "lib/agent_server/runtime_owner.ml"
+      ; "lib/agent_server/delegation_lifecycle.ml"
+      ]
+    , "runtime.lifecycle"
+    , [ "test/agent_session/extension_stop_tests.ml"
+      ; "test/agent_session/delegation_lifecycle_tests.ml"
+      ; "test/chatml_composition/background_shell_tests.ml"
+      ] )
+  ; ( "compilation.policy"
     , "No-effect compiler domains, explicit policy and cooperative cancellation"
     , [ "lib/chatml/chatml_compilation.ml" ]
     , "runtime.execution"
@@ -158,7 +199,19 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/chatml/chatml_compilation.ml"
+  [ ( "lib/agent_session/administration.ml"
+    , "d63ea3ff1e6e3afa5aa13a85069252dc417aec8a1a5e8fbd7b6aab9666b409d0" )
+  ; ( "lib/agent_server/command_handler.ml"
+    , "b5d00899cfa47677fe24eeaf280a14c3870e22bbed5484a2b8187b541bebe618" )
+  ; ( "lib/agent_server/runtime_owner.ml"
+    , "f7593e18eaa9df2d7cb4d37c0cc0542148e65364af9b76a383ded0937e93a30f" )
+  ; ( "lib/agent_session/managed_submission_tracking.ml"
+    , "395c05cb876b720af5c416d65202281e2878c3fd8732cebf56263d4f1edde0e4" )
+  ; ( "lib/agent_server/managed_output_cursor.ml"
+    , "d5db2b48aa4a0c4a1b05704054ef3c41557ea31c8c4b92d8f538406185af472c" )
+  ; ( "lib/agent_server/delegation_lifecycle.ml"
+    , "5bfed8ecc3cd3f7976457adbab4a5e875f8b56bd08f4856d18149c694303ad49" )
+  ; ( "lib/chatml/chatml_compilation.ml"
     , "5b5f2a27e8615fc45c8050c7015fc36b33d9f4314379496ff7f1c5683d2efa3b" )
   ; ( "lib/chatml/chatml_execution.ml"
     , "e2272786e56f379f14bd6fba149ca2e822c74a05ef512a87185bdbb518018afe" )
@@ -235,6 +288,18 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "runtime.lifecycle"
+    , "67bfe132296406fa0f952d3ff96a8cc04d55b47a74a4d029a6898a8185964496" )
+  ; ( "tool_v1"
+    , "runtime.lifecycle"
+    , "58416121d8b4febec31ea46aac5ad4c75401c648519e27581c9945a6262f4ee3" )
+  ; ( "moderator_v1"
+    , "runtime.lifecycle"
+    , "fcce5a8d5061bbd7ed7ea2aba42375d4aae4b23f92bfd8d74699bf4d561692b9" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.lifecycle"
+    , "57e06b5149a415436f2bc93d8f47f7e923e3c8294a5fd2c009c35f159bc8df28" )
+  ; ( "one_off_v1"
     , "runtime.execution"
     , "c080dc6cef32933bd0f105bc7911980cc4895d71a7d3281ea0d8ebe6a0abe84e" )
   ; ( "tool_v1"
