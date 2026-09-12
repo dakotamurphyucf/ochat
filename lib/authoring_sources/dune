@@ -44,7 +44,41 @@
     lib/meta_prompting/preprocessor.ml %{dep:../meta_prompting/preprocessor.ml}
     lib/chatmd/chatmd_attributes.ml %{dep:../chatmd/chatmd_attributes.ml}
     lib/chatmd_shell_spec/duration.ml %{dep:../chatmd_shell_spec/duration.ml}
-    lib/chatmd_shell_spec/source_ref.ml %{dep:../chatmd_shell_spec/source_ref.ml}))))
+    lib/chatmd_shell_spec/source_ref.ml %{dep:../chatmd_shell_spec/source_ref.ml}
+    lib/agent_protocol/invocation.ml %{dep:../agent_protocol/invocation.ml}
+    lib/agent_server/delegated_runtime.ml %{dep:../agent_server/delegated_runtime.ml}
+    lib/agent_server/delegation_lifecycle.ml %{dep:../agent_server/delegation_lifecycle.ml}
+    lib/agent_server/managed_output_cursor.ml %{dep:../agent_server/managed_output_cursor.ml}
+    lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
+    lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
+    lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}
+    lib/agent_session/authoring_reference_scope.ml %{dep:../agent_session/authoring_reference_scope.ml}
+    lib/agent_session/authoring_services.ml %{dep:../agent_session/authoring_services.ml}
+    lib/agent_session/authoring_validation_tool.ml %{dep:../agent_session/authoring_validation_tool.ml}
+    lib/agent_session/delegation_authority.ml %{dep:../agent_session/delegation_authority.ml}
+    lib/agent_session/generated_definition.ml %{dep:../agent_session/generated_definition.ml}
+    lib/agent_session/generated_session_request.ml %{dep:../agent_session/generated_session_request.ml}
+    lib/agent_session/generated_session_tool.ml %{dep:../agent_session/generated_session_tool.ml}
+    lib/agent_session/managed_read_tool.ml %{dep:../agent_session/managed_read_tool.ml}
+    lib/agent_session/managed_send_tool.ml %{dep:../agent_session/managed_send_tool.ml}
+    lib/agent_session/managed_session_service.ml %{dep:../agent_session/managed_session_service.ml}
+    lib/agent_session/managed_session_tool.ml %{dep:../agent_session/managed_session_tool.ml}
+    lib/agent_session/managed_stop.ml %{dep:../agent_session/managed_stop.ml}
+    lib/agent_session/managed_stop_tool.ml %{dep:../agent_session/managed_stop_tool.ml}
+    lib/agent_session/managed_submission.ml %{dep:../agent_session/managed_submission.ml}
+    lib/agent_session/managed_submission_tracking.ml %{dep:../agent_session/managed_submission_tracking.ml}
+    lib/agent_session/managed_wait_tool.ml %{dep:../agent_session/managed_wait_tool.ml}
+    lib/agent_session/native_tool_invocation.ml %{dep:../agent_session/native_tool_invocation.ml}
+    lib/agent_session/one_off_execution.ml %{dep:../agent_session/one_off_execution.ml}
+    lib/agent_session/run_chatml_tool.ml %{dep:../agent_session/run_chatml_tool.ml}
+    lib/agent_session/script_tool_calls.ml %{dep:../agent_session/script_tool_calls.ml}
+    lib/agent_session/session_management.ml %{dep:../agent_session/session_management.ml}
+    lib/agent_session/session_management_native.ml %{dep:../agent_session/session_management_native.ml}
+    lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
+    lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
+    lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}
+    lib/chat_response/one_off_request.ml %{dep:../chat_response/one_off_request.ml}
+    lib/chat_response/one_off_script.ml %{dep:../chat_response/one_off_script.ml}))))
 
 (rule
  (targets bundled_grammar.ml)
@@ -75,6 +109,7 @@
     guide/chatml-invocation-context.md %{dep:../../docs-src/guide/chatml-invocation-context.md}
     guide/chatml-authoring-primer.md %{dep:../../docs-src/guide/chatml-authoring-primer.md}
     guide/authoring-context-tool.md %{dep:../../docs-src/guide/authoring-context-tool.md}
+    guide/chatml-native-requests.md %{dep:../../docs-src/guide/chatml-native-requests.md}
     guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
     guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}
     guide/chatml-authoring-background.md %{dep:../../docs-src/guide/chatml-authoring-background.md}
@@ -97,7 +132,7 @@
 (library
  (name authoring_corpus)
  (public_name ochat.authoring_corpus)
- (modules authoring_corpus grammar_coverage_data semantic_coverage_data declaration_coverage_data)
- (private_modules grammar_coverage_data semantic_coverage_data declaration_coverage_data)
+ (modules authoring_corpus grammar_coverage_data semantic_coverage_data declaration_coverage_data native_coverage_data)
+ (private_modules grammar_coverage_data semantic_coverage_data declaration_coverage_data native_coverage_data)
  (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))

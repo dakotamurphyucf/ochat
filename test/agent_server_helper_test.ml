@@ -123,6 +123,7 @@ let run env helper ~native_watch =
         ~create:(`Exclusive 0o600)
         (path prompt)
         ({|<config model="gpt-4.1" reasoning_effort="low"/>
+<authoring_context policy="manual"/>
 <developer>HELPER_PARENT</developer>
 <tool name="specialist" agent="authored-helper.chatmd" local persistence="persistent"/>
 <tool name="run_chatml"/>

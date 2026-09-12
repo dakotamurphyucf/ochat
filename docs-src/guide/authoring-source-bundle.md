@@ -21,7 +21,11 @@ production a digest of its left/right symbols and semantic action. It also recor
 build-time hashes of seven language implementation sources: the lexer, parser,
 type checker, resolver, evaluator, runtime values and value codec. Twenty further
 source hashes cover reviewed ChatMD declarations, source capture, generated
-admission, authoring policy and authored persistence contracts. The bundle
+admission, authoring policy and authored persistence contracts. Thirty-four
+additional sources cover native computation/validation/reference adapters,
+captured child creation, delegated authority and managed lifecycle operations.
+The native taxonomy uses 35 sources including the already captured generated
+admission implementation; there are 61 distinct implementation hashes. The bundle
 identity hashes the format version and sorted document, surface, production and
 implementation contracts. Changing any of these inputs changes the source
 identity. The structural `manifest` exposes these hashes without repeating

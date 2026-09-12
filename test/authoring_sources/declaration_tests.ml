@@ -9,7 +9,7 @@ let%expect_test "declaration coverage accounts for sources and rejects missing m
   let sources = S.installed () |> ok in
   let corpus = C.runtime_foundation ~sources |> ok in
   let paths =
-    V.semantic_features @ V.declaration_features
+    V.semantic_features @ V.declaration_features @ V.native_features
     |> List.concat_map ~f:(fun feature -> feature.implementation_paths)
     |> List.dedup_and_sort ~compare:String.compare
   in
@@ -36,5 +36,5 @@ let%expect_test "declaration coverage accounts for sources and rejects missing m
       (List.length V.declaration_features : int)
     , (List.length targets : int)
     , (List.length paths : int)];
-  [%expect {| (14 42 27) |}]
+  [%expect {| (14 42 61) |}]
 ;;

@@ -219,6 +219,19 @@ module Coverage : sig
 
   val declaration_mappings : mapping list
 
+  (** Native computation, validation/reference, captured creation and managed
+      session semantics. This maintained taxonomy is separate from the actual
+      runtime catalog's descriptor snapshots. Surface IDs identify readable
+      guidance, not availability or authorization of host services. *)
+  val native_features : semantic_feature list
+
+  val native_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  val native_mappings : mapping list
+
   (** Digest the complete prerequisite-first topic closure for this surface.
       Every topic must be audited; a prerequisite change invalidates the pin
       even if the root topic's excerpts remain unchanged. *)

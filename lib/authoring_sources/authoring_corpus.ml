@@ -538,6 +538,7 @@ module Coverage = struct
 
   let semantic_features = features Semantic_coverage_data.features
   let declaration_features = features Declaration_coverage_data.features
+  let native_features = features Native_coverage_data.features
 
   let semantic_contract ~surface_id ~implementation_sources feature =
     let open Result.Let_syntax in
@@ -631,6 +632,8 @@ module Coverage = struct
         ~surface_ids
   ;;
 
+  let native_targets = feature_targets ~namespace:"native" ~features:native_features
+
   let feature_mappings
         ~namespace
         ~features
@@ -672,6 +675,15 @@ module Coverage = struct
       ~implementation_sources:Declaration_coverage_data.implementation_sources
       ~topic_contracts:Declaration_coverage_data.topic_contracts
       ~surface_ids:[ "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+  ;;
+
+  let native_mappings =
+    feature_mappings
+      ~namespace:"native"
+      ~features:native_features
+      ~implementation_sources:Native_coverage_data.implementation_sources
+      ~topic_contracts:Native_coverage_data.topic_contracts
+      ~surface_ids:[ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
   ;;
 
   let grammar_targets ~sources ~surface_ids =
@@ -3246,6 +3258,31 @@ let runtime_foundation ~sources =
                    ; "lib/agent_server/session_factory.ml"
                    ; "test/agent_docs/docs_chatml_control.ml"
                    ; "test/moderation/moderator_native_requests_test.ml"
+                   ]
+               }
+         }
+       ; { id = "runtime.native.requests"
+         ; title =
+             "Native computation requests, limits and non-executing validation reports"
+         ; prerequisites = [ "runtime.invocations.validation" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-native-requests.md"
+               ; heading = "# Native computation and validation requests"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "9e24239b9f0faefb1095ec4302f9847871ea9071019fc9e2a3c9ef57c14e3ce3" ]
+               ; evidence =
+                   [ "lib/chat_response/one_off_request.ml"
+                   ; "lib/chat_response/authoring_validation.ml"
+                   ; "lib/agent_session/run_chatml_tool.ml"
+                   ; "lib/agent_session/authoring_validation_tool.ml"
+                   ; "test/chatml_composition/native_contract_tests.ml"
+                   ; "test/authoring_validation_test.ml"
                    ]
                }
          }

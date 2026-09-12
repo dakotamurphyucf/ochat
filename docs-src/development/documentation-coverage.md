@@ -730,6 +730,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-match-semantics.md) | `docs-src/guide/chatml-match-semantics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-moderator-data.md) | `docs-src/guide/chatml-moderator-data.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-moderator-runtime.md) | `docs-src/guide/chatml-moderator-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-native-requests.md) | `docs-src/guide/chatml-native-requests.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-ocaml-differences.md) | `docs-src/guide/chatml-ocaml-differences.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-parsing-and-diagnostics.md) | `docs-src/guide/chatml-parsing-and-diagnostics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-runtime-control.md) | `docs-src/guide/chatml-runtime-control.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

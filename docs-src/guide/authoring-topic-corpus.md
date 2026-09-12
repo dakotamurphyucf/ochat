@@ -112,8 +112,27 @@ contracts or prerequisite text require reviewing the corresponding expectation.
 Host-dependent implementation revisions and private reference keys are excluded
 from this public API snapshot. Registration inspection does not invoke tools or
 borrow a session. This check detects API/reference drift; it does not replace
-native lifecycle, authority, persistence or failure-behavior qualification, and
-does not yet add a native semantic inventory to the service-start coverage audit.
+native lifecycle, authority, persistence or failure-behavior qualification.
+
+`Coverage.native_features` separately records 17 reviewed native behavior groups:
+one-off requests/ownership/results, validation requests and deferred checks,
+reference operations and paging, captured creation/retries/lifetimes, management
+authority, status/submission/output/wait/stop and the shared helper adapter.
+Its 68 mappings cover readable guidance on the four extension surfaces, with
+35 implementation source pins and 28 prerequisite-closure pins. These include
+actual native adapters, request decoders, delegation authority, receipt/output
+code and the shared session factory. Hashes detect changes to these sources;
+they do not automatically discover new semantics or prove all behavior correct.
+The source participation gate now covers 61 distinct language, declaration and
+native implementation files. Query-service construction checks native mappings
+alongside the other maintained inventories before serving documentation.
+
+The native request guide closes the field-level gaps for `run_chatml` and all
+four `ochat_validate` targets. Its complete JSON requests run through actual
+native tools with a fake provider; the moderator's intentionally failing
+initializer remains unevaluated. Separately run child/session helper tests cover
+the lifecycle contracts. The helper-only fixture explicitly uses manual authoring
+policy so automatic native documentation helpers cannot invalidate its premise.
 
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
@@ -137,7 +156,8 @@ build would defeat this check. Authoring-context service construction also audit
 this maintained subset against the installed compiler and corpus; incompatible
 reviewed guidance fails before queries are served. Service construction now
 requires complete mappings for all four maintained inventories: bindings,
-grammar productions, language semantics and ChatMD declarations. Packages remain labelled
+grammar productions, language semantics, ChatMD declarations and native operation
+semantics. Packages remain labelled
 incomplete while the other required feature mappings are missing.
 
 After reviewing a module's implementation, writing its full reference, and running
@@ -156,9 +176,10 @@ that module's documentation check.
 
 Use `--globals TOPIC_ID` or `--alias NAME TOPIC_ID` to inspect those candidate
 families. `--semantics` prints the maintained language rules, source hashes and
-candidate topic contracts. `--declarations` does the same for ChatMD, defaulting
+candidate topic contracts. `--native` reports native behavior groups, their source
+contracts and reference closures. `--declarations` does the same for ChatMD, defaulting
 to its three compatible surfaces. `--changed-docs` lists changed topic closures
-only after verifying that reviewed binding, grammar, semantic and declaration contracts still match;
+only after verifying that reviewed binding, grammar, semantic, declaration and native contracts still match;
 it never updates pins. Optional trailing surface IDs select a narrower exact set;
 for example:
 
@@ -177,6 +198,12 @@ on one-off/standalone targets. The complete binding inventory adds checks for
 the other runtime families; broader semantic qualification remains separate.
 
 ## Initial topic corpus
+
+`runtime.native.requests` explains native computation inputs and limit overrides,
+shared deadlines and outcome handling, plus the four validation request shapes
+and interpretation of reports. It is readable on all four extension surfaces;
+the computation and validation tool descriptions link directly to it. This does
+not make native tools available outside the invoking scope's selection.
 
 `authoring.reference` explains the query helper itself: its single strict request
 shape, task and feature IDs, search versus full-topic retrieval, selected schema

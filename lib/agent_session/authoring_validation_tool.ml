@@ -15,7 +15,8 @@ let registration ~env ~host =
         "Validate ChatML or captured ChatMD without evaluating it. Version 1 targets: \
          one_off_script, standalone_tool, moderator, generated_chatmd. Returns \
          source-bound diagnostics and deferred runtime checks; validation grants no \
-         execution authority. Topic: runtime.invocations.validation."
+         execution authority. Read runtime.native.requests for target-specific fields \
+         and report handling; runtime.invocations.validation explains deferred checks."
     ;;
 
     let type_ = "function"

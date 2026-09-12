@@ -34,6 +34,7 @@ let () =
     ; "guide/chatml-match-semantics.md"
     ; "guide/chatml-moderator-data.md"
     ; "guide/chatml-moderator-runtime.md"
+    ; "guide/chatml-native-requests.md"
     ; "guide/chatml-ocaml-differences.md"
     ; "guide/chatml-runtime-control.md"
     ; "guide/chatml-strings.md"

@@ -41,12 +41,12 @@ let all_registrations env host =
 let documentation name =
   let shared = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
   match name with
-  | "run_chatml" -> "runtime.invocations.one-off", [ "one_off_v1" ]
+  | "run_chatml" -> "runtime.native.requests", shared
   | "agent_create" -> "runtime.delegation.creation", shared
   | "agent_status" | "agent_send" -> "runtime.delegation.submissions", shared
   | "agent_read" | "agent_wait" -> "runtime.delegation.output", shared
   | "agent_stop" -> "runtime.delegation.stop-helper", shared
-  | "ochat_validate" -> "runtime.invocations.validation", shared
+  | "ochat_validate" -> "runtime.native.requests", shared
   | "ochat_authoring_context" -> "authoring.reference", shared
   | name -> failwith ("native tool needs a reviewed reference mapping: " ^ name)
 ;;
@@ -84,9 +84,9 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
         [%sexp (name : string), (topic_id : string), (api : string), (reference : string)]));
   [%expect
     {|
-    (run_chatml runtime.invocations.one-off
-     24ab48ad9325d81fba3c1946524bf9d806241264e2d742bc6f891510c8958d63
-     6a11707d42ddb1db4f5c7773d33566cace3ddb7b941cc26b7a7c2df6204cfe83)
+    (run_chatml runtime.native.requests
+     cedc80aa5b6589d7acbe45078be963eaecb5058bfe69daf19bf896e668d68985
+     dfc6623a1207b02f61a03eb5fe37eb08defb8d1d4f44bc1f2da3a939477a9910)
     (agent_create runtime.delegation.creation
      f50060c1bdd22759d368f8962e1f21f2f347fdcc2bb5383d392d99025f5dd664
      d5f8d1f4eb80fc380ed92f9ac6ed3bbddffac71884044246fd279f5fab11f022)
@@ -105,19 +105,19 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     (agent_stop runtime.delegation.stop-helper
      d10ebc8001ca0ea8e709be0a4ee5a3d64de024e9fcff086774aba2463a9d1a6d
      b195262b33cf574fa441e55a5ad630857d2972646e4350c5e3bc8b47adecc45b)
-    (ochat_validate runtime.invocations.validation
-     be4d9f636dcf5174cbfc9ac7d8f8c5f328aaeef15962bdb521ecf0043616bb72
-     224b05617c96ed3917e9d67e572ab6d5fbee72988fb156abaf0a62c36decb38f)
+    (ochat_validate runtime.native.requests
+     f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
+     dfc6623a1207b02f61a03eb5fe37eb08defb8d1d4f44bc1f2da3a939477a9910)
     (ochat_authoring_context authoring.reference
      ef75b53009dd542be6591879c5311fbb00b8fcfe905e94de02c05d8c83c7b46c
      ff17a0cbb8036f5aa0e061c1b8fd207a764442a7da6d3e4cf2165d630d56ec97)
     |}]
 ;;
 
-let json_requests text =
+let json_requests ?(tool = "ochat_authoring_context") text =
   let rec scan acc = function
     | [] -> List.rev acc
-    | "```json tool=ochat_authoring_context" :: rest ->
+    | opening :: rest when String.equal opening ("```json tool=" ^ tool) ->
       let body, rest =
         List.split_while rest ~f:(fun line -> not (String.equal line "```"))
       in
@@ -127,6 +127,54 @@ let json_requests text =
     | _ :: rest -> scan acc rest
   in
   scan [] (String.split_lines text)
+;;
+
+let%expect_test "native request guide executes and validates through the actual tools" =
+  let sources = Authoring_sources.installed () |> Result.ok_or_failwith in
+  let document =
+    Authoring_sources.document sources ~path:"guide/chatml-native-requests.md"
+    |> Result.ok_or_failwith
+  in
+  let execution = json_requests ~tool:"run_chatml" document.text in
+  let validation = json_requests ~tool:"ochat_validate" document.text in
+  let calls =
+    List.mapi execution ~f:(fun i request ->
+      "execute-" ^ Int.to_string i, "run_chatml", request)
+    @ List.mapi validation ~f:(fun i request ->
+      "validate-" ^ Int.to_string i, "ochat_validate", request)
+  in
+  Fixtures.with_daemon
+    ~sources:
+      [ ( "agent.chatmd"
+        , {|<developer>Check the exact installed requests.</developer><tool name="run_chatml"/><tool name="ochat_validate"/>|}
+        )
+      ]
+    ~calls
+    (fun state ->
+       List.iteri execution ~f:(fun i _ ->
+         match Fixtures.result state ("execute-" ^ Int.to_string i) with
+         | Agent_protocol.Invocation.Complete (`Number n) ->
+           assert (Float.equal (Float.of_string n) 10.)
+         | outcome -> raise_s [%sexp (outcome : Agent_protocol.Invocation.outcome)]);
+       List.iteri validation ~f:(fun i request ->
+         let report =
+           match Fixtures.result state ("validate-" ^ Int.to_string i) with
+           | Agent_protocol.Invocation.Complete (`String text) -> Jsonaf.of_string text
+           | outcome -> raise_s [%sexp (outcome : Agent_protocol.Invocation.outcome)]
+         in
+         require_json (field request "target") (field report "target");
+         require_json `True (field report "valid");
+         require_json (`Array []) (field report "diagnostics");
+         match field report "validation_id", field report "deferred" with
+         | `String _, `Array (_ :: _) -> ()
+         | _ -> failwith (Jsonaf.to_string report)));
+  printf
+    "%d computation request, %d target-specific validation requests, including an inert \
+     failing initializer: native paths pass\n"
+    (List.length execution)
+    (List.length validation);
+  [%expect
+    {| 1 computation request, 4 target-specific validation requests, including an inert failing initializer: native paths pass |}]
 ;;
 
 let%expect_test "installed query examples and the native self-reference are usable" =
