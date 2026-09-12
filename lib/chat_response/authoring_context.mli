@@ -23,6 +23,11 @@ val fingerprint : t -> string
     This does not grant model-facing access without target/policy checks. *)
 val installed_corpus : t -> Authoring_corpus.t
 
+(** Use a host's immutable captured corpus when configured; otherwise use the
+    service's installed/captured source snapshot. Actual caller hosts can differ
+    from the host that originally registered an inherited helper. *)
+val corpus_for_host : t -> host:Authoring_validation.host -> Authoring_corpus.t
+
 (** Captured custom packages are host input to [create], never query parameters.
     Select their visibility from actual tool help metadata. Missing dependencies
     fail rather than restoring an omitted package or exposing its private name.
@@ -30,7 +35,8 @@ val installed_corpus : t -> Authoring_corpus.t
     Query prepare adds selected custom roots and their prerequisites; topic/search/
     continuation apply the same scope and configured response budgets. *)
 val scoped_corpus
-  :  t
+  :  ?host:Authoring_validation.host
+  -> t
   -> capabilities:Tool_capability.t
   -> (Authoring_corpus.t, string) result
 

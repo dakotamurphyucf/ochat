@@ -11,9 +11,9 @@ type message = private
   ; guidance : Agent_protocol.Authoring_guidance.t
   }
 
-(** Installed native help packages and topic/task compatibility, restricted to
-    this host's enabled compiler targets. No package completeness claim, custom
-    package discovery or new helper capability is implied. *)
+(** Native and captured authored help packages, restricted to this host's enabled
+    compiler targets. Includes complete authored dependency ownership for policy
+    admission. No package completeness or new helper capability is implied. *)
 val catalog
   :  Authoring_context.t
   -> host:Authoring_validation.host
@@ -24,7 +24,9 @@ val catalog
     Preload closures are assembled in full with shared prerequisites deduplicated;
     incompatible topics fail without falling back to another target. The full
     initial batch must fit [max_tokens], estimated as ceil(payload UTF-8 bytes/3).
-    Manual policy and ordinary tools produce no automatic guidance. *)
+    Manual policy and ordinary tools produce no automatic guidance. Captured custom
+    preloads are scoped to selected authoring packages, labelled as conventions
+    and carry Authored source digests; they never acquire Installed provenance. *)
 val create
   :  ?max_tokens:int
   -> context:Authoring_context.t

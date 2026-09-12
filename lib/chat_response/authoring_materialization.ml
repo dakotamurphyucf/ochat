@@ -45,30 +45,7 @@ let task_surfaces host =
       | Error _ -> None)
 ;;
 
-let catalog context ~host =
-  let corpus = Q.installed_corpus context in
-  let surfaces = task_surfaces host in
-  let topics =
-    Corpus.topics corpus
-    |> List.filter_map ~f:(fun topic ->
-      let tasks =
-        List.filter_map surfaces ~f:(fun (task, surface) ->
-          Option.some_if
-            (List.mem topic.specification.surfaces surface ~equal:String.equal)
-            task)
-      in
-      match tasks with
-      | [] -> None
-      | _ -> Some (topic.specification.id, tasks))
-  in
-  P.catalog
-    ~identity:(Corpus.identity corpus)
-    ~packages:
-      (List.map (V.targets host) ~f:V.help
-       |> List.dedup_and_sort ~compare:(fun a b -> String.compare a.M.package b.package))
-    ~topics
-  |> Result.map_error ~f:(fun error -> error.P.message)
-;;
+let catalog context ~host = V.catalog_of_corpus host (Q.corpus_for_host context ~host)
 
 let estimated_tokens messages =
   List.sum
@@ -90,7 +67,7 @@ let entry (message : message) ~id =
 
 let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () =
   let open Result.Let_syntax in
-  let corpus = Q.installed_corpus context in
+  let corpus = Q.corpus_for_host context ~host in
   let corpus_identity = Corpus.identity corpus in
   let%bind () =
     match
@@ -122,6 +99,7 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
       | true -> Ok ()
       | false -> Error "authoring policy refers to a different installed corpus"
     in
+    let%bind corpus = Q.scoped_corpus ~host context ~capabilities in
     let available = task_surfaces host in
     let%bind surfaces =
       P.authoring_tools policy
@@ -143,9 +121,9 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
       | Some topics ->
         (match
            List.for_all topics ~f:(fun topic ->
-             match topic.Corpus.specification.review with
-             | Audited _ -> true
-             | Pending -> false)
+             match topic.Corpus.origin, topic.specification.review with
+             | Authored _, _ | Installed, Audited _ -> true
+             | Installed, Pending -> false)
          with
          | true -> Ok topics
          | false -> Error ("unaudited preload topic: " ^ id))
@@ -153,7 +131,10 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
     in
     let make purpose topic =
       let content =
-        "[Ochat installed authoring reference; topic="
+        (match topic.Corpus.origin with
+         | Installed -> "[Ochat installed authoring reference; topic="
+         | Authored _ ->
+           "[Author-supplied conventions; not authoritative runtime semantics; topic=")
         ^ topic.Corpus.specification.id
         ^ "; corpus="
         ^ corpus_identity
@@ -178,7 +159,10 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
           ~topics:
             [ { id = topic.specification.id
               ; document_sha256 = topic.sha256
-              ; source = Installed corpus_identity
+              ; source =
+                  (match topic.origin with
+                   | Installed -> Installed corpus_identity
+                   | Authored owner -> Authored owner.package_sha256)
               ; complete = true
               }
             ]
@@ -214,7 +198,9 @@ let refresh t ~known ~effective =
   let open Result.Let_syntax in
   let%bind known = Authoring_presence.remember ~previous:known ~history:effective in
   let%map report =
-    Authoring_presence.inspect
+    Authoring_presence.inspect_with_topics
+      ~expected_topics:
+        (List.concat_map t.initial ~f:(fun message -> message.guidance.topics))
       ~policy:t.policy
       ~context_identity:t.context_identity
       ~known

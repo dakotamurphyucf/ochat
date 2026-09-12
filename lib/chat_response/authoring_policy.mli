@@ -21,6 +21,18 @@ val catalog
   -> topics:(string * Metadata.task list) list
   -> (catalog, error) result
 
+(** Catalog metadata with authored-package ownership for each topic's complete
+    prerequisite closure. Auto/preload admission requires all these packages in
+    selected authoring metadata, including for directly requested preload topics.
+    Missing/duplicate ownership entries or unknown packages reject construction.
+    Topics without an ownership entry are installed public references. *)
+val catalog_with_ownership
+  :  identity:string
+  -> packages:Metadata.help list
+  -> topics:(string * Metadata.task list) list
+  -> topic_packages:(string * string list) list
+  -> (catalog, error) result
+
 type t
 
 (** Pure admission plan. [ceiling] is the host-approved registry, or the parent's

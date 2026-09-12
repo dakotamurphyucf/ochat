@@ -2173,7 +2173,7 @@ let independent_resource_host t =
               ?catalog:
                 (Option.bind
                    t.authoring_validation_host
-                   ~f:Chat_response.Authoring_validation.catalog)
+                   ~f:Chat_response.Authoring_validation.delegated_catalog)
               ~env:t.env
               ~artifact_store
               ~revision_id:state.spec.prompt_revision_id
@@ -2723,7 +2723,7 @@ let prepare_runtime_at_paths
                 ?catalog:
                   (Option.bind
                      t.authoring_validation_host
-                     ~f:Chat_response.Authoring_validation.catalog)
+                     ~f:Chat_response.Authoring_validation.delegated_catalog)
                 ~env:t.env
                 ~artifact_store
                 ~revision_id:artifact.revision_id
@@ -6101,7 +6101,9 @@ let reconcile_generated_creations t =
                                       ?catalog:
                                         (Option.bind
                                            t.authoring_validation_host
-                                           ~f:Chat_response.Authoring_validation.catalog)
+                                           ~f:
+                                             Chat_response.Authoring_validation
+                                             .delegated_catalog)
                                       ~env:t.env
                                       ~artifact_store:artifacts
                                       ~revision_id:record.admission.revision_id
@@ -6913,7 +6915,7 @@ let create_from_native t borrowed (request : Agent_session.Generated_session_req
       ?catalog:
         (Option.bind
            t.authoring_validation_host
-           ~f:Chat_response.Authoring_validation.catalog)
+           ~f:Chat_response.Authoring_validation.delegated_catalog)
       ~revision_id:(P.Id.Prompt_revision.create ())
       ~created_at:(now t)
       ~current_capabilities:(fun () -> selected)

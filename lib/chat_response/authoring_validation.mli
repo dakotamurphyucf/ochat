@@ -36,12 +36,36 @@ val create_host
 val host_fingerprint : host -> string
 
 (** Narrow moderator validation to the generated execution surface, preserving
-    the host's targets, runtime identity, limits and installed catalog. *)
+    targets/runtime/limits and selecting the captured delegated catalog when
+    present. Uncaptured, explicitly supplied catalogs remain host-owned metadata. *)
 val for_delegated : host -> host
+
+(** Capture custom conventions in an immutable host snapshot, with separate
+    ordinary/delegated catalogs derived from actual supported surfaces. This
+    replaces previous captured packages/catalog metadata; source names are labels,
+    never paths to open. Source/package revisions participate in host identity. *)
+val configure_authored
+  :  ?max_bytes:int
+  -> host
+  -> packages:Authoring_corpus.authored_package list
+  -> (host, string) result
+
+val corpus : host -> Authoring_corpus.t option
+val delegated_catalog : host -> Authoring_policy.catalog option
+
+(** Derive package/topic compatibility and complete authored dependency ownership
+    for this host. Unavailable packages are excluded rather than relabelled as
+    compatible; policy admission then rejects a requested unavailable dependency. *)
+val catalog_of_corpus
+  :  host
+  -> Authoring_corpus.t
+  -> (Authoring_policy.catalog, string) result
 
 (** Configure host-owned source limits and compatible catalog metadata. These are
     never read from candidate JSON. Omitted configuration uses default bundle
-    limits and no catalog; authoring auto/preload still requires authentic helpers. *)
+    limits and no catalog; authoring auto/preload still requires authentic helpers.
+    A captured corpus's catalogs cannot be replaced independently of its source
+    packages; use [configure_authored] to replace that snapshot. *)
 val configure_generated
   :  host
   -> limits:Chatmd_source_bundle.limits

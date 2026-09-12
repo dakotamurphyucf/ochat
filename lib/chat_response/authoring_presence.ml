@@ -62,7 +62,7 @@ let remember ~previous ~history =
   Map.data index
 ;;
 
-let inspect ~policy ~context_identity ~known ~effective =
+let inspect_internal ~expected_topics ~policy ~context_identity ~known ~effective =
   let open Result.Let_syntax in
   let%bind known = receipt_index known in
   let%bind entries =
@@ -119,13 +119,22 @@ let inspect ~policy ~context_identity ~known ~effective =
       | Present -> Some observation.receipt.guidance
       | _ -> None)
   in
+  let complete_topics guidance =
+    match expected_topics, guidance.Guidance.purpose with
+    | _, Rediscovery -> []
+    | None, _ -> complete_installed_topics guidance
+    | Some expected, _ ->
+      List.filter guidance.topics ~f:(fun topic ->
+        topic.complete && List.mem expected topic ~equal:Guidance.equal_topic)
+  in
   let primer =
     List.exists present ~f:(fun guidance ->
       Guidance.equal_purpose guidance.purpose Primer
-      && List.length (complete_installed_topics guidance) = List.length guidance.topics)
+      && List.length (complete_installed_topics guidance) = List.length guidance.topics
+      && List.length (complete_topics guidance) = List.length guidance.topics)
   in
   let complete_topics =
-    List.concat_map present ~f:complete_installed_topics
+    List.concat_map present ~f:complete_topics
     |> List.map ~f:(fun topic -> topic.Guidance.id)
     |> String.Set.of_list
   in
@@ -136,4 +145,17 @@ let inspect ~policy ~context_identity ~known ~effective =
         List.filter (Authoring_policy.preload_topics policy) ~f:(fun id ->
           not (Set.mem complete_topics id))
     }
+;;
+
+let inspect ~policy ~context_identity ~known ~effective =
+  inspect_internal ~expected_topics:None ~policy ~context_identity ~known ~effective
+;;
+
+let inspect_with_topics ~expected_topics ~policy ~context_identity ~known ~effective =
+  inspect_internal
+    ~expected_topics:(Some expected_topics)
+    ~policy
+    ~context_identity
+    ~known
+    ~effective
 ;;

@@ -25,6 +25,8 @@ type host =
   ; compilation : Compiler.limits
   ; bundle_limits : Chatmd_source_bundle.limits
   ; catalog : Authoring_policy.catalog option
+  ; delegated_catalog : Authoring_policy.catalog option
+  ; corpus : Authoring_corpus.t option
   }
 
 let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
@@ -47,13 +49,23 @@ let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
       ; compilation
       ; bundle_limits = Chatmd_source_bundle.default_limits
       ; catalog = None
+      ; delegated_catalog = None
+      ; corpus = None
       }
 ;;
 
-let for_delegated host = { host with moderator_surface = Delegated }
+let for_delegated host =
+  { host with
+    moderator_surface = Delegated
+  ; catalog = Option.first_some host.delegated_catalog host.catalog
+  }
+;;
+
 let compilation_limits host = host.compilation
 let bundle_limits host = host.bundle_limits
 let catalog host = host.catalog
+let delegated_catalog host = catalog (for_delegated host)
+let corpus host = host.corpus
 let runtime_identity host = host.runtime_identity
 let targets host = host.targets
 let moderator_surface host = host.moderator_surface
@@ -77,12 +89,26 @@ let task_surface host task =
 
 let configure_generated host ~limits ~catalog =
   let open Result.Let_syntax in
-  let%map _ =
+  let%bind _ =
     Chatmd_source_bundle.create
       ~limits
       ~root_file:"root.chatmd"
       ~sources:[ "root.chatmd", "" ]
       ()
+  in
+  let%map () =
+    match host.corpus with
+    | None -> Ok ()
+    | Some _ ->
+      (match
+         Option.equal
+           String.equal
+           (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint)
+           (Option.map catalog ~f:Authoring_policy.catalog_fingerprint)
+       with
+       | true -> Ok ()
+       | false ->
+         Error "captured reference catalogs must be configured with their source packages")
   in
   { host with bundle_limits = limits; catalog }
 ;;
@@ -144,6 +170,99 @@ let help target =
        author. Custom tools may still declare genuine required dependencies. *)
     ; required_helpers = []
     }
+;;
+
+let catalog_of_corpus host corpus =
+  let open Result.Let_syntax in
+  let module Corpus = Authoring_corpus in
+  let task_surfaces =
+    List.filter_map
+      [ Metadata.One_off_script
+      ; Standalone_tool
+      ; Moderator_tool
+      ; Child_agent
+      ; Background_workflow
+      ]
+      ~f:(fun task ->
+        Result.ok (task_surface host task) |> Option.map ~f:(fun surface -> task, surface))
+  in
+  let%bind topics =
+    List.map (Corpus.topics corpus) ~f:(fun topic ->
+      let tasks =
+        List.filter_map task_surfaces ~f:(fun (task, surface) ->
+          Option.some_if
+            (List.mem topic.Corpus.specification.surfaces surface ~equal:String.equal)
+            task)
+      in
+      let%map closure =
+        Corpus.assemble
+          corpus
+          ~surface_id:(List.hd_exn topic.specification.surfaces)
+          ~roots:[ topic.specification.id ]
+      in
+      let owners =
+        List.filter_map closure ~f:(fun topic ->
+          match topic.Corpus.origin with
+          | Installed -> None
+          | Authored owner -> Some owner.package)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
+      topic.specification.id, tasks, owners)
+    |> Result.all
+  in
+  let packages =
+    (List.map host.targets ~f:help
+     |> List.dedup_and_sort ~compare:(fun a b ->
+       String.compare a.Metadata.package b.package))
+    @ Corpus.authored_packages corpus
+    |> List.filter_map ~f:(fun package ->
+      let tasks =
+        List.filter package.Metadata.tasks ~f:(fun task ->
+          List.Assoc.mem task_surfaces task ~equal:Metadata.equal_task)
+      in
+      Option.some_if (not (List.is_empty tasks)) { package with tasks })
+  in
+  let rec compatible packages =
+    let names = List.map packages ~f:(fun package -> package.Metadata.package) in
+    let topics =
+      List.filter topics ~f:(fun (_, tasks, owners) ->
+        (not (List.is_empty tasks))
+        && List.for_all owners ~f:(List.mem names ~equal:String.equal))
+    in
+    let retained =
+      List.filter packages ~f:(fun package ->
+        List.for_all package.Metadata.topics ~f:(fun id ->
+          List.exists topics ~f:(fun (topic, tasks, _) ->
+            String.equal id topic
+            && List.exists tasks ~f:(List.mem package.tasks ~equal:Metadata.equal_task))))
+    in
+    match List.length retained = List.length packages with
+    | true -> retained, topics
+    | false -> compatible retained
+  in
+  let packages, topics = compatible packages in
+  Authoring_policy.catalog_with_ownership
+    ~identity:(Corpus.identity corpus)
+    ~packages
+    ~topics:(List.map topics ~f:(fun (id, tasks, _) -> id, tasks))
+    ~topic_packages:
+      (List.filter_map topics ~f:(fun (id, _, owners) ->
+         Option.some_if (not (List.is_empty owners)) (id, owners)))
+  |> Result.map_error ~f:(fun error -> error.Authoring_policy.message)
+;;
+
+let configure_authored ?max_bytes host ~packages =
+  let open Result.Let_syntax in
+  let%bind sources = Authoring_sources.installed () in
+  let%bind installed = Authoring_corpus.runtime_foundation ~sources in
+  let%bind corpus = Authoring_corpus.extend_authored ?max_bytes installed packages in
+  let%bind catalog = catalog_of_corpus host corpus in
+  let%map delegated_catalog = catalog_of_corpus (for_delegated host) corpus in
+  { host with
+    corpus = Some corpus
+  ; catalog = Some catalog
+  ; delegated_catalog = Some delegated_catalog
+  }
 ;;
 
 let helper_metadata = Metadata.{ authoring = None; helper = Some Validation }
@@ -333,19 +452,30 @@ let compiler_target host = function
 ;;
 
 let host_fingerprint (host : host) =
-  [%sexp
-    ("ochat.authoring.validation.host.v1" : string)
-  , (host.runtime_identity : string)
-  , (host.moderator_surface : moderator_surface)
-  , (host.compilation.max_source_bytes : int)
-  , (host.compilation.wall_seconds : float)
-  , (host.bundle_limits.max_source_bytes : int)
-  , (host.bundle_limits.max_bundle_bytes : int)
-  , (host.bundle_limits.max_files : int)
-  , (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint : string option)
-  , (List.map host.targets ~f:(fun target ->
-       target, Compiler.contract (compiler_target host target))
-     : (target * Sexp.t) list)]
+  let contract =
+    [%sexp
+      ("ochat.authoring.validation.host.v1" : string)
+    , (host.runtime_identity : string)
+    , (host.moderator_surface : moderator_surface)
+    , (host.compilation.max_source_bytes : int)
+    , (host.compilation.wall_seconds : float)
+    , (host.bundle_limits.max_source_bytes : int)
+    , (host.bundle_limits.max_bundle_bytes : int)
+    , (host.bundle_limits.max_files : int)
+    , (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint : string option)
+    , (List.map host.targets ~f:(fun target ->
+         target, Compiler.contract (compiler_target host target))
+       : (target * Sexp.t) list)]
+  in
+  (match host.corpus with
+   | None -> contract
+   | Some corpus ->
+     [%sexp
+       ("ochat.authoring.captured-host.v1" : string)
+     , (contract : Sexp.t)
+     , (Authoring_corpus.identity corpus : string)
+     , (Option.map host.delegated_catalog ~f:Authoring_policy.catalog_fingerprint
+        : string option)])
   |> Sexp.to_string
   |> Source_ref.digest
 ;;
@@ -698,7 +828,7 @@ let validate_generated ~env ~(host : host) ~capabilities json =
     let%map admission =
       Generated_admission.prepare
         ~limits:host.compilation
-        ?catalog:host.catalog
+        ?catalog:(delegated_catalog host)
         ~env
         ~dir:(Eio.Stdenv.cwd env)
         ~ceiling:selected

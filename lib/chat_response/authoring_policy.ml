@@ -22,12 +22,13 @@ type catalog =
   { identity : string
   ; packages : Metadata.help String.Map.t
   ; topics : Metadata.task list String.Map.t
+  ; topic_packages : string list String.Map.t
   ; fingerprint : string
   }
 
 let catalog_fingerprint catalog = catalog.fingerprint
 
-let catalog ~identity ~packages ~topics =
+let catalog_with_ownership ~identity ~packages ~topics ~topic_packages =
   let valid_tasks tasks =
     (not (List.is_empty tasks))
     && List.length tasks <= 5
@@ -49,13 +50,19 @@ let catalog ~identity ~packages ~topics =
   else (
     match
       ( String.Map.of_alist (List.map packages ~f:(fun p -> p.Metadata.package, p))
-      , String.Map.of_alist topics )
+      , String.Map.of_alist topics
+      , String.Map.of_alist topic_packages )
     with
-    | `Duplicate_key _, _ | _, `Duplicate_key _ ->
+    | `Duplicate_key _, _, _ | _, `Duplicate_key _, _ | _, _, `Duplicate_key _ ->
       error "authoring.invalid_catalog" "duplicate package or topic"
-    | `Ok packages, `Ok topics ->
+    | `Ok packages, `Ok topics, `Ok topic_packages ->
       let compatible =
-        Map.for_all packages ~f:(fun package ->
+        Map.for_alli topic_packages ~f:(fun ~key:topic ~data:owners ->
+          Map.mem topics topic
+          && (not (List.is_empty owners))
+          && Option.is_none (List.find_a_dup owners ~compare:String.compare)
+          && List.for_all owners ~f:(Map.mem packages))
+        && Map.for_all packages ~f:(fun package ->
           List.for_all package.Metadata.topics ~f:(fun id ->
             match Map.find topics id with
             | None -> false
@@ -66,15 +73,27 @@ let catalog ~identity ~packages ~topics =
       if not compatible
       then error "authoring.invalid_catalog" "package has missing or incompatible topics"
       else (
-        let fingerprint =
+        let contract =
           [%sexp
             (identity : string)
           , (Map.data packages : Metadata.help list)
           , (Map.to_alist topics : (string * Metadata.task list) list)]
+        in
+        let fingerprint =
+          (match Map.is_empty topic_packages with
+           | true -> contract
+           | false ->
+             [%sexp
+               (contract : Sexp.t)
+             , (Map.to_alist topic_packages : (string * string list) list)])
           |> Sexp.to_string
           |> digest
         in
-        Ok { identity; packages; topics; fingerprint }))
+        Ok { identity; packages; topics; topic_packages; fingerprint }))
+;;
+
+let catalog ~identity ~packages ~topics =
+  catalog_with_ownership ~identity ~packages ~topics ~topic_packages:[]
 ;;
 
 type t =
@@ -153,6 +172,16 @@ let resolve ?(policy = Spec.Auto) ?catalog ~ceiling ~selected_names () =
           "authoring.catalog_unavailable"
           "automatic guidance requires the compatible installed corpus"
       | Some catalog ->
+        let allowed_packages =
+          List.map authoring_tools ~f:(fun (_, help) -> help.Metadata.package)
+        in
+        let allowed_topic id =
+          Option.value_map
+            (Map.find catalog.topic_packages id)
+            ~default:true
+            ~f:(fun packages ->
+              List.for_all packages ~f:(List.mem allowed_packages ~equal:String.equal))
+        in
         let valid_help help =
           match Map.find catalog.packages help.Metadata.package with
           | None -> false
@@ -160,7 +189,8 @@ let resolve ?(policy = Spec.Auto) ?catalog ~ceiling ~selected_names () =
             List.for_all help.tasks ~f:(fun task ->
               List.mem package.tasks task ~equal:Metadata.equal_task)
             && List.for_all help.topics ~f:(fun topic ->
-              List.mem package.topics topic ~equal:String.equal
+              allowed_topic topic
+              && List.mem package.topics topic ~equal:String.equal
               && Option.value_map
                    (Map.find catalog.topics topic)
                    ~default:false
@@ -169,9 +199,10 @@ let resolve ?(policy = Spec.Auto) ?catalog ~ceiling ~selected_names () =
                        List.mem supported task ~equal:Metadata.equal_task)))
         in
         let valid_topic id =
-          match Map.find catalog.topics id with
-          | None -> false
-          | Some supported ->
+          match allowed_topic id, Map.find catalog.topics id with
+          | false, _ -> false
+          | _, None -> false
+          | true, Some supported ->
             List.exists tasks ~f:(fun task ->
               List.mem supported task ~equal:Metadata.equal_task)
         in

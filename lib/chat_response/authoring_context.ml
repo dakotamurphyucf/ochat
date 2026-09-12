@@ -18,6 +18,7 @@ type t =
 
 let fingerprint t = t.fingerprint
 let installed_corpus t = t.corpus
+let corpus_for_host t ~host = Option.value (V.corpus host) ~default:t.corpus
 
 let create
       ?(default_tokens = 12000)
@@ -65,7 +66,12 @@ let create
   Ok { corpus; sources; secret; default_tokens; max_tokens; fingerprint }
 ;;
 
-let scoped_corpus t ~capabilities =
+let scoped_corpus ?host t ~capabilities =
+  let t =
+    match host with
+    | None -> t
+    | Some host -> { t with corpus = corpus_for_host t ~host }
+  in
   let installed = Corpus.authored_packages t.corpus in
   let packages =
     C.references capabilities
@@ -734,7 +740,7 @@ let query t ~host ~capabilities ~scope request =
       | false -> Error "documentation request exceeds 16 KiB"
     in
     let%bind () = validate_operation request in
-    let%bind corpus = scoped_corpus t ~capabilities in
+    let%bind corpus = scoped_corpus ~host t ~capabilities in
     let t = { t with corpus } in
     let%bind requested_budget =
       match field request "max_tokens" with

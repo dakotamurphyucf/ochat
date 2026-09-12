@@ -55,3 +55,15 @@ val inspect
   -> known:receipt list
   -> effective:History.entry list
   -> (report, Agent_protocol.Error.t) result
+
+(** Inspection against exact topic/source digests from a trusted materialization
+    plan. Authored preloads can satisfy their own expected conventions, never an
+    installed topic or primer. Expected topics must come from the owning host's
+    admitted plan, not from model-supplied labels or observed history. *)
+val inspect_with_topics
+  :  expected_topics:Agent_protocol.Authoring_guidance.topic list
+  -> policy:Authoring_policy.t
+  -> context_identity:string
+  -> known:receipt list
+  -> effective:History.entry list
+  -> (report, Agent_protocol.Error.t) result

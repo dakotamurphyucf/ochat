@@ -53,7 +53,7 @@ than widening the child's authority. A child merely consuming an ordinary tool
 does not inherit implementation-authoring prose. Runtime reload rechecks the
 effective history before inserting anything again.
 
-Complete custom-package integration, bounded context retention and
+Public custom-package configuration, bounded context retention and
 public qualification remain open. Manual and ordinary-tool policies produce no
 automatic messages. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
@@ -123,9 +123,22 @@ metadata or authority invalidates continuation. Responses label custom text as
 count as audited compiler/runtime documentation. The aggregate captured-text
 budget defaults to 4 MB and can be configured independently from response budgets.
 
-This is the corpus/query library path. Daemon/TUI host configuration and automatic
-preload materialization of custom conventions remain to be integrated; declaring
-`authoring_help` alone does not install a custom package's text.
+Qualified hosts can install the captured packages with
+`Authoring_validation.configure_authored` and pass that immutable host through
+the daemon's `authoring_validation_host` option or local runtime extension
+services. Native reference helpers and automatic/preload materialization consume
+the actual calling host snapshot, including when a helper is inherited by a child.
+Custom preloads remain labelled authored conventions and deduplicate by their
+actual payload/source identity. Declaring `authoring_help` alone does not install
+a custom package's text; a general CLI/configuration-file input remains pending.
+
+Admission checks the authored owners of every requested topic's full dependency
+closure. A preload cannot access a private package merely because its topic
+supports the same compiler surface. Captured hosts have separate ordinary and
+delegated catalogs, and child creation/restoration use the delegated catalog.
+An ordinary-only moderator package cannot be presented as valid child guidance.
+Replacing captured sources rebuilds both catalogs and changes host identity;
+their catalog metadata cannot be replaced independently of the captured source.
 
 ## One strict request schema
 
