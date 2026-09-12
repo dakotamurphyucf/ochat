@@ -21,7 +21,14 @@ let%expect_test
      |> List.filter ~f:(fun path ->
        String.is_prefix path ~prefix:"lib/chatml/"
        (* Host control belongs to the separate runtime contract inventory. *)
-       && not (String.equal path "lib/chatml/chatml_host_runtime.ml")))
+       && not
+            (List.mem
+               [ "lib/chatml/chatml_host_runtime.ml"
+               ; "lib/chatml/chatml_compilation.ml"
+               ; "lib/chatml/chatml_execution.ml"
+               ]
+               path
+               ~equal:String.equal)))
     paths;
   let targets = V.semantic_targets ~sources ~surface_ids:surfaces |> ok in
   let report = V.audit corpus ~targets ~mappings:V.semantic_mappings |> ok in

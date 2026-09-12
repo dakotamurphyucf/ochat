@@ -26,6 +26,7 @@ let () =
     ; "guide/chatml-background-values.md"
     ; "guide/chatml-collections.md"
     ; "guide/chatml-evaluation.md"
+    ; "guide/chatml-execution-limits.md"
     ; "guide/chatml-global-helpers.md"
     ; "guide/chatml-host-effects.md"
     ; "guide/chatml-inference.md"

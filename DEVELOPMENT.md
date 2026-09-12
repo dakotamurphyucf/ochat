@@ -29,8 +29,9 @@ reference assembly lives in `lib/authoring_sources/authoring_corpus.ml`.
 
 There are six separate coverage inventories: compiler bindings, grammar
 productions, language semantics, ChatMD declarations, native operations and
-runtime transactions/recovery. Runtime mappings distinguish shared job APIs from
-moderator-only control, subscriptions, timers, notifications and ingress. A topic
+runtime transactions/recovery. Runtime mappings include compilation/execution
+policy and distinguish shared job APIs from moderator state/control, subscriptions,
+timers, notifications and ingress. A topic
 being readable on a surface does not grant its described capabilities.
 
 When changing an inventoried implementation or its documentation:

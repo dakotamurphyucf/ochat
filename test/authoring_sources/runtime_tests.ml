@@ -69,13 +69,13 @@ let%expect_test "runtime coverage follows the selected surface and detects stale
     , (List.length paths : int)];
   [%expect
     {|
-    (one_off_v1 3)
-    (tool_v1 3)
-    (moderator_v1 11)
-    (delegated_moderator_v1 11)
+    (one_off_v1 5)
+    (tool_v1 5)
+    (moderator_v1 14)
+    (delegated_moderator_v1 14)
     (delegated_moderator_v1/runtime/timers.lifecycle)
     delegated_moderator_v1/runtime/timers.lifecycle: compiler contract changed; review documentation coverage
     delegated_moderator_v1/runtime/timers.lifecycle: topic changed; review documentation coverage
-    (11 28 33)
+    (14 38 36)
     |}]
 ;;

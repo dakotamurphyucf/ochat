@@ -3255,6 +3255,32 @@ let runtime_foundation ~sources =
                    ]
                }
          }
+       ; { id = "runtime.execution"
+         ; title = "Execution budgets, cancellation, nested scope and persisted state"
+         ; prerequisites = [ "chatml.evaluation"; "chatml.task-effects" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-execution-limits.md"
+               ; heading = "# Execution limits, cancellation and persisted state"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "9689f7153cb5bd7301fe9a84b4193b4d3423438a03ea9923168aa1dd59cc96b4" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_compilation.ml"
+                   ; "lib/chatml/chatml_execution.ml"
+                   ; "lib/chatml/chatml_value_codec.ml"
+                   ; "lib/chat_response/moderator_invocation.ml"
+                   ; "lib/chat_response/moderator_manager.ml"
+                   ; "test/chatml_compilation_test.ml"
+                   ; "test/chatml_execution_budget_test.ml"
+                   ; "test/moderation/moderator_execution_budget_test.ml"
+                   ]
+               }
+         }
        ; { id = "runtime.work-values"
          ; title = "Background value types, result envelopes and script-job requests"
          ; prerequisites = [ "chatml.json"; "runtime.invocations.contracts" ]

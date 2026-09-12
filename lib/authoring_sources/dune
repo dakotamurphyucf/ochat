@@ -25,6 +25,8 @@
     lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
     lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}
     lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
+    lib/chatml/chatml_compilation.ml %{dep:../chatml/chatml_compilation.ml}
+    lib/chatml/chatml_execution.ml %{dep:../chatml/chatml_execution.ml}
     lib/agent_protocol/delivery.ml %{dep:../agent_protocol/delivery.ml}
     lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
     lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
@@ -141,6 +143,7 @@
     guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
     guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
     guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
+    guide/chatml-execution-limits.md %{dep:../../docs-src/guide/chatml-execution-limits.md}
     guide/chatmd-authoring-definitions.md %{dep:../../docs-src/guide/chatmd-authoring-definitions.md}
     guide/chatmd-authoring-capabilities.md %{dep:../../docs-src/guide/chatmd-authoring-capabilities.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}

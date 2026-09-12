@@ -188,6 +188,21 @@ let%expect_test
     ~f:(fun task ->
       let response = query (request ~task ~max_tokens:1_000_000 "prepare") in
       require_json `True (field response "complete");
+      let execution =
+        List.find_exn (items response) ~f:(fun item ->
+          match Jsonaf.member "topic_id" item with
+          | Some (`String "runtime.execution") -> true
+          | _ -> false)
+      in
+      let installed = Authoring_sources.installed () |> Result.ok_or_failwith in
+      let reference =
+        Authoring_sources.document installed ~path:"guide/chatml-execution-limits.md"
+        |> Result.ok_or_failwith
+      in
+      (* Installed rendering removes the final paragraph separator. *)
+      [%test_eq: string]
+        (String.rstrip reference.text)
+        (field execution "text" |> Jsonaf.string_exn);
       let task_guidance =
         List.find_exn (items response) ~f:(fun item ->
           match Jsonaf.member "topic_id" item with

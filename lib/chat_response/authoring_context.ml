@@ -307,6 +307,7 @@ let roots task request =
            :: "chatml.inference"
            :: "chatml.programs"
            :: "chatml.task-effects"
+           :: "runtime.execution"
            :: base)
           @ extra)
          ~compare:String.compare)
@@ -419,7 +420,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
         "Executing generated code or spawning a child: reading documentation and passing \
          static checks never grant execution authority."
         One_off_script
-        [ "runtime.invocations.validation" ]
+        [ "runtime.invocations.validation"; "runtime.execution" ]
     ; guide
         "Transactions and recovery"
         "Design workflows around committed records, cancellation and restart behavior \

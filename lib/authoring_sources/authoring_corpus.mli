@@ -234,13 +234,14 @@ module Coverage : sig
 
   val native_mappings : mapping list
 
-  (** Runtime transaction, work, delivery and recovery contracts. This maintained
+  (** Compilation/execution policy, state, transaction, work, delivery and recovery contracts. This maintained
       taxonomy supplements compiler bindings and native request semantics; it
       does not automatically discover new runtime behavior. *)
   val runtime_features : semantic_feature list
 
   (** Requires nonempty unique selections from the four extensibility surfaces.
-      Jobs have mappings on all four; moderator control, subscriptions, timers,
+      Compilation/execution policy and jobs have mappings on all four; moderator
+      state/control, subscriptions, timers,
       notifications and ingress have mappings only on the two moderator surfaces.
       Readable guidance does not install or authorize any operation. *)
   val runtime_targets

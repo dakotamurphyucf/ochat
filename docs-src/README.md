@@ -42,6 +42,7 @@ For a specific declaration, go directly to the
 - [Built-in tools, file roots, and maintained MCP tools](overview/tools.md)
 - [ChatML moderator runtime](guide/chatml-moderator-runtime.md)
 - [ChatML language](guide/chatml-language-spec.md)
+- [ChatML execution limits, cancellation and state](guide/chatml-execution-limits.md)
 - [Background agent tutorial](agent-server/tutorials/background-agent.md)
 - [Interactive TUI keys and views](guide/chat_tui.md)
 - [File-backed completion CLI](cli/chat-completion.md)

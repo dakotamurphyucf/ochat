@@ -3,7 +3,18 @@
    to separately executed behavior suites. Surface mappings describe readable
    contracts, never an authority grant. *)
 let shared_features =
-  [ ( "jobs.launch"
+  [ ( "compilation.policy"
+    , "No-effect compiler domains, explicit policy and cooperative cancellation"
+    , [ "lib/chatml/chatml_compilation.ml" ]
+    , "runtime.execution"
+    , [ "test/chatml_compilation_test.ml" ] )
+  ; ( "execution.ancestry"
+    , "Owned shared counters, nested scope lifetimes and independent session budgets"
+    , [ "lib/chatml/chatml_execution.ml" ]
+    , "runtime.execution"
+    , [ "test/chatml_execution_budget_test.ml"; "test/chatml_projection_budget_test.ml" ]
+    )
+  ; ( "jobs.launch"
     , "Selected job starts stage intent until owner commit; reads and cancellation \
        retain live authority"
     , [ "lib/chat_response/background_job_operations.ml"
@@ -41,7 +52,17 @@ let shared_features =
 ;;
 
 let moderator_features =
-  [ ( "moderator.transactions"
+  [ ( "moderator.state_limits"
+    , "Fresh event scopes, bounded data snapshots and validation before commit"
+    , [ "lib/chatml/chatml_value_codec.ml"
+      ; "lib/chat_response/moderator_invocation.ml"
+      ; "lib/chat_response/moderator_manager.ml"
+      ]
+    , "runtime.execution"
+    , [ "test/moderation/moderator_execution_budget_test.ml"
+      ; "test/moderation/moderator_invocation_test.ml"
+      ] )
+  ; ( "moderator.transactions"
     , "Serialized handler state, invocation resolution and local commit versus external \
        effects"
     , [ "lib/chat_response/moderator_manager.ml"
@@ -137,7 +158,13 @@ let moderator_features =
 ;;
 
 let implementation_sources =
-  [ ( "lib/agent_protocol/delivery.ml"
+  [ ( "lib/chatml/chatml_compilation.ml"
+    , "5b5f2a27e8615fc45c8050c7015fc36b33d9f4314379496ff7f1c5683d2efa3b" )
+  ; ( "lib/chatml/chatml_execution.ml"
+    , "e2272786e56f379f14bd6fba149ca2e822c74a05ef512a87185bdbb518018afe" )
+  ; ( "lib/chatml/chatml_value_codec.ml"
+    , "0f621d743b97b856dd40270fc8c51444ca18e6098ceb7ff2481a22cf999d85be" )
+  ; ( "lib/agent_protocol/delivery.ml"
     , "777e3e1c569d328959909f4e174052ab9b53009fd3d5495628fd0a3508777b0d" )
   ; ( "lib/agent_protocol/job.ml"
     , "e4797978de6b8fd8caa68c09944d9b41687cefdf81c8689fa10b83ae351d29b2" )
@@ -208,6 +235,18 @@ let implementation_sources =
 
 let topic_contracts =
   [ ( "one_off_v1"
+    , "runtime.execution"
+    , "c080dc6cef32933bd0f105bc7911980cc4895d71a7d3281ea0d8ebe6a0abe84e" )
+  ; ( "tool_v1"
+    , "runtime.execution"
+    , "e07808a17df0589a70587d5979545088357114ce4b068fd9eb03c9f18ec423c4" )
+  ; ( "moderator_v1"
+    , "runtime.execution"
+    , "3b8eea643ba19cc6b70f668f5a1217454465f7903c7c10cbfc3c7529e42cc97a" )
+  ; ( "delegated_moderator_v1"
+    , "runtime.execution"
+    , "46eb7fc4b53765709194d2946484c98b926c5a725829ed4f12873c8bbf04708e" )
+  ; ( "one_off_v1"
     , "runtime.jobs.owned"
     , "86061e050c890becd2801c700ba10346398734b0936b16e70c615051b12a57ed" )
   ; ( "one_off_v1"
