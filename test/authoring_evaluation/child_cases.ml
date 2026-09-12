@@ -217,8 +217,8 @@ let execute ~env candidate =
                (H.request
                   embedded
                   (Session_send_message
-                     { session_id = Agent_server.Embedded.session_id embedded
-                     ; attachment_id = (Agent_server.Embedded.attachment embedded).id
+                     { session_id = H.session_id embedded
+                     ; attachment_id = (H.attachment embedded).id
                      ; content =
                          { kind = Plain_text
                          ; text = "Execute lifecycle step."

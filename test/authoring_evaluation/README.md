@@ -202,8 +202,21 @@ evaluation runner, not durable daemon compaction. The missing Process symbol is
 reported by the compiler as a semantic/type failure; it is not relabelled as a
 native authorization denial. No real model-quality evidence is implied.
 
-Generalize replay scoring beyond the private
-background fixture so arbitrary submitted handlers receive the same stimulus.
+Background scoring now also uses a daemon host, without a network listener, to
+retry completion delivery with the submitted source unchanged. For both success
+and cancellation, it resubmits the acknowledged job and a stale copy still marked
+Pending through `Runtime_owner.deliver_background_job_completion`. The actor must
+reject the current copy as already resolved and the stale copy as changed. The
+moderator checkpoint (including its event queue), published history and expected
+model-request count must remain unchanged. This generic delivery check runs in
+all guidance arms; the original embedded-session cases remain covered separately.
+
+Transport redelivery and application-level event replay have different contracts.
+The host prevents a retained completion from being delivered twice; it does not
+ask the handler to run a second time. The existing fixture that manually invokes
+its handler twice remains a separate application-state check. No submitted source
+is rewritten to score host completion retries, and neither check simulates a crash.
+
 Add the reproducible optional
 provider driver, fixed model settings/seeds/repetitions and deadlines, transcript
 and metric artifacts, execution-oracle revision identity, and threshold evaluation.

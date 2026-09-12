@@ -124,8 +124,19 @@ let%expect_test
            ~candidate:Background_tests.candidate
            ~validate:(Background_cases.validate ~env)
            ~execute:(fun candidate ->
-             match Background_cases.execute ~env ~finish:Release candidate with
-             | Passed -> Background_cases.execute ~env ~finish:Cancel candidate
+             match
+               Background_cases.execute
+                 ~replay_job_delivery:true
+                 ~env
+                 ~finish:Release
+                 candidate
+             with
+             | Passed ->
+               Background_cases.execute
+                 ~replay_job_delivery:true
+                 ~env
+                 ~finish:Cancel
+                 candidate
              | failure -> failure)));
   [%expect
     {|

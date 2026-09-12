@@ -123,7 +123,7 @@ let wait env ready =
   loop ()
 ;;
 
-let execute_checked ~env ~finish candidate =
+let execute_checked ?replay_job_delivery ~env ~finish candidate =
   match binding_validation ~env candidate with
   | Invalid (kind, message) -> Failed (kind, message)
   | Valid ->
@@ -171,8 +171,8 @@ let execute_checked ~env ~finish candidate =
           (H.request
              embedded
              (Job_cancel
-                { session_id = Agent_server.Embedded.session_id embedded
-                ; attachment_id = (Agent_server.Embedded.attachment embedded).id
+                { session_id = H.session_id embedded
+                ; attachment_id = (H.attachment embedded).id
                 ; job_id
                 ; idempotency_key =
                     P.Idempotency_key.of_string "evaluation:cancel" |> H.get
@@ -212,6 +212,7 @@ let execute_checked ~env ~finish candidate =
     in
     let snapshot =
       H.run
+        ?replay_job_delivery
         ~env
         ~background:
           { after_ack
@@ -268,8 +269,8 @@ let execute_checked ~env ~finish candidate =
          , "background completion or process cleanup did not satisfy the scenario" ))
 ;;
 
-let execute ~env ~finish candidate =
-  match execute_checked ~env ~finish candidate with
+let execute ?replay_job_delivery ~env ~finish candidate =
+  match execute_checked ?replay_job_delivery ~env ~finish candidate with
   | result -> result
   | exception H.Scenario_failure message -> Failed (Semantics, message)
   | exception Eio.Time.Timeout ->
