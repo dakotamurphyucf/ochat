@@ -364,6 +364,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_transport_socket/server.mli` | [contract](../../lib/agent_transport_socket/server.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_transport_stdio/gateway.mli` | [contract](../../lib/agent_transport_stdio/gateway.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_transport_stdio/server.mli` | [contract](../../lib/agent_transport_stdio/server.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/authoring_sources/authoring_sources.mli` | [contract](../../lib/authoring_sources/authoring_sources.mli) | [integration](../guide/authoring-source-bundle.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_response_loop.mli` | [contract](../../lib/chat_response/agent_response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_runtime.mli` | [contract](../../lib/chat_response/agent_runtime.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_tool_contract.mli` | [contract](../../lib/chat_response/agent_tool_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -683,6 +684,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../examples/agent-server/README.md) | `docs-src/examples/agent-server/README.md` | Current reference/tutorial; offline checker applies. |
 | [page](../examples/agent-server/config/README.md) | `docs-src/examples/agent-server/config/README.md` | Current reference/tutorial; offline checker applies. |
 | [page](../examples/prompt-patterns.md) | `docs-src/examples/prompt-patterns.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/authoring-source-bundle.md) | `docs-src/guide/authoring-source-bundle.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/build-troubleshooting.md) | `docs-src/guide/build-troubleshooting.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chat_tui.md) | `docs-src/guide/chat_tui.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-shell-examples.md) | `docs-src/guide/chatmd-shell-examples.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

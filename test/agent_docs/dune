@@ -5,7 +5,7 @@
   docs_example_completions docs_example_crawler)
  (libraries core eio eio_main eio.unix eio_posix jsonaf re mirage-crypto-rng.unix
   ochat.agent_protocol ochat.agent_server ochat.agent_client ochat.chatmd ochat.chatmd_shell_spec
-  ochat.chatml ochat.chatml_host_runtime ochat.shell_runtime ochat.io ochat.session ochat.lru_cache
+  ochat.chatml ochat.chatml_host_runtime ochat.authoring_sources ochat.shell_runtime ochat.io ochat.session ochat.lru_cache
   ochat.ttl_lru_cache ochat.template ochat.tikitoken ochat.vector_db ochat.bm25 owl base64
   ochat.functions ochat.environment ochat.source ochat.webpage_markdown ochat.odoc_crawler ochat.ochat_function)
  (preprocess (pps ppx_jane)))

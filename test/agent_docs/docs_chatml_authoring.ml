@@ -163,6 +163,15 @@ let check_exn { id; expectation; source } =
 ;;
 
 let run env root =
+  let installed = Authoring_sources.installed () |> Result.ok_or_failwith in
+  List.iter (Authoring_sources.documents installed) ~f:(fun document ->
+    let authored =
+      Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / "docs-src" / document.path)
+    in
+    match String.equal authored document.text with
+    | true -> ()
+    | false ->
+      fail document.path "installed source differs from shared human documentation");
   let examples =
     Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / fixture) |> examples_exn
   in

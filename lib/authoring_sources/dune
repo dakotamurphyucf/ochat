@@ -1,0 +1,26 @@
+(executable
+ (name embed_documents)
+ (modules embed_documents)
+ (libraries core))
+
+(rule
+ (targets bundled_documents.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_documents.exe}
+    guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
+    guide/chatml-ocaml-differences.md %{dep:../../docs-src/guide/chatml-ocaml-differences.md}
+    guide/chatml-match-semantics.md %{dep:../../docs-src/guide/chatml-match-semantics.md}
+    guide/chatml-moderator-runtime.md %{dep:../../docs-src/guide/chatml-moderator-runtime.md}
+    guide/chatml-surface-inventory.md %{dep:../../docs-src/guide/chatml-surface-inventory.md}
+    overview/chatmd-language.md %{dep:../../docs-src/overview/chatmd-language.md}
+    guide/chatmd-shell-extensions.md %{dep:../../docs-src/guide/chatmd-shell-extensions.md}
+    agent-server/extensibility-foundations.md %{dep:../../docs-src/agent-server/extensibility-foundations.md}))))
+
+(library
+ (name authoring_sources)
+ (public_name ochat.authoring_sources)
+ (modules authoring_sources bundled_documents)
+ (private_modules bundled_documents)
+ (libraries core jsonaf ochat.chatml ochat.chatmd_shell_spec)
+ (preprocess (pps ppx_jane)))

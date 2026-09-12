@@ -1,0 +1,3 @@
+(test
+ (name offline)
+ (libraries core core_unix ochat.authoring_sources ochat.chatmd_shell_spec))

@@ -53,7 +53,8 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ ( [ "background_request"
+    [ [ "authoring_sources" ], "../guide/authoring-source-bundle.md"
+    ; ( [ "background_request"
         ; "background_execution"
         ; "background_delivery"
         ; "background_job_event"
@@ -133,7 +134,8 @@ let module_rows env root =
   |> List.filter ~f:(fun file ->
     String.is_prefix file ~prefix:"lib/agent_"
     || List.exists
-         [ "chat_tui/"
+         [ "authoring_sources/"
+         ; "chat_tui/"
          ; "chat_response/"
          ; "chatmd/"
          ; "chatml/"
