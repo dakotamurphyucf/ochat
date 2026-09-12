@@ -720,6 +720,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-global-helpers.md) | `docs-src/guide/chatml-global-helpers.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-host-effects.md) | `docs-src/guide/chatml-host-effects.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-implementation-architecture.md) | `docs-src/guide/chatml-implementation-architecture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-inference.md) | `docs-src/guide/chatml-inference.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-invocation-context.md) | `docs-src/guide/chatml-invocation-context.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-json.md) | `docs-src/guide/chatml-json.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-language-spec.md) | `docs-src/guide/chatml-language-spec.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

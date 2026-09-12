@@ -197,6 +197,16 @@ let%expect_test
       let text = field task_guidance "text" |> Jsonaf.string_exn in
       assert (String.is_substring text ~substring:"not a general exception boundary");
       assert (String.is_substring text ~substring:"inside map");
+      let inference =
+        List.find_exn (items response) ~f:(fun item ->
+          match Jsonaf.member "topic_id" item with
+          | Some (`String "chatml.inference") -> true
+          | _ -> false)
+      in
+      assert (
+        String.is_substring
+          (field inference "text" |> Jsonaf.string_exn)
+          ~substring:"Type inference and annotations");
       require_json `False (field response "package_complete"));
   let orientation = List.hd_exn (items prepared) in
   require_json (`String "orientation") (field orientation "kind");

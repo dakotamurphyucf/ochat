@@ -8,6 +8,7 @@ let marker = "<!-- ochat-authoring-example: "
 let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
 let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let language_fixture = "docs-src/guide/chatml-authoring-language.md"
+let inference_fixture = "docs-src/guide/chatml-inference.md"
 let task_fixture = "docs-src/guide/chatml-task-effects.md"
 let primer_fixture = "docs-src/guide/chatml-authoring-primer.md"
 let strings_fixture = "docs-src/guide/chatml-strings.md"
@@ -354,6 +355,7 @@ let run env root =
       ; runtime_fixture
       ; background_fixture
       ; language_fixture
+      ; inference_fixture
       ; task_fixture
       ; primer_fixture
       ; strings_fixture

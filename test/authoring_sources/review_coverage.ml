@@ -10,6 +10,7 @@ type selection =
 type request =
   | Missing
   | Grammar
+  | Changed_docs
   | Candidates of selection * string
 
 let () =
@@ -17,6 +18,7 @@ let () =
     match Array.to_list (Sys.get_argv ()) with
     | _ :: "--missing" :: surfaces -> Missing, surfaces
     | _ :: "--grammar" :: surfaces -> Grammar, surfaces
+    | _ :: "--changed-docs" :: surfaces -> Changed_docs, surfaces
     | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
     | _ :: "--alias" :: name :: topic :: surfaces ->
       Candidates (Alias name, topic), surfaces
@@ -24,7 +26,7 @@ let () =
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...] | (--missing | --grammar) [SURFACE ...]"
+         ...] | (--missing | --grammar | --changed-docs) [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -92,6 +94,58 @@ let () =
                    [ "id", `String target.id
                    ; "contract_sha256", `String target.contract_sha256
                    ])) )
+        ]
+    | Changed_docs ->
+      let module C = Authoring_corpus.Coverage in
+      let targets =
+        (C.compiler_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
+        @ (C.grammar_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith)
+        |> List.map ~f:(fun target -> target.C.id, target)
+        |> String.Map.of_alist_exn
+      in
+      let changes =
+        C.reviewed_mappings @ C.grammar_mappings
+        |> List.filter_map ~f:(fun mapping ->
+          match Map.find targets mapping.C.target_id with
+          | None ->
+            (match
+               List.exists surfaces ~f:(fun surface ->
+                 String.is_prefix mapping.target_id ~prefix:(surface ^ "/"))
+             with
+             | false -> None
+             | true -> failwith ("compiler target removed: " ^ mapping.target_id))
+          | Some target ->
+            if not (String.equal target.contract_sha256 mapping.contract_sha256)
+            then failwith ("compiler contract changed: " ^ target.id);
+            let current =
+              C.topic_contract
+                corpus
+                ~surface_id:target.surface_id
+                ~topic_id:mapping.topic_id
+              |> Result.ok_or_failwith
+            in
+            (match String.equal current mapping.topic_closure_sha256 with
+             | true -> None
+             | false ->
+               Some
+                 ( target.surface_id
+                 , mapping.topic_id
+                 , mapping.topic_closure_sha256
+                 , current )))
+        |> List.dedup_and_sort ~compare:(fun a b ->
+          [%compare: string * string * string * string] a b)
+        |> List.map ~f:(fun (surface, topic, previous, current) ->
+          `Object
+            [ "surface", `String surface
+            ; "topic", `String topic
+            ; "previous", `String previous
+            ; "current", `String current
+            ])
+      in
+      `Object
+        [ "review_required", `True
+        ; "unchanged_reviewed_compiler_contracts", `True
+        ; "changed_topic_closures", `Array changes
         ]
     | Candidates (selection, topic) ->
       let candidates =

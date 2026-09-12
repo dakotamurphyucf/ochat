@@ -6,7 +6,8 @@
 (executable
  (name review_coverage)
  (modules review_coverage)
- (libraries core jsonaf ochat.authoring_corpus ochat.authoring_sources))
+ (libraries core jsonaf ochat.authoring_corpus ochat.authoring_sources)
+ (preprocess (pps ppx_jane)))
 
 (library
  (name topic_tests)

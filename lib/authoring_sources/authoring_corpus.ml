@@ -805,7 +805,7 @@ module Coverage = struct
   let string_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "8929a779461f25385ec1580d736eea0c628373811577e9306c2faf8cc3738a43"
+        , "7335e9ca92394561b99fcf3c1d7a0e7b01a455198fca97c4a82b5c9643c1609f"
         , [ ( "module/String"
             , "f83f103698597607463a72b4760e05febc850b6e61f0784c78206b293f112b50" )
           ; ( "module_export/String.concat"
@@ -838,7 +838,7 @@ module Coverage = struct
             , "d3de248c6c57b40dc591609f2c150b7f252d4e4e1d16618cd50e4d5e8365224c" )
           ] )
       ; ( "tool_v1"
-        , "8e6445c29792c36284332aba6ac7b4cfdddf7b44d0ae378041c71784a0c53dfa"
+        , "3f440110db8d63f182ed38951d62ab3b0d4c4a17aa6651bfe8d90f5c4af03a8d"
         , [ ( "module/String"
             , "83fe32513e2d6a2f499cf26764e89aa8664f4d9fe79e59842a41eba900d63027" )
           ; ( "module_export/String.concat"
@@ -871,7 +871,7 @@ module Coverage = struct
             , "22dab6846df6dc37ac7e5079f113b6166ae4d5b980ef3e37b7adf99df0b2990a" )
           ] )
       ; ( "moderator_v1"
-        , "7c89096edc2d8b14fd11d9cf95d28d0f2823e334f02af83c6f35ba0b3c337519"
+        , "d2fa2d467ca39fe78006cddfa2d931ac66f9e7fabb83a1c370b3345765d116c9"
         , [ ( "module/String"
             , "509fb6b69a90ce2af0f64b3bbc6a42cac7f6fec12163f7b6f03bbfdd41017989" )
           ; ( "module_export/String.concat"
@@ -904,7 +904,7 @@ module Coverage = struct
             , "05ac7d5684a1fcc693b1d04afb9439137a0bb7e6e17eb5e5bf83e4ea0d8be80a" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "b28fe686da0c259e769bba79f166bf4a6284cf18463c7428c32bd611cd05deb7"
+        , "8dfb0c39838bfc26752ea2dd7e6a7a037292908bee6d7c82c44c6eff2077006b"
         , [ ( "module/String"
             , "a9aea91e0022011ed771f94ef74061eab1d235bf0b56c94d8135546424cada59" )
           ; ( "module_export/String.concat"
@@ -953,7 +953,7 @@ module Coverage = struct
   let array_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "dfff5a377f9451cf3ecb4a156ebea0cc64a8c90e34899de6d38e43364510e441"
+        , "299a4325347b42fc38f12716afb735e4aab10f37be9d1e04e08610adf25b319d"
         , [ ( "module/Array"
             , "78131df6b3d97fc91f2ea988d48ea28aa0dd8cab44858ebb72cbae22f036e25b" )
           ; ( "module_export/Array.append"
@@ -1002,7 +1002,7 @@ module Coverage = struct
             , "492ac0862c0a81e7a1a8fab69fbbdbd4e771eba1d3648ef8515e2d73b878a02c" )
           ] )
       ; ( "tool_v1"
-        , "7a8c4ce3a13e58d43d656273c217f39f6425b95049ca7a416f9bf125e3d1ddf5"
+        , "917f4ee9fe0fd68bae869da9c23ebe29e50209dc2082e3aef331d23753882b6b"
         , [ ( "module/Array"
             , "d2f0bd5b3888593ea1aa60b15d5011c322d547ff9d289715209acd0cb200be6c" )
           ; ( "module_export/Array.append"
@@ -1051,7 +1051,7 @@ module Coverage = struct
             , "7107c4e1ba79f9df4d33b816245b6821b9e6ccfc2cb9ae017ff1db85097415cc" )
           ] )
       ; ( "moderator_v1"
-        , "2f46d515b7bb75760db1b771f37332eb8b79e009e308554fc5096e7360527859"
+        , "755774422db95ba5be3c569dca775406e688c4242d8f3f936abfca7aef51c574"
         , [ ( "module/Array"
             , "6c0cb819069d3ce215a3fadcbd2ef3b53e038b29ded5aef027ebe125ee3ff7b8" )
           ; ( "module_export/Array.append"
@@ -1100,7 +1100,7 @@ module Coverage = struct
             , "4fafa016b2d0bfbb6567494be00b463f8cb76cf48953e0e99084d8003d146c5b" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "a7c5e60e6dd2eba1dc6c2d63c56cbb3e2dc273cffad332dc297ce4ddef3d0528"
+        , "e9f092d6d1755d9fa74ad864f7a206b66616f4c6f5248fb301ce3925c7295676"
         , [ ( "module/Array"
             , "40b9b5d09333d558fc36cc99caf8bebcbc3e76f73726caf81d67a1ff1bb39d00" )
           ; ( "module_export/Array.append"
@@ -1165,7 +1165,7 @@ module Coverage = struct
   let option_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "dfff5a377f9451cf3ecb4a156ebea0cc64a8c90e34899de6d38e43364510e441"
+        , "299a4325347b42fc38f12716afb735e4aab10f37be9d1e04e08610adf25b319d"
         , [ ( "module/Option"
             , "35625c7916a5431fdcef89a05a6f24dfe4154b12e3076e6a38db17e8dc484b96" )
           ; ( "module_export/Option.get_or"
@@ -1180,7 +1180,7 @@ module Coverage = struct
             , "af6d3e053171d385c9315f96394ad854b84e2d6d5a7c8af8090dcb9a4b2bacfb" )
           ] )
       ; ( "tool_v1"
-        , "7a8c4ce3a13e58d43d656273c217f39f6425b95049ca7a416f9bf125e3d1ddf5"
+        , "917f4ee9fe0fd68bae869da9c23ebe29e50209dc2082e3aef331d23753882b6b"
         , [ ( "module/Option"
             , "8139706127f4fb46b6b7d2c8f8951efe78e58e59452de6cf2c5a78e552a489f8" )
           ; ( "module_export/Option.get_or"
@@ -1195,7 +1195,7 @@ module Coverage = struct
             , "9800ca939bd5dd2a790a94f29faca30ca578942749ce4aebccb8dd671b3a9f28" )
           ] )
       ; ( "moderator_v1"
-        , "2f46d515b7bb75760db1b771f37332eb8b79e009e308554fc5096e7360527859"
+        , "755774422db95ba5be3c569dca775406e688c4242d8f3f936abfca7aef51c574"
         , [ ( "module/Option"
             , "eed8a04643315785f17a45f6ff41a87b0936217c1205317613c9aefbd8375690" )
           ; ( "module_export/Option.get_or"
@@ -1210,7 +1210,7 @@ module Coverage = struct
             , "38d8c3c4754e9da41c9d4fcecb4deaceedcda41aaa5200d8bcc037cfea004d92" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "a7c5e60e6dd2eba1dc6c2d63c56cbb3e2dc273cffad332dc297ce4ddef3d0528"
+        , "e9f092d6d1755d9fa74ad864f7a206b66616f4c6f5248fb301ce3925c7295676"
         , [ ( "module/Option"
             , "eb0a6714a9d24b6c7e72a1c0e54a424080e40e700fd464aaa8e8bd672fab7d53" )
           ; ( "module_export/Option.get_or"
@@ -1241,7 +1241,7 @@ module Coverage = struct
   let json_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "9598e35b5722b27e3d9e0fd0b8a79c6069aab8252ac06fd9931d26a8d61fddfd"
+        , "371888190eaa04697354def05305c7453782a0413b1ceb5f8bfb9f8161008238"
         , [ ( "module/Json"
             , "8276161ec095028a7648fb61044eca879e3255f69d1280b8ad20b13c350235c1" )
           ; ( "module_export/Json.as_array"
@@ -1278,7 +1278,7 @@ module Coverage = struct
             , "775f180b4c48e9955bb980993420ca28ba4a832139e5905eb31edb35b940369b" )
           ] )
       ; ( "tool_v1"
-        , "0598fd72875d8502f88d4152d83666f7d10edecc175b39a63f7bfbc519ef967b"
+        , "932b0f3ddafebd0d9a4b58830b326ece9508ed405d804a8b19e50bd2fda6c3ab"
         , [ ( "module/Json"
             , "f594a3d6bedb39aa513044c62ffa6eccab150fdc787b030a370c47b61b9038d0" )
           ; ( "module_export/Json.as_array"
@@ -1315,7 +1315,7 @@ module Coverage = struct
             , "91a455c705c41b4b046e84ad03f0125533c4872d94745e1f0a67c9e334eeaf3d" )
           ] )
       ; ( "moderator_v1"
-        , "7666e108b1139830fea1f55c5858064e945093f96929db3d8253778f2715ae66"
+        , "517ef635827e3e3eee57a1753deab77f2c1edc302e4815252b2704b5b2ca8aea"
         , [ ( "module/Json"
             , "5693ccaf8653d32a31d1f478d215fbb447bac00435cfc10c3df8caee1ad85670" )
           ; ( "module_export/Json.as_array"
@@ -1352,7 +1352,7 @@ module Coverage = struct
             , "fd94d4e57a65a4381f7c6c87a98cc99f5b1c080b4eea5f9a6f20da11bd20b988" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "1525675290f78af03c14e06661a0d8389ca4e039b16ec5e1cb5b23a3b00501d5"
+        , "0d967efd2d5909f38ed8fdb5464cc3b0bf9cc29306e6fac8999fe65f5a7e7ac2"
         , [ ( "module/Json"
             , "dd36cafbd30b3b4396d4d7b02394ed09a988f3d818cf4626c2fe7da26cefc457" )
           ; ( "module_export/Json.as_array"
@@ -1406,7 +1406,7 @@ module Coverage = struct
   let hashtbl_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "2fc1d29574db1d5fe819b36d879cb2232e1c96f6dce3778292a7daeb12c8f045"
+        , "8a475c75458a2881e38b6055f936c65e85d54240a1cfe2541ed85942a4c54a0f"
         , [ ( "module/Hashtbl"
             , "44d97e5d36cbf23bb3b2e234a045a2f976bbc486da1bdcb2cf65c69b37d188e7" )
           ; ( "module_export/Hashtbl.create"
@@ -1421,7 +1421,7 @@ module Coverage = struct
             , "b1c0b7ec1710258f0df03ca217b9ee7a0a4696aaeed773439f5c920d3555c11b" )
           ] )
       ; ( "tool_v1"
-        , "e6eeb78a70551334e9424d937d4428c899a2304832eca55511a31a1237795bce"
+        , "18632f19f12084c9b9c025cdad8f14563fdc310b1b213c2368694c828023c17e"
         , [ ( "module/Hashtbl"
             , "866a8d298a7e56dbdb498517254086e88873c396a4595d494a8a05a26e8d3414" )
           ; ( "module_export/Hashtbl.create"
@@ -1436,7 +1436,7 @@ module Coverage = struct
             , "a8aed9d5f05a6de5b81289f27bf5b5828d13abb93e2dd1635ba4249c83774f27" )
           ] )
       ; ( "moderator_v1"
-        , "e518ac351ede12e897d4616abca9790adaf3588bdca89773a7732e77c0bf93db"
+        , "c37747552067df9cc088d583c9a9bba94fe10c28e2a78c515590c2caaa29e805"
         , [ ( "module/Hashtbl"
             , "d3de0228abd1f243c2d62e30fee6d770908c8db4724e639bd1cef1200bcbcfdc" )
           ; ( "module_export/Hashtbl.create"
@@ -1451,7 +1451,7 @@ module Coverage = struct
             , "37a78e5e2cfd9c7b5258d1d360cf3450ef66cf4bb0040b5356b5d95c18b9d407" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "e92ed0332f90ca8663517d269bfb4e671b481a5d72de4044bdbd6ebf556d9be1"
+        , "0b6a6acc8d4ea2f8efb8a625336bede188cedf797e08e3691ceb24327951b29d"
         , [ ( "module/Hashtbl"
             , "8460da183ee7f58302eed019d338422946e327f2522208d193c50ee7c80dabe0" )
           ; ( "module_export/Hashtbl.create"
@@ -1482,7 +1482,7 @@ module Coverage = struct
   let global_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "9b0979dfe9ea5e136b26a324ab4c0cbf35107501919de75d01c072a050f0d825"
+        , "83c0a63f9c7d7ae5c26e4a73cb745acda35ab60b5d478861312566ee20acd5ab"
         , [ ( "global/array_copy"
             , "326c36574ab0637860405f83de93ae1cc46de5d4773bb6c5ae899820b9847b98" )
           ; ( "global/fail"
@@ -1505,7 +1505,7 @@ module Coverage = struct
             , "8531aaf9c5bb13b869bf64a5a6e1e6fc765ce939f286963144ff94bdc2017858" )
           ] )
       ; ( "tool_v1"
-        , "09dc54ef4d5fe5464cd0d06333ae758e14f27c3af30d7c5a9ff995781a5cf84d"
+        , "68d15807a2b3258bdc475bc060b12d7bca5abd5490f1ae50d6f308d17d1d11ee"
         , [ ( "global/array_copy"
             , "a853a83afa1c9f7446e785af3bc34d652573e62e51a7350bbf7b4a197cf11893" )
           ; ( "global/fail"
@@ -1528,7 +1528,7 @@ module Coverage = struct
             , "97c0ae9a490897032699bc49604a53667792ab832e52fa28595fbd62b865515f" )
           ] )
       ; ( "moderator_v1"
-        , "dd7588489044aa53d0c907bc2722971c6b67e70d8e7b0ea8b38df27fd41cb76d"
+        , "dcc4bc5698e726174154c1874acb04c64badaddc2867ea369e3e5742521ad237"
         , [ ( "global/array_copy"
             , "593a99eb4072c3be8aa8fa8485efc2fca4b4efe65740568b0454e222e55a4e20" )
           ; ( "global/fail"
@@ -1553,7 +1553,7 @@ module Coverage = struct
             , "56997194476c168676fbe8bf5a1a471f170beb71dfb13583aa64191f86d4056f" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "43e5d45dd05197a255e9fbe7c767bcb1b30f60c74ee970e5a3226ebac34a21d0"
+        , "07bbff5d1af01c5640ee56a257e6b0f4eefba6a06f6d4cfdaecfb325823ef070"
         , [ ( "global/array_copy"
             , "aa75d71c337e070bee24369a8d14eb038601e57c106751310299f9890875b5e4" )
           ; ( "global/fail"
@@ -1594,22 +1594,22 @@ module Coverage = struct
   let json_alias_mappings =
     List.concat_map
       [ ( "one_off_v1"
-        , "9598e35b5722b27e3d9e0fd0b8a79c6069aab8252ac06fd9931d26a8d61fddfd"
+        , "371888190eaa04697354def05305c7453782a0413b1ceb5f8bfb9f8161008238"
         , [ ( "type_alias/json"
             , "de373e490c4ffee533ebbe5ca820e68a85731092a8fbf19a7205108d6ab26a0e" )
           ] )
       ; ( "tool_v1"
-        , "0598fd72875d8502f88d4152d83666f7d10edecc175b39a63f7bfbc519ef967b"
+        , "932b0f3ddafebd0d9a4b58830b326ece9508ed405d804a8b19e50bd2fda6c3ab"
         , [ ( "type_alias/json"
             , "fc0bb666163b3ce1934c8ac08c558fb9eaa90c41f08407271b55b76b7c8c226f" )
           ] )
       ; ( "moderator_v1"
-        , "7666e108b1139830fea1f55c5858064e945093f96929db3d8253778f2715ae66"
+        , "517ef635827e3e3eee57a1753deab77f2c1edc302e4815252b2704b5b2ca8aea"
         , [ ( "type_alias/json"
             , "5b5af3a1b53bbccfdfc3ffc34996a6c0e061f45809b1689b0a29fc24a138755a" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "1525675290f78af03c14e06661a0d8389ca4e039b16ec5e1cb5b23a3b00501d5"
+        , "0d967efd2d5909f38ed8fdb5464cc3b0bf9cc29306e6fac8999fe65f5a7e7ac2"
         , [ ( "type_alias/json"
             , "701bb077522f52d7894c6560b985a967f478a0f343e55f704186a1f32224295f" )
           ] )
@@ -1631,7 +1631,7 @@ module Coverage = struct
   let moderator_data_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "d4ce8120be3e86db7402d7219ef6c20d7be6f33c61c726163175867d25b6913e"
+        , "29894e0e7d20885ce4c65ea8f6508ec9a8d1a7876195e7e50e300e6ac82010a7"
         , [ ( "module/Item"
             , "30a1aec7224048beb927ac1cff733daaaebb03fc4144e90f3ec7319bb0694158" )
           ; ( "module_export/Item.assistant_text"
@@ -1722,7 +1722,7 @@ module Coverage = struct
             , "a7b9f78044d68da69b89b360bcf237eda4850f54c188c113720e779b1fbfa678" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "096df7d0f9d867430390952d1709e1224bbf71396c5780bc23ef2bed40cb3741"
+        , "bb5b321c3285fdd3917fda88b0314d116f73da7df5a42788f559300b07b8160f"
         , [ ( "module/Item"
             , "0d8a88fe4ea744ffef1c1e2c8ae566e17f6f27503da74c9ca8072fbb85f1b612" )
           ; ( "module_export/Item.assistant_text"
@@ -1985,7 +1985,7 @@ module Coverage = struct
   let runtime_control_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "1c87ed45957a3ac0a3c8ecb466af2e9cdf93fbea2e55696dca33dd30603ce021"
+        , "d6f287a69874947af3d68ec27d36c8ffa619e7abcb8c56dc3df49a64618e05da"
         , [ ( "module/Runtime"
             , "6a03d3ede904c05bd4e6e423ca255efaff8116367688886a061f782e020c3ef2" )
           ; ( "module_export/Runtime.emit"
@@ -2014,7 +2014,7 @@ module Coverage = struct
             , "883ed8b59789ef2950d08c978b439005ba5546d52d64908cf9bff26af355233d" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "1d8ac2f35a187d9d59b9f353261dc3f5c2a4fc21a599b8db215afa509f4a8996"
+        , "526dc77652a80915d0cd9a15868146c084fe1e0a8c17590ef6afbeb81d154f3d"
         , [ ( "module/Runtime"
             , "a7f003fdab4a960c0fe55073944b63aebe21775ba44e9be5fdf0412d3833715e" )
           ; ( "module_export/Runtime.emit"
@@ -2048,7 +2048,7 @@ module Coverage = struct
     List.concat_map
       [ ( "one_off_v1"
         , "runtime.jobs.owned"
-        , "183a9fe5b90625ea575f9597a8661ba05edc046994ca6bd4bb4d03210d029879"
+        , "86061e050c890becd2801c700ba10346398734b0936b16e70c615051b12a57ed"
         , [ "test/chatml_composition/job_launch_tests.ml"
           ; "test/chatml_composition/moderator_job_tests.ml"
           ; "test/chatml_composition/background_artifact_tests.ml"
@@ -2070,7 +2070,7 @@ module Coverage = struct
           ] )
       ; ( "tool_v1"
         , "runtime.jobs.owned"
-        , "e09302e261379f2c05b48f2060d88c6e34dfc4a1d7bbac255e0f7ae65936a3bb"
+        , "bdcb21f6852f20a75c8ba64d64b3fc5970bcd92d0388fa2e8ab0886568128ff1"
         , [ "test/chatml_composition/job_launch_tests.ml"
           ; "test/chatml_composition/moderator_job_tests.ml"
           ; "test/chatml_composition/background_artifact_tests.ml"
@@ -2092,7 +2092,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.owned"
-        , "9cbe942e4aada933d87ef900979005e7856be775691fb23d952972dc4b47cfdc"
+        , "f92f12bba346da69ea95a5e3d39eac9eb8df856b9b5c1c56dc64bb6b862247ac"
         , [ "test/chatml_composition/job_launch_tests.ml"
           ; "test/chatml_composition/moderator_job_tests.ml"
           ; "test/chatml_composition/background_artifact_tests.ml"
@@ -2114,7 +2114,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.owned"
-        , "09a44c3255f1a963bf22fdd3a6a3a987b1065a0aef89c5cd502da867ebc3e0b8"
+        , "b2bae731da421a9c11317ec5c0667bf0f193239a968ca4c4c6d3fcd0c3e21d51"
         , [ "test/chatml_composition/job_launch_tests.ml"
           ; "test/chatml_composition/moderator_job_tests.ml"
           ; "test/chatml_composition/background_artifact_tests.ml"
@@ -2136,7 +2136,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.subscriptions"
-        , "e92c3f3081aff7cb09e014c4ee4d00fef0f2822fafc57b11b87a1db5b4817718"
+        , "2552bf47c7171a787634b2e27074373824c9884c3bff77388db129bddcfc3c8c"
         , [ "test/chatml_composition/subscription_tests.ml"
           ; "test/chatml_composition/timer_tests.ml"
           ; "test/moderation/subscription_transaction_tests.ml"
@@ -2159,7 +2159,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.subscriptions"
-        , "cb7ee52281beb7d2cb366bc50425fae4f9d30ff99b3844f0665d53a931e1d098"
+        , "06f932c4ea6b293bbaa185b3bb7b87d331bb7651ff91f502f34d4818153a5bb5"
         , [ "test/chatml_composition/subscription_tests.ml"
           ; "test/chatml_composition/timer_tests.ml"
           ; "test/moderation/subscription_transaction_tests.ml"
@@ -2182,7 +2182,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.jobs.timers"
-        , "bc6a0724baf615ea5e55dd70338562224e77c02e174ca9bf0fb185280bab3aea"
+        , "94e0ef57f9aa7579622e3eb855349806de28eaff7086002ad738255885a03e9c"
         , [ "test/chatml_composition/timer_tests.ml"
           ; "lib/chat_response/schedule_operations.ml"
           ; "lib/agent_session/script_schedule_service.ml"
@@ -2200,7 +2200,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.jobs.timers"
-        , "90baa00cc625493cecab3c276783cb4bdfc8e09fa74ec180a9a58404b336c308"
+        , "572f2d1fe92e8e07295b0a71a6b9e0d5938e0ec9facd753a5b27d54adb229e4e"
         , [ "test/chatml_composition/timer_tests.ml"
           ; "lib/chat_response/schedule_operations.ml"
           ; "lib/agent_session/script_schedule_service.ml"
@@ -2218,7 +2218,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.delivery.notifications"
-        , "b118462c27e1c5e8cd23e12dd1c63d91e94744c8b42d156c66a49630ce547685"
+        , "f4bc2cbe7ac81aeea08efa11372902d763f1828b9937aa3b5644de4f3bdf4b97"
         , [ "test/chatml_composition/notification_admission_tests.ml"
           ; "test/chatml_composition/notification_wake_tests.ml"
           ; "test/moderation/notification_transaction_tests.ml"
@@ -2233,7 +2233,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.delivery.notifications"
-        , "0d3833f8253876624f568697accd80a8046863de3a8956bfda06e2490745c55e"
+        , "d5393b298e9abb128d7230c9f062855117f739dfdba314587b5ec6eed5a1476a"
         , [ "test/chatml_composition/notification_admission_tests.ml"
           ; "test/chatml_composition/notification_wake_tests.ml"
           ; "test/moderation/notification_transaction_tests.ml"
@@ -2248,7 +2248,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.delivery.ingress"
-        , "fc698feae6c76a51c62ff2627d0d983271e0c7fc2ae846c2bc23c3ef60fa5af8"
+        , "f19d1ac3d3ed57d7b17fe8ed873043e9a586864d9f14febb5ea7d24a770c7ec8"
         , [ "test/chatml_composition/ingress_tests.ml"
           ; "test/chatml_composition/ingress_socket_tests.ml"
           ; "lib/chat_response/ingress_operations.ml"
@@ -2265,7 +2265,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.delivery.ingress"
-        , "d7f52e4bbb14200fd374d81471697948e62e6d5b6174f804c8e7efc23e726949"
+        , "4bde4b8e9c886cf561b7d46cc37ea94a092d602cedec0ee73ccde04f2760bf60"
         , [ "test/chatml_composition/ingress_tests.ml"
           ; "test/chatml_composition/ingress_socket_tests.ml"
           ; "lib/chat_response/ingress_operations.ml"
@@ -2282,7 +2282,7 @@ module Coverage = struct
           ] )
       ; ( "tool_v1"
         , "runtime.work-values"
-        , "8fa63f210f4c7c741c99ae51660beabde01d57f18aa39f7037c9372b04f871e8"
+        , "0a80668bcb9bde57cbe21ff576c1022c4640b256fbcbc8d804e3862a7859ce35"
         , [ "test/agent_docs/docs_chatml_authoring.ml"
           ; "test/chatml_composition/job_launch_tests.ml"
           ; "lib/chatml/chatml_extension_surface.ml"
@@ -2292,7 +2292,7 @@ module Coverage = struct
           ] )
       ; ( "moderator_v1"
         , "runtime.work-values"
-        , "530f24bb4c7736865d6a94094cb3c05192b7da8eb5cc5c48bae2d81230fcb43d"
+        , "67bcbdc0686a7cb9e787a40f92ef5b8136ae17bb54d6ceee8bf2c47edfb208bc"
         , [ "test/agent_docs/docs_chatml_authoring.ml"
           ; "test/chatml_composition/job_launch_tests.ml"
           ; "lib/chatml/chatml_extension_surface.ml"
@@ -2312,7 +2312,7 @@ module Coverage = struct
           ] )
       ; ( "delegated_moderator_v1"
         , "runtime.work-values"
-        , "06b303b3f9a7d9bdde539840d154c1886765c1f959c5fb228990fee712e91589"
+        , "6197677950ce8a9f4ad4424a2bda814dc2f7d6ff992ae4f0f910b06f91b8c034"
         , [ "test/agent_docs/docs_chatml_authoring.ml"
           ; "test/chatml_composition/job_launch_tests.ml"
           ; "lib/chatml/chatml_extension_surface.ml"
@@ -2344,7 +2344,7 @@ module Coverage = struct
   let invocation_context_mappings =
     List.concat_map
       [ ( "moderator_v1"
-        , "e4f5bcd9afe43ba2f2600f00a574a8f661bcd50bfa30e867899681372add2ace"
+        , "12bf240e9bc3809ca2c2ca387b54e70988f92cfa10dc5e00e92be3e31a30d202"
         , [ ( "module/Invocation"
             , "534a62f3a88e211fb3c1ace77f59a5f33ea3634dfc9be30fcee7f7b636b1114c" )
           ; ( "module_export/Invocation.resolve"
@@ -2365,7 +2365,7 @@ module Coverage = struct
             , "95863a0b7fb7f97d93b244e89ce415a7137defe91f197fd4c0460113c797aed0" )
           ] )
       ; ( "delegated_moderator_v1"
-        , "396c53f3047fe5d70287b1727b7b6e489d351da725f53767489c0b3534548c0e"
+        , "ee1719d3be9ea16c04b86aca1901cf27f4c3c8654ffa442ad996536204fdee20"
         , [ ( "module/Invocation"
             , "6ffc1b9ef3a698ebfcccfa15fc29eb607d7dc42f4df3ad2897be1668b6e306fe" )
           ; ( "module_export/Invocation.resolve"
@@ -2386,7 +2386,7 @@ module Coverage = struct
             , "83d2a40e08bbd0ea31de2557b7b31b10d4f02e109c901b5ccacc17fd660810e9" )
           ] )
       ; ( "tool_v1"
-        , "b5dd1b9379238f9e5b8932f17e2d58040286c125c07529aa70514fcaefb6d5f3"
+        , "401ef247f92e1e6a372c7f24601d29bec596615cc728f1dc4642b466bc84f1c6"
         , [ ( "type_alias/tool_context"
             , "d421f79be4f1dfcc48061eefacc070de904df8979685fbd237bb9a682577d05a" )
           ; ( "type_alias/tool_capability"
@@ -2520,7 +2520,7 @@ let language_foundation ~sources =
         [ ( "# Writing ChatML programs"
           , "6a630398a3512067a4bf364a12a27e4fcd7e66ca1b6aa3a908f1ba6ec9a6f3b2" )
         ; ( "## Source text and operators"
-          , "e27196e5dfde0d4be194493d8a3c74cfc75154edfa793b25e29b7806cde3b03f" )
+          , "f74ba277ca042233d362fe81abfdc97b1843cc7489bc77af11013d627fe37593" )
         ; ( "## Functions, loops and modules"
           , "0fb2be402c3218392e48d5db0e0b31ca4321ccc033c4b643df1df203a4b42290" )
         ; ( "## Matching and explicit data types"
@@ -2530,6 +2530,27 @@ let language_foundation ~sources =
         ; ( "## Effects, errors and execution boundaries"
           , "00f02e2fb345cd50ba3f9ab75dc834f3d95e8f62895ce214faa63cd74d0d0f8a" )
         ]
+    ; { id = "chatml.inference"
+      ; title = "Type inference, annotations and structural contracts"
+      ; prerequisites = [ "chatml.programs" ]
+      ; surfaces = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+      ; excerpts =
+          [ { path = "guide/chatml-inference.md"
+            ; heading = "# Type inference and annotations"
+            ; include_children = true
+            }
+          ]
+      ; review =
+          Audited
+            { excerpt_sha256 =
+                [ "3462268bdb7b0b4f80c1778bf084c27c06966afb3131ad6246fa3387090384cb" ]
+            ; evidence =
+                [ "lib/chatml/chatml_typechecker.ml"
+                ; "test/chatml_typechecker_test.ml"
+                ; "test/agent_docs/docs_chatml_authoring.ml"
+                ]
+            }
+      }
     ]
 ;;
 

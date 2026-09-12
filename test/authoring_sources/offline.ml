@@ -24,6 +24,7 @@ let () =
     ; "guide/chatml-collections.md"
     ; "guide/chatml-global-helpers.md"
     ; "guide/chatml-host-effects.md"
+    ; "guide/chatml-inference.md"
     ; "guide/chatml-invocation-context.md"
     ; "guide/chatml-json.md"
     ; "guide/chatml-language-spec.md"

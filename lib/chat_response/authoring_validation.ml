@@ -180,6 +180,7 @@ let entrypoint_topic = function
 let topics =
   [ "chatml.syntax.calls", "guide/chatml-ocaml-differences.md"
   ; "chatml.types", "guide/chatml-ocaml-differences.md"
+  ; "chatml.inference", "guide/chatml-inference.md"
   ; "chatml.tasks", "guide/chatml-ocaml-differences.md"
   ; "chatmd.declarations.schemas", "guide/chatml-authoring-runtime.md"
   ; "runtime.invocations.one-off", "guide/chatml-authoring-runtime.md"
@@ -592,7 +593,9 @@ let compile_diagnostic target source (error : Compiler.error) =
       , source
       , (match diagnostic.stage with
          | Parse -> [ topic; entrypoint_topic target ]
-         | Typecheck -> [ topic; "chatml.syntax.calls"; entrypoint_topic target ]) )
+         | Typecheck ->
+           [ topic; "chatml.inference"; "chatml.syntax.calls"; entrypoint_topic target ])
+      )
   in
   issue ~source ~path:[ "source" ] ~topics:topic_ids code message
 ;;
@@ -910,6 +913,7 @@ let validate_generated ~env ~(host : host) ~capabilities json =
               ; "chatmd.declarations.schemas"
               ; "chatml.syntax.calls"
               ; "chatml.types"
+              ; "chatml.inference"
               ; "runtime.authority.tool-selection"
               ]
             error.code

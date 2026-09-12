@@ -275,6 +275,8 @@ end
     The broad [chatml.programs] topic adds the checked program-writing guide:
     source/operators, control flow, matching/types, data utilities and effects.
     Shared prerequisite context identifies the examples as one-off candidates.
+    The flat [chatml.inference] topic adds checked annotation, arity,
+    generalization, recursive-value and structural-contract examples.
     This is the compact language foundation, not full language/runtime coverage
     or any of the five complete task packages. *)
 val language_foundation : sources:Authoring_sources.t -> (t, string) result

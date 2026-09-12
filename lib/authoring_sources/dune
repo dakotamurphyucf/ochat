@@ -21,6 +21,7 @@
    (run %{exe:embed_documents.exe}
     guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
     guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
+    guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
     guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
     guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
     guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}

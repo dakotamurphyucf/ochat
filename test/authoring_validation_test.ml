@@ -354,10 +354,14 @@ let%expect_test
     {|
     ("call syntax"
      ((chatml.type_error
-       (chatml.types chatml.syntax.calls runtime.invocations.one-off) (1))))
+       (chatml.types chatml.inference chatml.syntax.calls
+        runtime.invocations.one-off)
+       (1))))
     (entrypoint
      ((chatml.type_error
-       (chatml.types chatml.syntax.calls runtime.invocations.one-off) (1))))
+       (chatml.types chatml.inference chatml.syntax.calls
+        runtime.invocations.one-off)
+       (1))))
     (schema ((schema.invalid (chatmd.declarations.schemas) ())))
     (tools ((capability.not_selected (runtime.authority.tool-selection) ())))
     ("host target"

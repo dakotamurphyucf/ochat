@@ -39,9 +39,12 @@ including CRLF line endings. There are no `//` or `#` line comments.
 | Mutation | `cell := value`, `array[index] <- value`; both return unit |
 | Sequencing | `first; second` evaluates both and returns the second value |
 
-Arithmetic does not implicitly convert integers to floats. Equality rejects
-arrays, refs, functions and tasks; it is not a general serialization/comparison
-operation. `=` introduces bindings and record fields, not equality. There are no
+Arithmetic does not implicitly convert integers to floats. Direct equality on
+known array, ref, function and task types is rejected. Generic helpers currently
+can bypass that static restriction and compare such values by identity; see the
+[inference boundary](chatml-inference.md#matching-and-equality-use-inferred-types).
+Equality is not a general serialization/comparison operation. `=` introduces
+bindings and record fields, not equality. There are no
 `&&`, `||`, pipeline, list-cons or modulo operators; use conditionals or matching
 for boolean control flow. Multiplication/division bind tighter than addition and
 concatenation, which bind tighter than comparison. Parenthesize compound operands
