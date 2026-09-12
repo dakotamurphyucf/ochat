@@ -66,7 +66,7 @@ let%expect_test
       |> protocol_ok
       |> ignore;
       H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-      Agent_server.Runtime_owner.unload registry_entry.runtime |> protocol_ok;
+      unload_idle_runtime env registry_entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       H.send_message
         handle

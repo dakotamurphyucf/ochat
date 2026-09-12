@@ -179,7 +179,7 @@ let%expect_test
             |> Background_recovery_tests.store_ok
           in
           assert (P.Subscription.equal saved (List.hd_exn restored.subscriptions));
-          Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+          unload_idle_runtime env entry.runtime;
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
           |> protocol_ok

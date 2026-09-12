@@ -67,7 +67,7 @@ let%expect_test "moderator replacement retires completion owned by the previous 
             (P.Job.to_json { job with delivery = retained.delivery })
             (P.Job.to_json retained));
         assert (List.is_empty retired.deliveries);
-        Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+        unload_idle_runtime env entry.runtime;
         H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
         Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
         |> protocol_ok

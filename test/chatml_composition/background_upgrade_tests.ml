@@ -88,7 +88,7 @@ let%expect_test
         Jsonaf.exactly_equal
           (P.Job.to_json retained)
           (P.Job.to_json (List.hd_exn snapshot.jobs)));
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       let restored = state () in
       assert (

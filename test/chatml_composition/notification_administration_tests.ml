@@ -159,7 +159,7 @@ let%expect_test
             |> Option.value_exn
           in
           assert (P.Completion.equal original exported_completion);
-          Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+          unload_idle_runtime env entry.runtime;
           assert (Option.is_some (entry.collect_results () |> protocol_ok));
           Option.iter reference.artifact ~f:(fun reference ->
             let reread =

@@ -143,6 +143,14 @@ module Coverage : sig
       topic prose or prerequisite topics change. Other APIs remain unmapped;
       this list alone is not the full public-feature coverage manifest. *)
   val entrypoint_mappings : mapping list
+
+  (** Exact reviewed Task module and pure/bind/map/fail/catch contracts on all
+      four extensibility surfaces, including checked recovery/error boundaries. *)
+  val task_mappings : mapping list
+
+  (** Maintained reviewed subset. Other compiler APIs and semantic inventories
+      still require coverage; this is not a complete public-feature manifest. *)
+  val reviewed_mappings : mapping list
 end
 
 (** Seven source-pinned topics from the checked OCaml-differences guide,

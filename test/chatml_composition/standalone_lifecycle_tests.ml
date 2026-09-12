@@ -63,7 +63,7 @@ let%expect_test
       [%test_eq: Sexp.t]
         (Agent_session.Session_state.sexp_of_t stopped)
         (Agent_session.Session_state.sexp_of_t (state ()));
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       Background_shell_tests.wait env (fun () ->
         let current = state () in
@@ -85,7 +85,7 @@ let%expect_test
        | Cancelled _, Request_turn -> ()
        | _ -> failwith "native cancellation did not retain its requested notification");
       H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
       |> protocol_ok

@@ -44,7 +44,7 @@ let%expect_test
       request ();
       [%test_eq: int] 1 (budget actor).followup_turns;
       let before = budget actor in
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
       assert (B.equal before (budget actor));
       request ();

@@ -99,7 +99,7 @@ let%expect_test
             |> Background_recovery_tests.store_ok
           in
           assert (List.is_empty restored.ingress_registrations);
-          Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+          unload_idle_runtime env entry.runtime;
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           assert (Result.is_error (submit ()));
           print_s

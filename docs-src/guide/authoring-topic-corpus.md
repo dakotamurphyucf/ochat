@@ -60,15 +60,24 @@ or reviewing explanations.
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
 and delegated moderator surfaces. The normal offline tests compare these literal
-reviewed pins to the current compiler and source-derived topics. Other compiler
+reviewed pins to the current compiler and source-derived topics.
+`Coverage.task_mappings` adds the Task module and its five exports on each surface,
+with the complete [task semantics guide](chatml-task-effects.md) and checked examples.
+`Coverage.reviewed_mappings` combines these thirty exact targets. Other compiler
 APIs remain explicitly unmapped. To update a pin, review the changed contract or
 topic closure and its relevant behavior tests first; regenerating pins on each
 build would defeat this check. Authoring-context service construction also audits
 this maintained subset against the installed compiler and corpus; incompatible
-entrypoint guidance fails before queries are served. Packages remain labelled
+entrypoint or Task guidance fails before queries are served. Packages remain labelled
 incomplete while the other required feature mappings are missing.
 
 ## Initial topic corpus
+
+The flat `chatml.task-effects` topic explains sequencing, repeated interpretation,
+nested tasks, task versus pure failures and local/external rollback boundaries.
+It is included in every prepared task package and in the language orientation's
+direct reading routes. Six examples are executed offline, including two expected
+runtime failures; those failures are tested rather than advertised as recoverable.
 
 The initial `language_foundation` provides these topics from the
 [checked OCaml-differences guide](chatml-ocaml-differences.md):

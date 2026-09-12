@@ -92,7 +92,7 @@ let%expect_test
         Contract.rebind contract ~current_capabilities:(capabilities entry) |> protocol_ok
       in
       H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       let current = capabilities entry in
       let selection =

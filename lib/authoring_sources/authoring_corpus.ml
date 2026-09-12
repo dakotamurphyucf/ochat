@@ -481,6 +481,84 @@ module Coverage = struct
         "4f6e6c33e84bef5b5f8a01906c9c87d51f6a80df28e40181666545c3f1dd4257"
     ]
   ;;
+
+  let task_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "de4730371e88a3bea91ba98f2ef303c9ebf38aac237ba8d701153c8e644e4d19"
+        , [ ( "module/Task"
+            , "a5057743d97256c6e123f089d84a21a57b42d89eed928a4d5183f527edf69a92" )
+          ; ( "module_export/Task.bind"
+            , "274e1738b20e0621475597d8e172be47420d32180c79c5f1f18f0dea4afe0555" )
+          ; ( "module_export/Task.catch"
+            , "ccf3b08ab8d322b5b1c1f85dda60a6e5143abac4845f91b25ce7d9bc25a314f5" )
+          ; ( "module_export/Task.fail"
+            , "87144726ec28b6b741dbe69314d4cf53d535c61844cd4a876bde87ef16b830cc" )
+          ; ( "module_export/Task.map"
+            , "6ac2714682bf18c3899679e3c23ed8117a3bcce32b9e9c3f5043a510470d5f65" )
+          ; ( "module_export/Task.pure"
+            , "0bb01ffcc976325a794463b2a16cbbd97116d10adb1bec9a4e376afff93c8f9e" )
+          ] )
+      ; ( "tool_v1"
+        , "891d098b492e63eceafc9c1eba9b6069a82e08a06c18661be8ce155dcfc89d1f"
+        , [ ( "module/Task"
+            , "2113974a76db0e60a5d9f9b676c78a2863ea283b282fa841c4e0c4f5d20da7df" )
+          ; ( "module_export/Task.bind"
+            , "051f4da2e8ed1ea6c1cb5198986da7659195191ddc5c6180d291989d294d9a66" )
+          ; ( "module_export/Task.catch"
+            , "5b7bd9fc5248785682c5cc974bafcf32b19c0c011f86373860a27471bc15a967" )
+          ; ( "module_export/Task.fail"
+            , "c94bcea233605c0e7bfffad449191798368d862d09fc56cdab6e61c9055b16a2" )
+          ; ( "module_export/Task.map"
+            , "52871b04f55a9776e388b8354036e23f4c5fdce9c7d87d55fe3d41ae30b16c72" )
+          ; ( "module_export/Task.pure"
+            , "d76749102b2bdee5923fea7df2847544ea3e2a5337b7487c8a5cd96eb4bd5721" )
+          ] )
+      ; ( "moderator_v1"
+        , "739d75ff8d4b2183b00b13967ccc35b26d23f07fe319370c0575bbdf28564b65"
+        , [ ( "module/Task"
+            , "6b60971e6b0bc872f863dcc3dc1b62660e028b863021ec7fc79f23ea824c32b8" )
+          ; ( "module_export/Task.bind"
+            , "d853de56e33e37aad546cb7e4ea6a026b8bae3681e40592fd327aacb13ca3000" )
+          ; ( "module_export/Task.catch"
+            , "15a4f3ef868ec6287a2e7898b869bc49bc6c542cf93c1ef3275987b249fb9270" )
+          ; ( "module_export/Task.fail"
+            , "3e54225f13fdd5444cfca2db2b81be6031cd16a6ec9e708879f3d842d81411e2" )
+          ; ( "module_export/Task.map"
+            , "1b25952904e5653c0bc27ec2396f01297e61fb5f9b1583246caefce41730d508" )
+          ; ( "module_export/Task.pure"
+            , "99f009e6fe16865e89ada34f70e71376560ba382fa373456fbb75fc811363b08" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "11f63fb503104c5515168c91d1d13a53043320ead580f0062c459aaa39ea40e4"
+        , [ ( "module/Task"
+            , "f77899678f7eb95edec85f308d5c47bc51a4e2fd8e91ba9698ad8d857f652b9a" )
+          ; ( "module_export/Task.bind"
+            , "61efaf1e960bf73ec2c8fd58800a36428ef66074ce13dfedde6ba6758c29d4dc" )
+          ; ( "module_export/Task.catch"
+            , "dcdfcf90251c9ad6d68cb6f0d0c90027e420ee6f9d4a55665f63edde324b1123" )
+          ; ( "module_export/Task.fail"
+            , "414d7662fbe5be4c1f107294ad704a15ae03f236273275229a99ed68ca8edaff" )
+          ; ( "module_export/Task.map"
+            , "7d1fea8b83f24c8b9423274b2219f22c1c9adb59e77cf74fc9fec24caad047b7" )
+          ; ( "module_export/Task.pure"
+            , "6046b0cbac68d8df0c00bec1c0d689f0bb910fc5f5d78f2ceb3018b7e5043b3d" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "chatml.task-effects"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_authoring.ml"
+              ; "test/chatml_composition/ingress_tests.ml"
+              ]
+          }))
+  ;;
+
+  let reviewed_mappings = entrypoint_mappings @ task_mappings
 end
 
 let language_foundation ~sources =
@@ -867,6 +945,29 @@ let runtime_foundation ~sources =
   create
     ~sources
     (List.map (topics language) ~f:(fun topic -> topic.specification)
+     @ [ { id = "chatml.task-effects"
+         ; title = "Task sequencing, reuse, error recovery and effect boundaries"
+         ; prerequisites = [ "chatml.tasks" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-task-effects.md"
+               ; heading = "# Task composition and failure boundaries"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "73fa478eef95e5a3f5dd32efee06200850ad2f00bd462dbb9bb1f89af83fe25b" ]
+               ; evidence =
+                   [ "test/agent_docs/docs_chatml_authoring.ml"
+                   ; "test/chatml_composition/ingress_tests.ml"
+                   ; "lib/chatml/chatml_host_runtime.ml"
+                   ; "lib/chatml/chatml_builtin_spec.ml"
+                   ]
+               }
+         }
+       ]
      @ runtime
      @ children
      @ background)

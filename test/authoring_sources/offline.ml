@@ -24,6 +24,7 @@ let () =
     ; "guide/chatml-moderator-runtime.md"
     ; "guide/chatml-ocaml-differences.md"
     ; "guide/chatml-surface-inventory.md"
+    ; "guide/chatml-task-effects.md"
     ; "overview/chatmd-language.md"
     ]
   in

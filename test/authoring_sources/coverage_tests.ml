@@ -4,6 +4,34 @@ module V = C.Coverage
 
 let ok = Result.ok_or_failwith
 
+let%expect_test "Task semantic coverage includes every export on each exact surface" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface_id ->
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface_id ] |> ok in
+      let selected =
+        List.filter targets ~f:(fun target ->
+          String.is_suffix target.V.id ~suffix:"/module/Task"
+          || String.is_substring target.id ~substring:"/module_export/Task.")
+      in
+      let mappings =
+        List.filter V.task_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.target_id ~prefix:(surface_id ^ "/"))
+      in
+      let coverage = V.audit corpus ~targets:selected ~mappings |> ok in
+      V.require_complete coverage |> ok;
+      print_s [%sexp (surface_id : string), (List.length coverage.mapped : int)]);
+  [%expect
+    {|
+    (one_off_v1 6)
+    (tool_v1 6)
+    (moderator_v1 6)
+    (delegated_moderator_v1 6)
+  |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)
@@ -118,7 +146,7 @@ let%expect_test "maintained entrypoint manifest is complete without hiding other
   let corpus = C.runtime_foundation ~sources |> ok in
   let surfaces = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
   let targets = V.compiler_targets ~sources ~surface_ids:surfaces |> ok in
-  let all = V.audit corpus ~targets ~mappings:V.entrypoint_mappings |> ok in
+  let all = V.audit corpus ~targets ~mappings:V.reviewed_mappings |> ok in
   assert (not (List.is_empty all.missing));
   let entrypoints =
     List.filter targets ~f:(fun target ->
@@ -128,7 +156,11 @@ let%expect_test "maintained entrypoint manifest is complete without hiding other
   |> ok
   |> V.require_complete
   |> ok;
-  print_s [%sexp (all.mapped : string list)];
+  print_s
+    [%sexp
+      (List.filter all.mapped ~f:(fun id ->
+         String.is_substring id ~substring:"/entrypoint/")
+       : string list)];
   print_endline "other compiler APIs remain explicitly unmapped";
   [%expect
     {|

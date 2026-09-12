@@ -8,6 +8,7 @@ let marker = "<!-- ochat-authoring-example: "
 let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
 let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let language_fixture = "docs-src/guide/chatml-authoring-language.md"
+let task_fixture = "docs-src/guide/chatml-task-effects.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -34,6 +35,7 @@ let contract = function
 
 type expectation =
   | Result of Jsonaf.t
+  | Runtime_failure of string
   | Fixture of
       { path : string
       ; also_check : target list
@@ -83,52 +85,60 @@ let metadata_exn line =
   let id = string_exn "metadata" fields "id" in
   let target = target_exn id (string_exn id fields "surface") in
   let expectation =
-    match
-      ( List.Assoc.find fields "result" ~equal:String.equal
-      , List.Assoc.find fields "fixture" ~equal:String.equal )
-    with
-    | Some result, None ->
-      exact_fields_exn id fields [ "id"; "surface"; "result" ];
+    match List.Assoc.find fields "runtime_error" ~equal:String.equal with
+    | Some _ ->
+      exact_fields_exn id fields [ "id"; "surface"; "runtime_error" ];
       (match target with
        | One_off -> ()
-       | _ -> fail id "pure result fixtures must use the one-off contract");
-      Result result
-    | None, Some (`String path)
-      when String.is_prefix path ~prefix:"test/chatml_extensibility_fixtures/"
-           && String.is_suffix path ~suffix:".chatml"
-           && not (List.exists (String.split path ~on:'/') ~f:(String.equal "..")) ->
-      let also_check =
-        match List.Assoc.find fields "also_check" ~equal:String.equal with
-        | None ->
-          exact_fields_exn id fields [ "id"; "surface"; "fixture" ];
-          []
-        | Some (`Array (_ :: _ as values)) ->
-          exact_fields_exn id fields [ "id"; "surface"; "fixture"; "also_check" ];
-          List.map values ~f:(function
-            | `String name -> target_exn id name
-            | _ -> fail id "also_check must contain surface IDs")
-        | _ -> fail id "also_check must be a nonempty surface list"
-      in
-      (match List.find_a_dup (target :: also_check) ~compare:compare_target with
-       | None -> ()
-       | Some _ -> fail id "duplicate example surface");
-      Fixture { path; also_check }
-    | _, Some _ -> fail id "invalid or conflicting source fixture metadata"
-    | None, None ->
-      exact_fields_exn id fields [ "id"; "surface"; "stage"; "contains"; "span" ];
-      let stage =
-        match string_exn id fields "stage" with
-        | "parse" -> Runtime.Parse
-        | "typecheck" -> Runtime.Typecheck
-        | other -> fail id ("unknown diagnostic stage: " ^ other)
-      in
-      let has_span =
-        match List.Assoc.find fields "span" ~equal:String.equal with
-        | Some `True -> true
-        | Some `False -> false
-        | _ -> fail id "expected boolean span field"
-      in
-      Diagnostic { stage; contains = string_exn id fields "contains"; has_span }
+       | _ -> fail id "runtime failure fixtures must use the one-off contract");
+      Runtime_failure (string_exn id fields "runtime_error")
+    | None ->
+      (match
+         ( List.Assoc.find fields "result" ~equal:String.equal
+         , List.Assoc.find fields "fixture" ~equal:String.equal )
+       with
+       | Some result, None ->
+         exact_fields_exn id fields [ "id"; "surface"; "result" ];
+         (match target with
+          | One_off -> ()
+          | _ -> fail id "pure result fixtures must use the one-off contract");
+         Result result
+       | None, Some (`String path)
+         when String.is_prefix path ~prefix:"test/chatml_extensibility_fixtures/"
+              && String.is_suffix path ~suffix:".chatml"
+              && not (List.exists (String.split path ~on:'/') ~f:(String.equal "..")) ->
+         let also_check =
+           match List.Assoc.find fields "also_check" ~equal:String.equal with
+           | None ->
+             exact_fields_exn id fields [ "id"; "surface"; "fixture" ];
+             []
+           | Some (`Array (_ :: _ as values)) ->
+             exact_fields_exn id fields [ "id"; "surface"; "fixture"; "also_check" ];
+             List.map values ~f:(function
+               | `String name -> target_exn id name
+               | _ -> fail id "also_check must contain surface IDs")
+           | _ -> fail id "also_check must be a nonempty surface list"
+         in
+         (match List.find_a_dup (target :: also_check) ~compare:compare_target with
+          | None -> ()
+          | Some _ -> fail id "duplicate example surface");
+         Fixture { path; also_check }
+       | _, Some _ -> fail id "invalid or conflicting source fixture metadata"
+       | None, None ->
+         exact_fields_exn id fields [ "id"; "surface"; "stage"; "contains"; "span" ];
+         let stage =
+           match string_exn id fields "stage" with
+           | "parse" -> Runtime.Parse
+           | "typecheck" -> Runtime.Typecheck
+           | other -> fail id ("unknown diagnostic stage: " ^ other)
+         in
+         let has_span =
+           match List.Assoc.find fields "span" ~equal:String.equal with
+           | Some `True -> true
+           | Some `False -> false
+           | _ -> fail id "expected boolean span field"
+         in
+         Diagnostic { stage; contains = string_exn id fields "contains"; has_span })
   in
   id, target, expectation
 ;;
@@ -174,7 +184,7 @@ let check_exn env root { id; target; expectation; source } =
        match Runtime.compile_script_detailed ~surface ~required_bindings ~source () with
        | Ok _ -> ()
        | Error diagnostic -> fail id ("additional surface: " ^ diagnostic.formatted))
-   | Result _ | Diagnostic _ -> ());
+   | Result _ | Runtime_failure _ | Diagnostic _ -> ());
   let surface, required_bindings = contract target in
   let compiled = Runtime.compile_script_detailed ~surface ~required_bindings ~source () in
   match expectation, compiled with
@@ -187,9 +197,10 @@ let check_exn env root { id; target; expectation; source } =
      | true -> ()
      | false -> fail id ("unexpected diagnostic:\n" ^ diagnostic.formatted))
   | Diagnostic _, Ok _ -> fail id "expected compilation to reject this example"
-  | (Result _ | Fixture _), Error diagnostic -> fail id diagnostic.formatted
+  | (Result _ | Runtime_failure _ | Fixture _), Error diagnostic ->
+    fail id diagnostic.formatted
   | Fixture _, Ok _ -> ()
-  | Result expected, Ok compiled ->
+  | (Result _ | Runtime_failure _), Ok compiled ->
     (* Deliberately install no operations. These are pure language examples;
        accidental host calls must fail, never access a tool or a provider. *)
     let config : Runtime.runtime_config =
@@ -205,9 +216,13 @@ let check_exn env root { id; target; expectation; source } =
         ()
       |> Result.bind ~f:Codec.value_to_jsonaf_result
     in
-    (match result with
-     | Error message -> fail id ("execution failed: " ^ message)
-     | Ok actual ->
+    (match expectation, result with
+     | Runtime_failure expected, Error message ->
+       if not (String.is_substring message ~substring:expected)
+       then fail id ("unexpected execution error: " ^ message)
+     | Runtime_failure _, Ok _ -> fail id "expected execution to fail"
+     | Result _, Error message -> fail id ("execution failed: " ^ message)
+     | Result expected, Ok actual ->
        (* Normalize numeric spellings through the same JSON codec, so 3 and
           the runtime's 3.0 compare as the same documented JSON number. *)
        let normalize json =
@@ -221,7 +236,8 @@ let check_exn env root { id; target; expectation; source } =
             (sprintf
                "expected %s, got %s"
                (Jsonaf.to_string expected)
-               (Jsonaf.to_string actual))))
+               (Jsonaf.to_string actual)))
+     | (Fixture _ | Diagnostic _), _ -> assert false)
 ;;
 
 let check_topic_coverage corpus ~path ~text =
@@ -282,7 +298,7 @@ let run env root =
       fail document.path "installed source differs from shared human documentation");
   let examples =
     List.concat_map
-      [ fixture; runtime_fixture; background_fixture; language_fixture ]
+      [ fixture; runtime_fixture; background_fixture; language_fixture; task_fixture ]
       ~f:(fun file ->
         let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
         let path = String.chop_prefix_exn file ~prefix:"docs-src/" in

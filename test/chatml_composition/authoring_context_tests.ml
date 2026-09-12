@@ -178,6 +178,26 @@ let%expect_test
   in
   assert (not (has_error prepared));
   require_json `False (field prepared "package_complete");
+  List.iter
+    [ "one_off_script"
+    ; "standalone_tool"
+    ; "moderator_tool"
+    ; "child_agent"
+    ; "background_workflow"
+    ]
+    ~f:(fun task ->
+      let response = query (request ~task ~max_tokens:1_000_000 "prepare") in
+      require_json `True (field response "complete");
+      let task_guidance =
+        List.find_exn (items response) ~f:(fun item ->
+          match Jsonaf.member "topic_id" item with
+          | Some (`String id) -> String.equal id "chatml.task-effects"
+          | _ -> false)
+      in
+      let text = field task_guidance "text" |> Jsonaf.string_exn in
+      assert (String.is_substring text ~substring:"not a general exception boundary");
+      assert (String.is_substring text ~substring:"inside map");
+      require_json `False (field response "package_complete"));
   let orientation = List.hd_exn (items prepared) in
   require_json (`String "orientation") (field orientation "kind");
   let content = field orientation "content" in

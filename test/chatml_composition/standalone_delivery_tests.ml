@@ -248,7 +248,7 @@ let%expect_test
           |> protocol_ok
         in
         assert (P.Delivery.equal delivery (List.hd_exn restored.deliveries));
-        Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+        unload_idle_runtime env entry.runtime;
         H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
         let reloaded = A.state entry.actor |> protocol_ok in
         assert (P.Delivery.equal delivery (List.hd_exn reloaded.deliveries));

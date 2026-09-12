@@ -40,7 +40,7 @@ let create ?(default_tokens = 12000) ?(max_tokens = 32000) ~secret () =
   (* Validate the maintained subset without claiming that all features have
      semantic coverage. The query still labels its packages incomplete. *)
   let%bind _ =
-    Corpus.Coverage.audit corpus ~targets ~mappings:Corpus.Coverage.entrypoint_mappings
+    Corpus.Coverage.audit corpus ~targets ~mappings:Corpus.Coverage.reviewed_mappings
   in
   let fingerprint =
     [%sexp
@@ -205,7 +205,10 @@ let roots task request =
         | `String name -> List.Assoc.find features name ~equal:String.equal
         | _ -> None)
     in
-    Ok (List.dedup_and_sort (("chatml.programs" :: base) @ extra) ~compare:String.compare)
+    Ok
+      (List.dedup_and_sort
+         (("chatml.programs" :: "chatml.task-effects" :: base) @ extra)
+         ~compare:String.compare)
   | _ -> Error "operation has no topic roots"
 ;;
 
@@ -239,7 +242,7 @@ let orientation corpus ~host ~capabilities ~surface_id =
         "Writing ChatML: OCaml familiarity helps, but call syntax, containers, \
          inference, operators and task execution differ."
         Metadata.One_off_script
-        [ "chatml.programs" ]
+        [ "chatml.programs"; "chatml.task-effects" ]
     ; guide
         "One-off scripts"
         "Combine selected tools with filtering, transformation and branching in one \

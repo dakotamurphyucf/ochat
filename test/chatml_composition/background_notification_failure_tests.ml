@@ -86,7 +86,7 @@ let%expect_test
         List.exists (state ()).conversation.canonical_history ~f:(fun entry ->
           P.History.Id.equal entry.id submission.history_id));
       H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-      Agent_server.Runtime_owner.unload entry.runtime |> protocol_ok;
+      unload_idle_runtime env entry.runtime;
       H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
       for _ = 1 to 10 do
         Eio.Time.sleep (Eio.Stdenv.clock env) 0.02;
