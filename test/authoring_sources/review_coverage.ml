@@ -9,12 +9,14 @@ type selection =
 
 type request =
   | Missing
+  | Grammar
   | Candidates of selection * string
 
 let () =
   let request, requested_surfaces =
     match Array.to_list (Sys.get_argv ()) with
     | _ :: "--missing" :: surfaces -> Missing, surfaces
+    | _ :: "--grammar" :: surfaces -> Grammar, surfaces
     | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
     | _ :: "--alias" :: name :: topic :: surfaces ->
       Candidates (Alias name, topic), surfaces
@@ -22,7 +24,7 @@ let () =
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...] | --missing [SURFACE ...]"
+         ...] | (--missing | --grammar) [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -53,6 +55,43 @@ let () =
         ; "targets", `Number (Int.to_string (List.length targets))
         ; "mapped", `Number (Int.to_string (List.length report.mapped))
         ; "missing", `Array (List.map report.missing ~f:(fun target -> `String target.id))
+        ]
+    | Grammar ->
+      let module C = Authoring_corpus.Coverage in
+      let targets =
+        C.grammar_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith
+      in
+      `Object
+        [ "review_required", `True
+        ; ( "productions"
+          , `Array
+              (List.map (Authoring_sources.grammar sources) ~f:(fun production ->
+                 `Object
+                   [ "id", `String production.id
+                   ; "contract_sha256", `String production.contract_sha256
+                   ])) )
+        ; ( "topic_contracts"
+          , `Array
+              (List.concat_map surfaces ~f:(fun surface ->
+                 List.map [ "chatml.programs"; "chatml.task-effects" ] ~f:(fun topic ->
+                   let sha256 =
+                     C.topic_contract corpus ~surface_id:surface ~topic_id:topic
+                     |> Result.ok_or_failwith
+                   in
+                   `Object
+                     [ "surface", `String surface
+                     ; "topic", `String topic
+                     ; "sha256", `String sha256
+                     ]))) )
+        ; ( "scope"
+          , `String "grammar productions only; no automatic semantic coverage claim" )
+        ; ( "targets"
+          , `Array
+              (List.map targets ~f:(fun target ->
+                 `Object
+                   [ "id", `String target.id
+                   ; "contract_sha256", `String target.contract_sha256
+                   ])) )
         ]
     | Candidates (selection, topic) ->
       let candidates =

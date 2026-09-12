@@ -72,6 +72,13 @@ let () =
   require
     (not (List.mem signatures.modules "Process" ~equal:String.equal))
     "offline lookup merged unrelated compiler surfaces";
+  let grammar = Sources.grammar sources in
+  require
+    (List.exists grammar ~f:(fun production ->
+       String.equal
+         production.id
+         "expr -> LETSTAR task_let_binder EQ expr_sequence IN expr_sequence"))
+    "compiled grammar is unavailable outside the checkout";
   printf
     "Offline authoring sources: %d documents, %d separate compiler surfaces; no checkout \
      required PASS\n"

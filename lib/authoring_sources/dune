@@ -3,6 +3,17 @@
  (modules embed_documents)
  (libraries core))
 
+(executable
+ (name embed_grammar)
+ (modules embed_grammar)
+ (libraries core menhirSdk digestif))
+
+(rule
+ (targets bundled_grammar.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_grammar.exe} %{dep:../chatml/chatml_parser.cmly}))))
+
 (rule
  (targets bundled_documents.ml)
  (action
@@ -36,14 +47,15 @@
 (library
  (name authoring_sources)
  (public_name ochat.authoring_sources)
- (modules authoring_sources bundled_documents)
- (private_modules bundled_documents)
+ (modules authoring_sources bundled_documents bundled_grammar)
+ (private_modules bundled_documents bundled_grammar)
  (libraries core jsonaf ochat.chatml ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))
 
 (library
  (name authoring_corpus)
  (public_name ochat.authoring_corpus)
- (modules authoring_corpus)
+ (modules authoring_corpus grammar_coverage_data)
+ (private_modules grammar_coverage_data)
  (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
  (preprocess (pps ppx_jane)))

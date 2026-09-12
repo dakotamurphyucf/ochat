@@ -74,7 +74,7 @@
 
 (menhir
  (modules chatml_parser)
- (flags --table --dump))
+ (flags --table --dump --cmly))
 
 (library
  (name chatml_execution)

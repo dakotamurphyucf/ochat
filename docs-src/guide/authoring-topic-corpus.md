@@ -57,6 +57,20 @@ ChatMD declarations, native tools and semantic boundaries before claiming full
 public-feature coverage. Evidence references do not substitute for running tests
 or reviewing explanations.
 
+`Coverage.grammar_targets` supplies a separate inventory derived from the actual
+compiled parser. The 143 regular productions are scoped to each of the four
+extension surfaces. `Coverage.grammar_mappings` accounts for all 572 targets with
+literal production/action pins and reviewed program/task topic closures. The
+normal offline test gate rejects missing mappings and changed production
+contracts. The private `grammar_coverage_data.ml` records these maintained pins;
+CI does not regenerate them. The maintainer `review_coverage --grammar` command
+prints candidates for review, not an automatic approval.
+
+This covers grammar accounting, including structural and rejection branches. It
+does not prove that every production is reachable or executable, nor that lexer
+rules, precedence, inference or runtime semantics are completely documented.
+Those remain separate requirements of the full public-feature manifest.
+
 The initial maintained `Coverage.entrypoint_mappings` covers `main` on
 `one_off_v1`, `run` on `tool_v1`, and `initial_state`/`on_event` on the ordinary
 and delegated moderator surfaces. The normal offline tests compare these literal

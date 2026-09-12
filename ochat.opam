@@ -48,6 +48,7 @@ depends: [
   "ppx_blob"
   "menhir"
   "menhirLib"
+  "menhirSdk" {build}
   "piaf"
   "odoc" {with-doc}
 ]

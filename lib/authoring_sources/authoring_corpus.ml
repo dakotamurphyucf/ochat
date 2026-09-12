@@ -551,6 +551,46 @@ module Coverage = struct
     |> List.sort ~compare:(fun a b -> String.compare a.id b.id)
   ;;
 
+  let grammar_targets ~sources ~surface_ids =
+    let open Result.Let_syntax in
+    (* Reuse exact surface validation; grammar is shared, target grants are not. *)
+    let%map _ = compiler_targets ~sources ~surface_ids in
+    List.concat_map surface_ids ~f:(fun surface_id ->
+      List.map (Authoring_sources.grammar sources) ~f:(fun production ->
+        let id = surface_id ^ "/grammar/" ^ production.Authoring_sources.id in
+        { id
+        ; surface_id
+        ; contract_sha256 = digest (id ^ "\n" ^ production.contract_sha256)
+        }))
+    |> List.sort ~compare:(fun a b -> String.compare a.id b.id)
+  ;;
+
+  let grammar_mappings =
+    List.concat_map
+      [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+      ~f:(fun surface_id ->
+        List.map
+          Grammar_coverage_data.productions
+          ~f:(fun (production, contract, topic_id) ->
+            let target_id = surface_id ^ "/grammar/" ^ production in
+            let _, _, topic_closure_sha256 =
+              List.find_exn
+                Grammar_coverage_data.topic_contracts
+                ~f:(fun (surface, topic, _) ->
+                  String.equal surface surface_id && String.equal topic topic_id)
+            in
+            { target_id
+            ; contract_sha256 = digest (target_id ^ "\n" ^ contract)
+            ; topic_id
+            ; topic_closure_sha256
+            ; evidence =
+                [ "test/agent_docs/docs_chatml_authoring.ml"
+                ; "test/chatml_typechecker_test.ml"
+                ; "lib/chatml/chatml_parser.mly"
+                ]
+            }))
+  ;;
+
   let topic_contract corpus ~surface_id ~topic_id =
     let open Result.Let_syntax in
     let%bind closure = assemble corpus ~surface_id ~roots:[ topic_id ] in

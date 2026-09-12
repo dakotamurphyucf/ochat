@@ -16,6 +16,17 @@ type document = private
 
 type t
 
+type grammar_production = private
+  { id : string
+  ; contract_sha256 : string
+  }
+
+(** Every regular production in the compiled ChatML parser, including structural
+    delimiters and explicit rejection branches. Stable IDs describe lhs/rhs;
+    contracts also hash the semantic action. Generated parser numbers/locations
+    are excluded. This does not inventory lexer rules or inference semantics. *)
+val grammar : t -> grammar_production list
+
 (** Materialize the embedded documents and compiler-owned signature inventory.
     Fails on invalid or ambiguous source identities rather than omitting material.
     No compiler builtin implementation is invoked. *)
@@ -24,7 +35,8 @@ val installed : unit -> (t, string) result
 val format_version : int
 
 (** Digest of the format version, sorted document paths/content hashes and all
-    separate signature inventories. It changes when those sources change; it is
+    separate signature inventories and parser production contracts. It changes
+    when those sources change; it is
     not the runtime build identity, an execution grant or a completeness claim. *)
 val identity : t -> string
 
@@ -44,6 +56,7 @@ val signatures
   -> (Chatml.Chatml_surface_inventory.t, string) result
 
 (** Structural source manifest: format, bundle identity, document hashes/byte
-    lengths and separate surface hashes. Excludes document bodies and does not
+    lengths, grammar production contracts and separate surface hashes. Excludes
+    document bodies and does not
     mark unaudited topics or packages complete. *)
 val manifest : t -> Jsonaf.t

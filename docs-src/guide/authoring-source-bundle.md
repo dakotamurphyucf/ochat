@@ -7,19 +7,30 @@ The installed library therefore needs no repository checkout, file-read tool,
 network access, vector store or provider request to retrieve those documents.
 
 The OCaml function `installed ()` returns the embedded documents and the
-[compiler-owned signature inventories](chatml-surface-inventory.md).
+[compiler-owned signature inventories](chatml-surface-inventory.md), plus the
+exact regular productions from the compiled ChatML parser.
 `document` accepts an exact `docs-src`-relative path; it does not normalize paths,
 read the filesystem or fetch another revision. `signatures` selects one exact
 compiler surface and preserves its entrypoint contract. It does not combine
 surfaces or install their operations. The build rule's explicit document list is
 the source inventory; adding a maintained reference requires updating that list.
 
-Format version 1 assigns each document a SHA-256 digest of its exact bytes and
-each compiler surface a digest of its structural inventory. The bundle identity
-hashes the format version and sorted document/surface identities. Changing prose,
-examples, document membership or a builtin signature therefore changes the source
-identity. The structural `manifest` exposes document hashes/byte lengths and
-separate surface hashes without repeating the document bodies.
+Format version 2 assigns each document a SHA-256 digest of its exact bytes, each
+compiler surface a digest of its structural inventory, and each grammar
+production a digest of its left/right symbols and semantic action. The bundle
+identity hashes the format version and sorted document, surface and production
+contracts. Changing prose, examples, membership, a builtin signature or parser
+production therefore changes the source identity. The structural `manifest`
+exposes these hashes without repeating document bodies or compiler action code.
+
+The build reads Menhir's `.cmly` metadata through the build-only `menhirSdk`
+dependency and embeds ordinary OCaml data. Installed execution does not load
+Menhir SDK, read a `.cmly` file or invoke a generator. `grammar` includes all
+regular productions, including structural, explicit rejection and never-reduced
+branches; it is not a list of programs that necessarily parse or typecheck.
+Production numbers and source locations are excluded from the contract. Lexer
+rules, precedence/conflict resolution, helper implementation and type inference
+are separate semantic review obligations.
 
 This identity describes reference source material. A retrieval service must also
 bind the installed runtime build/contract, actual target surface, effective tool

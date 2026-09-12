@@ -70,6 +70,7 @@
   ppx_blob
   menhir
   menhirLib
+  (menhirSdk :build)
   piaf)
  (tags
   (topics "to describe" your project)))

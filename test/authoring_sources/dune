@@ -10,7 +10,7 @@
 
 (library
  (name topic_tests)
- (modules topic_tests coverage_tests authored_tests)
+ (modules topic_tests coverage_tests authored_tests grammar_tests)
  (libraries core ochat.authoring_corpus ochat.authoring_sources)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

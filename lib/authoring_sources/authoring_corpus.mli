@@ -167,6 +167,21 @@ module Coverage : sig
     -> surface_ids:string list
     -> (target list, string) result
 
+  (** Complete regular-production inventory from the installed compiled parser,
+      separately scoped to each requested surface. No documentation coverage is
+      inferred from compiler-binding mappings. Lexer, precedence, type inference
+      and runtime behavior retain their own semantic review obligations. *)
+  val grammar_targets
+    :  sources:Authoring_sources.t
+    -> surface_ids:string list
+    -> (target list, string) result
+
+  (** Literal reviewed production/action contracts and topic-closure pins for
+      the four extension surfaces. Completeness means every grammar production
+      is accounted for, including structure and rejection branches. It is not
+      proof of lexical, precedence, inference or runtime semantic coverage. *)
+  val grammar_mappings : mapping list
+
   (** Digest the complete prerequisite-first topic closure for this surface.
       Every topic must be audited; a prerequisite change invalidates the pin
       even if the root topic's excerpts remain unchanged. *)
