@@ -404,6 +404,12 @@ type _ request =
   | Adopt_deferred : Agent_protocol.Session.t request
   | Reserve_history_block : int -> History_id_source.reservation request
   | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
+  | Prepare_authoring_input :
+      Agent_protocol.Id.Operation.t
+      * Chat_response.Authoring_materialization.t
+      * History_entry.t list
+      * Chat_response.Moderation.Effective_entry.t list
+      -> History_entry.t list request
   | Publish_invocation_output :
       Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t * History_entry.t
       -> unit request
@@ -4228,6 +4234,80 @@ let commit_worker_entry t operation_id entry =
     else Error (error Conflict "history ID was committed with a different payload")
 ;;
 
+let prepare_authoring_input t operation_id materialization history effective =
+  let module M = Chat_response.Authoring_materialization in
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    let committed = t.state.conversation.canonical_history in
+    let supplied = History_codec.all_to_protocol ~previous:committed history in
+    match List.equal Agent_protocol.History.equal_entry committed supplied with
+    | true -> Ok ()
+    | false -> Error (error Conflict "authoring input uses stale canonical history")
+  in
+  let%bind () =
+    match
+      String.equal
+        (M.scope materialization)
+        (M.session_scope
+           ~session_id:t.state.identity.session_id
+           ~generation:t.state.identity.generation)
+    with
+    | true -> Ok ()
+    | false ->
+      Error (error Conflict "authoring context belongs to a different session generation")
+  in
+  let canonical =
+    History_codec.canonical_encoder ~previous:t.state.conversation.canonical_history
+  in
+  let effective =
+    List.map effective ~f:(fun value ->
+      let module E = Chat_response.Moderation.Effective_entry in
+      match value.E.provenance with
+      | Canonical -> canonical value.entry
+      | Moderator_inserted _ ->
+        History_codec.to_protocol ~provenance:Moderator_inserted value.entry
+      | Moderator_replacement { target_id; _ } ->
+        History_codec.to_protocol ~provenance:(Moderator_replaced target_id) value.entry)
+  in
+  let%bind messages = M.refresh materialization ~known:[] ~effective in
+  match messages with
+  | [] -> Ok []
+  | _ ->
+    let first =
+      Int64.max
+        t.state.conversation.next_history_sequence
+        t.state.conversation.reserved_history_through
+    in
+    let count = List.length messages in
+    let%bind () =
+      match Int64.(first >= 0L && first <= of_int Int.(max_value - count)) with
+      | true -> Ok ()
+      | false -> Error (error Invalid_state "authoring history sequence overflow")
+    in
+    let%bind entries =
+      List.mapi messages ~f:(fun index message ->
+        History_entry.Id.create
+          ~namespace:(Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+          ~sequence:(Int64.to_int_exn first + index)
+        |> Result.map_error ~f:(error Invalid_state)
+        |> Result.map ~f:(fun id -> M.entry message ~id))
+      |> Result.all
+    in
+    let%bind returned = History_codec.all_of_protocol entries in
+    let%map _ =
+      transition
+        t
+        ~delta:
+          (Session_delta.Batch
+             [ History_block_reserved Int64.(first + of_int count)
+             ; Canonical_entries_appended entries
+             ])
+        ~payloads:[ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+    in
+    returned
+;;
+
 let publish_invocation_output t operation_id invocation_id entry =
   let open Result.Let_syntax in
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
@@ -6123,6 +6203,12 @@ let worker_capabilities t operation_id id_source buffer =
               state.conversation.reserved_history_through))
           id_source
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
+    ; prepare_authoring_input =
+        (fun materialization ~history ~effective ->
+          Eio.Cancel.protect (fun () ->
+            call
+              t
+              (Prepare_authoring_input (operation_id, materialization, history, effective))))
     ; commit_invocation_call =
         (fun ~invocation entry ->
           Eio.Cancel.protect (fun () ->
@@ -9218,6 +9304,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Adopt_deferred -> adopt_deferred t
   | Reserve_history_block count -> reserve_history_block t count
   | Commit_worker_entry (operation_id, entry) -> commit_worker_entry t operation_id entry
+  | Prepare_authoring_input (operation_id, materialization, history, effective) ->
+    prepare_authoring_input t operation_id materialization history effective
   | Publish_invocation_output (operation_id, invocation_id, entry) ->
     publish_invocation_output t operation_id invocation_id entry
   | Consume_deferred operation_id -> consume_deferred t operation_id

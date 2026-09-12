@@ -30,6 +30,12 @@ module Config : sig
     }
 end
 
+(* The optional authoring-context factory is trusted host configuration. It
+   must use the operation's session/generation scope and actual admitted tools.
+   Missing guidance is committed atomically after moderator preparation and
+   before provider execution, without submission or item-appended events. The
+   factory does not install helpers or resolve ChatMD policy declarations. *)
+
 (** [create config] delivers the committed submitted user entry to the
     moderator exactly once before the first turn-start boundary. Moderator
     requests to end the session at that boundary skip provider execution.
@@ -40,6 +46,9 @@ end
     All committed data is retained if a callback ends the session. *)
 val create
   :  ?runtime_policy:Chat_response.Runtime_semantics.policy
+  -> ?authoring_context:
+       (input:Operation_worker.Input.t
+        -> (Chat_response.Authoring_materialization.t, Agent_protocol.Error.t) result)
   -> ?dispatch_tool:
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t

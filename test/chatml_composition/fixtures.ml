@@ -7,11 +7,11 @@ module I = Agent_protocol.Invocation
 (* A committed terminal result can precede the delivery callback's lease release.
    Reload fixtures wait for that cleanup; they must not cancel an in-flight
    moderator callback or mistake its transient ownership for a failed reload. *)
-let unload_idle_runtime env runtime =
+let retry_runtime_busy env (attempt : unit -> (_, Agent_protocol.Error.t) result) =
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
     let rec loop () =
-      match Agent_server.Runtime_owner.unload runtime with
-      | Ok () -> ()
+      match attempt () with
+      | Ok value -> value
       | Error { code = Conflict; retryable = true; message; _ }
         when String.equal message "background execution still owns the loaded runtime" ->
         Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
@@ -19,6 +19,10 @@ let unload_idle_runtime env runtime =
       | Error error -> protocol_ok (Error error)
     in
     loop ())
+;;
+
+let unload_idle_runtime env runtime =
+  retry_runtime_busy env (fun () -> Agent_server.Runtime_owner.unload runtime)
 ;;
 
 let report_a = [%blob "../chatml_extensibility_fixtures/x01-report/report-a.json"]

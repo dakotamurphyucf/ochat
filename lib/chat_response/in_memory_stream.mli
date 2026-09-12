@@ -360,6 +360,10 @@ val run_completion_stream_in_memory_entries
   -> ?reasoning:Openai.Responses.Request.Reasoning.t
   -> ?moderator:moderator
   -> ?before_model_call:(unit -> unit)
+  -> ?prepare_model_input:
+       (history:History_entry.t list
+        -> effective:Moderation.Effective_entry.t list
+        -> History_entry.t list)
   -> ?runtime_policy:Runtime_semantics.policy
   -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
   -> ?history_compaction:bool
@@ -385,6 +389,13 @@ val run_completion_stream_in_memory_entries
     [before_model_call] runs before each root provider request, after moderator
     admission and outside provider retries. Hosts use it to persist notification
     wake acceptance; an exception prevents the request. Forks do not inherit it.
+    [prepare_model_input] follows that admission and receives identity-bearing
+    effective history after moderator projection. The trusted host returns only
+    newly committed reference entries; these are appended to both canonical
+    history and this request, without user-submission/item-appended moderation.
+    The hook runs once outside provider retries, never for forks or halted turns.
+    An exception prevents the request. Hosts own atomic persistence, provenance
+    and deduplication; returned IDs must already be durably reserved.
     [runtime_policy] overrides the moderator/default continuation policy for the
     root stream, including sessions without a moderator. *)
 

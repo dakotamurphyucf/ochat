@@ -376,6 +376,7 @@ let moderate_submission config input on_runtime_request =
 
 let run
       ?runtime_policy
+      ?authoring_context
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -433,6 +434,14 @@ let run
    | [] -> ()
    | _ -> checkpoint_moderator ());
   let final_history =
+    let prepare_model_input =
+      Option.map authoring_context ~f:(fun make ->
+        let materialization = make ~input |> require_ok in
+        fun ~history ~effective ->
+          checkpoint_moderator ();
+          capabilities.prepare_authoring_input materialization ~history ~effective
+          |> require_ok)
+    in
     if
       Option.is_some
         (Chat_response.Runtime_semantics.should_end_session !runtime_requests)
@@ -453,6 +462,7 @@ let run
         ?runtime_policy
         ~before_model_call:(fun () ->
           capabilities.admit_notification_turn () |> require_ok)
+        ?prepare_model_input
         ~on_sourced_event:(fun event ->
           checkpoint_moderator ();
           publish_live ~kind:Sourced_stream ~payload:(sourced_payload event))
@@ -496,6 +506,7 @@ let run
 
 let create
       ?runtime_policy
+      ?authoring_context
       ?dispatch_tool
       ?moderator_events
       ?notification_input
@@ -506,6 +517,7 @@ let create
     match
       run
         ?runtime_policy
+        ?authoring_context
         ?dispatch_tool
         ?moderator_events
         ?notification_input

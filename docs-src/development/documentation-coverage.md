@@ -373,6 +373,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/agent_tool_contract.mli` | [contract](../../lib/chat_response/agent_tool_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_context.mli` | [contract](../../lib/chat_response/authoring_context.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_materialization.mli` | [contract](../../lib/chat_response/authoring_materialization.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_presence.mli` | [contract](../../lib/chat_response/authoring_presence.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -702,6 +703,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-authoring-background.md) | `docs-src/guide/chatml-authoring-background.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-children.md) | `docs-src/guide/chatml-authoring-children.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-language.md) | `docs-src/guide/chatml-authoring-language.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-authoring-primer.md) | `docs-src/guide/chatml-authoring-primer.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-runtime.md) | `docs-src/guide/chatml-authoring-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-implementation-architecture.md) | `docs-src/guide/chatml-implementation-architecture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-language-spec.md) | `docs-src/guide/chatml-language-spec.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -710,6 +712,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatml-ocaml-differences.md) | `docs-src/guide/chatml-ocaml-differences.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-parsing-and-diagnostics.md) | `docs-src/guide/chatml-parsing-and-diagnostics.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-surface-inventory.md) | `docs-src/guide/chatml-surface-inventory.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-task-effects.md) | `docs-src/guide/chatml-task-effects.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/general-agent-workflow.md) | `docs-src/guide/general-agent-workflow.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/search-and-indexing.md) | `docs-src/guide/search-and-indexing.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/search-examples/README.md) | `docs-src/guide/search-examples/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

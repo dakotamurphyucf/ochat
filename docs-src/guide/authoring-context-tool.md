@@ -22,10 +22,23 @@ session/generation scope. Refresh checks actual effective history rather than a
 cached claim that guidance was once sent. Protocol and provider-history roundtrips,
 edited/redacted context and cross-session invalidation are covered offline.
 
-This assembler does not itself install tools, reserve history IDs or commit model
-input. Those actor-boundary operations, bounded receipt retention and public
-auto/preload enablement remain integration work. Manual and ordinary-tool policies
-produce no automatic messages. The current complete serialized primer payload
+The assembler does not itself install tools or commit model input. The shared
+foreground worker now accepts an optional host-owned guidance factory. Before
+each provider request, the actor checks the session/generation and canonical
+history snapshot, then reserves IDs and appends missing guidance in one
+transaction. The driver supplies the exact effective entries and moderator
+provenance captured with that request. A same-text moderator replacement cannot
+impersonate installed guidance. Failed persistence prevents the request and saves
+neither the reference entries nor their ID reservation.
+
+Successful additions enter both canonical history and provider input, without a
+new user-submission event or a second append by the stream callback. They are
+inspectable through history/export and survive persistence. Provider retries do
+not repeat insertion, and legacy fork calls do not inherit the root hook.
+Root/generated registration must still select and install these factories;
+automatic helper exposure, bounded receipt retention and public auto/preload
+enablement remain open. Manual and ordinary-tool policies produce no automatic
+messages. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
 this exceeds the initial 800-token engineering target and is not a tokenizer or
 model-quality measurement.

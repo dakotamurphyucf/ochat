@@ -32,6 +32,15 @@ module Capabilities : sig
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; prepare_authoring_input :
+        Chat_response.Authoring_materialization.t
+        -> history:History_entry.t list
+        -> effective:Chat_response.Moderation.Effective_entry.t list
+        -> (History_entry.t list, Agent_protocol.Error.t) result
+      (** Reconcile the actual model input with persisted provenance, then reserve
+          IDs and append missing installed guidance in one transaction. Requires
+          a running operation and the exact session/generation scope. Returns
+          only newly committed entries; no observer, provider or tool executes. *)
     ; commit_invocation_call :
         invocation:Agent_protocol.Invocation.t
         -> History_entry.t

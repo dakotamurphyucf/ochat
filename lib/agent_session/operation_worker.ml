@@ -28,6 +28,11 @@ module Capabilities = struct
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; prepare_authoring_input :
+        Chat_response.Authoring_materialization.t
+        -> history:History_entry.t list
+        -> effective:Chat_response.Moderation.Effective_entry.t list
+        -> (History_entry.t list, Agent_protocol.Error.t) result
     ; commit_invocation_call :
         invocation:Agent_protocol.Invocation.t
         -> History_entry.t

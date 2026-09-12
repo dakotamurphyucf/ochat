@@ -36,6 +36,12 @@ val create
   -> (t, string) result
 
 val context_identity : t -> string
+val scope : t -> string
+
+(** Canonical durable-session scope, shared by worker construction and the
+    actor's final ownership check. *)
+val session_scope : session_id:Agent_protocol.Id.Session.t -> generation:int -> string
+
 val initial : t -> message list
 val estimated_tokens : message list -> int
 

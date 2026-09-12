@@ -16,10 +16,18 @@ type message =
 type t =
   { policy : P.t
   ; context_identity : string
+  ; scope : string
   ; initial : message list
   }
 
 let context_identity t = t.context_identity
+let scope t = t.scope
+
+let session_scope ~session_id ~generation =
+  [%sexp (session_id : Agent_protocol.Id.Session.t), (generation : int)]
+  |> Sexp.to_string_mach
+;;
+
 let initial t = t.initial
 let digest = Chatmd_shell_spec.Source_ref.digest
 
@@ -105,7 +113,7 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
     |> digest
   in
   match P.inject_primer policy with
-  | false -> Ok { policy; context_identity; initial = [] }
+  | false -> Ok { policy; context_identity; scope; initial = [] }
   | true ->
     let%bind () =
       match
@@ -193,7 +201,7 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
       List.rev_map topics ~f:(fun (purpose, topic) -> make purpose topic) |> Result.all
     in
     (match estimated_tokens initial <= max_tokens with
-     | true -> Ok { policy; context_identity; initial }
+     | true -> Ok { policy; context_identity; scope; initial }
      | false ->
        Error
          (sprintf

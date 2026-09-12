@@ -208,6 +208,11 @@ type ctx =
   ; reasoning : Openai.Responses.Request.Reasoning.t option
   ; moderator : moderator option
   ; before_model_call : unit -> unit
+  ; prepare_model_input :
+      (history:History_entry.t list
+       -> effective:Moderation.Effective_entry.t list
+       -> History_entry.t list)
+        option
   ; runtime_policy : Runtime_semantics.policy option
   ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
@@ -266,6 +271,11 @@ type args =
   ; reasoning : Openai.Responses.Request.Reasoning.t option
   ; moderator : moderator option
   ; before_model_call : unit -> unit
+  ; prepare_model_input :
+      (history:History_entry.t list
+       -> effective:Moderation.Effective_entry.t list
+       -> History_entry.t list)
+        option
   ; runtime_policy : Runtime_semantics.policy option
   ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
@@ -695,19 +705,23 @@ let prepare_turn_request_entries
   let%bind runtime_requests =
     runtime_requests_of_outcomes_result ~source:"turn_start" outcomes
   in
-  let inputs =
+  let effective =
     match moderator with
-    | None -> History_entry.items history
-    | Some moderator ->
-      Moderator_manager.effective_history_entries moderator.manager history
-      |> History_entry.items
+    | None ->
+      List.map history ~f:(fun entry ->
+        Moderation.Effective_entry.{ entry; provenance = Canonical })
+    | Some moderator -> Moderator_manager.effective_entries moderator.manager history
+  in
+  let inputs =
+    List.map effective ~f:(fun entry ->
+      History_entry.item entry.Moderation.Effective_entry.entry)
   in
   let inputs =
     if Option.is_some (Runtime_semantics.should_end_session runtime_requests)
     then inputs
     else append_safe_point_input ~safe_point:Turn_start_boundary ~inputs ~safe_point_input
   in
-  Ok { inputs; runtime_requests }
+  Ok ({ inputs; runtime_requests }, effective)
 ;;
 
 let finish_turn_entries ~(moderator : moderator option) ~available_tools ~now_ms ~history =
@@ -1213,6 +1227,7 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
     ; parent_call_id = Some call_id
     ; moderator = None
     ; before_model_call = (fun () -> ())
+    ; prepare_model_input = None
     ; runtime_policy = None
     ; safe_point_input = None
     ; on_runtime_request = (fun _ -> ())
@@ -1982,7 +1997,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       =
       turn_with_budget fork_ctx fork_hist ~request_turn_budget:0
     in
-    let prepared =
+    let prepared, effective =
       prepare_turn_request_entries
         ~moderator:c.moderator
         ~safe_point_input:c.safe_point_input
@@ -2001,6 +2016,16 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
          handlers.before_model_call () |> Result.ok_or_failwith
        | _ -> ());
       c.before_model_call ();
+      let additions =
+        match c.prepare_model_input with
+        | None -> []
+        | Some prepare -> prepare ~history:hist ~effective
+      in
+      let hist = hist @ additions in
+      (match additions with
+       | [] -> ()
+       | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
+      let inputs = inputs @ History_entry.items additions in
       log_request c ~inputs;
       c.scope <- History_stream_event.Registry.create_scope c.registry;
       let events =
@@ -2091,6 +2116,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; reasoning = a.reasoning
     ; moderator = a.moderator
     ; before_model_call = a.before_model_call
+    ; prepare_model_input = a.prepare_model_input
     ; runtime_policy = a.runtime_policy
     ; on_runtime_request = a.on_runtime_request
     ; history_compaction = a.history_compaction
@@ -2154,6 +2180,7 @@ let run_completion_stream_in_memory_entries
       ?reasoning
       ?moderator
       ?(before_model_call = fun () -> ())
+      ?prepare_model_input
       ?runtime_policy
       ?(on_runtime_request = fun _ -> ())
       ?(history_compaction = false)
@@ -2196,6 +2223,7 @@ let run_completion_stream_in_memory_entries
     ; reasoning
     ; moderator
     ; before_model_call
+    ; prepare_model_input
     ; runtime_policy
     ; on_runtime_request
     ; history_compaction

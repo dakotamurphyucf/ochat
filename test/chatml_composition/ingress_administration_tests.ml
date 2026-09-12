@@ -41,32 +41,36 @@ let%expect_test
              submit () |> protocol_ok |> ignore;
              Subscription_tests.await_subscription env entry);
           H.stop handle ~mode:Graceful |> protocol_ok |> ignore;
-          let before = state () in
+          let before =
+            retry_runtime_busy env (fun () ->
+              let before = state () in
+              let result =
+                match replacement with
+                | N.Reset_keep | Reset_drop ->
+                  H.reset
+                    handle
+                    ~expected_revision:before.counters.revision
+                    ~keep_history:
+                      (match replacement with
+                       | Reset_keep -> true
+                       | _ -> false)
+                    ~keep_tasks:false
+                    ~keep_cache:true
+                    ~keep_workspace:true
+                    ~keep_grants:true
+                    ~keep_labels:true
+                | Rebuild ->
+                  H.rebuild
+                    handle
+                    ~expected_revision:before.counters.revision
+                    ~prompt_choice:Pinned
+              in
+              Result.map result ~f:(fun _ -> before))
+          in
           let old_registration = List.hd_exn before.ingress_registrations in
           [%test_eq: int]
             (if accepted then 1 else 0)
             (List.length old_registration.receipts);
-          (match replacement with
-           | N.Reset_keep | Reset_drop ->
-             H.reset
-               handle
-               ~expected_revision:before.counters.revision
-               ~keep_history:
-                 (match replacement with
-                  | Reset_keep -> true
-                  | _ -> false)
-               ~keep_tasks:false
-               ~keep_cache:true
-               ~keep_workspace:true
-               ~keep_grants:true
-               ~keep_labels:true
-           | Rebuild ->
-             H.rebuild
-               handle
-               ~expected_revision:before.counters.revision
-               ~prompt_choice:Pinned)
-          |> protocol_ok
-          |> ignore;
           let replaced = state () in
           [%test_eq: int] (before.identity.generation + 1) replaced.identity.generation;
           assert (List.is_empty replaced.ingress_registrations);
