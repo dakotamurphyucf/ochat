@@ -9,6 +9,9 @@ context. Instruction helper compatibility names emit developer-role messages.
 This document is the implementation-faithful specification of ChatML as it
 exists in the current codebase.
 
+For a shorter starting point with compiler-checked examples, see
+[ChatML differences from OCaml](chatml-ocaml-differences.md).
+
 It describes the language and runtime pipeline implemented by:
 
 - `lib/chatml/chatml_lexer.mll`

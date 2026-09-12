@@ -41,7 +41,8 @@ runtime feature. Semantic prose, operation phases, failure behavior, examples an
 the model-facing authoring reference service require their own maintained coverage.
 The inventories are a source for that work, not a complete authoring corpus.
 
-See the [language specification](chatml-language-spec.md),
+See the [checked OCaml differences](chatml-ocaml-differences.md),
+[language specification](chatml-language-spec.md),
 [moderator runtime](chatml-moderator-runtime.md), and
 [extensibility foundations](../agent-server/extensibility-foundations.md) for those
 contracts. The [inventory tests](../../test/chatml_surface_inventory_test.ml)

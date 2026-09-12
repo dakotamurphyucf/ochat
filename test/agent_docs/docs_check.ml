@@ -319,6 +319,7 @@ let () =
       check_anchors env root navigation;
       Docs_smoke.shell_actions env root;
       Docs_chatml.run env root;
+      Docs_chatml_authoring.run env root;
       Docs_examples.run env root;
       check_examples env root executable;
       run_example env tools_example [];
