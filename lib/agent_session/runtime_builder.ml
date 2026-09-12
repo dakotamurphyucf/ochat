@@ -90,6 +90,7 @@ type background_executor =
 
 type t =
   { worker : Operation_worker.t
+  ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
       id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
@@ -1761,6 +1762,7 @@ let build_with_services
   in
   let rec runtime =
     { worker
+    ; now
     ; parse_user_content
     ; initial_history
     ; initial_prompt_entry_count = List.length initial_history

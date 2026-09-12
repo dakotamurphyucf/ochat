@@ -108,15 +108,14 @@ The field defaults to an empty list. Package files do not enable extension tools
 or grant execution authority; package visibility still depends on selected tool
 metadata. Explicit reload of changed package contents requires a restart, even
 when filenames remain the same. The active snapshot stays unchanged on failure.
-This configuration path is implemented for internally qualified authoring hosts;
-general extension exposure remains gated.
+Daemon and embedded hosts provide authoring services by default for selected tools.
 
 ### Scoped external session helpers
 
 `server.session_helpers` optionally grants a named shell tool access to the same
 caller-scoped session services used by the native session tools. It defaults to
 `[]`; declaring a shell tool alone grants no management channel. This configuration
-path is qualified internally; the general extension rollout is still gated.
+path uses the normal daemon runtime and does not require a custom OCaml host.
 
 For example, add the following field to `server`. The paths and digest are
 deployment placeholders. Keep the daemon configuration itself, store, socket and

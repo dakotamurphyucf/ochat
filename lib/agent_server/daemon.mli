@@ -25,26 +25,28 @@ type options =
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
-    (** Internal integration qualification only. Defaults to false, has no CLI or
-        configuration-file flag, and does not advertise public extension features. *)
+    (** Enable the shared extension runtime; true by default. False is an explicit
+        embedding compatibility override and suppresses extension discovery.
+        Individual tools still require ChatMD declarations and normal authority. *)
   ; session_helpers : Agent_session.Session_management_channel.grant list
     (** Trusted host opt-ins for named shell tools using the private helper
         channel. Empty by default. Each grant must validate its helper's actual
         filesystem/environment boundary against this host's credentials/control
-        endpoints. This does not enable public extensions before qualification. *)
+        endpoints. Alternatively use [Config.Server.session_helpers]; these two
+        grant sources cannot be combined. *)
   ; independent_lifetime_policy : string option
     (** Explicit trusted host policy revision authorizing independent lifetime.
         None denies it. The revision is hashed into private admissions; changing
         it invalidates earlier grants. This is not a model-supplied bearer token
-        and does not enable unqualified extension hosts or public creator tools. *)
+        and does not enable extensions when the host override disables them. *)
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
     (** Initial policy for newly qualified runtimes. Existing sessions retain
         their recorded policy across reload/restart. No CLI/configuration flag. *)
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
-    (** Optional target identity/policy for readonly helper qualification. With
-        the internal extension gate enabled, None selects the installed native
+    (** Optional target identity/policy for readonly helpers. With
+        extensions enabled, None selects the installed native
         targets/catalog. An explicit host retains its target/compiler/source
-        restrictions. This does not enable public extensions or effect grants. *)
+        restrictions. This does not grant tool execution authority. *)
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 

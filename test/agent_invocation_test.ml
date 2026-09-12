@@ -356,7 +356,9 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "12")));
+  (* Version 12 is the supported authoring-reference codec. Use a deliberately
+     distant unknown version to exercise compatibility rejection. *)
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "999")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));

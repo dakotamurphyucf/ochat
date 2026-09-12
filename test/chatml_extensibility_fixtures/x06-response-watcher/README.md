@@ -2,7 +2,8 @@
 
 This is user-authored polling built from existing ChatML jobs, one-shot schedules,
 subscriptions and notifications. It does not use a native child-response push API.
-The features remain behind internal extensibility qualification.
+The shared extension runtime is enabled by default; the agent must declare its
+tools and retain authority to manage the selected child.
 
 `watcher.chatml` provides `watch_initial_state` and `watch_on_event`; the daemon
 fixture combines these with the X07 helper moderator's state and event handler.
@@ -44,6 +45,14 @@ uses the actual sandboxed `ochat-agent-helper` process with all six native lifec
 registrations absent. The native backend replaces `watch_session_request` with
 `native-request.chatml`, using the scoped `agent_wait`, `agent_read`, and
 `agent_status` tools. Provider responses are deterministic local fixtures.
+
+The integration fixture supplies a host wall clock with a different epoch from
+the process clock and advances it on completed Eio waits. This checks that
+foreground and idle moderator callbacks use the same clock as persisted workflow
+deadlines, while excluding fixture CPU/setup time from the response window.
+Real monotonic process limits and the external test timeout remain active.
+This is functional recovery qualification, not a wall-clock latency benchmark
+or a measurement of expiry during downtime.
 
 Current integration coverage includes delayed receipt completion, future output
 from a cursor, concurrent-watch cancellation without child termination, foreign

@@ -138,9 +138,11 @@ val virtual_topics
     useful scenarios and direct reference roots. It distinguishes selected tools
     and enabled authoring targets from reference compatibility and runtime grants.
 
-    [complete] concerns pagination of this query, not full feature coverage.
-    Prepared packages remain labelled foundation-only until A01's full coverage
-    audit is completed. Prepare includes exact selected tool schemas and the
+    [complete] concerns pagination of this query. [package_complete] is true only
+    when one prepare response contains the entire package; it is false on every
+    partial or continuation page, including the last. The coverage marker records
+    reviewed builtin feature coverage separately from pagination and current model
+    context presence. Prepare includes exact selected tool schemas and the
     actual target compiler's readable signatures. Direct topic IDs
     [reference.tools] and [reference.signatures] retrieve these inventories with
     the same scope/budget/continuation checks. Read all pages for alias definitions;

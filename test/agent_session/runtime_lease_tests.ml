@@ -8,6 +8,7 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   { worker =
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
         failwith "unexpected model operation")
+  ; now = Agent_protocol.Timestamp.now
   ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
   ; initial_history = []
   ; initial_prompt_entry_count = 0

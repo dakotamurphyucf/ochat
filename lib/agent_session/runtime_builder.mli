@@ -198,6 +198,9 @@ type background_executor =
 
 type t =
   { worker : Operation_worker.t
+  ; now : unit -> Agent_protocol.Timestamp.t
+    (** Host wall clock shared by foreground, idle and delegated moderation and
+        persisted workflow deadlines. Monotonic execution limits are separate. *)
   ; parse_user_content :
       id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t

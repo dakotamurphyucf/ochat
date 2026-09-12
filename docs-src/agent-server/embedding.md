@@ -50,8 +50,12 @@ shared daemon's provider adapter, policy, reviewer resolvers and runtime options
 The default remains `Daemon.default_options`. Embedded startup derives its host
 identity from `data_root` even if those options specify another host, and applies
 the configured attachment limit to each in-memory connection. It starts no network
-listener. The internal ChatML qualification option remains unavailable from the
-CLI/configuration file and does not advertise public extension features.
+listener. ChatML extensions are enabled by default, with individual tools selected
+by the ChatMD definition and constrained by its execution authority. Durable
+embedded hosts advertise the same five extension services as the daemon;
+transient hosts omit persisted child delegation. An embedding application can
+set `qualify_chatml_extensions = false` as a compatibility override, which also
+suppresses extension discovery. This override has no CLI/configuration-file flag.
 
 `Embedded.start` initializes the Unix cryptographic RNG before allocating its
 transient root or any session IDs. Callers do not need to initialize it first.

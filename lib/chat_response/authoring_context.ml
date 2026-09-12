@@ -49,7 +49,7 @@ let corpus_for_host t ~host = Option.value (V.corpus host) ~default:t.corpus
 
 let query_fingerprint corpus ~default_tokens ~max_tokens =
   [%sexp
-    ("ochat.authoring-query.v3" : string)
+    ("ochat.authoring-query.v4" : string)
   , (Corpus.identity corpus : string)
   , (default_tokens : int)
   , (max_tokens : int)]
@@ -98,7 +98,8 @@ let create
   in
   (* Require the maintained inventories to match the installed implementation
      before serving guidance. They do not automatically discover every public
-     feature; packages remain incomplete until the full authoring audit. *)
+     feature; the maintained feature audit also requires source review whenever
+     a public feature is introduced or changed. *)
   let%bind () =
     let module Coverage = Corpus.Coverage in
     let shared = [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ] in
@@ -1016,9 +1017,12 @@ let query_with_receipt t ~host ~capabilities ~scope request =
           ; "runtime_identity", `String (V.runtime_identity host)
           ; "corpus_identity", `String (Corpus.identity t.corpus)
           ; "capability_fingerprint", `String (C.fingerprint capabilities)
-          ; "coverage", `String "reviewed_foundation_not_full_feature_coverage"
+          ; "coverage", `String "reviewed_builtin_feature_coverage"
           ; ( "package_complete"
-            , if String.equal operation "prepare" then `False else `Null )
+            , match String.equal operation "prepare", offset = 0 && complete with
+              | false, _ -> `Null
+              | true, true -> `True
+              | true, false -> `False )
           ; "topic_sequence", strings covered
           ; "items", `Array page
           ; ("complete", if complete then `True else `False)

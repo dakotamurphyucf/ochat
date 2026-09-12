@@ -1,12 +1,12 @@
 # ochat-agent-helper
 
 This executable transports one JSON request over a host-lent private pipe pair.
-Internally qualified durable hosts can opt named ChatMD shell tools into the
+Durable hosts can opt named ChatMD shell tools into the
 session-management bridge. A one-off ChatML script can call the same shell tool.
 The default host grants no channels; launching the binary from an ordinary shell
 reports an unavailable channel. It does not obtain operator credentials or connect
-to the daemon's control socket. Public configuration-file/CLI exposure remains
-gated by the authoring and composition qualification work.
+to the daemon's control socket. Configure the grant through
+[`server.session_helpers`](../agent-server/configuration.md#scoped-external-session-helpers).
 
 Build with `dune build bin/ochat_agent_helper.exe`. Installation provides the
 `ochat-agent-helper` command. The command accepts no arguments. It reads a JSON
@@ -64,7 +64,9 @@ cannot change the grant. An empty operation list or blank
 name/revision rejects, and multiple grants matching one invocation reject.
 
 Pass these grants through `Agent_server.Daemon.options.session_helpers` (default
-`[]`) for the internally qualified durable host. The factory installs them through
+`[]`) when embedding a durable host in OCaml. Normal daemon configuration instead
+uses `server.session_helpers` to pin the executable, operations, read roots and
+environment, with known private-path exclusion. The factory installs them through
 `Script_tool_calls.with_session_helpers`. Native shell dispatch uses the actual
 caller's services, approval store and expiring capability borrow. The shell
 executor adapter runs after binding those services, never during tool registration.
@@ -125,7 +127,7 @@ Validation checks captured source without executing initializers, tools or model
 ## Qualification
 
 `@test/runtest-request_channel_integration_test` launches the compiled helper
-and resource runner through a real platform sandbox. It covers JSON exchange,
+through a real platform sandbox with in-process child setup. It covers JSON exchange,
 large escaped Unicode payloads, unsafe backend rejection, byte limits,
 revocation before response, cancellation and process reaping, helper exit during
 a suspended handler, and attempts to access a private fixture file, Unix socket,
@@ -137,9 +139,11 @@ script creates a child; the helper exercises all six operations, readonly grants
 foreign-parent denial, duplicate creation, inherited file-read denial and retained
 output after daemon restart. It also distinguishes reading stored child state from
 reactivating a binding after host helper policy changes. Its provider is local and
-offline. This is not yet the complete moderator-handled X07/X06 composition.
+offline. The same fixture also exercises moderator-handled/background X07 creation,
+the X06 watcher through native and helper backends, and authored persistent-agent
+tools across restart. Configured policies reject changed digests/argv/environment
+and symlink-expanded read roots before creating a child.
 
-Authored persistent-agent tools and the remaining composition matrix retain their
-separate qualification work. Linux needs an installed, usable bubblewrap;
+Linux needs an installed, usable bubblewrap;
 unavailable confinement fails the tests rather than substituting an unconfined or
 fake process. The current local process evidence uses macOS Seatbelt.

@@ -77,6 +77,7 @@ let default_options =
       ; "sessions.durable"
       ; "workspaces.configured"
       ]
+      @ Agent_protocol.Extension_capabilities.known_features
   ; protocol_limits =
       { max_request_bytes = 16 * 1024 * 1024
       ; max_event_bytes = 16 * 1024 * 1024
@@ -136,7 +137,7 @@ let default_options =
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
   ; model_post_stream = None
-  ; qualify_chatml_extensions = false
+  ; qualify_chatml_extensions = true
   ; session_helpers = []
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
@@ -328,16 +329,26 @@ let implementation options =
     ~version:options.implementation_version
 ;;
 
-(* Qualification is deliberately empty until the execution services pass their
-   host-specific acceptance suites. Configuring a feature string cannot enable it. *)
+(* Discovery describes installed host services, never a session's tool grants.
+   Transient embedded sessions retain the in-process workflow services but cannot
+   create persisted children. Feature strings alone cannot enable a service. *)
 let extension_capabilities options config =
+  let available_features =
+    match options.qualify_chatml_extensions, options.extension_host with
+    | false, _ | true, Direct -> []
+    | true, (Daemon | Embedded_durable) ->
+      Agent_protocol.Extension_capabilities.known_features
+    | true, Embedded_transient ->
+      List.filter Agent_protocol.Extension_capabilities.known_features ~f:(fun name ->
+        not (String.equal name "agent.delegation.v1"))
+  in
   Agent_protocol.Extension_capabilities.create
     ~host:options.extension_host
     ~journal_flush:
       (match durability config.Config.server with
        | Flush -> Synced
        | Buffered -> Buffered)
-    ~available_features:[]
+    ~available_features
   |> function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]

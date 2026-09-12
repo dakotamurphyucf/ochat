@@ -339,10 +339,11 @@ context on all four script surfaces:
 These form a prerequisite chain after shared language/authority/validation
 context. A surface's ability to assemble this reference does not establish that
 its host has installed any lifecycle tool. All ten validation routing IDs now
-resolve to installed topics with matching human-document sources. These are
-reviewed foundations, not complete background-workflow or child-agent packages.
-The full feature/native-schema inventory, policy filtering and public helper
-remain separate requirements.
+resolve to installed topics with matching human-document sources. Preparation
+combines these reviewed topics with language/runtime prerequisites and the actual
+selected native schemas and compiler signatures. Policy filtering and separate
+read-only helper grants keep documentation access within the invoking scope;
+preparation and validation never grant execution authority.
 
 Eight additional topics partition the
 [background reference](chatml-authoring-background.md):
@@ -361,9 +362,9 @@ Eight additional topics partition the
 Job guidance includes transaction/recovery prerequisites. Notification guidance
 includes acknowledgement rules, and the shell example depends on that full
 notification context. Moderator-only topics reject assembly for one-off or
-standalone surfaces. The corpus still does not cover every language/native schema
-construct; retrieval and model-context integration use the separate query and
-materialization services. Public enablement awaits complete qualification.
+standalone surfaces. The reviewed corpus includes compiler/native schema inventories
+and language/runtime semantics; retrieval and model-context integration use the
+shared query and materialization services on the default runtime.
 
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and

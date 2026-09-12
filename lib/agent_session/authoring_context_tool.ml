@@ -30,9 +30,8 @@ let registration ~host =
          topic_id=reference.tools or reference.signatures. Read authoring.reference for \
          request fields, task/feature IDs and pagination rules. Follow next_cursor when \
          complete is false, increasing max_tokens when minimum_next_tokens is returned. \
-         Prepared packages are currently reviewed foundations, not full feature \
-         coverage. All fields are required; set fields unused by the chosen operation to \
-         null. Set max_tokens to null for the host default."
+         All fields are required; set fields unused by the chosen operation to null. Set \
+         max_tokens to null for the host default."
     ;;
 
     let type_ = "function"

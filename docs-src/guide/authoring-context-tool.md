@@ -1,11 +1,12 @@
 # Query authoring documentation from an agent
 
 `ochat_authoring_context` retrieves installed ChatML, ChatMD and runtime reference
-text without network access or model calls. Internally qualified extension hosts
-now supply this helper and `ochat_validate` automatically for declared authoring
+text without network access or model calls. Daemon and embedded local hosts
+supply this helper and `ochat_validate` automatically for declared authoring
 tools such as `run_chatml` and `agent_create`. You can also explicitly declare
-`<tool name="ochat_authoring_context"/>`. General public enablement remains pending;
-the current corpus is a reviewed foundation, not complete feature coverage.
+`<tool name="ochat_authoring_context"/>`. The installed corpus covers the reviewed
+language, ChatMD declarations, native tools and runtime semantics. Transient local
+hosts support authoring and local workflows; persisted children require a durable host.
 
 The default `auto` policy inserts one shared primer before the first model request
 that can author code, with deeper retrieval available through the helpers.
@@ -167,7 +168,7 @@ cannot make `agent_create` available: its normal execution check still rejects
 the operation. The limitation participates in host identity and survives
 compaction; it does not silently change manual policy.
 
-General public extension qualification remains open.
+These host flows are exercised offline; real-model authoring quality is a separate measurement.
 Manual mode inserts no automatic documentation prose; it can preserve the compact
 metadata above for earlier reads. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
@@ -280,8 +281,7 @@ Custom preloads remain labelled authored conventions and deduplicate by their
 actual payload/source identity. Declaring `authoring_help` alone does not install
 a custom package's text. The daemon's normal configuration loader can capture
 package files with `server.authoring_packages`, as described below. Local TUI and
-stdio hosts accept the same files through `--authoring-package`. General extension
-exposure remains pending qualification.
+stdio hosts accept the same files through `--authoring-package`.
 
 For a configured daemon, add the file list inside its `server` record:
 
@@ -331,8 +331,7 @@ explicit reload detects changed package content at the same path and returns
 Normalized configuration contains the captured text. Supply packages through
 either server configuration or an explicitly configured host's corpus; combining
 both is rejected to avoid silently replacing either source of conventions.
-Loading packages does not register tools, grant permissions, change manual policy
-or enable the currently gated extension rollout.
+Loading packages does not register tools, grant permissions or change manual policy.
 
 For local hosts, `chat-tui --local -file agent.chatmd --authoring-package conventions.json`
 and `ochat-agent-stdio --local --prompt agent.chatmd --authoring-package conventions.json`
@@ -347,8 +346,8 @@ The entire set is captured and validated before creating the local store, then
 installed through the same daemon composition. Transient and durable local hosts
 retain their existing execution/lifetime differences. Neither rereads package
 files during queries, and private packages still require matching selected tool
-metadata. These flags supply configuration; they do not bypass the current
-extension qualification gate.
+metadata. These flags supply configuration; they do not bypass admission or
+execution authority checks.
 
 Admission checks the authored owners of every requested topic's full dependency
 closure. A preload cannot access a private package merely because its topic
@@ -445,14 +444,20 @@ and successful validation do not prove that a host service is installed, or gran
 permission to use a tool. Execution still checks current bindings and authority.
 
 Responses identify the runtime, surface, corpus and capability fingerprint.
-`coverage` currently reports `reviewed_foundation_not_full_feature_coverage`, and
-`prepare` reports `package_complete: false`. Selected native schemas and compiler
-signatures are included, but full language/ChatMD/runtime semantic qualification
-remains unfinished. Context tracking supports compaction and rediscovery; retained
+`coverage` reports `reviewed_builtin_feature_coverage`. The assembled package
+includes the reviewed contract and prerequisites for the requested task/features,
+selected native schemas and compiler signatures. `package_complete` is true only
+when this response contains the entire prepared package in one page. It is false
+on every partial or continuation page, including the last one; collect all pages
+to assemble a larger package. Non-prepare operations report `package_complete: null`.
+Custom conventions remain separately labelled
+authored content and do not override the reviewed built-in semantics.
+Context tracking supports compaction and rediscovery; retained
 reference identities do not imply that all previously read prose remains in the
 model's current context. `topic_sequence` identifies the assembled reference topics, including
 ones on later pages; `items` contains only this page. `complete` describes pagination
-of this query, not completion of the full authoring reference.
+of this query, not proof that all pages remain in the current model context or
+that the program will execute successfully. Documentation grants no authority.
 
 ## Budgets and continuation
 

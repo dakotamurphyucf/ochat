@@ -1,6 +1,6 @@
 # Moderator-handled session helper
 
-This internally qualified fixture supplies a moderator-handled `manage_agent`
+This fixture supplies a moderator-handled `manage_agent`
 tool accepting the version 1 session-management envelope. The moderator starts
 `session_request` as a background job, returns a pending job reference, then
 publishes the decoded result as a correlated runtime notification. The helper
@@ -16,6 +16,8 @@ The integration test writes these sources as `helper-request.chatml`,
 The parent must also declare a fixed `session_bridge` shell tool and its shell
 manifest. Its trusted host explicitly grants that named tool the scoped helper
 channel; the ChatMD declaration alone grants no session-management authority.
+Normal daemon hosts configure these grants through
+[`server.session_helpers`](../../../docs-src/agent-server/configuration.md).
 The private `read_file` dependency permits the fixture's child to receive that
 existing binding without widening its filesystem scope.
 
@@ -27,6 +29,7 @@ restart, and rejection of changed helper policy on child reactivation. Providers
 are deterministic local fixtures.
 
 The sibling [X06 response watcher](../x06-response-watcher/README.md) composes this
-helper with polling jobs, timers and correlated notifications. Its active-watch
-recovery and remaining policy matrix still require qualification. These fixtures
-alone do not establish full X07 or public feature availability.
+helper with polling jobs, timers and correlated notifications. Both backends
+exercise active-watch recovery; compiled-source tests cover the deadline and
+policy branches described in X06. Complete standalone example packaging remains
+separate from these executable integration fixtures.

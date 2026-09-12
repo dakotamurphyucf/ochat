@@ -786,8 +786,15 @@ let%expect_test
       Agent_protocol.Extension_capabilities.equal_journal_flush
         metadata.journal_flush
         Synced);
-    assert (
-      List.is_empty result.enabled_features && List.is_empty metadata.available_features);
+    let expected =
+      List.sort
+        Agent_protocol.Extension_capabilities.known_features
+        ~compare:String.compare
+    in
+    [%test_eq: string list] expected metadata.available_features;
+    [%test_eq: string list]
+      expected
+      (List.sort result.enabled_features ~compare:String.compare);
     let json = Agent_protocol.Initialize.Response.to_json result in
     ignore
       (Agent_protocol.Initialize.Response.of_json json |> ok
@@ -801,15 +808,26 @@ let%expect_test
     in
     assert (
       Option.is_none (Agent_protocol.Initialize.Response.of_json legacy |> ok).extensions);
-    let forged = { result with enabled_features = [ "chatml.invocations.v1" ] } in
+    let forged =
+      { result with
+        enabled_features = [ "chatml.invocations.v1" ]
+      ; extensions =
+          Some
+            (Agent_protocol.Extension_capabilities.create
+               ~host:metadata.host
+               ~journal_flush:metadata.journal_flush
+               ~available_features:[]
+             |> ok)
+      }
+    in
     assert (
       Result.is_error
         (Agent_protocol.Initialize.Response.of_json
            (Agent_protocol.Initialize.Response.to_json forged)));
     Agent_client.Connection.close reader);
   print_endline
-    "embedded durable/synced reported; unavailable features excluded; legacy response \
+    "embedded durable/synced reported; installed features negotiated; legacy response \
      accepted";
   [%expect
-    {| embedded durable/synced reported; unavailable features excluded; legacy response accepted |}]
+    {| embedded durable/synced reported; installed features negotiated; legacy response accepted |}]
 ;;

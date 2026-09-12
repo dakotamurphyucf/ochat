@@ -218,6 +218,7 @@ let run env helper ~native_watch =
         |> Result.ok_or_failwith
       in
       let queued = ref None in
+      let last_tool = ref "none" in
       let child_tool = ref None in
       let child_calls = ref 0 in
       let child_pause = ref None in
@@ -299,12 +300,52 @@ let run env helper ~native_watch =
         in
         loop ()
       in
+      (* Advance the daemon's wall clock at completed waits, rather than charging
+         unrelated fixture serialization and parallel test CPU time to a watch.
+         Concurrent waits advance to their deadline, never add their durations.
+         Scheduler waits still perform real I/O sleeps; real monotonic process
+         limits and the outer test timeout remain unchanged. Deadline/backoff
+         branches are separately checked with the compiled watcher recording host. *)
+      (* A different epoch also catches callbacks that accidentally bypass the
+         host clock and compare process wall time with persisted host deadlines. *)
+      let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env) -. 86_400.) in
+      let module Clock = struct
+        type t = unit
+        type time = float
+
+        let now () = !logical_now
+
+        let sleep_until () deadline =
+          let delay = Float.max 0. (deadline -. !logical_now) in
+          Eio.Time.sleep (Eio.Stdenv.clock env) delay;
+          logical_now := Float.max !logical_now deadline
+        ;;
+      end
+      in
+      let clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
+      let daemon_env =
+        object
+          method fs = env#fs
+          method cwd = env#cwd
+          method stdin = env#stdin
+          method stdout = env#stdout
+          method stderr = env#stderr
+          method net = env#net
+          method domain_mgr = env#domain_mgr
+          method process_mgr = env#process_mgr
+          method clock = clock
+          method mono_clock = env#mono_clock
+          method secure_random = env#secure_random
+          method debug = env#debug
+          method backend_id = env#backend_id
+        end
+      in
       let with_daemon ?(grants = grants) f =
         Eio.Switch.run (fun sw ->
           let daemon =
             D.start
               ~sw
-              ~env
+              ~env:daemon_env
               ~config:
                 { configuration with
                   server = { configuration.server with session_helpers = grants }
@@ -314,8 +355,7 @@ let run env helper ~native_watch =
               ~process_start_identity:None
               ~options:
                 { D.default_options with
-                  qualify_chatml_extensions = true
-                ; authoring_validation_host = Some authoring_host
+                  authoring_validation_host = Some authoring_host
                 ; model_post_stream = Some provider
                 }
               ()
@@ -324,15 +364,29 @@ let run env helper ~native_watch =
           Exn.protect
             ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
             ~f:(fun () ->
-              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 90. (fun () ->
-                let client = connection daemon (principal ()) in
-                Exn.protect
-                  ~finally:(fun () -> Agent_client.Connection.close client)
-                  ~f:(fun () ->
-                    initialize client;
-                    f sw daemon client))))
+              (* This watchdog bounds the whole multi-step fixture, including
+                 real process launches and persistence under parallel test load.
+                 It is separate from every script/process/watch deadline. *)
+              match
+                Eio.Time.with_timeout (Eio.Stdenv.clock env) 180. (fun () ->
+                  let client = connection daemon (principal ()) in
+                  Ok
+                    (Exn.protect
+                       ~finally:(fun () -> Agent_client.Connection.close client)
+                       ~f:(fun () ->
+                         initialize client;
+                         f sw daemon client)))
+              with
+              | Ok result -> result
+              | Error `Timeout ->
+                raise_s
+                  [%sexp
+                    "helper lifecycle fixture watchdog expired"
+                  , (native_watch : bool)
+                  , (!last_tool : string)]))
       in
       let invoke_status sw daemon client parent name arguments =
+        last_tool := name;
         let before = state daemon parent in
         let handle =
           H.attach
@@ -905,15 +959,17 @@ let run env helper ~native_watch =
           await_timer daemon parent.id cancelled_watch;
           cursor_step "cancellation watch armed";
           let calls_before_cancel = !child_calls in
-          [%test_eq: string]
-            "cancelled"
-            (invoke
-               sw
-               daemon
-               client
-               parent.id
-               "cancel_response_watch"
-               (`Object [ "subscription_id", P.Id.Subscription.to_json cancelled_watch ]));
+          let cancellation =
+            invoke
+              sw
+              daemon
+              client
+              parent.id
+              "cancel_response_watch"
+              (`Object [ "subscription_id", P.Id.Subscription.to_json cancelled_watch ])
+          in
+          cursor_step "cancellation tool returned";
+          [%test_eq: string] "cancelled" cancellation;
           (match await_watch daemon parent.id cancelled_watch with
            | Cancelled _ -> ()
            | result ->
@@ -1003,6 +1059,13 @@ let run env helper ~native_watch =
         ~create:(`Or_truncate 0o600)
         (path (Filename.concat root "authored-helper.chatmd"))
         "<developer>Edited live authored specialist.</developer>";
+      let restart_started = ref 0. in
+      let restart_steps = ref [] in
+      let restart_step name =
+        restart_steps
+        := (name, Eio.Time.now (Eio.Stdenv.clock env) -. !restart_started)
+           :: !restart_steps
+      in
       let cursor_watch, receipt_watch =
         with_daemon (fun sw daemon client ->
           let handle =
@@ -1153,6 +1216,7 @@ let run env helper ~native_watch =
                      ]))
             |> complete
           in
+          restart_started := Eio.Time.now (Eio.Stdenv.clock env);
           let receipt_watch =
             start_watch
               sw
@@ -1162,6 +1226,7 @@ let run env helper ~native_watch =
               (target @ [ "receipt_id", field "receipt_id" sent ])
           in
           await_timer daemon parent_id receipt_watch;
+          restart_step "receipt watch armed";
           let cursor_watch =
             start_watch
               sw
@@ -1171,12 +1236,15 @@ let run env helper ~native_watch =
               (target @ [ "cursor", field "next_cursor" snapshot ])
           in
           await_timer daemon parent_id cursor_watch;
+          restart_step "cursor watch armed";
           assert (Option.is_some (state daemon child_id).active_operation);
           H.close child_handle;
           cursor_watch, receipt_watch)
       in
+      restart_step "previous daemon shut down";
       child_pause := None;
       with_daemon (fun sw daemon client ->
+        restart_step "next daemon started";
         let step name f =
           match
             Eio.Time.with_timeout (Eio.Stdenv.clock env) 10. (fun () -> Ok (f ()))
@@ -1203,6 +1271,7 @@ let run env helper ~native_watch =
                 (name : string)
               , (subscriptions : P.Subscription.t list)
               , (failures : P.Moderator_execution.t list)
+              , (List.rev !restart_steps : (string * float) list)
               , (jobs : (P.Id.Job.t * P.Job.status * P.Job.delivery) list)]
         in
         let before_calls = !child_calls in
@@ -1216,15 +1285,24 @@ let run env helper ~native_watch =
          with
          | Failed error -> [%test_eq: string] "agent.read.cursor_expired" error.code
          | result ->
-           raise_s [%sexp "expired cursor was not reported", (result : P.Completion.t)]);
+           restart_step "cursor completion";
+           raise_s
+             [%sexp
+               "expired cursor was not reported"
+             , (result : P.Completion.t)
+             , (List.rev !restart_steps : (string * float) list)]);
         (match
            step "receipt completion" (fun () ->
              await_watch ~require_wake:false daemon parent_id receipt_watch)
          with
          | Failed error -> [%test_eq: string] "watcher.target_failed" error.code
          | result ->
+           restart_step "receipt completion";
            raise_s
-             [%sexp "interrupted receipt was not reported", (result : P.Completion.t)]);
+             [%sexp
+               "interrupted receipt was not reported"
+             , (result : P.Completion.t)
+             , (List.rev !restart_steps : (string * float) list)]);
         [%test_eq: int] before_calls !child_calls;
         check_notification daemon parent_id child_id;
         check_watch_notifications daemon parent_id;
@@ -1312,7 +1390,14 @@ let run env helper ~native_watch =
 
 let () =
   let args = Sys.get_argv () in
+  let variants =
+    match Array.to_list args with
+    | [ _; _ ] -> [ false; true ]
+    | [ _; _; "native" ] -> [ true ]
+    | [ _; _; "helper" ] -> [ false ]
+    | _ -> failwith "Usage: agent_server_helper_test HELPER [native|helper]"
+  in
   Eio_main.run (fun env ->
-    List.iter [ false; true ] ~f:(fun native_watch ->
+    List.iter variants ~f:(fun native_watch ->
       run env (Caml_unix.realpath args.(1)) ~native_watch))
 ;;

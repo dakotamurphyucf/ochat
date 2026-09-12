@@ -1,9 +1,9 @@
 # ChatML extension records and capability discovery
 
 The extension records, transactions, one-off scripts, moderator tools,
-subscriptions and child lifecycle services are implemented at their internally
-qualified host scopes. General model-visible exposure remains gated on complete
-authoring guidance and qualification. This page records implementation and
+subscriptions and child lifecycle services are available through the default
+daemon and embedded runtimes. ChatMD declarations select tools; a transient local
+session cannot create persisted children. This page records implementation and
 protocol contracts, including historical milestones. For maintained authoring
 contracts, start with the [runtime guide](../guide/chatml-authoring-runtime.md),
 [child guide](../guide/chatml-authoring-children.md) and
@@ -96,9 +96,10 @@ The internal `Agent_runtime.prepare_extensions` path now prepares the full captu
 definition against the exact authorized native resources. `Runtime_builder.build_with_extensions`
 consumes it with explicit host services, creates real moderator tool descriptors,
 and installs owned native/moderator dispatch. The daemon binds these services only
-when its internal `Daemon.options.qualify_chatml_extensions` option is true. This
-defaults to false and has no CLI or configuration-file switch; public feature
-flags remain disabled pending qualification.
+when `Daemon.options.qualify_chatml_extensions` is true, which is the default.
+An OCaml embedding may explicitly disable it as a compatibility override. Normal
+users select extension tools in ChatMD; capability discovery reports installed
+services and never adds tools or permission to a session.
 
 The daemon binding checks native invocation ownership, session generation and the
 pinned permission-profile digest. Native approval requests belong to the actual
@@ -1466,9 +1467,11 @@ The catalog distinguishes known contracts from qualified host functionality:
 - `agent.delegation.v1`
 - `chatml.authoring.v1`
 
-`available_features` is empty on current hosts. Negotiation intersects requested
-features, server options and host qualification. Adding an extension string to
-server options cannot activate an unfinished service. `server.info` applies the
+`available_features` lists all five services on daemon and durable embedded hosts.
+Transient embedded hosts list all except `agent.delegation.v1`. An explicitly
+disabled extension runtime and the reserved direct host advertise none.
+Negotiation intersects requested features, server options and installed host
+services. Adding a feature string cannot activate an unavailable service. `server.info` applies the
 same qualification filter. Capability discovery does not confer execution
 permission; eventual tool admission must still check inherited authority.
 

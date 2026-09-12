@@ -320,7 +320,7 @@ let prepare_delegated_tool t ~delegation ~event ~authorize =
           ~history:(fun () -> !history)
           ~available_tools:runtime.moderator_tools
           ~session_meta:`Null
-          ~now:Agent_protocol.Timestamp.now
+          ~now:runtime.now
           ()
       in
       (* A committed parent intent remains the parent's responsibility even if
@@ -715,7 +715,7 @@ let drain_loaded_queued_events ~max_events t runtime manager =
             ~history:(fun () -> !history)
             ~available_tools:runtime.moderator_tools
             ~session_meta:`Null
-            ~now:Agent_protocol.Timestamp.now
+            ~now:runtime.now
             ()
         in
         match outcome with
@@ -823,7 +823,7 @@ let drain_loaded_observations t runtime =
            ~history:(fun () -> !history)
            ~available_tools:runtime.moderator_tools
            ~session_meta:`Null
-           ~now:Agent_protocol.Timestamp.now
+           ~now:runtime.now
            ()
        in
        drain.budget_exhausted)

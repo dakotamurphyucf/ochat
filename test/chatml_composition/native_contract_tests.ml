@@ -86,31 +86,31 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     {|
     (run_chatml runtime.native.requests
      cedc80aa5b6589d7acbe45078be963eaecb5058bfe69daf19bf896e668d68985
-     dfc6623a1207b02f61a03eb5fe37eb08defb8d1d4f44bc1f2da3a939477a9910)
+     b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)
     (agent_create runtime.delegation.creation
      f50060c1bdd22759d368f8962e1f21f2f347fdcc2bb5383d392d99025f5dd664
-     d5f8d1f4eb80fc380ed92f9ac6ed3bbddffac71884044246fd279f5fab11f022)
+     7642a7ae7b8d366a9eaa24e3e28f0aed4ca1da5923d81972d5a31fb5bb5038c0)
     (agent_status runtime.delegation.submissions
      c948e863b277175b367e349d6edd845405843173ab2845a17dd220a0bcbe1273
-     908662be01b5d4670488821482017e8cded4b60ce410163b23d148a0b296ea3b)
+     83180a03a8933f5f195ab1640ef3eaa2e9f7036b0260e92230106c2fabac00fe)
     (agent_send runtime.delegation.submissions
      ebd399228691c35671afa1fe353623284f6eabd788c95748e7e6b38f3ebdbf0e
-     908662be01b5d4670488821482017e8cded4b60ce410163b23d148a0b296ea3b)
+     83180a03a8933f5f195ab1640ef3eaa2e9f7036b0260e92230106c2fabac00fe)
     (agent_read runtime.delegation.output
      7b7763f30e055fcc0a81a0578b08d75c7d90ccc5b7e524ead6e99b450fe8d946
-     d9a5d0ea0796e59912d1d005657ac43e784d9718ef27ea2d61baeca39c6ab05c)
+     e1d5360e4122e0737faa3de0ee9be013ae429010c0bc172beccdf42ff26a8ec4)
     (agent_wait runtime.delegation.output
      88196ca1f4dc34e34441e8687ffff3557e8e48215205e4cdcd0303b50a2be722
-     d9a5d0ea0796e59912d1d005657ac43e784d9718ef27ea2d61baeca39c6ab05c)
+     e1d5360e4122e0737faa3de0ee9be013ae429010c0bc172beccdf42ff26a8ec4)
     (agent_stop runtime.delegation.stop-helper
      d10ebc8001ca0ea8e709be0a4ee5a3d64de024e9fcff086774aba2463a9d1a6d
-     b195262b33cf574fa441e55a5ad630857d2972646e4350c5e3bc8b47adecc45b)
+     8e649991f4609dba8714dfec5bda048c2ffe4fa0dd7b16a2e848a76149d34725)
     (ochat_validate runtime.native.requests
      f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
-     dfc6623a1207b02f61a03eb5fe37eb08defb8d1d4f44bc1f2da3a939477a9910)
+     b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)
     (ochat_authoring_context authoring.reference
-     ef75b53009dd542be6591879c5311fbb00b8fcfe905e94de02c05d8c83c7b46c
-     ff17a0cbb8036f5aa0e061c1b8fd207a764442a7da6d3e4cf2165d630d56ec97)
+     5af75d5c259034e3e5ed36b55716575412a4b6633fc35b771a260e4ef4a3a9f3
+     7684a3aa2f943911039a35d1430b4922b9383c015a1293dbaa2c18e370dcb7f7)
     |}]
 ;;
 

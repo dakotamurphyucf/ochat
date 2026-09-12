@@ -101,6 +101,9 @@ let%expect_test
   in
   let rec collect count reversed response =
     assert (count < 100);
+    (match field response "operation" with
+     | `String "prepare" -> require_json `False (field response "package_complete")
+     | _ -> require_json `Null (field response "package_complete"));
     let budget = field response "budget" in
     require_json
       (`Number (Int.to_string ((String.length (Jsonaf.to_string response) + 2) / 3)))
@@ -178,6 +181,18 @@ let%expect_test
   in
   assert (not (has_error prepared));
   require_json `False (field prepared "package_complete");
+  require_json `False (field prepared "complete");
+  require_json (`String "reviewed_builtin_feature_coverage") (field prepared "coverage");
+  let prepared_pages = collect 0 [] prepared in
+  let prepared_whole =
+    query
+      (request
+         ~task:"background_workflow"
+         ~features:[ "timers"; "notifications" ]
+         ~max_tokens:1_000_000
+         "prepare")
+  in
+  assert (List.equal Jsonaf.exactly_equal prepared_pages (items prepared_whole));
   List.iter
     [ "one_off_script"
     ; "standalone_tool"
@@ -246,7 +261,7 @@ let%expect_test
              ~substring:"<tool type=\"inherited\" name=\"read_file\"/>");
          assert (
            not (String.is_substring definitions ~substring:"ochat-authoring-example:")));
-      require_json `False (field response "package_complete"));
+      require_json `True (field response "package_complete"));
   let orientation = List.hd_exn (items prepared) in
   require_json (`String "orientation") (field orientation "kind");
   let content = field orientation "content" in

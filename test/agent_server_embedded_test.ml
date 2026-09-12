@@ -127,7 +127,13 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
         Agent_protocol.Extension_capabilities.equal_journal_flush
           metadata.journal_flush
           Synced);
-      assert (List.is_empty metadata.available_features);
+      [%test_eq: string list]
+        [ "chatml.authoring.v1"
+        ; "chatml.background.v1"
+        ; "chatml.invocations.v1"
+        ; "chatml.notifications.v1"
+        ]
+        metadata.available_features;
       Agent_client.Connection.close probe;
       let session_id = Agent_server.Embedded.session_id embedded in
       let response =
@@ -223,7 +229,7 @@ let%expect_test "session creation returns the requested attachment after session
           }]));
   [%expect
     {|
-    ((attachment_mode Read_only) (first_event_present false) (revision 2)
+    ((attachment_mode Read_only) (first_event_present false) (revision 3)
      (sequence 1))
     |}]
 ;;

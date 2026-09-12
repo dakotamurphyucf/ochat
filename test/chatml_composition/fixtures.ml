@@ -148,8 +148,7 @@ let with_daemon
               ~process_start_identity:None
               ~options:
                 { Agent_server.Daemon.default_options with
-                  qualify_chatml_extensions = true
-                ; factory_limits
+                  factory_limits
                 ; chatml_runtime_policy = runtime_policy
                 ; authoring_validation_host = validation_host
                 ; model_post_stream = Some post_stream

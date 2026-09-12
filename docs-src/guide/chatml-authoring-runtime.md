@@ -1,8 +1,8 @@
 # ChatML authoring: execution and invocation contracts
 
 This reference covers the three ways a ChatML program participates in an Ochat
-session. These versioned extension paths are implemented on internally qualified
-hosts; public authoring/helper rollout remains in progress. A compiler surface
+session. These versioned extension paths are available on daemon and embedded
+local hosts when declared in ChatMD. A compiler surface
 does not enable a host feature. Use the entrypoint, selected capabilities and
 limits supplied by the host that will execute your candidate.
 

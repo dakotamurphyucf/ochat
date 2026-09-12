@@ -1327,7 +1327,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)));
   [%expect
     {|
-    ((expected_transaction 4) (checkpoint_transaction 4)
+    ((expected_transaction 5) (checkpoint_transaction 5)
      (checkpoint_is_latest true))
     |}]
 ;;

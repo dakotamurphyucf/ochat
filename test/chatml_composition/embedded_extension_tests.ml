@@ -136,8 +136,7 @@ let%expect_test
       in
       let daemon_options =
         { Agent_server.Daemon.default_options with
-          qualify_chatml_extensions = true
-        ; model_post_stream = Some post_stream
+          model_post_stream = Some post_stream
         ; chatml_runtime_policy =
             { Chat_response.Runtime_semantics.default_policy with
               honor_request_turn = false
@@ -159,7 +158,12 @@ let%expect_test
             metadata.host
             (if durable then Embedded_durable else Embedded_transient));
         assert (P.Extension_capabilities.equal_journal_flush metadata.journal_flush Synced);
-        assert (List.is_empty metadata.available_features);
+        let expected =
+          List.filter P.Extension_capabilities.known_features ~f:(fun name ->
+            durable || not (String.equal name "agent.delegation.v1"))
+          |> List.sort ~compare:String.compare
+        in
+        [%test_eq: string list] expected metadata.available_features;
         Agent_client.Connection.close probe;
         send embedded "Run the report workflow.";
         Background_shell_tests.wait env (fun () ->

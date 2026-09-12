@@ -132,10 +132,7 @@ let%expect_test
           )
         ]
       ~daemon_options:
-        { Agent_server.Daemon.default_options with
-          qualify_chatml_extensions = true
-        ; model_post_stream = Some post_stream
-        }
+        { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
       (fun env _ embedded ->
          let wait count =
            Background_shell_tests.wait env (fun () ->
