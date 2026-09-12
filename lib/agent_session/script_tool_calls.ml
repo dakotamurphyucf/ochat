@@ -65,6 +65,7 @@ type t =
   ; shell_context : (unit -> (Shell_runtime.Call_context.t, string) result) option
   ; session_helpers : Session_management_channel.grant list
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; authoring_services : Authoring_services.t option
   ; generated_creation_service : Generated_session_request.service option
   ; managed_session_service : Managed_session_service.t option
   }
@@ -125,7 +126,8 @@ let with_native_services tools ~session_id ~generation f =
               (Session_management_channel.prepare_executor
                  ~grants:tools.session_helpers
                  ~creation:tools.generated_creation_service
-                 ~sessions:tools.managed_session_service)
+                 ~sessions:tools.managed_session_service
+                 ~authoring:tools.authoring_services)
             (fun () ->
                let open Result.Let_syntax in
                let%map services = services () in
@@ -181,6 +183,7 @@ let create
   ; shell_context = None
   ; session_helpers = []
   ; authoring_validation_host = None
+  ; authoring_services = None
   ; generated_creation_service = None
   ; managed_session_service = None
   }
@@ -188,7 +191,16 @@ let create
 
 let with_shell_context t services = { t with shell_context = Some services }
 let with_session_helpers t grants = { t with session_helpers = grants }
-let with_authoring_validation_host t host = { t with authoring_validation_host = host }
+
+let with_authoring_validation_host ~env t host =
+  { t with
+    authoring_validation_host = host
+  ; authoring_services =
+      Option.map host ~f:(fun host -> Authoring_services.create ~env ~host)
+  }
+;;
+
+let authoring_services t = t.authoring_services
 let authoring_validation_host t = t.authoring_validation_host
 
 let with_generated_creation_service t service =

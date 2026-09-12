@@ -57,8 +57,10 @@ does not itself request a managed child session to stop.
 `Agent_session.Session_management_channel.grant` constructs a trusted host grant
 with `tool_name`, `policy_revision`, `allowed`, `limits` and `authorize`. The named
 tool must already be an admitted shell tool. `allowed` selects from `Create`,
-`Send`, `Read`, `Status`, `Wait` and `Stop`; it does not choose the tools a child
-inherits. The request cannot change the grant. An empty operation list or blank
+`Send`, `Read`, `Status`, `Wait`, `Stop`, `Reference` and `Validate`; it does not choose
+the tools a child inherits. `Reference` and `Validate` are separate readonly
+authoring grants, not implied by permission to read a child session. The request
+cannot change the grant. An empty operation list or blank
 name/revision rejects, and multiple grants matching one invocation reject.
 
 Pass these grants through `Agent_server.Daemon.options.session_helpers` (default
@@ -83,6 +85,42 @@ are `Agent_protocol.Invocation.outcome` JSON, whose `type` identifies a complete
 value or failure. A completed outer shell invocation can also contain the shell
 tool's own structured error if process authorization/spawning failed; check that
 before interpreting the helper response. These are separate failure boundaries.
+
+## Authoring requests
+
+An admitted helper can use `operation: "reference"` with the complete
+[ochat_authoring_context request](../guide/authoring-context-tool.md) as `arguments`,
+or `operation: "validate"` with an `ochat_validate` request. The qualified runtime
+must have an authoring target configured, and the helper's host grant must include
+the chosen operation. Native authoring tools do not need to appear in the agent's
+tool list. Neither operation grants child creation, messaging or other session
+management capabilities.
+
+```json
+{
+  "version": 1,
+  "operation": "reference",
+  "arguments": {
+    "version": 1,
+    "operation": "prepare",
+    "task": "child_agent",
+    "query": null,
+    "topic_id": null,
+    "features": null,
+    "cursor": null,
+    "max_tokens": null
+  }
+}
+```
+
+The `Complete` outcome's value is the ordinary reference response or validation
+report. Check reference pagination and validation's `valid` field: successful
+transport and a completed operation do not mean a package is fully read or a
+candidate is valid. Both operations use the invoking scope's selected tools and
+target. Reference cursors can continue through subsequent helper invocations in
+the same session/generation and runtime service; scope, permissions, target or
+service replacement invalidates them. Reissue the original query after restart.
+Validation checks captured source without executing initializers, tools or models.
 
 ## Qualification
 

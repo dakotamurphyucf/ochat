@@ -4601,12 +4601,21 @@ The version-1 adapter envelope (distinct from a transport's JSON-RPC envelope) i
 }
 ```
 
-Operations are `create`, `send`, `read`, `status`, `wait` and `stop`. Their arguments
+Lifecycle operations are `create`, `send`, `read`, `status`, `wait` and `stop`. Their arguments
 use the same decoder as the corresponding native tool. Responses use the existing
 invocation outcome envelope. Unsupported versions, unknown/duplicate fields and
 unknown operations reject. The envelope cannot choose a caller identity or expand
 the allowed operation list. Disallowed operations and expired borrows fail before
 calling a service; the services still enforce current relationship/target authority.
+
+The adapter also accepts separately granted `reference` and `validate` operations
+when the caller's runtime installs `Authoring_services`. Their arguments are the
+ordinary `ochat_authoring_context` and `ochat_validate` requests; their completed
+values are the corresponding reference response and validation report. These
+services reuse the installed corpus and non-executing compiler validation with
+the current borrow's exact capability selection. They require no native authoring
+tool registrations and provide no session-mutation permission. The helper guide
+documents the nested envelope and continuation behavior.
 
 This is a host API, not a transport credential or a new public protocol method.
 The [private helper bridge](../bin/ochat_agent_helper.doc.md) now binds it to

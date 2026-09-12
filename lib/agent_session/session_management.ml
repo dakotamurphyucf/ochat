@@ -8,6 +8,8 @@ type operation =
   | Status
   | Wait
   | Stop
+  | Reference
+  | Validate
 [@@deriving equal, sexp]
 
 let operation_to_string = function
@@ -17,6 +19,8 @@ let operation_to_string = function
   | Status -> "status"
   | Wait -> "wait"
   | Stop -> "stop"
+  | Reference -> "reference"
+  | Validate -> "validate"
 ;;
 
 let operation_of_json =
@@ -28,6 +32,8 @@ let operation_of_json =
     ; "status", Status
     ; "wait", Wait
     ; "stop", Stop
+    ; "reference", Reference
+    ; "validate", Validate
     ]
 ;;
 
@@ -36,10 +42,11 @@ type t =
   ; allowed : operation list
   ; creation : Generated_session_request.service option
   ; sessions : Managed_session_service.t option
+  ; authoring : Authoring_services.t option
   }
 
-let create ~borrowed ~allowed ~creation ~sessions =
-  { borrowed; allowed; creation; sessions }
+let create ~borrowed ~allowed ~creation ~sessions ~authoring =
+  { borrowed; allowed; creation; sessions; authoring }
 ;;
 
 let failure code message =
@@ -74,6 +81,19 @@ let run t operation json =
       failure "agent.management.denied" "The session-management invocation has expired.")
   in
   match operation with
+  | Reference | Validate ->
+    let%bind service =
+      Result.of_option
+        t.authoring
+        ~error:
+          (failure
+             "authoring.unavailable"
+             "Authoring services are unavailable for this session.")
+    in
+    (match operation with
+     | Reference -> Authoring_services.reference service t.borrowed json
+     | Validate -> Authoring_services.validate service t.borrowed json
+     | Create | Send | Read | Status | Wait | Stop -> assert false)
   | Create ->
     let%bind service =
       t.creation
@@ -102,7 +122,7 @@ let run t operation json =
       | Status -> [ "session_id" ]
       | Wait -> [ "session_id"; "receipt_id"; "cursor"; "timeout_ms" ]
       | Stop -> [ "session_id"; "idempotency_key"; "mode" ]
-      | Create -> assert false
+      | Create | Reference | Validate -> assert false
     in
     let%bind fields = fields ~names json |> decode in
     let%bind id =
@@ -190,7 +210,7 @@ let run t operation json =
          |> decode
        in
        service.stop t.borrowed id ~key ~mode
-     | Create -> assert false)
+     | Create | Reference | Validate -> assert false)
 ;;
 
 let decode_request json =

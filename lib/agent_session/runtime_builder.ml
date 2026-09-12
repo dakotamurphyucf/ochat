@@ -1196,6 +1196,7 @@ let build_with_services
       ; script_tools =
           (fun native ->
             Script_tool_calls.with_authoring_validation_host
+              ~env
               (services.script_tools native)
               host)
       })

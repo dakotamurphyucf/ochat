@@ -49,7 +49,7 @@ let policy_fingerprint = function
           |> Sexp.to_string_mach))
 ;;
 
-let prepare_executor ~grants ~creation ~sessions config =
+let prepare_executor ~grants ~creation ~sessions ~authoring config =
   match grants with
   | [] -> Ok config
   | _ ->
@@ -66,7 +66,12 @@ let prepare_executor ~grants ~creation ~sessions config =
      | _ :: _ :: _ -> Error "ambiguous session helper grants for this tool"
      | [ grant ] ->
        let adapter =
-         Session_management.create ~borrowed ~allowed:grant.allowed ~creation ~sessions
+         Session_management.create
+           ~borrowed
+           ~allowed:grant.allowed
+           ~creation
+           ~sessions
+           ~authoring
        in
        let final_context = ref None in
        let authorize context =

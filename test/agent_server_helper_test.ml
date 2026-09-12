@@ -189,9 +189,19 @@ let run env helper runner ~native_watch =
         |> Result.ok_or_failwith
       in
       let grants =
-        [ grant "session_bridge" [ Create; Send; Read; Status; Wait; Stop ]
+        [ grant
+            "session_bridge"
+            [ Create; Send; Read; Status; Wait; Stop; Reference; Validate ]
         ; grant "session_view" [ Read; Status; Wait ]
         ]
+      in
+      let authoring_host =
+        Chat_response.Authoring_validation.create_host
+          ~runtime_identity:"helper-authoring-fixture-v1"
+          ~targets:[ One_off_script; Standalone_tool; Moderator; Generated_chatmd ]
+          ~moderator_surface:Ordinary
+          ~compilation:Chatml_compilation.default_limits
+        |> Result.ok_or_failwith
       in
       let queued = ref None in
       let child_tool = ref None in
@@ -277,6 +287,7 @@ let run env helper runner ~native_watch =
                 { D.default_options with
                   qualify_chatml_extensions = true
                 ; session_helpers = grants
+                ; authoring_validation_host = Some authoring_host
                 ; model_post_stream = Some provider
                 }
               ()
@@ -512,6 +523,8 @@ let run env helper runner ~native_watch =
               ; "agent_status"
               ; "agent_wait"
               ; "agent_stop"
+              ; "ochat_authoring_context"
+              ; "ochat_validate"
               ]
               ~f:(fun name ->
                 let present =
@@ -604,6 +617,93 @@ let run env helper runner ~native_watch =
           in
           let child = id created in
           assert (P.Id.Session.equal child (id one_off_replay));
+          let docs_request =
+            `Object
+              [ "version", `Number "1"
+              ; "operation", `String "topic"
+              ; "task", `String "child_agent"
+              ; "topic_id", `String "reference.tools"
+              ; "query", `Null
+              ; "features", `Null
+              ; "cursor", `Null
+              ; "max_tokens", `Null
+              ]
+          in
+          let reference =
+            bridge sw daemon client parent.id "reference" docs_request |> complete
+          in
+          let selected = Jsonaf.member_exn "items" reference |> Jsonaf.list_exn in
+          assert (
+            List.exists selected ~f:(fun item ->
+              String.equal (text item "name") "session_bridge"));
+          assert (
+            not
+              (List.exists selected ~f:(fun item ->
+                 List.mem
+                   [ "ochat_authoring_context"; "ochat_validate"; "agent_create" ]
+                   (text item "name")
+                   ~equal:String.equal)));
+          let page_request operation task topic cursor =
+            `Object
+              [ "version", `Number "1"
+              ; "operation", `String operation
+              ; "task", task
+              ; "topic_id", topic
+              ; "cursor", cursor
+              ; "query", `Null
+              ; "features", `Null
+              ; "max_tokens", `Number "6000"
+              ]
+          in
+          let page =
+            page_request
+              "topic"
+              (`String "moderator_tool")
+              (`String "runtime.jobs.shell-example")
+              `Null
+            |> bridge sw daemon client parent.id "reference"
+            |> complete
+          in
+          let cursor = field "next_cursor" page in
+          (match cursor with
+           | `String _ -> ()
+           | _ -> failwith "expected paged helper reference");
+          let next =
+            page_request "continue" `Null `Null cursor
+            |> bridge sw daemon client parent.id "reference"
+            |> complete
+          in
+          assert (not (List.is_empty (field "items" next |> Jsonaf.list_exn)));
+          assert (not (Jsonaf.exactly_equal (field "items" page) (field "items" next)));
+          let validation_request =
+            `Object
+              [ "version", `Number "1"
+              ; "target", `String "one_off_script"
+              ; ( "source"
+                , `String
+                    "let never = fail(\"must not execute\")\n\
+                     let main input = Task.pure(input)" )
+              ; "tools", `Array []
+              ]
+          in
+          let calls_before = !child_calls in
+          let report =
+            bridge sw daemon client parent.id "validate" validation_request |> complete
+          in
+          assert (Jsonaf.exactly_equal (field "valid" report) `True);
+          [%test_eq: int] calls_before !child_calls;
+          List.iter
+            [ "reference", docs_request; "validate", validation_request ]
+            ~f:(fun (operation, arguments) ->
+              match
+                bridge ~name:"session_view" sw daemon client parent.id operation arguments
+              with
+              | P.Invocation.Fail error ->
+                [%test_eq: string] "agent.management.denied" error.code
+              | _ -> failwith "ungranted authoring operation was accepted");
+          print_endline
+            "confined helper reference and non-executing validation work without native \
+             authoring tools";
           [%test_eq: string]
             (text created "session_id")
             (bridge sw daemon client parent.id "create" child_request

@@ -29,5 +29,6 @@ val prepare_executor
   :  grants:grant list
   -> creation:Generated_session_request.service option
   -> sessions:Managed_session_service.t option
+  -> authoring:Authoring_services.t option
   -> Shell_access.Executor.config
   -> (Shell_access.Executor.config, string) result

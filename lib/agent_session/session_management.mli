@@ -9,6 +9,8 @@ type operation =
   | Status
   | Wait
   | Stop
+  | Reference
+  | Validate
 [@@deriving equal, sexp]
 
 val operation_to_string : operation -> string
@@ -27,6 +29,7 @@ val create
   -> allowed:operation list
   -> creation:Generated_session_request.service option
   -> sessions:Managed_session_service.t option
+  -> authoring:Authoring_services.t option
   -> t
 
 (** Shared strict argument decoding and dispatch. No native tool registration or
@@ -41,6 +44,9 @@ val run
 (** Version-1 envelope: [{"version":1,"operation":"read","arguments":{...}}].
     Rejects missing, duplicate and unknown fields and unsupported versions.
     Arguments use exactly the same decoder as the corresponding native tool.
+    [reference] accepts the strict ochat_authoring_context request; [validate]
+    accepts the ochat_validate request. Both return their normal JSON value inside
+    Complete and require separate host grants, without granting session mutation.
     The envelope contains no caller identity, capability selection or credentials. *)
 val dispatch : t -> Jsonaf.t -> Agent_protocol.Invocation.outcome
 

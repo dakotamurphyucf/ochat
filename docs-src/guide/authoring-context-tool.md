@@ -7,6 +7,14 @@ host with an authoring validation target, explicitly declare
 enablement, automatic helper installation and primer/preload insertion are still
 pending. The current corpus is a reviewed foundation, not complete feature coverage.
 
+An explicitly authorized shell helper can query the same service using
+`operation: "reference"` in the [private helper envelope](../bin/ochat_agent_helper.doc.md#authoring-requests),
+with the strict request below as `arguments`. This lets a ChatML moderator implement
+its own authoring tool through an admitted shell integration. The helper can also
+request non-executing validation with `operation: "validate"`. Each operation needs
+its own host grant and a configured authoring target; neither requires a native
+authoring tool in the agent's tool list.
+
 Start with `prepare`. Its first item is a flat feature map explaining what each
 feature enables, when to use it and the guides to read before implementing it:
 

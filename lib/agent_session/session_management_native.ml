@@ -25,6 +25,7 @@ let run operation json =
         ~allowed:[ operation ]
         ~creation:(Script_tool_calls.generated_creation_service services)
         ~sessions:(Script_tool_calls.managed_session_service services)
+        ~authoring:(Script_tool_calls.authoring_services services)
     in
     Session_management.run adapter operation json
   in

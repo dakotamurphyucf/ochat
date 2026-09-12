@@ -22,10 +22,12 @@ val current_native_services : unit -> (t, string) result
 (** The actual caller's validation contract, inherited with the expiring native
     services scope. This does not add helper tools or widen selected capabilities. *)
 val with_authoring_validation_host
-  :  t
+  :  env:Eio_unix.Stdenv.base
+  -> t
   -> Chat_response.Authoring_validation.host option
   -> t
 
+val authoring_services : t -> Authoring_services.t option
 val authoring_validation_host : t -> Chat_response.Authoring_validation.host option
 
 (** Actual caller's persisted creation service. Installing it does not register

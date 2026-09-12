@@ -70,6 +70,7 @@
   run_chatml_tool
   authoring_validation_tool
   authoring_context_tool
+  authoring_services
   moderator_observation
   moderator_event
   observation_follow_up
