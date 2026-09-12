@@ -38,6 +38,7 @@
   authoring_tool_description
   authoring_presence
   authoring_reference_index
+  authoring_rediscovery
   authoring_materialization
   authoring_validation
   authoring_context

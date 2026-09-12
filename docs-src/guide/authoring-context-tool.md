@@ -64,14 +64,33 @@ Explicit history deletion forgets the deleted occurrences, and generation resets
 clear the index. Rediscovery pointers do not count as new documentation reads.
 
 The model-input boundary uses these receipts for presence checks, but a receipt
-never satisfies missing, modified or stale documentation. This persistence work
-does not yet supply a visible rediscovery pointer or label live helper results as
-reference receipts; those integrations and the complete post-compaction authoring
-flow remain open. See the [index contract](../../lib/chat_response/authoring_reference_index.mli).
+never satisfies missing, modified or stale documentation. Missing historical
+references now produce a visible, metadata-only rediscovery message with stable
+topic IDs, remembered/current hashes, source labels and current entrypoints.
+Unavailable authored packages and compiler targets are omitted. Manual mode lists
+only explicitly selected helpers, adds no primer or tools, and suppresses optional
+guidance with unavailable package dependencies. Ordinary agents get no pointer.
+Topics being preloaded again do not also need a pointer, and current effective
+pointers prevent duplicate metadata. Changed or redacted entries cannot satisfy
+presence checks.
+
+Pointer defaults allow 32 topics and 8192 content bytes, retaining whole recent
+entries with an explicit truncation flag. Existing current pointers consume the
+same aggregate allowance, with their serialized payload bytes charged
+conservatively; repeated turns cannot keep expanding a truncated pointer.
+This metadata is a bounded selection of remembered references, never retained
+topic prose or a complete retrieval audit. See the
+[index contract](../../lib/chat_response/authoring_reference_index.mli) and
+[pointer contract](../../lib/chat_response/authoring_rediscovery.mli).
+
+Live helper results still need trusted reference provenance, including paged
+content and generated tool/signature references. The complete post-compaction
+retrieve-and-author flow remains open; pointer and actor tests use offline
+fixtures and fake provider callbacks.
 
 Public custom-package configuration and public qualification also remain open.
-Manual and ordinary-tool policies produce no
-automatic messages. The current complete serialized primer payload
+Manual mode inserts no automatic documentation prose; it can preserve the compact
+metadata above for earlier reads. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
 this exceeds the initial 800-token engineering target and is not a tokenizer or
 model-quality measurement.

@@ -24,8 +24,9 @@ val augment
 (** Resolve source policy against the fully constructed registry. An admitted
     inherited policy may be supplied instead. Validate complete preload assembly
     before tools can be exposed. [elements] is the original source, before helper
-    augmentation, so the policy retains which helpers it added. No factory is
-    needed for manual/ordinary tools. *)
+    augmentation, so the policy retains which helpers it added. Manual authoring
+    retains a factory for metadata-only rediscovery after earlier reads; it adds
+    no primer or helpers. Ordinary tools need no factory. *)
 val prepare
   :  ?admitted:Chat_response.Authoring_policy.t
   -> host:Chat_response.Authoring_validation.host

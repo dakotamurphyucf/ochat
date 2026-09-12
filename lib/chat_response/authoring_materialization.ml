@@ -18,6 +18,7 @@ type t =
   ; context_identity : string
   ; scope : string
   ; initial : message list
+  ; rediscovery : Authoring_rediscovery.t
   }
 
 let context_identity t = t.context_identity
@@ -89,8 +90,9 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
     |> Sexp.to_string
     |> digest
   in
+  let%bind rediscovery = Authoring_rediscovery.create ~context ~host ~policy in
   match P.inject_primer policy with
-  | false -> Ok { policy; context_identity; scope; initial = [] }
+  | false -> Ok { policy; context_identity; scope; initial = []; rediscovery }
   | true ->
     let%bind () =
       match
@@ -185,7 +187,7 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
       List.rev_map topics ~f:(fun (purpose, topic) -> make purpose topic) |> Result.all
     in
     (match estimated_tokens initial <= max_tokens with
-     | true -> Ok { policy; context_identity; scope; initial }
+     | true -> Ok { policy; context_identity; scope; initial; rediscovery }
      | false ->
        Error
          (sprintf
@@ -196,8 +198,9 @@ let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () 
 
 let refresh t ~known ~effective =
   let open Result.Let_syntax in
+  let remembered = known in
   let%bind known = Authoring_presence.remember ~previous:known ~history:effective in
-  let%map report =
+  let%bind report =
     Authoring_presence.inspect_with_topics
       ~expected_topics:
         (List.concat_map t.initial ~f:(fun message -> message.guidance.topics))
@@ -215,12 +218,44 @@ let refresh t ~known ~effective =
          | Primer | Preload | Reference -> Some observation.receipt.guidance)
       | _ -> None)
   in
-  List.filter t.initial ~f:(fun message ->
-    not
-      (List.for_all message.guidance.topics ~f:(fun topic ->
-         List.exists present ~f:(fun guidance ->
-           (match message.guidance.purpose, guidance.G.purpose with
-            | Primer, (Preload | Reference | Rediscovery) -> false
-            | _ -> true)
-           && List.exists guidance.topics ~f:(G.equal_topic topic)))))
+  let missing =
+    List.filter t.initial ~f:(fun message ->
+      not
+        (List.for_all message.guidance.topics ~f:(fun topic ->
+           List.exists present ~f:(fun guidance ->
+             (match message.guidance.purpose, guidance.G.purpose with
+              | Primer, (Preload | Reference | Rediscovery) -> false
+              | _ -> true)
+             && List.exists guidance.topics ~f:(G.equal_topic topic)))))
+  in
+  let%bind pointer =
+    Authoring_rediscovery.render
+      t.rediscovery
+      ~context_identity:t.context_identity
+      ~known:remembered
+      ~effective
+      ~inserting:(List.concat_map missing ~f:(fun message -> message.guidance.topics))
+      ()
+  in
+  match pointer with
+  | None -> Ok missing
+  | Some pointer ->
+    let module R = Openai.Responses in
+    let payload =
+      R.Item.Input_message
+        { role = User
+        ; content = [ R.Input_message.Text { text = pointer.text; _type = "input_text" } ]
+        ; _type = "message"
+        }
+      |> R.Item.jsonaf_of_t
+    in
+    let%map guidance =
+      G.create
+        ~context_identity:t.context_identity
+        ~policy_fingerprint:(P.fingerprint t.policy)
+        ~purpose:Rediscovery
+        ~payload
+        ~topics:pointer.topics
+    in
+    missing @ [ { payload; guidance } ]
 ;;

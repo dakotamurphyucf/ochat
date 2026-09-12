@@ -24,7 +24,9 @@ val catalog
     Preload closures are assembled in full with shared prerequisites deduplicated;
     incompatible topics fail without falling back to another target. The full
     initial batch must fit [max_tokens], estimated as ceil(payload UTF-8 bytes/3).
-    Manual policy and ordinary tools produce no automatic guidance. Captured custom
+    Manual policy produces no initial guidance; it may retain metadata-only
+    rediscovery pointers for the owner's earlier reads. Ordinary tools produce
+    no guidance. Captured custom
     preloads are scoped to selected authoring packages, labelled as conventions
     and carry Authored source digests; they never acquire Installed provenance. *)
 val create
@@ -51,7 +53,10 @@ val estimated_tokens : message list -> int
     guidance only, never count a modified/redacted/stale entry or a rediscovery
     pointer as complete context. No internal mutable cache: concurrent sessions
     cannot satisfy each other's presence checks. The caller owns bounded receipt
-    retention and atomic history insertion. *)
+    retention and atomic history insertion. Missing previously read references
+    may add a scoped Rediscovery pointer with no topic prose. Current pointers
+    suppress duplicate metadata, never suppress necessary primer/preload refresh.
+    Manual policy lists only its explicitly selected helpers and adds no primer. *)
 val refresh
   :  t
   -> known:Authoring_presence.receipt list

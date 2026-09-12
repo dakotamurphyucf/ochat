@@ -201,7 +201,12 @@ let%expect_test
         ()
       |> ok
     in
-    print_s [%sexp (A.refresh t ~known ~effective |> protocol_ok |> List.length : int)]);
+    print_s
+      [%sexp
+        (A.refresh t ~known ~effective
+         |> protocol_ok
+         |> List.map ~f:(fun message -> message.A.guidance.purpose)
+         : G.purpose list)]);
   [%expect
     {|
     (authoring.primer chatml.introduction chatml.syntax.calls
@@ -211,7 +216,7 @@ let%expect_test
     (chatml.introduction chatml.syntax.calls chatml.syntax.containers
      chatml.types chatml.operators chatml.tasks chatml.task-effects)
     (chatml.task-effects)
-    1
+    (Primer Rediscovery)
     |}]
 ;;
 

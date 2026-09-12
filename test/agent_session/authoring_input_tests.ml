@@ -23,7 +23,11 @@ let outcomes backend =
     | _ -> None)
 ;;
 
-let materialization env (input : W.Input.t) =
+let materialization
+      ?(policy = Chatmd_shell_spec.Extension_spec.Auto)
+      env
+      (input : W.Input.t)
+  =
   let module V = Chat_response.Authoring_validation in
   let module C = Chat_response.Tool_capability in
   let module Policy = Chat_response.Authoring_policy in
@@ -63,7 +67,7 @@ let materialization env (input : W.Input.t) =
   in
   let catalog = M.catalog context ~host |> Result.ok_or_failwith in
   let policy =
-    Policy.resolve ~catalog ~ceiling ~selected_names:[ "run_chatml" ] ()
+    Policy.resolve ~policy ~catalog ~ceiling ~selected_names:[ "run_chatml" ] ()
     |> function
     | Ok x -> x
     | Error e -> raise_s [%sexp (e : Policy.error)]
@@ -223,6 +227,96 @@ let%expect_test
            final.conversation.authoring_reference_index);
        print_s [%sexp (!requests : int), (List.length (guidance final) : int)]);
   [%expect {| (0 0) |}]
+;;
+
+let%expect_test
+    "manual model input rediscovers compacted preloads without reinserting prose"
+  =
+  let module Spec = Chatmd_shell_spec.Extension_spec in
+  let module G = P.Authoring_guidance in
+  let policy = ref (Spec.Preload [ "chatml.tasks" ]) in
+  let requests = ref 0 in
+  with_handoff_actor
+    ~make_worker:(fun env ready ->
+      let plans = ref [] in
+      let post_stream ~sw:_ ~inputs =
+        incr requests;
+        let saved = guidance (A.state (Eio.Promise.await ready) |> protocol_ok) in
+        List.iter saved ~f:(fun entry ->
+          assert (
+            List.exists inputs ~f:(fun item ->
+              Jsonaf.exactly_equal
+                entry.H.payload
+                (Openai.Responses.Item.jsonaf_of_t item))));
+        (match !policy with
+         | Preload _ -> assert (List.length saved > 1)
+         | Manual ->
+           assert (List.length saved = 1);
+           let entry = List.hd_exn saved in
+           (match entry.provenance with
+            | Runtime_authoring metadata ->
+              assert (G.equal_purpose metadata.purpose Rediscovery);
+              assert (List.for_all metadata.topics ~f:(fun topic -> not topic.G.complete));
+              assert (
+                List.exists metadata.topics ~f:(fun topic ->
+                  String.equal topic.G.id "chatml.tasks"))
+            | _ -> assert false);
+           let encoded = Jsonaf.to_string entry.payload in
+           assert (not (String.is_substring encoded ~substring:"ochat_authoring_context"));
+           assert (not (String.is_substring encoded ~substring:"ochat_validate"))
+         | Auto -> assert false);
+        Stdlib.List.to_seq []
+      in
+      Agent_session.Turn_worker.create
+        ~authoring_context:(fun ~input ->
+          match List.Assoc.find !plans !policy ~equal:Spec.equal_policy with
+          | Some plan -> Ok plan
+          | None ->
+            let plan = materialization ~policy:!policy env input in
+            plans := (!policy, plan) :: !plans;
+            Ok plan)
+        (worker_config env post_stream))
+    (fun _env actor writer _backend ->
+       let first = finished actor in
+       assert (!requests = 1);
+       A.compact
+         actor
+         ~attachment_id:writer.id
+         ~expected_revision:(Some first.counters.revision)
+       |> protocol_ok
+       |> ignore;
+       let compacted = finished actor in
+       assert (!requests = 1);
+       let restored =
+         Agent_session.Session_persistence.restore_snapshot
+           (Agent_session.Session_state.sexp_of_t compacted |> Sexp.to_string_mach)
+         |> store_ok
+       in
+       let known =
+         Agent_session.Session_state.authoring_references restored
+         |> protocol_ok
+         |> Chat_response.Authoring_reference_index.receipts
+       in
+       assert (List.length known > 1);
+       policy := Manual;
+       List.iter [ 1; 2 ] ~f:(fun sequence ->
+         let id =
+           History_entry.Id.create ~namespace:"after-compaction" ~sequence
+           |> Result.ok_or_failwith
+         in
+         A.submit_message
+           actor
+           ~attachment_id:writer.id
+           (Codec.user_text ~id "continue authoring" |> Codec.to_protocol)
+         |> protocol_ok
+         |> ignore;
+         ignore (finished actor : Agent_session.Session_state.t));
+       assert (!requests = 3);
+       print_endline
+         "compaction makes no provider request; manual turns receive one committed, \
+          deduplicated pointer and no primer");
+  [%expect
+    {| compaction makes no provider request; manual turns receive one committed, deduplicated pointer and no primer |}]
 ;;
 
 let%expect_test

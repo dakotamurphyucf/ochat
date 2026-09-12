@@ -112,9 +112,9 @@ let prepare ?admitted ~host ~elements ~capabilities () =
   let%bind _ =
     M.create ~context ~host ~policy ~capabilities ~scope:"host-preparation" ()
   in
-  match P.inject_primer policy with
-  | false -> Ok None
-  | true -> Ok (Some { context; host; policy; capabilities })
+  match P.authoring_tools policy with
+  | [] -> Ok None
+  | _ -> Ok (Some { context; host; policy; capabilities })
 ;;
 
 let materialize t ~input =

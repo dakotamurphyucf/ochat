@@ -1201,7 +1201,7 @@
 (library
  (name authoring_materialization_test)
  (wrapped false)
- (modules authoring_materialization_test authoring_reference_index_test)
+ (modules authoring_materialization_test authoring_reference_index_test authoring_rediscovery_test)
  (libraries core jsonaf chat_response agent_protocol ochat.agent_session ochat.history_entry chatmd_shell_spec ochat_function openai mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess (pps ppx_jane)))
