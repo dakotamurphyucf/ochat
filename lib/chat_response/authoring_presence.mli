@@ -43,8 +43,10 @@ val remember
 (** Inspect the actual effective input, after moderator edits and compaction.
     Matching topic names or stable entry IDs alone do not prove presence: the
     role/payload digest and host provenance must match. Old context/policy receipts
-    stay inspectable but cannot satisfy the current automatic plan. Authored prose
-    and incomplete/rediscovery references never satisfy installed guidance.
+    stay inspectable but cannot satisfy the current automatic plan. Reference
+    pages satisfy a topic only when their exact source/version group covers every
+    part without conflicting counts or hashes. Authored prose and rediscovery
+    pointers never satisfy installed guidance.
 
     This is a pure hook, not an injector or scheduler. Manual plans request no
     automatic refresh. A01 owns corpus lookup, bounded retained pointers and the

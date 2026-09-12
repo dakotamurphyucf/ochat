@@ -128,12 +128,12 @@ let render
         pointers
         ~f:(fun (entry, _) -> String.length (Jsonaf.to_string entry.H.payload))
   in
+  let%bind complete =
+    Authoring_fragment_coverage.complete (List.map current_guidance ~f:snd)
+  in
   let covered =
-    List.concat_map current_guidance ~f:(fun (_, guidance) ->
-      match guidance.purpose with
-      | Rediscovery -> guidance.topics
-      | Primer | Preload | Reference ->
-        List.filter guidance.topics ~f:(fun topic -> topic.complete))
+    List.concat_map pointers ~f:(fun (_, guidance) -> guidance.G.topics)
+    @ complete
     @ inserting
   in
   let seen = String.Hash_set.create () in

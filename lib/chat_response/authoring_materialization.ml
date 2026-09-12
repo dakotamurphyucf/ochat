@@ -218,15 +218,21 @@ let refresh t ~known ~effective =
          | Primer | Preload | Reference -> Some observation.receipt.guidance)
       | _ -> None)
   in
+  let%bind complete = Authoring_fragment_coverage.complete present in
   let missing =
     List.filter t.initial ~f:(fun message ->
+      let available =
+        match message.guidance.purpose with
+        | Primer ->
+          List.concat_map present ~f:(fun guidance ->
+            match guidance.G.purpose with
+            | Primer -> guidance.topics
+            | _ -> [])
+        | Preload | Reference | Rediscovery -> complete
+      in
       not
         (List.for_all message.guidance.topics ~f:(fun topic ->
-           List.exists present ~f:(fun guidance ->
-             (match message.guidance.purpose, guidance.G.purpose with
-              | Primer, (Preload | Reference | Rediscovery) -> false
-              | _ -> true)
-             && List.exists guidance.topics ~f:(G.equal_topic topic)))))
+           List.mem available topic ~equal:G.equal_topic)))
   in
   let%bind pointer =
     Authoring_rediscovery.render

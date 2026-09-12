@@ -27,8 +27,23 @@ type t =
   ; payload_sha256 : string
   ; purpose : purpose
   ; topics : topic list
+  ; fragments : fragment list [@sexp.list]
+  }
+
+and part =
+  { index : int
+  ; item_sha256 : string
+  }
+
+and fragment =
+  { topic_id : string
+  ; total_parts : int
+  ; parts : part list
   }
 [@@deriving equal, sexp]
+
+(* Fragment coverage is separate from [topic] so existing version-1 provenance
+   and reference topic identities retain their wire and source contracts. *)
 
 let digest text = Digestif.SHA256.(digest_string text |> to_hex)
 
@@ -60,21 +75,70 @@ let valid_topic topic =
 ;;
 
 let validate t =
-  match t.version with
-  | 1
-    when valid_hash t.context_identity
-         && valid_hash t.policy_fingerprint
-         && valid_hash t.payload_sha256
-         && (not (List.is_empty t.topics))
-         && List.length t.topics <= 128
-         && List.for_all t.topics ~f:valid_topic
-         && Option.is_none
-              (List.find_a_dup
-                 (List.map t.topics ~f:(fun topic -> topic.id))
-                 ~compare:String.compare)
-         && ((not (equal_purpose t.purpose Rediscovery))
-             || List.for_all t.topics ~f:(fun topic -> not topic.complete)) -> Ok ()
-  | _ -> invalid "invalid or unsupported authoring guidance provenance"
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.version with
+    | (1 | 2)
+      when valid_hash t.context_identity
+           && valid_hash t.policy_fingerprint
+           && valid_hash t.payload_sha256
+           && (not (List.is_empty t.topics))
+           && List.length t.topics <= 128
+           && List.for_all t.topics ~f:valid_topic
+           && Option.is_none
+                (List.find_a_dup
+                   (List.map t.topics ~f:(fun topic -> topic.id))
+                   ~compare:String.compare)
+           && ((not (equal_purpose t.purpose Rediscovery))
+               || List.for_all t.topics ~f:(fun topic -> not topic.complete)) -> Ok ()
+    | _ -> invalid "invalid or unsupported authoring guidance provenance"
+  in
+  match t.version, t.fragments, t.purpose with
+  | 1, [], _ -> Ok ()
+  | 2, (_ :: _ as fragments), Reference when List.length fragments = List.length t.topics
+    ->
+    let%bind () =
+      match
+        List.find_a_dup fragments ~compare:(fun a b ->
+          String.compare a.topic_id b.topic_id)
+      with
+      | None -> Ok ()
+      | Some _ -> invalid "duplicate authoring fragment topic"
+    in
+    let%map _ =
+      List.fold_result fragments ~init:0 ~f:(fun used fragment ->
+        let%bind topic =
+          List.find t.topics ~f:(fun topic -> String.equal topic.id fragment.topic_id)
+          |> Result.of_option
+               ~error:(Protocol_error.invalid_request "fragment topic is not in guidance")
+        in
+        let count = List.length fragment.parts in
+        let%bind () =
+          match
+            fragment.total_parts > 0
+            && fragment.total_parts <= 4096
+            && count > 0
+            && count <= fragment.total_parts
+            && used <= 4096 - count
+            && Bool.equal topic.complete (count = fragment.total_parts)
+          with
+          | true -> Ok ()
+          | false -> invalid "invalid authoring fragment coverage"
+        in
+        let%map _ =
+          List.fold_result fragment.parts ~init:(-1) ~f:(fun previous part ->
+            match
+              part.index > previous
+              && part.index < fragment.total_parts
+              && valid_hash part.item_sha256
+            with
+            | true -> Ok part.index
+            | false -> invalid "invalid or repeated authoring fragment index")
+        in
+        used + count)
+    in
+    ()
+  | _ -> invalid "authoring fragments require version-2 reference provenance"
 ;;
 
 let create ~context_identity ~policy_fingerprint ~purpose ~topics ~payload =
@@ -86,10 +150,25 @@ let create ~context_identity ~policy_fingerprint ~purpose ~topics ~payload =
     ; payload_sha256 = digest (Jsonaf.to_string payload)
     ; purpose
     ; topics
+    ; fragments = []
     }
   in
   let%map () = validate t in
   t
+;;
+
+let create_reference ~context_identity ~policy_fingerprint ~topics ~fragments ~payload =
+  let t =
+    { version = 2
+    ; context_identity
+    ; policy_fingerprint
+    ; payload_sha256 = digest (Jsonaf.to_string payload)
+    ; purpose = Reference
+    ; topics
+    ; fragments
+    }
+  in
+  Result.map (validate t) ~f:(fun () -> t)
 ;;
 
 let source_to_json source =
@@ -154,31 +233,51 @@ let purpose_name = function
 
 let to_json t =
   `Object
-    [ "version", `Number (Int.to_string t.version)
-    ; "context_identity", `String t.context_identity
-    ; "policy_fingerprint", `String t.policy_fingerprint
-    ; "payload_sha256", `String t.payload_sha256
-    ; "purpose", `String (purpose_name t.purpose)
-    ; "topics", `Array (List.map t.topics ~f:topic_to_json)
-    ]
+    ([ "version", `Number (Int.to_string t.version)
+     ; "context_identity", `String t.context_identity
+     ; "policy_fingerprint", `String t.policy_fingerprint
+     ; "payload_sha256", `String t.payload_sha256
+     ; "purpose", `String (purpose_name t.purpose)
+     ; "topics", `Array (List.map t.topics ~f:topic_to_json)
+     ]
+     @
+     match t.fragments with
+     | [] -> []
+     | fragments ->
+       [ ( "fragments"
+         , `Array
+             (List.map fragments ~f:(fun fragment ->
+                `Object
+                  [ "topic_id", `String fragment.topic_id
+                  ; "total_parts", `Number (Int.to_string fragment.total_parts)
+                  ; ( "parts"
+                    , `Array
+                        (List.map fragment.parts ~f:(fun part ->
+                           `Object
+                             [ "index", `Number (Int.to_string part.index)
+                             ; "item_sha256", `String part.item_sha256
+                             ])) )
+                  ])) )
+       ])
 ;;
 
 let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
+  let%bind version =
+    Json_codec.required_as fields "version" (Json_codec.bounded_int ~min:1 ~max:2)
+  in
   let%bind () =
     Extension_codec.closed
       fields
-      [ "version"
-      ; "context_identity"
-      ; "policy_fingerprint"
-      ; "payload_sha256"
-      ; "purpose"
-      ; "topics"
-      ]
-  in
-  let%bind version =
-    Json_codec.required_as fields "version" (Json_codec.bounded_int ~min:1 ~max:1)
+      ([ "version"
+       ; "context_identity"
+       ; "policy_fingerprint"
+       ; "payload_sha256"
+       ; "purpose"
+       ; "topics"
+       ]
+       @ if version = 2 then [ "fragments" ] else [])
   in
   let%bind context_identity =
     Json_codec.required_as fields "context_identity" Json_codec.string
@@ -198,8 +297,58 @@ let of_json json =
   let%bind topics =
     Json_codec.required_as fields "topics" (Json_codec.list topic_of_json)
   in
+  let%bind fragments =
+    match version with
+    | 1 -> Ok []
+    | _ ->
+      Json_codec.required_as
+        fields
+        "fragments"
+        (Json_codec.list (fun json ->
+           let%bind fields = Json_codec.fields json in
+           let%bind () =
+             Extension_codec.closed fields [ "topic_id"; "total_parts"; "parts" ]
+           in
+           let%bind topic_id =
+             Json_codec.required_as fields "topic_id" Json_codec.string
+           in
+           let%bind total_parts =
+             Json_codec.required_as
+               fields
+               "total_parts"
+               (Json_codec.bounded_int ~min:1 ~max:4096)
+           in
+           let%map parts =
+             Json_codec.required_as
+               fields
+               "parts"
+               (Json_codec.list (fun json ->
+                  let%bind fields = Json_codec.fields json in
+                  let%bind () =
+                    Extension_codec.closed fields [ "index"; "item_sha256" ]
+                  in
+                  let%bind index =
+                    Json_codec.required_as
+                      fields
+                      "index"
+                      (Json_codec.bounded_int ~min:0 ~max:4095)
+                  in
+                  let%map item_sha256 =
+                    Json_codec.required_as fields "item_sha256" Json_codec.string
+                  in
+                  { index; item_sha256 }))
+           in
+           { topic_id; total_parts; parts }))
+  in
   let t =
-    { version; context_identity; policy_fingerprint; payload_sha256; purpose; topics }
+    { version
+    ; context_identity
+    ; policy_fingerprint
+    ; payload_sha256
+    ; purpose
+    ; topics
+    ; fragments
+    }
   in
   let%map () = validate t in
   t

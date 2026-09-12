@@ -54,6 +54,8 @@ val estimated_tokens : message list -> int
     pointer as complete context. No internal mutable cache: concurrent sessions
     cannot satisfy each other's presence checks. The caller owns bounded receipt
     retention and atomic history insertion. Missing previously read references
+    are checked across all retained pages with matching source/version and part
+    hashes; duplicate pages cannot stand in for missing parts. Such references
     may add a scoped Rediscovery pointer with no topic prose. Current pointers
     suppress duplicate metadata, never suppress necessary primer/preload refresh.
     Manual policy lists only its explicitly selected helpers and adds no primer. *)

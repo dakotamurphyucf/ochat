@@ -108,9 +108,19 @@ execution-context handoffs. Replacing the response, returning a failure or losin
 the commit prevents a new receipt. Later observation preserves the original read
 and does not open a fresh documentation-read scope for the completed invocation.
 
+Effective-history checks support version-2 reference provenance with bounded part
+indexes, hashes and total counts. A topic counts as present only when all parts
+remain under matching source/version, context and policy identities. Duplicate
+pages do not fill gaps; conflicting hashes or counts prevent combining the pages.
+Preload refresh and rediscovery both use this coverage. Version-1 complete guidance
+remains readable, and metadata-only pointers never supply topic content. The offline
+integration test exercises real query pages through history restore, missing and
+altered pages, changed context/source versions, and conflicting fragment evidence.
+
 An invocation annotation does not prove delivery to a model. Provider-history
-publication still needs to bind it to real history identities; multi-page presence
-must check every retained fragment. The complete post-compaction retrieve-and-author
+publication still needs to create this provenance from actual published results;
+the coverage algorithm does not automatically promote invocation annotations.
+The complete post-compaction retrieve-and-author
 flow remains open; pointer and actor tests use offline fixtures and fake providers.
 
 Public custom-package configuration and public qualification also remain open.

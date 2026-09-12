@@ -376,6 +376,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/agent_tool_contract.mli` | [contract](../../lib/chat_response/agent_tool_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_context.mli` | [contract](../../lib/chat_response/authoring_context.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_fragment_coverage.mli` | [contract](../../lib/chat_response/authoring_fragment_coverage.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_materialization.mli` | [contract](../../lib/chat_response/authoring_materialization.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_presence.mli` | [contract](../../lib/chat_response/authoring_presence.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |

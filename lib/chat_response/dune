@@ -37,6 +37,7 @@
   authoring_policy
   authoring_tool_description
   authoring_presence
+  authoring_fragment_coverage
   authoring_reference_index
   authoring_rediscovery
   authoring_materialization

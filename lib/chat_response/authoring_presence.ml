@@ -133,8 +133,19 @@ let inspect_internal ~expected_topics ~policy ~context_identity ~known ~effectiv
       && List.length (complete_installed_topics guidance) = List.length guidance.topics
       && List.length (complete_topics guidance) = List.length guidance.topics)
   in
+  let%bind covered = Authoring_fragment_coverage.complete present in
   let complete_topics =
-    List.concat_map present ~f:complete_topics
+    List.filter covered ~f:(fun topic ->
+      match expected_topics with
+      | Some expected -> List.mem expected topic ~equal:Guidance.equal_topic
+      | None ->
+        (match topic.source with
+         | Authored _ -> false
+         | Installed identity ->
+           Option.value_map
+             (Authoring_policy.corpus_identity policy)
+             ~default:false
+             ~f:(String.equal identity)))
     |> List.map ~f:(fun topic -> topic.Guidance.id)
     |> String.Set.of_list
   in

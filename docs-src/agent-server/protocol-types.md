@@ -82,6 +82,18 @@ type t = private
   ; payload_sha256 : string
   ; purpose : purpose
   ; topics : topic list
+  ; fragments : fragment list [@sexp.list]
+  }
+
+and part =
+  { index : int
+  ; item_sha256 : string
+  }
+
+and fragment =
+  { topic_id : string
+  ; total_parts : int
+  ; parts : part list
   }
 [@@deriving equal, sexp]
 
@@ -94,6 +106,20 @@ val create
   -> policy_fingerprint:string
   -> purpose:purpose
   -> topics:topic list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** Version-2 reference provenance. Every topic has exactly one coverage record;
+    indexes are ordered and unique, and per-page [complete] requires every part.
+    At most 4096 parts are recorded. Version-1 primer/preload/reference/pointer
+    records remain readable and do not acquire fragment metadata. The host must
+    derive this evidence from a verified query receipt and the actual provider
+    item; model-supplied labels are not an authority to create provenance. *)
+val create_reference
+  :  context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
+  -> fragments:fragment list
   -> payload:Jsonaf.t
   -> (t, Error.t) result
 
