@@ -1,6 +1,6 @@
 (executable
  (name docs_check)
- (modules docs_check docs_inventory docs_smoke docs_links docs_links_test docs_chatml docs_chatml_authoring docs_chatml_effects docs_child_authoring docs_library
+ (modules docs_check docs_inventory docs_smoke docs_links docs_links_test docs_chatml docs_chatml_authoring docs_chatml_effects docs_chatml_control docs_child_authoring docs_library
   docs_observer docs_tutorials docs_examples docs_example_environment docs_example_source docs_example_webpage
   docs_example_completions docs_example_crawler)
  (libraries core eio eio_main eio.unix eio_posix jsonaf re mirage-crypto-rng.unix

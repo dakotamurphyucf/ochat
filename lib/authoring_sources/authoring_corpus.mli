@@ -232,6 +232,11 @@ module Coverage : sig
       the versioned owned-job spawn alias through an actual daemon. *)
   val host_effect_mappings : mapping list
 
+  (** Runtime on both moderators; Model and Process on the ordinary moderator.
+      Checked request rollback/phase/event semantics and fake model/process
+      callbacks, with audited real recipe and shell adapter contracts. *)
+  val runtime_control_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list

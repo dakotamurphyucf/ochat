@@ -1942,6 +1942,68 @@ module Coverage = struct
           }))
   ;;
 
+  let runtime_control_mappings =
+    List.concat_map
+      [ ( "moderator_v1"
+        , "1c87ed45957a3ac0a3c8ecb466af2e9cdf93fbea2e55696dca33dd30603ce021"
+        , [ ( "module/Runtime"
+            , "6a03d3ede904c05bd4e6e423ca255efaff8116367688886a061f782e020c3ef2" )
+          ; ( "module_export/Runtime.emit"
+            , "3f7f3e2773c0d06607a68dbe08161ecfb4647c8616f411597ba89371a27c84a3" )
+          ; ( "module_export/Runtime.end_session"
+            , "694178f8d868f0ceb3737e6a096d1674cba3ada6cf75a906ec4a815e1876bc0d" )
+          ; ( "module_export/Runtime.request_compaction"
+            , "d45ae1e44df12e9fad4e5c9807ce98572332b02f1845bc1a7f2ed50667cc6ab2" )
+          ; ( "module_export/Runtime.request_turn"
+            , "a37589db5b7a7a48d588350931c83adcc61d5ee17a90f1a6bec06ff98bc6c236" )
+          ; ( "module/Model"
+            , "0f098eb624aee2eedf45c042ce387b1bd713878a2927601d3790cca80e47a5af" )
+          ; ( "module_export/Model.call"
+            , "3d60ab4c46ebffe4088804336cec8343594ebbfb36631f5dba25a2cc9f7671f3" )
+          ; ( "module_export/Model.call_json"
+            , "ed36144b68a320358c5d85b598f9226af61c48b272202e494053203b49e15844" )
+          ; ( "module_export/Model.call_text"
+            , "7f0f27d7a8cf10c5ef0ed087e79693e3ce5bb9884200c95e90125845c84a14c7" )
+          ; ( "module_export/Model.spawn"
+            , "9347ab40f37ae4be888f79f95d7cfee595b6f96841291ac5419266216e68d7cb" )
+          ; ( "module_export/Model.spawn_text"
+            , "24c8d7a071c73bedee083896630ae2f66133b11038f4b51edcbbc2bd0475022b" )
+          ; ( "module/Process"
+            , "ee99fe4464f8a9f477b9fa1f9aaf14bf5ce34d385f48ef0caf5867534a48c147" )
+          ; ( "module_export/Process.run"
+            , "883ed8b59789ef2950d08c978b439005ba5546d52d64908cf9bff26af355233d" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "1d8ac2f35a187d9d59b9f353261dc3f5c2a4fc21a599b8db215afa509f4a8996"
+        , [ ( "module/Runtime"
+            , "a7f003fdab4a960c0fe55073944b63aebe21775ba44e9be5fdf0412d3833715e" )
+          ; ( "module_export/Runtime.emit"
+            , "80a5c7351e54de8e1339d93ea29b962010e1f1432e5c07e6c304d6ab8ecb83e4" )
+          ; ( "module_export/Runtime.end_session"
+            , "ceb2dc7028797b8085b304b2ae973b7a289cc1f4136d77cf46bdd6324c8293e3" )
+          ; ( "module_export/Runtime.request_compaction"
+            , "b9ae3ba4dabb42e0bafd70318872d1c715efa2ecf97102bc367675b98fc3d513" )
+          ; ( "module_export/Runtime.request_turn"
+            , "3be8ccc22985f8d9f3fb1890a523fa89c55553fffe5bea83c00839b180ecaabf" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_closure_sha256, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id = "runtime.control"
+          ; topic_closure_sha256
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_control.ml"
+              ; "test/moderation/moderator_native_requests_test.ml"
+              ; "lib/chat_response/model_executor.ml"
+              ; "lib/shell_runtime/moderator_process_adapter.ml"
+              ; "lib/agent_session/runtime_builder.ml"
+              ; "lib/agent_server/session_factory.ml"
+              ]
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -1954,6 +2016,7 @@ module Coverage = struct
     @ json_alias_mappings
     @ moderator_data_mappings
     @ host_effect_mappings
+    @ runtime_control_mappings
   ;;
 end
 
@@ -2493,6 +2556,36 @@ let runtime_foundation ~sources =
                    ; "test/agent_docs/docs_chatml_effects.ml"
                    ; "test/chatml_composition/moderator_job_tests.ml"
                    ; "test/moderation/chat_response_moderator_manager_test.ml"
+                   ]
+               }
+         }
+       ; { id = "runtime.control"
+         ; title =
+             "Model recipes, shell process output and transactional session requests"
+         ; prerequisites =
+             [ "chatml.task-effects"; "runtime.invocations.moderator"; "chatml.json" ]
+         ; surfaces = moderators
+         ; excerpts =
+             [ { path = "guide/chatml-runtime-control.md"
+               ; heading = "# Model, process and runtime control"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "0afc20f2866592fe16b34fd7b268470947223270a54756cea0ba0eeb341f7205" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_builtin_spec.ml"
+                   ; "lib/chatml/chatml_extension_surface.ml"
+                   ; "lib/chatml/chatml_host_runtime.ml"
+                   ; "lib/chat_response/moderator_invocation.ml"
+                   ; "lib/chat_response/model_executor.ml"
+                   ; "lib/shell_runtime/moderator_process_adapter.ml"
+                   ; "lib/agent_session/runtime_builder.ml"
+                   ; "lib/agent_server/session_factory.ml"
+                   ; "test/agent_docs/docs_chatml_control.ml"
+                   ; "test/moderation/moderator_native_requests_test.ml"
                    ]
                }
          }

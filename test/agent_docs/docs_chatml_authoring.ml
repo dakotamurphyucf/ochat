@@ -17,6 +17,7 @@ let tables_fixture = "docs-src/guide/chatml-tables.md"
 let globals_fixture = "docs-src/guide/chatml-global-helpers.md"
 let moderator_data_fixture = "docs-src/guide/chatml-moderator-data.md"
 let host_effects_fixture = "docs-src/guide/chatml-host-effects.md"
+let runtime_control_fixture = "docs-src/guide/chatml-runtime-control.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -360,6 +361,7 @@ let run env root =
       ; globals_fixture
       ; moderator_data_fixture
       ; host_effects_fixture
+      ; runtime_control_fixture
       ]
       ~f:(fun file ->
         let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in

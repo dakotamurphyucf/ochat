@@ -1,0 +1,28 @@
+let describe result =
+  match result with
+  | `Ok(value) -> value
+  | `Refused(message) -> `String(String.concat("refused: ", message))
+  | `Error(message) -> `String(String.concat("error: ", message))
+let initial_state = `Null
+let on_event ctx state event =
+  match event with
+  | `Session_start ->
+    let* text = Model.call_text("echo", "hello") in
+    let* data = Model.call_json("echo", `Object([{key = "count"; value = `Number(2.0)}])) in
+    let* refused = Model.call("refuse", `Null) in
+    let* failed = Model.call("fail", `Null) in
+    let* missing = Task.catch(
+      Model.call("missing", `Null),
+      fun message -> Task.pure(`Error(message))) in
+    let* first_job = Model.spawn("echo", `Null) in
+    let* second_job = Model.spawn_text("echo", "later") in
+    let* output = Process.run("fixture-command", ["a b", ";literal"]) in
+    Task.pure(`Object([
+      {key = "text"; value = describe(text)},
+      {key = "data"; value = describe(data)},
+      {key = "refused"; value = describe(refused)},
+      {key = "failed"; value = describe(failed)},
+      {key = "missing"; value = describe(missing)},
+      {key = "jobs"; value = `Array([`String(first_job), `String(second_job)])},
+      {key = "output"; value = `String(output)}]))
+  | _ -> Task.pure(state)

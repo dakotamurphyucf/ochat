@@ -184,6 +184,41 @@ let%expect_test "effect module coverage follows each exact target's exports" =
     |}]
 ;;
 
+let%expect_test "runtime control coverage preserves delegated and narrow exclusions" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface ->
+      let prefix = surface ^ "/" in
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface ] |> ok in
+      let targets =
+        List.filter targets ~f:(fun target ->
+          let name = String.chop_prefix_exn target.V.id ~prefix in
+          List.exists [ "Model"; "Process"; "Runtime" ] ~f:(fun module_name ->
+            String.equal name ("module/" ^ module_name)
+            || String.is_prefix name ~prefix:("module_export/" ^ module_name ^ ".")))
+      in
+      let mappings =
+        List.filter V.runtime_control_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.V.target_id ~prefix)
+      in
+      let guidance = C.assemble corpus ~surface_id:surface ~roots:[ "runtime.control" ] in
+      (match targets, guidance with
+       | [], Error _ -> assert (List.is_empty mappings)
+       | _ :: _, Ok _ ->
+         V.audit corpus ~targets ~mappings |> ok |> V.require_complete |> ok
+       | _ -> failwith "control API/guidance surface mismatch");
+      print_s [%sexp (surface : string), (List.length targets : int)]);
+  [%expect
+    {|
+    (one_off_v1 0)
+    (tool_v1 0)
+    (moderator_v1 13)
+    (delegated_moderator_v1 5)
+    |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)

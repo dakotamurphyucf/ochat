@@ -29,6 +29,7 @@ let () =
     ; "guide/chatml-moderator-data.md"
     ; "guide/chatml-moderator-runtime.md"
     ; "guide/chatml-ocaml-differences.md"
+    ; "guide/chatml-runtime-control.md"
     ; "guide/chatml-strings.md"
     ; "guide/chatml-surface-inventory.md"
     ; "guide/chatml-tables.md"
