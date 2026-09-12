@@ -355,7 +355,10 @@ let require_projection_matches writer session projected =
 ;;
 
 let pressure_payload index =
-  sprintf "pressure-%02d:%s" index (String.make (512 * 1024) (Char.of_int_exn 120))
+  (* Thirty-two messages still overflow the deliberately stalled subscriber's
+     transport/queue buffers. Keep retained history below the journal frame
+     bound too: moderator snapshots can repeat that history within one commit. *)
+  sprintf "pressure-%02d:%s" index (String.make (64 * 1024) (Char.of_int_exn 120))
 ;;
 
 let send_pressure_messages client session ~count =

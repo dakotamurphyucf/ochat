@@ -113,13 +113,23 @@ let function_call serial name arguments =
   |> Stdlib.List.to_seq
 ;;
 
-let%expect_test
-    "authored shell approval over HTTP belongs to the child and respects client scopes"
-  =
+let qualify_authored_shell ~snapshot_replacement =
   with_sources (fun env root ->
     let profile = { permission_profile with tool_default = Ask } in
     let configuration =
       config ~profile root root (Filename.concat root "parent.chatmd")
+    in
+    let configuration =
+      match snapshot_replacement with
+      | false -> configuration
+      | true ->
+        { configuration with
+          server =
+            { configuration.server with
+              event_retention =
+                { configuration.server.event_retention with max_events_per_session = 4 }
+            }
+        }
     in
     let requests = ref 0 in
     let mode = ref "persistent" in
@@ -369,9 +379,20 @@ let%expect_test
           ~request:(fun command ->
             let result = Agent_client.Connection.request resumed_client command in
             (match command, result with
-             | ( Session_attach { after_sequence = Some _; _ }
-               , Ok (Session_attach { replay = Events events; _ }) ) ->
-               assert (not (List.is_empty events));
+             | Session_attach { after_sequence = Some _; _ }, Ok (Session_attach response)
+               ->
+               (match snapshot_replacement, response.replay with
+                | false, Events events -> assert (not (List.is_empty events))
+                | true, Snapshot replacement ->
+                  assert (
+                    Int64.(
+                      replacement.latest_event_sequence > snapshot.latest_event_sequence));
+                  assert (P.Id.Session.equal replacement.session.id child_id)
+                | _ ->
+                  raise_s
+                    [%sexp
+                      "unexpected HTTP replay mode"
+                    , (response.replay : P.Method_result.Attach.replay)]);
                replay_seen := true
              | Session_attach _, _ ->
                failwith "HTTP reconnect did not return event replay"
@@ -413,6 +434,49 @@ let%expect_test
       let repeated = idle child in
       [%test_eq: int] 1 (List.length repeated.permissions);
       H.close handle;
+      let cancelled_child, release = create () in
+      let cancelled_id = (state cancelled_child).identity.session_id in
+      let cancel_client =
+        Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal ()
+      in
+      initialize cancel_client;
+      let first_canceller = attach client cancelled_id in
+      let second_canceller = attach cancel_client cancelled_id in
+      release ();
+      ignore (pending cancelled_child : P.Permission.t);
+      let operation = Option.value_exn (state cancelled_child).active_operation in
+      let first, second =
+        Eio.Fiber.pair
+          (fun () -> H.cancel_operation first_canceller operation.id)
+          (fun () -> H.cancel_operation second_canceller operation.id)
+      in
+      (match first, second with
+       | Ok _, Ok _
+       | Ok _, Error { code = Operation_not_found; _ }
+       | Error { code = Operation_not_found; _ }, Ok _ -> ()
+       | results ->
+         raise_s
+           [%sexp
+             "concurrent child cancellation failed"
+           , (results : (P.Session.t, P.Error.t) result * (P.Session.t, P.Error.t) result)]);
+      let cancelled = idle cancelled_child in
+      ignore (idle parent_entry : Agent_session.Session_state.t);
+      assert (List.is_empty cancelled.shell.approval_grants);
+      [%test_eq: int] 1 (List.length cancelled.permissions);
+      [%test_eq: P.Permission.state] Cancelled (List.hd_exn cancelled.permissions).state;
+      (match cancelled.managed_submissions with
+       | [ submission ] ->
+         (match submission.status with
+          | Terminal (Some id, Cancelled) -> assert (P.Id.Operation.equal id operation.id)
+          | status ->
+            raise_s
+              [%sexp
+                "lost child cancellation receipt"
+              , (status : Agent_session.Managed_submission.status)])
+       | _ -> failwith "concurrent cancellation duplicated a child receipt");
+      H.close first_canceller;
+      H.close second_canceller;
+      Agent_client.Connection.close cancel_client;
       List.iter [ "persistent"; "one_off" ] ~f:(fun requested_mode ->
         mode := requested_mode;
         let unattended, release = create () in
@@ -441,21 +505,47 @@ let%expect_test
            | Stopped, Stopped -> ()
            | _ -> failwith "one-off shell child was not joined and stopped")
         | _ -> ());
-      [%test_eq: int] 3 (List.length (state parent_entry).permissions);
+      [%test_eq: int] 4 (List.length (state parent_entry).permissions);
       H.close parent_handle;
       print_endline
         "child approval/grant; management cannot approve; exact grant reuse; unattended \
          child denial";
       print_endline
         "HTTP reader sees pending approval; send/cancel/approve leave child unchanged";
+      print_endline "concurrent HTTP approvals resolve once";
       print_endline
-        "concurrent HTTP approvals resolve once; reader reconnect replays child \
-         completion"));
+        "concurrent HTTP cancellation retains one cancelled receipt and clears child \
+         approval";
+      print_endline
+        (match snapshot_replacement with
+         | false -> "reader reconnect replays child completion"
+         | true -> "reader replaces stale projection after child replay retention gap")))
+;;
+
+let%expect_test "authored shell approval over HTTP respects scopes and replays completion"
+  =
+  qualify_authored_shell ~snapshot_replacement:false;
   [%expect
     {|
     child approval/grant; management cannot approve; exact grant reuse; unattended child denial
     HTTP reader sees pending approval; send/cancel/approve leave child unchanged
-    concurrent HTTP approvals resolve once; reader reconnect replays child completion
+    concurrent HTTP approvals resolve once
+    concurrent HTTP cancellation retains one cancelled receipt and clears child approval
+    reader reconnect replays child completion
+    |}]
+;;
+
+let%expect_test
+    "HTTP child snapshot replacement preserves scope and completed shell state"
+  =
+  qualify_authored_shell ~snapshot_replacement:true;
+  [%expect
+    {|
+    child approval/grant; management cannot approve; exact grant reuse; unattended child denial
+    HTTP reader sees pending approval; send/cancel/approve leave child unchanged
+    concurrent HTTP approvals resolve once
+    concurrent HTTP cancellation retains one cancelled receipt and clears child approval
+    reader replaces stale projection after child replay retention gap
     |}]
 ;;
 
