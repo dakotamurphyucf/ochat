@@ -80,7 +80,7 @@ resolve against the installed corpus. Other tests exercise repair accounting,
 context loss, unavailable execution, retrieval-only step exhaustion and invalid
 comparisons. These fixtures do not solve or score the held-out task suite.
 
-## Required work remaining
+## Runtime oracles
 
 `Execution_cases` now implements the one-off ledger and standalone delta task
 oracles. They create an actual embedded session, serialize fake-provider tool
@@ -217,12 +217,66 @@ ask the handler to run a second time. The existing fixture that manually invokes
 its handler twice remains a separate application-state check. No submitted source
 is rewritten to score host completion retries, and neither check simulates a crash.
 
-Add the reproducible optional
-provider driver, fixed model settings/seeds/repetitions and deadlines, transcript
-and metric artifacts, execution-oracle revision identity, and threshold evaluation.
-Adapt host startup/timeout failures into reported infrastructure outcomes while
-preserving cancellation. Bind that driver to actual runtime
-guidance/compaction when comparing production policies. Report safety violations
-independently of compile/runtime rates. An explicitly authorized real-model run is
-optional; none has occurred here. A01.09/T15 remain incomplete until the required
-offline driver, task coverage and reporting are qualified.
+## Whole-suite driver and artifacts
+
+The offline command runs all eight tasks in all three conditions through `Suite`'s
+actual scoped reference, validation and execution backends:
+
+```sh
+opam exec -- dune exec test/authoring_evaluation/evaluate.exe -- --check
+opam exec -- dune exec test/authoring_evaluation/evaluate.exe -- \
+  --seed 7 --seed 19 > scratch/authoring-evaluation-private.json
+```
+
+`--check` verifies the full runtime-success and repair/context-loss transcript
+contract, serializes and reloads the artifact, and checks its report. The normal
+`runtest` alias includes this check. Without `--check`, stdout is a JSON object
+containing `artifact` and `report`. Artifacts include private fixture solutions and
+full provider-visible messages; keep them outside the installed/public corpus.
+Seeds identify paired repetitions; the offline provider is scripted and does not
+use randomness. No real model or provider adapter is invoked by this command.
+
+`Driver.run` records the model name/parameters, seeds, repetition indexes, suite
+manifest, runtime/oracle identities, exact requests and actions, usage, errors and
+elapsed time. Every task/condition/repetition remains in the artifact, including
+startup failures and timeouts. Provider failures preserve earlier attempts and
+exchanges; case-level failures retain exchanges but can lack partial runner
+metrics. Such costs are marked incomplete, not silently treated as complete zero
+measurements. Cancellation propagates without producing a fabricated report.
+
+The CLI derives both runtime and oracle identity from SHA-256 of the executing
+binary, binding the actual linked runtime, oracles and fixture code. That identity
+can differ between equivalent builds; it is not a portable source revision. Each
+successful host setup also records its validation-host and live capability
+fingerprints. The run fingerprint binds configuration and manifest bytes; it is
+not an authenticated signature of the results.
+
+The driver enforces cooperative Eio provider/case deadlines and a per-case sum of
+serialized exchange bytes. `--case-timeout` and `--transcript-bytes` override the
+offline command's defaults. Requests are checked against the remaining transcript
+budget before invoking the provider. A response can still exhaust that budget;
+in that case the result records an infrastructure failure and incomplete costs.
+These are harness budgets, not OS process limits or a whole-artifact size bound.
+
+`Report.create` rejects missing, duplicate, mixed or inconsistent run rows. Failure
+cases remain in rate denominators; absent provider usage remains unknown. It
+evaluates the predeclared compile/runtime thresholds and separately records known
+capability-boundary violations and whether safety was measured. Any known
+violation fails the threshold verdict even if other rows lack measurements.
+The current whole-suite factory marks comprehensive safety audits **unmeasured**;
+passing output/permission-negative oracles alone does not establish that claim.
+Consequently its overall threshold verdict remains `Incomplete`. Offline
+`real_model_evaluation` remains `not_run` even when synthetic plumbing fixtures
+meet every numeric threshold. The two intentionally broken initial submissions
+produce a 0.75 first-pass rate in the scripted suite, not a model-quality estimate.
+
+## Remaining evaluation work
+
+Add the optional real-provider transport and qualify its strict action contract,
+settings propagation and error handling offline. `Driver.run` already rejects
+`Real_model` provenance before host/provider construction unless the caller passes
+explicit authorization; no real-model evaluation has occurred. Add measured
+capability-boundary observations appropriate to each execution host. A01.09/T15
+remain open. Actual production policy/daemon compaction behavior is qualified in
+the corresponding runtime tests; these three experimental conditions do not
+claim to compare those production policy implementations.

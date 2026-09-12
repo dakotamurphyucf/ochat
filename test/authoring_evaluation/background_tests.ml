@@ -2,17 +2,7 @@ open Core
 open Authoring_evaluation
 open Runner
 
-let candidate =
-  `Object
-    [ "source", `String [%blob "fixtures/observe.chatml"]
-    ; "binding", `String [%blob "fixtures/observe-binding.chatmd"]
-    ; "input_schema", Jsonaf.of_string {|{"type":"object","additionalProperties":false}|}
-    ; ( "output_schema"
-      , Jsonaf.of_string
-          {|{"type":"object","required":["job_id","status"],"properties":{"job_id":{"type":"string"},"status":{"const":"accepted"}},"additionalProperties":false}|}
-      )
-    ]
-;;
+let candidate = Authoring_evaluation_fixtures.Solutions.background
 
 let source_with pattern replacement =
   let source = Jsonaf.member_exn "source" candidate |> Jsonaf.string_exn in

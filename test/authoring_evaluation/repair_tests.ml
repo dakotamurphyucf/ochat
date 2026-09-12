@@ -5,48 +5,9 @@ module V = Chat_response.Authoring_validation
 module Q = Chat_response.Authoring_context
 module C = Chat_response.Tool_capability
 
-let count source =
-  `Object
-    [ "version", `Number "1"
-    ; "target", `String "one_off_script"
-    ; "source", `String source
-    ; "tools", `Array []
-    ]
-;;
-
-let moderator ~id ~name ~source ~input ~output =
-  `Object
-    [ "source", `String source
-    ; ( "binding"
-      , `String
-          (sprintf
-             {|<tool name="%s" type="moderator" moderator="%s" input_schema="input.json" output_schema="output.json"/>|}
-             name
-             id) )
-    ; "input_schema", input
-    ; "output_schema", output
-    ]
-;;
-
-let tally =
-  moderator
-    ~id:"tally"
-    ~name:"tally"
-    ~source:[%blob "fixtures/tally.chatml"]
-    ~input:
-      (Jsonaf.of_string
-         {|{"type":"object","required":["amount"],"properties":{"amount":{"type":"integer"}},"additionalProperties":false}|})
-    ~output:(Jsonaf.of_string {|{"type":"integer"}|})
-;;
-
-let digest =
-  moderator
-    ~id:"digest_owner"
-    ~name:"hash"
-    ~source:[%blob "fixtures/digest.chatml"]
-    ~input:Digest_cases.input_schema
-    ~output:(Jsonaf.of_string {|{"type":"string"}|})
-;;
+let count = Authoring_evaluation_fixtures.Solutions.count
+let tally = Authoring_evaluation_fixtures.Solutions.tally
+let digest = Authoring_evaluation_fixtures.Solutions.digest
 
 let empty_capabilities () =
   Mirage_crypto_rng_unix.use_default ();

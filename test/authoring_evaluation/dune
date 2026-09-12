@@ -1,14 +1,21 @@
 (library
  (name authoring_evaluation)
- (modules runner tasks reference_backend execution_host execution_cases moderator_cases background_cases child_cases repair_cases digest_cases)
+ (modules runner tasks driver report suite reference_backend execution_host execution_cases moderator_cases background_cases child_cases repair_cases digest_cases)
  (libraries core core_unix jsonaf eio eio_main mirage-crypto-rng.unix
   ochat.chat_response ochat.agent_server ochat.agent_client agent_server_test_support)
  (preprocess (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
+ (name authoring_evaluation_fixtures)
+ (modules solutions offline_transcript)
+ (libraries core jsonaf authoring_evaluation)
+ (preprocessor_deps (glob_files_rec fixtures/*))
+ (preprocess (pps ppx_jane ppx_blob)))
+
+(library
  (name authoring_evaluation_tests)
- (modules runner_tests integration_tests execution_tests moderator_tests background_tests capability_tests child_tests repair_tests)
- (libraries core eio_main authoring_evaluation ochat.chatml_runtime ochat.chatml)
+ (modules runner_tests driver_tests integration_tests execution_tests moderator_tests background_tests capability_tests child_tests repair_tests)
+ (libraries core eio_main authoring_evaluation authoring_evaluation_fixtures ochat.chatml_runtime ochat.chatml)
  (inline_tests)
  (preprocessor_deps (glob_files_rec fixtures/*))
  (preprocess (pps ppx_jane ppx_jsonaf_conv ppx_expect ppx_blob)))
@@ -17,3 +24,13 @@
  (name manifest)
  (modules manifest)
  (libraries jsonaf authoring_evaluation))
+
+(executable
+ (name evaluate)
+ (modules evaluate)
+ (libraries core eio_main jsonaf authoring_evaluation authoring_evaluation_fixtures)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest)
+ (action (run %{exe:evaluate.exe} --check)))

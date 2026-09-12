@@ -2,19 +2,7 @@ open Core
 open Authoring_evaluation
 open Runner
 
-let delta =
-  `Object
-    [ "version", `Number "1"
-    ; "target", `String "standalone_tool"
-    ; ( "source"
-      , `String
-          ([%blob "fixtures/string-order.chatml"] ^ "\n" ^ [%blob "fixtures/delta.chatml"])
-      )
-    ; "tools", `Array []
-    ; "input_schema", Jsonaf.of_string [%blob "fixtures/delta-input.json"]
-    ; "output_schema", Jsonaf.of_string [%blob "fixtures/delta-output.json"]
-    ]
-;;
+let delta = Authoring_evaluation_fixtures.Solutions.delta
 
 let%expect_test "held-out standalone delta executes through the public session path" =
   Eio_main.run (fun env ->
@@ -23,18 +11,7 @@ let%expect_test "held-out standalone delta executes through the public session p
   [%expect {| Passed |}]
 ;;
 
-let reconciliation =
-  `Object
-    [ "version", `Number "1"
-    ; "target", `String "one_off_script"
-    ; ( "source"
-      , `String
-          ([%blob "fixtures/string-order.chatml"]
-           ^ "\n"
-           ^ [%blob "fixtures/reconcile.chatml"]) )
-    ; "tools", `Array [ `String "read_file" ]
-    ]
-;;
+let reconciliation = Authoring_evaluation_fixtures.Solutions.reconciliation
 
 let%expect_test "held-out ledger reconciliation uses confined native file calls" =
   Eio_main.run (fun env ->

@@ -2,14 +2,7 @@ open Core
 open Authoring_evaluation
 open Runner
 
-let candidate =
-  `Object
-    [ "source", `String [%blob "fixtures/quota.chatml"]
-    ; "binding", `String [%blob "fixtures/quota-binding.chatmd"]
-    ; "input_schema", Jsonaf.of_string [%blob "fixtures/quota-input.json"]
-    ; "output_schema", Jsonaf.of_string [%blob "fixtures/quota-output.json"]
-    ]
-;;
+let candidate = Authoring_evaluation_fixtures.Solutions.quota
 
 let%expect_test "quota moderator preserves state through sequential calls and rejections" =
   Eio_main.run (fun env ->

@@ -2,37 +2,7 @@ open Core
 open Authoring_evaluation
 open Runner
 
-let candidate =
-  `Object
-    [ ( "create"
-      , `Object
-          [ "version", `Number "1"
-          ; "root_file", `String "reviewer.chatmd"
-          ; ( "sources"
-            , `Array
-                [ `Object
-                    [ "path", `String "reviewer.chatmd"
-                    ; "text", `String [%blob "fixtures/reviewer.chatmd"]
-                    ]
-                ; `Object
-                    [ "path", `String "instructions.chatmd"
-                    ; "text", `String [%blob "fixtures/reviewer-instructions.chatmd"]
-                    ]
-                ] )
-          ; "tools", `Array [ `String "read_file" ]
-          ; "start_immediately", `True
-          ; "lifetime", `String "owned"
-          ; "idempotency_key", `String "evidence-review-child"
-          ] )
-    ; ( "send"
-      , `Object
-          [ "session_id", `String "$session_id"
-          ; "message", `String "$message"
-          ; "idempotency_key", `String "$key"
-          ] )
-    ; "read", `Object [ "session_id", `String "$session_id"; "cursor", `String "$cursor" ]
-    ]
-;;
+let candidate = Authoring_evaluation_fixtures.Solutions.child
 
 let%expect_test
     "generated child authoring retains evidence across follow-ups and reads incrementally"

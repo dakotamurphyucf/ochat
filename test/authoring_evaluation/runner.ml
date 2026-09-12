@@ -94,7 +94,10 @@ type termination =
   | Declined
   | Attempts_exhausted
   | Steps_exhausted
+  | Infrastructure_failed of string
 [@@deriving equal, sexp, jsonaf]
+
+exception Infrastructure_failure of string
 
 type tokens =
   { primer : int
@@ -239,7 +242,13 @@ let run
                | true -> Attempts_exhausted
                | false -> loop ())))
     in
-    let termination = loop () in
+    let termination =
+      match loop () with
+      | termination -> termination
+      | exception Infrastructure_failure message ->
+        provider_input := None;
+        Infrastructure_failed message
+    in
     let attempts = List.rev !attempts in
     let first_pass_compile =
       match attempts with
