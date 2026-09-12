@@ -78,6 +78,26 @@ let run_journal_child env count directory =
 
 let run_child env arguments =
   match arguments with
+  | [ "authored-ack"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child
+      ~lose_ack:true
+      env
+      ~root
+      ~boundary
+      ~mode
+      ~recover:false
+  | [ "authored-ack-recover"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child
+      ~lose_ack:true
+      env
+      ~root
+      ~boundary
+      ~mode
+      ~recover:true
+  | [ "authored-create"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child env ~root ~boundary ~mode ~recover:false
+  | [ "authored-recover"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child env ~root ~boundary ~mode ~recover:true
   | [ "creator"; root; boundary ] ->
     Crash_creator.run_child env ~root ~boundary ~recover:false
   | [ "creator-recover"; root; boundary ] ->
@@ -288,6 +308,8 @@ let cases =
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
   ; "generated.creation-stage-recovery", Crash_generated_creation.test
+  ; "authored.creation-stage-recovery", Crash_authored_creation.test
+  ; "authored.creation-lost-acknowledgement", Crash_authored_creation.test_lost_ack
   ; "generated.creator-outcome-recovery", Crash_creator.test
   ; "generated.owned-stop-recovery", Crash_owned_stop.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test

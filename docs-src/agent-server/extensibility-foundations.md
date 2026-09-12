@@ -4724,12 +4724,24 @@ reconstruction uses the same preparation path and selects authored or generated
 restoration from the private ledger origin. It verifies authored artifacts and
 private resource pins without restarting an ancestor's conversation or moderator.
 
-Public availability remains gated. The remaining approval, concurrency and
-fault-recovery qualification are unfinished.
-Partial-creation reconciliation now
-selects the authored artifact and private bindings, but its authored fault matrix
-is not yet qualified. Abrupt-crash recovery of an active one-off also needs a
-dedicated integration test; orderly restart and active cancellation are covered.
+Public availability remains gated. Concurrent creation/retry, pending-response and
+broader lifecycle/bridge qualification remain unfinished.
+Partial-creation reconciliation selects the authored artifact and private bindings.
+The offline crash matrix now interrupts actual native authored calls at reservation,
+partial artifact write, artifact admission, partial child snapshot, child admission,
+link publication and active child execution after a retained private file read.
+Each boundary runs for persistent and one-off calls, followed by two daemon
+recoveries with the live specialist source edited. Recovery preserves the admitted
+identity and history, publishes the interrupted parent invocation only once, removes
+incomplete staging directories and never replays a model request. An interrupted
+one-off remains stopped and cannot be restarted; a persistent child can remain
+idle and available within its parent's authority.
+Separate cases lose the write acknowledgement after each of the four ledger stages,
+allowing ordinary error unwinding and cleanup before restart. The caller receives a
+persistence failure without submitting child work. A fully admitted persistent child
+can remain available, while a one-off cannot retain loaded execution resources after
+the failed invocation. Both cases preserve the failure and creation identity across
+two restarts. These tests do not yet qualify concurrent retries of the same call.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. The daemon
 fixture now exercises actual named-tool creation, continuation, separate instances,
