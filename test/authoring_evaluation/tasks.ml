@@ -33,8 +33,12 @@ let all =
         "Author a moderator handling a custom reserve tool. Retain an integer budget \
          initially 11. A positive request at or below the remaining budget succeeds and \
          decreases it; other requests fail without changing it. Resolve each handled \
-         invocation exactly once and ignore unrelated events. Supply the ChatMD tool \
-         binding and moderator source."
+         invocation exactly once and ignore unrelated events. Input is a strict object \
+         with integer amount; success returns a strict object with integer remaining. \
+         Reject nonpositive or over-budget requests with code quota.rejected. Submit \
+         source, binding, input_schema and output_schema fields. The binding must name \
+         reserve, use moderator quota and reference input.json/output.json; the host \
+         supplies the quota script declaration."
     ; preload_topics = [ "runtime.invocations.moderator"; "chatml.task-effects" ]
     ; compaction_after_step = None
     }

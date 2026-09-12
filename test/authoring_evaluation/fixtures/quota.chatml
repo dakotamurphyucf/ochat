@@ -1,0 +1,22 @@
+let initial_state = 11.0
+
+let on_event ctx state event = match event with
+  | `Tool_invoked(p) ->
+    if p.context.tool_name == "reserve" then
+      let amount = match Json.get_field(p.input, "amount") with
+        | `Some(`Number(amount)) -> amount
+        | _ -> fail("expected amount")
+      in
+      let allowed = if amount >. 0.0 then amount <=. state else false in
+      if allowed then
+        let remaining = state -. amount in
+        let* () = Invocation.resolve(p.context.invocation_id,
+          `Complete(`Object([{key = "remaining"; value = `Number(remaining)}]))) in
+        Task.pure(remaining)
+      else
+        let* () = Invocation.resolve(p.context.invocation_id,
+          `Fail({code = "quota.rejected"; message = "Amount exceeds budget or is not positive.";
+            retryable = false; details = `Null})) in
+        Task.pure(state)
+    else Task.pure(state)
+  | _ -> Task.pure(state)

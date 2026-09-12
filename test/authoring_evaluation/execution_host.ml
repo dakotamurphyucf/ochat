@@ -49,11 +49,12 @@ let snapshot embedded =
   | _ -> failwith "evaluation host received another protocol response"
 ;;
 
-(* Candidate sources execute in an actual embedded session. Only host-authored
-   file names and root declarations are accepted here, never candidate ChatMD.
+(* Candidate sources execute in an actual embedded session. Callers supply only
+   host-approved file names and root declarations; candidate bindings must pass
+   their scenario's captured-source admission before reaching this helper.
    Calls traverse provider serialization, invocation admission and tool dispatch.
    The scripted provider is local and never opens a model connection. *)
-let run ~env ~sources ~workspace_files ~calls =
+let run ?(sequential = false) ~env ~sources ~workspace_files ~calls () =
   Mirage_crypto_rng_unix.use_default ();
   let root = Agent_server_test_support.temporary_root env in
   Exn.protect
@@ -70,12 +71,18 @@ let run ~env ~sources ~workspace_files ~calls =
       in
       List.iter sources ~f:(save root);
       List.iter workspace_files ~f:(save workspace);
+      let batches =
+        match sequential with
+        | false -> [ calls ]
+        | true -> List.map calls ~f:(fun call -> [ call ])
+      in
+      let expected_requests = List.length batches + 1 in
       let requests = ref 0 in
       let post_stream ~sw:_ ~inputs:_ =
         incr requests;
-        match !requests with
-        | 1 -> call_events calls
-        | _ -> Stdlib.Seq.empty
+        match List.nth batches (!requests - 1) with
+        | Some calls -> call_events calls
+        | None -> Stdlib.Seq.empty
       in
       Eio.Switch.run (fun sw ->
         let embedded =
@@ -126,10 +133,11 @@ let run ~env ~sources ~workspace_files ~calls =
                 let current = snapshot embedded in
                 Option.iter current.failure ~f:(fun error -> raise (Protocol_error error));
                 match
-                  !requests >= 2 && Option.is_none current.session.active_operation
+                  !requests >= expected_requests
+                  && Option.is_none current.session.active_operation
                 with
                 | true ->
-                  (match !requests = 2 && List.is_empty current.jobs with
+                  (match !requests = expected_requests && List.is_empty current.jobs with
                    | true -> current
                    | false ->
                      failwith "synchronous evaluation unexpectedly scheduled extra work")

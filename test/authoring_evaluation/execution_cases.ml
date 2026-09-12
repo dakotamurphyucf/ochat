@@ -90,6 +90,7 @@ let execute_standalone ~env candidate =
       ~sources:(standalone_sources candidate)
       ~workspace_files:[]
       ~calls:(List.map standalone ~f:(fun c -> c.id, "delta", c.input))
+      ()
   in
   assess standalone snapshot
 ;;
@@ -148,7 +149,7 @@ let execute_one_off ~env candidate =
           ; "tools", field candidate "tools"
           ] ))
   in
-  let snapshot = Execution_host.run ~env ~sources ~workspace_files:ledgers ~calls in
+  let snapshot = Execution_host.run ~env ~sources ~workspace_files:ledgers ~calls () in
   match
     String.is_substring
       (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string)

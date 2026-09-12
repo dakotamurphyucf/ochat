@@ -105,8 +105,27 @@ UTF-8 byte comparator from existing string/JSON operations. Standalone array
 results use explicit `json` annotations to retain the full recursive result type.
 The scripts do not add host primitives, shell access, or native dependencies.
 
-Add execution oracles/transcripts for the remaining moderator, background and
-generated-child families, plus the extra repair/capability/compaction tasks.
+`Moderator_cases` evaluates the quota task through eight sequential calls within
+one embedded session. It checks successful decrement, rejection without decrement,
+zero/negative requests, fractional/wrong-type schema failures, exact exhaustion,
+and subsequent rejection. Mutations that reset successful state, alter rejected
+state, leave a call unresolved or resolve it twice fail. The default synchronous
+host still sends one batch; sequential mode explicitly expects one provider step
+per call and one final response, and still rejects unexpected jobs/extra work.
+
+The quota candidate has exactly `source`, `binding`, `input_schema` and
+`output_schema` fields. This is an evaluation submission envelope, not a new
+`ochat_validate` input shape. Its binding is parsed using a captured source bundle
+without preprocessing or filesystem fallback. Only synchronous `reserve` owned by
+moderator `quota`, with no tool dependencies or additional declarations, is admitted.
+The harness then constructs the unchanged native moderator validation request.
+The positive task runs through actual validation/execution in all three guidance
+conditions. Attempting to add a native reader is rejected before runtime creation.
+The clarified task prompt specifies the call/result/error and binding contract;
+the suite manifest fingerprint changes accordingly.
+
+Add execution oracles/transcripts for background and generated-child families,
+plus the extra repair/capability/compaction tasks.
 Integrate ledger scoring with the invoking host's actual read capability metadata.
 Add the reproducible optional
 provider driver, fixed model settings/seeds/repetitions and deadlines, transcript
