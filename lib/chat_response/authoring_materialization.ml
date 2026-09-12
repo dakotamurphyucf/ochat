@@ -98,8 +98,16 @@ let entry (message : message) ~id =
     }
 ;;
 
-let create ?(max_tokens = 32000) ~context ~host ~policy ~capabilities ~scope () =
+let create ?max_tokens ~context ~host ~policy ~capabilities ~scope () =
   let open Result.Let_syntax in
+  let context = Q.with_host_budget context ~host in
+  let max_tokens =
+    match max_tokens, V.configured_context_budget host with
+    | None, None -> V.default_context_budget.preload_tokens
+    | Some requested, None -> requested
+    | None, Some budget -> budget.preload_tokens
+    | Some requested, Some budget -> Int.min requested budget.preload_tokens
+  in
   let corpus = Q.corpus_for_host context ~host in
   let corpus_identity = Corpus.identity corpus in
   let%bind () =

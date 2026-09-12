@@ -18,6 +18,32 @@ type moderator_surface =
   | Delegated
 [@@deriving sexp, equal]
 
+type context_budget =
+  { default_tokens : int
+  ; max_tokens : int
+  ; preload_tokens : int
+  }
+[@@deriving compare, equal, sexp]
+
+let context_budget ~default_tokens ~max_tokens ~preload_tokens =
+  match
+    default_tokens > 0
+    && default_tokens <= max_tokens
+    && max_tokens <= 1_000_000
+    && preload_tokens > 0
+    && preload_tokens <= 1_000_000
+  with
+  | true -> Ok { default_tokens; max_tokens; preload_tokens }
+  | false ->
+    Error
+      "authoring context budgets must be positive, at most 1000000, with default_tokens \
+       <= max_tokens"
+;;
+
+let default_context_budget =
+  { default_tokens = 12000; max_tokens = 32000; preload_tokens = 32000 }
+;;
+
 type host =
   { runtime_identity : string
   ; targets : target list
@@ -28,6 +54,7 @@ type host =
   ; delegated_catalog : Authoring_policy.catalog option
   ; corpus : Authoring_corpus.t option
   ; persisted_children_unavailable : bool
+  ; context_budget : context_budget option
   }
 
 let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
@@ -53,7 +80,19 @@ let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
       ; delegated_catalog = None
       ; corpus = None
       ; persisted_children_unavailable = false
+      ; context_budget = None
       }
+;;
+
+let configured_context_budget host = host.context_budget
+
+let configure_context_budget host budget =
+  Result.map
+    (context_budget
+       ~default_tokens:budget.default_tokens
+       ~max_tokens:budget.max_tokens
+       ~preload_tokens:budget.preload_tokens)
+    ~f:(fun budget -> { host with context_budget = Some budget })
 ;;
 
 let for_delegated host =
@@ -488,6 +527,15 @@ let host_fingerprint (host : host) =
       , (Authoring_corpus.identity corpus : string)
       , (Option.map host.delegated_catalog ~f:Authoring_policy.catalog_fingerprint
          : string option)]
+  in
+  let contract =
+    match host.context_budget with
+    | None -> contract
+    | Some budget ->
+      [%sexp
+        ("ochat.authoring.context-budget.v1" : string)
+      , (contract : Sexp.t)
+      , (budget : context_budget)]
   in
   (match host.persisted_children_unavailable with
    | false -> contract

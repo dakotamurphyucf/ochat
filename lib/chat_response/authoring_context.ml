@@ -47,9 +47,34 @@ let fingerprint t = t.fingerprint
 let installed_corpus t = t.corpus
 let corpus_for_host t ~host = Option.value (V.corpus host) ~default:t.corpus
 
+let query_fingerprint corpus ~default_tokens ~max_tokens =
+  [%sexp
+    ("ochat.authoring-query.v3" : string)
+  , (Corpus.identity corpus : string)
+  , (default_tokens : int)
+  , (max_tokens : int)]
+  |> Sexp.to_string
+  |> Digest.digest
+;;
+
+let with_host_budget t ~host =
+  match V.configured_context_budget host with
+  | None -> t
+  | Some budget ->
+    { t with
+      default_tokens = budget.default_tokens
+    ; max_tokens = budget.max_tokens
+    ; fingerprint =
+        query_fingerprint
+          t.corpus
+          ~default_tokens:budget.default_tokens
+          ~max_tokens:budget.max_tokens
+    }
+;;
+
 let create
-      ?(default_tokens = 12000)
-      ?(max_tokens = 32000)
+      ?(default_tokens = V.default_context_budget.default_tokens)
+      ?(max_tokens = V.default_context_budget.max_tokens)
       ?(authored_packages = [])
       ?authored_max_bytes
       ~secret
@@ -81,15 +106,7 @@ let create
   let%bind _ =
     Corpus.Coverage.audit corpus ~targets ~mappings:Corpus.Coverage.reviewed_mappings
   in
-  let fingerprint =
-    [%sexp
-      ("ochat.authoring-query.v3" : string)
-    , (Corpus.identity corpus : string)
-    , (default_tokens : int)
-    , (max_tokens : int)]
-    |> Sexp.to_string
-    |> Digest.digest
-  in
+  let fingerprint = query_fingerprint corpus ~default_tokens ~max_tokens in
   Ok { corpus; sources; secret; default_tokens; max_tokens; fingerprint }
 ;;
 
@@ -854,6 +871,7 @@ let reference_to_protocol (receipt : reference_receipt) =
 ;;
 
 let query_with_receipt t ~host ~capabilities ~scope request =
+  let t = with_host_budget t ~host in
   let run () =
     let open Result.Let_syntax in
     let%bind () =

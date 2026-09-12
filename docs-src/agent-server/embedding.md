@@ -13,6 +13,12 @@ same loader and host configuration as a daemon. Package text stays immutable for
 the host's lifetime and is visible only through matching selected tool metadata.
 This configuration does not grant tools or enable the gated extension rollout.
 
+`~authoring_budget` configures documentation query defaults/ceilings and the total
+automatic primer/preload budget. Construct it with
+`Chat_response.Authoring_validation.context_budget`; the shared daemon host passes
+it to native/helper queries, context insertion and delegated sessions. See the
+[budget contract](../guide/authoring-context-tool.md#budgets-and-continuation).
+
 ## Client integration
 
 The complete [compiled client](../examples/agent-server/clients/docs_example.ml)

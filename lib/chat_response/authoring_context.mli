@@ -80,6 +80,12 @@ val create
 
 val fingerprint : t -> string
 
+(** Apply explicit trusted host budgets to an immutable service, retaining its
+    corpus/signing key. Used by query and materialization so inherited native
+    bindings follow the invoking host and receipts use the same query identity.
+    An unconfigured host preserves [create]'s defaults/overrides. *)
+val with_host_budget : t -> host:Authoring_validation.host -> t
+
 (** Trusted host access to the same immutable, checked corpus used by queries.
     This does not grant model-facing access without target/policy checks. *)
 val installed_corpus : t -> Authoring_corpus.t

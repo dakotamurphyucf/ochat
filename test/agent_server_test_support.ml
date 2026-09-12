@@ -52,6 +52,7 @@ let config
     ; server =
         { data_dir = Filename.concat root "data"
         ; authoring_packages = []
+        ; authoring_budget = None
         ; unix_socket = Filename.concat root "agent.sock"
         ; http =
             { enabled = false

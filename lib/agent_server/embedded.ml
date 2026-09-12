@@ -80,6 +80,7 @@ let server_config data_root =
   Config.Server.
     { data_dir = data_root
     ; authoring_packages = []
+    ; authoring_budget = None
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false
@@ -292,6 +293,7 @@ let start
       ~env
       ?(daemon_options = Daemon.default_options)
       ?(authoring_package_files = [])
+      ?authoring_budget
       options
   =
   Mirage_crypto_rng_unix.use_default ();
@@ -302,7 +304,9 @@ let start
   in
   let%bind data_root, temporary_root = data_root env options in
   let config = config options data_root in
-  let config = { config with server = { config.server with authoring_packages } } in
+  let config =
+    { config with server = { config.server with authoring_packages; authoring_budget } }
+  in
   let daemon_result =
     Daemon.start
       ~sw

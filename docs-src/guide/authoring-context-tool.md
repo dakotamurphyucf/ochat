@@ -460,6 +460,33 @@ ceiling. `max_tokens: null` selects the default. The current estimate is
 `utf8_bytes_div_3_estimate`. It is not an exact tokenizer, a token upper bound or a
 provider billing measurement. The host rejects requests above its ceiling.
 
+Configure a daemon's immutable authoring budgets in its `server` record:
+
+```scheme
+(authoring_budget
+ ((default_tokens 12000)
+  (max_tokens 32000)
+  (preload_tokens 32000)))
+```
+
+All fields are optional and use the values shown when omitted. Estimates must be
+positive and at most 1,000,000; `default_tokens` must not exceed `max_tokens`.
+`preload_tokens` bounds the combined automatic primer and prerequisite-complete
+preload, independently of query pages. An oversized batch fails admission instead
+of silently omitting required material. Manual policy still inserts nothing.
+These are documentation budgets, separate from ChatML execution resource limits.
+
+OCaml embeddings can construct a budget with
+`Chat_response.Authoring_validation.context_budget` and pass it as
+`Embedded.start ~authoring_budget`, or use `configure_context_budget` on their
+trusted authoring host. Native queries and helper queries use the actual calling
+host's budget; delegated sessions inherit it. A per-call materialization budget
+can lower an explicit host budget, but cannot raise it. Supplying conflicting
+budgets through both the daemon configuration and an explicit authoring host is
+an error. Changing server budgets requires a restart and invalidates old context
+identities and continuation cursors. Local TUI/stdio command-line budget flags
+are not exposed yet; the embedding API supports the same configuration.
+
 When `complete` is false, pass `next_cursor` to `continue`, setting `task`, `query`,
 `topic_id` and `features` to null. If the next intact section cannot fit, the page
 may be empty and `budget.minimum_next_tokens` reports the estimated space needed.

@@ -709,6 +709,22 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         ()
       |> Result.map_error ~f:Agent_protocol.Error.invalid_request
       |> Result.bind ~f:(fun host ->
+        match config.server.authoring_budget with
+        | None -> Ok host
+        | Some budget ->
+          (match Chat_response.Authoring_validation.configured_context_budget host with
+           | Some previous
+             when not
+                    (Chat_response.Authoring_validation.equal_context_budget
+                       previous
+                       budget) ->
+             Error
+               (Agent_protocol.Error.invalid_request
+                  "Server authoring budgets conflict with the supplied host budgets.")
+           | None | Some _ ->
+             Chat_response.Authoring_validation.configure_context_budget host budget
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
+      |> Result.bind ~f:(fun host ->
         match config.server.authoring_packages with
         | [] -> Ok host
         | files ->

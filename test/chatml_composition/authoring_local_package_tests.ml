@@ -19,16 +19,18 @@ let%expect_test
         Fixtures.call_events
           [ ( "local-reference"
             , "ochat_authoring_context"
-            , Q.request
-                ~task:"one_off_script"
-                ~topic_id:"custom.reports.rules"
-                ~max_tokens:32000
-                "topic" )
+            , Q.request ~task:"one_off_script" ~topic_id:"custom.reports.rules" "topic" )
           ]
       | _ -> Stdlib.Seq.empty
     in
     E.with_host
       ~durable
+      ~authoring_budget:
+        (Chat_response.Authoring_validation.context_budget
+           ~default_tokens:16000
+           ~max_tokens:24000
+           ~preload_tokens:20000
+         |> Result.ok_or_failwith)
       ~package_files:[ "reports.json"; "private.json" ]
       ~sources:
         [ ( "reports.json"
@@ -66,6 +68,9 @@ let%expect_test
            assert (not (String.is_substring text ~substring:"LOCAL-PRIVATE-CONVENTIONS")));
          let response = Flow.response (List.hd_exn !inputs) "local-reference" in
          assert (not (Q.has_error response));
+         Q.require_json
+           (`Number "16000")
+           (Q.field (Q.field response "budget") "max_tokens");
          assert (
            String.is_substring
              (Flow.content [ response ])

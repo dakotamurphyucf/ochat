@@ -29,7 +29,7 @@ let send embedded text =
   |> ignore
 ;;
 
-let with_host ?(package_files = []) ~durable ~sources ~daemon_options f =
+let with_host ?(package_files = []) ?authoring_budget ~durable ~sources ~daemon_options f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -73,7 +73,13 @@ let with_host ?(package_files = []) ~durable ~sources ~daemon_options f =
             List.map package_files ~f:(Filename.concat root)
           in
           let embedded =
-            Embedded.start ~sw ~env ~daemon_options ~authoring_package_files options
+            Embedded.start
+              ~sw
+              ~env
+              ~daemon_options
+              ~authoring_package_files
+              ?authoring_budget
+              options
             |> protocol_ok
           in
           Exn.protect

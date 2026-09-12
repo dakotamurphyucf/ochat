@@ -96,7 +96,13 @@ let%expect_test
     let entered_left, signal_left = Eio.Promise.create () in
     let entered_right, signal_right = Eio.Promise.create () in
     let run ctx ready signal =
-      let service = Services.create ~env ~host:(host ()) in
+      let default_tokens = 6000 + (ctx.I.generation * 1000) in
+      let caller =
+        V.context_budget ~default_tokens ~max_tokens:9000 ~preload_tokens:16000
+        |> Result.bind ~f:(V.configure_context_budget (host ()))
+        |> Result.ok_or_failwith
+      in
+      let service = Services.create ~env ~host:caller in
       let invocation = I.create ctx |> protocol_ok |> I.dispatch |> protocol_ok in
       let retained_borrow = ref None in
       let retained_scope = ref None in
@@ -137,6 +143,9 @@ let%expect_test
           |> protocol_ok)
       in
       let reference = List.hd_exn references in
+      require_json
+        (`Number (Int.to_string default_tokens))
+        (field (field result "budget") "max_tokens");
       assert (List.length references = 1);
       assert (R.matches_response reference result);
       assert (
@@ -152,7 +161,7 @@ let%expect_test
       let response =
         Q.query_with_receipt
           query_service
-          ~host:(host ())
+          ~host:caller
           ~capabilities:selected
           ~scope:(R.scope_for ~session_id:ctx.session_id ~generation:ctx.generation)
           request
@@ -170,8 +179,8 @@ let%expect_test
       (fun () -> run (List.hd_exn contexts) entered_right signal_left)
       (fun () -> run (List.last_exn contexts) entered_left signal_right));
   print_endline
-    "overlapping generations isolated; nested helper retains owner; duplicate reads \
-     coalesce; late borrows and collectors expire";
+    "overlapping generations and host budgets isolated; nested helper retains owner; \
+     duplicate reads coalesce; late borrows and collectors expire";
   [%expect
-    {| overlapping generations isolated; nested helper retains owner; duplicate reads coalesce; late borrows and collectors expire |}]
+    {| overlapping generations and host budgets isolated; nested helper retains owner; duplicate reads coalesce; late borrows and collectors expire |}]
 ;;

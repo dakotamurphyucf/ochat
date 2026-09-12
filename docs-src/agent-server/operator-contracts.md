@@ -122,6 +122,9 @@ module Server : sig
     ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
       (** Captured host conventions loaded during configuration validation.
           Changes require restart; package presence never enables extensions. *)
+    ; authoring_budget : Chat_response.Authoring_validation.context_budget option
+          [@sexp.option]
+      (** Explicit query/default/preload estimates; changes require restart. *)
     ; unix_socket : string
     ; http : http
     ; shutdown_grace_ms : int

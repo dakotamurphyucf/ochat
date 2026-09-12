@@ -103,6 +103,47 @@ let validated_exn env source_file contents =
       , (diagnostics : Agent_server.Config.Diagnostic.t list)]
 ;;
 
+let%expect_test "authoring budgets validate as a captured server configuration" =
+  with_fixture (fun env temporary workspace prompt _ ->
+    let source_file = Filename.concat temporary "server.sexp" in
+    let text budget =
+      String.substr_replace_first
+        (config_text ~workspace ~prompt ~http:"((enabled false))")
+        ~pattern:"(shutdown_grace_ms 30000)"
+        ~with_:("(authoring_budget (" ^ budget ^ "))")
+    in
+    let configured =
+      validated_exn
+        env
+        source_file
+        (text "(default_tokens 6000) (max_tokens 8000) (preload_tokens 16000)")
+    in
+    let budget = Option.value_exn configured.server.authoring_budget in
+    print_s [%sexp (budget : Chat_response.Authoring_validation.context_budget)];
+    let defaults = validated_exn env source_file (text "") in
+    assert (
+      Chat_response.Authoring_validation.equal_context_budget
+        (Option.value_exn defaults.server.authoring_budget)
+        Chat_response.Authoring_validation.default_context_budget);
+    List.iter
+      [ "(default_tokens 9000) (max_tokens 8000)"
+      ; "(preload_tokens 0)"
+      ; "(max_tokens 1000001)"
+      ; "(default_tokens 6000) (default_tokens 7000)"
+      ; "(extra_budget 42)"
+      ]
+      ~f:(fun invalid ->
+        assert (Result.is_error (validate env source_file (text invalid))));
+    print_endline
+      "defaults captured; reversed, zero, oversized, duplicate and unknown settings \
+       rejected");
+  [%expect
+    {|
+    ((default_tokens 6000) (max_tokens 8000) (preload_tokens 16000))
+    defaults captured; reversed, zero, oversized, duplicate and unknown settings rejected
+    |}]
+;;
+
 let%expect_test "configuration normalizes paths and preflights ChatMD" =
   with_fixture (fun env temporary workspace prompt token_file ->
     let source_file = Filename.concat temporary "server.sexp" in

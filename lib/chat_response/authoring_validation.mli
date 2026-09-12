@@ -19,6 +19,26 @@ type moderator_surface =
 
 type host
 
+type context_budget = private
+  { default_tokens : int
+  ; max_tokens : int
+  ; preload_tokens : int
+  }
+[@@deriving compare, equal, sexp]
+
+(** Host-selected estimates for reference responses and automatic context.
+    Values must be positive, at most one million, with default <= maximum.
+    These do not change execution limits or grant any capability. *)
+val context_budget
+  :  default_tokens:int
+  -> max_tokens:int
+  -> preload_tokens:int
+  -> (context_budget, string) result
+
+val configure_context_budget : host -> context_budget -> (host, string) result
+val configured_context_budget : host -> context_budget option
+val default_context_budget : context_budget
+
 (** The owning host supplies the installed runtime identity, available targets,
     actual moderator surface and compiler ceilings. None of these are accepted
     from submitted JSON. Identity must change with the target runtime build or

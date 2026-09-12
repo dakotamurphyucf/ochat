@@ -34,6 +34,9 @@ val start
        (** Absolute paths captured through the shared bounded loader before store
          creation. Packages configure the same host as daemon configuration;
          they do not enable extensions or widen selected tool authority. *)
+  -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
+       (** Query defaults/ceiling and automatic insertion budget, shared with
+           daemon configuration and inherited by delegated sessions. *)
   -> options
   -> (t, Agent_protocol.Error.t) result
 

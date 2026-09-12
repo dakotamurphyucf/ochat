@@ -67,6 +67,8 @@ module Server = struct
   type t =
     { data_dir : string
     ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
+    ; authoring_budget : Chat_response.Authoring_validation.context_budget option
+          [@sexp.option]
     ; unix_socket : string
     ; http : http
     ; shutdown_grace_ms : int

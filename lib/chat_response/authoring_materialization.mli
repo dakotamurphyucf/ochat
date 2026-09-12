@@ -23,7 +23,9 @@ val catalog
     corpus. [scope] is the owning session/generation identity, never model input.
     Preload closures are assembled in full with shared prerequisites deduplicated;
     incompatible topics fail without falling back to another target. The full
-    initial batch must fit [max_tokens], estimated as ceil(payload UTF-8 bytes/3).
+    initial batch must fit the explicit host preload budget, estimated as
+    ceil(payload UTF-8 bytes/3); [max_tokens] may lower that ceiling. Without a
+    configured host budget, [max_tokens] overrides the 32,000-token fallback.
     Manual policy produces no initial guidance; it may retain metadata-only
     rediscovery pointers for the owner's earlier reads. Ordinary tools produce
     no guidance. Captured custom

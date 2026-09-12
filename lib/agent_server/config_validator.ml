@@ -558,6 +558,56 @@ let parse_authoring_packages context path sexp =
     ])
 ;;
 
+let parse_authoring_budget context path sexp =
+  let module V = Chat_response.Authoring_validation in
+  let open Result.Let_syntax in
+  let%bind fields = record context path sexp in
+  let%bind () =
+    ensure_allowed
+      context
+      path
+      fields
+      [ "default_tokens"; "max_tokens"; "preload_tokens" ]
+  in
+  let%bind default_tokens =
+    optional_value
+      context
+      path
+      fields
+      "default_tokens"
+      parse_int
+      ~default:V.default_context_budget.default_tokens
+  in
+  let%bind max_tokens =
+    optional_value
+      context
+      path
+      fields
+      "max_tokens"
+      parse_int
+      ~default:V.default_context_budget.max_tokens
+  in
+  let%bind preload_tokens =
+    optional_value
+      context
+      path
+      fields
+      "preload_tokens"
+      parse_int
+      ~default:V.default_context_budget.preload_tokens
+  in
+  V.context_budget ~default_tokens ~max_tokens ~preload_tokens
+  |> Result.map_error ~f:(fun message ->
+    [ diagnostic
+        context
+        ~code:"config.authoring_budget"
+        ~path
+        ~message
+        ~remediation:
+          "Use positive token estimates up to 1000000 and default_tokens <= max_tokens."
+    ])
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
@@ -565,6 +615,7 @@ let parse_server context sexp =
   let allowed =
     [ "data_dir"
     ; "authoring_packages"
+    ; "authoring_budget"
     ; "unix_socket"
     ; "http"
     ; "shutdown_grace_ms"
@@ -588,6 +639,13 @@ let parse_server context sexp =
       "authoring_packages"
       parse_authoring_packages
       ~default:[]
+  in
+  let%bind authoring_budget =
+    match field fields "authoring_budget" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_budget context "server.authoring_budget" value
+      |> Result.map ~f:Option.some
   in
   let%bind unix_socket =
     required context path fields "unix_socket"
@@ -692,6 +750,7 @@ let parse_server context sexp =
   Config.Server.
     { data_dir
     ; authoring_packages
+    ; authoring_budget
     ; unix_socket
     ; http
     ; shutdown_grace_ms

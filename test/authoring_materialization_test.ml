@@ -221,6 +221,51 @@ let%expect_test
 ;;
 
 let%expect_test
+    "host budgets bind preload admission, refresh identity and delegated hosts"
+  =
+  fixture (fun context host _ plan ->
+    let configure preload_tokens =
+      V.context_budget ~default_tokens:6000 ~max_tokens:8000 ~preload_tokens
+      |> Result.bind ~f:(V.configure_context_budget host)
+      |> ok
+    in
+    let policy = plan (Preload [ "chatml.tasks" ]) in
+    let make ?max_tokens host policy =
+      A.create
+        ?max_tokens
+        ~context
+        ~host
+        ~policy
+        ~capabilities:(P.capabilities policy)
+        ~scope:"budget:1"
+        ()
+    in
+    let initial = make (configure 32000) policy |> ok |> A.initial in
+    let needed = A.estimated_tokens initial in
+    List.iter
+      [ configure (needed - 1); V.for_delegated (configure (needed - 1)) ]
+      ~f:(fun host ->
+        (* A per-call override must not widen the configured host ceiling. *)
+        match make ~max_tokens:1_000_000 host policy with
+        | Error error -> assert (String.is_substring error ~substring:"needs at least")
+        | Ok _ -> failwith "configured preload budget was bypassed");
+    let admitted = make (configure needed) policy |> ok in
+    [%test_eq: int] needed (A.estimated_tokens (A.initial admitted));
+    let old = entries (A.initial admitted) |> restored in
+    let changed = make (configure (needed + 1)) policy |> ok in
+    assert (not (String.equal (A.context_identity admitted) (A.context_identity changed)));
+    assert (
+      not (List.is_empty (A.refresh changed ~known:[] ~effective:old |> protocol_ok)));
+    let manual = make (configure 1) (plan Manual) |> ok in
+    assert (List.is_empty (A.initial manual));
+    print_endline
+      "preloads reject rather than truncate; caller overrides cannot widen host budget; \
+       changed budgets refresh; manual stays manual");
+  [%expect
+    {| preloads reject rather than truncate; caller overrides cannot widen host budget; changed budgets refresh; manual stays manual |}]
+;;
+
+let%expect_test
     "manual and ordinary policies add nothing; stale capability and target selections \
      fail"
   =
