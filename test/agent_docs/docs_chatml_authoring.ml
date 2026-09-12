@@ -6,6 +6,7 @@ module Codec = Chatml.Chatml_value_codec
 let fixture = "docs-src/guide/chatml-ocaml-differences.md"
 let marker = "<!-- ochat-authoring-example: "
 let runtime_fixture = "docs-src/guide/chatml-authoring-runtime.md"
+let background_fixture = "docs-src/guide/chatml-authoring-background.md"
 let fail id message = failwith (sprintf "ChatML authoring reference [%s]: %s" id message)
 
 type target =
@@ -278,13 +279,13 @@ let run env root =
     | true -> ()
     | false ->
       fail document.path "installed source differs from shared human documentation");
-  let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / fixture) in
-  check_topic_coverage corpus ~path:"guide/chatml-ocaml-differences.md" ~text;
-  let runtime_text =
-    Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / runtime_fixture)
+  let examples =
+    List.concat_map [ fixture; runtime_fixture; background_fixture ] ~f:(fun file ->
+      let text = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
+      let path = String.chop_prefix_exn file ~prefix:"docs-src/" in
+      check_topic_coverage corpus ~path ~text;
+      examples_exn text)
   in
-  let examples = examples_exn text @ examples_exn runtime_text in
-  check_topic_coverage corpus ~path:"guide/chatml-authoring-runtime.md" ~text:runtime_text;
   (match
      List.find_a_dup
        (List.map examples ~f:(fun example -> example.id))

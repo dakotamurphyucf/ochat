@@ -230,6 +230,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/authored_agent_binding.mli` | [contract](../../lib/agent_session/authored_agent_binding.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authored_agent_call.mli` | [contract](../../lib/agent_session/authored_agent_call.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/authored_agent_source.mli` | [contract](../../lib/agent_session/authored_agent_source.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/authoring_context_tool.mli` | [contract](../../lib/agent_session/authoring_context_tool.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_validation_tool.mli` | [contract](../../lib/agent_session/authoring_validation_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/automatic_turn_budget.mli` | [contract](../../lib/agent_session/automatic_turn_budget.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/background_execution.mli` | [contract](../../lib/agent_session/background_execution.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -370,6 +371,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/agent_runtime.mli` | [contract](../../lib/chat_response/agent_runtime.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_tool_contract.mli` | [contract](../../lib/chat_response/agent_tool_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_context.mli` | [contract](../../lib/chat_response/authoring_context.mli) | [integration](../guide/authoring-context-tool.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_presence.mli` | [contract](../../lib/chat_response/authoring_presence.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -685,6 +687,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../examples/agent-server/README.md) | `docs-src/examples/agent-server/README.md` | Current reference/tutorial; offline checker applies. |
 | [page](../examples/agent-server/config/README.md) | `docs-src/examples/agent-server/config/README.md` | Current reference/tutorial; offline checker applies. |
 | [page](../examples/prompt-patterns.md) | `docs-src/examples/prompt-patterns.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/authoring-context-tool.md) | `docs-src/guide/authoring-context-tool.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/authoring-source-bundle.md) | `docs-src/guide/authoring-source-bundle.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/authoring-topic-corpus.md) | `docs-src/guide/authoring-topic-corpus.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/build-troubleshooting.md) | `docs-src/guide/build-troubleshooting.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -695,6 +698,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../guide/chatmd-shell-persistence-and-audit.md) | `docs-src/guide/chatmd-shell-persistence-and-audit.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-shell-runtime-internals.md) | `docs-src/guide/chatmd-shell-runtime-internals.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatmd-shell-security.md) | `docs-src/guide/chatmd-shell-security.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../guide/chatml-authoring-background.md) | `docs-src/guide/chatml-authoring-background.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-children.md) | `docs-src/guide/chatml-authoring-children.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-authoring-runtime.md) | `docs-src/guide/chatml-authoring-runtime.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../guide/chatml-implementation-architecture.md) | `docs-src/guide/chatml-implementation-architecture.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

@@ -55,6 +55,13 @@ val compilation_limits : host -> Chatml_compilation.limits
 val bundle_limits : host -> Chatmd_source_bundle.limits
 val catalog : host -> Authoring_policy.catalog option
 
+(** Trusted target metadata shared with readonly documentation retrieval. Model
+    requests choose an authoring task, never these host identities or surfaces. *)
+val runtime_identity : host -> string
+
+val targets : host -> target list
+val moderator_surface : host -> moderator_surface
+
 type diagnostic =
   { diagnostic : Chatmd_shell_spec.Diagnostic.t
   ; topic_ids : string list

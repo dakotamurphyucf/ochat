@@ -69,6 +69,7 @@
   background_execution
   run_chatml_tool
   authoring_validation_tool
+  authoring_context_tool
   moderator_observation
   moderator_event
   observation_follow_up

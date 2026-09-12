@@ -1,10 +1,13 @@
 # ChatML extension records and capability discovery
 
-The extension record/transaction foundations and strict declaration parsing are implemented. Model-visible
-one-off scripts, moderator tools, subscription adapters and generated-child tools
-are still under implementation; none of their feature flags is enabled yet.
-This page describes the available storage and client protocol contracts, not a
-runnable extension tutorial.
+The extension records, transactions, one-off scripts, moderator tools,
+subscriptions and child lifecycle services are implemented at their internally
+qualified host scopes. General model-visible exposure remains gated on complete
+authoring guidance and qualification. This page records implementation and
+protocol contracts, including historical milestones. For maintained authoring
+contracts, start with the [runtime guide](../guide/chatml-authoring-runtime.md),
+[child guide](../guide/chatml-authoring-children.md) and
+[background guide](../guide/chatml-authoring-background.md).
 
 The extensibility-v1 moderator compiler also defines `Subscription.create`,
 `get`, `complete`, `fail`, `cancel` and `arm`. These require an explicitly
@@ -68,7 +71,8 @@ revision includes registry authority, rather than just the compiled tool hash.
 
 Completion operations preserve a retained terminal winner. When an active
 subscription is completed after its deadline, the service records expiry using
-the expected epoch. This check is not yet an autonomous expiry scheduler.
+the expected epoch. The qualified host also sweeps expiry during startup and
+normal scheduling; expiry does not depend on another script completing it.
 
 The actor's host-only stage/select/read/abort operations require an actual live
 moderator invocation or event borrow with the installed source identity.

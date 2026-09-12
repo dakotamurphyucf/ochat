@@ -54,6 +54,9 @@ let for_delegated host = { host with moderator_surface = Delegated }
 let compilation_limits host = host.compilation
 let bundle_limits host = host.bundle_limits
 let catalog host = host.catalog
+let runtime_identity host = host.runtime_identity
+let targets host = host.targets
+let moderator_surface host = host.moderator_surface
 
 let configure_generated host ~limits ~catalog =
   let open Result.Let_syntax in

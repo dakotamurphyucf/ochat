@@ -53,7 +53,8 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "authoring_corpus" ], "../guide/authoring-topic-corpus.md"
+    [ [ "authoring_context" ], "../guide/authoring-context-tool.md"
+    ; [ "authoring_corpus" ], "../guide/authoring-topic-corpus.md"
     ; [ "authoring_sources" ], "../guide/authoring-source-bundle.md"
     ; ( [ "background_request"
         ; "background_execution"

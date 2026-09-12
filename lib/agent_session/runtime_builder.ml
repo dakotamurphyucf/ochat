@@ -340,20 +340,34 @@ let native_registrations ~env ~elements ~one_off_policy ~authoring_validation_ho
     | true, Some _ -> registrations @ [ Managed_stop_tool.registration () ]
     | _ -> registrations
   in
+  let open Result.Let_syntax in
+  let unavailable message =
+    Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
+  in
+  let%bind registrations =
+    match
+      declares_native elements Authoring_validation_tool.name, authoring_validation_host
+    with
+    | false, _ -> Ok registrations
+    | true, Some host ->
+      Ok (registrations @ [ Authoring_validation_tool.registration ~env ~host ])
+    | true, None ->
+      Error
+        (unavailable
+           "authoring.unavailable: readonly validation needs an explicit host target")
+  in
   match
-    declares_native elements Authoring_validation_tool.name, authoring_validation_host
+    declares_native elements Authoring_context_tool.name, authoring_validation_host
   with
   | false, _ -> Ok registrations
   | true, Some host ->
-    Ok (registrations @ [ Authoring_validation_tool.registration ~env ~host ])
+    Authoring_context_tool.registration ~host
+    |> Result.map_error ~f:unavailable
+    |> Result.map ~f:(fun registration -> registrations @ [ registration ])
   | true, None ->
     Error
-      (Agent_protocol.Error.create
-         Invalid_state
-         ~message:
-           "authoring.unavailable: readonly validation needs an explicit host target"
-         ~retryable:false
-         ())
+      (unavailable
+         "authoring.unavailable: documentation queries need an explicit host target")
 ;;
 
 let create_authored_resources
@@ -399,6 +413,7 @@ let create_authored_resources
             || declares_native elements Managed_wait_tool.name
             || declares_native elements Managed_stop_tool.name
             || declares_native elements Authoring_validation_tool.name
+            || declares_native elements Authoring_context_tool.name
             || List.exists elements ~f:(function
               | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
               | _ -> false)))

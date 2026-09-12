@@ -51,8 +51,10 @@ All use the shared introduction as a prerequisite. The examples remain labelled
 as one-off candidates even when retrieved for an author writing a standalone tool
 or moderator; each target still needs its own entrypoint guidance. The seven
 topics partition that guide, not the full language specification or runtime API.
-They do not yet provide complete task packages, native tool schemas, feature
-coverage, token budgeting, pagination or model-context insertion.
+They do not yet provide complete task packages, native tool schemas, full feature
+coverage or model-context insertion. The separate
+[authoring query tool](authoring-context-tool.md) adds flat feature orientation,
+retrieval budgets and pagination over this foundation.
 
 `runtime_foundation` includes those seven language topics and seven topics from
 the [execution-contract reference](chatml-authoring-runtime.md):
@@ -90,12 +92,32 @@ reviewed foundations, not complete background-workflow or child-agent packages.
 The full feature/native-schema inventory, policy filtering and public helper
 remain separate requirements.
 
+Eight additional topics partition the
+[background reference](chatml-authoring-background.md):
+
+| Topic | Available targets and contents |
+|---|---|
+| `runtime.jobs.owned` | All four surfaces: owned starts, status, results and cancellation |
+| `runtime.recovery.background` | All four surfaces: staging, authority, interruption and retries |
+| `runtime.jobs.acknowledgement` | Moderators: pending outcomes and actual completion events |
+| `runtime.jobs.subscriptions` | Moderators: lifetime, epochs, links and terminal winners |
+| `runtime.jobs.timers` | Moderators: one-shot checks, misfire and bounded polling |
+| `runtime.delivery.notifications` | Moderators: acknowledgement ordering, safe input boundaries and wakes |
+| `runtime.delivery.ingress` | Moderators: scoped external producers and data events |
+| `runtime.jobs.shell-example` | Moderators: the complete checked X03 coordinator |
+
+Job guidance includes transaction/recovery prerequisites. Notification guidance
+includes acknowledgement rules, and the shell example depends on that full
+notification context. Moderator-only topics reject assembly for one-off or
+standalone surfaces. These 27 topics still do not cover every language/native
+schema construct or implement the five task packages and public retrieval service.
+
 The [topic tests](../../test/authoring_sources/topic_tests.ml) cover fenced-source
 boundaries, shared dependency order, invalid graphs, incompatible surfaces and
 stale review pins. The documentation gate checks source parity, whole-guide topic
 coverage, the 18 language examples and exact source/entrypoint checks for the
-three runtime integration fixtures. The moderator fixture also compiles against
-the delegated surface. Their actual tool/state/restart behavior is checked by the
+four runtime integration fixtures. The invocation and background moderator fixtures
+also compile against the delegated surface. Their actual tool/state/restart behavior is checked by the
 linked integration tests. Review pin updates must be
 accompanied by semantic review and the relevant checks, rather than automatically
 accepting new hashes after a failure. The child reference separately checks its

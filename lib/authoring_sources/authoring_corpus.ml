@@ -550,7 +550,114 @@ let runtime_foundation ~sources =
         ]
     ]
   in
+  let moderators = [ "moderator_v1"; "delegated_moderator_v1" ] in
+  let make_background id title surfaces prerequisites sections =
+    { id
+    ; title
+    ; prerequisites
+    ; surfaces
+    ; excerpts =
+        List.map sections ~f:(fun (heading, _) ->
+          { path = "guide/chatml-authoring-background.md"
+          ; heading
+          ; include_children = false
+          })
+    ; review =
+        Audited
+          { excerpt_sha256 = List.map sections ~f:snd
+          ; evidence =
+              [ "test/agent_docs/docs_chatml_authoring.ml"
+              ; "test/chatml_composition/background_shell_tests.ml"
+              ; "test/chatml_composition/ingress_socket_tests.ml"
+              ; "lib/chatml/chatml_extension_surface.ml"
+              ; "lib/chat_response/background_job_operations.mli"
+              ; "lib/chat_response/background_delivery.ml"
+              ; "lib/chat_response/schedule_delivery.ml"
+              ; "lib/chat_response/ingress_delivery.ml"
+              ; "lib/agent_session/script_subscription_service.mli"
+              ; "lib/agent_session/script_notification_service.mli"
+              ; "lib/agent_session/notification_delivery.mli"
+              ; "lib/agent_protocol/subscription.mli"
+              ]
+          }
+    }
+  in
+  let background =
+    [ make_background
+        "runtime.jobs.owned"
+        "Owned tool/script jobs and terminal results"
+        shared
+        [ "chatml.tasks"
+        ; "runtime.authority.tool-selection"
+        ; "runtime.recovery.background"
+        ]
+        [ ( "# ChatML authoring: background work and delivery"
+          , "9325ab62bf13da4e28435229745a845394a656faa4c55a74f17655c20adad49d" )
+        ; ( "## Start and inspect owned jobs"
+          , "85e40afc8b2384462aa77386aad3ae9b38af656639c3683acf72c902fa3e5674" )
+        ]
+    ; make_background
+        "runtime.jobs.acknowledgement"
+        "Pending acknowledgements and source-owned completion events"
+        moderators
+        [ "runtime.jobs.owned"; "runtime.invocations.moderator" ]
+        [ ( "## Acknowledge before publishing a result"
+          , "8464fb4c18ff6b012ea34334723ee1e6d7b124d6fc79e440ed174ea5d26a40e5" )
+        ]
+    ; make_background
+        "runtime.jobs.shell-example"
+        "Checked shell-backed asynchronous coordinator"
+        moderators
+        [ "runtime.delivery.notifications" ]
+        [ ( "## Shell-backed coordinator example"
+          , "972d192ed9347e8fbde22ced410558f5be8972ad47b4b7e5b81af652aafefeef" )
+        ]
+    ; make_background
+        "runtime.jobs.subscriptions"
+        "Subscription lifetimes, epochs and retained terminal winners"
+        moderators
+        [ "runtime.jobs.acknowledgement" ]
+        [ ( "## Track a workflow with subscriptions"
+          , "1e05496cdb7c3f35f9c8bd403e017db94b1665f554fcb4cf0f427213efd55fd4" )
+        ]
+    ; make_background
+        "runtime.jobs.timers"
+        "One-shot timers, misfire policy and bounded polling"
+        moderators
+        [ "runtime.jobs.subscriptions" ]
+        [ ( "## Schedule checks and choose recovery behavior"
+          , "9736013396d1444d85a26a1f15a377796d57d8a60f27b15269e0c2306ccd5d69" )
+        ]
+    ; make_background
+        "runtime.delivery.notifications"
+        "Acknowledgement ordering, publication and model wake-ups"
+        moderators
+        [ "runtime.jobs.acknowledgement" ]
+        [ ( "## Publish data and request a model turn"
+          , "9cbc50caaec23ef9ac8362612502405cfeed103f48eb5c826574e84232caac3d" )
+        ]
+    ; make_background
+        "runtime.delivery.ingress"
+        "External producer registration and data delivery"
+        moderators
+        [ "runtime.jobs.subscriptions"; "runtime.delivery.notifications" ]
+        [ ( "## Receive external completion data"
+          , "6cbb2723d0f49f6db020dd620bcae79bb12390bb4937310b6fd3466a65d77eae" )
+        ]
+    ; make_background
+        "runtime.recovery.background"
+        "Staged transactions, cancellation and interrupted execution"
+        shared
+        [ "chatml.tasks"; "runtime.authority.tool-selection" ]
+        [ ( "## Keep transaction and restart guarantees precise"
+          , "8c4c7cb181f94d2fd3ed244d8b1a9f65a97bdbc449374eb4f635cb3c989115de" )
+        ]
+    ]
+  in
   create
     ~sources
-    (List.map (topics language) ~f:(fun topic -> topic.specification) @ runtime @ children)
+    (List.map (topics language) ~f:(fun topic -> topic.specification)
+     @ runtime
+     @ children
+     @ background)
 ;;

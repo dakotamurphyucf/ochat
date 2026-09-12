@@ -37,6 +37,7 @@
   authoring_policy
   authoring_presence
   authoring_validation
+  authoring_context
   generated_admission
   initial_prompt_history
   authoring_registration
@@ -86,6 +87,10 @@
   mcp_types
   webpage_markdown
   history_entry
-  ochat.shell_runtime)
+  ochat.shell_runtime
+  ochat.authoring_sources
+  ochat.authoring_corpus
+  digestif
+  base64)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

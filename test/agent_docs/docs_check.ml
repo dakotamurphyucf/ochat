@@ -224,7 +224,36 @@ let check_json env root documents =
         (V.valid report)
         (file
          ^ ": invalid readonly validation example: "
-         ^ Jsonaf.to_string (V.to_json report))))
+         ^ Jsonaf.to_string (V.to_json report))));
+  let reference_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json tool=ochat_authoring_context\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  let reference =
+    Chat_response.Authoring_context.create
+      ~secret:"documentation-reference-check-fixture"
+      ()
+    |> Result.ok_or_failwith
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all reference_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      let response =
+        Chat_response.Authoring_context.query
+          reference
+          ~host
+          ~capabilities
+          ~scope:"documentation-examples"
+          (Re.Group.get block 1 |> Jsonaf.of_string)
+      in
+      require
+        (Option.is_none (Jsonaf.member "error" response))
+        (file ^ ": invalid authoring reference example: " ^ Jsonaf.to_string response)))
 ;;
 
 let temporary_root env =

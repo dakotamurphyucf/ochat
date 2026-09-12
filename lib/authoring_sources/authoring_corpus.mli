@@ -94,6 +94,10 @@ val language_foundation : sources:Authoring_sources.t -> (t, string) result
     cannot be assembled for other targets. Five additional child-session topics
     cover captured definitions, creation/authority, receipts, output/cursor recovery
     and stop/helper semantics. Child guidance is reference context on all four
-    surfaces, not a grant of the described tools. This remains a foundation, not
-    full background guidance, native schemas or complete task packages. *)
+    surfaces, not a grant of the described tools. Eight background topics add
+    jobs/recovery on all four surfaces, with moderator-only acknowledgements,
+    subscriptions, timers, notifications, ingress and a checked shell coordinator.
+    Notification/example prerequisites include acknowledgement and recovery
+    boundaries. This remains a foundation, not complete feature/native-schema
+    coverage, task packages or a model-facing retrieval service. *)
 val runtime_foundation : sources:Authoring_sources.t -> (t, string) result
