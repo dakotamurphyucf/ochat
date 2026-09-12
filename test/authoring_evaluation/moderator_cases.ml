@@ -4,18 +4,19 @@ module CM = Prompt.Chat_markdown
 module V = Chat_response.Authoring_validation
 module Spec = Chatmd_shell_spec.Extension_spec
 
-let root binding =
-  {|<developer>Execute the quota evaluation.</developer>
-<authoring_context policy="manual"/>
-<script id="quota" language="chatml" kind="moderator" api="extensibility-v1" src="candidate.chatml"/>
-|}
+let root ?(id = "quota") binding =
+  "<developer>Execute the moderator evaluation.</developer>\n"
+  ^ "<authoring_context policy=\"manual\"/>\n<script id=\""
+  ^ id
+  ^ "\" language=\"chatml\" kind=\"moderator\" api=\"extensibility-v1\" \
+     src=\"candidate.chatml\"/>\n"
   ^ binding
 ;;
 
 let field = Execution_cases.field
 
-let sources candidate =
-  [ "agent.chatmd", root (field candidate "binding" |> Jsonaf.string_exn)
+let sources ?id candidate =
+  [ "agent.chatmd", root ?id (field candidate "binding" |> Jsonaf.string_exn)
   ; "candidate.chatml", field candidate "source" |> Jsonaf.string_exn
   ; "input.json", field candidate "input_schema" |> Jsonaf.to_string
   ; "output.json", field candidate "output_schema" |> Jsonaf.to_string
@@ -25,7 +26,7 @@ let sources candidate =
 (* This is a harness candidate envelope, not another shape for ochat_validate.
    Parse captured bytes without preprocessing, then admit only the requested
    ghost binding. Candidate tags can never install native/file/shell authority. *)
-let binding_validation ~env candidate =
+let binding_validation ?(id = "quota") ?(name = "reserve") ~env candidate =
   let fields = [ "source"; "binding"; "input_schema"; "output_schema" ] in
   match candidate with
   | `Object entries
@@ -37,7 +38,7 @@ let binding_validation ~env candidate =
        let bundle =
          Chatmd_source_bundle.create
            ~root_file:"agent.chatmd"
-           ~sources:(sources candidate)
+           ~sources:(sources ~id candidate)
            ()
          |> Result.ok_or_failwith
        in
@@ -51,23 +52,27 @@ let binding_validation ~env candidate =
           ; Tool (Extension tool)
           ] ->
           (match tool.implementation, tool.uses, tool.completion_schema with
-           | Spec.Moderator "quota", [], None when String.equal tool.name "reserve" ->
-             Valid
+           | Spec.Moderator owner, [], None
+             when String.equal owner id && String.equal tool.name name -> Valid
            | _ ->
              Invalid
                ( Capability
-               , "binding must be synchronous reserve owned by quota with no dependencies"
-               ))
+               , "binding must be synchronous "
+                 ^ name
+                 ^ " owned by "
+                 ^ id
+                 ^ " with no dependencies" ))
         | _ ->
-          Invalid (Capability, "only the reserve moderator tool binding may be supplied"))
+          Invalid
+            (Capability, "only the " ^ name ^ " moderator tool binding may be supplied"))
      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
      | exception exn -> Invalid (Semantics, Exn.to_string exn))
   | _ ->
     Invalid (Semantics, "expected exactly source, binding, input_schema and output_schema")
 ;;
 
-let validate ~env ~host ~capabilities candidate =
-  match binding_validation ~env candidate with
+let validate ?id ?name ~env ~host ~capabilities candidate =
+  match binding_validation ?id ?name ~env candidate with
   | Invalid _ as failure -> failure
   | Valid ->
     V.validate

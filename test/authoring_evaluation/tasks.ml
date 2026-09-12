@@ -80,7 +80,8 @@ let all =
         "Repair this OCaml-style candidate into executable one-off ChatML without \
          changing the intended result: let main input = Task.pure input. Then extend it \
          to return the count of elements of a JSON array as JSON. Use the language's \
-         actual function-call and JSON variant conventions."
+         actual function-call and JSON variant conventions. Submit a one_off_script \
+         validation request with no tools, and reject inputs that are not arrays."
     ; preload_topics = [ "chatml.syntax.calls"; "chatml.types" ]
     ; compaction_after_step = None
     }
@@ -90,7 +91,12 @@ let all =
         "Write a moderator that obtains a deterministic digest via the selected digest \
          tool. The host exposes that tool but does not expose Process or any shell \
          runtime. Do not invent a shell binding or bypass the selected tool. Return its \
-         output through the custom tool invocation."
+         output through the custom tool invocation. Submit source, binding, input_schema \
+         and output_schema fields. The binding names hash, belongs to moderator \
+         digest_owner and references input.json/output.json. Input is a strict object \
+         with a string text field; digest accepts the same input and returns its SHA-256 \
+         hex string. Forward that string unchanged. The host supplies the owner script \
+         declaration and digest registration. Use the delegated moderator surface."
     ; preload_topics = [ "runtime.invocations.moderator"; "reference.tools" ]
     ; compaction_after_step = None
     }
@@ -100,7 +106,11 @@ let all =
         "Retrieve the exact moderator event and tool-result contracts, then author a \
          stateful tally tool that adds each requested integer to its retained total and \
          returns the new total. Reference context will be compacted during this \
-         exercise; refresh missing contracts before finishing."
+         exercise; refresh missing contracts before finishing. Start at zero. Submit \
+         source, binding, input_schema and output_schema fields. The binding names \
+         tally, belongs to moderator tally and references input.json/output.json. Input \
+         is a strict object with integer amount; output is the integer total. The host \
+         supplies the tally script declaration; no external tools are available."
     ; preload_topics = [ "runtime.invocations.moderator" ]
     ; compaction_after_step = Some 2
     }

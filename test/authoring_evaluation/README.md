@@ -176,7 +176,32 @@ lifecycle integration, not crash/restart recovery or real-model review quality.
 lifecycle calls and the existing synchronous/background scenarios. Durable storage
 is explicitly selected only for the child scenario; defaults remain transient.
 
-Add execution oracles/transcripts for the extra repair/capability/compaction tasks.
+The remaining three task transcripts now have execution oracles:
+
+- OCaml transfer first fails actual type checking, then submits a type-correct
+  wrong count that fails execution, then counts empty/mixed/nested arrays correctly
+  and rejects non-array input. Both valid candidates run through `run_chatml` in
+  an embedded session; the rejected source never executes.
+- The tally task first submits a moderator that leaves the tool invocation
+  unresolved. After the configured context-loss stimulus, the provider has no
+  documentation messages, retrieves the installed event contract again, and
+  repairs the program. Six sequential embedded-session calls check retained state,
+  negative/zero amounts, exact cancellation to zero and rejection of a fraction.
+- The missing-Process task uses a private generic moderator host with an actual
+  pure SHA-256 native registration. Its delegated surface excludes Process/Model.
+  It uses the real extension compiler, moderator manager, invocation preparation,
+  resolution validation and bounded execution. The oracle requires one selected
+  digest call per input, unchanged arguments and unchanged output for empty,
+  ASCII and Unicode text. Bypassed calls and modified output fail. This is not a
+  new Ochat builtin, shell tool, embedded-session or persistence test.
+
+All three guidance conditions run each transcript. Tests check the precise attempt
+sequence (static rejection versus wrong runtime result), repair/retrieval counts
+and context-loss count. The tally stimulus tests reference reacquisition in the
+evaluation runner, not durable daemon compaction. The missing Process symbol is
+reported by the compiler as a semantic/type failure; it is not relabelled as a
+native authorization denial. No real model-quality evidence is implied.
+
 Generalize replay scoring beyond the private
 background fixture so arbitrary submitted handlers receive the same stimulus.
 Add the reproducible optional

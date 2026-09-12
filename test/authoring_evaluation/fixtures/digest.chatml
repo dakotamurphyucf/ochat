@@ -1,0 +1,11 @@
+let initial_state = 0
+let on_event ctx state event = match event with
+  | `Tool_invoked(p) ->
+    let* result = Tool.call("digest", p.input) in
+    let outcome = match result with
+      | `Ok(value) -> `Complete(value)
+      | `Error(message) -> `Fail({code = "digest.failed"; message = message;
+          retryable = false; details = `Null}) in
+    let* () = Invocation.resolve(p.context.invocation_id, outcome) in
+    Task.pure(state)
+  | _ -> Task.pure(state)

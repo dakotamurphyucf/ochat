@@ -1,0 +1,3 @@
+let main input = match input with
+  | `Array(values) -> Task.pure(`Number(Array.fold(values, 0.0, fun total value -> total +. 1.0)))
+  | _ -> fail("expected JSON array")
