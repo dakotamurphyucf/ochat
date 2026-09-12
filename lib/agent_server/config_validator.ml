@@ -528,12 +528,65 @@ let parse_job_limits context path sexp =
         }
 ;;
 
+let parse_authoring_packages context path sexp =
+  let module F = Chat_response.Authoring_package_file in
+  let open Result.Let_syntax in
+  let invalid message =
+    fail
+      context
+      ~code:"config.authoring_packages"
+      ~path
+      ~message
+      ~remediation:"Use valid version-1 authoring package files, then restart the server."
+  in
+  let%bind values = list context path sexp in
+  let%bind () =
+    match List.length values <= 128 with
+    | true -> Ok ()
+    | false -> invalid "at most 128 authoring package files may be configured"
+  in
+  let%bind paths = List.map values ~f:(resolve_path context path) |> Result.all in
+  let%bind paths = require_unique context path paths in
+  let%bind _, reversed =
+    List.fold_result paths ~init:(0, []) ~f:(fun (bytes, files) source_file ->
+      let%bind file =
+        F.load ~env:context.env ~path:source_file
+        |> Result.map_error ~f:(fun message ->
+          [ diagnostic
+              context
+              ~code:"config.authoring_packages"
+              ~path
+              ~message:(source_file ^ ": " ^ message)
+              ~remediation:"Fix the authoring package file and validate again."
+          ])
+      in
+      let bytes = bytes + String.length file.contents in
+      match bytes <= 4 * 1024 * 1024 with
+      | true -> Ok (bytes, file :: files)
+      | false -> invalid "authoring package files exceed the 4 MiB aggregate bound")
+  in
+  let files = List.rev reversed in
+  let%map _ =
+    F.packages files
+    |> Result.map_error ~f:(fun message ->
+      [ diagnostic
+          context
+          ~code:"config.authoring_packages"
+          ~path
+          ~message
+          ~remediation:"Fix package metadata or dependencies and validate again."
+      ])
+  in
+  files
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
   let%bind fields = record context path sexp in
   let allowed =
     [ "data_dir"
+    ; "authoring_packages"
     ; "unix_socket"
     ; "http"
     ; "shutdown_grace_ms"
@@ -548,6 +601,15 @@ let parse_server context sexp =
   let%bind () = ensure_allowed context path fields allowed in
   let%bind data_dir =
     required context path fields "data_dir" >>= resolve_path context "server.data_dir"
+  in
+  let%bind authoring_packages =
+    optional_value
+      context
+      path
+      fields
+      "authoring_packages"
+      parse_authoring_packages
+      ~default:[]
   in
   let%bind unix_socket =
     required context path fields "unix_socket"
@@ -651,6 +713,7 @@ let parse_server context sexp =
   in
   Config.Server.
     { data_dir
+    ; authoring_packages
     ; unix_socket
     ; http
     ; shutdown_grace_ms

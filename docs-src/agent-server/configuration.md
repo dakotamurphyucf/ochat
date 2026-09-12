@@ -101,6 +101,16 @@ exports, and indexes. Only one daemon process may own it. Store and session
 lock contention returns a typed error; library code does not terminate the
 process to resolve contention.
 
+`authoring_packages` optionally lists version-1 JSON files of custom documentation
+packages. Paths resolve relative to this configuration, and validation captures
+the complete file contents. See the [authoring package format](../guide/authoring-context-tool.md).
+The field defaults to an empty list. Package files do not enable extension tools
+or grant execution authority; package visibility still depends on selected tool
+metadata. Explicit reload of changed package contents requires a restart, even
+when filenames remain the same. The active snapshot stays unchanged on failure.
+This configuration path is implemented for internally qualified authoring hosts;
+general extension exposure remains gated.
+
 `unix_socket` is always enabled. Its parent directory must already be private,
 owned by the effective user, and not writable by other users. Startup probes
 an existing socket before removing a stale node. Unix clients authenticate

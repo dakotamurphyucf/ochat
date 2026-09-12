@@ -56,6 +56,7 @@ let call_events calls =
 
 let with_daemon
       ?validation_host
+      ?config_file
       ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
       ?settle
@@ -101,7 +102,20 @@ let with_daemon
         save (Filename.concat workspace "reports/report-a.json") report_a;
         save (Filename.concat workspace "reports/report-b.json") report_b;
         save (Filename.concat workspace "secret.json") "PRIVATE-REPORT-SENTINEL";
-        let configuration = config root workspace (Filename.concat root "agent.chatmd") in
+        let configuration =
+          match config_file with
+          | None -> config root workspace (Filename.concat root "agent.chatmd")
+          | Some filename ->
+            let open Result.Let_syntax in
+            (let%bind raw =
+               Agent_server.Config_parser.load ~env ~path:(Filename.concat root filename)
+             in
+             Agent_server.Config_validator.validate ~env raw)
+            |> Result.map_error ~f:(fun diagnostics ->
+              Sexp.to_string_hum
+                [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)])
+            |> Result.ok_or_failwith
+        in
         let requests = ref 0 in
         let provider_failure = ref None in
         let post_stream ~sw:_ ~inputs =

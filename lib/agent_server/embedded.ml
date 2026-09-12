@@ -79,6 +79,7 @@ let data_root env options =
 let server_config data_root =
   Config.Server.
     { data_dir = data_root
+    ; authoring_packages = []
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false

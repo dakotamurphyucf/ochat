@@ -66,6 +66,9 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
+      (** Captured host conventions loaded during configuration validation.
+          Changes require restart; package presence never enables extensions. *)
     ; unix_socket : string
     ; http : http
     ; shutdown_grace_ms : int

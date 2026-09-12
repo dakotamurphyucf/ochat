@@ -167,7 +167,7 @@ cannot make `agent_create` available: its normal execution check still rejects
 the operation. The limitation participates in host identity and survives
 compaction; it does not silently change manual policy.
 
-Public custom-package configuration and public qualification also remain open.
+Local CLI package configuration and public extension qualification remain open.
 Manual mode inserts no automatic documentation prose; it can preserve the compact
 metadata above for earlier reads. The current complete serialized primer payload
 measures 953 estimated tokens using UTF-8 bytes divided by three, rounded up;
@@ -278,7 +278,60 @@ services. Native reference helpers and automatic/preload materialization consume
 the actual calling host snapshot, including when a helper is inherited by a child.
 Custom preloads remain labelled authored conventions and deduplicate by their
 actual payload/source identity. Declaring `authoring_help` alone does not install
-a custom package's text; a general CLI/configuration-file input remains pending.
+a custom package's text. The daemon's normal configuration loader can capture
+package files with `server.authoring_packages`, as described below. Local CLI
+package flags and general extension exposure remain pending qualification.
+
+For a configured daemon, add the file list inside its `server` record:
+
+```lisp
+(authoring_packages ("./report-conventions.json"))
+```
+
+Paths resolve relative to the server configuration. Each file is a closed
+version-1 JSON object, for example:
+
+```json
+{
+  "version": 1,
+  "packages": [{
+    "help": {
+      "version": 1,
+      "package": "reports",
+      "tasks": ["one_off_script"],
+      "topics": ["custom.reports.rules"],
+      "required_helpers": []
+    },
+    "topics": [{
+      "id": "custom.reports.rules",
+      "title": "Report conventions",
+      "prerequisites": ["chatml.syntax.calls"],
+      "surfaces": ["one_off_v1"],
+      "source_name": "report-conventions.md",
+      "text": "Keep source file names in every report.\n"
+    }]
+  }]
+}
+```
+
+All shown fields are required; unknown and duplicate fields are rejected. Task
+and helper names use their public string identifiers. `source_name` labels the
+captured `text`; the loader never opens it. A file may hold multiple packages,
+and dependencies may cross configured files. The complete set must satisfy the
+same namespace, dependency, surface and ownership rules as the library API.
+Files are limited to 1 MiB each and 128 files / 4 MiB in aggregate; the corpus
+also checks its package, topic and captured-text budgets.
+
+Configuration validation reads and captures the bytes, including in the server
+CLI's `-validate-only` path. Running sessions use that immutable snapshot and do
+not reread the files during queries. File changes require a daemon restart;
+explicit reload detects changed package content at the same path and returns
+`config.restart_required`. A failed reload leaves the existing snapshot intact.
+Normalized configuration contains the captured text. Supply packages through
+either server configuration or an explicitly configured host's corpus; combining
+both is rejected to avoid silently replacing either source of conventions.
+Loading packages does not register tools, grant permissions, change manual policy
+or enable the currently gated extension rollout.
 
 Admission checks the authored owners of every requested topic's full dependency
 closure. A preload cannot access a private package merely because its topic

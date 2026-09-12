@@ -631,7 +631,8 @@ let config_watcher
         [ reload_diagnostic
             candidate
             "config.restart_required"
-            "server listener, storage, durability, or retention changes require restart"
+            "server listener, storage, durability, retention, or authoring package \
+             changes require restart"
             "Restart the daemon with the new server configuration."
         ]
     else (
@@ -707,6 +708,28 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         ~policy:Chat_response.One_off_request.default_policy
         ()
       |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      |> Result.bind ~f:(fun host ->
+        match config.server.authoring_packages with
+        | [] -> Ok host
+        | files ->
+          let existing =
+            Chat_response.Authoring_validation.corpus host
+            |> Option.map ~f:Authoring_corpus.authored_packages
+            |> Option.value ~default:[]
+          in
+          (match existing with
+           | _ :: _ ->
+             Error
+               (Agent_protocol.Error.invalid_request
+                  "Configure authoring packages in either server configuration or the \
+                   supplied host, not both.")
+           | [] ->
+             let%bind packages =
+               Chat_response.Authoring_package_file.packages files
+               |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+             in
+             Chat_response.Authoring_validation.configure_authored host ~packages
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
       |> Result.map ~f:(fun host ->
         let host =
           match options.extension_host with

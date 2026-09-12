@@ -43,6 +43,7 @@
   authoring_rediscovery
   authoring_materialization
   authoring_validation
+  authoring_package_file
   authoring_context
   generated_admission
   initial_prompt_history

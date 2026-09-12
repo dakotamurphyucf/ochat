@@ -51,6 +51,7 @@ let config
     ; source_file = Filename.concat root "server.sexp"
     ; server =
         { data_dir = Filename.concat root "data"
+        ; authoring_packages = []
         ; unix_socket = Filename.concat root "agent.sock"
         ; http =
             { enabled = false
