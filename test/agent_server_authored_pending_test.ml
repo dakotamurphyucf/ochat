@@ -72,7 +72,8 @@ let answer id value =
 ;;
 
 let%expect_test
-    "concurrent authored instances and pending receipts use shared lifecycle tools"
+    "concurrent authored instances and pending receipts use shared lifecycle tools over \
+     HTTP"
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -162,23 +163,29 @@ let%expect_test
                  named-tool response deadline. This is an outer fixture guard. *)
                 try
                   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
-                    let client = connection daemon (principal ()) in
-                    Exn.protect
-                      ~finally:(fun () -> Agent_client.Connection.close client)
-                      ~f:(fun () ->
-                        initialize client;
-                        let attach id =
-                          H.attach
-                            ~sw
-                            ~clock:(Eio.Stdenv.clock env)
-                            ~connection:client
-                            ~session_id:id
-                            ~mode:Read_write
-                            ~subscribe:false
-                            ()
-                          |> protocol_ok
-                        in
-                        f sw daemon client attach))
+                    let connect =
+                      Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root
+                    in
+                    let client = ref (connect ()) in
+                    let disconnect () = Agent_client.Connection.close !client in
+                    let reconnect () =
+                      client := connect ();
+                      initialize !client
+                    in
+                    Exn.protect ~finally:disconnect ~f:(fun () ->
+                      initialize !client;
+                      let attach id =
+                        H.attach
+                          ~sw
+                          ~clock:(Eio.Stdenv.clock env)
+                          ~connection:!client
+                          ~session_id:id
+                          ~mode:Read_write
+                          ~subscribe:false
+                          ()
+                        |> protocol_ok
+                      in
+                      f ~disconnect ~reconnect sw daemon !client attach))
                 with
                 | Eio.Time.Timeout -> failwith ("pending fixture timeout: " ^ !phase)))
         in
@@ -278,7 +285,7 @@ let%expect_test
             ]
         in
         let parent, left, right, left_receipts, right_receipt, stopped_history =
-          with_daemon (fun sw daemon client attach ->
+          with_daemon (fun ~disconnect ~reconnect sw daemon client attach ->
             let parent, _ = create_session ~start_immediately:true client in
             phase := "concurrent creation";
             let first =
@@ -437,6 +444,10 @@ let%expect_test
                 (`Object [ "session_id", P.Id.Session.to_json left ])
             in
             [%test_eq: string] "running" (text running "state");
+            (* Accepted child work belongs to the daemon, including while every
+               requesting HTTP client is disconnected. Release both providers
+               only after the original logical connection has closed. *)
+            disconnect ();
             phase := "release and correlate";
             Eio.Promise.resolve release_u ();
             await (fun () ->
@@ -446,8 +457,35 @@ let%expect_test
                 && List.for_all current.managed_submissions ~f:(fun submission ->
                   match submission.M.status with
                   | Terminal (_, Completed) -> true
+                  | Terminal (_, _) ->
+                    let entry = R.load (D.registry daemon) child |> protocol_ok in
+                    let failures =
+                      match
+                        Agent_session.Durable_event_log.replay
+                          entry.durable_events
+                          ~after_sequence:0L
+                          ~through_sequence:current.counters.event_sequence
+                      with
+                      | Snapshot_required -> []
+                      | Available events ->
+                        List.filter_map events ~f:(fun event ->
+                          match
+                            P.Event.Durable.Payload.of_json
+                              ~kind:event.P.Event.Durable.kind
+                              event.payload
+                            |> protocol_ok
+                          with
+                          | Operation_failed operation -> Some operation
+                          | _ -> None)
+                    in
+                    raise_s
+                      [%sexp
+                        "released child failed"
+                      , (submission.M.status : M.status)
+                      , (failures : P.Operation.t list)]
                   | _ -> false)));
             [%test_eq: int] 3 !child_calls;
+            reconnect ();
             let assigned id =
               List.find_exn (state daemon left).managed_submissions ~f:(fun submission ->
                 String.equal (P.History.Id.to_string submission.history_id) id)
@@ -484,7 +522,7 @@ let%expect_test
             parent.id, left, right, left_receipts, right_receipt, history)
         in
         save "child.chatmd" "<developer>Edited source after pending results.</developer>";
-        with_daemon (fun _sw daemon _client attach ->
+        with_daemon (fun ~disconnect:_ ~reconnect:_ _sw daemon _client attach ->
           phase := "retained pending receipts after restart";
           check_history stopped_history (state daemon left).conversation.canonical_history;
           List.iter
@@ -508,6 +546,8 @@ let%expect_test
     "results stay scoped and readable after stop/restart; send/stop replays add no \
      effects";
   print_endline "cancelling the persistent caller preserves its accepted child request";
+  print_endline
+    "children finish without an HTTP client; reconnect reads retained receipts";
   [%expect
     {| 
     concurrent first calls create separate durable instances before either finishes
@@ -515,5 +555,6 @@ let%expect_test
     pending continuation receipts remain distinct, coalesce, and interoperate with generic native/ChatML tools
     results stay scoped and readable after stop/restart; send/stop replays add no effects
     cancelling the persistent caller preserves its accepted child request
+    children finish without an HTTP client; reconnect reads retained receipts
   |}]
 ;;

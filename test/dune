@@ -963,14 +963,20 @@
 (library
  (name agent_server_authored_pending_test)
  (modules agent_server_authored_pending_test)
- (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_server_wire_fixture)
+ (modules agent_server_wire_fixture)
+ (libraries agent_server_test_support core eio eio.unix digestif uri ochat.agent_transport_socket ochat.agent_transport_http)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name agent_server_authored_test)
  (modules agent_server_authored_test)
- (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 

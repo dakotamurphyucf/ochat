@@ -67,8 +67,8 @@ let answer ~id =
 ;;
 
 let%expect_test
-    "authored native sessions retain private moderator state across calls and daemon \
-     restart"
+    "authored native sessions retain private moderator state over Unix sockets and \
+     daemon restart"
   =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -172,7 +172,13 @@ let on_event ctx state event = match event with
               ~f:(fun () ->
                 try
                   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                    let client = connection daemon (principal ()) in
+                    let client =
+                      Agent_server_wire_fixture.connect_unix
+                        ~sw
+                        ~env
+                        ~daemon
+                        ~socket_path:(Filename.concat root "authored.sock")
+                    in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)
                       ~f:(fun () ->
