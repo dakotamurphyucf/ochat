@@ -2004,6 +2004,303 @@ module Coverage = struct
           }))
   ;;
 
+  let background_mappings =
+    List.concat_map
+      [ ( "one_off_v1"
+        , "runtime.jobs.owned"
+        , "183a9fe5b90625ea575f9597a8661ba05edc046994ca6bd4bb4d03210d029879"
+        , [ "test/chatml_composition/job_launch_tests.ml"
+          ; "test/chatml_composition/moderator_job_tests.ml"
+          ; "test/chatml_composition/background_artifact_tests.ml"
+          ; "lib/chat_response/background_job_operations.ml"
+          ; "lib/agent_session/script_job_service.ml"
+          ]
+        , [ ( "module/Job"
+            , "2aa8df304b64f5a737a322b36174a138731209957b503feb185e26417c8e7757" )
+          ; ( "module_export/Job.cancel"
+            , "9f8be3ad789fea8ec33c1d8ea41c2e8322c4fdfef5d7110360020712c9cda402" )
+          ; ( "module_export/Job.get"
+            , "baea9e18db9b8da3de5b2fbcd06baf14ead637cba87d736a0b3e030f8f603fb1" )
+          ; ( "module_export/Job.read_result"
+            , "132b4984970f3a6ad47c52b69cb8f0b8b2186a88030e178da2015cda4d5ae736" )
+          ; ( "module_export/Job.start_script"
+            , "e984a235ba6c079dfa8ccf66b92dc10e3a623cdf926a26b487aa9eb1d82804e0" )
+          ; ( "module_export/Job.start_tool"
+            , "17445677c0fa3210c57756f489e95f645d77a25cda95584250534b6a195f84e3" )
+          ] )
+      ; ( "tool_v1"
+        , "runtime.jobs.owned"
+        , "e09302e261379f2c05b48f2060d88c6e34dfc4a1d7bbac255e0f7ae65936a3bb"
+        , [ "test/chatml_composition/job_launch_tests.ml"
+          ; "test/chatml_composition/moderator_job_tests.ml"
+          ; "test/chatml_composition/background_artifact_tests.ml"
+          ; "lib/chat_response/background_job_operations.ml"
+          ; "lib/agent_session/script_job_service.ml"
+          ]
+        , [ ( "module/Job"
+            , "f26d78ea646b5556803eedbbb06d68a529769d95fac4faee537bd0dba2206649" )
+          ; ( "module_export/Job.cancel"
+            , "882a3ca8d82cd0506fe3839d6e4234837da73cea1543ed21598570497d10a299" )
+          ; ( "module_export/Job.get"
+            , "b50303b005655a57969f803e67e1d4e0445d7a2f27e9d46e9da03cdf4f4a195c" )
+          ; ( "module_export/Job.read_result"
+            , "115edbca0f44022eb00622446584e2f9dbe6f297e0748de4191a91e4abab38b2" )
+          ; ( "module_export/Job.start_script"
+            , "34e3f3b04883aa73851efcd1da7e339608f74d939e515b6c2a11d6182626eb88" )
+          ; ( "module_export/Job.start_tool"
+            , "759aebe6c9a8a20f7904998274488ac4f8a11dc7d6da49c1c685d0f016e38023" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.jobs.owned"
+        , "9cbe942e4aada933d87ef900979005e7856be775691fb23d952972dc4b47cfdc"
+        , [ "test/chatml_composition/job_launch_tests.ml"
+          ; "test/chatml_composition/moderator_job_tests.ml"
+          ; "test/chatml_composition/background_artifact_tests.ml"
+          ; "lib/chat_response/background_job_operations.ml"
+          ; "lib/agent_session/script_job_service.ml"
+          ]
+        , [ ( "module/Job"
+            , "e608006da494140ea66266be3e97a46c945dd142304a339941d6052fe4d5d906" )
+          ; ( "module_export/Job.cancel"
+            , "12d176b2d5579055b15370555061bff6a6b8c6c7a8f62f903139d9c7d2548349" )
+          ; ( "module_export/Job.get"
+            , "7e0c0d449ca7305d436bdc33ea8f17383f23ef22cdd26756c2a453419d0c2a30" )
+          ; ( "module_export/Job.read_result"
+            , "08428bad2bd375f25fb5c4ca4af8ed1be77f1d9a0be609bcc3b3b4f288d7e981" )
+          ; ( "module_export/Job.start_script"
+            , "578fded4981e6630f6036815fee2a3afa3243cbbeab5ecd72efdc2bc85a89e4d" )
+          ; ( "module_export/Job.start_tool"
+            , "28e8aa29a002ece9b74fe404a850bb6ad78761e6178b2e295564be0f06a14612" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.jobs.owned"
+        , "09a44c3255f1a963bf22fdd3a6a3a987b1065a0aef89c5cd502da867ebc3e0b8"
+        , [ "test/chatml_composition/job_launch_tests.ml"
+          ; "test/chatml_composition/moderator_job_tests.ml"
+          ; "test/chatml_composition/background_artifact_tests.ml"
+          ; "lib/chat_response/background_job_operations.ml"
+          ; "lib/agent_session/script_job_service.ml"
+          ]
+        , [ ( "module/Job"
+            , "da15259a7eb3cf0b0926c8e447d83e2c782253a7fa4b721222f5994e018f3b83" )
+          ; ( "module_export/Job.cancel"
+            , "98a6f5b4a549cb0393952d26cb52c5669105a88bc6791e89042f22994a94a3d3" )
+          ; ( "module_export/Job.get"
+            , "8b0d071e500383c36bb33e9a9507dcc7814f1cb2122d24a2c60e5aa3a2916ff9" )
+          ; ( "module_export/Job.read_result"
+            , "17a81655039f54c1d5f47c59242db4ec71461242001296f21f126e2d437e482e" )
+          ; ( "module_export/Job.start_script"
+            , "2a58b08a35562e6bbdef2993802db698b166d0d3938a2c1fb742f839ba0d8cd9" )
+          ; ( "module_export/Job.start_tool"
+            , "774f9ba12c2ac21ac35fd6115b24cbb546564d2cb78bd9e1f16d6746381cf6a6" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.jobs.subscriptions"
+        , "e92c3f3081aff7cb09e014c4ee4d00fef0f2822fafc57b11b87a1db5b4817718"
+        , [ "test/chatml_composition/subscription_tests.ml"
+          ; "test/chatml_composition/timer_tests.ml"
+          ; "test/moderation/subscription_transaction_tests.ml"
+          ; "lib/chat_response/subscription_operations.ml"
+          ]
+        , [ ( "module/Subscription"
+            , "52316cd512ca3c9743d6a83013e7e26832c1e0e03825d4959db1160d84203db1" )
+          ; ( "module_export/Subscription.arm"
+            , "60c64f5d1b3c159ea227bfe75e772de86da041c8686d4a48c90cec4c58beb239" )
+          ; ( "module_export/Subscription.cancel"
+            , "e18b7746322ff35d736a815313a743cc63ae77f34ab8917cf951f34ed0ced216" )
+          ; ( "module_export/Subscription.complete"
+            , "25fd2109d2c2560c154cdb3e43c4f2227538c64f2d00986825f4695e15ecef78" )
+          ; ( "module_export/Subscription.create"
+            , "0619453484928f73f09220dd8e53b4ca369bd64629c8d0c1b318dbba8219e470" )
+          ; ( "module_export/Subscription.fail"
+            , "51a1125d3febe9494dd0649d2e0f94ce844428b35217ea6968f536d8c1022e69" )
+          ; ( "module_export/Subscription.get"
+            , "f74bff0eb164a7d9a07eda3f78a86704ac213182cb50d0289fbd023e1cdc767c" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.jobs.subscriptions"
+        , "cb7ee52281beb7d2cb366bc50425fae4f9d30ff99b3844f0665d53a931e1d098"
+        , [ "test/chatml_composition/subscription_tests.ml"
+          ; "test/chatml_composition/timer_tests.ml"
+          ; "test/moderation/subscription_transaction_tests.ml"
+          ; "lib/chat_response/subscription_operations.ml"
+          ]
+        , [ ( "module/Subscription"
+            , "6a9a5b13b50b1e046f2a112657fae92568ea320808b4f93a706a1c9e743fdd32" )
+          ; ( "module_export/Subscription.arm"
+            , "8d0a8de59d416625442ee253b75eab41501668f8abbedc602726629f4c1fd8a5" )
+          ; ( "module_export/Subscription.cancel"
+            , "3740018fe623437aca12ba3b0cd38a1a1f064f41faf7277f00b7fe19e02bad7b" )
+          ; ( "module_export/Subscription.complete"
+            , "a68c3c5cb4ade8addd834c3e046e93bab29225e4cebf129a10600bf9a525c018" )
+          ; ( "module_export/Subscription.create"
+            , "0c3e3b4273e4e47bea9503c058d641c69bb203919127082a632744389488ab65" )
+          ; ( "module_export/Subscription.fail"
+            , "31987e4c1e19a7cbd5a26079ca4e68400c74537363c6ab8a506c97bc4ecf72b1" )
+          ; ( "module_export/Subscription.get"
+            , "de619a3b13aec2da69728db762790e9285c903a1b35a9bf73a8fcc64d1e973e8" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.jobs.timers"
+        , "bc6a0724baf615ea5e55dd70338562224e77c02e174ca9bf0fb185280bab3aea"
+        , [ "test/chatml_composition/timer_tests.ml"
+          ; "lib/chat_response/schedule_operations.ml"
+          ; "lib/agent_session/script_schedule_service.ml"
+          ]
+        , [ ( "module/Schedule"
+            , "80f3738fc56c9c565a090f9a923b7bd327a56ca40b2f6d96ff6dfaeb4e0e74ab" )
+          ; ( "module_export/Schedule.after_ms"
+            , "97e076bef5545a4820cdf54d43ed16ecdbce22fb9f06eaa80d4739265ad86351" )
+          ; ( "module_export/Schedule.after_ms_with_policy"
+            , "ad0b11f17ade899ca440752d52bffac6574eac44828e9c240215f754f75035bb" )
+          ; ( "module_export/Schedule.cancel"
+            , "24885cdfb870bbe2d2b6434d5a9dff673beb1168e1f1ab3347c61245770acb26" )
+          ; ( "module_export/Schedule.get"
+            , "738af71846c1fed3b0c84504a225f1cf4ba4f6d3a6d1ff959b6ce45c22b6ce68" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.jobs.timers"
+        , "90baa00cc625493cecab3c276783cb4bdfc8e09fa74ec180a9a58404b336c308"
+        , [ "test/chatml_composition/timer_tests.ml"
+          ; "lib/chat_response/schedule_operations.ml"
+          ; "lib/agent_session/script_schedule_service.ml"
+          ]
+        , [ ( "module/Schedule"
+            , "4840e3965fbd2a5f1ed97b91822fdff20e7ebc840326177e4349d44b6a706f4c" )
+          ; ( "module_export/Schedule.after_ms"
+            , "944dd9898967d46c87ddacf692d897629c5f8190986870886274aa213831c86c" )
+          ; ( "module_export/Schedule.after_ms_with_policy"
+            , "61e6c613b4984bc5184d726580d5905743562f810a018cc41b2b86fb42f38499" )
+          ; ( "module_export/Schedule.cancel"
+            , "aeb8f1d2083955b082943b5bb0ebde5780d368a13bf43c63cf53bd86d2a6b5f1" )
+          ; ( "module_export/Schedule.get"
+            , "16f490e94ede06345712d1d041047f70b919fe5bbc87a63351e06a6b807507d0" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.delivery.notifications"
+        , "b118462c27e1c5e8cd23e12dd1c63d91e94744c8b42d156c66a49630ce547685"
+        , [ "test/chatml_composition/notification_admission_tests.ml"
+          ; "test/chatml_composition/notification_wake_tests.ml"
+          ; "test/moderation/notification_transaction_tests.ml"
+          ; "lib/chat_response/notification_operations.ml"
+          ]
+        , [ ( "module/Notification"
+            , "60777c4d4ba53251cbd7a70e4acad833945646e2df8fecd1e3a9496adb998a2a" )
+          ; ( "module_export/Notification.get"
+            , "a20b78f8405e774c15f41cf0e5383e9275fe2406644275754837cee3681c1811" )
+          ; ( "module_export/Notification.publish"
+            , "eab33aea6fb790ceaec176e2a016936d551e3a048af2c452f9d80af457383413" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.delivery.notifications"
+        , "0d3833f8253876624f568697accd80a8046863de3a8956bfda06e2490745c55e"
+        , [ "test/chatml_composition/notification_admission_tests.ml"
+          ; "test/chatml_composition/notification_wake_tests.ml"
+          ; "test/moderation/notification_transaction_tests.ml"
+          ; "lib/chat_response/notification_operations.ml"
+          ]
+        , [ ( "module/Notification"
+            , "78ac3dc103b756aff41f21bcf62aacc067fa4d7f87bbb0569d72e28b3eb294a4" )
+          ; ( "module_export/Notification.get"
+            , "9e8ce741701379fb1d07155fc8d2a97955b38605861b1af7eebf1426cf70bcc1" )
+          ; ( "module_export/Notification.publish"
+            , "375a8d3cdbd337c4aa630cefe85725256dc88e2c31bf2acbff9d2e6a742b4770" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.delivery.ingress"
+        , "fc698feae6c76a51c62ff2627d0d983271e0c7fc2ae846c2bc23c3ef60fa5af8"
+        , [ "test/chatml_composition/ingress_tests.ml"
+          ; "test/chatml_composition/ingress_socket_tests.ml"
+          ; "lib/chat_response/ingress_operations.ml"
+          ; "lib/agent_session/script_ingress_service.ml"
+          ]
+        , [ ( "module/Ingress"
+            , "1435e0e85966a47f7b8723f72a68dec378154ef1c9321b165ce79de5ab7447d2" )
+          ; ( "module_export/Ingress.get"
+            , "6043aa63593fd8bac86a53ed3e0faefa7f20b8f82be1c246f709234aa536f10b" )
+          ; ( "module_export/Ingress.register"
+            , "4221b1fcbc1cf23d5ff517cc8cddd974ca98473b42b30e2b147502f6db9986be" )
+          ; ( "module_export/Ingress.revoke"
+            , "545f210a584d09b042c2001edaec103533eec6479915bc76246c2323811dd2db" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.delivery.ingress"
+        , "d7f52e4bbb14200fd374d81471697948e62e6d5b6174f804c8e7efc23e726949"
+        , [ "test/chatml_composition/ingress_tests.ml"
+          ; "test/chatml_composition/ingress_socket_tests.ml"
+          ; "lib/chat_response/ingress_operations.ml"
+          ; "lib/agent_session/script_ingress_service.ml"
+          ]
+        , [ ( "module/Ingress"
+            , "d2923f8b23db1aff9a7f9db802fb88da9628d6059e4d958c65af159c82bd4abd" )
+          ; ( "module_export/Ingress.get"
+            , "9312e369c60c37eb72c39c237139fc1723a9ce38e60b48452bd189809ee8d8d1" )
+          ; ( "module_export/Ingress.register"
+            , "2fb6f3820c1df76e2edd92459bc13b429e74885af5115b6a65ea487c25eee2b8" )
+          ; ( "module_export/Ingress.revoke"
+            , "b44a0682014e5015e799f21f2c37b06ab83ddf6af579237a2a25e935232bf35f" )
+          ] )
+      ; ( "tool_v1"
+        , "runtime.work-values"
+        , "8fa63f210f4c7c741c99ae51660beabde01d57f18aa39f7037c9372b04f871e8"
+        , [ "test/agent_docs/docs_chatml_authoring.ml"
+          ; "test/chatml_composition/job_launch_tests.ml"
+          ; "lib/chatml/chatml_extension_surface.ml"
+          ]
+        , [ ( "type_alias/work_ref"
+            , "c42359d394acf8cd14a52da11eab32599e1e5dc8eb6e07f95dcf9028b12c7ff0" )
+          ] )
+      ; ( "moderator_v1"
+        , "runtime.work-values"
+        , "530f24bb4c7736865d6a94094cb3c05192b7da8eb5cc5c48bae2d81230fcb43d"
+        , [ "test/agent_docs/docs_chatml_authoring.ml"
+          ; "test/chatml_composition/job_launch_tests.ml"
+          ; "lib/chatml/chatml_extension_surface.ml"
+          ]
+        , [ ( "type_alias/work_ref"
+            , "e54c58dc3e155e176ec315f45dca4ed39682cbeab6d855b189798eecb10d511d" )
+          ; ( "type_alias/completion"
+            , "5b296fd113e9152cbc5ba94e7db7bb7af1317c0d7ec8599a623c83f36a0f067a" )
+          ; ( "type_alias/wake_policy"
+            , "ecb931bb228b56543421e1d37cf5075e324906e1ec0a66f99d842c19c35e4ab4" )
+          ; ( "type_alias/schedule_misfire"
+            , "290efd1d1bfc5644f60597bb12171e3e18b2323b817c804d0a80dea0efead4b6" )
+          ; ( "type_alias/notification_correlation"
+            , "20a76026e17ebb69761661af6c6db3af40a9c98aca74ba468c81cc9885564005" )
+          ; ( "type_alias/work_completion"
+            , "e8ba57d4d79196a7ed37b41420e602bdecae478b95d6d5052ff25657b67d067e" )
+          ] )
+      ; ( "delegated_moderator_v1"
+        , "runtime.work-values"
+        , "06b303b3f9a7d9bdde539840d154c1886765c1f959c5fb228990fee712e91589"
+        , [ "test/agent_docs/docs_chatml_authoring.ml"
+          ; "test/chatml_composition/job_launch_tests.ml"
+          ; "lib/chatml/chatml_extension_surface.ml"
+          ]
+        , [ ( "type_alias/work_ref"
+            , "47ee4d59822a16fa377eefd53fdef6d54c9508fe79b8713a33e55183eeee062f" )
+          ; ( "type_alias/completion"
+            , "5a1556210ef5f40d3e570a3c3e5daf85b77abc127aaa2edb521aaab93533774e" )
+          ; ( "type_alias/wake_policy"
+            , "1a41bd74fdb959b99aebee43128afba3f35c96412fa2566a31ff437bdcef635f" )
+          ; ( "type_alias/schedule_misfire"
+            , "b6a8a0317d4d7b63dcd83a783502a43ade5724a79ac632b7de68fab0e1a3f898" )
+          ; ( "type_alias/notification_correlation"
+            , "34dd4f58bc1cc2dd0af8363ebfab48315f7fa6cdfc4b3557c8cde1130dd3ed42" )
+          ; ( "type_alias/work_completion"
+            , "4c174d896f0ae10b860cd6627a5a6ba465a1d3b9c38c74aae3d751191dfd11a3" )
+          ] )
+      ]
+      ~f:(fun (surface_id, topic_id, topic_closure_sha256, evidence, contracts) ->
+        List.map contracts ~f:(fun (name, contract_sha256) ->
+          { target_id = surface_id ^ "/" ^ name
+          ; contract_sha256
+          ; topic_id
+          ; topic_closure_sha256
+          ; evidence
+          }))
+  ;;
+
   let reviewed_mappings =
     entrypoint_mappings
     @ task_mappings
@@ -2017,6 +2314,7 @@ module Coverage = struct
     @ moderator_data_mappings
     @ host_effect_mappings
     @ runtime_control_mappings
+    @ background_mappings
   ;;
 end
 
@@ -2301,7 +2599,7 @@ let runtime_foundation ~sources =
   let make_background id title surfaces prerequisites sections =
     { id
     ; title
-    ; prerequisites
+    ; prerequisites = "runtime.work-values" :: prerequisites
     ; surfaces
     ; excerpts =
         List.map sections ~f:(fun (heading, _) ->
@@ -2556,6 +2854,37 @@ let runtime_foundation ~sources =
                    ; "test/agent_docs/docs_chatml_effects.ml"
                    ; "test/chatml_composition/moderator_job_tests.ml"
                    ; "test/moderation/chat_response_moderator_manager_test.ml"
+                   ]
+               }
+         }
+       ; { id = "runtime.work-values"
+         ; title = "Background value types, result envelopes and script-job requests"
+         ; prerequisites = [ "chatml.json"; "runtime.invocations.contracts" ]
+         ; surfaces = shared
+         ; excerpts =
+             [ { path = "guide/chatml-background-values.md"
+               ; heading = "# Background work values and result formats"
+               ; include_children = true
+               }
+             ]
+         ; review =
+             Audited
+               { excerpt_sha256 =
+                   [ "5043a833337e82d989560e954fbe2a16b758c031761c4c3fd705df20162362d6" ]
+               ; evidence =
+                   [ "lib/chatml/chatml_extension_surface.ml"
+                   ; "lib/chat_response/one_off_request.ml"
+                   ; "lib/agent_session/script_job_service.ml"
+                   ; "lib/agent_session/script_ingress_service.ml"
+                   ; "lib/agent_protocol/subscription.ml"
+                   ; "lib/agent_protocol/schedule.ml"
+                   ; "lib/agent_protocol/delivery.ml"
+                   ; "test/agent_docs/docs_chatml_authoring.ml"
+                   ; "test/chatml_composition/job_launch_tests.ml"
+                   ; "test/chatml_composition/timer_tests.ml"
+                   ; "test/chatml_composition/subscription_tests.ml"
+                   ; "test/chatml_composition/notification_admission_tests.ml"
+                   ; "test/chatml_composition/ingress_tests.ml"
                    ]
                }
          }

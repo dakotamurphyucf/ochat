@@ -237,6 +237,12 @@ module Coverage : sig
       callbacks, with audited real recipe and shell adapter contracts. *)
   val runtime_control_mappings : mapping list
 
+  (** Job on all surfaces; Subscription, Schedule, Notification and Ingress on
+      moderators; six work/completion/policy aliases on their exact targets.
+      Literal pins link complete operation semantics, checked value examples
+      and existing daemon/transaction integration tests. *)
+  val background_mappings : mapping list
+
   (** Maintained reviewed subset. Other compiler APIs and semantic inventories
       still require coverage; this is not a complete public-feature manifest. *)
   val reviewed_mappings : mapping list

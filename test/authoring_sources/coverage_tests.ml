@@ -219,6 +219,65 @@ let%expect_test "runtime control coverage preserves delegated and narrow exclusi
     |}]
 ;;
 
+let%expect_test "background operations and value aliases have exact surface coverage" =
+  let sources = Authoring_sources.installed () |> ok in
+  let corpus = C.runtime_foundation ~sources |> ok in
+  let aliases =
+    [ "work_ref"
+    ; "completion"
+    ; "wake_policy"
+    ; "schedule_misfire"
+    ; "notification_correlation"
+    ; "work_completion"
+    ]
+  in
+  List.iter
+    [ "one_off_v1"; "tool_v1"; "moderator_v1"; "delegated_moderator_v1" ]
+    ~f:(fun surface ->
+      let prefix = surface ^ "/" in
+      let targets = V.compiler_targets ~sources ~surface_ids:[ surface ] |> ok in
+      let targets =
+        List.filter targets ~f:(fun target ->
+          let name = String.chop_prefix_exn target.V.id ~prefix in
+          List.exists
+            [ "Job"; "Subscription"; "Schedule"; "Notification"; "Ingress" ]
+            ~f:(fun module_name ->
+              String.equal name ("module/" ^ module_name)
+              || String.is_prefix name ~prefix:("module_export/" ^ module_name ^ "."))
+          || List.exists aliases ~f:(fun alias ->
+            String.equal name ("type_alias/" ^ alias)))
+      in
+      let mappings =
+        List.filter V.background_mappings ~f:(fun mapping ->
+          String.is_prefix mapping.V.target_id ~prefix)
+      in
+      V.audit corpus ~targets ~mappings |> ok |> V.require_complete |> ok;
+      List.iter
+        [ "runtime.jobs.owned"
+        ; "runtime.jobs.subscriptions"
+        ; "runtime.jobs.timers"
+        ; "runtime.delivery.notifications"
+        ; "runtime.delivery.ingress"
+        ]
+        ~f:(fun topic ->
+          match C.assemble corpus ~surface_id:surface ~roots:[ topic ] with
+          | Error _ ->
+            assert (String.equal surface "one_off_v1" || String.equal surface "tool_v1");
+            assert (not (String.equal topic "runtime.jobs.owned"))
+          | Ok topics ->
+            assert (
+              List.exists topics ~f:(fun topic ->
+                String.equal topic.C.specification.id "runtime.work-values")));
+      print_s [%sexp (surface : string), (List.length targets : int)]);
+  [%expect
+    {|
+    (one_off_v1 6)
+    (tool_v1 7)
+    (moderator_v1 31)
+    (delegated_moderator_v1 31)
+    |}]
+;;
+
 let report label = function
   | Ok _ -> print_endline (label ^ ": accepted")
   | Error error -> print_endline (label ^ ": " ^ error)

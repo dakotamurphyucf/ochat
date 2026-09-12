@@ -20,6 +20,7 @@ let () =
     ; "guide/chatml-authoring-language.md"
     ; "guide/chatml-authoring-primer.md"
     ; "guide/chatml-authoring-runtime.md"
+    ; "guide/chatml-background-values.md"
     ; "guide/chatml-collections.md"
     ; "guide/chatml-global-helpers.md"
     ; "guide/chatml-host-effects.md"

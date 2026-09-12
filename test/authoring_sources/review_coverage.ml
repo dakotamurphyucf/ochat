@@ -7,16 +7,22 @@ type selection =
   | Globals
   | Alias of string
 
+type request =
+  | Missing
+  | Candidates of selection * string
+
 let () =
-  let selection, topic, requested_surfaces =
+  let request, requested_surfaces =
     match Array.to_list (Sys.get_argv ()) with
-    | _ :: "--globals" :: topic :: surfaces -> Globals, topic, surfaces
-    | _ :: "--alias" :: name :: topic :: surfaces -> Alias name, topic, surfaces
-    | _ :: name :: topic :: surfaces -> Module name, topic, surfaces
+    | _ :: "--missing" :: surfaces -> Missing, surfaces
+    | _ :: "--globals" :: topic :: surfaces -> Candidates (Globals, topic), surfaces
+    | _ :: "--alias" :: name :: topic :: surfaces ->
+      Candidates (Alias name, topic), surfaces
+    | _ :: name :: topic :: surfaces -> Candidates (Module name, topic), surfaces
     | _ ->
       failwith
         "usage: review_coverage (MODULE | --globals | --alias NAME) TOPIC_ID [SURFACE \
-         ...]"
+         ...] | --missing [SURFACE ...]"
   in
   let surfaces =
     match requested_surfaces with
@@ -28,45 +34,66 @@ let () =
    | Some surface -> failwith ("duplicate surface: " ^ surface));
   let sources = Authoring_sources.installed () |> Result.ok_or_failwith in
   let corpus = Authoring_corpus.runtime_foundation ~sources |> Result.ok_or_failwith in
-  let candidates =
-    List.map surfaces ~f:(fun surface ->
+  let output =
+    match request with
+    | Missing ->
+      let module C = Authoring_corpus.Coverage in
       let targets =
-        Authoring_corpus.Coverage.compiler_targets ~sources ~surface_ids:[ surface ]
-        |> Result.ok_or_failwith
+        C.compiler_targets ~sources ~surface_ids:surfaces |> Result.ok_or_failwith
       in
-      let selected =
-        List.filter targets ~f:(fun target ->
-          let id = target.Authoring_corpus.Coverage.id in
-          match selection with
-          | Globals -> String.is_prefix id ~prefix:(surface ^ "/global/")
-          | Alias name -> String.equal id (surface ^ "/type_alias/" ^ name)
-          | Module name ->
-            String.equal id (surface ^ "/module/" ^ name)
-            || String.is_prefix id ~prefix:(surface ^ "/module_export/" ^ name ^ "."))
+      let mappings =
+        List.filter C.reviewed_mappings ~f:(fun mapping ->
+          List.exists surfaces ~f:(fun surface ->
+            String.is_prefix mapping.target_id ~prefix:(surface ^ "/")))
       in
-      if List.is_empty selected then failwith ("no selected targets on " ^ surface);
-      let closure =
-        Authoring_corpus.Coverage.topic_contract
-          corpus
-          ~surface_id:surface
-          ~topic_id:topic
-        |> Result.ok_or_failwith
-      in
+      let report = C.audit corpus ~targets ~mappings |> Result.ok_or_failwith in
       `Object
-        [ "surface", `String surface
-        ; "topic_sha256", `String closure
-        ; ( "bindings"
-          , `Array
-              (List.map selected ~f:(fun target ->
-                 `Object
-                   [ ( "target"
-                     , `String (String.chop_prefix_exn target.id ~prefix:(surface ^ "/"))
-                     )
-                   ; "contract_sha256", `String target.contract_sha256
-                   ])) )
-        ])
+        [ ( "scope"
+          , `String "compiler bindings only; semantic and ChatMD coverage is separate" )
+        ; "targets", `Number (Int.to_string (List.length targets))
+        ; "mapped", `Number (Int.to_string (List.length report.mapped))
+        ; "missing", `Array (List.map report.missing ~f:(fun target -> `String target.id))
+        ]
+    | Candidates (selection, topic) ->
+      let candidates =
+        List.map surfaces ~f:(fun surface ->
+          let targets =
+            Authoring_corpus.Coverage.compiler_targets ~sources ~surface_ids:[ surface ]
+            |> Result.ok_or_failwith
+          in
+          let selected =
+            List.filter targets ~f:(fun target ->
+              let id = target.Authoring_corpus.Coverage.id in
+              match selection with
+              | Globals -> String.is_prefix id ~prefix:(surface ^ "/global/")
+              | Alias name -> String.equal id (surface ^ "/type_alias/" ^ name)
+              | Module name ->
+                String.equal id (surface ^ "/module/" ^ name)
+                || String.is_prefix id ~prefix:(surface ^ "/module_export/" ^ name ^ "."))
+          in
+          if List.is_empty selected then failwith ("no selected targets on " ^ surface);
+          let closure =
+            Authoring_corpus.Coverage.topic_contract
+              corpus
+              ~surface_id:surface
+              ~topic_id:topic
+            |> Result.ok_or_failwith
+          in
+          `Object
+            [ "surface", `String surface
+            ; "topic_sha256", `String closure
+            ; ( "bindings"
+              , `Array
+                  (List.map selected ~f:(fun target ->
+                     `Object
+                       [ ( "target"
+                         , `String
+                             (String.chop_prefix_exn target.id ~prefix:(surface ^ "/")) )
+                       ; "contract_sha256", `String target.contract_sha256
+                       ])) )
+            ])
+      in
+      `Object [ "review_required", `True; "candidates", `Array candidates ]
   in
-  print_endline
-    (Jsonaf.to_string
-       (`Object [ "review_required", `True; "candidates", `Array candidates ]))
+  print_endline (Jsonaf.to_string output)
 ;;
