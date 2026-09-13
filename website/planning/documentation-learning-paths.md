@@ -321,3 +321,37 @@ The earlier full 111-case browser matrix remains applicable to unchanged reader
 behavior; it was not repeated for these prose and evidence changes.
 Three mobile journeys also followed the new file-tool → shell, batch → daemon
 and stdio → learning-path links in the rendered site without document overflow.
+
+## D04 — Guarded engineering application
+
+The first complete application combines six useful capabilities: scoped file
+reading, fixed inspection, literal text search, real checks with reviewed report
+writes, a standalone ChatML report summarizer, and an authored evidence reviewer.
+Its two entry points demonstrate deterministic ChatML review and the stock
+tool-free model-review callback. The latter's identity label does not load the
+application's authored specialist. The walkthrough explains authority, actual
+check evidence, human correction, review-state lifetime and shutdown.
+
+The 19-file archive shares maintained checker, schema and script sources with
+the learning checkpoints. Both extracted roots pass shell inspection. Every
+published archive file matches its canonical bytes; the actual checker saves
+the expected failing report, and the documented human correction produces three
+passing checks. This is mechanical evidence, not a judgment of prose quality.
+
+Two focused expect scenarios qualify the composition. A native transient session
+executes inspection, search, the real checker and report summarizer, with outside
+access rejected and a later denied report write preserving evidence. A separate
+explicitly injected agent callback checks the model-review policy and the exact
+one-off specialist binding receiving real checker output. The ordinary one-off
+agent runner has a separate transport from the native parent's model override;
+the test does not claim that one override covers both. No provider call was made.
+
+Canonical validation passed for 355 pages and 39 protocol methods; website checks
+passed 83 cases and the build checked 163 HTML pages and 806 files. Nine Chromium
+application/source cases passed, including archive byte parity and all 19 inline
+files without JavaScript. Desktop and mobile review followed the root/source
+links and opened companion ChatML without document-wide overflow. Search found
+all 33 benchmark queries in the top five, across 152 indexed pages and 2,512
+checked anchors. Long mobile code still benefits from the planned D05 reader
+improvements. These are local macOS and preview results, not a live provider,
+interactive TUI, Linux or deployed-site qualification.

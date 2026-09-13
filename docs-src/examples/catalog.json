@@ -1882,5 +1882,259 @@
         "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
       }
     }
+  },
+  {
+    "id": "guarded-engineering",
+    "title": "Guarded engineering assistant",
+    "summary": "Investigate documentation with scoped reads and search, real checks, reviewed report writes, ChatML aggregation and a specialist.",
+    "tutorial": "applications/guarded-engineering",
+    "host": "Native local TUI with explicit shell-manifest authorization",
+    "capabilities": [
+      "Scoped file tools",
+      "Literal text search",
+      "Separate shell runtimes",
+      "ChatML report reviewer",
+      "Standalone report tool",
+      "One-off specialist",
+      "Optional model review"
+    ],
+    "required": [
+      "Installed Ochat, configured gpt-6-astra provider, and a supported required confinement backend.",
+      "/bin/sh, /bin/cat, /usr/bin/grep and awk; create the reports directory before launch.",
+      "Inspect the complete bundle and use --local --authorize-shell-manifest."
+    ],
+    "kind": "complete",
+    "entry": "engineer.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/engineer.chatmd",
+        "path": "engineer.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/model-engineer.chatmd",
+        "path": "model-engineer.chatmd",
+        "role": "variant"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/capabilities.chatmd",
+        "path": "capabilities.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/runtimes/inspection.chatmd",
+        "path": "runtimes/inspection.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/agents/reviewer.chatmd",
+        "path": "agents/reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/shell-customization/runtimes/checks-base.chatmd",
+        "path": "runtimes/checks-base.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/shell-customization/runtimes/checks.chatmd",
+        "path": "runtimes/checks.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/shell-customization/runtimes/model-checks.chatmd",
+        "path": "runtimes/model-checks.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/shell-customization/scripts/report-reviewer.chatml",
+        "path": "scripts/report-reviewer.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/shell-customization/tools.chatmd",
+        "path": "tools.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
+        "path": "scripts/check-report.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/schemas/input.json",
+        "path": "schemas/check-input.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/schemas/output.json",
+        "path": "schemas/check-output.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+        "path": "sample-project/docs/setup.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+        "path": "sample-project/docs/reference.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+        "path": "sample-project/scripts/check-docs.sh",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+        "path": "sample-project/expected-report.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/applications/guarded-engineering/README.md",
+        "path": "README.md",
+        "role": "data"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [
+      {
+        "fromPath": "engineer.chatmd",
+        "toPath": "runtimes/inspection.chatmd",
+        "reference": "runtimes/inspection.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "engineer.chatmd",
+        "toPath": "capabilities.chatmd",
+        "reference": "capabilities.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "model-engineer.chatmd",
+        "toPath": "runtimes/inspection.chatmd",
+        "reference": "runtimes/inspection.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "model-engineer.chatmd",
+        "toPath": "capabilities.chatmd",
+        "reference": "capabilities.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "engineer.chatmd",
+        "toPath": "runtimes/checks.chatmd",
+        "reference": "runtimes/checks.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "engineer.chatmd",
+        "toPath": "scripts/report-reviewer.chatml",
+        "reference": "scripts/report-reviewer.chatml",
+        "kind": "script"
+      },
+      {
+        "fromPath": "model-engineer.chatmd",
+        "toPath": "runtimes/model-checks.chatmd",
+        "reference": "runtimes/model-checks.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "runtimes/checks.chatmd",
+        "toPath": "runtimes/checks-base.chatmd",
+        "reference": "checks-base.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "runtimes/model-checks.chatmd",
+        "toPath": "runtimes/checks-base.chatmd",
+        "reference": "checks-base.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "tools.chatmd",
+        "reference": "tools.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "scripts/check-report.chatml",
+        "reference": "scripts/check-report.chatml",
+        "kind": "script"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "schemas/check-input.json",
+        "reference": "schemas/check-input.json",
+        "kind": "import"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "schemas/check-output.json",
+        "reference": "schemas/check-output.json",
+        "kind": "import"
+      },
+      {
+        "fromPath": "capabilities.chatmd",
+        "toPath": "agents/reviewer.chatmd",
+        "reference": "agents/reviewer.chatmd",
+        "kind": "agent"
+      }
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "615513c5fecf28cd25f17dad7c2ff0da2031997e",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64; required confinement",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "Build and run the documentation_engineering_tests.ml partition of chatml_composition_test with the repository OCaml toolchain.",
+        "opam exec -- dune build -j 2 @agent-docs-check",
+        "Extract the generated nineteen-file archive, inspect engineer.chatmd and model-engineer.chatmd from its directory, run the real checker, and apply the documented human correction."
+      ],
+      "observed": "Exact application sources execute through a native transient host with simulated parent responses: real source inspection/search, capability denial for an out-of-root search, scoped file-read denial, selective report rejection, a full saved report, ChatML aggregation of its real contents, and later user denial preserving evidence. The separate model-review root compiles against real native bindings; injected model callbacks verify static denial before review, successful check execution after approval, exact source/evidence handoff to a tool-free specialist, and malformed model review preserving the report. The extracted bundle matches every source byte; both roots inspect, and the documented human correction changes the checker from exit1 to exit0.",
+      "limitations": "No live provider, physical TUI or Linux run. Parent responses, policy judgment and specialist judgment are simulated. The legacy authored specialist uses its separate injected runner; the native parent model override is not claimed to control that transport. Direct extracted checker execution complements the confined runtime tests. Native local state is process-bound; a new session resets the report reviewer decision state.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/applications/guarded-engineering.md": "883b9bd51f8ce1d6041822d44d25b0a9283c0d04214b82a575b6d19b2cd60774",
+        "docs-src/examples/applications/guarded-engineering/README.md": "4e01743b362390d9d4e7cfc52615d6bec5c1cc135304fbb1f2303fa9bb3b52e5",
+        "docs-src/examples/applications/guarded-engineering/agents/reviewer.chatmd": "7072418016b63176b7517c0e282148cec8f5276cf93c4053bb3e9c5834fc6a3b",
+        "docs-src/examples/applications/guarded-engineering/capabilities.chatmd": "c84ceb25f85f3798e2e3d764a6eef47794e4b4f21b47e4100cb13858e3d0916f",
+        "docs-src/examples/applications/guarded-engineering/engineer.chatmd": "c299d439dd490c9d74edc72814313489f9436f9b755f093c240233e3e970334c",
+        "docs-src/examples/applications/guarded-engineering/model-engineer.chatmd": "73214f72d199fd4e2647196dcf1a5c856a0e978090464525c7bff894db2eb9a1",
+        "docs-src/examples/applications/guarded-engineering/runtimes/inspection.chatmd": "c70d443061780954ce8d1143d8608f70170f45f540cd46ccb522cffe2d5e8a78",
+        "docs-src/examples/learning/check-reports/schemas/input.json": "d94a1f336f621edc3fca0bbaea29ff65b09fdef97c708dd757bc6e73b76e5cc9",
+        "docs-src/examples/learning/check-reports/schemas/output.json": "27005355269833d562bdcaa1cb333724c4e30732eaa0edfb144d4776111110c9",
+        "docs-src/examples/learning/check-reports/scripts/aggregate.chatml": "f437fb8ea178afeea94b76a6e5514f2906f8369eb0400f0ec42e7ca4c5e2cce2",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "docs-src/examples/learning/shell-customization/runtimes/checks-base.chatmd": "e5be22d873d152ae73d1a1fe0a8ba7b598ea2951140e2fb94303e14e136ce65e",
+        "docs-src/examples/learning/shell-customization/runtimes/checks.chatmd": "f9b9b2d3e3e340a3dee78535e86bb4676fa249af5d434036efa45210e3e9f255",
+        "docs-src/examples/learning/shell-customization/runtimes/model-checks.chatmd": "a7419b05fe6c6a11192036266870f1baec1f80d087ee5aafa54311676e5b3f03",
+        "docs-src/examples/learning/shell-customization/scripts/report-reviewer.chatml": "9f0cef04be55473c98b7190b3cb63e4347d8010ef1710105e832e25d2bbf13be",
+        "docs-src/examples/learning/shell-customization/tools.chatmd": "213a10dd1d3859e63357eb9966c9312a80deccedb3df4ccb1529408aa26e2c8e",
+        "lib/agent_session/runtime_builder.ml": "03fecc74dadb6599ef8eaaf8ffb0118080cebf895718bb613af58c51f5582381",
+        "lib/chat_response/agent_runtime.ml": "9883acb2ad551c86718ad8ffc532259b8f74a43b478fa119966ac3456ce7dfac",
+        "lib/chat_response/tool.ml": "5a02982d6061e992ec5af248a1f9d9e17b672616fd8077ca2d1026838b977846",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1",
+        "test/chatml_composition/documentation_engineering_tests.ml": "11ec8f5175ea141dc72a50213279a4cd813f0cd365fd27eff59a5361fa10821f",
+        "test/chatml_composition/documentation_program_tests.ml": "629c251b0060d453d2703545ae18b93eb09d3371b6244d038b7edf64e8997355",
+        "test/chatml_composition/documentation_shell_review_tests.ml": "434899ed49e1694520a53b482bfbf8bf64f30dba17f36b9640a2554f9f3d922c",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/documentation_workflow_tests.ml": "20f8952bf461678226b451ce5c33c9e3392fef31c0c7b8df1f001438e961b4e1",
+        "test/chatml_composition/dune": "9ae10728bdc56344f07566a22ce5cdf192b5e16c505c4360f624f7a2e0792988",
+        "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
+      }
+    }
   }
 ]

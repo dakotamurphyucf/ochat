@@ -183,6 +183,10 @@ protocol checks do not demonstrate live model judgment.
 
 ## Adapt the pattern
 
+Combine this review policy with file/search tools, saved-report processing and
+a specialist in the [guarded engineering application](../applications/guarded-engineering.md).
+Its complete bundle shows how the capabilities work together in one investigation.
+
 Use a ChatML reviewer when the decision depends on normalized command details or
 retained review state. Use a matcher for selecting a policy rule, a before-hook
 to reject or rewrite a request, and an after-hook to control result disclosure.

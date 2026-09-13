@@ -1,0 +1,10 @@
+<import src="runtimes/inspection.chatmd"/>
+<import src="runtimes/model-checks.chatmd"/>
+<import src="capabilities.chatmd"/>
+
+<developer>
+This configuration denies selective saved reports through static policy and
+reviews full reports with a separate tool-free model callback. Its approval is
+model approval. A failed review denies execution. The callback cannot read the
+project or call review_docs; use review_docs separately for evidence-based advice.
+</developer>

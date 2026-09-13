@@ -1903,7 +1903,7 @@
     "noindex": false,
     "status": "current",
     "verification": "not-checked",
-    "order": 10
+    "order": 11
   },
   {
     "id": "examples/agent-server/README",
@@ -4467,7 +4467,7 @@
     "description": "Turn a named project file into an explanation you can check against the source.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 1,
+    "order": 2,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4489,7 +4489,7 @@
     "description": "Let an explorer gather the context and a specialist identify what a new contributor needs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 2,
+    "order": 3,
     "navigation": false,
     "related": [
       "tutorials/specialist"
@@ -4511,7 +4511,7 @@
     "description": "Compare supplied source notes, preserve attribution, and separate evidence from open questions.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 3,
+    "order": 4,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4533,7 +4533,7 @@
     "description": "Read a supplied patch and acceptance criteria, then produce findings tied to the changed lines.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 4,
+    "order": 5,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4555,7 +4555,7 @@
     "description": "Run one request without the terminal UI and save the conversation as an inspectable artifact.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 5,
+    "order": 6,
     "navigation": false,
     "related": [
       "cli/chat-completion"
@@ -4577,7 +4577,7 @@
     "description": "Learn the host lifecycle with a real timer, then extend it with background research jobs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 6,
+    "order": 7,
     "navigation": false,
     "related": [
       "background"
@@ -4806,5 +4806,43 @@
     "audience": [
       "author"
     ]
+  },
+  {
+    "id": "applications/guarded-engineering",
+    "source": "docs-src/applications/guarded-engineering.md",
+    "route": "/docs/applications/guarded-engineering/",
+    "title": "Build a guarded engineering assistant",
+    "description": "Investigate documentation with scoped reads and search, real checks, reviewed report writes, ChatML aggregation and a specialist.",
+    "section": "Complete applications",
+    "kind": "guide",
+    "order": 1,
+    "navigation": true,
+    "audience": [
+      "author",
+      "operator"
+    ],
+    "related": [
+      "tutorials/shell-customization",
+      "tutorials/chatml-tool",
+      "tutorials/specialist"
+    ],
+    "disposition": "publish",
+    "provenance": "authored",
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "offline-checked",
+    "reviewNote": "Complete nineteen-file application; exact native composition, separately injected specialist/model-review binding, canonical source closure and real extracted checker qualified offline. See the catalog evidence for scope and limitations.",
+    "verifiedAt": "2026-09-13",
+    "verifiedCommit": "615513c5fecf28cd25f17dad7c2ff0da2031997e"
+  },
+  {
+    "id": "examples/applications/guarded-engineering/README",
+    "source": "docs-src/examples/applications/guarded-engineering/README.md",
+    "disposition": "repository-only",
+    "title": "Guarded engineering bundle instructions",
+    "reviewNote": "Complete bundle setup and usage instructions displayed/downloaded in the source reader; the public walkthrough is the application page.",
+    "provenance": "authored"
   }
 ]

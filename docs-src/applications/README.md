@@ -6,6 +6,12 @@ application and follow its linked tutorial to adapt it.
 
 ## Choose a useful starting point
 
+For a complete composition, build the
+[guarded engineering assistant](guarded-engineering.md). It connects file/search
+tools, separate shell runtimes, ChatML report decisions and processing, and a
+specialist around one real documentation investigation. Its full multi-file
+project is inspectable here and independently downloadable.
+
 The gallery groups applications by the job they help you do. The
 [documentation review](documentation-review.md) includes an inspectable execution
 recording. Other preview cards are labeled illustrations; their source bundles

@@ -1,5 +1,27 @@
 [
   {
+    "id": "guarded-engineering",
+    "title": "Investigate a project with guarded capabilities",
+    "category": "Code",
+    "summary": "Investigate documentation with scoped reads and search, real checks, reviewed report writes, ChatML aggregation and a specialist.",
+    "input": "Lantern documentation and a deliberately failing check",
+    "output": "A saved report, failure summary and specialist proposal with evidence",
+    "example": "guarded-engineering",
+    "level": "Complete application",
+    "steps": [
+      "Read, search and check the source",
+      "Review and summarize saved evidence",
+      "Ask a specialist and propose a correction"
+    ],
+    "preview": [
+      "Real check \u2192 missing verification instructions",
+      "Guardrails \u2192 reviewed reports-only writes",
+      "Specialist \u2192 evidence-based correction proposal"
+    ],
+    "tutorial": "tutorials/shell-customization",
+    "benefit": "Combine different tools and runtimes in one reusable engineering assistant while keeping decisions, execution and evidence distinct."
+  },
+  {
     "id": "repository-onboarding",
     "title": "Understand an unfamiliar repository",
     "category": "Code",

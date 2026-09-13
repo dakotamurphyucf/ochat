@@ -395,6 +395,36 @@
       "source": "docs-src/examples/learning/background-results/schemas/progress.json",
       "disposition": "example-download",
       "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/engineer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/model-engineer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/capabilities.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/README.md",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
     }
   ],
   "directories": [
