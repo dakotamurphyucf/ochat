@@ -107,7 +107,7 @@ outputs from recorded results and marks unfinished invocations interrupted. It
 does not rerun their handlers. Removed calls receive an explicit discarded-output
 disposition. Conflicting output evidence fails recovery. See the
 [invocation recovery contract](extensibility-foundations.md#invocation-recovery-at-daemon-restart)
-for exact history bindings, allocation and remaining worker/reset limitations.
+for exact history bindings, allocation and worker/reset recovery behavior.
 
 ## Backup and restore
 

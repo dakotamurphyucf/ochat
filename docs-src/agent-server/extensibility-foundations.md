@@ -4,7 +4,7 @@ The extension records, transactions, one-off scripts, moderator tools,
 subscriptions and child lifecycle services are available through the default
 daemon and embedded runtimes. ChatMD declarations select tools; a transient local
 session cannot create persisted children. This page records implementation and
-protocol contracts, including historical milestones. For maintained authoring
+protocol contracts. For task-oriented authoring
 contracts, start with the [runtime guide](../guide/chatml-authoring-runtime.md),
 [child guide](../guide/chatml-authoring-children.md) and
 [background guide](../guide/chatml-authoring-background.md).
@@ -143,7 +143,8 @@ boundary. The lower-level builder queue functions accept an optional preparation
 callback for embedded hosts; those hosts must supply equivalent ownership and
 persistence checks. Versioned queue ingress currently accepts validated
 `Internal_event` envelopes. Legacy model-job events keep their legacy path;
-the versioned `Job_completed` adapter remains part of background-work integration.
+the versioned `Job_completed` adapter validates and delivers owned background-work
+completions through the corresponding event transaction.
 
 ## Background request reconstruction
 
@@ -215,7 +216,8 @@ hierarchical quotas but cannot execute. After durable commit, the host publishes
 the reservation and the scheduler transfers that slot to the worker without a
 second charge. Aborting an unpublished reservation releases it; caller cleanup
 cannot release a published or claimed worker's slot. This capacity service grants
-no tool authority and is not yet the script-facing `Job.start_*` integration.
+no tool authority; the script-facing `Job.start_*` service uses it as part of
+the owning actor transaction.
 
 Cancellation before launch, generation reset, and session teardown retire unclaimed
 reservations. Claimed workers keep their slot until actual cleanup. A scheduler
@@ -307,13 +309,11 @@ uses the captured-source parser and generated-definition admission pipeline. The
 runtime identity, supported targets, ordinary/delegated moderator surface and
 compiler limits. The request cannot replace that context.
 
-An extensibility-qualified host can register the explicit
-`<tool name="ochat_validate"/>` helper by supplying
-`authoring_validation_host` in its extension services or internal daemon options.
-The option defaults to absent, and a declaration without the host fails before
-session execution. There is no public CLI/configuration flag for this internal
-qualification path. A01 will supply the compatible installed runtime/corpus
-context before general authoring exposure.
+The default daemon and embedded runtimes supply the installed runtime/corpus
+context for an explicit `<tool name="ochat_validate"/>` declaration. Custom hosts
+must supply compatible validation services; naming a tool cannot create a missing
+host capability. See the [authoring tool guide](../guide/authoring-context-tool.md)
+for automatic helper selection, manual/preloaded policies and retrieval.
 
 For example, the readonly helper accepts:
 
@@ -388,15 +388,15 @@ validation cannot use a parent-only reader or grant a new helper dependency.
 `configure_generated` supplies host-owned bundle limits and installed catalog
 metadata. Factory restoration uses the same configuration. Auto/preload authoring
 packages may select only authentic helper bindings already inside the permitted
-subset; missing helpers or catalog metadata reject. A01 still supplies the complete
-corpus, retrieval, prepared examples and context insertion before general exposure.
+subset; missing helpers or catalog metadata reject. The installed authoring
+services supply the corpus, retrieval, prepared examples and context insertion.
 The helper's ordinary tool call/output bookkeeping still occurs;
 validation creates no Script invocation, child session, model request or tool
 effect from the candidate. Offline daemon tests verify this with initializers
 that would fail if evaluated and source that declares a real file-tool call.
 
 `Authoring_validation.topics` and `help` provide stable topic dependencies for
-A01's shared corpus and coverage manifest. `run_chatml` now carries its authored
+the shared corpus and coverage manifest. `run_chatml` now carries its authored
 task/package/helper metadata on the actual native registration, with short
 entrypoint/call-syntax/topic pointers in the descriptor. Selection preserves the
 metadata and it participates in capability identity. These hooks do not insert
@@ -465,16 +465,15 @@ and wrap them as `Internal_event` data. They do not reinterpret a payload as a
 native invocation or completion event. Legacy scripts retain their existing event
 representation.
 
-These are internal execution primitives, not public tool registration. Complete
-shared tool routing, current authority checks, nested-call admission and
-worker/reset recovery qualification remain required before a host exposes moderator tools. The
-stream/actor integration below is available to qualified internal fixtures. The host
+These are internal execution primitives, not public tool registration. The
+stream/actor integration below supplies shared routing, current authority checks,
+nested-call admission and worker/reset recovery. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
 actor's durable transaction or the active-worker borrow protocol; the scoped
 worker service described below supplies that boundary.
-Runtime task limits and bounded result/state conversion are present here; pure
-evaluation interruption remains part of the execution-budget work.
+Runtime task limits, bounded result/state conversion and cooperative pure
+evaluation interruption use the shared execution-budget service.
 
 ### Transactional ordinary events
 
@@ -518,8 +517,7 @@ These primitives do not automatically retry failures. The host must persist a
 claim before external effects and record failed/interrupted disposition so a
 retained event cannot replay effects after a failed checkpoint. The idle queued
 event handoff below supplies that claim and acknowledgement boundary. Other event
-phases, event-owned interactive permissions, host execution deadlines
-and normal v1 runtime construction remain integration work. The legacy pop-first
+phases use the same owned permissions, deadlines and runtime services. The legacy pop-first
 drain remains separate and does not supply transactional acknowledgement.
 
 ### Actor and worker handoff
@@ -664,13 +662,12 @@ Invocation-owned requests use the shared actor permission mechanism during idle
 native calls. Approval, denial, timeout, cancel-stop and cancellation while waiting
 are covered by the compiled-handler/runtime-owner tests. The native invocation's
 scoped identity also feeds shell approval/reviewer ownership selection; ordinary
-legacy requests retain operation ownership. General runtime policy-service
-construction and complete shell/child qualification remain separate work.
+legacy requests retain operation ownership. Shell and child execution preserve
+the actual caller's permission ownership through the shared runtime services.
 
-Startup/foreground event ownership, changed-checkpoint reconciliation,
-and normal v1 runtime binding remain integration work.
-This path is exercised through internally installed compiled managers, not public
-tools or normal v1 ChatMD construction.
+Startup/foreground event ownership and changed-checkpoint reconciliation use
+normal v1 runtime bindings. Internal compiled-manager tests exercise the boundary
+directly; default-host composition tests exercise its public ChatMD integration.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before
@@ -988,24 +985,23 @@ the same calls execute no native work. A failing fallback callback in both cases
 proves observations do not use unscoped Tool.call. Neither path starts a model turn
 or manufactures provider history during the drain.
 
-**Normal v1 runtime construction is still required.** The stream
-option remains off by default pending that integration. Tests exercise the
+Normal v1 runtime construction installs the owned observation drain. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,
 duplicate acknowledgement and forbidden `Invocation.resolve`. They also cover
 persisted intent and pure recovery plans. An expect-test matrix shows budget,
 concurrent, failed and terminated drain dispositions while preserving unrelated
 intent. The compiled native-call matrix runs with stream draining both disabled
-and enabled. These do not yet qualify observation
-delivery across real daemon restarts or administrative reset/compaction.
+and enabled. Separate actor, composition and crash fixtures qualify observation
+delivery across daemon restarts and administrative reset/compaction.
 
 Compiled-handler tests cover native function/custom calls, policy denial,
 revocation/replacement during approval, moderator reentrancy, unknown/unselected
 tools, schema/value limits, disclosure, observer failure and parent rollback.
 They also check callback restoration, absence of child provider history, and
 agreement between live and persisted state. Scope tests cover call limits and
-escaped/closed-parent callbacks. General standalone/script routing, normal-runtime
-Tool.call installation and complete admission-attempt auditing remain open.
+escaped/closed-parent callbacks. Standalone/script routing and normal-runtime
+Tool.call installation use the same owned admission and audit services.
 
 ### Owned foreground event routing
 
@@ -1023,8 +1019,9 @@ The streaming loop preserves canonical entry IDs at pre-tool and post-tool
 boundaries. Before a call is admitted, its pending arguments are available in the
 pre-tool event; no provisional canonical history entry is invented. Post-tool
 handling sees the committed result entry. Raw-item APIs reject owned handlers
-instead of silently dropping their identity requirements. Transient model forks
-have no moderator and cannot acknowledge requests owned by the root session.
+instead of silently dropping their identity requirements. Temporary built-in
+forks use an expiring borrow of their active parent invocation, retaining parent
+moderation without creating a separate child moderator or root history entries.
 
 Execution completion retains scheduling intent; it does not count as scheduling.
 Turn-only requests pass through the stream's existing policy and consecutive-turn
@@ -1056,7 +1053,8 @@ capability references advertised when the runtime was constructed, before any
 lifecycle event or turn. Those names remain claimed after live revocation or registry
 replacement, so a stale capability produces a recorded failure rather than
 falling through to a legacy runner. Unknown names remain available to other host
-services. Transient fork requests cannot borrow the root persisted owner.
+services. Temporary built-in fork requests use the separately verified branch
+dispatcher; they cannot claim an unrelated root invocation owner.
 
 `Tool_dispatch.chain` combines services with disjoint registered names. All
 original-input validators run before pre-tool moderation; unknown targets must
@@ -1087,10 +1085,10 @@ failure, revocation before dispatch and during authorization, halt during
 authorization, disclosure failure, redacted history and permanent publication
 rejection. A trap legacy runner ensures claimed native names never fall through.
 
-This adapter is installed by the internal extension builder and qualified daemon
-option described above. The scoped native bridge is available to moderator
-dispatch. General standalone routing, the remaining host-wide admission audit and
-public qualification are still required. No new feature flag is enabled.
+The default extension builder installs this adapter alongside standalone and
+moderator dispatch. The scoped native bridge remains an internal execution
+service; exposing a tool still requires a selected ChatMD declaration and
+successful host admission.
 
 ### Atomic model-call intent
 
@@ -1159,14 +1157,13 @@ with a discarded-publication disposition use codec 4; nested moderator records
 with observation intent use codec 5. Acknowledged observations retaining runtime
 follow-up requests use codec 6. Intermediate compaction acceptance and discarded
 follow-up requests use codec 7. Receipts with a retained compaction operation ID
-use codec 8. All eight
-remain readable; missing optional S-expression fields load as absent. Older JSON
+use codec 8. Parent event ownership uses codec 9, handler intent uses codec 10,
+completion contracts use codec 11, and authoring references use codec 12.
+All twelve remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature
-flags. The internal
-stream adapter below calls this service; normal runtime construction remains
-unfinished. Daemon restart reconciliation is described below; immediate
-worker-cancellation reconciliation remains separate work.
+flags. The stream adapter calls this service in normal runtime construction.
+Daemon restart and foreground cancellation reconciliation are described below.
 
 An observation host can opt into `retain_follow_up` to store coalesced turn,
 compaction and termination requests with the acknowledgement and prospective
@@ -1178,8 +1175,7 @@ reason it will not run. Applied means durably accepted, not that a requested ope
 finished. Requests cannot be replaced, silently dropped or rearmed, and applying them does
 not rerun the observer or alter the native result. Existing foreground dispatch
 uses returned requests and leaves this option disabled. The durable receipt is
-used by the idle scheduler described above; normal v1 runtime construction
-remains unfinished.
+used by the idle scheduler described above in normal v1 runtime construction.
 
 ### Invocation recovery at daemon restart
 
@@ -1309,7 +1305,7 @@ an oversized projection skips that handler and
 records `invocation.invalid_input` against the original canonical call. A typed
 rejection distinguishes this case from a subsequent pre-tool policy denial;
 validator diagnostic text is not published. Unknown targets pass through to other
-services, so this adapter does not yet validate all native tool schemas.
+services; the composed native dispatcher validates their schemas and arguments.
 
 The final target's schema and input projection limits are rechecked after any
 rewrite or redirect and again inside the owning moderator
@@ -1329,7 +1325,8 @@ diagnostic text. Raw exception diagnostics are not placed in model-visible outpu
 Host persistence failures propagate without rerunning the handler. The qualified
 runtime composes the standalone adapter before moderator/native dispatch, so a
 standalone declaration never falls through to a same-named native runner.
-Transient fork calls cannot use the root actor's invocation ownership.
+Temporary built-in fork calls use linked child invocation receipts through their
+active parent's verified borrow; their conversation history remains separate.
 
 With the internal dispatch service installed, pre-tool script errors, host
 exceptions and invalid moderation outcomes produce `invocation.pre_tool_failed`.
@@ -1343,8 +1340,8 @@ serializable state, apply their declared task/fuel limits, and validate buffered
 effects before committing. This includes both item and history-entry manager APIs.
 A failed pre/post handler restores mutated arrays and discards buffered overlays
 and internal events. External effects and mutable globals are not rolled back or
-automatically retried. Task limits do not yet interrupt unproductive pure
-evaluation; that remains part of the standalone execution work.
+automatically retried. Configured execution budgets also bound pure evaluation;
+cancellation and compiler checks remain cooperative rather than hard preemption.
 
 Moderator invocation execution rejects legacy UI suspension before a continuation
 is installed. A rejected suspension restores copied state, discards buffered
@@ -1377,8 +1374,8 @@ before authorization, even if their earlier preparation passed. Their records
 retain that preparation and publish the same terminal error. Previously committed
 results are preserved; this check does not undo external effects or cancel work
 that already began. Pending internal events remain queued when the manager has
-halted; draining does not consume or execute them. Restart/job lifecycle handling
-remains separate work.
+halted; draining does not consume or execute them. Restart and job lifecycle
+handling preserve their separate interruption and ownership rules.
 
 Post-tool observation failures instead produce a separate, non-retryable durable
 `operation.failed` event, with `phase=post_tool_response` and the committed output
@@ -1417,9 +1414,8 @@ turn, unchanged state for stopped calls, zero native execution and no operation
 failure. A held first handler plus queued second invocation proves termination
 is rechecked before admission; a subsequent third call remains stopped too.
 The internal extension builder now installs this adapter with daemon host services.
-Remaining shared nested/standalone routing, admission audit and cross-host
-qualification are still required. No extension feature flag is enabled by
-installing this adapter.
+Shared nested/standalone routing uses this owned boundary. Capability discovery
+reflects the actual host services; installing an adapter alone grants no tools.
 
 ### Synchronous call coordination
 
@@ -1653,9 +1649,8 @@ deadline for expiry. A subscription's recovery deadline is not a substitute for 
 current runtime status. Ownership follows the live invocation and source identity,
 not wall-clock ordering between invocation admission and subscription creation.
 Inherited absolute job deadlines still constrain the parent wait and are never
-extended by a subscription's relative lifetime. Reset/rebuild/upgrade classification
-and automatic notification delivery remain separate work. General feature
-advertisement remains gated on A01.
+extended by a subscription's relative lifetime. Reset/rebuild/upgrade and
+notification delivery apply their separate generation and publication rules.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6
@@ -1894,8 +1889,9 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 introduced this disposition; current schema 14 safely upgrades schema 8/9/10/11/12/13
-snapshots. Older snapshots cannot contain the new disposition; unknown delivery
+Session-state schema 9 introduced this disposition; current schema 20 upgrades
+supported older snapshots while checking the fields permitted by each version.
+Pre-schema-9 snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
 back to a binary that cannot read the current schema; do not edit stored version numbers to
 bypass migration checks. The nested JSON delivery record uses version 1, separate
@@ -1932,8 +1928,8 @@ authorized chunked reads and process-crash recovery. Native stop/resume tests al
 check actual process reaping, no data publication while stopped, and one retained
 cancellation notification after runtime reload. Standalone cancellation requests
 a turn under host policy; a moderator handler can choose a quieter policy, as X03
-does. This qualification covers the daemon. Additional hosts and the broader
-recovery matrix belong to E07; general feature exposure still waits for A01.
+does. Embedded hosts use the same services within their process lifetime;
+daemon restart and local host shutdown have distinct recovery contracts.
 
 ### Historical results after reset and rebuild
 
@@ -1990,7 +1986,8 @@ per session, and `job_result_recovery_max_bytes` defaults to 64 MiB of aggregate
 selected payloads. Each payload also remains subject to `job_result_max_bytes`.
 Exceeding a recovery budget prevents readiness and preserves the files; the operator
 can adjust these host options. These are storage-recovery limits, not ChatML
-language limits. Orphan cleanup remains separate and is not yet installed.
+language limits. Orphan cleanup uses the separate reference-aware reconciliation
+path described below.
 
 A waiting parent also reuses its already selected completion while publication is
 pending. It does not reread a subsequently damaged child artifact or change that
@@ -2130,7 +2127,8 @@ ownership record for retry. Failure acknowledging the final intent removal can
 happen after cleanup has completed; fresh enumeration determines what remains.
 An in-memory intent without its durable record cannot authorize deletion.
 These operations still require a caller to prove complete reference absence and
-exclude active work; automatic maintenance integration is not installed yet.
+exclude active work; the reference-aware maintenance coordinator supplies that
+proof before invoking them.
 
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
@@ -2170,11 +2168,10 @@ the exact terminal record and active owner for script materialization; a job ID
 does not bypass the script's selected tools. Transport clients can read the saved
 blob in bounded chunks using `blob.read`.
 
-Safe orphan reconciliation is installed. Phase-wide asynchronous race/quota
-qualification remains in E05.05. Stale in-memory preparations may be evicted, but
+Safe orphan reconciliation is installed. Stale in-memory preparations may be evicted, but
 possibly referenced blobs are retained. Large invocation audit records can still retain the original
 outcome; this change removes large payloads from job results, not all historical
-copies. General model-visible availability remains gated on authoring qualification.
+copies.
 
 Cancelling a provisional ticket releases capacity immediately and preserves a
 cancelled record for the owner's eventual `Pending(Job(id), acknowledgement)`.
@@ -2233,14 +2230,13 @@ This does not cancel unrelated work that the subscription may be watching.
 Subscription-backed waits release worker capacity and survive daemon restart
 without rerunning the creating handler. The host expiry sweep also runs after
 an overdue restart without calling the handler. Transactional timer linkage and
-automatic model notification remain separate integration work.
+model notification use the distinct subscription and delivery services.
 
 The qualified daemon tests exercise these functions through normal model tool
 dispatch, persisted invocations, native file reads and real worker scheduling.
 They also cover nested one-off launches, selected-tool confinement, cancelled
-ticket inspection and rejection of an invalid initial acknowledgement. General
-feature advertisement still waits for A01; these tests use the internal qualification
-option and simulated model streams, with no live provider requests.
+ticket inspection and rejection of an invalid initial acknowledgement. Providers
+are simulated; the public source-bundle tests also exercise default host services.
 
 The X03 shell fixture now exercises a real bounded shell process behind a
 moderator-owned `Pending` acknowledgement. The root finishes that turn and handles
@@ -2249,8 +2245,9 @@ stderr and exit status. Job cancellation and session stop reap the actual proces
 an external mutation made before cancellation remains visible. Restart reports an
 interrupted attempt and does not rerun the helper or duplicate that mutation.
 Its script tool reads `work.sh` from the configured `tool_dir`; arbitrary shell
-path arguments are not implicitly copied into the prompt artifact. Correlated
-completion notification and wake-up remain the separate E06 part of X03.
+path arguments are not implicitly copied into the prompt artifact. Its moderator
+publishes a correlated completion notification and chooses whether to request a
+new turn separately from recording the result.
 
 After committing stop, the daemon excludes new runtime admission, cancels and
 joins background leases outside the runtime-owner mutex, then unloads before
@@ -2438,8 +2435,8 @@ wakes does not insert the original frames again. Unpublished notifications still
 insert their data once after compaction. Stale pre-compaction delivery proposals
 are rejected and prepared again against current state.
 
-Remaining composition qualification, approved completion/ingress adapters, broader
-lifecycle recovery and standalone local-host installation remain open. See
+Completion/ingress adapters and local-host installation use the same owned
+lifecycle and delivery services. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 
 ## Recovery classifications
@@ -2568,9 +2565,9 @@ effects. Later lifecycle interruption cases remain part of the recovery audit.
 
 ### Execution recovery
 
-These classifications define the execution-service recovery work. Record replay
-and local transaction deduplication are implemented; automatic reconciliation of
-all execution states is not yet available.
+These classifications define execution-service recovery. Record replay and
+local transaction deduplication preserve retained identities. Reconciliation
+does not resume a serialized stack or replay an uncertain external mutation.
 
 | Retained state | Required recovery action |
 |---|---|
@@ -2586,8 +2583,8 @@ all execution states is not yet available.
 
 Active and unresolved records must not be removed to meet a retention target.
 Notification text and delivery receipts have different lifetimes: compacting text
-does not clear the committed receipt. Full reset, shutdown and restart reconciliation
-are part of the remaining recovery implementation.
+does not clear the committed receipt. Reset retires old-generation authority;
+shutdown joins owned work and restart reconciles retained records before readiness.
 
 See the [protocol interfaces](protocol-types.md) for exact codecs and
 [session architecture](../lib/agent_session/architecture.doc.md) for actor APIs.
@@ -2634,8 +2631,8 @@ sources, instantiate ChatML modules, or invoke any tool.
 ## Parsed extension declarations
 
 The following declaration shapes are parsed, serialized and captured in pinned
-prompt artifacts. Runtime execution is implemented on internally qualified hosts;
-public authoring/helper rollout remains incomplete. Nonexecuting handler,
+prompt artifacts. The default daemon and embedded hosts install extension runtime
+services subject to their supported capabilities. Nonexecuting handler,
 entrypoint, schema and effective-capability checks run through the preparation
 APIs below before the owning host exposes a matching dispatcher.
 
@@ -2676,8 +2673,8 @@ An authoring policy is a single top-level declaration:
 
 `auto` and `manual` reject a `topics` attribute. `preload` requires a nonempty,
 unique whitespace-separated topic list. The admission planner described below
-checks topic existence and helper dependencies; full context insertion and public
-helper exposure remain unfinished. Hosts without extension qualification reject
+checks topic existence and helper dependencies; the installed authoring service
+materializes guidance according to that policy. Hosts without extension services reject
 these declarations instead of silently ignoring them. Ordinary inline
 `uses`/`authoring_context` markup remains text outside its declaration scope.
 
@@ -2761,7 +2758,7 @@ expose transcript items, credentials, filesystem handles or callable OCaml value
 including each name produced by MCP discovery, and offers a lazy capability registry.
 The registry includes the configured host resource/manifest/policy fingerprint and
 the actual provider descriptor. Descriptors are checked as bounded valid JSON;
-this does not yet compile their schema keywords or validate invocation arguments.
+schema compilation and argument validation occur in the owning invocation path.
 
 Selecting a list of names returns a subset of those same bindings. Empty selects
 none; duplicate or unavailable names reject. Selection cannot install another
@@ -2800,14 +2797,14 @@ cases plus `Tool_invoked`, `Job_completed`, `Subscription_expired` and a JSON
 Native delivery must validate the work kind and ownership before constructing them.
 
 The new `Invocation.resolve(id, outcome)` builtin constructs a task; it does not
-resolve an invocation merely by being called. Transactional resolution, ownership
-checking and handler dispatch are still being implemented.
+resolve an invocation merely by being called. The moderator handler must execute
+that task; ownership, outcome validation and the state/result commit then apply.
 
 For this API, `Runtime.emit` and `Schedule.after_ms` accept JSON payloads only.
 Their tasks use the distinct host operation names `Runtime.emit_json` and
 `Schedule.after_ms_json`. Host adapters must deliver these payloads inside
 `Internal_event`; an object with a `type` field naming a native event remains data.
-The adapters are not implemented yet. Keeping the operation names distinct prevents
+Keeping the operation names distinct prevents
 a host from accidentally routing the new contract through a legacy handler that
 accepts arbitrary event constructors. Existing legacy emit/timer behavior is unchanged.
 
@@ -2834,7 +2831,8 @@ cycles first. `prepare_in_domain` preserves those checks and uses the separate
 compiler domain for typechecking. Public generated-definition validation must
 combine the strict bundle parser, inherited-authority checks and this bounded
 compiler path; runtime registration must use the prepared value before exposing a
-handler. Runtime execution integration remains open.
+handler. The default runtime builder performs that integration; custom hosts must
+provide the same admission and execution services.
 
 `prepare_definition_in_domain` validates the whole parsed extension definition.
 It reuses the parser's declaration-registry checks for duplicate IDs, handler kinds,
@@ -2958,10 +2956,10 @@ Validation diagnostics identify the `source`, `tools` or `limits` request field.
 Parser/type failures retain their original span against the submitted source hash;
 `one-off-<hash>.chatml` is a logical source label, not a file to load. Errors without
 a compiler location retain whole-source provenance. This API provides static
-preparation for the future run/authoring tools; it does not expose `run_chatml` or
+preparation for the run/authoring tools; it does not itself expose `run_chatml` or
 borrow execution authority. The owned execution service is described below.
-Public registration, remaining host integrations and authoring-context/helper
-installation remain required.
+Public registration and authoring-context/helper installation are supplied by
+the default extension runtime; custom hosts must provide their own services.
 
 ## Standalone execution primitives
 
@@ -3083,7 +3081,7 @@ an explicit host callback; the daemon's qualification path uses captured script
 limits with the execution service's default allocation budget. Standalone tools
 can run without a moderator or alongside an extensibility-v1 moderator. Combining
 them with a legacy moderator is currently rejected before legacy initialization.
-The normal daemon feature flags remain disabled pending authoring qualification.
+The default daemon and embedded hosts advertise their installed extension capabilities.
 
 With a moderator, nested native calls pass through actor-owned `Pre_tool_call`
 events. Their runtime requests join the standalone dispatch result, including a
@@ -3100,9 +3098,9 @@ more native effects or another provider request. Runtime-builder fixtures exerci
 this alongside concurrent fresh globals, nested pre rejection, permitted file
 argument rewriting and standalone execution without a moderator.
 
-The public one-off `run_chatml` tool, generalized extension-to-extension selection,
-effective budget/deadline projection and remaining authoring/qualification work
-still belong to E04 and A01; this installation does not complete those phases.
+The public one-off `run_chatml` tool uses these primitives with selected
+extension-to-extension calls, effective budget/deadline projection and the
+installed authoring services described below.
 
 The actor suite is organized in [focused test modules](../../test/agent_session/README.md),
 with shared fixtures and the retained `@test/runtest-agent_session_test` entrypoint.
@@ -3249,8 +3247,8 @@ Construction binds the actual native registry first, then installs the one-off
 service resolver before deferred moderator activation or model execution. A
 one-off-only document needs no moderator. Combining this tool with a legacy
 moderator is rejected before initialization; coordinated moderation requires the
-versioned extensibility interface. Ordinary hosts still reject the declaration,
-and the daemon's qualification flag remains disabled by default until A01.
+versioned extensibility interface. Hosts without the required extension services
+reject the declaration; the default daemon and embedded hosts provide them.
 
 The executable source bundles in
 `test/chatml_extensibility_fixtures/x01-report/` and `x04-standalone/` exercise
@@ -3261,8 +3259,8 @@ performs two selected reads, validates input/output, and initializes mutable
 globals independently for calls submitted in the same provider batch. Neither
 example needs a moderator or creates another session. Their offline provider
 uses the ordinary tool-call/continuation pair; executing the scripts adds no
-model request. The asynchronous X04 variant remains part of background-work
-qualification. Run `dune build @test/chatml_composition/runtest` for these cases.
+model request. The asynchronous X04 variant also exercises independently completing
+background work. Run `dune build @test/chatml_composition/runtest` for these cases.
 
 `Native_tool_moderation` carries the owning invocation's pre-tool callback and
 observer through synchronous nesting. Its callback expires with its lexical scope;
@@ -3367,8 +3365,8 @@ Offline actor tests execute `run_chatml → root → leaf → read_file`, repeat
 to prove fresh globals, and reject direct access to the private dependency. Cases
 cover denied permissions, dependencies revoked during authorization, pre-tool
 rejection, invalid output and nested depth limits. They inspect persisted outcomes
-and canonical history. General model-visible availability remains gated on A01;
-full E04 qualification remains separate work.
+and canonical history. Default-host source bundles exercise the same path with
+the installed authoring helpers.
 
 ### Nested moderator-handled tools
 
@@ -3446,9 +3444,9 @@ The resulting plan can request a missing automatic primer or identify missing
 preloaded topics. Manual policy requests neither. Partial topics, rediscovery
 pointers and authored prose cannot satisfy complete installed guidance. These
 hooks perform no retrieval, tool calls, context insertion or model scheduling.
-The A01 integration still owns the compatible corpus, bounded retained pointer
-index, exact topic-version selection, budget accounting and refresh at model-input
-boundaries. This foundation does not enable authoring features for general use.
+The installed authoring service supplies the compatible corpus, bounded retained
+pointer index, exact topic-version selection, budget accounting and refresh at
+model-input boundaries. These planning hooks alone grant no authoring capability.
 
 ### Registration and policy selection
 
@@ -3618,9 +3616,9 @@ Same-named tools with changed configuration and stale live references are reject
 The creation coordinator must reserve/protect the artifact before installation and
 persist the capability pins in its host-owned delegation record. The artifact is
 not an execution grant. Parent identity/generation, live policy and revocation,
-stateful moderator mediation, child lifetime and staged session creation are
-separate E08 integration responsibilities. This API does not yet create a child
-session or enable a model-visible creation tool.
+stateful moderator mediation, child lifetime and staged session creation belong
+to the creation coordinator. The artifact API alone creates no session; the
+`agent_create` tool invokes the complete admitted coordinator.
 
 ### Durable creation reservations
 
@@ -3765,8 +3763,8 @@ authoring quality.
 The builder is an internal runtime component, not the child-creation service.
 The owning coordinator must still authorize model availability, mediate current
 parent restrictions, keep inherited resources alive, persist the management link,
-and coordinate creation, stop and recovery. General model-visible exposure remains
-gated on authoring-support qualification.
+and coordinate creation, stop and recovery. The default durable host's creation
+service performs these steps and installs compatible authoring guidance.
 
 ### Generated session identity and checkpoint references
 
@@ -3871,8 +3869,8 @@ The qualified factory accepts explicit `Independent` lifetime with a trusted
 `independent_lifetime_policy` revision configured by its host. It records a digest
 of that grant and checks the current grant on restore and invocation. The default
 remains `Owned`; absent authorization rejects independent creation. Creation needs
-an active parent through the durable linking checkpoint. General model-facing
-creation remains separate work.
+an active parent through the durable linking checkpoint. The model-facing creator
+uses that same service and cannot grant itself Independent authority.
 
 The independent-authority tests use real private ledger records with trusted host
 states. They cover stopped ancestry, owned peers/descendants, grant changes during
@@ -4161,7 +4159,7 @@ integration command is the local `/bin/echo`.
 
 The same direct-shell and private standalone-to-shell checks run with Independent
 lifetime and a stopped original parent. Approval provenance and grant reuse remain
-with the calling child after resources are reconstructed. The future public
+with the calling child after resources are reconstructed. The public
 session/helper bridge has separate service and authorization requirements.
 
 ### Durable delegated moderator handoffs
@@ -4232,8 +4230,9 @@ before admission, and argument changes retain it. It is an owned candidate ident
 not proof that the invocation has already committed. Reused provider item/call IDs
 in later turns do not collapse distinct history entries into one invocation.
 
-Invalid and previously rejected calls skip host preparation. Transient fork
-requests cannot use this persisted-owner hook. With the hook installed, admission
+Invalid and previously rejected calls skip host preparation. Temporary built-in
+forks apply preparation through their active parent's verified branch dispatcher.
+With the hook installed, admission
 and execution must use an owned dispatcher; a redirect cannot fall back to a legacy
 runner. The existing final-target schema, binding, permission and disclosure checks
 still apply. Preparation exceptions become bounded pre-tool failures, while
@@ -4362,8 +4361,8 @@ the same child IDs after two daemon restarts, then starts/sends through the publ
 session APIs and executes inherited recursive scripts. These tests qualify normal
 creation and retained retry behavior, including rejection after archive/removal.
 The qualified native creator described below exercises this service through model
-and nested script invocation. Public session management tools and the external
-helper bridge remain separate work. Abandoned unreferenced source artifacts use the startup
+and nested script invocation. Public session management tools and the optional
+scoped helper bridge use the same services. Abandoned unreferenced source artifacts use the startup
 collection protocol described above; creation records are retained.
 
 ### Qualified native creator invocation
@@ -4421,8 +4420,8 @@ Status reports lifecycle, current operation ID/kind/state and the count of pendi
 permissions. It omits transcript, tool arguments, failure text and permission
 details. Inspection does not resolve approvals or start a stopped child. An idle
 session does not establish completion of a particular submitted message. This is
-part of the qualified management service. Wait/stop tools and the public
-helper bridge are still being implemented.
+part of the shared management service used by the lifecycle tools and optional
+scoped helper bridge.
 
 ### Managed submission receipt foundation
 
@@ -4506,7 +4505,7 @@ This preserves large responses without truncation. A ceiling too small to fit
 metadata or make fragment progress returns an error. Caught-up status describes
 this snapshot and does not imply that the child or selected operation has ended.
 
-### Managed child waits (implementation in qualification)
+### Managed child waits
 
 On internally qualified durable hosts, `<tool name="agent_wait"/>` uses the same
 management authority as read/send. Supply `session_id` and a specific target:
@@ -4541,7 +4540,7 @@ retention gaps retain explicit `agent.wait.cursor_expired` or
 `agent.wait.snapshot_required` errors with `snapshot_required: true`; a changed
 child generation during a wait also requires a new snapshot. After host restart,
 durable receipts remain queryable while process-bound cursors must be refreshed.
-This path remains internally gated pending the complete authoring-guidance phase.
+An explicit `agent_wait` declaration selects this service on a supported host.
 
 ### Managed child stop admission
 
@@ -4577,7 +4576,7 @@ Authority is checked before target access and again before receipt/status disclo
 `managed_stop_max_count` defaults to `Some 4096`; trusted hosts can set `None` for
 unrestricted receipt admission. Existing retry identities remain usable at capacity
 and are not automatically expired into repeatable effects. Older checkpoints without
-stop receipts migrate to schema 17, while an older schema tag carrying stop receipts
+stop receipts migrate to the current schema, while a pre-schema-17 tag carrying stop receipts
 is rejected. Administrative replacement retains immutable retry identities.
 
 Graceful completion uses a non-adopting final safe point: deferred user input and
@@ -4627,12 +4626,11 @@ grants. The actual caller's borrow and existing services are acquired at dispatc
 and the helper has no operator token or control-socket lookup. Grant policy identity
 participates in authored resource fingerprints and resource-only reconstruction,
 so an older delegated binding cannot silently acquire widened helper services.
-The complete moderator-handled helper/subscription compositions remain E09/E10
-qualification work; ordinary same-user Unix CLI access is
-not a substitute for a constrained helper identity. General exposure remains
-gated until A01.
+The complete moderator-handled helper/subscription source bundles exercise this
+path. Ordinary same-user Unix CLI access is not a substitute for a constrained
+helper identity.
 
-### Authored agent-tool persistence contract (implementation in progress)
+### Authored agent-tool persistence contract
 
 The parser now accepts author-controlled policies:
 
@@ -4745,8 +4743,8 @@ reconstruction uses the same preparation path and selects authored or generated
 restoration from the private ledger origin. It verifies authored artifacts and
 private resource pins without restarting an ancestor's conversation or moderator.
 
-Public availability remains gated. Broader lifecycle/bridge qualification and
-authoring guidance remain unfinished.
+Authored persistence is available through explicitly configured named tools,
+with installed authoring guidance and the shared lifecycle/helper services.
 Partial-creation reconciliation selects the authored artifact and private bindings.
 The offline crash matrix now interrupts actual native authored calls at reservation,
 partial artifact write, artifact admission, partial child snapshot, child admission,
@@ -4762,7 +4760,8 @@ allowing ordinary error unwinding and cleanup before restart. The caller receive
 persistence failure without submitting child work. A fully admitted persistent child
 can remain available, while a one-off cannot retain loaded execution resources after
 the failed invocation. Both cases preserve the failure and creation identity across
-two restarts. These tests do not yet qualify concurrent retries of the same call.
+two restarts. Concurrent invocation behavior is covered by the separate pending
+response and creation-ledger fixtures described next.
 The pending-response daemon fixture issues two native specialist calls in the same
 turn and verifies that both children start before either call completes. Each
 call returns its own durable session ID, receipt and pending output page at the
@@ -4782,8 +4781,8 @@ native lifecycle registrations absent. A read-only helper can inspect that child
 but cannot send work; a foreign caller cannot read it. Denials and retries leave
 child state unchanged. Results remain readable after editing the live specialist
 source and restarting the daemon, without restarting the stopped child or calling
-its provider. This qualifies interoperability at the internally enabled host
-scope; installed authoring guidance and public exposure remain separate work.
+its provider. Default-host helper and source-bundle fixtures additionally qualify
+this path with installed authoring guidance.
 The composition tests use real actor scopes with recording service callbacks;
 source and ledger tests use actual artifact and ledger persistence. The daemon
 fixture now exercises actual named-tool creation, continuation, separate instances,
@@ -4883,8 +4882,8 @@ An authorized explicit start reconciles and joins old child work before runtime
 loading. The actor then checks the parent acknowledgement expected by that prepared
 start. A newer stop rejects a stale start; repeated callbacks for an already handled
 parent epoch leave a subsequently restarted child unchanged. Independent children
-are outside owned stop propagation; their executable ownership support remains a
-separate unfinished feature.
+are outside owned stop propagation. They retain independently reconstructed
+resources and remain subject to their current host grant and inherited authority.
 
 The offline crash fixture creates a real root/child/grandchild tree, kills the
 process after the parent's stop journal sync, and interrupts recovery twice more:

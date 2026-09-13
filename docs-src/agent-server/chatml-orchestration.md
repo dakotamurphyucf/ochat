@@ -8,9 +8,12 @@ for a completion or timer.
 
 See the [moderator language/runtime reference](../guide/chatml-moderator-runtime.md)
 for full builtin signatures, event constructors, task syntax and helper modules.
-The agent host has durable model jobs and protocol-level job inspection and
-cancellation. Generic tool/script job execution is still being integrated;
-the current agent-host `Tool.spawn` callback is not configured.
+The agent host has durable model, tool and script jobs with inspection and
+cancellation. On the extensibility-v1 surface, `Job.start_tool` and
+`Job.start_script` stage owned background work; `Tool.spawn` uses the same
+transactional job-start path. See the
+[background workflow guide](../guide/chatml-authoring-background.md) for
+acknowledgement, completion and notification patterns.
 
 ## Async work and timers
 
@@ -52,8 +55,11 @@ guaranteed to have an interactive approval widget or local TUI callback.
 
 The extensibility-v1 [event ownership and persistence internals](extensibility-foundations.md#actor-and-worker-handoff)
 describe the separate queued-event receipt, actor borrow and checkpoint handoff.
-That internal path is still being integrated; new model-visible extension tools
-remain disabled pending runtime and permission qualification.
+The default daemon and embedded runtime install this path. Tools remain selected
+by their ChatMD declarations, and execution still requires the host's permissions.
+Embedded work ends with its hosting process; a durable data directory alone does
+not provide detached execution. Transient local hosts reject persisted child
+creation explicitly.
 
 Instruction helpers retain compatibility names but construct developer messages:
 `Item.system_text`, `Turn.prepend_system`, notice helpers, and

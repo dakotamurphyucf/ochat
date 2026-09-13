@@ -18,15 +18,13 @@ the source inventory; adding a maintained reference requires updating that list.
 Format version 3 assigns each document a SHA-256 digest of its exact bytes, each
 compiler surface a digest of its structural inventory, and each grammar
 production a digest of its left/right symbols and semantic action. It also records
-build-time hashes of seven language implementation sources: the lexer, parser,
-type checker, resolver, evaluator, runtime values and value codec. Thirty-three further
-source hashes cover reviewed ChatMD declarations, source capture, generated
-admission, authoring policy, authored persistence and root capability/resource
-contracts. Thirty-four
-additional sources cover native computation/validation/reference adapters,
-captured child creation, delegated authority and managed lifecycle operations.
-The native taxonomy uses 35 sources including the already captured generated
-admission implementation; there are 74 distinct implementation hashes. The bundle
+build-time hashes of the reviewed lexer, parser, type checker, resolver, evaluator,
+runtime values and value codec. Additional source hashes cover ChatMD declarations,
+source capture, generated admission, authoring policy, authored persistence,
+resource contracts, native adapters, child lifecycle, helper authority and
+background runtime semantics. Some sources participate in more than one review
+inventory; `implementation_sources` and the generated manifest give the exact
+distinct list for the installed version. The bundle
 identity hashes the format version and sorted document, surface, production and
 implementation contracts. Changing any of these inputs changes the source
 identity. The structural `manifest` exposes these hashes without repeating
@@ -53,8 +51,9 @@ them does not enable experimental features or mark their examples qualified on
 every host. Custom conventions must not replace official semantics.
 
 [Topic assembly](authoring-topic-corpus.md) builds source-pinned fragments and
-prerequisite closures on this bundle; complete task packages and service policy
-remain separate work.
+prerequisite closures on this bundle. The
+[authoring context service](authoring-context-tool.md) adds complete task packages,
+capability filtering, paging, budgets and context materialization.
 
 The [offline executable fixture](../../test/authoring_sources/offline.ml)
 runs from `/`, outside the checkout, and retrieves the embedded references and

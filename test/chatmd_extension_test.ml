@@ -128,6 +128,8 @@ let%test_unit "strict binding and capability errors are rejected before dependen
       ; {|<tool name="bad" type="chatml" script="x" entrypoint="wrong" input_schema="schema.json" output_schema="schema.json"/>|}
       ; {|<tool name="bad" type="chatml" script="x" entrypoint="run" input_schema="schema.json" output_schema="schema.json"><uses tool="read_file"/><uses tool="read_file"/></tool>|}
       ; {|<tool name="bad" type="moderator" moderator="x" input_schema="schema.json" output_schema="schema.json"><uses tool="read_file"/></tool>|}
+      ; {|<script id="worker" language="chatml" kind="tool" src="tool.chatml">let run ctx input = Task.pure(`Complete(input))</script>|}
+      ; {|<script id="worker" language="chatml" kind="moderator" api="extensibility-v1" src="tool.chatml">let initial_state = 0</script>|}
       ]
       ~f:(fun text -> assert (rejected (fun () -> parse ~source_loader:loader dir text)));
     assert (!reads = 0))
