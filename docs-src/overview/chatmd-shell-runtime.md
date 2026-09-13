@@ -1,16 +1,36 @@
 # ChatMD shell runtime reference
 
-Host integration: see [native/legacy/daemon authorization and administration](../guide/chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` authorizes a reviewed prompt in native
-`--local` or legacy interactive TUI mode; it is not a daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 ChatMD can describe a complete shell-capable agent runtime without custom
 OCaml code. A document may declare process authority, executable resolution,
 sandboxing, command policy, approvals, reviewers, interceptors, limits,
 environment values, secret redaction, and audit behavior. Ochat compiles those
 declarations before it exposes any shell tool to a model.
+
+Use a runtime to give related tools a reusable set of capabilities and guardrails.
+For example, inspection can read the project while a separate test runtime may
+write build output. A third tool can require approval before saving a report.
+Start with [the guardrails lesson](../tutorials/shell-guardrails.md), then inspect
+the complete [engineering assistant](../applications/guarded-engineering.md).
+
+| Configuration | What it lets you decide |
+| --- | --- |
+| Shell tool bound to a runtime | Which useful action the agent can request and its input/output shape |
+| Executable resolution and environment | Which program runs and which configured environment it receives |
+| Filesystem and network capabilities | Which boundaries are requested from the selected confinement backend |
+| Policy and approvals | Which commands proceed, need review or are denied |
+| ChatML hooks and reviewer agents | Which project-specific decisions or transformations happen within that authority |
+| Limits, redaction and audit | How work is bounded and how its results and decisions are recorded |
+
+These layers work together. A schema describes accepted data; it does not grant
+file access. A reviewer can refine a decision within the authorized configuration;
+it cannot create stronger authority. Required confinement fails when a suitable
+backend is unavailable.
+
+For startup, follow [host authorization and administration](../guide/chatmd-shell-host-integration.md).
+Native `--local` and legacy interactive TUI modes accept
+`--authorize-shell-manifest` for a reviewed prompt. Daemon setup uses its host
+configuration. Declaration syntax is shared; permission profiles, approval
+delivery and persistence owners are host-specific.
 
 This page is the language and lifecycle reference. Related pages provide more
 focused guidance:

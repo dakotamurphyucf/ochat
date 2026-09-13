@@ -40,4 +40,12 @@ Open the saved ChatMD transcript and check citations against the source notes.
 Do not treat a fluent synthesis as independent verification. A specialist can
 review attribution or missing evidence using the [agent composition pattern](../tutorials/specialist.md).
 
+## Keep specialists working on the investigation
+
+The supplied-notes example is a focused synthesis, not an autonomous research
+service. Adapt the [persistent review team](persistent-review-team.md) when you
+need separate perspectives and follow-up conversations. For responses delivered
+later, study the [documentation lab's response watcher](documentation-lab.md).
+Choose and delegate the research tools each specialist actually needs.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

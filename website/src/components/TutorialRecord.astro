@@ -2,6 +2,7 @@
 import applications from '../../.generated/applications-report.json';
 import report from '../../.generated/examples-report.json';
 import ExampleSource from './ExampleSource.astro';
+import VerificationDetails from './VerificationDetails.astro';
 const tutorial = report.tutorials.find((t) => t.route === Astro.url.pathname);
 const application = applications.applications.find(
   (a) => a.route === Astro.url.pathname,
@@ -47,26 +48,7 @@ const examples = application
             ? 'checked offline'
             : tutorial.verification.state.replaceAll('-', ' ')}
         </summary>
-        <p>{tutorial.verification.scope}</p>
-        <p>{tutorial.verification.limitations}</p>
-        <p>
-          {tutorial.verification.testedAt} · {tutorial.verification.platform} ·{' '}
-          {tutorial.verification.toolchain}
-        </p>
-        <p>
-          Base revision <code>{tutorial.verification.baseRevision}</code>.
-          Checks apply to the recorded source hashes, including local edits.{' '}
-          {tutorial.verification.liveProvider
-            ? 'Includes recorded provider work.'
-            : 'No live provider calls.'}
-        </p>
-        <ul>
-          {tutorial.verification.commands.map((command) => (
-            <li>
-              <code>{command}</code>
-            </li>
-          ))}
-        </ul>
+        <VerificationDetails verification={tutorial.verification} />
       </details>
     </aside>
   )

@@ -5,6 +5,11 @@ workflows visible learning destinations. Previously, substantial runtime feature
 were documented in references while the connected tutorials mainly introduced
 small examples and transport setup.
 
+The learning paths, three complete applications and presentation/reference work
+are implemented locally. The final reader-journey and release-artifact audit is
+still in progress. Sections below retain the evidence from each implementation
+checkpoint; their historical next-step statements are not the current status.
+
 ## Navigation and source ownership
 
 The public sidebar now groups pages into Start here, Tools and shell access,
@@ -517,3 +522,86 @@ assertions were disabled and CI trace defaults remain unchanged. Contributor
 guidance now documents the feature-to-application path, complete bundles, readable
 source and truthful verification. Reference formatting, evidence presentation
 and final reader-journey qualification remain separate outstanding D05/D06 work.
+
+## D05 — Reference presentation and evidence
+
+Shell references now begin with useful capabilities and a configuration map.
+The extension index explains when matchers, deterministic/model reviewers,
+interceptors, effect analysis and audit filtering help. The 17 declaration
+patterns remain available, grouped by purpose and linked to complete projects.
+Host authorization details have one primary home, with concise links from the
+other introductions. Tool schemas remain explicitly distinct from authority.
+
+The six earlier application pages now lead to substantial variants. The README
+links the implemented lab, engineering assistant and review team. Human reference
+introductions lead to complete learning steps, while installed authoring guidance
+retains its model-facing purpose. Delegation and conversational/unattended
+coordination diagrams make session identity, workflow ownership and lifecycle
+differences visible. The sidebar avoids a redundant Reference-within-Reference
+disclosure without moving public URLs.
+
+Language examples and the X01–X04 runtime examples have clearer function, match
+and record spacing. The runtime fences remain exact copies of their maintained
+fixtures, and the lab coordinator retains the same non-whitespace source. Source
+review and compilation accompany this formatting: reviewed excerpt/topic hashes
+were updated, with unchanged compiler contracts. Topic hashes include their
+document dependencies, so language formatting also changes some grammar,
+semantic, declaration and native-request coverage pins; this is not a change to
+those runtime contracts.
+
+Verification panels now distinguish **current check status** from **recorded
+evidence**. Earlier observations, limitations and commands remain readable when
+a revision changes. The existing conservative rule still marks the current
+status unverified if the revision, required source coverage or recorded hashes
+do not match. Matching example files alone does not requalify the current runtime.
+The lab's changed coordinator hash was recorded only after its affected runtime
+scenarios and extracted-bundle check/stage/recheck passed.
+
+### Existing-page review
+
+This table records the disposition of the approved existing-page checklist;
+the final D06 reader-journey and release-artifact audit remains separate.
+
+| Existing source or family | Result and evidence location |
+| --- | --- |
+| `Readme.md` | Correct application URL, linked human feature choices, authentic introductory agent, and direct links to the three implemented applications. |
+| `docs-src/README.md` | Capability composition, three feature paths, beginner/reference choices and complete applications. |
+| `docs-src/chatmd/README.md` | Instructions/tools/imports/scripts/host distinctions and a direct complete engineering root link. |
+| `docs-src/overview/tools.md` | Built-in, shell, agent, standalone, moderator-handled and MCP tool comparison, followed by exact declarations. |
+| `docs-src/chatml/README.md` | Execution choices, participant responsibilities, paired coordinator diagrams, practical lessons and separate implementation references. |
+| `docs-src/shell/README.md` | Useful capability/runtime explanation, guardrails/custom-review progression and complete engineering/lab links. |
+| Shell-agent tutorial | Fixed useful Lantern inspection, complete bundle, native authorization, backend prerequisites and onward guardrails lesson. |
+| Shell runtime/tool references | Configuration map, structured inputs, named runtime binding and retained exact sections. |
+| Shell extension/pattern references | Practical extension index, all 17 patterns and explicit complete-versus-partial setup. |
+| Shell host/security/persistence guides | Correct native/legacy/daemon authorization, linked process-resource setup, actual confinement and audit contracts; repeated host boilerplate removed. |
+| File-tool and specialist tutorials | Shared Lantern sample, bounded read authority and direct shell/persistent/optional/generated choices. |
+| Workflow tutorial | Readable three-turn source, event/task explanation and onward stateful/background paths. |
+| Batch/local/Unix/stdio/HTTP tutorials | Existing routes and explicit setup/lifetime qualifications retained; curriculum assigns operating/client branches independently of advanced authoring. |
+| Background timer tutorial | Minimal timer purpose remains explicit; direct link to useful background results and daemon lifetime explanation. |
+| Authoring primer | Website-only human framing and navigable topic references; installed primer remains model-facing. |
+| Authoring language/runtime | Human lesson links, readable checked programs and exact execution/state/outcome contracts. |
+| Authoring children | Human delegation entry links into persistent/generated tutorials. Exact captured JSON, start state, IDs, receipts and inherited authority remain in the reference. Embedded source stays valid JSON; complete human-readable templates are in the linked source bundles. |
+| Authoring background | Reformatted exact X03 coordinator, useful background lesson and lab links; polling distinguished from native subscriptions. |
+| ChatMD authoring definitions/capabilities | Human example/guardrails framing, with exact static-versus-generated declaration and delegation contracts retained. |
+| Native requests/authoring context | Complete team/generated-specialist framing, strict request examples and documentation-discovery purpose. |
+| Agent-host orchestration | Outcome-oriented introduction, script-form/team/lab links and exact supported host behavior. |
+| Agent operations/configuration/security | Host lifetime, shutdown/recovery, child exposure, bootstrap grants and disconnected approval behavior remain beside setup and operation contracts. |
+| Example index | Learning steps, complete applications and advanced fixture recipes are distinguished; inline reader and exact archive instructions match the UI. |
+| Application index and six earlier pages | Three complete compositions featured, earlier scopes preserved, and task-specific onward links added. |
+
+Local runtime qualification for this presentation batch includes five X01/X04
+scenarios, the X02 concurrent-state/restart scenario, six affected X03/lab
+scenarios and the full authoring-source suite. The canonical gate checks 361
+pages and 39 methods. Website validation passes 83 tests with zero Astro
+diagnostics across 112 files, and the build validates 165 HTML pages and 859
+files. These are deterministic/offline checks on macOS; no provider quality,
+Linux execution or hosted deployment is claimed.
+
+The final affected browser run passes 154 cases across Chromium, Firefox and
+WebKit, with two existing Chromium-only clipboard skips. It covers all lessons,
+complete source archives, no-JavaScript reading, keyboard/file selection,
+wrapping, article width and current-versus-recorded verification panels. Actual
+desktop/mobile review renders all three new decision diagrams and confirms the
+evidence panel's text spacing. Diagrams retain their existing bounded scroll
+region and source fallback on narrow screens. Local runs use `--trace=off` to
+avoid large-catalog snapshot overhead; CI tracing and assertions are unchanged.

@@ -1,11 +1,5 @@
 # ChatMD shell runtime examples
 
-Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` authorizes a reviewed prompt in native
-`--local` or legacy interactive TUI mode; it is not a daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 These declaration patterns illustrate complete use cases, but many are partial
 deployment inputs with external files, hashes or platform prerequisites. They are
 not seventeen ready-to-run scripts. The documentation checker parses every XML
@@ -16,6 +10,17 @@ Start with the complete [inspection](../agent-server/tutorials/shell-agent.md),
 [custom decisions](../tutorials/shell-customization.md) projects for runnable
 sources and exact startup instructions. Replace illustrative paths/hashes
 and inspect every full manifest before authorizing it.
+
+Read them by the task you want to customize: patterns 1–4 cover useful command
+access; 5, 6, 8 and 9 customize decisions, transformations and auditing; 7 covers
+network access and redaction; 10 shares an imported runtime; 11–14 cover execution
+environments; 15–17 show rejection and
+administrative boundaries. The [engineering assistant](../applications/guarded-engineering.md)
+combines interactive checks and report approvals. The
+[documentation lab](../applications/documentation-lab.md) uses a preauthorized
+staging command and background checks. Both are complete applications.
+Follow [host-specific authorization](chatmd-shell-host-integration.md) when
+running a reviewed configuration.
 
 | Example | Additional prerequisites / intended boundary |
 |---|---|

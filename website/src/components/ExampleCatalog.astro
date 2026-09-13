@@ -1,6 +1,7 @@
 ---
 import report from '../../.generated/examples-report.json';
 import ExampleSource from './ExampleSource.astro';
+import VerificationDetails from './VerificationDetails.astro';
 const labels = {
   complete: 'Complete source example',
   template: 'Configurable template',
@@ -107,22 +108,7 @@ const size = (n: number) =>
                         </li>
                       ))}
                     </ul>
-                    <p>
-                      <strong>{e.verification.state}</strong> ·{' '}
-                      {e.verification.scope}
-                    </p>
-                    <p>{e.verification.limitations}</p>
-                    <p class="verification-context">
-                      {e.verification.testedAt} · {e.verification.platform} ·{' '}
-                      {e.verification.toolchain}
-                    </p>
-                    <p class="verification-context">
-                      Base revision <code>{e.verification.baseRevision}</code>;
-                      exact source hashes above.{' '}
-                      {e.verification.liveProvider
-                        ? 'Includes recorded provider work.'
-                        : 'No live provider calls.'}
-                    </p>
+                    <VerificationDetails verification={e.verification} />
                   </details>
                 )}
               </article>
@@ -251,10 +237,6 @@ const size = (n: number) =>
     overflow-wrap: anywhere;
     white-space: normal;
     margin-top: 0.4rem;
-  }
-  .verification-context {
-    font-size: 0.75rem;
-    overflow-wrap: anywhere;
   }
   @media (max-width: 55rem) {
     .example-grid {

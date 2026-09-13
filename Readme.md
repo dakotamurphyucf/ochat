@@ -421,15 +421,19 @@ ownership and restart behavior. Generated children select from the parent's
 delegable tools and retain their file and shell restrictions, while choosing
 their own instructions and model settings.
 
-One application is a **living documentation lab**: a coordinator assigns tutorials
+The complete [living documentation lab](https://ochatlabs.com/docs/applications/documentation-lab/)
+shows a coordinator that assigns tutorials
 to persistent reviewers, runs approved example commands as background jobs,
 collects failures, and asks a writer to propose corrections. A moderator tracks
 which checks and reviews are complete and delivers updates as results arrive.
-These are building blocks for your workflow; the lab itself is an application
-you can build with them.
+Its walkthrough includes the complete source, private host setup, staged rechecks
+and an evidence-linked report. Compare the
+[guarded engineering assistant](https://ochatlabs.com/docs/applications/guarded-engineering/)
+and [persistent review team](https://ochatlabs.com/docs/applications/persistent-review-team/)
+for smaller compositions you can adapt first.
 
 Start with the [ChatML workflow overview](docs-src/chatml/README.md) or inspect
-the [complete example bundles](test/chatml_extensibility_fixtures/README.md).
+the [complete example bundles](docs-src/examples/README.md).
 Authoring tools are opt-in through ChatMD declarations. By default, declaring
 tools such as `run_chatml` or `agent_create` also supplies a shared authoring
 primer and documentation/validation helpers; authors can choose manual guidance

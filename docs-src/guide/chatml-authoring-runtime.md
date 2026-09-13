@@ -85,23 +85,28 @@ contains the input reports and expected aggregate.
 <!-- ochat-authoring-example: {"id":"runtime.one-off.report","surface":"one_off_v1","fixture":"test/chatml_extensibility_fixtures/x01-report/aggregate.chatml"} -->
 ```ocaml
 (* read_file returns two metadata lines before the file body. *)
-let after_line text = match String.find(text, "\n") with
+let after_line text =
+  match String.find(text, "\n") with
   | `Some(index) -> String.slice(text, index + 1, String.length(text) - index - 1)
   | `None -> fail("expected a complete read_file response")
 
-let field text key = match Json.get_field(text, key) with
+let field text key =
+  match Json.get_field(text, key) with
   | `Some(`String(value)) -> value
   | _ -> fail("expected string field " ++ key)
 
 let add_failure groups check =
   if Array.exists(groups, fun group -> group.check == check) then
     Array.map(groups, fun group ->
-      if group.check == check then { check = check; failures = group.failures +. 1.0 }
+      if group.check == check then
+        { check = check; failures = group.failures +. 1.0 }
       else group)
   else Array.append(groups, [{ check = check; failures = 1.0 }])
 
-let add_report groups report = match report with
-  | `Array(checks) -> Array.fold(checks, groups, fun acc item ->
+let add_report groups report =
+  match report with
+  | `Array(checks) ->
+    Array.fold(checks, groups, fun acc item ->
       let status = field(item, "status") in
       if status == "failed" then add_failure(acc, field(item, "check"))
       else if status == "passed" then acc
@@ -110,7 +115,8 @@ let add_report groups report = match report with
 
 let rec read_reports files index groups =
   if index == Array.length(files) then Task.pure(groups)
-  else match files[index] with
+  else
+    match files[index] with
     | `String(file) ->
       let* result = Tool.call("read_file", `Object([
         { key = "root"; value = `String("reports") },
@@ -124,7 +130,8 @@ let rec read_reports files index groups =
         | `Error(code) -> Task.fail(code))
     | _ -> Task.fail("expected report filenames")
 
-let main input = match input with
+let main input =
+  match input with
   | `Array(files) ->
       let+ groups = read_reports(files, 0, []) in
       `Array(Array.map(groups, fun group -> `Object([
@@ -165,35 +172,42 @@ binds `compare_reports` to `compare.chatml`, its `run` entrypoint and the
 (* Each invocation must start with a fresh mutable global. *)
 let calls = [0.0]
 
-let field input name = match Json.get_field(input, name) with
+let field input name =
+  match Json.get_field(input, name) with
   | `Some(`String(value)) -> value
   | _ -> fail("expected a filename")
 
-let read file = Tool.call("read_file", `Object([
-  { key = "root"; value = `String("reports") },
-  { key = "file"; value = `String(file) }
-]))
+let read file =
+  Tool.call("read_file", `Object([
+    { key = "root"; value = `String("reports") },
+    { key = "file"; value = `String(file) }
+  ]))
 
 let run ctx input =
   let left = field(input, "left") in
   let right = field(input, "right") in
-  if left == right then Task.pure(`Fail({
-    code = "reports.same_file"; message = "Choose two different reports.";
-    retryable = false; details = `Null
-  }))
+  if left == right then
+    Task.pure(`Fail({
+      code = "reports.same_file";
+      message = "Choose two different reports.";
+      retryable = false;
+      details = `Null
+    }))
   else
     let ignored = calls[0] <- calls[0] +. 1.0 in
     let* first = read(left) in
     let* second = read(right) in
-      match first with
+    match first with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(left_text) ->
+      (match second with
       | `Error(code) -> Task.fail(code)
-      | `Ok(left_text) -> (match second with
-          | `Error(code) -> Task.fail(code)
-          | `Ok(right_text) -> Task.pure(`Complete(`Object([
-              { key = "invocation_count"; value = `Number(calls[0]) },
-              { key = "left"; value = left_text },
-              { key = "right"; value = right_text }
-            ]))))
+      | `Ok(right_text) ->
+        Task.pure(`Complete(`Object([
+          { key = "invocation_count"; value = `Number(calls[0]) },
+          { key = "left"; value = left_text },
+          { key = "right"; value = right_text }
+        ]))))
 ```
 
 The host validates input before calling `run`. Its context contains invocation,
@@ -242,28 +256,45 @@ type review = { revision : string; reference : string }
 
 let initial_state : review array = []
 
-let on_event = fun ctx state event -> match event with
-| `Tool_invoked(p) ->
-  (match p.context.tool_name with
-  | "begin_review" ->
-    let revision = match Json.get_field(p.input, "revision") with
-      | `Some(`String(value)) -> value
-      | _ -> fail("revision is required")
-    in
-    (match Array.find(state, fun review -> review.revision == revision) with
-    | `Some(review) ->
-      let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String(review.reference))) in
+let on_event = fun ctx state event ->
+  match event with
+  | `Tool_invoked(p) ->
+    (match p.context.tool_name with
+    | "begin_review" ->
+      let revision =
+        match Json.get_field(p.input, "revision") with
+        | `Some(`String(value)) -> value
+        | _ -> fail("revision is required")
+      in
+      (match Array.find(state, fun review -> review.revision == revision) with
+      | `Some(review) ->
+        let* () = Invocation.resolve(
+          p.context.invocation_id,
+          `Complete(`String(review.reference))
+        ) in
+        Task.pure(state)
+      | `None ->
+        let review = {
+          revision = revision;
+          reference = "review-" ++ to_string(Array.length(state) + 1)
+        } in
+        let* () = Invocation.resolve(
+          p.context.invocation_id,
+          `Complete(`String(review.reference))
+        ) in
+        Task.pure(Array.append(state, [review])))
+    | "double_resolve" ->
+      let* () = Invocation.resolve(
+        p.context.invocation_id,
+        `Complete(`String("first"))
+      ) in
+      let* () = Invocation.resolve(
+        p.context.invocation_id,
+        `Complete(`String("second"))
+      ) in
       Task.pure(state)
-    | `None ->
-      let review = { revision = revision; reference = "review-" ++ to_string(Array.length(state) + 1) } in
-      let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String(review.reference))) in
-      Task.pure(Array.append(state, [review])))
-  | "double_resolve" ->
-    let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String("first"))) in
-    let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String("second"))) in
-    Task.pure(state)
-  | _ -> Task.pure(state))
-| _ -> Task.pure(state)
+    | _ -> Task.pure(state))
+  | _ -> Task.pure(state)
 ```
 
 The normal `begin_review` path deduplicates by revision in moderator state.

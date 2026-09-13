@@ -50,7 +50,7 @@ need the additional host, backend, library, or connection setup described in the
 linked tutorial. **Illustrative output** is a reading sample, not executable input.
 
 On the website, expand **View source** in the catalog to read complete files with
-syntax highlighting. The entrypoint is shown first; expand other filenames to
+syntax highlighting. The entrypoint is shown first; select other filenames to
 inspect companion prompts, ChatML scripts, sample data, build files, and notices.
 The reader also works without JavaScript. Downloads provide exact-byte source
 files and complete `.tar` bundles. Extract a bundle into a new directory with `tar -xf FILE.tar`;

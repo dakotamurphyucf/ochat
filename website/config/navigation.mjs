@@ -67,7 +67,7 @@ export function buildSidebar(entries) {
       items: members.flatMap((member) => {
         const section = sections.find((section) => section.label === member);
         return section
-          ? members.length === 1
+          ? members.length === 1 || member === label
             ? section.items
             : [section]
           : [];

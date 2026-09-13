@@ -85,6 +85,41 @@ test('catalog distinguishes complete examples, configured templates and illustra
   }
 });
 
+test('verification retains earlier observations separately from current check status without JavaScript', async ({
+  browser,
+}) => {
+  await withNativeSourceReader(browser, async (page) => {
+    const tutorial = report.tutorials.find(
+      (item: { route: string }) => item.route === '/docs/tutorials/file-tool/',
+    );
+    await page.goto(tutorial.route);
+    await page.locator('.tutorial-record summary').click();
+    const evidence = page.locator('.tutorial-record .verification-evidence');
+    await expect(evidence).toContainText('Current check status:');
+    await expect(evidence).toContainText('Recorded evidence:');
+    await expect(evidence).toContainText(tutorial.verification.scope);
+    await expect(evidence).toContainText(tutorial.verification.observed);
+    await expect(evidence).toContainText(tutorial.verification.limitations);
+
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.goto('/docs/examples/#example-documentation-lab');
+    const application = report.examples.find(
+      (item: { id: string }) => item.id === 'documentation-lab',
+    );
+    const card = page.locator('#example-documentation-lab');
+    await card.locator('.source-details > summary').click();
+    const recorded = card.locator('.verification-evidence');
+    await expect(recorded).toContainText(application.verification.scope);
+    await expect(recorded).toContainText(application.verification.observed);
+    await expect(recorded).toContainText(application.verification.limitations);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
+});
+
 test('every served source file and archive matches the declared bytes and has a working download', async ({
   page,
   request,

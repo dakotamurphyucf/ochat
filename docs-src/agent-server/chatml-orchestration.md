@@ -1,5 +1,12 @@
 # ChatML orchestration in agent hosts
 
+Use host-backed orchestration to keep checks running after a client disconnects,
+collect specialist responses, or recover the records of interrupted work. Begin
+with the [script execution-form guide](../chatml/README.md) to choose a program,
+tool or moderator. The [persistent review team](../applications/persistent-review-team.md)
+shows session coordination; the [living documentation lab](../applications/documentation-lab.md)
+combines background checks, response polling and evidence-based rechecks.
+
 ChatMD declares the prompt/tools and optional moderator script. ChatML handles
 events and returns typed tasks through the shared moderation runtime. The daemon
 session actor/controller, not a connected TUI, owns semantic work and durable

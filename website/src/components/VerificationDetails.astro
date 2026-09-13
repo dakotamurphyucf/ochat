@@ -1,0 +1,70 @@
+---
+import type report from '../../.generated/examples-report.json';
+interface Props {
+  verification: Pick<
+    (typeof report.examples)[number]['verification'],
+    | 'state'
+    | 'recordedState'
+    | 'scope'
+    | 'observed'
+    | 'limitations'
+    | 'testedAt'
+    | 'platform'
+    | 'toolchain'
+    | 'baseRevision'
+    | 'liveProvider'
+    | 'commands'
+  >;
+}
+const { verification } = Astro.props;
+const label = (state: string) =>
+  state === 'offline-checked' ? 'checked offline' : state.replaceAll('-', ' ');
+---
+
+<div class="verification-evidence" data-pagefind-ignore>
+  <p>
+    <strong>Current check status: {label(verification.state)}.</strong>{' '}
+    {verification.scope}
+  </p>
+  <p>
+    <strong>Recorded evidence: {label(verification.recordedState)}.</strong>{
+      ' '
+    }
+    {verification.observed}
+  </p>
+  <p>{verification.limitations}</p>
+  <p>
+    {verification.testedAt} · {verification.platform} · {verification.toolchain}
+  </p>
+  <p>
+    Base revision <code>{verification.baseRevision}</code>. The record describes
+    its tested inputs, including any local edits captured by its hashes.
+    {
+      verification.liveProvider
+        ? ' Includes recorded provider work.'
+        : ' No live provider calls.'
+    }
+  </p>
+  <ul>
+    {
+      verification.commands.map((command) => (
+        <li>
+          <code>{command}</code>
+        </li>
+      ))
+    }
+  </ul>
+</div>
+
+<style>
+  .verification-evidence {
+    overflow-wrap: anywhere;
+    font-size: 0.85rem;
+  }
+  p {
+    margin-block: 0.75rem;
+  }
+  code {
+    white-space: pre-wrap;
+  }
+</style>

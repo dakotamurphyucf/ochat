@@ -1,14 +1,11 @@
 # ChatMD shell runtime security
 
-Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` authorizes a reviewed prompt in native
-`--local` or legacy interactive TUI mode; it is not a daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 This guide explains how ochat decides whether a shell request may run and what
 the operating system actually confines. It complements the
 [language reference](../overview/chatmd-shell-runtime.md).
+Start with the [guardrails lesson](../tutorials/shell-guardrails.md) for a runnable
+example, and use [host-specific authorization](chatmd-shell-host-integration.md)
+for native-local, legacy or daemon startup.
 
 ## Four separate security questions
 

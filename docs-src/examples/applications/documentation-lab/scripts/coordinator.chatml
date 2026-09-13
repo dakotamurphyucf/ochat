@@ -1,16 +1,36 @@
 type run = {
-  id : string; kind : string; job : string; invocation : string;
-  input : json; result : json; finished : bool
+  id : string;
+  kind : string;
+  job : string;
+  invocation : string;
+  input : json;
+  result : json;
+  finished : bool
 }
 
 type watch = {
-  id : string; invocation : string; query : json; epoch : int;
-  job : string; timer : string; deadline : int; result : json; finished : bool
+  id : string;
+  invocation : string;
+  query : json;
+  epoch : int;
+  job : string;
+  timer : string;
+  deadline : int;
+  result : json;
+  finished : bool
 }
 
-type state = { runs : run array; watches : watch array; closed : bool }
+type state = {
+  runs : run array;
+  watches : watch array;
+  closed : bool
+}
 
-let initial_state : state = { runs = []; watches = []; closed = false }
+let initial_state : state = {
+  runs = [];
+  watches = [];
+  closed = false
+}
 
 (* Application choices, not language/runtime limits. A bounded watch makes
    permission waits and missing responses visible instead of polling forever. *)
@@ -29,7 +49,12 @@ let text value =
   | _ -> fail("Expected a response identifier.")
 
 let error code message =
-  { code = code; message = message; retryable = false; details = `Null }
+  {
+    code = code;
+    message = message;
+    retryable = false;
+    details = `Null
+  }
 
 let completion result =
   match field(result, "type") with
@@ -37,7 +62,8 @@ let completion result =
   | `String("cancelled") -> `Cancelled(text(field(result, "reason")))
   | `String("expired") -> `Expired
   | `String("failed") ->
-      let retryable = match field(result, "retryable") with
+      let retryable =
+        match field(result, "retryable") with
         | `Bool(value) -> value
         | _ -> false
       in
@@ -109,8 +135,13 @@ let start_run state invocation kind tool input =
       { key = "status"; value = `String("accepted") }
     ]))) in
     let item : run = {
-      id = id; kind = kind; job = job; invocation = invocation;
-      input = input; result = `Null; finished = false
+      id = id;
+      kind = kind;
+      job = job;
+      invocation = invocation;
+      input = input;
+      result = `Null;
+      finished = false
     } in
     Task.pure({ state with runs = Array.append(state.runs, [item]) })
 
@@ -120,7 +151,8 @@ let finish_run state item =
   let terminal = completion(result) in
   let wake = if state.closed then `No_wake else `Request_turn in
   let* delivery = Notification.publish({
-    key = item.id; invocation_id = `Some(item.invocation);
+    key = item.id;
+    invocation_id = `Some(item.invocation);
     work = `Some(`Job(item.job))
   }, terminal, wake) in
   Task.pure(replace_run(state, { item with result = result; finished = true }))
@@ -155,7 +187,8 @@ let finish_watch item terminal wake =
   in
   let result = field(finished, "result") in
   let* delivery = Notification.publish({
-    key = "review-result"; invocation_id = `Some(item.invocation);
+    key = "review-result";
+    invocation_id = `Some(item.invocation);
     work = `Some(`Subscription(item.id))
   }, completion(result), wake) in
   Task.pure({ item with result = result; finished = true; job = ""; timer = "" })
@@ -176,8 +209,15 @@ let start_watch ctx state invocation query =
   else
     let* id = Subscription.create("lab_review", `Some(response_deadline_ms + 10000), `No_wake) in
     let item : watch = {
-      id = id; invocation = invocation; query = query; epoch = 0; job = ""; timer = "";
-      deadline = ctx.now_ms + response_deadline_ms; result = `Null; finished = false
+      id = id;
+      invocation = invocation;
+      query = query;
+      epoch = 0;
+      job = "";
+      timer = "";
+      deadline = ctx.now_ms + response_deadline_ms;
+      result = `Null;
+      finished = false
     } in
     let* item = start_probe(item) in
     let* () = Invocation.resolve(invocation, `Pending(`Subscription(id), `Object([
@@ -217,11 +257,14 @@ let rec stop_watches watches index results =
       { key = "mode"; value = `String("cancel") }
     ])) in
     (* Keep errors visible. Stop admission is not a join of descendant cleanup. *)
-    let stop_result = match stop with
+    let stop_result =
+      match stop with
       | `Ok(value) -> value
       | `Error(message) -> `Object([{ key = "error"; value = `String(message) }])
     in
-    let updated = { updated with query = Json.set_field(updated.query, "stop", stop_result) } in
+    let updated = {
+      updated with query = Json.set_field(updated.query, "stop", stop_result)
+    } in
     stop_watches(watches, index + 1, Array.append(results, [updated]))
 
 let rec cancel_runs runs index =
@@ -253,7 +296,8 @@ let on_event ctx state event =
           Task.pure(closed)
       | _ -> Task.pure(state))
   | `Internal_event(payload) ->
-      let completed_job = match field(payload, "kind") with
+      let completed_job =
+        match field(payload, "kind") with
         | `String("background_job_completed") -> text(field(payload, "job_id"))
         | _ -> ""
       in

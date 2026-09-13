@@ -51,4 +51,12 @@ explicit next step and review the resulting diff. Follow the
 [specialist tutorial](../tutorials/specialist.md) to understand relative paths
 and what context the child actually receives.
 
+## Grow this into a documentation lab
+
+This example teaches a focused review and includes an inspectable recorded run.
+For real checks, continuing reviewers and staged corrections, use the complete
+[living documentation lab](documentation-lab.md). Its ChatML moderator connects
+background checks, a generated reviewer and a persistent writer to the evidence
+behind each proposed change.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

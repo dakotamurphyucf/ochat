@@ -189,16 +189,25 @@ test('verification is invalidated by changed source bytes, revision, or missing 
       (await effectiveVerification(record, ['extra.txt'], context)).state,
       'not-checked',
     );
-    assert.equal(
-      (
-        await effectiveVerification(record, ['sample.txt'], {
-          ...context,
-          revision: '0'.repeat(40),
-        })
-      ).state,
-      'not-checked',
-    );
+    const historical = await effectiveVerification(record, ['sample.txt'], {
+      ...context,
+      revision: '0'.repeat(40),
+    });
+    assert.equal(historical.state, 'not-checked');
+    assert.equal(historical.recordedState, 'offline-checked');
+    assert.equal(historical.observed, record.observed);
+    assert.equal(historical.sourcesMatch, true);
+    assert.equal(historical.revisionMatches, false);
+    assert.match(historical.scope, /runtime behavior has not been requalified/);
     await fs.writeFile(path.join(temporary, 'sample.txt'), 'two');
+    const changed = await effectiveVerification(
+      record,
+      ['sample.txt'],
+      context,
+    );
+    assert.equal(changed.sourcesMatch, false);
+    assert.equal(changed.recordedState, 'offline-checked');
+    assert.match(changed.scope, /Earlier results do not verify/);
     assert.equal(
       (await effectiveVerification(record, ['sample.txt'], context)).state,
       'not-checked',

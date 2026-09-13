@@ -99,25 +99,35 @@ export async function effectiveVerification(
   { root, tracked, revision },
 ) {
   verificationSchema.parse(record);
-  let current =
-    record.baseRevision === revision && required.every((s) => record.hashes[s]);
+  const revisionMatches = record.baseRevision === revision;
+  const coverageComplete = required.every((s) => record.hashes[s]);
+  let sourcesMatch = coverageComplete;
   for (const [source, expected] of Object.entries(record.hashes)) {
     if (!tracked.has(source))
       throw new Error(`Untracked verification source: ${source}`);
     if (
       digest(await fs.readFile(await containedFile(root, source))) !== expected
     )
-      current = false;
+      sourcesMatch = false;
   }
   if (record.state === 'live-checked' && !record.liveProvider)
     throw new Error('Live verification requires a recorded live provider run');
+  const current = revisionMatches && sourcesMatch;
   return {
     ...record,
+    recordedState: record.state,
     state: current ? record.state : 'not-checked',
+    coverageComplete,
+    sourcesMatch,
+    revisionMatches,
     current,
     scope: current
-      ? record.observed
-      : 'Source or revision changed; recorded checks need repeating.',
+      ? 'Recorded revision and required source hashes match this build.'
+      : !coverageComplete
+        ? 'The record does not cover all required sources. Current inputs have not been qualified.'
+        : !sourcesMatch
+          ? 'Recorded source files have changed. Earlier results do not verify the current inputs.'
+          : 'Recorded source hashes still match. This build has a different revision; runtime behavior has not been requalified by this record.',
   };
 }
 

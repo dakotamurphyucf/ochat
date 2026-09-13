@@ -107,7 +107,8 @@ unimplemented alias declarations fail instead of being silently ignored.
 Git provenance is computed from the original sources. Local edits are labeled
 in preview; production generation rejects uncommitted published source bytes.
 Shallow history and modified/new source files do not receive a last-updated
-date. A verification label is effective only for its recorded current revision.
+date. A current verification label requires matching revision and source hashes;
+earlier observations remain visible as explicitly recorded evidence.
 The migration report lists highlighting fallbacks and per-source hashes.
 
 Mermaid loads only when a reader chooses **Show rendered diagram**. The diagram
@@ -202,7 +203,10 @@ After affected checks pass, update the record and exact SHA-256 values; never
 refresh hashes merely to suppress a stale label. Commands containing PRIVATE_ROOT
 or AVAILABLE_PORT record temporary contexts; use the complete helper or tutorial
 to reproduce them. A mismatched hash/revision downgrades the visible state to
-`not-checked`. T09 retains `known-limitation` for its explicit data-root workaround.
+`not-checked`. The reader separately preserves the recorded state and observations,
+and explains whether required evidence is missing, hashed sources have changed,
+or only the build revision differs. Matching source hashes alone do not qualify
+unrecorded runtime changes. T09 retains its recorded `known-limitation` for its explicit data-root workaround.
 No P06 record claims a live provider run. Verification details/hashes are excluded
 from Pagefind; example descriptions and host/capability metadata remain searchable.
 

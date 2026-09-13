@@ -76,11 +76,45 @@ In a **conversational coordinator**, the user asks a question, the model request
 a check, and the moderator records its state and arranges the next step. A later
 result can become a new input for the model to explain.
 
+```mermaid
+flowchart TD
+  User[User asks for a check] --> Model[Model requests the declared tool]
+  Model --> Handler[Moderator records state and starts admitted work]
+  Handler --> Ack[Initial tool acknowledgement]
+  Ack --> Reply[Model can reply while work continues]
+  Handler --> Work[Job executes selected tools]
+  Work --> Event[Completion event reaches moderator]
+  Event --> Notify[Moderator publishes a correlated notification]
+  Notify --> Explain[Requested model turn explains the result]
+```
+
+The [background-results lesson](../tutorials/background-results.md) implements
+this acknowledgement/completion split, including unsuccessful and cancelled work.
+
 In an **unattended coordinator**, the initial input/configuration starts a
 workflow and the moderator may perform all coordination through tools and child
 agents. It need not call its own model. This is an agent workflow whose script
 does the coordination, not a separate ChatMD file type. It still depends on the
 actual declared tools and supported host services.
+
+```mermaid
+flowchart TD
+  Setup[Initial configuration or admitted input] --> Coordinator[Moderator coordinates the workflow]
+  Coordinator --> Tools[Selected deterministic tools]
+  Coordinator --> Children[Specialist child agents when judgment is needed]
+  Tools --> Evidence[Collect results and handle failures]
+  Children --> Evidence
+  Evidence --> Decision{More work required?}
+  Decision -->|Yes| Coordinator
+  Decision -->|No| Report[Record the final report]
+  Report --> Finish[Finish through the supported host lifecycle]
+```
+
+This second diagram describes an execution pattern, not additional API names.
+The [review-team collector](../applications/persistent-review-team.md) demonstrates
+deterministic session coordination. A standalone program returns its result;
+a session moderator must separately arrange its host-supported completion or
+stop behavior. Finishing a handler alone does not end the enclosing session.
 
 For example, a report task can sequence file reads as a one-off program. A named
 report tool can reuse that logic. A moderator can retain several report jobs and

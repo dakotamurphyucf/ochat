@@ -1,18 +1,23 @@
 # ChatMD shell tool declarations
 
-Host integration: see [native/legacy/daemon authorization and administration](../guide/chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` authorizes a reviewed prompt in native
-`--local` or legacy interactive TUI mode; it is not a daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 Shell tools expose commands to a model through a named `<shell_access>`
-runtime. The runtime—not the tool alone—controls resolution, capabilities,
+runtime. That runtime controls resolution, capabilities,
 sandboxing, policy, approval, interception, limits, secrets, and audit.
 
 Start with `fixed` for a narrow operation or `structured` for general agent
 shell access. Use `chain`, `raw`, and `script` only when their additional
 semantics are required.
+
+For a complete progression, [build a useful shell tool](../agent-server/tutorials/shell-agent.md)
+and [give inspection and checks different guardrails](../tutorials/shell-guardrails.md).
+The [engineering assistant](../applications/guarded-engineering.md) combines these
+tools with ChatML decisions and a reviewer. All source files, schemas and host
+instructions are included in its bundle.
+
+The tool's arguments and output schema describe how a model calls it. The
+`runtime` binding supplies its execution rules; accepting a path as input does
+not make that path accessible. Host setup still requires authorization of the
+reviewed manifest: see [native, legacy and daemon setup](../guide/chatmd-shell-host-integration.md).
 
 See also:
 

@@ -41,6 +41,11 @@ the [TUI guide](../guide/chat_tui.md) covers editing and navigation.
 - **Orchestration:** add an optional [ChatML script](../chatml/README.md) when
   instructions alone are not enough to express your workflow.
 
+See those pieces together in the [guarded engineering assistant](../applications/guarded-engineering.md).
+Its complete [root ChatMD file](../examples/applications/guarded-engineering/engineer.chatmd)
+connects imported runtimes, structured shell commands, a reviewer and a reusable
+script tool. The walkthrough's source reader includes every companion file.
+
 The workspace supplies the `${workspace}` location used by configured tools.
 It is not a blanket filesystem sandbox or an automatic access grant. The
 language reference explains the other path variables, including `${prompt_dir}`

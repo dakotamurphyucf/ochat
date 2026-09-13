@@ -17,12 +17,30 @@ some questions need one answer, while an investigation benefits from follow-up.
 | Follow-up with the same specialist | Persistent authored agent tool | [Keep a specialist conversation](../tutorials/persistent-specialist.md) |
 | Let the model decide whether to retain the conversation | Authored tool with optional persistence | [Choose the specialist's lifetime](../tutorials/persistent-specialist.md#choose-the-specialists-lifetime) |
 | Define a specialist for the current task | Dynamically generated persistent child | [Create a task-specific specialist](../tutorials/generated-specialist.md) |
-| Coordinate several continuing specialists | ChatML over the session lifecycle tools | [Background coordination and response watching](chatml-authoring-background.md) |
+| Coordinate several continuing specialists | ChatML over the session lifecycle tools | [Complete persistent review team](../applications/persistent-review-team.md) |
 
 An agent tool is a declaration in the parent's ChatMD. A child session is a
 particular conversation created from a definition. Reusing a declaration does
 not imply reusing the same conversation: retain and supply the returned session
 ID when you want to continue it.
+
+```mermaid
+flowchart TD
+  Parent[Parent session] --> Authored[Authored agent-tool declaration]
+  Parent --> Generated[Captured generated ChatMD and selected inherited tools]
+  Authored --> Once[One-off invocation: temporary conversation and answer]
+  Authored --> Persist[Persistent invocation: new child session and ID]
+  Generated --> Create[agent_create: new child session and ID]
+  Persist --> Follow[agent_send with existing ID: continue that child]
+  Create --> Ready[Start immediately when preparing to send work]
+  Ready --> Follow
+  Follow --> Results[Receipt, status, output and stop operations]
+```
+
+Invoke an authored tool to create a conversation; use its returned ID to continue
+that conversation. For a generated child, retain the creation retry key with the
+same captured definition. A message retry key and a creation retry key identify
+different operations; neither substitutes for the child session ID.
 
 ## Authored specialists: define the role once
 
