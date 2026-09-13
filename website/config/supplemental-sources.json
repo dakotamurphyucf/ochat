@@ -305,6 +305,51 @@
       "source": "docs-src/examples/learning/shell-customization/scripts/report-reviewer.chatml",
       "disposition": "example-download",
       "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/authored.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/project-tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/create.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/validate.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/server.sexp",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
     }
   ],
   "directories": [

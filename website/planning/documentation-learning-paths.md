@@ -142,9 +142,9 @@ passed across Chromium, Firefox and WebKit. Desktop lessons and the mobile sourc
 reader were visually reviewed. Catalog records identify exact source hashes and
 the limits of this evidence; no live provider or Linux execution is claimed.
 
-Custom shell reviewers, persistent and generated specialist lessons, stateful and
-background workflows, the three complete applications, and the final presentation
-and reader-journey audit remain separate unfinished work in the full plan.
+The following sections record subsequent shell and specialist checkpoints.
+Stateful and background workflows, the three complete applications, and the final
+presentation and reader-journey audit remain unfinished work in the full plan.
 
 ## Custom shell decisions
 
@@ -179,3 +179,46 @@ build checked 158 HTML pages and 719 files; search passed all 33 queries. The
 desktop lesson, alternate-entry label and mobile wrapped script were reviewed.
 All 99 tutorial and reading browser checks passed across Chromium, Firefox and
 WebKit, including complete source access with JavaScript disabled.
+
+## Continuing and generated specialists
+
+T15 and T16 add a visible agent-team learning path after the one-off specialist.
+Both use Lantern's setup instructions and recorded check report, asking a reviewer
+to diagnose the missing verification step and refine its proposal in the same
+conversation. Optional and fixed authored persistence are taught alongside the
+shared lifecycle tools. The generated variant discovers authoring help, validates
+captured ChatMD sources, selects the parent's existing file tool and explicitly
+starts its child before sending work. Both tutorials distinguish session identity,
+submission receipts, output cursors, lifecycle state and retained output.
+
+Each independently complete 14-file archive includes both parent entry points,
+the authored reviewer, readable generated templates and matching creation and
+validation requests, the shared sample project, and an exact private daemon
+configuration. Prompt definitions and the store remain outside the read-only
+project workspace. Readers can inspect every companion file in the browser.
+The earlier specialist tutorial and delegation guide link directly to the new
+lessons. Search accepts these human tutorials as useful destinations while
+retaining the required top-three threshold.
+
+A combined integration scenario executes the exact public files through a real
+durable daemon and its dispatcher, replacing only model responses. It checks
+retained conversation history, wrong-wrapper rejection, optional one-off output,
+fixed persistence, authoring discovery, source parity and validation, rejection of
+a broader native reader, idempotent generated creation, correlated follow-up
+responses, scoped file reads and output retained after stop. Both built archives
+were extracted, compared byte-for-byte, and validated from their extracted paths.
+The canonical checks cover 351 documentation pages and 39 protocol methods; the
+website checks pass all 83 tests. This evidence does not claim live model quality,
+a physical TUI walkthrough, a wire-transport walkthrough of these bundles, or a
+Linux run.
+
+The initial concurrent runtime/browser run hit an existing compaction deadline
+and Firefox test deadlines. The runtime and canonical suites passed when rerun
+without browser load, with unchanged expectations. Heavy validation groups are
+kept separate on this development machine to avoid counterproductive contention.
+All 105 tutorial and reading browser checks passed across Chromium, Firefox and
+WebKit across the initial run and targeted rechecks. Four Firefox rechecks passed
+with two workers; the remaining existing shell-customization check passed alone
+in 11.4 seconds, with its original 30-second deadline and assertions unchanged.
+The final build checks 160 HTML pages and 755 files. Desktop lesson and mobile
+source expansion were visually reviewed.

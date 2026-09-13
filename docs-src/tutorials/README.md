@@ -22,6 +22,8 @@ to add; lesson numbers are stable identifiers, not a required global sequence.
 - **ChatML workflows:** [summarize project reports](chatml-program.md),
   [turn the program into a reusable tool](chatml-tool.md), then learn how a
   [moderator controls a conversation](workflow.md).
+- **Subagents and agent teams:** [keep a specialist conversation](persistent-specialist.md),
+  then [create a reviewer for the current task](generated-specialist.md).
 - **Run and host:** save batch requests or keep sessions in a daemon.
 - **Connect external clients:** integrate through stdio or authenticated HTTP.
 

@@ -20,6 +20,13 @@ export const tutorialPaths = [
     ],
   },
   {
+    id: 'agent-teams',
+    title: 'Subagents and agent teams',
+    description:
+      'Keep a specialist conversation, then create a reviewer for the current task.',
+    pages: ['tutorials/persistent-specialist', 'tutorials/generated-specialist'],
+  },
+  {
     id: 'chatml',
     title: 'ChatML workflows',
     description:

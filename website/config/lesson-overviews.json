@@ -82,5 +82,17 @@
     "outcome": "Enforce a report rule with ChatML and retain decisions before deferring to a user.",
     "requires": "The guardrails lesson, complete bundle, configured provider and required shell backend.",
     "nextBenefit": "Combine custom capabilities with specialist agents and larger workflows."
+  },
+  {
+    "page": "tutorials/persistent-specialist",
+    "outcome": "Choose one-off or persistent review, send follow-up context, and track the same specialist through receipts and lifecycle tools.",
+    "requires": "One-off specialist basics, the complete Lantern bundle, provider configuration and its private durable daemon.",
+    "nextBenefit": "Let the parent define a specialist for the current task."
+  },
+  {
+    "page": "tutorials/generated-specialist",
+    "outcome": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
+    "requires": "One-off specialist basics, the complete Lantern bundle, provider configuration and its private durable daemon.",
+    "nextBenefit": "Coordinate several retained specialists using ChatML workflows."
   }
 ]

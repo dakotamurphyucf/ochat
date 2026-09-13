@@ -62,7 +62,7 @@
     "route": "/docs/guides/delegated-tools/",
     "section": "Subagents and agent teams",
     "kind": "guide",
-    "order": 2,
+    "order": 4,
     "navigation": true,
     "search": true,
     "sitemap": true,
@@ -4690,6 +4690,58 @@
     "related": [
       "tutorials/shell-guardrails",
       "guide/chatmd-shell-extensions"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
+  },
+  {
+    "id": "tutorials/persistent-specialist",
+    "source": "docs-src/tutorials/persistent-specialist.md",
+    "disposition": "publish",
+    "title": "Keep a conversation with a specialist",
+    "description": "Choose one-off or persistent review, send follow-up context, and track the same specialist through receipts and lifecycle tools.",
+    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources. Runtime qualification pending; see catalog.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/persistent-specialist/",
+    "section": "Subagents and agent teams",
+    "kind": "tutorial",
+    "order": 2,
+    "related": [
+      "guide/subagents",
+      "guide/delegated-tools"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
+  },
+  {
+    "id": "tutorials/generated-specialist",
+    "source": "docs-src/tutorials/generated-specialist.md",
+    "disposition": "publish",
+    "title": "Create a task-specific specialist",
+    "description": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
+    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources. Runtime qualification pending; see catalog.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/generated-specialist/",
+    "section": "Subagents and agent teams",
+    "kind": "tutorial",
+    "order": 3,
+    "related": [
+      "guide/subagents",
+      "guide/delegated-tools"
     ],
     "navigation": true,
     "search": true,

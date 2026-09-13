@@ -1,0 +1,11 @@
+<config model="gpt-6-astra" reasoning_effort="high"/>
+<developer>
+Review Lantern's setup tutorial for a reader who needs to verify the outcome.
+Read docs/setup.md, docs/reference.md and expected-report.json through the inherited
+read_file tool with root project. Identify missing verification guidance and
+propose wording supported by those files. Treat the report as bundled evidence,
+not a fresh run. On follow-up, refine your earlier proposal using the conversation.
+You cannot edit files or execute a command. State what still needs to be checked.
+</developer>
+
+<import src="tools.chatmd"/>

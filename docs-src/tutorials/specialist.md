@@ -102,9 +102,9 @@ You now have evidence of a parent reading data and delegating a bounded review.
 Choose what the specialist should do next:
 
 - For follow-up questions in the same conversation, explore
-  [persistent and optionally persistent specialists](../guide/subagents.md#authored-specialists-define-the-role-once).
+  [persistent and optionally persistent specialists](persistent-specialist.md).
 - To let the parent define a reviewer for the current task, learn about
-  [generated subagents](../guide/subagents.md#generated-specialists-adapt-the-role-to-the-task)
+  [generated subagents](generated-specialist.md)
   and [inherited tools](../guide/delegated-tools.md).
 - To control review stages or collect results later, explore
   [ChatML workflows](../chatml/README.md).

@@ -14,9 +14,9 @@ some questions need one answer, while an investigation benefits from follow-up.
 | What you need | Pattern | Start here |
 | --- | --- | --- |
 | One focused answer | One-off authored agent tool | [Specialist tutorial](../tutorials/specialist.md) |
-| Follow-up with the same specialist | Persistent authored agent tool | [Authored persistence contract](chatmd-authoring-definitions.md#existing-tools-versus-new-tool-definitions) and [complete specialist bundle](../../test/chatml_extensibility_fixtures/x05-child-session/README.md) |
-| Let the model decide whether to retain the conversation | Authored tool with optional persistence | [Optional and fixed persistence](../agent-server/extensibility-foundations.md#authored-agent-tool-persistence-contract) |
-| Define a specialist for the current task | Dynamically generated persistent child | [Captured child definitions](chatml-authoring-children.md) |
+| Follow-up with the same specialist | Persistent authored agent tool | [Keep a specialist conversation](../tutorials/persistent-specialist.md) |
+| Let the model decide whether to retain the conversation | Authored tool with optional persistence | [Choose the specialist's lifetime](../tutorials/persistent-specialist.md#choose-the-specialists-lifetime) |
+| Define a specialist for the current task | Dynamically generated persistent child | [Create a task-specific specialist](../tutorials/generated-specialist.md) |
 | Coordinate several continuing specialists | ChatML over the session lifecycle tools | [Background coordination and response watching](chatml-authoring-background.md) |
 
 An agent tool is a declaration in the parent's ChatMD. A child session is a
@@ -35,12 +35,11 @@ persistence declaration lets the model choose a one-off call or request a
 persistent instance. Its default remains one-off. A fixed persistent declaration
 always uses the persistent behavior and does not need the optional mode choice.
 
-The complete [authored specialist example](../../test/chatml_extensibility_fixtures/x05-child-session/README.md)
-contains the parent, companion, schemas, sample data and daemon setup. Follow its
-bundle instructions: some companion data is assembled by the documented build.
-It demonstrates independent specialist state and follow-up across the supported
-session lifecycle. Its qualification uses offline providers; interactive use
-calls your configured model.
+The complete [specialist conversation lesson](../tutorials/persistent-specialist.md)
+contains both lifetime declarations, the reviewer, sample evidence and private
+daemon setup. Follow a review with a request to refine the proposed verification
+guidance, keeping the same session and the relevant receipt. Its catalog records
+the scope of available verification; interactive use calls your configured model.
 
 ## Generated specialists: adapt the role to the task
 

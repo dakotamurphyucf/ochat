@@ -1366,5 +1366,303 @@
         "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
       }
     }
+  },
+  {
+    "id": "specialist-conversations",
+    "title": "Lantern specialist conversations",
+    "summary": "Choose one-off or persistent review, send follow-up context, and track the same specialist through receipts and lifecycle tools.",
+    "tutorial": "tutorials/persistent-specialist",
+    "host": "Durable local Unix daemon",
+    "capabilities": [
+      "Persistent sessions",
+      "Authored agent tools",
+      "Scoped file reads",
+      "Lifecycle tools"
+    ],
+    "required": [
+      "Installed Ochat and gpt-6-astra provider; start the bundled private Unix daemon. Keep sample-project as the workspace and private-data outside it. Native transient --local is not sufficient."
+    ],
+    "kind": "complete",
+    "entry": "authored.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/learning/agent-teams/authored.chatmd",
+        "path": "authored.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated.chatmd",
+        "path": "generated.chatmd",
+        "role": "variant"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/project-tools.chatmd",
+        "path": "project-tools.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd",
+        "path": "agents/reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd",
+        "path": "generated/reviewer.chatmd",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/tools.chatmd",
+        "path": "generated/tools.chatmd",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/create.json",
+        "path": "generated/create.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/validate.json",
+        "path": "generated/validate.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/server.sexp",
+        "path": "server.sexp",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+        "path": "sample-project/docs/setup.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+        "path": "sample-project/docs/reference.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+        "path": "sample-project/scripts/check-docs.sh",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+        "path": "sample-project/expected-report.json",
+        "role": "data"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [
+      {
+        "fromPath": "authored.chatmd",
+        "toPath": "project-tools.chatmd",
+        "reference": "project-tools.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "generated.chatmd",
+        "toPath": "project-tools.chatmd",
+        "reference": "project-tools.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "authored.chatmd",
+        "toPath": "agents/reviewer.chatmd",
+        "reference": "agents/reviewer.chatmd",
+        "kind": "agent"
+      }
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "234c8d2bd35c0ba8d148b6e60a6413486a63de14",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64 (durable daemon; simulated provider)",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest @agent-docs-check",
+        "Extract each generated archive, compare all maintained files and captured source text, then run ochat-agent-server -config ABS/server.sexp -validate-only"
+      ],
+      "observed": "The exact public sources and read-only server configuration execute through a real durable daemon with simulated provider responses. Optional and fixed authored specialists retain follow-up history, reject a different wrapper, and return one-off output. The generated parent queries authoring help, validates the captured source, rejects a broader native file declaration, reuses an idempotent creation, and collects two receipt-correlated responses. Both specialist forms read the sample project and reject access to the private server configuration. Stopping the generated child leaves its committed answer readable. Both extracted 14-file archives preserve every maintained byte and validate independently.",
+      "limitations": "No live model API calls, physical TUI walkthrough, Unix transport walkthrough of these bundles, Linux run, or model-quality claim. The integration client uses the real daemon dispatcher in-process; existing transport suites cover wire framing separately. Sample report data is bundled evidence, not a new checker run.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd": "9c151384b15841dc58f7e5916db8fb14528997cae764bb9a3b5dc08c5b1006c1",
+        "docs-src/examples/learning/agent-teams/authored.chatmd": "750fe72e5a961d78835262a84fd5c9e50d94e9ab85e51df23438f6db1264924a",
+        "docs-src/examples/learning/agent-teams/generated.chatmd": "0db5f53f45dd17553b6c2b011492a3527af8666b4078d61d089af0e631d03942",
+        "docs-src/examples/learning/agent-teams/generated/create.json": "ef4857ed5b41c92f87e9f349b1e6f52aa1ccaac234f42a13a2fc2c34bb40ec58",
+        "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd": "2607f7a044aa00b3a504763bec28fdba2cbb23d25a50332700aa3460d276e19d",
+        "docs-src/examples/learning/agent-teams/generated/tools.chatmd": "611f9a7f8c9e494f4d875b4bdbcea49d77a4ad68fade39c48e8d10177a49358f",
+        "docs-src/examples/learning/agent-teams/generated/validate.json": "2dd2e87f605ba0bcdf80200e2a88dfe710e930f911926974e59a8eec77c9f0e1",
+        "docs-src/examples/learning/agent-teams/project-tools.chatmd": "eedb9f3d52810a71e8121f42aed262c98dd6ac1f5f504097b52cc8752fed0565",
+        "docs-src/examples/learning/agent-teams/server.sexp": "f101224118dd35549a1d6d63ac723aadfff4cbdc1d5032e9a708c07cbdbf99c8",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "docs-src/tutorials/persistent-specialist.md": "716bf71dfc4fad0f20b93c57c103cd24b5ad2a91e0ee01827b4a3159d7d44a22",
+        "lib/agent_session/authored_agent_call.ml": "3051888e7fe39e353858677938a36a374a702b8d5e0d775d2dd0817278278f33",
+        "lib/agent_session/generated_session_request.ml": "90af4ba27a871509ae8b0805f36c008d7167fc748104c7055b7660d960ce6a8d",
+        "lib/agent_session/session_management.ml": "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1",
+        "test/chatml_composition/documentation_agent_team_tests.ml": "5b3cd6eebe66dadb4153e9b90e96302a7205a546db9e86935336d15003ad0533",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/dune": "113c9c25d2f4396a48d91c465deb326726333ca7c7ca8677c85fc33ab805dd45"
+      }
+    }
+  },
+  {
+    "id": "generated-specialist",
+    "title": "Lantern generated specialist",
+    "summary": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
+    "tutorial": "tutorials/generated-specialist",
+    "host": "Durable local Unix daemon",
+    "capabilities": [
+      "Persistent sessions",
+      "Generated child agents",
+      "Scoped file reads",
+      "Lifecycle tools"
+    ],
+    "required": [
+      "Installed Ochat and gpt-6-astra provider; start the bundled private Unix daemon. Keep sample-project as the workspace and private-data outside it. Native transient --local is not sufficient."
+    ],
+    "kind": "complete",
+    "entry": "generated.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/learning/agent-teams/authored.chatmd",
+        "path": "authored.chatmd",
+        "role": "variant"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated.chatmd",
+        "path": "generated.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/project-tools.chatmd",
+        "path": "project-tools.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd",
+        "path": "agents/reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd",
+        "path": "generated/reviewer.chatmd",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/tools.chatmd",
+        "path": "generated/tools.chatmd",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/create.json",
+        "path": "generated/create.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/generated/validate.json",
+        "path": "generated/validate.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/agent-teams/server.sexp",
+        "path": "server.sexp",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+        "path": "sample-project/docs/setup.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+        "path": "sample-project/docs/reference.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+        "path": "sample-project/scripts/check-docs.sh",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+        "path": "sample-project/expected-report.json",
+        "role": "data"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [
+      {
+        "fromPath": "authored.chatmd",
+        "toPath": "project-tools.chatmd",
+        "reference": "project-tools.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "generated.chatmd",
+        "toPath": "project-tools.chatmd",
+        "reference": "project-tools.chatmd",
+        "kind": "import"
+      },
+      {
+        "fromPath": "authored.chatmd",
+        "toPath": "agents/reviewer.chatmd",
+        "reference": "agents/reviewer.chatmd",
+        "kind": "agent"
+      }
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "234c8d2bd35c0ba8d148b6e60a6413486a63de14",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64 (durable daemon; simulated provider)",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest @agent-docs-check",
+        "Extract each generated archive, compare all maintained files and captured source text, then run ochat-agent-server -config ABS/server.sexp -validate-only"
+      ],
+      "observed": "The exact public sources and read-only server configuration execute through a real durable daemon with simulated provider responses. Optional and fixed authored specialists retain follow-up history, reject a different wrapper, and return one-off output. The generated parent queries authoring help, validates the captured source, rejects a broader native file declaration, reuses an idempotent creation, and collects two receipt-correlated responses. Both specialist forms read the sample project and reject access to the private server configuration. Stopping the generated child leaves its committed answer readable. Both extracted 14-file archives preserve every maintained byte and validate independently.",
+      "limitations": "No live model API calls, physical TUI walkthrough, Unix transport walkthrough of these bundles, Linux run, or model-quality claim. The integration client uses the real daemon dispatcher in-process; existing transport suites cover wire framing separately. Sample report data is bundled evidence, not a new checker run.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd": "9c151384b15841dc58f7e5916db8fb14528997cae764bb9a3b5dc08c5b1006c1",
+        "docs-src/examples/learning/agent-teams/authored.chatmd": "750fe72e5a961d78835262a84fd5c9e50d94e9ab85e51df23438f6db1264924a",
+        "docs-src/examples/learning/agent-teams/generated.chatmd": "0db5f53f45dd17553b6c2b011492a3527af8666b4078d61d089af0e631d03942",
+        "docs-src/examples/learning/agent-teams/generated/create.json": "ef4857ed5b41c92f87e9f349b1e6f52aa1ccaac234f42a13a2fc2c34bb40ec58",
+        "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd": "2607f7a044aa00b3a504763bec28fdba2cbb23d25a50332700aa3460d276e19d",
+        "docs-src/examples/learning/agent-teams/generated/tools.chatmd": "611f9a7f8c9e494f4d875b4bdbcea49d77a4ad68fade39c48e8d10177a49358f",
+        "docs-src/examples/learning/agent-teams/generated/validate.json": "2dd2e87f605ba0bcdf80200e2a88dfe710e930f911926974e59a8eec77c9f0e1",
+        "docs-src/examples/learning/agent-teams/project-tools.chatmd": "eedb9f3d52810a71e8121f42aed262c98dd6ac1f5f504097b52cc8752fed0565",
+        "docs-src/examples/learning/agent-teams/server.sexp": "f101224118dd35549a1d6d63ac723aadfff4cbdc1d5032e9a708c07cbdbf99c8",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "docs-src/tutorials/generated-specialist.md": "231ee17a2658b4df2617d7879f470bb64b83fda15b95748efd212b4c031aa5ad",
+        "lib/agent_session/authored_agent_call.ml": "3051888e7fe39e353858677938a36a374a702b8d5e0d775d2dd0817278278f33",
+        "lib/agent_session/generated_session_request.ml": "90af4ba27a871509ae8b0805f36c008d7167fc748104c7055b7660d960ce6a8d",
+        "lib/agent_session/session_management.ml": "18431c4fd97a2d24a72b927fe8f0d20b8aea561f1f119d8f122d943f2a137f86",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1",
+        "test/chatml_composition/documentation_agent_team_tests.ml": "5b3cd6eebe66dadb4153e9b90e96302a7205a546db9e86935336d15003ad0533",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/dune": "113c9c25d2f4396a48d91c465deb326726333ca7c7ca8677c85fc33ab805dd45"
+      }
+    }
   }
 ]

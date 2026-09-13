@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "root_file": "reviewer.chatmd",
+  "sources": [
+    {
+      "path": "reviewer.chatmd",
+      "text": "<config model=\"gpt-6-astra\" reasoning_effort=\"high\"/>\n<developer>\nReview Lantern's setup tutorial for a reader who needs to verify the outcome.\nRead docs/setup.md, docs/reference.md and expected-report.json through the inherited\nread_file tool with root project. Identify missing verification guidance and\npropose wording supported by those files. Treat the report as bundled evidence,\nnot a fresh run. On follow-up, refine your earlier proposal using the conversation.\nYou cannot edit files or execute a command. State what still needs to be checked.\n</developer>\n\n<import src=\"tools.chatmd\"/>\n"
+    },
+    {
+      "path": "tools.chatmd",
+      "text": "<tool type=\"inherited\" name=\"read_file\"/>\n"
+    }
+  ],
+  "tools": [
+    "read_file"
+  ],
+  "start_immediately": true,
+  "lifetime": "owned",
+  "display_name": "Lantern verification reviewer",
+  "idempotency_key": "lantern-verification-review-1"
+}

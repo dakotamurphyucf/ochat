@@ -9,7 +9,8 @@
   {
     "query": "persistent agents",
     "expected": [
-      "/docs/guides/subagents/"
+      "/docs/guides/subagents/",
+      "/docs/tutorials/persistent-specialist/"
     ],
     "maxRank": 3
   },
@@ -25,7 +26,8 @@
     "query": "create an agent",
     "expected": [
       "/docs/guides/subagents/",
-      "/docs/start/first-agent/"
+      "/docs/start/first-agent/",
+      "/docs/tutorials/generated-specialist/"
     ],
     "maxRank": 3
   },
