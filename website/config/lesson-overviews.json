@@ -9,7 +9,7 @@
     "page": "tutorials/file-tool",
     "outcome": "Read a real file through an explicitly configured tool root.",
     "requires": "The first-agent lesson and the bundled Lantern reference directory.",
-    "nextBenefit": "Connect a specialist with its own review instructions."
+    "nextBenefit": "Connect a specialist or add a shell tool with explicit guardrails."
   },
   {
     "page": "tutorials/specialist",
@@ -27,7 +27,7 @@
     "page": "tutorials/workflow",
     "outcome": "Ask the host to stop after three completed turns.",
     "requires": "Local-agent basics, both bundled files, and a compatible ChatML host.",
-    "nextBenefit": "Choose shell capabilities, hosting or another workflow from the learning paths."
+    "nextBenefit": "Keep workflow state behind a named moderator-handled tool."
   },
   {
     "page": "agent-server/tutorials/shell-agent",
@@ -45,7 +45,7 @@
     "page": "background",
     "outcome": "Observe a timer owned by the host rather than the terminal.",
     "requires": "The private-daemon setup; the included timer itself needs no model request.",
-    "nextBenefit": "Connect through the local stdio protocol."
+    "nextBenefit": "Run real background checks or return to the learning paths."
   },
   {
     "page": "stdio",

@@ -99,5 +99,12 @@ remain. Archive them or remove only the recorded temporary directory after exit.
 Review provider logs and runtime caches separately if they were produced.
 
 You can now distinguish tool authority from instructions and verify a file read.
-Next, [give this agent a specialist reviewer](specialist.md). The
-[example catalog](../examples/README.md) provides the complete source bundle.
+Next, [give this agent a specialist reviewer](specialist.md), or
+[inspect a project through a shell tool](../agent-server/tutorials/shell-agent.md)
+when you want to connect command-line programs with explicit guardrails.
+
+This lesson starts with Lantern's short project brief. The shell path expands
+the same learning context into real setup documentation and a runnable checker.
+Each lesson supplies a fresh, complete bundle; you do not need to merge files
+from this workspace into the next one. The [example catalog](../examples/README.md)
+provides every companion file for inspection and download.

@@ -274,3 +274,50 @@ both reference introductions into their practical lessons and confirmed the
 rendered pages have no document-wide overflow. The reference callouts and lesson
 introductions were visually inspected. Browser projects ran after runtime checks;
 Firefox used one worker and Chromium/WebKit used two to avoid local contention.
+
+## D03 learning-path completion
+
+The foundation now leads explicitly from file reading to either a specialist or
+a guarded shell capability. The curriculum explains Lantern's progression from
+a brief to real documentation/checks and directs readers to independently complete
+bundles. It distinguishes recorded report inputs from actual checker execution.
+Installation → build troubleshooting → first agent stays unchanged. Batch,
+daemon, stdio and HTTP introductions explain why to choose those optional paths;
+the batch page no longer inserts itself between specialist and ChatML lessons.
+Persistent/generated lessons include the durable setup at the point of use.
+
+All 18 tutorial IDs belong to exactly one primary path, with meaningful
+previous/next links and matching overviews. The runtime evidence for the completed
+checkpoint families is:
+
+| Checkpoints | Behavioral evidence |
+| --- | --- |
+| First agent, file reader, one-off specialist | Canonical complete-source parity, actual scoped file reads with escape denial, companion capture and specialist tool isolation; no claim of a live model conversation. |
+| Shell inspection, guardrails and custom review | Native confined tool execution, literal argument handling, separate read/write authority, report approvals and deterministic review state; model-review behavior uses a controlled callback. |
+| Persistent and generated specialists | Real durable host with controlled model responses: continuing identities, source validation, selected inherited tools, receipts, follow-up and stop/read behavior. |
+| One-off program and reusable tool | Real registered-tool execution: aggregation, strict schema rejection before reads, file boundaries and malformed-report failure. |
+| Moderator, stateful tools and background results | Exact scripts execute retained state, invocation resolution, three-turn termination, real checker jobs, correlated notification and cancellation. |
+| Batch, daemon and clients | Canonical batch fixtures, embedded timer/observer checks, private config validation and actual local/Unix/HTTP discovery. |
+
+Canonical checks passed for 353 pages and 39 protocol methods. The maintained host
+integration checker now covers both explicit durable and automatic transient
+stdio data roots; both return the five discovery responses and exit cleanly at
+EOF. Private Unix and authenticated loopback HTTP discovery also pass. The old
+T09 verification note incorrectly retained a historical RNG limitation; it now
+records the observed working behavior. These six host checks make no model calls.
+
+The actual foundation, timer, stdio and program/tool archives were extracted and
+compared byte-for-byte; ChatMD entries inspect from their extracted working
+directories. Shell, specialist-team and stateful/background archive execution is
+recorded in their sections above. No checkpoint relies on the untracked obsolete
+Lantern preparation draft. Tutorial evidence was refreshed only for these
+executed offline checks; historical live application recordings were retained.
+Verification remains tied to its recorded revision and hashed dependencies; this
+is not a claim to have tested live providers or every platform at a future revision.
+
+Website validation passed all 83 checks; the build checks 162 pages and 783 files.
+The targeted onboarding, all-lesson path and instruction browser checks passed.
+The earlier full 111-case browser matrix remains applicable to unchanged reader
+behavior; it was not repeated for these prose and evidence changes.
+Three mobile journeys also followed the new file-tool → shell, batch → daemon
+and stdio → learning-path links in the rendered site without document overflow.

@@ -2,6 +2,12 @@
 
 Initialize the protocol, discover and attach to a session, then distinguish acknowledgements from streamed completion.
 
+Use this integration path when an editor, command-line program or other client
+needs to exchange structured requests and events with Ochat. You do not need to
+implement the protocol to [author tools or workflows](../../tutorials/README.md):
+the TUI already supplies a client. This lesson explains the client boundary,
+including discovery, request IDs, attachment and streamed notifications.
+
 ## Prerequisites and command context
 
 Complete [installation](../quickstart.md) and [private example setup](../../examples/agent-server/README.md). Commands run from the repository root with the active opam environment. Local mode owns a process-bound host with an explicit private durable data root; gateway mode requires a running daemon. Discovery is offline. Sending the example message requires provider credentials in the host environment and incurs charges.
