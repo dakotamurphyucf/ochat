@@ -166,7 +166,10 @@ test('tutorial instructions preserve tool, batch, and source-context qualificati
       'not through an arbitrary working-directory fallback',
     ],
     ['/docs/tutorials/workflow/', 'not a dollar spending cap'],
-    ['/docs/tutorials/stdio-client/', 'before the binary initializes the RNG'],
+    [
+      '/docs/tutorials/stdio-client/',
+      'it does not keep a process running after the client exits',
+    ],
     ['/docs/tutorials/http-client/', 'loopback, not public HTTPS'],
   ]) {
     await page.goto(route);

@@ -22,6 +22,10 @@ memory, and storage. They are not filesystem or network confinement. Required
 confinement still needs the selected Seatbelt, bubblewrap, or approved external
 backend.
 
+Bubblewrap is resolved through the host's `PATH` to a canonical executable before
+the child changes working directory. The child's selected environment does not
+choose the sandbox launcher; explicit `execve` receives the resolved path.
+
 ## Private channels and process lifetime
 
 Private channels require a supported verified backend. After mapping standard
@@ -48,8 +52,9 @@ batch and repeating until all unrelated descriptors are gone. Apple's
 [userspace wrapper](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)
 invokes the kernel without userspace allocation; the
 [kernel implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
-supports listing a prefix into a bounded buffer. Linux runtime
-qualification remains open work.
+supports listing a prefix into a bounded buffer. Run the private-channel and
+resource-limit integration checks on each target platform; a configured CI job
+alone is not execution evidence.
 
 The former `ochat-shell-resource-runner` executable and
 `OCHAT_SHELL_RESOURCE_RUNNER` setting have been removed. Embeddings no longer pass

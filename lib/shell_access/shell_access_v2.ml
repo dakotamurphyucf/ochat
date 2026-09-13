@@ -1806,15 +1806,23 @@ module Backend = struct
 
   let available t ~fs = Result.is_ok (availability t ~fs)
 
-  let command_available ~fs executable =
-    if String.contains executable '/'
-    then Path_util.file_exists ~fs executable
-    else
-      Sys.getenv "PATH"
-      |> Option.value ~default:"/usr/bin:/bin:/usr/sbin:/sbin"
-      |> String.split ~on:':'
-      |> List.exists ~f:(fun directory ->
-        Path_util.file_exists ~fs (Filename.concat directory executable))
+  let command_path ~fs executable =
+    let candidates =
+      match String.contains executable '/' with
+      | true -> [ executable ]
+      | false ->
+        Sys.getenv "PATH"
+        |> Option.value ~default:"/usr/bin:/bin:/usr/sbin:/sbin"
+        |> String.split ~on:':'
+        |> List.map ~f:(fun directory -> Filename.concat directory executable)
+    in
+    List.find_map candidates ~f:(fun candidate ->
+      (* The launcher's PATH belongs to the host. Bind the selected path before
+         spawn changes cwd; explicit execve does not perform PATH lookup. *)
+      let candidate = Path_util.absolute ~cwd:(Core_unix.getcwd ()) candidate in
+      match Path_util.file_exists ~fs candidate with
+      | false -> None
+      | true -> Some (Path_util.canonical ~fs candidate))
   ;;
 
   let has_os_limits limits =
@@ -1919,30 +1927,33 @@ module Backend = struct
     ; available_fn =
         (fun fs ->
           String.equal (Core_unix.Utsname.sysname (Core_unix.uname ())) "Linux"
-          && command_available ~fs executable)
+          && Option.is_some (command_path ~fs executable))
     ; confinement = Verified
     ; eligible_for_required = true
     ; simulate_fn = None
     ; prepare_fn =
         (fun fs plan ->
-          let context = plan.Execution_plan.context in
-          let target = context.executable.canonical_path in
-          let bind flag path = [ flag; path; path ] in
-          let system_roots =
-            List.filter linux_read_roots ~f:(Path_util.file_exists ~fs)
-          in
-          let argv =
-            [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
-            @ (if context.capabilities.network then [ "--share-net" ] else [])
-            @ (if plan.request_channel then [ "--preserve-fds"; "2" ] else [])
-            @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
-            @ List.concat_map system_roots ~f:(bind "--ro-bind")
-            @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
-            @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
-            @ [ "--chdir"; plan.cwd; "--"; target ]
-            @ context.command.arguments
-          in
-          Ok { executable; argv; environment = plan.environment })
+          match command_path ~fs executable with
+          | None -> Error "bubblewrap executable is unavailable"
+          | Some executable ->
+            let context = plan.Execution_plan.context in
+            let target = context.executable.canonical_path in
+            let bind flag path = [ flag; path; path ] in
+            let system_roots =
+              List.filter linux_read_roots ~f:(Path_util.file_exists ~fs)
+            in
+            let argv =
+              [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
+              @ (if context.capabilities.network then [ "--share-net" ] else [])
+              @ (if plan.request_channel then [ "--preserve-fds"; "2" ] else [])
+              @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
+              @ List.concat_map system_roots ~f:(bind "--ro-bind")
+              @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
+              @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
+              @ [ "--chdir"; plan.cwd; "--"; target ]
+              @ context.command.arguments
+            in
+            Ok { executable; argv; environment = plan.environment })
     }
   ;;
 

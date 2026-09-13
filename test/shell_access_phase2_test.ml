@@ -43,6 +43,44 @@ let executor_ok = function
   | Error error -> failwith (S.Executor.error_to_string error)
 ;;
 
+let%expect_test "sandbox launcher resolves host PATH before changing child cwd" =
+  Eio_main.run
+  @@ fun env ->
+  let backend =
+    fake_backend (fun plan ~stdin:_ ->
+      let plan = { plan with S.Execution_plan.environment = [||]; cwd = "/tmp" } in
+      (* Exercise launcher preparation on either OS without claiming that sh is
+         a sandbox. The real confined helper is tested separately on each OS. *)
+      let spawn =
+        S.Backend.For_testing.prepare
+          (S.Backend.linux_bubblewrap ~executable:"sh" ())
+          ~fs:(Eio.Stdenv.fs env)
+          plan
+        |> Result.ok_or_failwith
+      in
+      [%test_eq: bool] false (Filename.is_relative spawn.executable);
+      [%test_eq: string] spawn.executable (List.hd_exn spawn.argv);
+      let stdout =
+        Eio.Process.parse_out
+          (Eio.Stdenv.process_mgr env)
+          Eio.Buf_read.take_all
+          ~executable:spawn.executable
+          ~env:spawn.environment
+          ~cwd:Eio.Path.(Eio.Stdenv.fs env / plan.cwd)
+          [ "sh"; "-c"; "printf launcher-selected" ]
+      in
+      Ok { status = `Exited 0; stdout; stderr = "" })
+  in
+  let result =
+    S.Executor.run
+      (config env backend)
+      (invocation (S.Request.command (S.Command.create "/bin/echo" [])))
+    |> executor_ok
+  in
+  print_endline result.stdout;
+  [%expect {| launcher-selected |}]
+;;
+
 let%expect_test
     "delegated execution scopes isolate grants and recheck authority after review"
   =
