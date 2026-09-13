@@ -15,25 +15,25 @@
     "page": "tutorials/specialist",
     "outcome": "Delegate a documentation review from one agent to another.",
     "requires": "File-tool basics; keep both agent definitions beside one another.",
-    "nextBenefit": "Save an entire request and response from a script."
+    "nextBenefit": "Choose another learning path or explore persistent and generated specialists."
   },
   {
     "page": "cli/chat-completion",
     "outcome": "Save a ChatMD conversation from one headless request.",
     "requires": "Installed Ochat, configured provider, and a fresh output filename.",
-    "nextBenefit": "Add a small script that controls when a session ends."
+    "nextBenefit": "Host continuing work in a daemon when it should outlive a client connection."
   },
   {
     "page": "tutorials/workflow",
     "outcome": "Ask the host to stop after three completed turns.",
     "requires": "Local-agent basics, both bundled files, and a compatible ChatML host.",
-    "nextBenefit": "Learn how a specific shell command is declared and authorized."
+    "nextBenefit": "Choose shell capabilities, hosting or another workflow from the learning paths."
   },
   {
     "page": "agent-server/tutorials/shell-agent",
     "outcome": "Inspect and authorize one fixed working-directory command.",
     "requires": "Installed Ochat, supported shell runtime, and the host-specific authorization path.",
-    "nextBenefit": "Move an agent into a private daemon host."
+    "nextBenefit": "Return to the learning paths to add scripts, specialists or hosted operation."
   },
   {
     "page": "agent-server/tutorials/unix-daemon",
@@ -58,5 +58,17 @@
     "outcome": "Initialize an authenticated HTTP connection to a local daemon.",
     "requires": "The private HTTP daemon configuration and generated bearer-token file.",
     "nextBenefit": "Choose an application and adapt its complete source bundle."
+  },
+  {
+    "page": "tutorials/chatml-program",
+    "outcome": "Count repeated failures across project reports using a one-off program and admitted file tools.",
+    "requires": "File-tool basics, the complete extracted bundle, and native local Ochat with provider configuration.",
+    "nextBenefit": "Give this calculation a stable tool name, input schema and selected tool dependencies."
+  },
+  {
+    "page": "tutorials/chatml-tool",
+    "outcome": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
+    "requires": "File-tool basics, the complete extracted bundle, and native local Ochat with provider configuration.",
+    "nextBenefit": "Use a moderator when behavior must react to conversation events."
   }
 ]

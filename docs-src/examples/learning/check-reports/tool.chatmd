@@ -1,0 +1,15 @@
+<config model="gpt-6-astra"/>
+<developer>
+Use summarize_checks to count failing checks across Lantern's reports.
+Ask for the desired report filenames if they are unclear. Explain the returned
+counts and distinguish reported results from actually running a check.
+</developer>
+<tool name="read_file">
+  <read id="reports" path="${workspace}/reports" description="Lantern check reports"/>
+</tool>
+<script id="report_program" language="chatml" kind="tool" src="scripts/aggregate.chatml"/>
+<tool name="summarize_checks" type="chatml" script="report_program" entrypoint="run"
+      input_schema="schemas/input.json" output_schema="schemas/output.json"
+      description="Count failures by check name across the selected report files.">
+  <uses tool="read_file"/>
+</tool>

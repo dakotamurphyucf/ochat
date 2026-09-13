@@ -55,7 +55,8 @@ and public revision links; use the protected workflow for publication.
 | Code-generated reference prose | The existing OCaml generator identified by the manifest's `generatedBy`; regenerate through its documented Dune target |
 | Title, description, route, publication/indexing status | `config/docs-manifest.json` |
 | Sidebar and Start here groups | `config/navigation.mjs` and manifest section/order fields |
-| Tutorial sequence and example associations | `config/tutorials.json` |
+| Stable tutorial IDs and example associations | `config/tutorials.json` |
+| Learning-path membership and previous/next destinations | `config/tutorial-paths.mjs` |
 | Homepage copy and layout | `src/pages/index.astro` and its imported components; the hero ChatMD comes from root `Readme.md` |
 | Application guides and recorded workflow | `docs-src/applications/`, `config/applications.json`, and the selected canonical example/recording files |
 | ChatMD/ChatML source and downloads | `docs-src/examples/catalog.json`, its exact files, and `config/supplemental-sources.json` |

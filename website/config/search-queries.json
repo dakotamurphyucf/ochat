@@ -136,8 +136,11 @@
     "query": "ChatML",
     "expected": [
       "/docs/concepts/chatml/",
-      "/docs/reference/chatml/"
-    ]
+      "/docs/reference/chatml/",
+      "/docs/tutorials/chatml-program/",
+      "/docs/tutorials/chatml-tool/"
+    ],
+    "maxRank": 3
   },
   {
     "query": "specialist",
@@ -233,6 +236,7 @@
     "query": "tutorial curriculum",
     "expected": [
       "/docs/tutorials/"
-    ]
+    ],
+    "maxRank": 3
   }
 ]

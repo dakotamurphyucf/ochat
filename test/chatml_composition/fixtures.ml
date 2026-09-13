@@ -70,6 +70,8 @@ let with_daemon
       ?request_counts
       ?(expected_schedules = 0)
       ?(expect_moderator = false)
+      ?(workspace_files =
+        [ "reports/report-a.json", report_a; "reports/report-b.json", report_b ])
       ~sources
       ~calls
       f
@@ -92,6 +94,10 @@ let with_daemon
           ~perm:0o700
           Eio.Path.(Eio.Stdenv.fs env / workspace / "reports");
         let save path source =
+          Eio.Path.mkdirs
+            ~exists_ok:true
+            ~perm:0o700
+            Eio.Path.(Eio.Stdenv.fs env / Filename.dirname path);
           Eio.Path.save
             ~create:(`Exclusive 0o600)
             Eio.Path.(Eio.Stdenv.fs env / path)
@@ -99,8 +105,8 @@ let with_daemon
         in
         List.iter sources ~f:(fun (name, source) ->
           save (Filename.concat root name) source);
-        save (Filename.concat workspace "reports/report-a.json") report_a;
-        save (Filename.concat workspace "reports/report-b.json") report_b;
+        List.iter workspace_files ~f:(fun (name, source) ->
+          save (Filename.concat workspace name) source);
         save (Filename.concat workspace "secret.json") "PRIVATE-REPORT-SENTINEL";
         let configuration =
           match config_file with

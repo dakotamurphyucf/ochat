@@ -1,27 +1,8 @@
 ---
 import report from '../../.generated/examples-report.json';
 import overviews from '../../config/lesson-overviews.json';
-const groups = [
-  {
-    title: 'Create and compose',
-    description: 'The local authoring foundation. Start here.',
-    start: 0,
-    end: 3,
-  },
-  {
-    title: 'Add workflow control',
-    description:
-      'Use batch execution, scripts, and explicitly configured shell tools.',
-    start: 3,
-    end: 6,
-  },
-  {
-    title: 'Host and connect',
-    description: 'Optional paths for persistent agents and custom clients.',
-    start: 6,
-    end: 10,
-  },
-];
+import { resolveTutorialPaths } from '../../config/tutorial-paths.mjs';
+const groups = resolveTutorialPaths(report.tutorials);
 ---
 
 <nav class="tutorial-curriculum" aria-label="Tutorial curriculum">
@@ -35,8 +16,8 @@ const groups = [
               <p>{group.description}</p>
             </>
           </div>
-          <ol start={group.start + 1}>
-            {report.tutorials.slice(group.start, group.end).map((t) => {
+          <ol>
+            {group.tutorials.map((t) => {
               const info = overviews.find((o) => o.page === t.page)!;
               return (
                 <li>

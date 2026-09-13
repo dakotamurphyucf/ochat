@@ -863,5 +863,186 @@
         "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153"
       }
     }
+  },
+  {
+    "id": "chatml-program",
+    "title": "ChatML report program",
+    "summary": "Count repeated failures across project reports using a one-off program and admitted file tools.",
+    "tutorial": "tutorials/chatml-program",
+    "host": "Native local TUI",
+    "capabilities": [
+      "ChatML",
+      "File tools",
+      "One-off programs"
+    ],
+    "required": [
+      "Installed Ochat and provider access to gpt-6-astra. Run from the extracted bundle; the supplied reports are input data, not executed checks."
+    ],
+    "kind": "complete",
+    "entry": "agent.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/learning/check-reports/program.chatmd",
+        "path": "agent.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
+        "path": "scripts/aggregate.chatml",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/reports/report-a.json",
+        "path": "reports/report-a.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/reports/report-b.json",
+        "path": "reports/report-b.json",
+        "role": "data"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "506f350dd21b5712e829c2196695923b78174822",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest",
+        "opam exec -- dune build @agent-docs-check"
+      ],
+      "observed": "The maintained ChatMD/script/schema/report files execute through registered tools in a real daemon session with deterministic provider responses. Both entry points return the documented failure counts; invalid input performs no reads, a root escape fails without leaking file contents, and malformed reports fail without partial totals. The extracted catalog closure parses and rejects missing attached companions.",
+      "limitations": "Offline runtime and source-closure checks only; no live provider or physical local TUI interaction. An unrelated existing compaction test timed out in the initial parallel suite; the suite passed with two Dune jobs.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/check-reports/program.chatmd": "496a2da2d7405d55194527cfe3cd03fb5a30a5f2d3494dc6cd2cd5a8d54eceb7",
+        "docs-src/examples/learning/check-reports/reports/report-a.json": "a74c8661f732da390c3abfeab15eb4ca0cddd0050eb3070ef574a8507f2f86c8",
+        "docs-src/examples/learning/check-reports/reports/report-b.json": "2587a3b667b74e463d2a656bd0cdc6186d41083e0308e3db28df1d6315c7ea02",
+        "docs-src/examples/learning/check-reports/scripts/aggregate.chatml": "f437fb8ea178afeea94b76a6e5514f2906f8369eb0400f0ec42e7ca4c5e2cce2",
+        "docs-src/tutorials/chatml-program.md": "bacb5b4c7d53489f188ed2c10379258455445d7f2ab0a9f77c67e4d73cba8a85",
+        "lib/agent_session/run_chatml_tool.ml": "228d10f6edfb0a5568692332653ac8136d10588eebebbafc827226a6c122a079",
+        "lib/agent_session/runtime_builder.ml": "03fecc74dadb6599ef8eaaf8ffb0118080cebf895718bb613af58c51f5582381",
+        "lib/chatml/chatml_host_runtime.ml": "9bce55b94e4733d606d1196bb893382580a4d87c85b717cee96c8b3a613dbc5f",
+        "lib/io.ml": "25a160b1a9a6a48a0be42bf37ea38997f6e0493ac30b4c1e67e855a60eb6e57d",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/chatml_composition/documentation_program_tests.ml": "629c251b0060d453d2703545ae18b93eb09d3371b6244d038b7edf64e8997355",
+        "test/chatml_composition/dune": "d05c293df8649213f4522daa77875620f25cb7c68cc44ddc386f1eab4398409c",
+        "test/chatml_composition/fixtures.ml": "e9403d21564099e53f90bce2055faabea2e1c1d05162708f72a8ea4498df8cb0"
+      }
+    }
+  },
+  {
+    "id": "chatml-tool",
+    "title": "Reusable check-summary tool",
+    "summary": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
+    "tutorial": "tutorials/chatml-tool",
+    "host": "Native local TUI",
+    "capabilities": [
+      "ChatML",
+      "File tools",
+      "Standalone script tools"
+    ],
+    "required": [
+      "Installed Ochat and provider access to gpt-6-astra. Run from the extracted bundle; the supplied reports are input data, not executed checks."
+    ],
+    "kind": "complete",
+    "entry": "agent.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/learning/check-reports/tool.chatmd",
+        "path": "agent.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
+        "path": "scripts/aggregate.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/reports/report-a.json",
+        "path": "reports/report-a.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/reports/report-b.json",
+        "path": "reports/report-b.json",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/schemas/input.json",
+        "path": "schemas/input.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/learning/check-reports/schemas/output.json",
+        "path": "schemas/output.json",
+        "role": "companion"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [
+      {
+        "fromPath": "agent.chatmd",
+        "toPath": "scripts/aggregate.chatml",
+        "reference": "scripts/aggregate.chatml",
+        "kind": "script"
+      },
+      {
+        "fromPath": "agent.chatmd",
+        "toPath": "schemas/input.json",
+        "reference": "schemas/input.json",
+        "kind": "import"
+      },
+      {
+        "fromPath": "agent.chatmd",
+        "toPath": "schemas/output.json",
+        "reference": "schemas/output.json",
+        "kind": "import"
+      }
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "506f350dd21b5712e829c2196695923b78174822",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest",
+        "opam exec -- dune build @agent-docs-check"
+      ],
+      "observed": "The maintained ChatMD/script/schema/report files execute through registered tools in a real daemon session with deterministic provider responses. Both entry points return the documented failure counts; invalid input performs no reads, a root escape fails without leaking file contents, and malformed reports fail without partial totals. The extracted catalog closure parses and rejects missing attached companions.",
+      "limitations": "Offline runtime and source-closure checks only; no live provider or physical local TUI interaction. An unrelated existing compaction test timed out in the initial parallel suite; the suite passed with two Dune jobs.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/check-reports/reports/report-a.json": "a74c8661f732da390c3abfeab15eb4ca0cddd0050eb3070ef574a8507f2f86c8",
+        "docs-src/examples/learning/check-reports/reports/report-b.json": "2587a3b667b74e463d2a656bd0cdc6186d41083e0308e3db28df1d6315c7ea02",
+        "docs-src/examples/learning/check-reports/schemas/input.json": "d94a1f336f621edc3fca0bbaea29ff65b09fdef97c708dd757bc6e73b76e5cc9",
+        "docs-src/examples/learning/check-reports/schemas/output.json": "27005355269833d562bdcaa1cb333724c4e30732eaa0edfb144d4776111110c9",
+        "docs-src/examples/learning/check-reports/scripts/aggregate.chatml": "f437fb8ea178afeea94b76a6e5514f2906f8369eb0400f0ec42e7ca4c5e2cce2",
+        "docs-src/examples/learning/check-reports/tool.chatmd": "5d910a93056528f341ae32c115db23c3c8ea732825167d94ed38dd53692a9762",
+        "docs-src/tutorials/chatml-tool.md": "6b9edfebcd8e92d1fdf93e4038b9625ae0ad119b4e4970f70c86c728dee45db4",
+        "lib/agent_session/run_chatml_tool.ml": "228d10f6edfb0a5568692332653ac8136d10588eebebbafc827226a6c122a079",
+        "lib/agent_session/runtime_builder.ml": "03fecc74dadb6599ef8eaaf8ffb0118080cebf895718bb613af58c51f5582381",
+        "lib/chatml/chatml_host_runtime.ml": "9bce55b94e4733d606d1196bb893382580a4d87c85b717cee96c8b3a613dbc5f",
+        "lib/io.ml": "25a160b1a9a6a48a0be42bf37ea38997f6e0493ac30b4c1e67e855a60eb6e57d",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/chatml_composition/documentation_program_tests.ml": "629c251b0060d453d2703545ae18b93eb09d3371b6244d038b7edf64e8997355",
+        "test/chatml_composition/dune": "d05c293df8649213f4522daa77875620f25cb7c68cc44ddc386f1eab4398409c",
+        "test/chatml_composition/fixtures.ml": "e9403d21564099e53f90bce2055faabea2e1c1d05162708f72a8ea4498df8cb0"
+      }
+    }
   }
 ]

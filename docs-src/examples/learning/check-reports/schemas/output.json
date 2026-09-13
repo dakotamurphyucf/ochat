@@ -1,0 +1,12 @@
+{
+  "type": "array",
+  "items": {
+    "type": "object",
+    "properties": {
+      "check": { "type": "string" },
+      "failures": { "type": "number" }
+    },
+    "required": ["check", "failures"],
+    "additionalProperties": false
+  }
+}

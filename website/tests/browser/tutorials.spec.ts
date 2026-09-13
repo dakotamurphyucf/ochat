@@ -9,14 +9,14 @@ const report = JSON.parse(
   ),
 );
 
-test('all ten lessons expose their host, verification, source bundles, and real previous/next links without JavaScript', async ({
+test('all lessons expose host, verification and learning-path navigation without JavaScript', async ({
   browser,
 }) => {
   const context = await browser.newContext({ javaScriptEnabled: false });
   try {
     const page = await context.newPage();
-    await page.goto(report.tutorials[0].route);
-    for (const [index, t] of report.tutorials.entries()) {
+    for (const t of report.tutorials) {
+      await page.goto(t.route);
       await expect(page).toHaveURL(t.route);
       const record = page.getByRole('complementary', {
         name: 'Tutorial context and verification',
@@ -25,21 +25,22 @@ test('all ten lessons expose their host, verification, source bundles, and real 
       await record.locator('summary').click();
       await expect(record).toContainText('No live provider calls');
       await expect(record).toContainText(t.verification.platform);
-      if (index)
+      if (t.previous)
         await expect(
           page.getByRole('link', {
             name: new RegExp(
               'Previous.*' +
-                report.tutorials[index - 1].title.replace(
-                  /[.*+?^${}()|[\]\\]/g,
-                  '\\$&',
-                ),
+                t.previous.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
             ),
           }),
-        ).toHaveAttribute('href', report.tutorials[index - 1].route);
+        ).toHaveAttribute('href', t.previous.route);
+      else
+        await expect(page.getByRole('link', { name: /Previous / })).toHaveCount(
+          0,
+        );
       await page.getByRole('link', { name: /Next / }).click();
+      await expect(page).toHaveURL(t.next.route);
     }
-    await expect(page).toHaveURL('/docs/examples/');
   } finally {
     await context.close();
   }
@@ -125,6 +126,8 @@ test('new lessons and catalog retain readable narrow layouts and accessible expa
       '/docs/tutorials/file-tool/',
       '/docs/tutorials/specialist/',
       '/docs/tutorials/workflow/',
+      '/docs/tutorials/chatml-program/',
+      '/docs/tutorials/chatml-tool/',
       '/docs/examples/',
     ]) {
       await page.goto(route);

@@ -37,11 +37,22 @@ test('tutorial hub exposes the curriculum and lessons explain outcomes and next 
   const curriculum = page.getByRole('navigation', {
     name: 'Tutorial curriculum',
   });
-  await expect(curriculum.locator('li')).toHaveCount(10);
+  await expect(curriculum.locator('li')).toHaveCount(12);
+  await expect(
+    curriculum.getByRole('heading', { name: 'ChatML workflows' }),
+  ).toBeVisible();
+  await expect(
+    curriculum.getByRole('link', {
+      name: /Summarize reports with a ChatML program/,
+    }),
+  ).toBeVisible();
   await curriculum.getByRole('link').first().click();
   await expect(
     page.getByRole('complementary', { name: 'Lesson outcome and setup' }),
   ).toContainText('You’ll build');
+  await expect(
+    page.getByRole('complementary', { name: 'Lesson outcome and setup' }),
+  ).toContainText('Create and compose · T01');
   await expect(
     page.getByRole('complementary', { name: 'What comes next' }),
   ).toContainText('file tool');

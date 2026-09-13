@@ -57,12 +57,15 @@ test('inline source preserves approved file bytes and refuses malformed UTF-8', 
 });
 
 test('catalog enforces explicit file ownership, paths, dependency edges, notices and example types', () => {
-  assert.equal(validateExampleSelection(input, entries, tracked).length, 14);
+  assert.equal(
+    validateExampleSelection(input, entries, tracked).length,
+    input.length,
+  );
   assert.deepEqual(
     ['complete', 'template', 'illustration'].map(
       (kind) => input.filter((e) => e.kind === kind).length,
     ),
-    [8, 5, 1],
+    [10, 5, 1],
   );
   const source = input.find((e) => e.id === 'specialist');
   const reject = (mutate, pattern) => {
@@ -263,10 +266,13 @@ test('download publication rejects escaping symlinks and uncommitted release sou
   }
 });
 
-test('ten tutorial records drive actual previous and next links without changing existing route owners', () => {
+test('tutorial records keep stable IDs and navigation follows learning paths', () => {
   assert.deepEqual(
     report.tutorials.map((t) => t.id),
-    Array.from({ length: 10 }, (_, i) => `T${String(i + 1).padStart(2, '0')}`),
+    Array.from(
+      { length: curriculum.length },
+      (_, i) => `T${String(i + 1).padStart(2, '0')}`,
+    ),
   );
   const byId = new Map(entries.map((e) => [e.id, e]));
   for (const [index, t] of curriculum.entries()) {
@@ -276,16 +282,36 @@ test('ten tutorial records drive actual previous and next links without changing
       byId,
       tutorials: curriculum,
     });
-    assert.equal(
-      metadata.prev?.link,
-      index ? report.tutorials[index - 1].route : undefined,
-    );
-    assert.equal(
-      metadata.next.link,
-      index < 9 ? report.tutorials[index + 1].route : '/docs/examples/',
-    );
+    assert.equal(metadata.prev?.link, report.tutorials[index].previous?.route);
+    assert.equal(metadata.next.link, report.tutorials[index].next.route);
     assert.ok(report.tutorials[index].examples.length);
   }
+  const byPage = new Map(report.tutorials.map((t) => [t.page, t]));
+  assert.equal(
+    byPage.get('tutorials/chatml-program').next.route,
+    '/docs/tutorials/chatml-tool/',
+  );
+  assert.equal(
+    byPage.get('tutorials/chatml-tool').next.route,
+    '/docs/tutorials/workflow/',
+  );
+  assert.equal(byPage.get('tutorials/workflow').next.route, '/docs/tutorials/');
+  assert.equal(
+    byPage.get('tutorials/specialist').next.route,
+    '/docs/tutorials/',
+  );
+  assert.equal(byPage.get('stdio').previous, null);
+  const workflowLinks = entries
+    .filter((e) => e.navigation && e.section === 'ChatML workflows')
+    .sort((a, b) => a.order - b.order)
+    .slice(0, 4)
+    .map((e) => e.id);
+  assert.deepEqual(workflowLinks, [
+    'chatml',
+    'tutorials/chatml-program',
+    'tutorials/chatml-tool',
+    'tutorials/workflow',
+  ]);
 });
 
 test('new tutorial code fences preserve the complete maintained prompts, scripts, and data', async () => {

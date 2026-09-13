@@ -185,6 +185,41 @@
       "source": "docs-src/examples/applications/docs-review/recording.json",
       "disposition": "example-review",
       "reason": "Captured application execution evidence; consumed through a hash-validated website importer, not copied as an arbitrary asset."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/program.chatmd",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/reports/report-a.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/reports/report-b.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/tool.chatmd",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/schemas/input.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/schemas/output.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
     }
   ],
   "directories": [

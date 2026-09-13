@@ -644,7 +644,7 @@
     "description": "Understand ChatML jobs, one-shot schedules, safe points, and recovery in agent hosts.",
     "section": "ChatML workflows",
     "kind": "guide",
-    "order": 3,
+    "order": 6,
     "related": [
       "background"
     ],
@@ -2193,7 +2193,7 @@
     "route": "/docs/guides/moderator-runtime/",
     "description": "Understand ChatML surfaces, transactional state, effective history, approval suspension, and host ownership.",
     "section": "ChatML workflows",
-    "order": 2,
+    "order": 5,
     "status": "experimental",
     "navigation": true,
     "search": true,
@@ -4413,7 +4413,7 @@
     "status": "experimental",
     "verification": "not-checked",
     "reviewNote": "P06 complete source-based tutorial; offline verification and exact example hashes are recorded separately in the tutorial manifest. No live provider execution is claimed.",
-    "order": 1,
+    "order": 3,
     "related": [
       "agent-server/tutorials/shell-agent"
     ]
@@ -4441,7 +4441,7 @@
     "id": "tutorials",
     "source": "docs-src/tutorials/README.md",
     "route": "/docs/tutorials/",
-    "title": "Choose a learning path",
+    "title": "Learn Ochat: tutorial curriculum",
     "description": "Learn Ochat through ten connected lessons, from your first local agent to hosted workflows.",
     "section": "Start here",
     "kind": "index",
@@ -4587,5 +4587,49 @@
     "status": "current",
     "verification": "not-checked",
     "reviewNote": "Application-led UI follow-up: authored against maintained source examples and linked host contracts; example verification and recording scope remain explicit."
+  },
+  {
+    "id": "tutorials/chatml-program",
+    "source": "docs-src/tutorials/chatml-program.md",
+    "disposition": "publish",
+    "title": "Summarize reports with a ChatML program",
+    "description": "Count repeated failures across project reports using a one-off program and admitted file tools.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/chatml-program/",
+    "section": "ChatML workflows",
+    "kind": "tutorial",
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked",
+    "reviewNote": "Complete maintained source bundle; execution evidence is tracked in the example and tutorial catalog. No live provider run is claimed.",
+    "order": 1,
+    "related": [
+      "tutorials/chatml-tool"
+    ]
+  },
+  {
+    "id": "tutorials/chatml-tool",
+    "source": "docs-src/tutorials/chatml-tool.md",
+    "disposition": "publish",
+    "title": "Make a reusable ChatML tool",
+    "description": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/chatml-tool/",
+    "section": "ChatML workflows",
+    "kind": "tutorial",
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked",
+    "reviewNote": "Complete maintained source bundle; execution evidence is tracked in the example and tutorial catalog. No live provider run is claimed.",
+    "order": 2,
+    "related": [
+      "tutorials/workflow"
+    ]
   }
 ]

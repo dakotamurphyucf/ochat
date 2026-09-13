@@ -1,0 +1,70 @@
+(* The file tool prefixes text with two metadata lines. Keep decoding separate
+   from the workflow so malformed or truncated input fails visibly. *)
+let after_line text =
+  match String.find(text, "\n") with
+  | `Some(index) ->
+      String.slice(text, index + 1, String.length(text) - index - 1)
+  | `None -> fail("Expected a complete read_file response.")
+
+let string_field value name =
+  match Json.get_field(value, name) with
+  | `Some(`String(text)) -> text
+  | _ -> fail("Expected a string field: " ++ name)
+
+let add_failure totals check_name =
+  if Array.exists(totals, fun item -> item.check == check_name) then
+    Array.map(totals, fun item ->
+      if item.check == check_name then
+        { check = check_name; failures = item.failures +. 1.0 }
+      else item)
+  else
+    Array.append(totals, [{ check = check_name; failures = 1.0 }])
+
+let add_report totals report =
+  match report with
+  | `Array(checks) ->
+      Array.fold(checks, totals, fun current item ->
+        match string_field(item, "status") with
+        | "failed" -> add_failure(current, string_field(item, "check"))
+        | "passed" -> current
+        | _ -> fail("A check status must be passed or failed."))
+  | _ -> fail("Expected an array of check results.")
+
+let read_report filename =
+  let* result = Tool.call("read_file", `Object([
+    { key = "root"; value = `String("reports") },
+    { key = "file"; value = `String(filename) }
+  ])) in
+  match result with
+  | `Ok(`String(text)) ->
+      Task.pure(Json.parse(after_line(after_line(text))))
+  | `Ok(_) -> Task.fail("The file tool returned a non-text result.")
+  | `Error(message) -> Task.fail(message)
+
+let rec summarize files index totals =
+  if index == Array.length(files) then Task.pure(totals)
+  else
+    match files[index] with
+    | `String(filename) ->
+        let* report = read_report(filename) in
+        summarize(files, index + 1, add_report(totals, report))
+    | _ -> Task.fail("Expected report filenames.")
+
+(* One-off programs return JSON through main(input). *)
+let main input =
+  match input with
+  | `Array(files) ->
+      let* totals = summarize(files, 0, []) in
+      Task.pure(`Array(Array.map(totals, fun item -> `Object([
+        { key = "check"; value = `String(item.check) },
+        { key = "failures"; value = `Number(item.failures) }
+      ]))))
+  | _ -> Task.fail("Expected an array of report filenames.")
+
+(* The reusable tool uses the same program with an explicit tool outcome. *)
+let run ctx input =
+  match Json.get_field(input, "files") with
+  | `Some(files) ->
+      let* summary = main(files) in
+      Task.pure(`Complete(summary))
+  | `None -> Task.fail("Expected a files field.")

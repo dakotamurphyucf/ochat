@@ -3,6 +3,10 @@ import path from 'node:path';
 import { z } from 'zod';
 import { containedFile, rendered } from './content-lib.mjs';
 import { digest } from './provenance.mjs';
+import {
+  resolveTutorialPaths,
+  tutorialNeighbors,
+} from '../config/tutorial-paths.mjs';
 
 const text = z.string().min(1);
 // Extensionless files are treated as routes by static preview hosts. The
@@ -309,13 +313,14 @@ export async function publishExamples(
 export async function tutorialCurriculum(input, examples, entries, context) {
   const tutorials = tutorialSchema.parse(input);
   if (
-    tutorials.length !== 10 ||
+    tutorials.length < 10 ||
     tutorials.some((t, i) => t.id !== `T${String(i + 1).padStart(2, '0')}`) ||
-    new Set(tutorials.map((t) => t.page)).size !== 10
+    new Set(tutorials.map((t) => t.page)).size !== tutorials.length
   )
     throw new Error(
-      'Tutorial curriculum must own T01–T10 exactly once in order',
+      'Tutorial curriculum must preserve T01–T10 and append unique sequential IDs',
     );
+  resolveTutorialPaths(tutorials);
   const pages = tutorials.map((t) => {
     const page = entries.find((e) => e.id === t.page);
     if (!page || !rendered(page) || !page.search || page.kind !== 'tutorial')
@@ -325,6 +330,14 @@ export async function tutorialCurriculum(input, examples, entries, context) {
   return Promise.all(
     tutorials.map(async (t, index) => {
       const page = pages[index];
+      const adjacent = tutorialNeighbors(t.page);
+      const neighbor = (id) => {
+        if (!id) return null;
+        const entry = entries.find((e) => e.id === id);
+        if (!entry || !rendered(entry))
+          throw new Error(`Unpublished learning-path destination: ${id}`);
+        return { route: entry.route, title: entry.title };
+      };
       const selected = t.examples.map((id) => {
         const example = examples.find((e) => e.id === id);
         if (!example)
@@ -336,16 +349,8 @@ export async function tutorialCurriculum(input, examples, entries, context) {
         title: page.title,
         route: page.route,
         source: page.source,
-        previous: index
-          ? { route: pages[index - 1].route, title: pages[index - 1].title }
-          : null,
-        next:
-          index < 9
-            ? { route: pages[index + 1].route, title: pages[index + 1].title }
-            : {
-                route: '/docs/examples/',
-                title: 'Explore the example catalog',
-              },
+        previous: neighbor(adjacent.previous),
+        next: neighbor(adjacent.next),
         verification: await effectiveVerification(
           t.verification,
           [

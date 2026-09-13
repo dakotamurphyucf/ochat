@@ -26,8 +26,8 @@ Choose the smallest execution form that fits the work:
 
 | Need | Use |
 |---|---|
-| Let an agent write deterministic logic over its existing tools | [`run_chatml` and one-off scripts](../guide/chatml-authoring-runtime.md) |
-| Expose a reusable script as a tool | [Standalone ChatML handlers](../guide/chatml-authoring-runtime.md#standalone-tools-and-explicit-outcomes) |
+| Let an agent write deterministic logic over its existing tools | [One-off report program](../tutorials/chatml-program.md) |
+| Expose a reusable script as a tool | [Reusable check-summary tool](../tutorials/chatml-tool.md) |
 | React to conversation events and control progression | [Conversation moderator](../guide/chatml-moderator-runtime.md) |
 | Implement a tool that depends on conversation state | [Moderator-handled tools](../guide/chatml-authoring-runtime.md) |
 | Return promptly and notify the agent when work finishes | [Jobs, subscriptions and notifications](../guide/chatml-authoring-background.md) |
@@ -108,11 +108,14 @@ the persistence boundary, jobs, timers, and restart behavior.
 
 ## Read and try
 
-1. Follow the [background agent tutorial](../agent-server/tutorials/background-agent.md)
-   for a concrete timer-driven workflow and its host setup.
-2. Use the [runtime guide](../guide/chatml-moderator-runtime.md) to choose events
+1. Start with the [report program](../tutorials/chatml-program.md) and
+   [reusable tool](../tutorials/chatml-tool.md) to sequence useful file operations.
+2. Follow the [moderator lesson](../tutorials/workflow.md), then the
+   [background agent tutorial](../agent-server/tutorials/background-agent.md)
+   for timer-driven work and its host setup.
+3. Use the [runtime guide](../guide/chatml-moderator-runtime.md) to choose events
    and capabilities for your own script.
-3. Consult the [language reference](../guide/chatml-language-spec.md) and
+4. Consult the [language reference](../guide/chatml-language-spec.md) and
    [parsing and diagnostics guide](../guide/chatml-parsing-and-diagnostics.md)
    while writing it.
 4. For library work, read the

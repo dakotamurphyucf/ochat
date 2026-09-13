@@ -47,9 +47,28 @@ release workflow.
 
 ## Remaining learning work
 
-The next work extends the foundation through independently runnable checkpoints
+The first connected scripting checkpoints are now available: **T11** summarizes
+Lantern reports with `run_chatml`; **T12** exposes the same maintained source as
+`summarize_checks`. Each bundle is independently inspectable and downloadable.
+The program takes a JSON array; the named tool takes an object containing a
+`files` array and validates its output. Neither example runs the checks reported
+in its supplied data.
+
+`config/tutorial-paths.mjs` now owns explicit primary learning paths. Every
+registered tutorial must appear once. Stable IDs identify lessons; they are not
+a global prerequisite sequence. Previous/next links stay within a path and return
+to the curriculum at its end. Add new IDs after T12, and update the manifest,
+path membership, overview, catalog and approved sources together.
+
+Offline composition tests execute these exact sources through registered tools
+in a real session with deterministic provider responses. They check aggregation,
+schema rejection before reads, inherited file boundaries and malformed-report
+failure without partial results. Captured bundle checks separately verify source
+closure and missing companions. This does not establish live-provider behavior.
+
+The remaining work extends the foundation through independently runnable checkpoints
 for useful shell commands, custom guardrails/review, persistent and generated
-specialists, one-off programs, reusable tools, stateful moderation and background
+specialists, stateful moderation and background
 results. Those converge on three complete multi-file applications: a guarded
 engineering assistant, a persistent review team and a living documentation lab.
 
