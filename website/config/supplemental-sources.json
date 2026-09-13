@@ -350,6 +350,51 @@
       "source": "docs-src/examples/learning/agent-teams/server.sexp",
       "disposition": "example-download",
       "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/scripts/ledger.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/schemas/ledger-input.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/schemas/ledger-output.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/schemas/empty.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/schemas/progress.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
     }
   ],
   "directories": [

@@ -75,7 +75,8 @@
     "query": "stateful tools",
     "expected": [
       "/docs/concepts/chatml/",
-      "/docs/reference/chatml/execution-contracts/"
+      "/docs/reference/chatml/execution-contracts/",
+      "/docs/tutorials/stateful-workflow/"
     ],
     "maxRank": 3
   },
@@ -83,7 +84,8 @@
     "query": "background results",
     "expected": [
       "/docs/concepts/chatml/",
-      "/docs/reference/chatml/background-work/"
+      "/docs/reference/chatml/background-work/",
+      "/docs/tutorials/background-results/"
     ],
     "maxRank": 3
   },

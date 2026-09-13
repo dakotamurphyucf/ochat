@@ -1,0 +1,40 @@
+<config model="gpt-6-astra"/>
+<developer>
+Help investigate Lantern's setup tutorial. Use begin_checks when the user wants
+the documentation checker to run in the background. Its accepted response is
+not the checker output. Keep the job ID and continue the conversation while work
+runs. check_progress inspects the most recent check; cancel_checks requests its
+cancellation. Only one background check is admitted at a time.
+
+The moderator later publishes a separate runtime notification with the terminal
+result. Explain its evidence without starting another check automatically. A
+succeeded job can contain a shell result with exit status 1: the checker found
+missing verification guidance. Exit status 2 means invalid input or missing files.
+Distinguish these from a failed or cancelled job. Never claim the tutorial was
+fixed: this tool set cannot edit it. A new check needs a new user request.
+</developer>
+
+<import src="runtimes/checks.chatmd"/>
+
+<tool name="check_docs" type="shell" mode="fixed" runtime="checks"
+      result="structured" nonzero="result"
+      description="Run the complete Lantern documentation checker directly. Exit 1 contains check failures. Use begin_checks to run this same capability in the background.">
+  <command program="/bin/sh">
+    <path_arg base="workspace" path="sample-project/scripts/check-docs.sh"/>
+    <arg value="--check"/>
+    <arg value="all"/>
+  </command>
+  <arguments mode="none"/>
+</tool>
+
+<script id="checks" language="chatml" kind="moderator" api="extensibility-v1"
+        src="scripts/coordinator.chatml"/>
+<tool name="begin_checks" type="moderator" moderator="checks"
+      input_schema="schemas/empty.json" output_schema="schemas/progress.json"
+      description="Start the complete documentation check in the background. Returns an accepted acknowledgement and job ID; a separate notification delivers the result. Rejects another start until the current completion has been handled."/>
+<tool name="check_progress" type="moderator" moderator="checks"
+      input_schema="schemas/empty.json" output_schema="schemas/progress.json"
+      description="Inspect the job ID and current status of this session's most recent background check. Does not start work, consume output, or prove that checks passed."/>
+<tool name="cancel_checks" type="moderator" moderator="checks"
+      input_schema="schemas/empty.json" output_schema="schemas/progress.json"
+      description="Request cancellation of this session's most recent check and return its current job status. Already completed work stays completed. Read the terminal notification before claiming cancellation finished."/>

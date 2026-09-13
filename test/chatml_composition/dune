@@ -7,6 +7,8 @@
  (inline_tests (deps ../../bin/ochat_agent_stdio.exe))
  (preprocessor_deps
   (glob_files_rec ../../docs-src/examples/learning/agent-teams/*)
+  (glob_files_rec ../../docs-src/examples/learning/stateful-workflow/*)
+  (glob_files_rec ../../docs-src/examples/learning/background-results/*)
   (glob_files_rec ../../docs-src/examples/learning/check-reports/*)
   (glob_files_rec ../../docs-src/examples/learning/lantern/*)
   (glob_files_rec ../../docs-src/examples/learning/shell-inspection/*)

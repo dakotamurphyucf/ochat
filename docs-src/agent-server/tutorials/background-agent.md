@@ -38,6 +38,13 @@ request to restart its script.
 
 ## Extend to asynchronous model work
 
+For a complete tool-backed workflow, follow
+[Run checks and deliver background results](../../tutorials/background-results.md).
+It replaces this minimal timer demonstration with a real documentation checker,
+an initial acknowledgement, progress/cancellation tools and terminal notifications.
+That lesson uses a process-bound native local host; keep this daemon setup when
+the work needs to survive a disconnected client.
+
 The [orchestration guide](../chatml-orchestration.md) describes `Model.spawn`,
 completion events, budgets, jobs and cancellation. Use the complete tested
 [background recipe example](../../../test/agent_server_e2e/scenarios/background_scenario.ml)

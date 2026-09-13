@@ -35,6 +35,8 @@ export const tutorialPaths = [
       'tutorials/chatml-program',
       'tutorials/chatml-tool',
       'tutorials/workflow',
+      'tutorials/stateful-workflow',
+      'tutorials/background-results',
     ],
   },
   {

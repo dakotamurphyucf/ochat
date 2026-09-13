@@ -65,7 +65,7 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
     ['complete', 'template', 'illustration'].map(
       (kind) => input.filter((e) => e.kind === kind).length,
     ),
-    [15, 4, 1],
+    [17, 4, 1],
   );
   const source = input.find((e) => e.id === 'specialist');
   const reject = (mutate, pattern) => {
@@ -295,7 +295,18 @@ test('tutorial records keep stable IDs and navigation follows learning paths', (
     byPage.get('tutorials/chatml-tool').next.route,
     '/docs/tutorials/workflow/',
   );
-  assert.equal(byPage.get('tutorials/workflow').next.route, '/docs/tutorials/');
+  assert.equal(
+    byPage.get('tutorials/workflow').next.route,
+    '/docs/tutorials/stateful-workflow/',
+  );
+  assert.equal(
+    byPage.get('tutorials/stateful-workflow').next.route,
+    '/docs/tutorials/background-results/',
+  );
+  assert.equal(
+    byPage.get('tutorials/background-results').next.route,
+    '/docs/tutorials/',
+  );
   assert.equal(
     byPage.get('tutorials/specialist').next.route,
     '/docs/tutorials/',
@@ -304,13 +315,15 @@ test('tutorial records keep stable IDs and navigation follows learning paths', (
   const workflowLinks = entries
     .filter((e) => e.navigation && e.section === 'ChatML workflows')
     .sort((a, b) => a.order - b.order)
-    .slice(0, 4)
+    .slice(0, 6)
     .map((e) => e.id);
   assert.deepEqual(workflowLinks, [
     'chatml',
     'tutorials/chatml-program',
     'tutorials/chatml-tool',
     'tutorials/workflow',
+    'tutorials/stateful-workflow',
+    'tutorials/background-results',
   ]);
 });
 

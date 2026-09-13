@@ -28,9 +28,9 @@ Choose the smallest execution form that fits the work:
 |---|---|
 | Let an agent write deterministic logic over its existing tools | [One-off report program](../tutorials/chatml-program.md) |
 | Expose a reusable script as a tool | [Reusable check-summary tool](../tutorials/chatml-tool.md) |
-| React to conversation events and control progression | [Conversation moderator](../guide/chatml-moderator-runtime.md) |
-| Implement a tool that depends on conversation state | [Moderator-handled tools](../guide/chatml-authoring-runtime.md) |
-| Return promptly and notify the agent when work finishes | [Jobs, subscriptions and notifications](../guide/chatml-authoring-background.md) |
+| React to conversation events and control progression | [Three-turn conversation moderator](../tutorials/workflow.md) |
+| Implement a tool that depends on conversation state | [Stateful review ledger](../tutorials/stateful-workflow.md) |
+| Return promptly and notify the agent when work finishes | [Background documentation checks](../tutorials/background-results.md) |
 
 A continuing specialist is another **agent session**, not another script form.
 Use the [delegation guide](../guide/subagents.md) to choose its lifetime, then
@@ -44,8 +44,11 @@ the specific invocation. Declaring a tool alone does not implement its handler.
 An agent can learn these contracts from the installed
 [authoring documentation tool](../guide/authoring-context-tool.md), then validate
 its candidate without executing it. The
-[complete source bundles](../../test/chatml_extensibility_fixtures/README.md)
-show each pattern and include required scripts, schemas and example inputs.
+[complete source bundles](../examples/README.md)
+include runnable learning projects with scripts, schemas and sample inputs.
+The [runtime contract reference](../guide/chatml-authoring-runtime.md) and
+[background API reference](../guide/chatml-authoring-background.md) explain exact
+behavior once you have tried the corresponding lesson.
 
 - **Language:** values, functions, pattern matching, task syntax, and parsing
   rules are defined by the [ChatML language specification](../guide/chatml-language-spec.md).
@@ -111,14 +114,14 @@ the persistence boundary, jobs, timers, and restart behavior.
 1. Start with the [report program](../tutorials/chatml-program.md) and
    [reusable tool](../tutorials/chatml-tool.md) to sequence useful file operations.
 2. Follow the [moderator lesson](../tutorials/workflow.md), then the
-   [background agent tutorial](../agent-server/tutorials/background-agent.md)
-   for timer-driven work and its host setup.
+   [stateful review ledger](../tutorials/stateful-workflow.md) and
+   [background check workflow](../tutorials/background-results.md).
 3. Use the [runtime guide](../guide/chatml-moderator-runtime.md) to choose events
    and capabilities for your own script.
 4. Consult the [language reference](../guide/chatml-language-spec.md) and
    [parsing and diagnostics guide](../guide/chatml-parsing-and-diagnostics.md)
    while writing it.
-4. For library work, read the
+5. For library work, read the
    [implementation architecture](../guide/chatml-implementation-architecture.md).
 
 For precise host behavior, see the [session-controller contract](../chatml-host-session-controller-contract.md),

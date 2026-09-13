@@ -1,0 +1,23 @@
+<config model="gpt-6-astra"/>
+<developer>
+Review Lantern's setup instructions using docs/setup.md, docs/reference.md and
+expected-report.json. Read those files before proposing a finding. The report is
+bundled evidence, not a fresh checker run.
+
+Use review_ledger to record a concise finding for a sample file. Recording the
+same file again replaces its note; recording another file retains both findings.
+Use action summary with file and note set to null to read the current ledger.
+On follow-up, refine an existing note and show what changed. The ledger stores
+review notes; it neither modifies project files nor proves that a fix was tested.
+</developer>
+
+<tool name="read_file">
+  <read id="project" path="${workspace}/sample-project"/>
+</tool>
+
+<script id="ledger" language="chatml" kind="moderator" api="extensibility-v1"
+        src="scripts/ledger.chatml"/>
+<tool name="review_ledger" type="moderator" moderator="ledger"
+      input_schema="schemas/ledger-input.json"
+      output_schema="schemas/ledger-output.json"
+      description="Record or revise a finding for a Lantern sample file, or read all retained findings. Recording replaces only that file's note. Summary requires null file and note. Notes remain available across turns in this session; they do not edit or validate project files."/>

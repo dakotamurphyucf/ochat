@@ -94,5 +94,17 @@
     "outcome": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
     "requires": "One-off specialist basics, the complete Lantern bundle, provider configuration and its private durable daemon.",
     "nextBenefit": "Coordinate several retained specialists using ChatML workflows."
+  },
+  {
+    "page": "tutorials/stateful-workflow",
+    "outcome": "Record and revise findings across turns using a moderator-handled tool with retained state.",
+    "requires": "File tools, reusable tool schemas, the three-turn moderator, and the complete Lantern bundle.",
+    "nextBenefit": "Start a real check in the background and deliver its result later."
+  },
+  {
+    "page": "tutorials/background-results",
+    "outcome": "Start the real documentation checker, inspect or cancel its job, and deliver terminal evidence as a separate notification.",
+    "requires": "Stateful moderator tools, shell guardrails, the complete Lantern bundle and explicit shell-manifest authorization.",
+    "nextBenefit": "Combine checks with continuing specialists and a durable host."
   }
 ]

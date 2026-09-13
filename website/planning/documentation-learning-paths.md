@@ -45,7 +45,7 @@ source dependencies change; do not refresh recorded hashes without reviewing and
 repeating the relevant checks. Production publication remains a separate protected
 release workflow.
 
-## Remaining learning work
+## Connected learning paths
 
 The first connected scripting checkpoints are now available: **T11** summarizes
 Lantern reports with `run_chatml`; **T12** exposes the same maintained source as
@@ -57,8 +57,9 @@ in its supplied data.
 `config/tutorial-paths.mjs` now owns explicit primary learning paths. Every
 registered tutorial must appear once. Stable IDs identify lessons; they are not
 a global prerequisite sequence. Previous/next links stay within a path and return
-to the curriculum at its end. Add new IDs after T12, and update the manifest,
-path membership, overview, catalog and approved sources together.
+to the curriculum at its end. Allocate new IDs after the last registered lesson,
+and update the manifest, path membership, overview, catalog and approved sources
+together.
 
 Offline composition tests execute these exact sources through registered tools
 in a real session with deterministic provider responses. They check aggregation,
@@ -66,11 +67,11 @@ schema rejection before reads, inherited file boundaries and malformed-report
 failure without partial results. Captured bundle checks separately verify source
 closure and missing companions. This does not establish live-provider behavior.
 
-The remaining work extends the foundation through independently runnable checkpoints
-for useful shell commands, custom guardrails/review, persistent and generated
-specialists, stateful moderation and background
-results. Those converge on three complete multi-file applications: a guarded
-engineering assistant, a persistent review team and a living documentation lab.
+The paths now include independently runnable checkpoints for useful shell commands,
+custom guardrails/review, persistent and generated specialists, stateful moderation
+and background results. The next stage combines these capabilities in three
+complete multi-file applications: a guarded engineering assistant, a persistent
+review team and a living documentation lab.
 
 Each application must include its root, imports, agents, scripts, schemas and
 sample data in the existing website source reader, with exact host setup and
@@ -222,3 +223,54 @@ with two workers; the remaining existing shell-customization check passed alone
 in 11.4 seconds, with its original 30-second deadline and assertions unchanged.
 The final build checks 160 HTML pages and 755 files. Desktop lesson and mobile
 source expansion were visually reviewed.
+
+## Stateful tools and background evidence
+
+T17 builds a retained review ledger behind one strict moderator-handled tool.
+Recording a note replaces only that file's previous note; a rejected update leaves
+the ledger unchanged. Resolving the invocation returns tool output, while the
+handler's returned state retains the ledger for subsequent turns. T18 uses a
+separate moderator to start Lantern's real checker through a constrained shell
+binding, acknowledge its job, expose progress/cancellation, and deliver a
+correlated terminal result with an explicit request for a model turn. Both
+complete projects are available in the inline source reader and as independent
+nine- and ten-file archives.
+
+The ChatML path now runs from one-off programs through reusable tools, the
+three-turn moderator, stateful tools and background results. The three-turn source
+uses `let*` and its lesson distinguishes model decisions, event handling and
+runtime execution. The original timer remains an operations example with a link
+to useful background work. Website-only reference introductions lead directly to
+the two practical lessons without changing the audited model-authoring corpus.
+
+Offline native-host integrations execute the maintained ledger and coordinator
+with controlled provider responses. They check retained/replaced findings, failed
+updates, real checker exit 1, missing-input exit 2, a running-job progress query,
+overlapping-start rejection and cancellation. The cancellation case adds a
+filesystem readiness gate only to the temporary sample checker; it does not
+change the published moderator, shell binding or schemas. Every background case
+requires the initial acknowledgement to precede exactly one terminal notification
+and observes the requested follow-up input without rewriting that acknowledgement.
+
+The approval variant also exposed an existing host distinction worth teaching:
+an unresolved shell permission pauses foreground model work. The model cannot
+use its progress or cancellation tools during that permission wait; the reader
+must resolve it through the host's permission controls. Cancellation tools apply
+to admitted running work. The lesson retains this behavior explicitly.
+
+The full composition and canonical-documentation checks passed on macOS, covering
+353 documentation pages and 39 protocol methods. All 83 website checks passed;
+the final build checks 162 HTML pages and 783 files. All 33 search queries reached
+the top five, including the required feature queries' stricter rank thresholds.
+The two new archives and the reformatted three-turn archive were extracted and
+compared byte-for-byte, then inspected from their extracted working directories.
+Both bundled checkers produced the expected failing report. These checks establish
+local offline behavior, not live model quality, physical TUI interaction, Linux
+execution or restart persistence for these process-bound examples.
+
+All 111 tutorial and reading browser checks passed across Chromium, Firefox and
+WebKit without retries or changed deadlines. Desktop/mobile review also followed
+both reference introductions into their practical lessons and confirmed the
+rendered pages have no document-wide overflow. The reference callouts and lesson
+introductions were visually inspected. Browser projects ran after runtime checks;
+Firefox used one worker and Chromium/WebKit used two to avoid local contention.

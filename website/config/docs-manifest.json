@@ -644,7 +644,7 @@
     "description": "Understand ChatML jobs, one-shot schedules, safe points, and recovery in agent hosts.",
     "section": "ChatML workflows",
     "kind": "guide",
-    "order": 6,
+    "order": 7,
     "related": [
       "background"
     ],
@@ -1005,17 +1005,18 @@
     "provenance": "authored",
     "route": "/docs/tutorials/background-agent/",
     "description": "Build a daemon-hosted workflow with timers and background events.",
-    "section": "ChatML workflows",
+    "section": "Run and operate",
     "navigation": true,
     "search": true,
     "sitemap": true,
     "noindex": false,
     "status": "current",
     "verification": "not-checked",
-    "order": 4,
+    "order": 5,
     "kind": "tutorial",
     "related": [
-      "stdio"
+      "tutorials/background-results",
+      "agent-server/chatml-orchestration"
     ]
   },
   {
@@ -2194,7 +2195,7 @@
     "route": "/docs/guides/moderator-runtime/",
     "description": "Understand ChatML surfaces, transactional state, effective history, approval suspension, and host ownership.",
     "section": "ChatML workflows",
-    "order": 5,
+    "order": 6,
     "status": "experimental",
     "navigation": true,
     "search": true,
@@ -4416,7 +4417,8 @@
     "reviewNote": "P06 complete source-based tutorial; offline verification and exact example hashes are recorded separately in the tutorial manifest. No live provider execution is claimed.",
     "order": 3,
     "related": [
-      "agent-server/tutorials/shell-agent"
+      "tutorials/stateful-workflow",
+      "chatml"
     ]
   },
   {
@@ -4707,7 +4709,7 @@
     "disposition": "publish",
     "title": "Keep a conversation with a specialist",
     "description": "Choose one-off or persistent review, send follow-up context, and track the same specialist through receipts and lifecycle tools.",
-    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources. Runtime qualification pending; see catalog.",
+    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources; exact offline verification is recorded in the catalog.",
     "provenance": "authored",
     "route": "/docs/tutorials/persistent-specialist/",
     "section": "Subagents and agent teams",
@@ -4733,7 +4735,7 @@
     "disposition": "publish",
     "title": "Create a task-specific specialist",
     "description": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
-    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources. Runtime qualification pending; see catalog.",
+    "reviewNote": "D03 paired specialist lessons with complete shared Lantern/daemon sources; exact offline verification is recorded in the catalog.",
     "provenance": "authored",
     "route": "/docs/tutorials/generated-specialist/",
     "section": "Subagents and agent teams",
@@ -4742,6 +4744,58 @@
     "related": [
       "guide/subagents",
       "guide/delegated-tools"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
+  },
+  {
+    "id": "tutorials/stateful-workflow",
+    "source": "docs-src/tutorials/stateful-workflow.md",
+    "disposition": "publish",
+    "title": "Keep a review ledger with a stateful tool",
+    "description": "Record and revise findings across turns using a moderator-handled tool with retained state.",
+    "reviewNote": "D03 complete-source Lantern workflow lesson; exact verification is tracked separately in the catalog.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/stateful-workflow/",
+    "section": "ChatML workflows",
+    "kind": "tutorial",
+    "order": 4,
+    "related": [
+      "tutorials/workflow",
+      "guide/chatml-authoring-runtime"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
+  },
+  {
+    "id": "tutorials/background-results",
+    "source": "docs-src/tutorials/background-results.md",
+    "disposition": "publish",
+    "title": "Run checks and deliver background results",
+    "description": "Start the real documentation checker, inspect or cancel its job, and deliver terminal evidence as a separate notification.",
+    "reviewNote": "D03 complete-source Lantern workflow lesson; exact verification is tracked separately in the catalog.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/background-results/",
+    "section": "ChatML workflows",
+    "kind": "tutorial",
+    "order": 5,
+    "related": [
+      "tutorials/stateful-workflow",
+      "guide/chatml-authoring-background"
     ],
     "navigation": true,
     "search": true,

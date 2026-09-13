@@ -10,6 +10,7 @@ import report from '../../.generated/content-report.json';
 import DocsOverview from './DocsOverview.astro';
 import CapabilityOverview from './CapabilityOverview.astro';
 import AuthoringContextIntro from './AuthoringContextIntro.astro';
+import PracticalWorkflowIntro from './PracticalWorkflowIntro.astro';
 import ExampleCatalog from './ExampleCatalog.astro';
 import TutorialRecord from './TutorialRecord.astro';
 import examples from '../../.generated/examples-report.json';
@@ -37,6 +38,7 @@ const diagrams =
   )
 }
 {isTutorial && <LessonOverview />}
+<PracticalWorkflowIntro />
 {isApplication && <ApplicationIntro />}
 {Astro.url.pathname === '/docs/applications/' && <ApplicationGallery />}
 {Astro.url.pathname === '/docs/tutorials/' && <TutorialCurriculum />}

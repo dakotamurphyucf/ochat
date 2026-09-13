@@ -171,35 +171,22 @@
     ],
     "verification": {
       "state": "offline-checked",
-      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
-      "testedAt": "2026-09-06",
-      "platform": "macOS 14.5 / arm64",
-      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "baseRevision": "1c922c5cef223c4022d749bd94ee2b20c3264e7c",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64 (offline runtime qualification)",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
       "liveProvider": false,
       "commands": [
-        "dune build --force @agent-docs-check"
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest @agent-docs-check"
       ],
-      "observed": "The real parser resolves the external script. The runtime compiles and instantiates it; synthetic completed-turn events preserve state and request session end on the third turn only.",
-      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "observed": "The maintained let* moderator compiles and executes in the canonical tutorial check: state advances on completed turns, ignores unrelated events and requests termination after the third completed turn. Source parity with the tutorial is checked; no provider is invoked.",
+      "limitations": "No live model API call, physical TUI walkthrough or durable local recovery claim. Local working state is process-bound. The direct extracted sample check is separate from any model workflow.",
       "hashes": {
         "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
-        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
-        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
-        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
         "docs-src/examples/learning/three-turns/three-turns.chatmd": "6a6eb625c7fcc4390c4a9658e91b0bcf066e0df875a6009001402c155968b41f",
-        "docs-src/examples/learning/three-turns/three-turns.chatml": "ac3ba0b15cd5ad43530f897bcfae06918587c0ac010823b8912414b28a7f61a3",
-        "docs-src/tutorials/workflow.md": "f4ad8f388bfd2913e0293c2fe7a9c6d4e9da8971d2ae119dc6f893a008117054",
-        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
-        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
-        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
-        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
-        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
-        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
-        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
-        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
-        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
-        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
-        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+        "docs-src/examples/learning/three-turns/three-turns.chatml": "419715685a243e6113ce9e843444cea0d4c27d508406efdb2cbde444dc72983b",
+        "docs-src/tutorials/workflow.md": "7adadc43a74f19fc5f1837a4b19e789438158e505122c6e93c1871b2439870b7",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1"
       }
     }
   },
@@ -702,6 +689,85 @@
         "test/chatml_composition/documentation_agent_team_tests.ml": "5b3cd6eebe66dadb4153e9b90e96302a7205a546db9e86935336d15003ad0533",
         "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
         "test/chatml_composition/dune": "113c9c25d2f4396a48d91c465deb326726333ca7c7ca8677c85fc33ab805dd45"
+      }
+    }
+  },
+  {
+    "id": "T17",
+    "page": "tutorials/stateful-workflow",
+    "host": "Native local TUI",
+    "examples": [
+      "stateful-workflow"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "1c922c5cef223c4022d749bd94ee2b20c3264e7c",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64 (offline runtime qualification)",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest @agent-docs-check",
+        "Extract each built archive, compare every maintained file, run ochat shell inspect agent.chatmd -canonical, and run the extracted sample checker with /bin/sh"
+      ],
+      "observed": "Exact public moderator and schemas execute through the native transient host across five distinct turns. Recording replaces only a matching file, preserves another finding, rejects a whitespace note without changing retained state, and returns the unchanged ledger afterward. The sample source file remains unchanged. The extracted nine-file archive preserves all source bytes and its root inspects successfully.",
+      "limitations": "No live model API call, physical TUI walkthrough or durable local recovery claim. Local working state is process-bound. The direct extracted sample check is separate from any model workflow.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "docs-src/examples/learning/stateful-workflow/agent.chatmd": "303596558c3db8bb29ec05262a507abb2e2ae7a5038fcaf140e86fbc06ee46d0",
+        "docs-src/examples/learning/stateful-workflow/schemas/ledger-input.json": "391d874c793c4932c332245bb04c88f412355fe18d419677c9b1447097c063d2",
+        "docs-src/examples/learning/stateful-workflow/schemas/ledger-output.json": "a843ba872187129ad92e6e2fe9dc6f275723211559d94e6167ab830aaec3ba47",
+        "docs-src/examples/learning/stateful-workflow/scripts/ledger.chatml": "4f415b611b8221093618d2aa4ddb3e3aa9f741733614c87166caaa54e2ae4580",
+        "docs-src/tutorials/stateful-workflow.md": "aa149e078321b0173b6968162479fc96aa153b4b52ec7accad25cc4bfeb46994",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/documentation_workflow_tests.ml": "20f8952bf461678226b451ce5c33c9e3392fef31c0c7b8df1f001438e961b4e1",
+        "test/chatml_composition/dune": "6018c966d5eafa2a632464d9c21a6f7559494b3bd9d37f5b32e7e925abd7bbd3",
+        "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
+      }
+    }
+  },
+  {
+    "id": "T18",
+    "page": "tutorials/background-results",
+    "host": "Native local TUI",
+    "examples": [
+      "background-results"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "1c922c5cef223c4022d749bd94ee2b20c3264e7c",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64 (required Seatbelt backend; native embedded host)",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "opam exec -- dune build -j 2 @test/chatml_composition/runtest @agent-docs-check",
+        "Extract each built archive, compare every maintained file, run ochat shell inspect agent.chatmd -canonical, and run the extracted sample checker with /bin/sh"
+      ],
+      "observed": "Exact public coordinator, tool declaration, schemas and required shell runtime execute in the native transient host. The real checker returns expected exit1 evidence; missing setup input returns exit2 diagnostics. A controlled cancellation fixture retains a running job long enough for separate progress, busy-start rejection and cancellation calls. Each case keeps its initial Pending acknowledgement, commits one later terminal notification and triggers an observed follow-up model request. The extracted ten-file archive preserves all source bytes and runs the original sample checker successfully with its expected failing check.",
+      "limitations": "Provider responses are simulated. The cancellation case prepends a filesystem-condition gate to the temporary sample checker so the test does not race its quick completion; coordinator/tool/runtime/schemas remain the public files. No live model, physical TUI, Linux run or durable restart claim. Shell approval waits pause foreground model work too; they are resolved through host permission controls. Direct archive execution supplements, rather than substitutes for, confined integration testing.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/examples/learning/background-results/agent.chatmd": "689bc8d56e125209ff3ed8bfd645d637126f17a757b4123494403a42b161826e",
+        "docs-src/examples/learning/background-results/runtimes/checks.chatmd": "901e8c4aa25d668a24583eb70ed30fb921d3f4d39d6f6fee6d5344ed1b76289f",
+        "docs-src/examples/learning/background-results/schemas/empty.json": "fb224ba2f183e4422368b3b48213e4229d06d019f138a8483b3f9cb89b57a78b",
+        "docs-src/examples/learning/background-results/schemas/progress.json": "5e607a334edf20ba5a6f459835b946908f806d0610e9ba9f88e863917869249e",
+        "docs-src/examples/learning/background-results/scripts/coordinator.chatml": "5d6453ac35f6697505ae61881cbe2cd4b23f7c58b86d0377610fc5221de56f04",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "docs-src/tutorials/background-results.md": "484646fd1bb38dd99ac32bd0fc53dd3808847961bf158710866aa4ef73090de5",
+        "test/agent_docs/docs_tutorials.ml": "8d97af1ea101dd298b5ba7cb188ac7aafac5aa5b69154136aac8cea993c4d8a1",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/documentation_workflow_tests.ml": "20f8952bf461678226b451ce5c33c9e3392fef31c0c7b8df1f001438e961b4e1",
+        "test/chatml_composition/dune": "6018c966d5eafa2a632464d9c21a6f7559494b3bd9d37f5b32e7e925abd7bbd3",
+        "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
       }
     }
   }

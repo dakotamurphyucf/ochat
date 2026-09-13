@@ -31,15 +31,17 @@ Its external [three-turns.chatml](../examples/learning/three-turns/three-turns.c
 ```chatml
 type state = int
 type event = [ `Session_start | `Turn_end ]
+
 let initial_state = 0
+
 let on_event : context -> state -> event -> state task =
   fun ctx st ev ->
     match ev with
     | `Turn_end ->
       let completed = st + 1 in
       if completed >= 3 then
-        Task.bind(Runtime.end_session("Three-turn session finished"),
-          fun ignored -> Task.pure(completed))
+        let* () = Runtime.end_session("Three-turn session finished") in
+        Task.pure(completed)
       else Task.pure(completed)
     | _ -> Task.pure(st)
 ```
@@ -48,6 +50,14 @@ The script starts at zero and increments on `Turn_end`; other delivered events
 leave its state unchanged. The third completed turn requests `Runtime.end_session`.
 This is executable host workflow logic, not a reminder to the model. A completed
 turn can contain multiple model/tool calls: this is **not a dollar spending cap**.
+
+The model answers each request; the moderator decides when the conversation has
+completed enough turns; the runtime delivers events and executes the returned
+tasks. `Task.pure` returns the next state. `let*` sequences an effect before that
+state is returned. Constructing a task describes work for the runtime rather than
+immediately making an ambient shell or model call. This arrangement also supports
+conversational coordination: a moderator can react to tool calls and results while
+the agent continues to choose its own next useful action.
 
 ## 2. Complete three turns
 
@@ -79,9 +89,10 @@ Press Esc, type `:q`, and press Enter after work stops. Native local state is
 process-bound and is not resumed on the next launch; a new session resets this
 counter. Archive or remove only the recorded temporary directory after exit.
 
-To grow beyond a turn counter, use the
-[ChatML execution-form guide](../chatml/README.md): add a reusable script tool,
-retain state behind a custom tool, or deliver a result from background work.
+To grow beyond a turn counter, [build a stateful review tool](stateful-workflow.md)
+and then [deliver real background check results](background-results.md).
+The [ChatML execution-form guide](../chatml/README.md) compares those forms with
+one-off programs and reusable script tools.
 For several continuing reviewers, compare
 [subagent coordination patterns](../guide/subagents.md#coordinate-a-team-without-hiding-the-work).
 

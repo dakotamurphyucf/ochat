@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "required": ["action", "file", "note"],
+  "properties": {
+    "action": {"type": "string", "enum": ["record", "summary"]},
+    "file": {"type": ["string", "null"], "enum": ["docs/setup.md", "docs/reference.md", "expected-report.json", null]},
+    "note": {"type": ["string", "null"], "maxLength": 2000}
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,52 @@
+---
+const lessons = [
+  {
+    reference: '/docs/reference/chatml/execution-contracts/',
+    href: '/docs/tutorials/stateful-workflow/',
+    title: 'Build a stateful review ledger',
+    description:
+      'See invocation resolution and retained moderator state in a complete working example.',
+  },
+  {
+    reference: '/docs/reference/chatml/background-work/',
+    href: '/docs/tutorials/background-results/',
+    title: 'Run checks and deliver background results',
+    description:
+      'Follow a real checker from acknowledgement through progress, cancellation and a terminal notification.',
+  },
+];
+const lesson = lessons.find((item) => item.reference === Astro.url.pathname);
+---
+
+{
+  lesson && (
+    <aside
+      class="workflow-intro"
+      aria-label="Try this workflow"
+      data-pagefind-ignore
+    >
+      <p>
+        <strong>Learn through a complete example.</strong> {lesson.description}
+      </p>
+      <a href={lesson.href}>{lesson.title} →</a>
+    </aside>
+  )
+}
+
+<style>
+  .workflow-intro {
+    padding: 1rem 1.25rem;
+    margin-bottom: 2rem;
+    border-left: 3px solid var(--ochat-accent);
+    background: var(--ochat-panel);
+    border-radius: 0 var(--ochat-radius-panel) var(--ochat-radius-panel) 0;
+    line-height: 1.7;
+  }
+  p {
+    margin: 0 0 0.5rem;
+  }
+  a {
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+  }
+</style>
