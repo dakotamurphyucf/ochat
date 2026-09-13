@@ -868,16 +868,28 @@ let on_event ctx state event = match event with
                   |> protocol_ok
                 in
                 let final =
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-                    let rec wait () =
-                      let state = A.state entry.actor |> protocol_ok in
-                      match state.halted with
-                      | true -> state
-                      | false ->
-                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
-                        wait ()
-                    in
-                    wait ())
+                  match
+                    Eio.Time.with_timeout (Eio.Stdenv.clock env) 5. (fun () ->
+                      let rec wait () =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match state.halted with
+                        | true -> state
+                        | false ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait ()
+                      in
+                      Ok (wait ()))
+                  with
+                  | Ok state -> state
+                  | Error `Timeout ->
+                    let state = A.state entry.actor |> protocol_ok in
+                    raise_s
+                      [%sexp
+                        "timer delivery did not finish after restart"
+                      , (exceed_grace : bool)
+                      , (state.schedules : Agent_protocol.Schedule.t list)
+                      , (state.moderator_executions
+                         : Agent_protocol.Moderator_execution.t list)]
                 in
                 [%test_eq: int]
                   1

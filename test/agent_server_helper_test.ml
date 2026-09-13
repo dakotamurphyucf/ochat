@@ -967,7 +967,17 @@ let run env helper ~native_watch =
               (`Object [ "subscription_id", P.Id.Subscription.to_json cancelled_watch ])
           in
           cursor_step "cancellation tool returned";
-          [%test_eq: string] "cancelled" cancellation;
+          (match cancellation with
+           | "cancelled" -> ()
+           | cancellation ->
+             raise_s
+               [%sexp
+                 "response watch was not cancelled"
+               , (native_watch : bool)
+               , (cancellation : string)
+               , (!cursor_steps : (string * float) list)
+               , (watch_subscription daemon parent.id cancelled_watch : P.Subscription.t)
+               , ((state daemon parent.id).jobs : P.Job.t list)]);
           (match await_watch daemon parent.id cancelled_watch with
            | Cancelled _ -> ()
            | result ->
