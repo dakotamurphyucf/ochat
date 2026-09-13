@@ -11,6 +11,11 @@ custom executables without adding OCaml code. Extensions remain subordinate to
 manifest authorization, administrative ceilings, worker-runtime confinement,
 resource limits, typed protocols, and output redaction.
 
+Start with [custom shell decisions](../tutorials/shell-customization.md) for a
+complete project: enforce full-report evidence, retain review state, and defer
+later requests to a user. The alternate entry point demonstrates the stock
+tool-free model reviewer. Use the contracts below when adapting those examples.
+
 ## Extension points
 
 | Extension | Input | Result |
@@ -172,15 +177,17 @@ timeouts follow `failure`, which may not widen access.
     id="model-security"
     kind="model"
     agent="security-reviewer"
-    model="gpt-5"
+    model="gpt-6-astra"
     failure="deny"/>
 ```
 
 The reviewer receives a bounded redacted prompt and must produce one strict
-versioned JSON decision. Markdown fences, prose, duplicate/unknown fields,
+JSON decision. Markdown fences, prose, duplicate/unknown fields,
 unsupported scopes/actions, malformed expiration, excessive output, timeout,
-or transport failure fail closed. Tools are disabled by default; a reviewer
-must not use the shell request it is evaluating.
+or transport failure fail closed. The stock adapter runs a fixed tool-free prompt;
+`agent` labels the reviewer and does not load a ChatMD file or resolve an agent
+tool. Custom hosts can supply a different model-completion adapter. The native
+example does not grant the reviewer tools or access to the shell being reviewed.
 
 ## Interceptors
 

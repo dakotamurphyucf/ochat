@@ -15,7 +15,8 @@ The host then admits and enforces the supported configuration.
 Follow the [shell-agent walkthrough](../agent-server/tutorials/shell-agent.md).
 It reads Lantern's actual setup tutorial through a fixed command and a reusable
 read-only runtime. Continue with [separate checker capabilities and approved report writes](../tutorials/shell-guardrails.md)
-to run real checks against that project. Both lessons include complete source
+to run real checks against that project, then [customize review decisions](../tutorials/shell-customization.md)
+with ChatML state and a separate model-review variant. These lessons include complete source
 bundles you can inspect in the browser. The [declaration examples](../guide/chatmd-shell-examples.md)
 cover more patterns, but are not all standalone prompts or universal policies.
 
@@ -57,8 +58,8 @@ or that a backend is installed.
 
 ## Customize decisions with scripts and agents
 
-Use the [shell extension contracts](../guide/chatmd-shell-extensions.md) to add
-project rules where static declarations need help:
+Build [custom shell decisions](../tutorials/shell-customization.md), then use the
+[extension contracts](../guide/chatmd-shell-extensions.md) to adapt the pattern:
 
 - A **matcher** recognizes a command/effect pattern for policy selection.
 - A **ChatML reviewer** applies a deterministic project-specific decision.
@@ -72,7 +73,8 @@ project rules where static declarations need help:
 These extension kinds have different inputs and return contracts. Shell ChatML
 hooks receive a narrow normalized context; do not assume they can call arbitrary
 general tools or make model/network requests. A model reviewer is a separately
-configured agent.
+configured model request. The stock adapter uses a fixed tool-free reviewer
+prompt; its `agent` field is an identity label, not a named ChatMD file lookup.
 
 Custom decisions remain within the admitted authority. A hook cannot turn a
 hard denial into broader permission. Rewritten requests go through the applicable

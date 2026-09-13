@@ -11,8 +11,10 @@ deployment inputs with external files, hashes or platform prerequisites. They ar
 not seventeen ready-to-run scripts. The documentation checker parses every XML
 block and compiles/invokes the three inline ChatML hooks with synthetic inputs;
 it does not execute deployment commands or synthesize absent dependencies.
-The [tracked narrow shell prompt](../examples/agent-server/shell/pwd.chatmd) is the
-self-contained manifest-compilation example. Replace illustrative paths/hashes
+Start with the complete [inspection](../agent-server/tutorials/shell-agent.md),
+[guardrails](../tutorials/shell-guardrails.md), and
+[custom decisions](../tutorials/shell-customization.md) projects for runnable
+sources and exact startup instructions. Replace illustrative paths/hashes
 and inspect every full manifest before authorizing it.
 
 | Example | Additional prerequisites / intended boundary |
@@ -24,7 +26,7 @@ and inspect every full manifest before authorizing it.
 | 5 Python interceptor | Trusted wrapper at `/opt/ochat-tools/safe-python`; adapt both script and policy to your installation. |
 | 6 Output sanitizer | Installed executable sanitizer and identity pin. |
 | 7 Network API | Explicit network authority and privately supplied secret. |
-| 8 Model reviewer | Configured reviewer agent/provider and human fallback host. |
+| 8 Model reviewer | Configured model provider; stock tool-free reviewer after ChatML screening. |
 | 9 Compliance audit | Required audit sink/storage policy; protect sensitive records. |
 | 10 Imported library | Create the referenced files/namespaces; imports are not bundled by this fragment. |
 | 11 Moderator process | Explicit moderator/runtime association and host Process.run handler. |
@@ -238,11 +240,11 @@ excess output rejects the result rather than exposing unsanitized output.
 The manifest records a secret source/argument position but not its value. The
 review and audit display `[TOKEN]`. The model cannot choose another endpoint.
 
-## 8. Model reviewer with human fallback
+<a id="8-model-reviewer-with-human-fallback"></a>
+
+## 8. ChatML screening followed by model review
 
 ```xml
-<tool name="security-reviewer" agent="${source_dir}/agents/reviewer.chatmd" local/>
-
 <script id="static-review" language="chatml" kind="shell_reviewer">
 let initial_state = `State(0)
 let review = fun event state ->
@@ -258,8 +260,8 @@ let review = fun event state ->
   </policy>
   <reviewers strategy="first_terminal">
     <reviewer id="static" kind="chatml" script="static-review" failure="deny"/>
-    <reviewer id="model" kind="model" agent="security-reviewer" failure="deny"/>
-    <reviewer id="human" kind="ui"/>
+    <reviewer id="model" kind="model" agent="security-reviewer"
+              model="gpt-6-astra" failure="deny"/>
   </reviewers>
 </shell_access>
 ```
@@ -267,6 +269,11 @@ let review = fun event state ->
 Hard denial prevents any reviewer call. A valid `defer` reaches the next
 reviewer. Malformed model output follows `failure="deny"`; it does not become
 implicit defer. The reviewer model has no access to the shell being reviewed.
+The stock adapter's `agent` value is an identity label, not a named agent-tool
+lookup. It uses a fixed tool-free prompt. To demonstrate a human fallback, place
+a UI reviewer after a ChatML reviewer that can defer, as in the complete
+[custom decisions lesson](../tutorials/shell-customization.md). Model decisions
+are terminal; model failure is denied in this configuration.
 
 ## 9. Compliance audit
 

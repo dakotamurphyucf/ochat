@@ -76,5 +76,11 @@
     "outcome": "Run project checks and approve report writes using separate shell runtimes.",
     "requires": "Shell inspection basics, the complete bundle, /bin/sh and awk, and an empty reports directory.",
     "nextBenefit": "Customize decisions with ChatML hooks and reviewer agents."
+  },
+  {
+    "page": "tutorials/shell-customization",
+    "outcome": "Enforce a report rule with ChatML and retain decisions before deferring to a user.",
+    "requires": "The guardrails lesson, complete bundle, configured provider and required shell backend.",
+    "nextBenefit": "Combine custom capabilities with specialist agents and larger workflows."
   }
 ]

@@ -1,0 +1,20 @@
+<import src="checks-base.chatmd"/>
+
+<shell_access id="checks" extends="checks-base">
+  <policy>
+    <rule id="complete-reports-only" action="deny">
+      <all>
+        <argument value="--write-report"/>
+        <any>
+          <argument value="setup"/>
+          <argument value="links"/>
+          <argument value="verification"/>
+        </any>
+      </all>
+    </rule>
+  </policy>
+  <reviewers strategy="first_terminal">
+    <reviewer id="model-security" kind="model" agent="lantern-report-review"
+              model="gpt-6-astra" failure="deny"/>
+  </reviewers>
+</shell_access>

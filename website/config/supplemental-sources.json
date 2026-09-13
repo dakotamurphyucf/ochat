@@ -265,6 +265,46 @@
       "source": "docs-src/examples/learning/shell-guardrails/runtimes/checks.chatmd",
       "disposition": "example-download",
       "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/model-agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/checks-base.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/model-checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/scripts/report-reviewer.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
     }
   ],
   "directories": [

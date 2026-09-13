@@ -2028,7 +2028,7 @@
     "route": "/docs/guides/shell-extensions/",
     "description": "Add ChatML resolution, review, interception, and audit hooks to shell execution.",
     "section": "Tools and shell access",
-    "order": 5,
+    "order": 6,
     "kind": "guide",
     "status": "experimental",
     "related": [
@@ -4674,5 +4674,31 @@
     "title": "Lantern sample reference",
     "reviewNote": "Sample project input displayed and downloaded through the complete example bundle; not an independent Ochat documentation page.",
     "provenance": "authored"
+  },
+  {
+    "id": "tutorials/shell-customization",
+    "source": "docs-src/tutorials/shell-customization.md",
+    "disposition": "publish",
+    "title": "Customize shell decisions with ChatML",
+    "reviewNote": "Complete Lantern reviewer checkpoint with session-state decisions and separate stock model-review variant; verification tracked in catalog.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/shell-customization/",
+    "description": "Enforce full-report evidence, retain review state, and defer later shell requests to the user.",
+    "section": "Tools and shell access",
+    "kind": "tutorial",
+    "order": 5,
+    "related": [
+      "tutorials/shell-guardrails",
+      "guide/chatmd-shell-extensions"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "experimental",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
   }
 ]

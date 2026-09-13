@@ -10,6 +10,7 @@
   (glob_files_rec ../../docs-src/examples/learning/lantern/*)
   (glob_files_rec ../../docs-src/examples/learning/shell-inspection/*)
   (glob_files_rec ../../docs-src/examples/learning/shell-guardrails/*)
+  (glob_files_rec ../../docs-src/examples/learning/shell-customization/*)
   (glob_files_rec ../chatml_extensibility_fixtures/authoring-invocation/*)
   (glob_files ../chatml_extensibility_fixtures/authoring-lab/*)
   (glob_files_rec ../chatml_extensibility_fixtures/x01-report/*)

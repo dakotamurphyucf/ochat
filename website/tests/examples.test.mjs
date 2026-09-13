@@ -65,7 +65,7 @@ test('catalog enforces explicit file ownership, paths, dependency edges, notices
     ['complete', 'template', 'illustration'].map(
       (kind) => input.filter((e) => e.kind === kind).length,
     ),
-    [12, 4, 1],
+    [13, 4, 1],
   );
   const source = input.find((e) => e.id === 'specialist');
   const reject = (mutate, pattern) => {

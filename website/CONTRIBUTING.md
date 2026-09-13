@@ -130,6 +130,12 @@ offline semantic documentation checks before refreshing verification hashes.
 Changing a recorded input without rerunning its actual verification must leave
 the example visibly not checked.
 
+Keep one primary `entry` per bundle. Mark an independently selected alternate root
+as `variant`; the reader labels it **Alternate entry**. Record its outgoing import
+and script edges too. A `companion` is a dependency and must be the target of a
+declared edge; do not invent an import from the primary root to an alternate root
+that should only run when explicitly selected.
+
 Markdown sample inputs under `docs-src/examples/` need both a canonical manifest
 entry (normally `repository-only`) and an exact `example-download` supplemental
 rule with a catalog destination. This permits reading/downloading their source

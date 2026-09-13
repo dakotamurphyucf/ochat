@@ -142,9 +142,23 @@ let run env root scratch =
             child)
         in
         Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(directory / name) contents);
-      let nodes, nested, reads = parse_bundle env scratch sources entry in
+      let entries =
+        entry
+        :: List.filter_map files ~f:(fun file ->
+          Option.some_if
+            (String.equal (string file "role") "variant")
+            (string file "path"))
+      in
+      let parsed =
+        List.map entries ~f:(fun entry -> entry, parse_bundle env scratch sources entry)
+      in
+      let nodes, nested, _ = List.Assoc.find_exn parsed entry ~equal:String.equal in
+      let reads =
+        List.concat_map parsed ~f:(fun (_, (_, _, reads)) -> reads)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
       let expected =
-        entry :: List.map (list example "edges") ~f:(fun e -> string e "toPath")
+        entries @ List.map (list example "edges") ~f:(fun e -> string e "toPath")
         |> List.dedup_and_sort ~compare:String.compare
       in
       require
@@ -155,9 +169,15 @@ let run env root scratch =
         let reduced =
           List.filter sources ~f:(fun (name, _) -> not (String.equal name missing))
         in
+        let readers =
+          List.filter_map parsed ~f:(fun (entry, (_, _, reads)) ->
+            Option.some_if (List.mem reads missing ~equal:String.equal) entry)
+        in
+        require (not (List.is_empty readers)) ("unread companion: " ^ missing);
         require
-          (Result.is_error
-             (Result.try_with (fun () -> parse_bundle env scratch reduced entry)))
+          (List.for_all readers ~f:(fun entry ->
+             Result.is_error
+               (Result.try_with (fun () -> parse_bundle env scratch reduced entry))))
           ("missing companion unexpectedly resolved: " ^ missing));
       (match string example "id" with
        | "file-reader" -> file_read env scratch example nodes

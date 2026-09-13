@@ -213,6 +213,7 @@ behavior and [host integration](../guide/chatmd-shell-host-integration.md) for d
 Quit with Esc, then `:q` and Enter after work finishes. Keep the report as evidence
 or remove the disposable bundle. No detached work was started.
 
-Next, explore [custom decisions with ChatML and reviewer agents](../shell/README.md#customize-decisions-with-scripts-and-agents).
+Next, build [custom decisions with ChatML](shell-customization.md) and try its
+separate model-review variant.
 Static rules handle a report flag; hooks and reviewer agents help when a decision
 depends on project-specific context.

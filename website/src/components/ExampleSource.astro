@@ -68,7 +68,7 @@ const language = (filename: string) => {
                 <summary>
                   <span class="filename">{file.path}</span>
                   <span class="file-role">
-                    {file.role === 'entry' ? 'Start here' : file.role}
+                    {file.role === 'entry' ? 'Start here' : file.role === 'variant' ? 'Alternate entry' : file.role}
                   </span>
                 </summary>
                 {/* Astro strips a final snippet newline; restore full-file text before tokenization. */}

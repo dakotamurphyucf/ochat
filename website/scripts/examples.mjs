@@ -50,7 +50,7 @@ const fileSchema = z
   .object({
     source: relative,
     path: relative,
-    role: z.enum(['entry', 'companion', 'data', 'build', 'notice']),
+    role: z.enum(['entry', 'variant', 'companion', 'data', 'build', 'notice']),
   })
   .strict();
 export const exampleSchema = z.array(

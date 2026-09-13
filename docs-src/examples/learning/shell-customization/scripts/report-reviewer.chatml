@@ -1,0 +1,24 @@
+(* Retained for this agent session. This records an approval decision, not a
+   successful write or the existence of a report on disk. *)
+let initial_state = false
+
+let is_full_report argv =
+  if Array.length(argv) == 5 then
+    if argv[2] == "--check" then
+      if argv[3] == "all" then argv[4] == "--write-report"
+      else false
+    else false
+  else false
+
+let review event already_approved =
+  let argv = Shell.argv(event) in
+  if is_full_report(argv) then
+    if already_approved then
+      let* () = Review.defer() in
+      Task.pure(already_approved)
+    else
+      let* () = Review.approve() in
+      Task.pure(true)
+  else
+    let* () = Review.deny("Saved reports must contain all check categories.") in
+    Task.pure(already_approved)

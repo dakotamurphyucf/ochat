@@ -145,3 +145,37 @@ the limits of this evidence; no live provider or Linux execution is claimed.
 Custom shell reviewers, persistent and generated specialist lessons, stateful and
 background workflows, the three complete applications, and the final presentation
 and reader-journey audit remain separate unfinished work in the full plan.
+
+## Custom shell decisions
+
+T14 completes the shell learning sequence with a real ChatML reviewer: reject a
+selective report, automatically approve the first complete report request, and
+defer later requests to the user. The lesson explains that retained state records
+review decisions rather than successful writes or file existence. The complete
+Lantern bundle includes a separately selected model-review entry point with the
+same command and confinement configuration and an explicit hard report policy.
+
+The model-review documentation now matches the stock adapter. Its `agent` field
+labels a fixed tool-free reviewer; it does not look up an authored ChatMD agent
+tool. Model failures configured as denial do not fall through to a human. The
+former shell pattern's misleading agent declaration and fallback wording were
+corrected while preserving its old fragment URL.
+
+The source reader distinguishes an **Alternate entry** from an imported companion.
+Bundle validation parses each entry point, compares the combined actual source
+closure with declared dependencies, and verifies missing-source failure for each
+entry that consumes a companion. This supports independently selected variants
+without fabricating imports that would change runtime behavior.
+
+Local macOS qualification covers the full composition suite and 349 canonical
+documentation pages. The exact public ChatML sources execute through a real
+session and required shell backend. A separate real Agent_runtime test replaces
+only the nested model callback: policy denial avoids the callback, a valid stub
+decision runs the checker, and malformed output preserves prior evidence. This
+does not make a model API call or establish live model judgment. The extracted
+13-file archive retains exact source bytes, both roots inspect correctly, and its
+sample checker produces the expected report. Website checks passed 83 tests; the
+build checked 158 HTML pages and 719 files; search passed all 33 queries. The
+desktop lesson, alternate-entry label and mobile wrapped script were reviewed.
+All 99 tutorial and reading browser checks passed across Chromium, Firefox and
+WebKit, including complete source access with JavaScript disabled.
