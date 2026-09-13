@@ -128,7 +128,8 @@ stale navigation expectations in each engine. Updating the homepage destination,
 direct persistent-specialist link and optional hosting-to-stdio path made all nine
 affected cases pass with traces enabled. The result is 307 passing cases and two
 existing skips, with initial failures and follow-up evidence retained separately.
-The full local run disabled trace recording for speed; CI trace policy is unchanged.
+The full local run disabled trace recording for speed. At that local checkpoint,
+CI trace policy was unchanged; see the publication follow-up below.
 
 Search passed all 33 queries across 154 indexed pages and 2,555 checked fragment
 destinations. All twelve required feature queries reached an intended destination
@@ -162,6 +163,34 @@ merged, deployed or sent to a live model provider during this overhaul.
 
 No live provider quality, Linux confinement execution, physical TUI session or
 hosted deployment is implied by local deterministic/browser evidence.
+
+## Authorized publication follow-up
+
+Publication was subsequently authorized through
+[PR #30](https://github.com/dakotamurphyucf/ochat/pull/30). The first
+[PR run](https://github.com/dakotamurphyucf/ochat/actions/runs/34766172420)
+passed ordinary framework tests, end-to-end tests, semantics, both website builds
+and both first browser shards. Both second browser shards exceeded their job
+deadlines. The retained errors showed catalog reading and whole-curriculum
+navigation timeouts, rather than incorrect source-byte assertions. This run was
+not merged or deployed.
+
+One failed lab trace contained 1,866 screencast frames and occupied 133 MB
+uncompressed. Removing only those frames was insufficient: a local WebKit
+shell-customization case still reached its 56-second deadline with repeated DOM
+snapshots enabled. The bulk catalog checks now retain action traces, test sources
+and failure diagnostics without continuous screenshots or DOM snapshots. All
+reader-interaction tests retain full traces. Every catalog assertion, timeout,
+retry setting and required gate remains intact. The single 18-lesson navigation
+case is divided into six validated learning paths with the same assertions.
+
+All 120 affected browser cases passed across Chromium, Firefox and WebKit in
+2.6 minutes with the revised configured tracing. WebKit shell customization took
+2.3 seconds and the complete lab took 7.0 seconds. These are local diagnostic
+comparisons, not hosted performance guarantees. Astro reported no errors,
+warnings or hints; the three learning-path/browser-evidence tests also passed.
+The exact new PR revision must still pass the complete protected gate before
+merge, followed by main qualification, deployment and live reader verification.
 
 ## Acceptance scenario evidence
 

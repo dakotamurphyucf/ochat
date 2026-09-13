@@ -210,8 +210,13 @@ runbook, not a website-installed compiler. It makes no provider calls.
 For local iteration on large source bundles, `npm run test:browser -- --workers=2
 --trace=off` retains every assertion while avoiding repeated diagnostic snapshots
 of the full catalog. If a case fails, rerun that case with `--trace=on` when a trace
-is needed to diagnose it. Keep the default trace policy for CI/release qualification;
-turning off local recording does not replace any required check.
+is needed to diagnose it. CI/release qualification retains failure traces. The
+bulk catalog source checks in `catalog-sources.spec.ts` omit continuous screenshot
+frames and repeated DOM snapshots because capturing the large static catalog
+dominated execution. They retain action traces, test sources and failure
+diagnostics, and all source, accessibility and native-reading assertions. Other
+browser tests, including reader interactions, use the default full trace settings.
+Turning off local recording does not replace any required check.
 
 ## Upgrade dependencies
 

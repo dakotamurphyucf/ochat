@@ -1,7 +1,9 @@
-import { test, expect, type Browser, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+import { withNativeSourceReader } from './native-source-reader';
 import AxeBuilder from '@axe-core/playwright';
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
+import { resolveTutorialPaths } from '../../config/tutorial-paths.mjs';
 const report = JSON.parse(
   fs.readFileSync(
     new URL('../../.generated/examples-report.json', import.meta.url),
@@ -9,42 +11,44 @@ const report = JSON.parse(
   ),
 );
 
-test('all lessons expose host, verification and learning-path navigation without JavaScript', async ({
-  browser,
-}) => {
-  const context = await browser.newContext({ javaScriptEnabled: false });
-  try {
-    const page = await context.newPage();
-    for (const t of report.tutorials) {
-      await page.goto(t.route);
-      await expect(page).toHaveURL(t.route);
-      const record = page.getByRole('complementary', {
-        name: 'Tutorial context and verification',
-      });
-      await expect(record).toContainText(t.host);
-      await record.locator('summary').click();
-      await expect(record).toContainText('No live provider calls');
-      await expect(record).toContainText(t.verification.platform);
-      if (t.previous)
-        await expect(
-          page.getByRole('link', {
-            name: new RegExp(
-              'Previous.*' +
-                t.previous.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
-            ),
-          }),
-        ).toHaveAttribute('href', t.previous.route);
-      else
-        await expect(page.getByRole('link', { name: /Previous / })).toHaveCount(
-          0,
-        );
-      await page.getByRole('link', { name: /Next / }).click();
-      await expect(page).toHaveURL(t.next.route);
+for (const learningPath of resolveTutorialPaths(report.tutorials)) {
+  test(`${learningPath.title} lessons expose host, verification and navigation without JavaScript`, async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ javaScriptEnabled: false });
+    try {
+      const page = await context.newPage();
+      for (const t of learningPath.tutorials) {
+        await page.goto(t.route);
+        await expect(page).toHaveURL(t.route);
+        const record = page.getByRole('complementary', {
+          name: 'Tutorial context and verification',
+        });
+        await expect(record).toContainText(t.host);
+        await record.locator('summary').click();
+        await expect(record).toContainText('No live provider calls');
+        await expect(record).toContainText(t.verification.platform);
+        if (t.previous)
+          await expect(
+            page.getByRole('link', {
+              name: new RegExp(
+                'Previous.*' +
+                  t.previous.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+              ),
+            }),
+          ).toHaveAttribute('href', t.previous.route);
+        else
+          await expect(
+            page.getByRole('link', { name: /Previous / }),
+          ).toHaveCount(0);
+        await page.getByRole('link', { name: /Next / }).click();
+        await expect(page).toHaveURL(t.next.route);
+      }
+    } finally {
+      await context.close();
     }
-  } finally {
-    await context.close();
-  }
-});
+  });
+}
 
 test('catalog distinguishes complete examples, configured templates and illustrative output without JavaScript', async ({
   browser,
@@ -215,70 +219,6 @@ test('tutorial instructions preserve tool, batch, and source-context qualificati
     await expect(page.locator('.sl-markdown-content')).toContainText(expected);
   }
 });
-
-// Keep catalog and guide checks independent as the example inventory grows.
-// Every case retains literal-byte, native-reading, and no-download coverage.
-async function withNativeSourceReader(
-  browser: Browser,
-  read: (page: Page) => Promise<void>,
-) {
-  const context = await browser.newContext({ javaScriptEnabled: false });
-  try {
-    const page = await context.newPage();
-    const downloads: string[] = [];
-    page.on('download', (download) =>
-      downloads.push(download.suggestedFilename()),
-    );
-    await read(page);
-    expect(downloads).toEqual([]);
-  } finally {
-    await context.close();
-  }
-}
-
-for (const example of report.examples.filter(
-  (e: { files: unknown[] }) => e.files.length,
-)) {
-  test(`catalog ${example.id} preserves all inline files without JavaScript or downloads`, async ({
-    browser,
-  }) => {
-    // This is a whole-bundle reading check, not a single interaction benchmark.
-    test.setTimeout(30_000 + example.files.length * 2_000);
-    await withNativeSourceReader(browser, async (page) => {
-      await page.goto('/docs/examples/');
-      const viewer = page.locator(`[data-example-source="${example.id}"]`);
-      await viewer.locator(':scope > summary').click();
-      for (const file of example.files) {
-        const panel = viewer.locator(`[data-source-path="${file.path}"]`);
-        if ((await panel.getAttribute('open')) === null)
-          await panel.locator(':scope > summary').click();
-        const code = panel.locator('pre');
-        await expect(code).toBeVisible();
-        // The no-JS document is static. Read its source properties together to
-        // avoid repeated protocol trips and trace snapshots of the large catalog.
-        const rendered = await code.evaluate((node) => ({
-          text: node.querySelector('code')?.textContent,
-          tabindex: node.getAttribute('tabindex'),
-          language: node.dataset.language,
-          highlighted: node.querySelectorAll('span[style]').length > 0,
-          nestedMarkup: node.querySelectorAll('user, tool, developer, script')
-            .length,
-        }));
-        expect(rendered.text).toBe(file.content);
-        expect(rendered.tabindex).toBe('0');
-        if (file.path.endsWith('.chatml')) {
-          expect(rendered.language).toBe('ocaml');
-          expect(rendered.highlighted).toBe(true);
-        }
-        await expect(code).toHaveAccessibleName(
-          `${example.title}: ${file.path} source`,
-        );
-        expect(rendered.nestedMarkup).toBe(0);
-        await panel.locator(':scope > summary').click();
-      }
-    });
-  });
-}
 
 test('tutorial entrypoints preserve inline source without JavaScript or downloads', async ({
   browser,
