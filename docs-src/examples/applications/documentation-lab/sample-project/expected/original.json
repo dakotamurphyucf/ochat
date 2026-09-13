@@ -1,0 +1,7 @@
+{
+  "phase":"original",
+  "checks":[
+    {"tutorial_id":"passing","status":"passed","exit_code":0,"evidence_path":"tutorials/passing.md","summary":"Verification heading and expected-result line are present."},
+    {"tutorial_id":"broken","status":"failed","exit_code":1,"evidence_path":"tutorials/broken.md","summary":"Add a Verification heading and an Expected result line."}
+  ]
+}

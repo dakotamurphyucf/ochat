@@ -180,3 +180,7 @@ The private store stays in the extracted directory. The
 [subagent decision guide](../guide/subagents.md) compares authored and generated
 delegation, and [ChatML workflows](../chatml/README.md) explains
 how to coordinate their lifecycle with scripts, background jobs, and notifications.
+
+The [complete living documentation lab](../applications/documentation-lab.md)
+combines this generated reviewer with background tutorial checks, timer-driven
+response collection, a retained writer and a staged correction/recheck cycle.

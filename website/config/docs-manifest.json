@@ -1903,7 +1903,7 @@
     "noindex": false,
     "status": "current",
     "verification": "not-checked",
-    "order": 12
+    "order": 13
   },
   {
     "id": "examples/agent-server/README",
@@ -4467,7 +4467,7 @@
     "description": "Turn a named project file into an explanation you can check against the source.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 3,
+    "order": 4,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4489,7 +4489,7 @@
     "description": "Let an explorer gather the context and a specialist identify what a new contributor needs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 4,
+    "order": 5,
     "navigation": false,
     "related": [
       "tutorials/specialist"
@@ -4511,7 +4511,7 @@
     "description": "Compare supplied source notes, preserve attribution, and separate evidence from open questions.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 5,
+    "order": 6,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4533,7 +4533,7 @@
     "description": "Read a supplied patch and acceptance criteria, then produce findings tied to the changed lines.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 6,
+    "order": 7,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4555,7 +4555,7 @@
     "description": "Run one request without the terminal UI and save the conversation as an inspectable artifact.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 7,
+    "order": 8,
     "navigation": false,
     "related": [
       "cli/chat-completion"
@@ -4577,7 +4577,7 @@
     "description": "Learn the host lifecycle with a real timer, then extend it with background research jobs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 8,
+    "order": 9,
     "navigation": false,
     "related": [
       "background"
@@ -4881,6 +4881,60 @@
     "disposition": "repository-only",
     "title": "Persistent review team bundle instructions",
     "reviewNote": "Included in complete source reader and download; application walkthrough is public.",
+    "provenance": "authored"
+  },
+  {
+    "id": "applications/documentation-lab",
+    "source": "docs-src/applications/documentation-lab.md",
+    "route": "/docs/applications/documentation-lab/",
+    "title": "Build a living documentation lab",
+    "description": "Run tutorial checks in the background, create narrowed reviewers, collect their responses with a ChatML watcher, and stage and recheck a proposed correction.",
+    "section": "Complete applications",
+    "kind": "guide",
+    "order": 3,
+    "navigation": true,
+    "audience": [
+      "author",
+      "operator"
+    ],
+    "related": [
+      "tutorials/background-results",
+      "tutorials/generated-specialist",
+      "guide/chatml-authoring-background"
+    ],
+    "disposition": "publish",
+    "provenance": "authored",
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "offline-checked",
+    "reviewNote": "Complete 28-file documentation lab: controlled native durable integration covers real checks, staging/recheck, generated and persistent reviewers, timer notifications, failure, cancellation and interrupted-check recovery. Live model quality and mid-write recovery remain unclaimed.",
+    "verifiedAt": "2026-09-13",
+    "verifiedCommit": "51fccd0751c512a0f40d882cf209361a386482a5"
+  },
+  {
+    "id": "examples/applications/documentation-lab/README",
+    "source": "docs-src/examples/applications/documentation-lab/README.md",
+    "disposition": "repository-only",
+    "title": "Documentation lab bundle instructions",
+    "reviewNote": "Included in the complete inline source reader and archive; the application walkthrough is public.",
+    "provenance": "authored"
+  },
+  {
+    "id": "examples/applications/documentation-lab/sample-project/tutorials/broken",
+    "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/broken.md",
+    "disposition": "repository-only",
+    "title": "Documentation lab sample tutorial: workspace/sample-project/tutorials/broken.md",
+    "reviewNote": "Included in the complete inline source reader and archive; the application walkthrough is public.",
+    "provenance": "authored"
+  },
+  {
+    "id": "examples/applications/documentation-lab/sample-project/tutorials/passing",
+    "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/passing.md",
+    "disposition": "repository-only",
+    "title": "Documentation lab sample tutorial: workspace/sample-project/tutorials/passing.md",
+    "reviewNote": "Included in the complete inline source reader and archive; the application walkthrough is public.",
     "provenance": "authored"
   }
 ]

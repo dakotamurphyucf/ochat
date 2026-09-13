@@ -1,0 +1,38 @@
+{
+  "type": "object",
+  "properties": {
+    "closed": {"type": "boolean"},
+    "runs": {
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "run_id": {"type": "string"},
+          "kind": {"type": "string", "enum": ["checks", "stage"]},
+          "job_id": {"type": "string"},
+          "input": {"type": "object"},
+          "finished": {"type": "boolean"},
+          "result": {"type": ["object", "null"]}
+        },
+        "required": ["run_id", "kind", "job_id", "input", "finished", "result"],
+        "additionalProperties": false
+      }
+    },
+    "reviews": {
+      "type": "array", "maxItems": 8,
+      "items": {
+        "type": "object",
+        "properties": {
+          "watch_id": {"type": "string"},
+          "query": {"type": "object"},
+          "finished": {"type": "boolean"},
+          "result": {"type": ["object", "null"]}
+        },
+        "required": ["watch_id", "query", "finished", "result"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["closed", "runs", "reviews"],
+  "additionalProperties": false
+}

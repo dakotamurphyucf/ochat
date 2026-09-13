@@ -1,0 +1,1 @@
+{"type":"object","properties":{"phase":{"type":"string","enum":["original","staged"]}},"required":["phase"],"additionalProperties":false}

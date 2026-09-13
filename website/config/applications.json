@@ -44,6 +44,28 @@
     "benefit": "Revisit the same specialist investigations while keeping identity, completion, evidence and disagreement visible."
   },
   {
+    "id": "documentation-lab",
+    "title": "Keep tutorial checks and specialist reviews connected",
+    "category": "Documentation",
+    "summary": "Run tutorial checks in the background, create narrowed reviewers, collect their responses with a ChatML watcher, and stage and recheck a proposed correction.",
+    "input": "A tutorial inventory and checkable sample project",
+    "output": "Check evidence, retained reviews, a staged correction and an actual recheck",
+    "example": "documentation-lab",
+    "level": "Complete application",
+    "steps": [
+      "Check tutorials in the background",
+      "Create reviewers and collect their responses",
+      "Stage a proposal and verify the result"
+    ],
+    "preview": [
+      "Original checks \u2192 one pass, one failure",
+      "Review \u2192 read-only child and retained writer",
+      "Staged recheck \u2192 evidence for the correction"
+    ],
+    "tutorial": "tutorials/background-results",
+    "benefit": "Combine deterministic checks with specialist judgment while retaining the evidence, conversations and lifecycle state."
+  },
+  {
     "id": "repository-onboarding",
     "title": "Understand an unfamiliar repository",
     "category": "Code",

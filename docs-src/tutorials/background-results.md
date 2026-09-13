@@ -186,5 +186,8 @@ For a longer workflow, combine this pattern with
 [generated reviewers](generated-specialist.md). A coordinator can check tutorials,
 assign their failures to reviewers, retain their conversations and collect
 follow-up evidence. Those children need the durable host described in their lessons.
+Build that composition in the [complete living documentation lab](../applications/documentation-lab.md):
+background checks, narrowed generated reviewers, a persistent writer, response
+watchers and an actual staged correction followed by a recheck.
 Return to [ChatML workflows](../chatml/README.md) to choose the appropriate
 script form, or [run and operate](../agent-server/README.md) for host lifecycle details.

@@ -6,6 +6,7 @@
   ochat.agent_transport_http)
  (inline_tests (deps ../../bin/ochat_agent_stdio.exe))
  (preprocessor_deps
+  (glob_files_rec ../../docs-src/examples/applications/documentation-lab/*)
   (glob_files_rec ../../docs-src/examples/applications/persistent-review-team/*)
   (glob_files_rec ../../docs-src/examples/applications/guarded-engineering/*)
   (glob_files_rec ../../docs-src/examples/learning/agent-teams/*)

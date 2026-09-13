@@ -1,0 +1,109 @@
+<config model="gpt-6-astra"/>
+<developer>
+Run a living documentation lab over the two sample tutorials. Begin with
+begin_lab_checks phase original; its acknowledgement is not the check result.
+Continue the conversation while work runs, and inspect the later notification
+and lab_report. A check can successfully execute and report a failing tutorial.
+
+For a failed or unclear tutorial, query ochat_authoring_context for child_agent
+guidance. Capture a task-specific reviewer ChatMD with gpt-6-astra/high reasoning,
+instructions tied to the actual tutorial/check evidence, and only inherited
+read_file. Validate those bytes with ochat_validate, then use agent_create with
+start_immediately true, lifetime owned and a fresh idempotency key. Select only
+read_file from your existing capabilities. Do not give the child shell, staging,
+authoring or child-management tools. Retain exact source bytes and retry keys.
+
+Send the investigation through agent_send and keep its receipt. Immediately
+register watch_lab_review with tutorial_id, role reviewer, session_id and
+receipt_id. The moderator polls that receipt with timers; it is not native child
+push. A completed watcher can carry a failed/cancelled/interrupted child receipt:
+inspect the returned wait and output before claiming a successful review. Retain
+the child for follow-up and register a NEW receipt when asking another question.
+The same receipt cannot be watched twice. Read extra output pages through
+agent_read using the same receipt and next_cursor; reconstruct fragments.
+
+Ask propose_fix, an authored persistent writer, to propose verification wording
+using the tutorial and reviewer findings. Keep its session and receipt and
+register role writer with watch_lab_review. Neither reviewer nor writer edits.
+Show the proposed text before requesting stage_lab_proposal with arguments
+["broken", PROPOSED_SECTION]. The operator pre-authorizes this fixed capability
+when starting the inspected private lab configuration. It
+writes only sample-project/staging/broken.md and never alters the original.
+Do not call apply_proposal directly to skip the moderator's evidence record.
+
+After successful staging, call begin_lab_checks phase staged. Missing staged
+input or a rejected stage is a visible failure, not a passing recheck. Use lab_report
+to assemble check evidence, child findings, proposal/stage result, recheck and
+unresolved issues with source paths and runtime IDs. This mechanical checker
+tests a heading and expected-result line; do not equate it with prose quality.
+
+When finished or cancelled, close_lab stops known watcher children, cancels
+pending jobs/timers and returns retained evidence. Inspect stop progress before
+claiming cleanup finished. Stop any created child that never reached watch
+registration separately. A closed lab cannot start another run; use a new parent
+session deliberately. Interrupted work needs inspection and an explicit retry:
+durability does not resume arbitrary processes or roll back staged files.
+</developer>
+
+<tool name="read_file">
+  <read id="project" path="${workspace}/sample-project"/>
+</tool>
+<import src="runtimes/tutorial-checks.chatmd"/>
+<tool name="check_one_tutorial" type="shell" mode="fixed" runtime="tutorial-checks"
+      result="structured" nonzero="result"
+      description="Run the fixed verification-v1 checker. Arguments are original or staged, then passing or broken. Exit 1 is a tutorial failure; exit 2 is invalid or missing input.">
+  <command program="/bin/sh">
+    <path_arg base="workspace" path="sample-project/checks/check-tutorial.sh"/>
+  </command>
+  <arguments mode="required" min_count="2" max_count="2" max_item_bytes="32"/>
+</tool>
+<tool name="apply_proposal" type="shell" mode="fixed" runtime="tutorial-staging"
+      result="structured" nonzero="result"
+      description="Apply a proposed section through the pre-authorized fixed staging capability. Arguments are broken and the literal proposed text; only the staged broken tutorial is written. Use stage_lab_proposal to retain its background evidence.">
+  <command program="/bin/sh">
+    <path_arg base="workspace" path="sample-project/checks/stage-proposal.sh"/>
+  </command>
+  <arguments mode="required" min_count="2" max_count="2" max_item_bytes="4096"/>
+</tool>
+
+<tool name="agent_create"/>
+<tool name="agent_send"/>
+<tool name="agent_status"/>
+<tool name="agent_wait"/>
+<tool name="agent_read"/>
+<tool name="agent_stop"/>
+<tool name="propose_fix" agent="agents/writer.chatmd" local persistence="persistent"
+      description="Keep a documentation writer working on a proposed verification section. Supply the tutorial, actual check evidence and reviewer findings; it returns advice without changing files."/>
+
+<script id="tutorial_program" language="chatml" kind="tool" src="scripts/check-tutorial.chatml"/>
+<tool name="check_tutorials" type="chatml" script="tutorial_program" entrypoint="run"
+      input_schema="schemas/phase.json" output_schema="schemas/check-result.json"
+      description="Validate the fixed tutorial inventory and run its two real checks. Prefer begin_lab_checks for background execution and retained lab evidence.">
+  <uses tool="read_file"/>
+  <uses tool="check_one_tutorial"/>
+</tool>
+<script id="review_probe" language="chatml" kind="tool" src="scripts/probe-review.chatml"/>
+<tool name="probe_review" type="chatml" script="review_probe" entrypoint="run"
+      input_schema="schemas/watch.json" output_schema="schemas/probe-result.json"
+      description="Perform one zero-time receipt check and read a terminal response page. Used by the lab's timer-driven watcher.">
+  <uses tool="agent_wait"/>
+  <uses tool="agent_read"/>
+</tool>
+
+<script id="lab_coordinator" language="chatml" kind="moderator" api="extensibility-v1"
+        src="scripts/coordinator.chatml"/>
+<tool name="begin_lab_checks" type="moderator" moderator="lab_coordinator"
+      input_schema="schemas/phase.json" output_schema="schemas/object.json"
+      description="Acknowledge and start the original or staged tutorial checks in the background. The moderator later publishes the canonical result and retains it in lab_report."/>
+<tool name="stage_lab_proposal" type="moderator" moderator="lab_coordinator"
+      input_schema="schemas/proposal.json" output_schema="schemas/object.json"
+      description="Start staging through this lab's pre-authorized fixed capability. Supply arguments [broken, proposed text]. Returns an acknowledgement; inspect its later actual result before requesting a staged recheck."/>
+<tool name="watch_lab_review" type="moderator" moderator="lab_coordinator"
+      input_schema="schemas/watch.json" output_schema="schemas/object.json"
+      description="Watch a specific owned reviewer or writer submission through bounded timer polling. Returns a watch ID now and delivers receipt/output evidence later; it does not create a child or guarantee its success."/>
+<tool name="lab_report" type="moderator" moderator="lab_coordinator"
+      input_schema="schemas/empty.json" output_schema="schemas/lab-report.json"
+      description="Read retained check, stage and reviewer evidence, including pending and failed work. Does not execute checks, read missing output pages or infer consensus."/>
+<tool name="close_lab" type="moderator" moderator="lab_coordinator"
+      input_schema="schemas/empty.json" output_schema="schemas/lab-report.json"
+      description="Close this lab, cancel pending jobs and watches, and request cancellation of known reviewer sessions. Inspect returned stop progress and retained evidence; this is not proof that every external effect was rolled back."/>

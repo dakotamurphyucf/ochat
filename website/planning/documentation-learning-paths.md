@@ -392,3 +392,59 @@ into the application, opens agents/schemas/scripts and reads wrapped ChatML
 without document overflow. Search passes 33/33 queries across 153 indexed pages
 and 2,523 checked anchors. No live provider, physical TUI, Linux, restart/recovery
 or deployed-site qualification is claimed for this batch.
+
+## D04 — Living documentation lab
+
+The third application combines the earlier lessons into a complete 28-file
+project. A conversational parent assigns a dynamically captured, validated,
+read-only reviewer and an authored persistent writer. One ChatML moderator owns
+background tutorial checks, retained evidence, stateful tools, timer-driven
+receipt watchers, fixed sample staging, rechecks and cancellation. It is linked
+from the background-results and generated-specialist lessons, the application
+gallery and the main documentation navigation. Every companion is readable in
+the existing browser source viewer and included in the complete archive.
+
+Its private daemon profile explicitly preauthorizes the inspected shell manifest
+and fixed staging capability. Required confinement, no network and a staging-only
+write boundary remain active. `tool_default allow` supplies an automatic shell
+approver; this application does not claim that a shell `ask` rule under that
+profile produces a human prompt. The guarded engineering application teaches
+interactive approval separately. The mechanical checker tests a verification
+heading and expected-result line; it does not judge tutorial quality.
+
+Controlled native durable integration executes the real pass/fail checker,
+rejects an unsupported staging target, stages a copy, verifies the changed
+result, and retains acknowledgments before canonical notifications. Reviewer
+validation/creation, idempotent creation retry, an actual inherited file read,
+timer arming, duplicate-watch rejection, same-session follow-up, a persistent
+writer, failed child receipts and four distinct result notifications pass.
+Closing a pending reviewer cancels its execution and watcher; repeated close
+retains one cancellation. Watcher success remains distinct from child success.
+
+A separate daemon-restart case uses the exact application sources with an Ask
+profile to hold an admitted file read. After shutdown and recovery, job identities,
+attempts and invocation counts are unchanged; one interrupted result is delivered
+and the moderator's report retains it. Automatic model wakes are disabled in this
+recovery fixture. This proves recovery of interrupted check evidence without
+replaying the read, not continuation of an arbitrary program counter or recovery
+of a partially written external file.
+
+The larger scenario exposed an embedded transport shutdown bug: an unread bounded
+notification queue could leave its publisher blocked after disconnect. Publication
+now observes connection closure before session detachment. The full embedded host
+suite and a zero-capacity backpressure/close regression pass; the application
+scenario also joins all host cleanup normally.
+
+Clean archive extraction verifies all 28 source files and exact captured reviewer
+request bytes. Private configuration validation and root shell inspection pass.
+Direct check/stage/recheck commands run from the configured sample-project working
+directory, preserve the original tutorial and treat shell-like proposal text
+literally. Canonical checks cover 361 pages and 39 methods. Astro reports no errors;
+the 83 website tests pass after updating the two catalog-count expectations, with
+the affected tests rerun. The build checks 165 HTML pages and 859 files, and all
+39 Chromium application/source-reader cases pass, including the lab's complete
+inline source without JavaScript. Desktop/mobile inspection follows a lesson into
+the application, opens five companion types and uses wrapping without document
+overflow. Search passes 33/33 queries across 154 indexed pages and 2,542 anchors.
+These are local results. No live provider, physical TUI, Linux, power-loss,
+mid-write recovery or hosted publication is claimed.

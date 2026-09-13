@@ -166,6 +166,46 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
     |}]
 ;;
 
+let%expect_test "closing an embedded client releases its backpressured publisher" =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let options : Agent_server.Embedded.options =
+          { prompt_file
+          ; workspace
+          ; tool_dir = workspace
+          ; home = root
+          ; data_root = None
+          ; start_immediately = true
+          ; permission_profile = Agent_server.Embedded.default_permission_profile
+          ; attachment_mode = Read_write
+          ; event_capacity = 0
+          }
+        in
+        let host = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+        let connection = Agent_server.Embedded.connection host in
+        let stop =
+          Agent_protocol.Command.Session_stop
+            { session_id = Agent_server.Embedded.session_id host
+            ; attachment_id = (Agent_server.Embedded.attachment host).id
+            ; mode = Cancel
+            ; idempotency_key =
+                Agent_protocol.Idempotency_key.of_string "close-backpressured-client"
+                |> protocol_ok
+            }
+        in
+        Agent_client.Connection.request connection stop |> protocol_ok |> ignore;
+        (* A rendezvous proves the forwarder is active. The remaining stop events
+           have no reader and no buffer space. Close must release that publisher. *)
+        assert (Option.is_some (Agent_client.Connection.next_notification connection));
+        Eio.Fiber.yield ();
+        Agent_server.Embedded.close host;
+        assert (Option.is_none (Agent_client.Connection.next_notification connection));
+        Agent_server.Embedded.close host)));
+  print_endline "unread events do not prevent close or the owning switch from joining";
+  [%expect {| unread events do not prevent close or the owning switch from joining |}]
+;;
+
 let%expect_test "session creation returns the requested attachment after session.created" =
   with_fixture (fun env root workspace prompt_file ->
     Eio.Switch.run (fun sw ->

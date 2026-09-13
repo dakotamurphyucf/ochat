@@ -480,6 +480,141 @@
       "source": "docs-src/examples/applications/persistent-review-team/README.md",
       "disposition": "example-download",
       "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/README.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/agents/writer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/lab.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/requests/create-reviewer.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/requests/validate-reviewer.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/runtimes/tutorial-checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/checks/check-tutorial.sh",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/checks/stage-proposal.sh",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/expected/original.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/staging/README.txt",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorial-inventory.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/broken.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/passing.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/check-result.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/empty.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/lab-report.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/object.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/phase.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/probe-result.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/proposal.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/tutorial-inventory.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/watch.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/check-tutorial.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/probe-review.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/server.sexp",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
     }
   ],
   "directories": [

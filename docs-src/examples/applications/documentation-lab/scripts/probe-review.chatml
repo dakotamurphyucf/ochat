@@ -1,0 +1,41 @@
+let field value name =
+  match Json.get_field(value, name) with
+  | `Some(found) -> found
+  | `None -> `Null
+
+let decode value =
+  match value with
+  | `String(text) -> Json.parse(text)
+  | other -> other
+
+let call name input =
+  let* response = Tool.call(name, input) in
+  match response with
+  | `Ok(value) -> Task.pure(decode(value))
+  | `Error(message) -> Task.fail(message)
+
+let run ctx input =
+  let query = [
+    { key = "session_id"; value = field(input, "session_id") },
+    { key = "receipt_id"; value = field(input, "receipt_id") }
+  ] in
+  let* waited = call("agent_wait", `Object(Array.append(query, [
+    { key = "timeout_ms"; value = `Number(0.0) }
+  ]))) in
+  match field(waited, "reason") with
+  | `String("timeout") ->
+      Task.pure(`Complete(`Object([
+        { key = "ready"; value = `Bool(false) },
+        { key = "wait"; value = waited },
+        { key = "output"; value = `Null }
+      ])))
+  | `String("receipt_terminal") ->
+      let* output = call("agent_read", `Object(Array.append(query, [
+        { key = "limit"; value = `Number(16.0) }
+      ]))) in
+      Task.pure(`Complete(`Object([
+        { key = "ready"; value = `Bool(true) },
+        { key = "wait"; value = waited },
+        { key = "output"; value = output }
+      ])))
+  | _ -> Task.fail("Unexpected receipt-wait response.")

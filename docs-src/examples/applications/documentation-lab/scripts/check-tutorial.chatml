@@ -1,0 +1,78 @@
+let field value name =
+  match Json.get_field(value, name) with
+  | `Some(found) -> found
+  | `None -> fail("Missing field: " ++ name)
+
+let text value =
+  match value with
+  | `String(value) -> value
+  | _ -> fail("Expected text.")
+
+let decode value =
+  match value with
+  | `String(value) -> Json.parse(value)
+  | other -> other
+
+let after_line text =
+  match String.find(text, "\n") with
+  | `Some(index) ->
+      String.slice(text, index + 1, String.length(text) - index - 1)
+  | `None -> fail("Expected a complete file response.")
+
+let call name input =
+  let* response = Tool.call(name, input) in
+  match response with
+  | `Ok(value) -> Task.pure(value)
+  | `Error(message) -> Task.fail(message)
+
+let check phase item =
+  let id = text(field(item, "tutorial_id")) in
+  let expected_path = "tutorials/" ++ id ++ ".md" in
+  let known_id = match id with
+    | "passing" -> true
+    | "broken" -> true
+    | _ -> false
+  in
+  let supported =
+    if known_id then
+      if text(field(item, "path")) == expected_path then
+        text(field(item, "check")) == "verification-v1"
+      else false
+    else false
+  in
+  if supported then
+    let* response = call("check_one_tutorial", `Object([
+      { key = "arguments"; value = `Array([`String(phase), `String(id)]) }
+    ])) in
+    let shell = decode(response) in
+    let result = Json.parse(text(field(shell, "stdout"))) in
+    if text(field(result, "tutorial_id")) == id then Task.pure(result)
+    else Task.fail("Checker returned mismatched tutorial evidence.")
+  else Task.fail("Inventory contains an unsupported tutorial, path or check.")
+
+let rec check_all phase items index results =
+  if index == Array.length(items) then Task.pure(results)
+  else
+    let* result = check(phase, items[index]) in
+    check_all(phase, items, index + 1, Array.append(results, [result]))
+
+let run ctx input =
+  let phase = text(field(input, "phase")) in
+  let* inventory = call("read_file", `Object([
+    { key = "root"; value = `String("project") },
+    { key = "file"; value = `String("tutorial-inventory.json") }
+  ])) in
+  match Json.parse(after_line(after_line(text(inventory)))) with
+  | `Array(items) ->
+      if Array.length(items) != 2 then Task.fail("Expected the two sample tutorials.")
+      else
+        let first = text(field(items[0], "tutorial_id")) in
+        let second = text(field(items[1], "tutorial_id")) in
+        if first == second then Task.fail("Tutorial IDs must be distinct.")
+        else
+          let* checks = check_all(phase, items, 0, []) in
+          Task.pure(`Complete(`Object([
+            { key = "phase"; value = `String(phase) },
+            { key = "checks"; value = `Array(checks) }
+          ])))
+  | _ -> Task.fail("Expected an inventory array.")

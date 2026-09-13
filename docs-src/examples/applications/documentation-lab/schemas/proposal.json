@@ -1,0 +1,8 @@
+{
+  "type":"object",
+  "properties":{
+    "arguments":{"type":"array","minItems":2,"maxItems":2,"items":{"type":"string"}}
+  },
+  "required":["arguments"],
+  "additionalProperties":false
+}
