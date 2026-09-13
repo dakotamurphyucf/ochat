@@ -95,7 +95,7 @@ identify the work being tracked; a notification should connect the later evidenc
 to that request. Cancellation and unsuccessful work also need explicit handling.
 
 For child responses, the current
-[watcher example](../../test/chatml_extensibility_fixtures/x06-response-watcher/README.md)
+[living documentation lab](../applications/documentation-lab.md)
 uses timers and lifecycle polling. It does not introduce a native push
 subscription for arbitrary child conversations.
 
@@ -110,6 +110,12 @@ an external effect happens exactly once. The
 the persistence boundary, jobs, timers, and restart behavior.
 
 ## Read and try
+
+See the scripts combined in complete applications: the
+[engineering assistant](../applications/guarded-engineering.md) uses custom shell
+decisions and report processing; the [review team](../applications/persistent-review-team.md)
+collects specialist evidence; the [documentation lab](../applications/documentation-lab.md)
+owns background checks, stateful tools, response watchers and staged rechecks.
 
 1. Start with the [report program](../tutorials/chatml-program.md) and
    [reusable tool](../tutorials/chatml-tool.md) to sequence useful file operations.

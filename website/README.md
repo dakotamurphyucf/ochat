@@ -2,14 +2,13 @@
 
 Production domain: **https://ochatlabs.com**. The protected Website workflow builds for this origin, retains the tested artifact, and publishes only after the main release gate passes. See [the production launch record](planning/p11-launch.md) and [release runbook](planning/release-runbook.md).
 
-A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample.
+A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Progressive lessons lead to three complete applications: a guarded engineering assistant, a persistent review team, and a living documentation lab. Smaller examples, configurable templates, and an inspectable recorded workflow remain available alongside them.
 
 The documentation is organized around tools and shell access, subagents and teams,
 ChatML workflows, complete applications, and running agents. Exact reference and
-contributor internals remain separately accessible. The inventory currently has
-343 canonical documents and produces 152 documentation routes; search includes
-143 approved pages. Generated migration/content reports are authoritative for a
-particular build. The former shell-resource-runner URL explains linked child-process
+contributor internals remain separately accessible. Generated migration/content
+reports describe the exact inventory, routes, and search policy for each build.
+The former shell-resource-runner URL explains linked child-process
 setup, preserving existing links without requiring that removed executable.
 
 The recorded demo retains its original live capture and authenticates runtime hashes against its recorded Git revision. Changed current runtime files are labeled as such; they do not turn old model output into current-runtime verification. Build with full Git history. Recording regeneration and optional live-provider calls are never implicit website-build steps.
@@ -148,15 +147,20 @@ and mobile software keyboards have been reviewed. Manual assistive-technology an
 
 Keep source examples in `docs-src/examples/`; the catalog is canonical there so
 the offline Dune gate can check the exact selected files without including npm
-dependencies in the OCaml build. `website/config/tutorials.json` maps T01–T10 to
+dependencies in the OCaml build. `website/config/tutorials.json` maps stable lesson IDs to
 existing canonical page IDs, host scopes, examples, and verification. It drives
 actual previous/next navigation and the context shown on each tutorial.
 
 The shared `src/components/ExampleSource.astro` reader displays the approved source
 files inside tutorials, associated reference pages, and catalog cards. Tutorials initially show the first
 example’s entrypoint; native details controls expose companions and notices even
-without JavaScript. ChatMD is highlighted as source (XML), ChatML as OCaml, and
-OCaml/NDJSON with their own grammars; highlighting does not execute or validate
+without JavaScript. With JavaScript, a desktop file tree or mobile picker selects
+one file at a time and preserves its direct fragment link. Copy and wrap controls
+sit above the code. On wide screens, **Expand reader** temporarily reclaims the
+contents sidebar for the source while preserving the article's reading width;
+**Restore width** or closing the reader restores the layout.
+ChatMD uses XML highlighting and ChatML uses OCaml. JSON/NDJSON, shell, Markdown,
+and S-expression files use appropriate grammars; highlighting does not execute or validate
 these languages. The importer decodes the exact download bytes as strict UTF-8
 into `files[].content`; malformed text fails generation. Astro escapes source
 tags. The reader uses both site themes and keyboard-scrollable code regions.
@@ -164,6 +168,9 @@ Markdown `chatml` fences also use the OCaml grammar. Astro’s snippet highlight
 removes a final newline; the reader restores the original full-file text through
 Shiki’s preprocessing hook so selecting code preserves its contents.
 Source bodies are excluded from Pagefind to avoid duplicating tutorial prose.
+Long ordinary article code blocks also offer **Wrap lines**. These controls only
+change presentation: source text and the existing clipboard/download bytes remain
+unchanged. Without JavaScript, code and native file disclosures remain readable.
 
 Each downloadable entry declares its entrypoint, local companions/data/build
 files, dependency edges, prerequisites, and original license. Directory-level

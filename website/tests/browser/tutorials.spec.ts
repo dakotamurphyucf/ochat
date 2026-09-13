@@ -142,9 +142,10 @@ test('new lessons and catalog retain readable narrow layouts and accessible expa
           .locator('#example-specialist .example-source > summary')
           .click();
       const source = page.locator('.example-source[open]').first();
-      await source
-        .locator('.source-file[data-source-path="LICENSE.txt"] > summary')
-        .click();
+      await source.getByRole('combobox').selectOption('LICENSE.txt');
+      await expect(
+        source.locator('[data-source-path="LICENSE.txt"] pre'),
+      ).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       expect(
         await page.evaluate(
@@ -206,6 +207,8 @@ for (const example of report.examples.filter(
   test(`catalog ${example.id} preserves all inline files without JavaScript or downloads`, async ({
     browser,
   }) => {
+    // This is a whole-bundle reading check, not a single interaction benchmark.
+    test.setTimeout(30_000 + example.files.length * 2_000);
     await withNativeSourceReader(browser, async (page) => {
       await page.goto('/docs/examples/');
       const viewer = page.locator(`[data-example-source="${example.id}"]`);
@@ -216,18 +219,27 @@ for (const example of report.examples.filter(
           await panel.locator(':scope > summary').click();
         const code = panel.locator('pre');
         await expect(code).toBeVisible();
-        expect(await code.locator('code').textContent()).toBe(file.content);
-        await expect(code).toHaveAttribute('tabindex', '0');
+        // The no-JS document is static. Read its source properties together to
+        // avoid repeated protocol trips and trace snapshots of the large catalog.
+        const rendered = await code.evaluate((node) => ({
+          text: node.querySelector('code')?.textContent,
+          tabindex: node.getAttribute('tabindex'),
+          language: node.dataset.language,
+          highlighted: node.querySelectorAll('span[style]').length > 0,
+          nestedMarkup: node.querySelectorAll('user, tool, developer, script')
+            .length,
+        }));
+        expect(rendered.text).toBe(file.content);
+        expect(rendered.tabindex).toBe('0');
         if (file.path.endsWith('.chatml')) {
-          await expect(code).toHaveAttribute('data-language', 'ocaml');
-          expect(await code.locator('span[style]').count()).toBeGreaterThan(0);
+          expect(rendered.language).toBe('ocaml');
+          expect(rendered.highlighted).toBe(true);
         }
         await expect(code).toHaveAccessibleName(
           `${example.title}: ${file.path} source`,
         );
-        await expect(code.locator('user, tool, developer, script')).toHaveCount(
-          0,
-        );
+        expect(rendered.nestedMarkup).toBe(0);
+        await panel.locator(':scope > summary').click();
       }
     });
   });
@@ -284,14 +296,34 @@ test('associated guide entrypoints preserve inline source without JavaScript or 
 
 test('inline reader supports keyboard file expansion and horizontal source scrolling', async ({
   page,
+  browserName,
 }) => {
+  // macOS WebKit uses Option+Tab to include buttons and links in keyboard navigation.
+  const next =
+    browserName === 'webkit' && process.platform === 'darwin'
+      ? 'Alt+Tab'
+      : 'Tab';
   await page.setViewportSize({ width: 320, height: 800 });
   await page.goto('/docs/tutorials/specialist/');
+  const picker = page.locator('.example-source select');
+  await picker.selectOption('docs-reviewer.chatmd');
   const companion = page.locator('[data-source-path="docs-reviewer.chatmd"]');
   await companion.locator('summary').focus();
   await page.keyboard.press('Enter');
+  await expect(companion.locator('pre')).not.toBeVisible();
+  await page.keyboard.press('Enter');
   await expect(companion.locator('pre')).toBeVisible();
-  await page.keyboard.press('Tab');
+  await page.keyboard.press(next);
+  await expect(
+    companion.getByRole('button', { name: 'Copy source' }),
+  ).toBeFocused();
+  await page.keyboard.press(next);
+  await expect(
+    companion.getByRole('button', { name: 'Wrap lines' }),
+  ).toBeFocused();
+  await page.keyboard.press(next);
+  await page.keyboard.press(next);
+  await page.keyboard.press(next);
   const code = companion.locator('pre');
   await expect(code).toBeFocused();
   await page.keyboard.press('ArrowRight');
@@ -301,4 +333,97 @@ test('inline reader supports keyboard file expansion and horizontal source scrol
   await companion.locator('summary').focus();
   await page.keyboard.press('Space');
   await expect(code).not.toBeVisible();
+});
+
+test('catalog keeps readers collapsed and expands only one source at a time', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await page.goto('/docs/examples/');
+  await expect(
+    page.locator('.example-source[data-enhanced="true"]').first(),
+  ).toBeAttached();
+  await expect(page.locator('.example-source[open]')).toHaveCount(0);
+  for (const id of ['guarded-engineering', 'documentation-lab']) {
+    const viewer = page.locator(`[data-example-source="${id}"]`);
+    await viewer.locator(':scope > summary').click();
+    await viewer.getByRole('button', { name: 'Expand reader' }).click();
+    await expect(
+      page.locator('.example-source[data-expanded="true"]'),
+    ).toHaveCount(1);
+    await expect(viewer).toHaveAttribute('data-expanded', 'true');
+  }
+  const active = page.locator('[data-example-source="documentation-lab"]');
+  await expect(page.locator('.right-sidebar-container')).not.toBeVisible();
+  await active.locator(':scope > summary').click();
+  await expect(page.locator('.right-sidebar-container')).toBeVisible();
+});
+
+test('expanded source preserves the selected file, wrapping, exact text and prose width', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await page.goto('/docs/applications/documentation-lab/');
+  const viewer = page.locator('.tutorial-sources .example-source');
+  await viewer.locator('[data-file-link="scripts/coordinator.chatml"]').click();
+  const file = viewer.locator(
+    '[data-source-path="scripts/coordinator.chatml"]',
+  );
+  const code = file.locator('pre');
+  const original = await file.locator('pre code').textContent();
+  const fragment = new URL(page.url()).hash;
+  const width = (await code.boundingBox())!.width;
+  const proseWidth = await page
+    .locator('.sl-markdown-content')
+    .evaluate((node) => node.getBoundingClientRect().width);
+  await file.getByRole('button', { name: 'Wrap lines' }).click();
+  const expand = viewer.getByRole('button', { name: 'Expand reader' });
+  await expand.click();
+  await expect(
+    viewer.getByRole('button', { name: 'Restore width' }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect
+    .poll(async () => (await code.boundingBox())!.width)
+    .toBeGreaterThan(width + 100);
+  expect(new URL(page.url()).hash).toBe(fragment);
+  await expect(file).toHaveAttribute('data-wrap', 'true');
+  expect(await file.locator('pre code').textContent()).toBe(original);
+  expect(
+    await page
+      .locator('.sl-markdown-content')
+      .evaluate((node) => node.getBoundingClientRect().width),
+  ).toBeCloseTo(proseWidth, 0);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
+  const actions = (await file.locator('.file-actions').boundingBox())!;
+  expect(actions.y + actions.height).toBeLessThanOrEqual(
+    (await code.boundingBox())!.y + 1,
+  );
+  await viewer.getByRole('button', { name: 'Restore width' }).click();
+  await expect
+    .poll(async () => (await code.boundingBox())!.width)
+    .toBeCloseTo(width, 0);
+  await page.setViewportSize({ width: 390, height: 950 });
+  await expect(
+    viewer.getByRole('button', { name: 'Expand reader' }),
+  ).not.toBeVisible();
+  await viewer.getByRole('combobox').selectOption('schemas/watch.json');
+  const schema = viewer.locator('[data-source-path="schemas/watch.json"]');
+  await expect(schema.locator('pre')).toBeVisible();
+  await expect(file).not.toBeVisible();
+  expect(await schema.locator('pre code .line span').count()).toBeGreaterThan(
+    1,
+  );
+  const expected = report.examples
+    .find((e: { id: string }) => e.id === 'documentation-lab')!
+    .files.find((f: { path: string }) => f.path === 'schemas/watch.json')!;
+  expect(await schema.locator('pre code').textContent()).toBe(expected.content);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
 });

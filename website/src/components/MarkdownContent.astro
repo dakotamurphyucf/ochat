@@ -91,6 +91,32 @@ const diagrams =
 
 {isTutorial && <LessonOverview next />}
 <script>
+  document
+    .querySelectorAll<HTMLElement>('.expressive-code')
+    .forEach((block) => {
+      const pre = block.querySelector<HTMLElement>('pre');
+      if (!pre || pre.dataset.language === 'mermaid') return;
+      const lines = [...block.querySelectorAll<HTMLElement>('.ec-line .code')];
+      if (
+        lines.length < 12 &&
+        !lines.some((line) => (line.textContent?.length || 0) > 80)
+      )
+        return;
+      const actions = document.createElement('div');
+      actions.className = 'code-reading-actions';
+      const wrap = document.createElement('button');
+      wrap.type = 'button';
+      wrap.textContent = 'Wrap lines';
+      wrap.setAttribute('aria-pressed', 'false');
+      wrap.addEventListener('click', () => {
+        const wrapped = wrap.getAttribute('aria-pressed') !== 'true';
+        wrap.setAttribute('aria-pressed', String(wrapped));
+        block.dataset.wrap = String(wrapped);
+      });
+      actions.append(wrap);
+      block.prepend(actions);
+    });
+
   // Some WebKit versions focus a scroll region without arrow-scrolling it.
   // Handle only the region itself; links and nested controls keep native keys.
   document

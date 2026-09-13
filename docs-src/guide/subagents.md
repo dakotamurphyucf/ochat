@@ -88,9 +88,11 @@ cursor identifies output progress, not a new specialist.
 A ChatML coordinator can assign work, retain identities, collect findings and
 handle unsuccessful reviewers. It can acknowledge a foreground request and
 deliver useful results later rather than making the caller block throughout.
-The current [response watcher](../../test/chatml_extensibility_fixtures/x06-response-watcher/README.md)
-does this with timers and lifecycle polling. It is not a native child-response
-push subscription.
+The [persistent review team](../applications/persistent-review-team.md) shows
+separate continuing specialists and a bounded collector. The
+[living documentation lab](../applications/documentation-lab.md) adds generated
+reviewers and later notifications through timers and lifecycle polling. Its
+response watcher is not a native child-response push subscription.
 
 Persistent children require an admitted durable host. Use the example's exact
 host setup and keep private configuration/store data outside the data workspace.

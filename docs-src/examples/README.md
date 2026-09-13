@@ -28,6 +28,20 @@ Read the associated ChatMD and companion files directly in each tutorial’s sou
 reader or in the website catalog. Download a bundle when you are ready to run it
 in your configured local environment. The website does not execute agents in your browser.
 
+## Complete applications
+
+After the focused lessons, study a whole working composition:
+
+- [Guarded engineering assistant](../applications/guarded-engineering.md): combine
+  scoped file/search tools, multiple shell runtimes, custom decisions and a reviewer.
+- [Persistent review team](../applications/persistent-review-team.md): give three
+  specialists continuing conversations and collect correlated findings with ChatML.
+- [Living documentation lab](../applications/documentation-lab.md): run checks,
+  generate narrowed reviewers, collect background responses and recheck a staged fix.
+
+Each walkthrough explains the host, every companion file, intermediate results,
+failures and cleanup. Its source reader and archive contain the complete project.
+
 ## Choosing a source example
 
 **Complete examples** include their local source/data dependencies; Ochat installation
@@ -93,6 +107,14 @@ a [timer script](agent-server/prompts/timer.chatmd), and a
 tutorials for setup rather than assuming each file runs without configuration.
 
 ## Before running an example
+
+Use the complete applications first. Additional repository recipes show an
+[external session helper](../../test/chatml_extensibility_fixtures/x07-helper-session/bundle/README.md),
+[authenticated external completion events](../../test/chatml_extensibility_fixtures/x08-external-completion/README.md),
+and [validation-driven repair](../../test/chatml_extensibility_fixtures/x11-authoring-repair/README.md).
+Follow their build and host instructions to assemble the full recipe dependencies.
+The helper is an optional extension, not an Ochat installation requirement;
+completion IDs do not grant producer access; validation does not prove execution.
 
 Check the host mode, provider configuration, tool access, and required services.
 Live model calls may cost money; generated demo credentials are for isolated

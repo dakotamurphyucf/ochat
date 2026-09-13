@@ -88,6 +88,13 @@ of the commands they can run.
 
 ## Operate and extend
 
+Combine these capabilities in the [guarded engineering assistant](../applications/guarded-engineering.md):
+separate inspection/check runtimes, custom ChatML decisions, reviewer logic and
+interactive approval for report writes. For an unattended configuration, the
+[documentation lab](../applications/documentation-lab.md) preauthorizes a fixed
+staging tool and uses background jobs to check its result. Compare the host
+permission profiles as well as the shell declarations when adapting either.
+
 - [Management CLI](../cli/shell-runtime-management.md): inspect and manage shell
   authorization and related state.
 - [TUI guide](../guide/chat_tui.md): security views, approvals, and navigation.

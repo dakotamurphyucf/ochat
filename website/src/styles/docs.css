@@ -36,6 +36,32 @@
 .sl-markdown-content {
   overflow-wrap: anywhere;
 }
+/* Expand the source workspace inline, while keeping prose at its reading width.
+   Closing the details or restoring width returns the contents sidebar. */
+@media (min-width: 65rem) {
+  .main-pane:has(.example-source[open][data-expanded='true']) {
+    width: 100%;
+  }
+  .right-sidebar-container:has(
+    ~ .main-pane .example-source[open][data-expanded='true']
+  ) {
+    display: none;
+  }
+  .sl-container:has(.example-source[open][data-expanded='true']) {
+    max-width: none;
+  }
+  .sl-container:has(.example-source[open][data-expanded='true'])
+    > :not(#lesson-resources):not(.example-catalog),
+  #lesson-resources:has(.example-source[open][data-expanded='true'])
+    .tutorial-record,
+  .example-catalog:has(.example-source[open][data-expanded='true'])
+    .example-card:not(:has(.example-source[open][data-expanded='true'])) {
+    max-width: var(--sl-content-width);
+  }
+  .example-card:has(.example-source[open][data-expanded='true']) {
+    grid-column: 1 / -1;
+  }
+}
 .sl-markdown-content table {
   max-width: 100%;
   display: block;
@@ -47,6 +73,34 @@
 }
 .sl-markdown-content pre {
   overflow-x: auto;
+}
+.code-reading-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-block: 0 0.4rem;
+}
+.code-reading-actions button {
+  min-height: 36px;
+  padding: 0.4rem 0.6rem;
+  border: 1px solid var(--ochat-control-border);
+  border-radius: 5px;
+  background: var(--ochat-bg);
+  color: var(--ochat-ink);
+  font: 0.75rem var(--ochat-font);
+  cursor: pointer;
+}
+.code-reading-actions button[aria-pressed='true'] {
+  background: var(--ochat-accent-soft);
+  color: var(--ochat-accent);
+}
+.expressive-code[data-wrap='true'] pre > code {
+  min-width: 0;
+  width: 100%;
+}
+.expressive-code[data-wrap='true'] .ec-line .code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 .sl-markdown-content img {
   max-width: 100%;

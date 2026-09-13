@@ -17,7 +17,11 @@ import {
 import hero from '../../.generated/hero.json';
 import '../styles/home.css';
 const capabilities = applications.applications.filter((a) =>
-  ['repository-onboarding', 'research-brief', 'headless-report'].includes(a.id),
+  [
+    'guarded-engineering',
+    'persistent-review-team',
+    'documentation-lab',
+  ].includes(a.id),
 );
 ---
 
@@ -168,7 +172,10 @@ const capabilities = applications.applications.filter((a) =>
         <div class="section-intro">
           <p class="eyebrow">Build around your work</p>
           <h2 id="build-title">What would you like to get done?</h2>
-          <p>Three ways to start. More applications when you’re ready.</p>
+          <p>
+            Three complete projects, from useful tools to continuing agent
+            workflows.
+          </p>
         </div>
         <div class="capability-grid">
           {

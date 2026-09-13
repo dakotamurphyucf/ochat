@@ -200,7 +200,7 @@ test('installation, troubleshooting, and first-agent pages form a complete readi
     'Build and configure Ochat',
     'Build troubleshooting',
     'Run your first local agent',
-    'Choose a learning path',
+    'Learn Ochat: tutorial curriculum',
     'Agents as text files',
   ]);
   await page.getByRole('link', { name: /Next.*Build troubleshooting/ }).click();

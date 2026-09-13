@@ -104,6 +104,44 @@ list of capabilities that every agent receives.
    Do not invent a verification date or call an example live-checked without
    execution evidence for its actual inputs.
 
+## Build a feature lesson or complete application
+
+Begin with a useful outcome and explain when someone would choose this feature.
+Link the feature introduction, a progressive lesson, the exact reference contract,
+and a complete example in both directions. Add terminology people actually search
+for (for example, “subagents” and “persistent agents”) to useful prose and review
+the search queries. Keep transport setup as an optional path when it is not the
+lesson's subject. End with meaningful follow-ups and configuration variants.
+
+A lesson should state its host, setup, expected result and limitations beside its
+launch command. Explain what the model chooses, what ChatML controls and what the
+runtime enforces. Shell examples must distinguish authorization, policy review and
+OS confinement; a reviewer cannot widen delegated authority. Generated children
+select delegated tools rather than inventing stronger shell or file permissions.
+
+For complete applications, include the root ChatMD, scripts, specialists, schemas,
+runtime declarations, sample inputs and required build/setup files in one approved
+bundle. Document the working directory, prerequisites, exact startup commands,
+intermediate states, cleanup and recovery. Reuse the Lantern sample project where
+it supports the learning progression. A test fixture requiring build-tree helpers
+is an advanced recipe until its public bundle and instructions are self-contained.
+Add application associations and feature-page links, not just a catalog record.
+
+Format maintained ChatML with blank lines between functions, expanded records and
+matches, and `let*` for readable task sequencing. Use `chatml` fences, rendered with
+OCaml highlighting. Keep the actual source readable before relying on wrapping.
+Readers must be able to inspect every companion in the browser; preserve entry
+selection, file anchors, keyboard operation, no-JavaScript reading and exact copied
+or downloaded text when changing the source viewer.
+
+Verification must say what was observed: compilation, controlled-provider runtime
+execution, real shell execution, a live model run or hosted behavior are different
+claims. Record commands, tested hashes, platform, revision and concrete limitations.
+Use existing provider-free integration harnesses where possible, including failure,
+cancellation and recovery cases that matter to the application. Never refresh a
+record solely to make its badge green. Batch related implementation changes, run
+their affected checks together, then qualify the finished reader journey.
+
 ## Remove or move a page
 
 Decide whether the old URL should remain a compatibility/bridge page or needs
@@ -165,6 +203,12 @@ start their own temporary previews. For a subset of browser tests, choose an
 existing relevant file/test; that does not replace full release qualification.
 The semantic gate uses the project's qualified OCaml setup and pins from the
 runbook, not a website-installed compiler. It makes no provider calls.
+
+For local iteration on large source bundles, `npm run test:browser -- --workers=2
+--trace=off` retains every assertion while avoiding repeated diagnostic snapshots
+of the full catalog. If a case fails, rerun that case with `--trace=on` when a trace
+is needed to diagnose it. Keep the default trace policy for CI/release qualification;
+turning off local recording does not replace any required check.
 
 ## Upgrade dependencies
 

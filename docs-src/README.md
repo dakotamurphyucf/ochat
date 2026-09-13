@@ -88,6 +88,14 @@ decision benefits from contextual judgment. The
 - [Child process setup](lib/shell_access/process_spawn.doc.md)
 - [Complete shell-agent walkthrough](agent-server/tutorials/shell-agent.md)
 
+## Build a complete application
+
+Combine the individual capabilities in a [guarded engineering assistant](applications/guarded-engineering.md),
+a [persistent review team](applications/persistent-review-team.md), or a
+[living documentation lab](applications/documentation-lab.md). Each project has
+complete inspectable source, precise setup, evidence of its intermediate work and
+an explanation of what happens when work fails or is cancelled.
+
 ## Operate and develop
 
 - [Operations, backup, recovery, and migration](agent-server/operations.md)

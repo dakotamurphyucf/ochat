@@ -448,3 +448,72 @@ the application, opens five companion types and uses wrapping without document
 overflow. Search passes 33/33 queries across 154 indexed pages and 2,542 anchors.
 These are local results. No live provider, physical TUI, Linux, power-loss,
 mid-write recovery or hosted publication is claimed.
+
+## D04 — Application discovery and composition-fixture disposition
+
+The homepage now features the three complete applications. Documentation and
+example landing pages compare them directly; shell, delegation and ChatML feature
+guides lead to the relevant composition. Public child-response introductions now
+link to the complete documentation lab instead of requiring readers to assemble
+the response-watcher test fixture. The existing simpler examples and URLs remain.
+
+The public catalog promotes reviewed derivatives of selected X01–X11 compositions.
+Their public names describe the task; their focused source, host instructions and
+verification records belong to the maintained lessons/applications. The original
+fixtures remain useful for exact contract and fault-injection coverage.
+
+| Fixture | Public disposition | Reason and destination |
+| --- | --- | --- |
+| X01 report | Promoted derivative | Complete ChatML report-program lesson/catalog bundle teaches selected file tools and deterministic aggregation. |
+| X02 review | Promoted derivative | Stateful review-ledger lesson/catalog bundle teaches session-owned state and moderator-handled tools. |
+| X03 background shell | Promoted derivative | Background-results lesson and documentation lab use configured required confinement and real checks; the original trusted `direct_unsafe` fixture remains a test, not a confinement example. |
+| X04 standalone | Promoted derivative | Complete reusable ChatML tool lesson/catalog bundle teaches schemas, selected bindings and a named entrypoint. |
+| X05 child session | Promoted derivatives | Persistent/generated-specialist lessons and review-team/lab applications teach distinct authored/generated lifecycles with public setup. |
+| X06 response watcher | Promoted derivative | Documentation lab supplies the complete timer/job/subscription receipt watcher and companion files; public entry guides link there. |
+| X07 helper session | Linked advanced recipe | Example index links its complete build/host instructions. An external helper is optional extensibility, not an installation dependency or default delegation architecture. |
+| X08 external completion | Linked advanced recipe | Example index links authenticated producer/registration flow. Its separate credentials and ingress contract should not obscure the simpler background-results lesson. |
+| X09 authoring discovery | Promoted derivative | Generated-specialist lesson and lab teach documentation discovery, exact source capture and validation before creation. |
+| X10 authoring compaction | Retained test/advanced reference | Primarily proves reference rediscovery after compaction and preservation of manual policy; the authoring-context reference explains it without adding a duplicate beginner application. The fixture index retains its instructions. |
+| X11 diagnostic repair | Linked advanced recipe | Example index links invalid candidate/diagnostic/topic/repair flow. This preserves explicit failure evidence without presenting invalid fixtures as runnable complete applications. |
+
+No raw build-tree fixture is relabeled as a complete public archive. Newly public
+derivatives are independently packaged in the source catalog and carry their own
+runtime/source evidence. Linked advanced recipes clearly remain repository
+instructions with build targets and declared host prerequisites.
+
+Local discovery qualification: the canonical documentation gate passes 361 pages
+and 39 methods; website validation passes 83 tests with no Astro diagnostics.
+The built site passes internal-link/fragment checks across 165 HTML pages and 859
+files. Search finds all 33 benchmark queries in the top five, across 154 indexed
+pages and 2,542 anchors. These checks qualify the links and published derivative
+inventory; application behavior evidence remains in the preceding application
+records. No new provider run or hosted publication is implied.
+
+## D05 — Source reading and contributor workflow
+
+Large bundles now show one selected file with a desktop tree or mobile picker,
+while native disclosures preserve access to every file without JavaScript.
+Catalog readers remain closed until selected. Copy/wrap controls precede the code;
+desktop expansion reclaims the contents column without widening article prose.
+Restoring width or closing the reader restores the contents sidebar. JSON, shell,
+Markdown and S-expression sources have syntax colors, while ChatML retains OCaml
+highlighting. Long ordinary article blocks offer a presentation-only wrap control.
+
+Local qualification covers 151 applicable cases across Chromium, Firefox and
+WebKit, with two existing Chromium-only clipboard skips. The full affected run
+passed 150 cases; its remaining keyboard test assumed macOS WebKit's plain Tab
+included buttons and links. After checking actual Option+Tab navigation, that
+test passed in all three engines. Source/archive bytes, no-JavaScript access,
+selected-file links, wrapping, narrow layouts, accessibility and expansion were
+covered. Actual Chromium clipboard reads retained exact ChatMD, ChatML and JSON
+bytes including final newlines. Desktop/mobile screenshots were inspected.
+
+The final Astro check reports no errors, warnings or hints across 111 files.
+The existing seven-page diagnostic performance/budget check passes; it is a
+local throttled sample, not hosted measurements or field Web Vitals. Repeated
+browser trace snapshots dominated large-catalog tests, so local validation used
+`--trace=off`; the corrected keyboard case was rerun with tracing enabled. No
+assertions were disabled and CI trace defaults remain unchanged. Contributor
+guidance now documents the feature-to-application path, complete bundles, readable
+source and truthful verification. Reference formatting, evidence presentation
+and final reader-journey qualification remain separate outstanding D05/D06 work.

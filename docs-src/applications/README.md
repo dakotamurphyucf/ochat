@@ -16,6 +16,18 @@ For continuing investigations, use the [persistent review team](persistent-revie
 Three authored specialists revisit their earlier findings while a ChatML collector
 keeps each conversation's receipts, progress, output and failures visible.
 
+For work that combines deterministic checks and model judgment, build the
+[living documentation lab](documentation-lab.md). It checks tutorials in the
+background, creates a read-only reviewer for a failure, retains a writer's
+proposal, then stages and rechecks a correction. A ChatML moderator keeps the
+evidence and delivers results as the work finishes.
+
+| Application | Start here when you need | Main capabilities |
+| --- | --- | --- |
+| [Guarded engineering assistant](guarded-engineering.md) | Useful project commands with custom access decisions | Separate shell runtimes, ChatML hooks, reviewer agents and approved report writes |
+| [Persistent review team](persistent-review-team.md) | Specialists who can revisit an investigation | Authored specialists, optional persistence, follow-up, receipts and partial results |
+| [Living documentation lab](documentation-lab.md) | Checks and reviews that progress while the conversation continues | Generated reviewers, stateful tools, background jobs, response watchers and staged rechecks |
+
 The gallery groups applications by the job they help you do. The
 [documentation review](documentation-review.md) includes an inspectable execution
 recording. Other preview cards are labeled illustrations; their source bundles
