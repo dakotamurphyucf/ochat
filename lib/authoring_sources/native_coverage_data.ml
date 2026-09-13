@@ -178,7 +178,7 @@ let implementation_sources =
   ; ( "lib/agent_server/session_helper_policy.ml"
     , "e88605f0d6f0fc512589ccd9546e5f8e741216dfa321ec66919b64c88d2958e1" )
   ; ( "lib/shell_access/shell_access_v2.ml"
-    , "93279c1982f696a765e1c57b5d328c9b9fe8d13a07a5d354f941b0cb43be0705" )
+    , "e9988ac61d5d9c4791593524a8720fe2cdcdcb9859e41668e6ee5501fe90d669" )
   ; ( "lib/agent_server/delegated_runtime.ml"
     , "b2f4ae578f7dddd08bb5503f16af4a9c86c5b87c2c5250f318a425103297c374" )
   ; ( "lib/agent_server/delegation_lifecycle.ml"

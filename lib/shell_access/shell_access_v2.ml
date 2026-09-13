@@ -1945,7 +1945,6 @@ module Backend = struct
             let argv =
               [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
               @ (if context.capabilities.network then [ "--share-net" ] else [])
-              @ (if plan.request_channel then [ "--preserve-fds"; "2" ] else [])
               @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
               @ List.concat_map system_roots ~f:(bind "--ro-bind")
               @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")

@@ -31,9 +31,11 @@ choose the sandbox launcher; explicit `execve` receives the resolved path.
 Private channels require a supported verified backend. After mapping standard
 streams and request/response pipes onto descriptors 0–4, child setup closes all
 unrelated descriptors above 4. It preserves only a close-on-exec spawn-error pipe
-until successful exec. Cleanup failures prevent execution. Bubblewrap receives
-`--preserve-fds 2` to carry descriptors 3/4 into the confined command. No descriptor
-flags or open handles are changed in the parent or another session.
+until successful exec. Cleanup failures prevent execution. Bubblewrap passes
+inherited descriptors 3/4 to the confined command without an extra CLI option;
+its monitor/init processes close their copies separately. See the
+[upstream payload and init paths](https://github.com/containers/bubblewrap/blob/v0.9.0/bubblewrap.c#L3092-L3108).
+No descriptor flags or open handles are changed in the parent or another session.
 
 Eio switches own child cancellation and reaping. Each process has its own PID,
 exit promise, and lock; signaling cannot race reaping into signaling a reused PID.
