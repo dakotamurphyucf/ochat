@@ -19,6 +19,14 @@ type t
 
 val default_permission_profile : Config.Permission_profile.t
 
+(** Explicit process-local authorization permits the compiled shell manifests to
+    load. Ordinary tool approval, shell command policy, capability checks and
+    sandbox enforcement remain unchanged. With [false], startup requires a grant.
+    This does not change daemon configuration or persist an operator grant. *)
+val interactive_permission_profile
+  :  authorize_shell_manifest:bool
+  -> Config.Permission_profile.t
+
 (** [daemon_options] supplies the shared runtime's trusted host configuration,
     including provider adapters, policy and internal extension qualification.
     Defaults match [Daemon.default_options]. The embedded host always derives

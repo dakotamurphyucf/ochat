@@ -43,7 +43,7 @@ test('application publishing rejects stale or misrepresented recording evidence'
       });
     };
     const report = await check(original);
-    assert.equal(report.applications.length, 6);
+    assert.equal(report.applications.length, 9);
     assert.equal(report.recording.steps.length, 3);
     // Runtime evolution does not rewrite a historical live recording. Its exact
     // original Git sources must still authenticate the retained hashes.

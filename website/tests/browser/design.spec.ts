@@ -1,6 +1,57 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 
+test('long article code wraps on mobile without changing its lines or copied source', async ({
+  page,
+}) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'clipboard', {
+      value: {
+        writeText: async (text: string) => {
+          (window as any).__copiedSource = text;
+        },
+      },
+    });
+  });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/docs/reference/chatml/background-work/');
+  const block = page
+    .locator('.expressive-code')
+    .filter({ has: page.locator('.code-reading-actions') })
+    .first();
+  const lines = block.locator('.ec-line .code');
+  const original = await lines.allTextContents();
+  const copy = block.getByRole('button', { name: 'Copy to clipboard' });
+  await copy.click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__copiedSource))
+    .toBeTruthy();
+  const copied = await page.evaluate(() => (window as any).__copiedSource);
+  const wrap = block.getByRole('button', { name: 'Wrap lines' });
+  await wrap.click();
+  await expect(wrap).toHaveAttribute('aria-pressed', 'true');
+  expect(await lines.allTextContents()).toEqual(original);
+  expect(
+    await block
+      .locator('pre')
+      .evaluate((node) => node.scrollWidth <= node.clientWidth + 1),
+  ).toBe(true);
+  await page.evaluate(() => {
+    (window as any).__copiedSource = null;
+  });
+  await copy.click();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__copiedSource))
+    .toBe(copied);
+  await wrap.click();
+  await expect(wrap).toHaveAttribute('aria-pressed', 'false');
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+});
+
 test('selected Graphite identity ignores old palette settings across pages and themes', async ({
   page,
 }) => {

@@ -39,4 +39,11 @@ alone does not authorize execution. Keep static review findings separate from
 actual test results, and review proposed edits before applying them.
 A [specialist agent](../tutorials/specialist.md) can apply a separate review checklist.
 
+## Keep a review team for follow-up
+
+This example reviews a supplied change in one conversation. For several
+specialists who revisit their findings as the change evolves, use the complete
+[persistent review team](persistent-review-team.md). Its collector preserves each
+reviewer's session and response identity, and reports partial or unsuccessful work.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

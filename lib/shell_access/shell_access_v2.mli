@@ -523,7 +523,12 @@ module Backend : sig
   val availability : t -> fs:Eio.Fs.dir_ty Eio.Path.t -> (unit, string) result
   val available : t -> fs:Eio.Fs.dir_ty Eio.Path.t -> bool
   val direct : t
+
+  (** Child execution, when enabled, is confined to the admitted read/write roots
+      and implicit system support roots. The initial resolved executable is
+      admitted separately; disabling children does not grant helper execution. *)
   val macos_seatbelt : t
+
   val linux_bubblewrap : ?executable:string -> unit -> t
 
   (** Conservative union of implicit readable paths for both request-channel

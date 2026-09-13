@@ -28,4 +28,11 @@ entire repository. The [tools guide](../overview/tools.md) explains additional
 capabilities, and [search and indexing](../guide/search-and-indexing.md) explains
 Markdown retrieval and OCaml-specific code indexing.
 
+## Grow this into an engineering assistant
+
+This starting example reads supplied project files. When you need repository
+search, executable checks and controlled report writes, follow the complete
+[guarded engineering assistant](guarded-engineering.md). It shows how separate
+shell runtimes, ChatML decisions and a specialist reviewer fit together.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

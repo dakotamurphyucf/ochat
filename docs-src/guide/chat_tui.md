@@ -702,10 +702,12 @@ The shell UI uses a centralized modern 256-color palette built with
 readable when a terminal reduces color fidelity or Unicode border support.
 A persistent red warning banner appears when a YOLO profile is active.
 
-`--authorize-shell-manifest` is a legacy-local, one-process authorization for
-the exact canonical manifest. A security-relevant edit changes the digest and
-requires new authorization. It is not global path trust and is rejected for
-noninteractive selector commands.
+`--authorize-shell-manifest` supplies one-process authorization for the compiled
+manifest. Use it with `--local` for the native embedded host; without `--local`,
+it retains the legacy interactive path. A security-relevant edit changes the
+digest; authorization does not install permanent path trust. Command policy,
+approvals and confinement still apply. The flag is rejected for noninteractive
+selector commands and daemon connections.
 
 See the [shell security guide](chatmd-shell-security.md),
 [persistence/audit guide](chatmd-shell-persistence-and-audit.md), and

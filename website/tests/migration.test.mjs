@@ -42,7 +42,7 @@ test('unknown sidebar sections and deferred learning paths fail before publicati
     () =>
       documentationPaths(
         entries.map((entry) =>
-          entry.id === 'tutorials'
+          entry.id === 'shell/README'
             ? { ...entry, disposition: 'deferred' }
             : entry,
         ),

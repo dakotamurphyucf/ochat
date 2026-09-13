@@ -1,0 +1,106 @@
+type check = { job : string; invocation : string; delivered : bool }
+
+type state = [ `None | `Some(check) ]
+
+let initial_state : state = `None
+
+let field value name =
+  match Json.get_field(value, name) with
+  | `Some(found) -> found
+  | `None -> `Null
+
+let string value =
+  match value with
+  | `String(text) -> text
+  | _ -> fail("Expected a string in a runtime response.")
+
+let progress job status =
+  `Object([
+    { key = "job_id"; value = `String(job) },
+    { key = "status"; value = `String(status) }
+  ])
+
+let reject invocation code message =
+  Invocation.resolve(invocation, `Fail({
+    code = code; message = message; retryable = false; details = `Null
+  }))
+
+let completion result =
+  match field(result, "type") with
+  | `String("succeeded") -> `Succeeded(field(result, "value"))
+  | `String("cancelled") -> `Cancelled(string(field(result, "reason")))
+  | `String("expired") -> `Expired
+  | `String("failed") ->
+      let retryable = match field(result, "retryable") with
+        | `Bool(value) -> value
+        | _ -> false
+      in
+      `Failed({
+        code = string(field(result, "code"));
+        message = string(field(result, "message"));
+        retryable = retryable;
+        details = field(result, "details")
+      })
+  | _ -> fail("Expected a terminal job result.")
+
+let start invocation =
+  let* job = Job.start_tool("check_docs", `Object([])) in
+  let* () = Invocation.resolve(invocation,
+    `Pending(`Job(job), progress(job, "accepted"))) in
+  Task.pure(`Some({ job = job; invocation = invocation; delivered = false }))
+
+let inspect invocation check =
+  let* metadata = Job.get(check.job) in
+  Invocation.resolve(invocation,
+    `Complete(progress(check.job, string(field(metadata, "status")))))
+
+let manage state invocation cancel =
+  match state with
+  | `None ->
+      let* () = reject(invocation, "checks.not_started",
+        "No check has been started in this session.") in
+      Task.pure(state)
+  | `Some(check) ->
+      let* () = if cancel then Job.cancel(check.job) else Task.pure(()) in
+      let* () = inspect(invocation, check) in
+      Task.pure(state)
+
+let deliver state payload =
+  match state with
+  | `None -> Task.pure(state)
+  | `Some(check) ->
+      if check.delivered then Task.pure(state)
+      else if string(field(payload, "job_id")) == check.job then
+        let* result = Job.read_result(check.job) in
+        let correlation = {
+          key = "documentation-check";
+          invocation_id = `Some(check.invocation);
+          work = `Some(`Job(check.job))
+        } in
+        let* delivery = Notification.publish(
+          correlation, completion(result), `Request_turn) in
+        Task.pure(`Some({ check with delivered = true }))
+      else Task.pure(state)
+
+let on_event ctx state event =
+  match event with
+  | `Tool_invoked(call) ->
+      let invocation = call.context.invocation_id in
+      (match call.context.tool_name with
+      | "begin_checks" ->
+          (match state with
+          | `Some(check) ->
+              if check.delivered then start(invocation)
+              else
+                let* () = reject(invocation, "checks.busy",
+                  "Wait for the current check's completion before starting another.") in
+                Task.pure(state)
+          | `None -> start(invocation))
+      | "check_progress" -> manage(state, invocation, false)
+      | "cancel_checks" -> manage(state, invocation, true)
+      | _ -> Task.pure(state))
+  | `Internal_event(payload) ->
+      (match field(payload, "kind") with
+      | `String("background_job_completed") -> deliver(state, payload)
+      | _ -> Task.pure(state))
+  | _ -> Task.pure(state)

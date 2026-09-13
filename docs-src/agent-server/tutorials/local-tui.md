@@ -113,8 +113,11 @@ chat-tui --no-config --list-sessions
 ```
 
 Use IDs from that legacy listing only with the corresponding legacy commands.
-Do not confuse them with daemon session IDs. Legacy `--authorize-shell-manifest`
-also selects that compatibility path. See [shell host integration](../../guide/chatmd-shell-host-integration.md).
+Do not confuse them with daemon session IDs. `--authorize-shell-manifest` without
+`--local` also selects that compatibility path. For a reviewed shell-enabled
+prompt in the native host, use `--local --authorize-shell-manifest` together.
+The flag permits the manifest to load; command approvals and sandbox restrictions
+still apply. See [shell host integration](../../guide/chatmd-shell-host-integration.md).
 
 ## Config precedence
 

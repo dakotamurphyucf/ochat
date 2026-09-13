@@ -1,15 +1,14 @@
 # ChatMD shell persistence, administration, and audit
 
-Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` is a legacy
-local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 Shell security state is explicit, typed, versioned, and separate from
 conversation history. This guide covers manifest grants, command grants,
 extension snapshots, interrupted requests, administrative policy, trusted
 sources, signatures, audit durability, and read-only replay.
+
+Use [host authorization and administration](chatmd-shell-host-integration.md)
+to select the correct store and management path. Native/daemon session IDs and
+legacy `Session_store` IDs are not interchangeable. To see retained background
+work in a complete application, follow the [documentation lab](../applications/documentation-lab.md).
 
 ## Session shell state
 

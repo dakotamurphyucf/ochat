@@ -35,6 +35,12 @@ let default_permission_profile =
     }
 ;;
 
+let interactive_permission_profile ~authorize_shell_manifest =
+  match authorize_shell_manifest with
+  | false -> default_permission_profile
+  | true -> { default_permission_profile with manifest_authorization = Assume_authorized }
+;;
+
 let protocol_of_store error =
   Agent_protocol.Error.create
     Persistence_error
@@ -186,20 +192,32 @@ let principal () =
 
 let make_connection daemon principal event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
+  let closed, close_resolver = Eio.Promise.create () in
+  let publish_notification envelope =
+    (* A disconnected consumer cannot drain its bounded queue. Release publishers
+       already waiting for space before detaching their session subscriptions. *)
+    Eio.Fiber.first
+      (fun () ->
+         Eio.Promise.await closed;
+         ())
+      (fun () -> Eio.Stream.add notifications envelope)
+  in
   let context =
     Connection_context.create
       ~connection_id:
         (Agent_protocol.Id.Attachment.create () |> Agent_protocol.Id.Attachment.to_string)
       ~principal
       ~transport:In_memory
-      ~publish_notification:(Eio.Stream.add notifications)
+      ~publish_notification
       ~max_attachments
   in
   Agent_client.In_memory.create
     ~request:(fun command ->
       Dispatcher.dispatch_command (Daemon.dispatcher daemon) ~context command)
     ~notifications
-    ~close:(fun () -> Daemon.close_connection daemon context)
+    ~close:(fun () ->
+      ignore (Eio.Promise.try_resolve close_resolver ());
+      Daemon.close_connection daemon context)
 ;;
 
 let initialize connection =

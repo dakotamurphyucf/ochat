@@ -1,0 +1,92 @@
+type finding = { file : string; note : string }
+
+let initial_state : finding array = []
+
+let field input name =
+  match Json.get_field(input, name) with
+  | `Some(value) -> value
+  | `None -> fail("Missing input field: " ++ name)
+
+let is_null value =
+  match value with
+  | `Null -> true
+  | _ -> false
+
+let finding_input input =
+  match field(input, "file") with
+  | `String(file) ->
+      (match field(input, "note") with
+      | `String(note) -> `Some({ file = file; note = note })
+      | _ -> `None)
+  | _ -> `None
+
+let report findings =
+  let findings : finding array = findings in
+  `Object([
+    { key = "findings";
+      value = `Array(Array.map(findings, fun finding ->
+        let finding : finding = finding in
+        `Object([
+        { key = "file"; value = `String(finding.file) },
+        { key = "note"; value = `String(finding.note) }
+      ]))) }
+  ])
+
+let record findings updated =
+  let findings : finding array = findings in
+  let updated : finding = updated in
+  if Array.exists(findings, fun finding ->
+    let finding : finding = finding in finding.file == updated.file) then
+    Array.map(findings, fun finding ->
+      let finding : finding = finding in
+      if finding.file == updated.file then updated else finding)
+  else
+    Array.append(findings, [updated])
+
+let reject invocation message =
+  Invocation.resolve(invocation, `Fail({
+    code = "ledger.invalid_request";
+    message = message;
+    retryable = false;
+    details = `Null
+  }))
+
+let on_event ctx state event =
+  let state : finding array = state in
+  match event with
+  | `Tool_invoked(call) ->
+      (match field(call.input, "action") with
+      | `String("summary") ->
+          let empty_inputs =
+            if is_null(field(call.input, "file")) then
+              is_null(field(call.input, "note"))
+            else false
+          in
+          if empty_inputs then
+              let* () = Invocation.resolve(
+                call.context.invocation_id, `Complete(report(state))) in
+              Task.pure(state)
+          else
+              let* () = reject(call.context.invocation_id,
+                "Summary requires null file and note.") in
+              Task.pure(state)
+      | `String("record") ->
+          (match finding_input(call.input) with
+          | `Some(finding) ->
+              if String.length(String.trim(finding.note)) == 0 then
+                let* () = reject(call.context.invocation_id,
+                  "A finding needs a non-empty note.") in
+                Task.pure(state)
+              else
+                let updated = record(state, finding) in
+                let* () = Invocation.resolve(
+                  call.context.invocation_id, `Complete(report(updated))) in
+                Task.pure(updated)
+          | _ ->
+              let* () = reject(call.context.invocation_id,
+                "Record requires a sample file and note.") in
+              Task.pure(state))
+      | _ ->
+          let* () = reject(call.context.invocation_id, "Unknown ledger action.") in
+          Task.pure(state))
+  | _ -> Task.pure(state)

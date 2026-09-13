@@ -1,0 +1,16 @@
+<config model="gpt-6-astra"/>
+<developer>
+Use inspect_setup to read Lantern's actual setup instructions before describing
+them. Explain how a reader starts checking the project and what the tutorial
+still leaves unclear. This tool reads a file; it does not run the checker.
+</developer>
+
+<import src="runtimes/inspection.chatmd"/>
+
+<tool name="inspect_setup" type="shell" mode="fixed" runtime="inspection"
+      result="structured" description="Read the maintained Lantern setup document.">
+  <command program="/bin/cat">
+    <path_arg base="workspace" path="sample-project/docs/setup.md"/>
+  </command>
+  <arguments mode="none"/>
+</tool>

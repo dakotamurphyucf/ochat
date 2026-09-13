@@ -1,9 +1,12 @@
 ---
 import report from '../../.generated/examples-report.json';
 import overviews from '../../config/lesson-overviews.json';
+import { tutorialPaths } from '../../config/tutorial-paths.mjs';
 const index = report.tutorials.findIndex((t) => t.route === Astro.url.pathname);
 const lesson = report.tutorials[index];
 const info = lesson && overviews.find((o) => o.page === lesson.page);
+const path =
+  lesson && tutorialPaths.find((path) => path.pages.includes(lesson.page));
 const { next = false } = Astro.props;
 ---
 
@@ -16,7 +19,11 @@ const { next = false } = Astro.props;
           <a href={lesson.next?.route || '/docs/examples/'}>
             {info.nextBenefit} <span aria-hidden="true">→</span>
           </a>
-          <a class="curriculum-link" href="/docs/tutorials/">
+          <a
+            class="curriculum-link"
+            href="/docs/tutorials/"
+            data-pagefind-ignore
+          >
             Back to the curriculum
           </a>
         </>
@@ -24,8 +31,12 @@ const { next = false } = Astro.props;
     ) : (
       <aside class="lesson-overview" aria-label="Lesson outcome and setup">
         <>
-          <a class="curriculum-link" href="/docs/tutorials/">
-            Lesson {index + 1} of {report.tutorials.length} · View curriculum
+          <a
+            class="curriculum-link"
+            href="/docs/tutorials/"
+            data-pagefind-ignore
+          >
+            {path?.title} · {lesson.id} · View learning paths
           </a>
           <p>
             <strong>You’ll build</strong> {info.outcome}

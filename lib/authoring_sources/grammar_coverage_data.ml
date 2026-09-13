@@ -438,19 +438,19 @@ let productions =
 let topic_contracts =
   [ ( "one_off_v1"
     , "chatml.programs"
-    , "79ad269851735994bfe1ec4e07783e13e4af7ed022ba44efcd146e5bd40cd1cd" )
+    , "c90ae19dde3e8e0ff503107e5bc1c4821c2f41eac0df32a824cee179515c3829" )
   ; ( "one_off_v1"
     , "chatml.task-effects"
     , "de4730371e88a3bea91ba98f2ef303c9ebf38aac237ba8d701153c8e644e4d19" )
   ; ( "tool_v1"
     , "chatml.programs"
-    , "696d4f167aea68172739ca008ae47b878f5d8580a99fa2a58c3d9f28ac19a7a6" )
+    , "5b323f4e9ec0cf81e6e64d7de8f8c7fce7e8da822cd9c5abbd7cd1e34027214b" )
   ; ( "moderator_v1"
     , "chatml.programs"
-    , "cc43822cdfacbe554acda4ec1dcfb8d7231ff166a8cec6570a70c45cf4d23089" )
+    , "c4697520d32c236931d44e986b041706fc1c11d26cceec0c1907477790e301b8" )
   ; ( "delegated_moderator_v1"
     , "chatml.programs"
-    , "2d5e08a2be6d893bf1596dbf3f0d9b8592c40e5dc6bad73ddedada59147c0244" )
+    , "6c850480705fdcf2b701effe53f2bc70d7485fd73350fa6a49f7935c1baa87c0" )
   ; ( "tool_v1"
     , "chatml.task-effects"
     , "891d098b492e63eceafc9c1eba9b6069a82e08a06c18661be8ce155dcfc89d1f" )

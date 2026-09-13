@@ -40,4 +40,12 @@ does not resume arbitrary process stacks or guarantee exactly-once external
 effects. [Sessions and workspaces](../agent-server/sessions-and-workspaces.md)
 explains the host's ownership and persistence boundaries.
 
+## Move from a timer to a useful background workflow
+
+The timer introduces host lifetime; it does not run the full research extension.
+Continue with [real background check results](../tutorials/background-results.md),
+then the complete [living documentation lab](documentation-lab.md). The lab
+combines jobs, retained state, child-response polling and notifications, including
+failure, cancellation and interrupted-work recovery.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

@@ -29,6 +29,8 @@ const schema = z
 
 // Directory rules authorize repository links only. Copies always require an
 // exact-file media/download rule plus the separate destination allowlist.
+// Markdown sample inputs also remain in the canonical docs manifest. Their
+// explicit download approval copies source bytes, not a new documentation route.
 export function supplementalInventory(input, tracked, assets, examples = []) {
   const policy = schema.parse(input);
   const seen = new Set();
@@ -46,7 +48,14 @@ export function supplementalInventory(input, tracked, assets, examples = []) {
   for (const file of policy.files) {
     if (!tracked.has(file.source))
       throw new Error(`Untracked supplemental file: ${file.source}`);
-    if (file.source.startsWith('docs-src/') && file.source.endsWith('.md'))
+    if (
+      file.source.startsWith('docs-src/') &&
+      file.source.endsWith('.md') &&
+      !(
+        file.source.startsWith('docs-src/examples/') &&
+        file.disposition === 'example-download'
+      )
+    )
       throw new Error(
         `Canonical docs belong to the docs manifest: ${file.source}`,
       );
@@ -69,7 +78,15 @@ export function supplementalInventory(input, tracked, assets, examples = []) {
   }
   const sources = [];
   for (const source of [...tracked].sort()) {
-    if (source.startsWith('docs-src/') && source.endsWith('.md')) continue;
+    if (
+      source.startsWith('docs-src/') &&
+      source.endsWith('.md') &&
+      !policy.files.some(
+        (rule) =>
+          rule.source === source && rule.disposition === 'example-download',
+      )
+    )
+      continue;
     const rule =
       policy.files.find((r) => r.source === source) ||
       policy.directories.find((r) => source.startsWith(r.source));

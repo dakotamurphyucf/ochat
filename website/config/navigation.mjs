@@ -2,19 +2,15 @@ import { assertApiReferenceExcluded } from './api-reference.mjs';
 
 const groups = [
   'Start here',
-  'Applications',
-  'Concepts',
-  'Tutorials',
-  'Guides',
-  'Shell access',
-  'ChatML runtime',
-  'MCP integration',
-  'Search and indexing',
-  'Agent hosting',
-  'Agent protocol',
+  'Tools and shell access',
+  'Subagents and agent teams',
+  'ChatML workflows',
+  'Complete applications',
+  'Run and operate',
   'Reference',
   'Commands',
-  'Learn more',
+  'ChatML reference',
+  'Agent protocol',
   'Library',
   'Agent libraries',
   'TUI internals',
@@ -49,69 +45,58 @@ export function buildSidebar(entries) {
     }))
     .filter((group) => group.items.length);
   const families = [
-    ['Getting started', ['Start here', 'Applications', 'Concepts']],
-    ['Tutorials', ['Tutorials']],
-    [
-      'Guides',
-      [
-        'Guides',
-        'Shell access',
-        'MCP integration',
-        'Search and indexing',
-        'Agent hosting',
-        'Learn more',
-      ],
-    ],
+    ['Start here', ['Start here']],
+    ['Tools and shell access', ['Tools and shell access']],
+    ['Subagents and agent teams', ['Subagents and agent teams']],
+    ['ChatML workflows', ['ChatML workflows']],
+    ['Complete applications', ['Complete applications']],
+    ['Run and operate', ['Run and operate']],
     [
       'Reference',
-      ['Reference', 'Commands', 'ChatML runtime', 'Agent protocol'],
+      ['Reference', 'Commands', 'ChatML reference', 'Agent protocol'],
     ],
     [
-      'Internals',
+      'Contributor documentation',
       ['Library', 'Agent libraries', 'TUI internals', 'Compatibility'],
     ],
   ];
   return families
     .map(([label, members]) => ({
       label,
-      collapsed: label !== 'Getting started',
-      items: sections
-        .filter((section) => members.includes(section.label))
-        .flatMap((section) =>
-          members.length === 1 ? section.items : [section],
-        ),
+      collapsed: label !== 'Start here',
+      items: members.flatMap((member) => {
+        const section = sections.find((section) => section.label === member);
+        return section
+          ? members.length === 1 || member === label
+            ? section.items
+            : [section]
+          : [];
+      }),
     }))
     .filter((group) => group.items.length);
 }
 
 const paths = [
   {
-    id: 'tutorials',
-    title: 'Learn from the beginning',
+    id: 'shell/README',
+    title: 'Build tools with guardrails',
     description:
-      'Follow a connected curriculum, with an outcome and complete source for every lesson.',
-    label: 'Tutorials',
+      'Give an agent useful command-line capabilities, then customize access with shell runtimes, ChatML rules, and reviewer agents.',
+    label: 'Tools and shell access',
   },
   {
-    id: 'applications',
-    title: 'Build something useful',
+    id: 'guide/subagents',
+    title: 'Work with a team of specialists',
     description:
-      'Choose a code, documentation, research, or automation workflow and adapt its files.',
-    label: 'Applications & guides',
+      'Choose one-off reviews, continuing conversations, or agents created for the task. Keep their tools and responsibilities explicit.',
+    label: 'Subagents and agent teams',
   },
   {
-    id: 'chatmd',
-    title: 'Understand the model',
+    id: 'chatml',
+    title: 'Program the workflow',
     description:
-      'Learn how instructions, tools, agent composition, and optional scripting fit together.',
-    label: 'Explanations',
-  },
-  {
-    id: 'chatmd-reference',
-    title: 'Look up the details',
-    description:
-      'Find exact ChatMD declarations, then follow links to tool, language, and host contracts.',
-    label: 'Reference',
+      'Sequence tools, retain workflow state, coordinate sessions, and deliver background results with ChatML.',
+    label: 'ChatML workflows',
   },
 ];
 

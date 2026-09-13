@@ -27,7 +27,14 @@ test('hosting tutorials share local setup and lead to configuration and transpor
     .getByRole('link', { name: /Next.*Run a private Unix daemon/ })
     .click();
   await page.getByRole('link', { name: /Next.*background/ }).click();
-  await page.getByRole('link', { name: /Next.*stdio client/ }).click();
+  await expect(
+    page.getByRole('link', { name: /Next.*Learn Ochat/ }),
+  ).toHaveAttribute('href', '/docs/tutorials/');
+  await page
+    .locator('.sl-markdown-content')
+    .getByRole('link', { name: 'the stdio client', exact: true })
+    .click();
+  await expect(page).toHaveURL('/docs/tutorials/stdio-client/');
   await page.getByRole('link', { name: /Next.*HTTP client/ }).click();
   await expect(page).toHaveURL('/docs/tutorials/http-client/');
   await page

@@ -6,7 +6,12 @@ native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
 `ochat shell` store administration targets legacy sessions, not daemon IDs.
 
 `ochat chat-completion` runs a ChatMD conversation non-interactively and appends
-its response to a transcript file. Complete [installation and provider setup](../agent-server/quickstart.md)
+its response to a transcript file. Use it for a scheduled report or a single
+request from an existing script. This is an optional operating path: you do not
+need it before learning [ChatML workflows](../chatml/README.md) or
+[persistent specialists](../tutorials/persistent-specialist.md).
+
+Complete [installation and provider setup](../agent-server/quickstart.md)
 first. The commands below assume the repository root and the active opam switch.
 The model request requires credentials and incurs provider charges; preparation
 alone is offline. Response timing and wording vary. Review the current
@@ -190,6 +195,7 @@ request failures and create the output parent before retrying a missing-path err
 Keep one writer per transcript. Follow the cleanup guidance in section 5 after all
 processes exit; caches and provider logs can live outside the transcript directory.
 
-Previous: [add a specialist reviewer](../tutorials/specialist.md). Next:
-[control completed turns with ChatML](../tutorials/workflow.md), or choose an
-advanced host from the [tutorial and example catalog](../examples/README.md).
+For work that should outlive its terminal client, continue with
+[private daemon hosting](../agent-server/tutorials/unix-daemon.md). To program
+the work itself, choose a [ChatML execution form](../chatml/README.md).
+Return to [the learning paths](../tutorials/README.md) to choose another capability.

@@ -68,8 +68,8 @@
     },
     {
       "source": "docs-src/examples/agent-server/shell/pwd.chatmd",
-      "disposition": "example-download",
-      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+      "disposition": "repository-only",
+      "reason": "Retained minimal declaration example; the complete Lantern bundle is the public learning checkpoint."
     },
     {
       "source": "docs-src/examples/chatml/moderator.chatml",
@@ -185,6 +185,436 @@
       "source": "docs-src/examples/applications/docs-review/recording.json",
       "disposition": "example-review",
       "reason": "Captured application execution evidence; consumed through a hash-validated website importer, not copied as an arbitrary asset."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/program.chatmd",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/scripts/aggregate.chatml",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/reports/report-a.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/reports/report-b.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/tool.chatmd",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/schemas/input.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/check-reports/schemas/output.json",
+      "disposition": "example-download",
+      "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-inspection/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-inspection/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/model-agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/checks-base.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/runtimes/model-checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-customization/scripts/report-reviewer.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for the complete custom shell-decision checkpoint and model-review variant."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/authored.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/project-tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/tools.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/create.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/generated/validate.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/agent-teams/server.sexp",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete persistent/generated Lantern specialist lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/scripts/ledger.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/schemas/ledger-input.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/stateful-workflow/schemas/ledger-output.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/schemas/empty.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/learning/background-results/schemas/progress.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained source for complete stateful and background Lantern workflow lessons."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/engineer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/model-engineer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/capabilities.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/guarded-engineering/README.md",
+      "disposition": "example-download",
+      "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/team.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/correctness-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/documentation-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/integration-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/schemas/review-request.json",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/schemas/review-findings.json",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/server.sexp",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/sample-project/requirements.txt",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/sample-project/follow-up.txt",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/README.md",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/README.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/agents/reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/agents/writer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/lab.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/requests/create-reviewer.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/requests/validate-reviewer.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/runtimes/tutorial-checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/checks/check-tutorial.sh",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/checks/stage-proposal.sh",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/expected/original.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/staging/README.txt",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorial-inventory.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/broken.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/sample-project/tutorials/passing.md",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/check-result.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/empty.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/lab-report.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/object.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/phase.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/probe-result.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/proposal.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/tutorial-inventory.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/schemas/watch.json",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/check-tutorial.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/scripts/probe-review.chatml",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/documentation-lab/server.sexp",
+      "disposition": "example-download",
+      "reason": "Complete documentation lab companion for inline source and archive reading."
     }
   ],
   "directories": [

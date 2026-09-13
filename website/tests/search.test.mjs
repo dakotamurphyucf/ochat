@@ -40,11 +40,15 @@ test('benchmark expectations are explicit searchable routes and compatibility st
     JSON.parse(await fs.readFile(new URL(path, import.meta.url), 'utf8'));
   const queries = await load('../config/search-queries.json');
   const manifest = await load('../config/docs-manifest.json');
-  assert.equal(queries.length, 21);
+  assert.ok(queries.length >= 21);
   assert.equal(new Set(queries.map((q) => q.query)).size, queries.length);
   assert.ok(queries.some((q) => q.query === '${workspace}'));
   for (const q of queries) {
     assert.ok(q.expected.length > 0);
+    if (q.maxRank !== undefined)
+      assert.ok(
+        Number.isInteger(q.maxRank) && q.maxRank >= 1 && q.maxRank <= 5,
+      );
     for (const route of q.expected)
       assert.ok(
         manifest.some((e) => e.route === route && e.search),

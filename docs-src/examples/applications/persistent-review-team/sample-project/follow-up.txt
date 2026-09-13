@@ -1,0 +1,12 @@
+Follow-up evidence for the same specialist conversations
+
+A proposed Verification section would say:
+"Run /bin/sh scripts/check-docs.sh --check all from sample-project. The original
+sample exits 1 because it lacks verification guidance. Inspect the report before
+deciding whether the project is ready."
+
+This wording has not been applied or checked. One reviewer may favor explaining
+the current failure; another may require a passing corrected run before release.
+Ask the same specialists to refine their earlier findings against requirements.txt.
+Which requirements does this proposal address? What remains unverified? Do not
+resolve disagreement by silently treating this proposal as an executed change.

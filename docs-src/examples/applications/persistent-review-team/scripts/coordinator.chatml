@@ -1,0 +1,70 @@
+(* The caller retains role/session/receipt/cursor state. This tool only observes
+   those exact queries, so a follow-up can deliberately supply a new receipt. *)
+let field input name =
+  match Json.get_field(input, name) with
+  | `Some(value) -> value
+  | `None -> fail("Missing review field: " ++ name)
+
+let observation result =
+  match result with
+  | `Ok(value) ->
+      let decoded =
+        match value with
+        | `String(text) -> Json.parse(text)
+        | other -> other
+      in
+      `Object([
+        { key = "ok"; value = `Bool(true) },
+        { key = "value"; value = decoded },
+        { key = "error"; value = `Null }
+      ])
+  | `Error(message) ->
+      `Object([
+        { key = "ok"; value = `Bool(false) },
+        { key = "value"; value = `Null },
+        { key = "error"; value = `String(message) }
+      ])
+
+let collect reviewer =
+  let session_id = field(reviewer, "session_id") in
+  let receipt_id = field(reviewer, "receipt_id") in
+  let query = [
+    { key = "session_id"; value = session_id },
+    { key = "receipt_id"; value = receipt_id }
+  ] in
+  let read_query =
+    let bounded = Array.append(query, [{ key = "limit"; value = `Number(16.0) }]) in
+    match field(reviewer, "cursor") with
+    | `Null -> bounded
+    | cursor -> Array.append(bounded, [{ key = "cursor"; value = cursor }])
+  in
+  let* status = Tool.call("agent_status", `Object([
+    { key = "session_id"; value = session_id }
+  ])) in
+  let* completion = Tool.call("agent_wait", `Object(Array.append(query, [
+    { key = "timeout_ms"; value = `Number(0.0) }
+  ]))) in
+  let* output = Tool.call("agent_read", `Object(read_query)) in
+  Task.pure(`Object([
+    { key = "role"; value = field(reviewer, "role") },
+    { key = "session_id"; value = session_id },
+    { key = "receipt_id"; value = receipt_id },
+    { key = "status"; value = observation(status) },
+    { key = "completion"; value = observation(completion) },
+    { key = "output"; value = observation(output) }
+  ]))
+
+let rec collect_all reviewers index observations =
+  if index == Array.length(reviewers) then Task.pure(observations)
+  else
+    let* current = collect(reviewers[index]) in
+    collect_all(reviewers, index + 1, Array.append(observations, [current]))
+
+let run ctx input =
+  match field(input, "reviewers") with
+  | `Array(reviewers) ->
+      let* observations = collect_all(reviewers, 0, []) in
+      Task.pure(`Complete(`Object([
+        { key = "reviews"; value = `Array(observations) }
+      ])))
+  | _ -> Task.fail("Expected a reviewers array.")

@@ -1,6 +1,10 @@
 # HTTP client walkthrough
 
 Use an authenticated loopback listener, establish a logical connection, and observe its permitted live updates.
+Choose this integration when your client needs an HTTP connection to an Ochat
+daemon. The tutorial keeps that connection on the same machine; it does not
+configure a publicly hosted service. HTTP is an optional client path, separate
+from [building tools, subagents and workflows](../../tutorials/README.md).
 
 ## Prerequisites and command context
 

@@ -15,6 +15,7 @@ let with_background_daemon
       ?(agent = native_agent)
       ?(sources = [])
       ?model_post_stream
+      ?(runtime_policy = Agent_server.Daemon.default_options.chatml_runtime_policy)
       ?(expected_model_calls = 0)
       ?per_session_jobs
       ?(max_request_bytes =
@@ -49,6 +50,10 @@ let with_background_daemon
           ~perm:0o700
           Eio.Path.(Eio.Stdenv.fs env / workspace / "reports");
         let save path source =
+          Eio.Path.mkdirs
+            ~exists_ok:true
+            ~perm:0o700
+            Eio.Path.(Eio.Stdenv.fs env / Filename.dirname path);
           Eio.Path.save
             ~create:(`Exclusive 0o600)
             Eio.Path.(Eio.Stdenv.fs env / path)
@@ -104,6 +109,7 @@ let with_background_daemon
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
+                ; chatml_runtime_policy = runtime_policy
                 ; protocol_limits =
                     { Agent_server.Daemon.default_options.protocol_limits with
                       max_request_bytes

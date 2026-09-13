@@ -1,0 +1,15 @@
+<shell_access id="inspection" extends="builtin:workspace-readonly@1"
+              cwd="${workspace}/sample-project">
+  <capabilities sandbox="required" network="false" child_processes="false"
+                arbitrary_code="false" privilege_change="false" merge="replace">
+    <read path="${workspace}/sample-project"/>
+  </capabilities>
+  <environment inherit="selected">
+    <set name="PATH" value="/usr/bin:/bin"/>
+  </environment>
+  <limits wall_time="10s" max_stdin="0B" stdout="16KiB" stderr="4KiB"
+          total_output="20KiB"/>
+  <policy default="deny" merge="replace">
+    <rule id="read-setup" action="allow"><basename value="cat"/></rule>
+  </policy>
+</shell_access>

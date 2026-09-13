@@ -20,8 +20,8 @@ test('static demonstration, diagram explanation and contribution links remain us
     page.getByRole('navigation', { name: 'Agent composition' }),
   ).toBeVisible();
   await expect(
-    page.getByRole('link', { name: 'Connect two agents' }),
-  ).toHaveAttribute('href', '/docs/tutorials/specialist/');
+    page.getByRole('link', { name: 'Choose a delegation pattern →' }),
+  ).toHaveAttribute('href', '/docs/guides/subagents/');
   await expect(page.getByRole('link', { name: 'Contribute' })).toHaveAttribute(
     'href',
     /#documentation-and-contributing$/,

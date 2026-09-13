@@ -1,0 +1,9 @@
+<import src="checks-base.chatmd"/>
+
+<shell_access id="checks" extends="checks-base">
+  <reviewers strategy="first_terminal">
+    <reviewer id="project" kind="chatml" script="report-reviewer"
+              lifecycle="session" failure="deny"/>
+    <reviewer id="human" kind="ui"/>
+  </reviewers>
+</shell_access>

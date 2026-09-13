@@ -1975,13 +1975,22 @@ let current_operation t operation_id =
   | None -> Error (error Operation_not_found "foreground operation is not active")
 ;;
 
-let running_operation ?(allow_stopping = false) t operation_id =
+let running_operation
+      ?(allow_stopping = false)
+      ?(allow_waiting_permission = false)
+      t
+      operation_id
+  =
   let open Result.Let_syntax in
   let%bind operation = current_operation t operation_id in
   match operation.state, t.state.lifecycle.desired, t.state.lifecycle.observed with
   | Agent_protocol.Operation.Running, desired, Running_turn id
     when (allow_stopping || Agent_protocol.Session.equal_desired_state desired Running)
          && Agent_protocol.Id.Operation.compare id operation_id = 0
+         && not t.state.halted -> Ok operation
+  | Running, desired, Waiting_for_permission _
+    when allow_waiting_permission
+         && (allow_stopping || Agent_protocol.Session.equal_desired_state desired Running)
          && not t.state.halted -> Ok operation
   | _ ->
     Error (error Invalid_state "foreground operation is not running at a tool safe point")
@@ -4340,7 +4349,11 @@ let prepare_authoring_input t operation_id materialization history effective =
 
 let publish_invocation_output t operation_id invocation_id entry =
   let open Result.Let_syntax in
-  let%bind _ = running_operation ~allow_stopping:true t operation_id in
+  (* A completed tool may publish while a sibling waits for permission. Publishing
+     its already-resolved result does not authorize or execute another tool. *)
+  let%bind _ =
+    running_operation ~allow_stopping:true ~allow_waiting_permission:true t operation_id
+  in
   let%bind invocation =
     match
       List.find t.state.invocations ~f:(fun i ->

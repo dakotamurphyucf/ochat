@@ -41,4 +41,12 @@ summary of supplied test results. The saved output is ChatMD, not a standalone
 HTML report or an automatic success/failure gate. Define and validate any
 machine-consumed report contract before using it to control a pipeline.
 
+## Add deterministic checks and continuing work
+
+Use a [ChatML program](../tutorials/chatml-program.md) when part of the report
+should be computed deterministically from tool results. The complete
+[documentation lab](documentation-lab.md) develops this into background checks,
+review sessions, staged proposals and an evidence-based final report. Its daemon
+setup and recovery behavior are part of that application, beyond this batch example.
+
 [Explore another application](README.md) or [follow the tutorial curriculum](../tutorials/README.md).

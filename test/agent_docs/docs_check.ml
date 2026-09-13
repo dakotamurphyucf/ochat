@@ -157,19 +157,33 @@ let check_json env root documents =
         |> String.substr_replace_all ~pattern:"ATTACHMENT_ID" ~with_:"att_tutorial"
       in
       let json = Jsonaf.of_string data in
-      match Agent_protocol.Envelope.of_json json with
-      | Ok (Request request) ->
-        (match
-           Agent_protocol.Command.of_method_and_params
-             ~method_:request.method_
-             ~params:request.params
-         with
-         | Ok _ -> ()
-         | Error error ->
-           failwith
-             (file ^ ": " ^ Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)))
-      | Ok _ -> ()
-      | Error error -> failwith (file ^ ": " ^ error.message)));
+      (* Hosting tutorials also contain tool inputs and result data. Validate all
+         JSON syntax, and retain typed RPC validation for envelope-shaped values,
+         including requests that accidentally omit their jsonrpc field. *)
+      let rpc =
+        match json with
+        | `Object fields ->
+          List.exists fields ~f:(fun (key, _) ->
+            List.mem [ "jsonrpc"; "method"; "id" ] key ~equal:String.equal)
+        | _ -> false
+      in
+      if rpc
+      then (
+        match Agent_protocol.Envelope.of_json json with
+        | Ok (Request request) ->
+          (match
+             Agent_protocol.Command.of_method_and_params
+               ~method_:request.method_
+               ~params:request.params
+           with
+           | Ok _ -> ()
+           | Error error ->
+             failwith
+               (file
+                ^ ": "
+                ^ Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)))
+        | Ok _ -> ()
+        | Error error -> failwith (file ^ ": " ^ error.message))));
   let management_pattern =
     Re.(
       compile

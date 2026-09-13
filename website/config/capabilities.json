@@ -86,8 +86,9 @@
   },
   {
     "id": "chatml",
-    "title": "ChatML capabilities and budgets",
+    "title": "Programmable ChatML workflows",
     "pages": [
+      "chatml",
       "guide/chatml-moderator-runtime"
     ],
     "qualification": "Capabilities depend on the host. Turn, event-drain, and job limits are not dollar caps; detailed phase contracts retain their historical scope.",
@@ -99,7 +100,7 @@
       "chatml-async-completion-lifecycle"
     ],
     "benefit": "Put workflow decisions in a script when instructions alone are insufficient.",
-    "example": "End a session after three completed turns or react to a tool event."
+    "example": "Collect check results, assign failed cases to specialists, and report the evidence."
   },
   {
     "id": "background",
@@ -125,15 +126,42 @@
   },
   {
     "id": "shell",
-    "title": "Shell grants and audit",
+    "title": "Custom shell capabilities and guardrails",
     "pages": [
+      "shell/README",
+      "guide/chatmd-shell-extensions",
       "guide/chatmd-shell-host-integration",
       "cli/shell-runtime-management"
     ],
     "qualification": "Legacy Session_store commands do not administer daemon IDs; a declaration alone does not authorize execution.",
     "deferred": [],
-    "benefit": "Give workflows explicitly configured project commands.",
-    "example": "Run a selected build or test command under the chosen host policy."
+    "benefit": "Design useful shell tools with reusable runtimes and project-specific review rules.",
+    "example": "Give inspection and build commands different access, with ChatML or an agent reviewing selected requests."
+  },
+  {
+    "id": "subagents",
+    "title": "Persistent and generated specialists",
+    "pages": [
+      "guide/subagents",
+      "guide/delegated-tools",
+      "guide/chatml-authoring-children"
+    ],
+    "qualification": "Persistent children require an admitted durable host; generated children select existing inherited tools and retain their restrictions.",
+    "deferred": [],
+    "benefit": "Delegate focused work while keeping useful specialist conversations available for follow-up.",
+    "example": "Create a reviewer for a failing tutorial, retain its session, and send updated evidence."
+  },
+  {
+    "id": "script-tools",
+    "title": "Reusable and stateful script tools",
+    "pages": [
+      "guide/chatml-authoring-runtime",
+      "chatml"
+    ],
+    "qualification": "Standalone tools have fresh invocation globals. Stateful tools require a supported moderator handler and explicit invocation resolution.",
+    "deferred": [],
+    "benefit": "Extend agent behavior with ChatML logic and selected existing capabilities.",
+    "example": "Expose a report calculator as a standalone tool or retain a queue of reviews in moderator state."
   },
   {
     "id": "protocol",

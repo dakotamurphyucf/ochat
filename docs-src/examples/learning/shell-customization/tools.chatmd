@@ -1,0 +1,16 @@
+<tool name="inspect_setup" type="shell" mode="fixed" runtime="inspection"
+      result="structured" description="Read the maintained Lantern setup document.">
+  <command program="/bin/cat">
+    <path_arg base="workspace" path="sample-project/docs/setup.md"/>
+  </command>
+  <arguments mode="none"/>
+</tool>
+
+<tool name="check_docs" type="shell" mode="fixed" runtime="checks"
+      result="structured" nonzero="result"
+      description="Check Lantern's setup, links or verification conventions. Supply --check followed by all, setup, links or verification. Optional --write-report saves reports/latest.json after review; saved reports must include all checks. Exit 1 reports a failed check.">
+  <command program="/bin/sh">
+    <path_arg base="workspace" path="sample-project/scripts/check-docs.sh"/>
+  </command>
+  <arguments mode="required" min_count="2" max_count="3" max_item_bytes="64"/>
+</tool>

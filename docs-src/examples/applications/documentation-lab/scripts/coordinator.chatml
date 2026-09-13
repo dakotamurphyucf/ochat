@@ -1,0 +1,326 @@
+type run = {
+  id : string;
+  kind : string;
+  job : string;
+  invocation : string;
+  input : json;
+  result : json;
+  finished : bool
+}
+
+type watch = {
+  id : string;
+  invocation : string;
+  query : json;
+  epoch : int;
+  job : string;
+  timer : string;
+  deadline : int;
+  result : json;
+  finished : bool
+}
+
+type state = {
+  runs : run array;
+  watches : watch array;
+  closed : bool
+}
+
+let initial_state : state = {
+  runs = [];
+  watches = [];
+  closed = false
+}
+
+(* Application choices, not language/runtime limits. A bounded watch makes
+   permission waits and missing responses visible instead of polling forever. *)
+let response_deadline_ms = 300000
+let response_poll_ms = 2000
+let max_records = 8
+
+let field value name =
+  match Json.get_field(value, name) with
+  | `Some(found) -> found
+  | `None -> `Null
+
+let text value =
+  match value with
+  | `String(value) -> value
+  | _ -> fail("Expected a response identifier.")
+
+let error code message =
+  {
+    code = code;
+    message = message;
+    retryable = false;
+    details = `Null
+  }
+
+let completion result =
+  match field(result, "type") with
+  | `String("succeeded") -> `Succeeded(field(result, "value"))
+  | `String("cancelled") -> `Cancelled(text(field(result, "reason")))
+  | `String("expired") -> `Expired
+  | `String("failed") ->
+      let retryable =
+        match field(result, "retryable") with
+        | `Bool(value) -> value
+        | _ -> false
+      in
+      `Failed({
+        code = text(field(result, "code"));
+        message = text(field(result, "message"));
+        retryable = retryable;
+        details = field(result, "details")
+      })
+  | _ -> fail("Expected a canonical terminal result.")
+
+let reject invocation code message =
+  Invocation.resolve(invocation, `Fail(error(code, message)))
+
+let report state =
+  let state : state = state in
+  `Object([
+    { key = "closed"; value = `Bool(state.closed) },
+    { key = "runs"; value = `Array(Array.map(state.runs, fun item ->
+        let item : run = item in
+        `Object([
+          { key = "run_id"; value = `String(item.id) },
+          { key = "kind"; value = `String(item.kind) },
+          { key = "job_id"; value = `String(item.job) },
+          { key = "input"; value = item.input },
+          { key = "finished"; value = `Bool(item.finished) },
+          { key = "result"; value = item.result }
+        ]))) },
+    { key = "reviews"; value = `Array(Array.map(state.watches, fun item ->
+        let item : watch = item in
+        `Object([
+          { key = "watch_id"; value = `String(item.id) },
+          { key = "query"; value = item.query },
+          { key = "finished"; value = `Bool(item.finished) },
+          { key = "result"; value = item.result }
+        ]))) }
+  ])
+
+let replace_run state updated =
+  let state : state = state in
+  let updated : run = updated in
+  { state with runs = Array.map(state.runs, fun item ->
+      let item : run = item in
+      if item.id == updated.id then updated else item) }
+
+let replace_watch state updated =
+  let state : state = state in
+  let updated : watch = updated in
+  { state with watches = Array.map(state.watches, fun item ->
+      let item : watch = item in
+      if item.id == updated.id then updated else item) }
+
+let start_run state invocation kind tool input =
+  let state : state = state in
+  let busy = Array.exists(state.runs, fun item ->
+    let item : run = item in if item.finished then false else true) in
+  let unavailable = if state.closed then true else
+    if busy then true else Array.length(state.runs) >= max_records in
+  if unavailable then
+    let* () = reject(invocation, "lab.unavailable",
+      "The lab is closed, another check/stage is pending, or the sample run limit was reached.") in
+    Task.pure(state)
+  else
+    let* job = Job.start_tool(tool, input) in
+    let id = "run-" ++ to_string(Array.length(state.runs) + 1) in
+    let* () = Invocation.resolve(invocation, `Pending(`Job(job), `Object([
+      { key = "run_id"; value = `String(id) },
+      { key = "job_id"; value = `String(job) },
+      { key = "status"; value = `String("accepted") }
+    ]))) in
+    let item : run = {
+      id = id;
+      kind = kind;
+      job = job;
+      invocation = invocation;
+      input = input;
+      result = `Null;
+      finished = false
+    } in
+    Task.pure({ state with runs = Array.append(state.runs, [item]) })
+
+let finish_run state item =
+  let item : run = item in
+  let* result = Job.read_result(item.job) in
+  let terminal = completion(result) in
+  let wake = if state.closed then `No_wake else `Request_turn in
+  let* delivery = Notification.publish({
+    key = item.id;
+    invocation_id = `Some(item.invocation);
+    work = `Some(`Job(item.job))
+  }, terminal, wake) in
+  Task.pure(replace_run(state, { item with result = result; finished = true }))
+
+let start_probe item =
+  let item : watch = item in
+  let* job = Job.start_tool("probe_review", item.query) in
+  let* armed = Subscription.arm(item.id, item.epoch, `None, `Some(job)) in
+  Task.pure({ item with epoch = item.epoch + 1; timer = ""; job = job })
+
+let schedule_probe item =
+  let item : watch = item in
+  let epoch = item.epoch + 1 in
+  let* timer = Schedule.after_ms_with_policy(response_poll_ms, `Object([
+    { key = "kind"; value = `String("lab_review_tick") },
+    { key = "watch_id"; value = `String(item.id) },
+    { key = "epoch"; value = `String(to_string(epoch)) }
+  ]), `Deliver_once_immediately) in
+  let* armed = Subscription.arm(item.id, item.epoch, `Some(timer), `None) in
+  Task.pure({ item with epoch = epoch; timer = timer; job = "" })
+
+let finish_watch item terminal wake =
+  let item : watch = item in
+  let* () = if item.timer == "" then Task.pure(()) else Schedule.cancel(item.timer) in
+  let* () = if item.job == "" then Task.pure(()) else Job.cancel(item.job) in
+  let* finished = match terminal with
+    | `Succeeded(value) -> Subscription.complete(item.id, item.epoch, value)
+    | `Failed(problem) -> Subscription.fail(item.id, item.epoch, problem)
+    | `Cancelled(reason) -> Subscription.cancel(item.id, item.epoch, reason)
+    | `Expired -> Subscription.fail(item.id, item.epoch,
+        error("lab.response_timeout", "The review watch expired."))
+  in
+  let result = field(finished, "result") in
+  let* delivery = Notification.publish({
+    key = "review-result";
+    invocation_id = `Some(item.invocation);
+    work = `Some(`Subscription(item.id))
+  }, completion(result), wake) in
+  Task.pure({ item with result = result; finished = true; job = ""; timer = "" })
+
+let start_watch ctx state invocation query =
+  let state : state = state in
+  let duplicate = Array.exists(state.watches, fun item ->
+    let item : watch = item in
+    if text(field(item.query, "session_id")) == text(field(query, "session_id")) then
+      text(field(item.query, "receipt_id")) == text(field(query, "receipt_id"))
+    else false) in
+  let unavailable = if state.closed then true else
+    if duplicate then true else Array.length(state.watches) >= max_records in
+  if unavailable then
+    let* () = reject(invocation, "lab.watch_unavailable",
+      "The lab is closed, this receipt already has a watch, or the watch limit was reached.") in
+    Task.pure(state)
+  else
+    let* id = Subscription.create("lab_review", `Some(response_deadline_ms + 10000), `No_wake) in
+    let item : watch = {
+      id = id;
+      invocation = invocation;
+      query = query;
+      epoch = 0;
+      job = "";
+      timer = "";
+      deadline = ctx.now_ms + response_deadline_ms;
+      result = `Null;
+      finished = false
+    } in
+    let* item = start_probe(item) in
+    let* () = Invocation.resolve(invocation, `Pending(`Subscription(id), `Object([
+      { key = "watch_id"; value = `String(id) },
+      { key = "status"; value = `String("watching") }
+    ]))) in
+    Task.pure({ state with watches = Array.append(state.watches, [item]) })
+
+let watch_event ctx item payload =
+  let item : watch = item in
+  if ctx.now_ms >= item.deadline then
+    finish_watch(item, `Failed(error("lab.response_timeout",
+      "No terminal response was collected before the application deadline.")), `Request_turn)
+  else
+    match field(payload, "kind") with
+    | `String("lab_review_tick") -> start_probe(item)
+    | _ ->
+        let* result = Job.read_result(item.job) in
+        (match completion(result) with
+        | `Succeeded(probe) ->
+            (match field(probe, "ready") with
+            | `Bool(true) -> finish_watch(item, `Succeeded(probe), `Request_turn)
+            | `Bool(false) -> schedule_probe(item)
+            | _ -> finish_watch(item, `Failed(error("lab.invalid_probe",
+                "Response probe returned no readiness result.")), `Request_turn))
+        | terminal -> finish_watch(item, terminal, `Request_turn))
+
+let rec stop_watches watches index results =
+  if index == Array.length(watches) then Task.pure(results)
+  else
+    let item : watch = watches[index] in
+    let* updated = if item.finished then Task.pure(item)
+      else finish_watch(item, `Cancelled("Lab closed."), `No_wake) in
+    let* stop = Tool.call("agent_stop", `Object([
+      { key = "session_id"; value = field(item.query, "session_id") },
+      { key = "idempotency_key"; value = `String("lab-stop-" ++ item.id) },
+      { key = "mode"; value = `String("cancel") }
+    ])) in
+    (* Keep errors visible. Stop admission is not a join of descendant cleanup. *)
+    let stop_result =
+      match stop with
+      | `Ok(value) -> value
+      | `Error(message) -> `Object([{ key = "error"; value = `String(message) }])
+    in
+    let updated = {
+      updated with query = Json.set_field(updated.query, "stop", stop_result)
+    } in
+    stop_watches(watches, index + 1, Array.append(results, [updated]))
+
+let rec cancel_runs runs index =
+  if index == Array.length(runs) then Task.pure(())
+  else
+    let item : run = runs[index] in
+    let* () = if item.finished then Task.pure(()) else Job.cancel(item.job) in
+    cancel_runs(runs, index + 1)
+
+let on_event ctx state event =
+  let state : state = state in
+  match event with
+  | `Tool_invoked(call) ->
+      let invocation = call.context.invocation_id in
+      (match call.context.tool_name with
+      | "begin_lab_checks" ->
+          start_run(state, invocation, "checks", "check_tutorials", call.input)
+      | "stage_lab_proposal" ->
+          start_run(state, invocation, "stage", "apply_proposal", call.input)
+      | "watch_lab_review" -> start_watch(ctx, state, invocation, call.input)
+      | "lab_report" ->
+          let* () = Invocation.resolve(invocation, `Complete(report(state))) in
+          Task.pure(state)
+      | "close_lab" ->
+          let* () = cancel_runs(state.runs, 0) in
+          let* watches = stop_watches(state.watches, 0, []) in
+          let closed = { state with closed = true; watches = watches } in
+          let* () = Invocation.resolve(invocation, `Complete(report(closed))) in
+          Task.pure(closed)
+      | _ -> Task.pure(state))
+  | `Internal_event(payload) ->
+      let completed_job =
+        match field(payload, "kind") with
+        | `String("background_job_completed") -> text(field(payload, "job_id"))
+        | _ -> ""
+      in
+      let run = Array.find(state.runs, fun item ->
+        let item : run = item in
+        if item.finished then false else item.job == completed_job) in
+      (match run with
+      | `Some(item) -> finish_run(state, item)
+      | `None ->
+          let watch = Array.find(state.watches, fun item ->
+            let item : watch = item in
+            if item.finished then false
+            else if completed_job != "" then item.job == completed_job
+            else match field(payload, "kind") with
+              | `String("lab_review_tick") ->
+                  if item.timer == "" then false else
+                    if text(field(payload, "watch_id")) == item.id then
+                      text(field(payload, "epoch")) == to_string(item.epoch)
+                    else false
+              | _ -> false) in
+          (match watch with
+          | `None -> Task.pure(state)
+          | `Some(item) ->
+              let* updated = watch_event(ctx, item, payload) in
+              Task.pure(replace_watch(state, updated))))
+  | _ -> Task.pure(state)

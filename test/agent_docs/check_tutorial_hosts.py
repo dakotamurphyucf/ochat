@@ -73,6 +73,8 @@ with tempfile.TemporaryDirectory(prefix='ochat-p06-') as temporary:
     results.append({'check': 'private Unix/HTTP config validation', 'result': 'pass'})
     count = discover(['dune', 'exec', 'bin/ochat_agent_stdio.exe', '--', '--local', '--prompt', str(root / 'hello.chatmd'), '--workspace', str(root / 'workspace'), '--data-root', str(root / 'stdio-state')])
     results.append({'check': 'standalone local stdio with explicit private data root; sequential discovery then EOF', 'responses': count, 'result': 'pass'})
+    count = discover(['dune', 'exec', 'bin/ochat_agent_stdio.exe', '--', '--local', '--prompt', str(root / 'hello.chatmd'), '--workspace', str(root / 'workspace')])
+    results.append({'check': 'standalone local stdio with automatic transient root; discovery then clean EOF without an RNG initialization error', 'responses': count, 'result': 'pass'})
     with daemon(root / 'unix.sexp', lambda: (root / 'agent.sock').exists()):
         count = discover(['dune', 'exec', 'bin/ochat_agent_stdio.exe', '--', '--connect', 'unix://' + str(root / 'agent.sock')])
     results.append({'check': 'real Unix daemon and stdio gateway discovery; graceful shutdown', 'responses': count, 'result': 'pass'})

@@ -55,13 +55,15 @@ and public revision links; use the protected workflow for publication.
 | Code-generated reference prose | The existing OCaml generator identified by the manifest's `generatedBy`; regenerate through its documented Dune target |
 | Title, description, route, publication/indexing status | `config/docs-manifest.json` |
 | Sidebar and Start here groups | `config/navigation.mjs` and manifest section/order fields |
-| Tutorial sequence and example associations | `config/tutorials.json` |
+| Stable tutorial IDs and example associations | `config/tutorials.json` |
+| Learning-path membership and previous/next destinations | `config/tutorial-paths.mjs` |
 | Homepage copy and layout | `src/pages/index.astro` and its imported components; the hero ChatMD comes from root `Readme.md` |
 | Application guides and recorded workflow | `docs-src/applications/`, `config/applications.json`, and the selected canonical example/recording files |
 | ChatMD/ChatML source and downloads | `docs-src/examples/catalog.json`, its exact files, and `config/supplemental-sources.json` |
 | Themes, typography, shared UI | `src/styles/tokens.css`, other `src/styles/`, and `src/components/` |
 | Images, fonts and license notices | `public/`, `config/media.json`, and approved repository mappings in `config/assets.json` |
 | Search ranking and regression queries | `config/search.mjs`, `config/search-queries.json`, and `scripts/search-index.mjs` |
+| Website links for model-facing topic IDs | `config/authoring-topics.mjs`; targets follow the installed corpus's maintained source excerpts |
 | Sitemap/social metadata | `config/presentation.mjs`, manifest policy and `config/site.mjs` |
 | HTTP headers and asset routing | `scripts/deployment-policy.mjs` and `wrangler.jsonc` |
 | www-to-apex redirect | `redirect/worker.mjs` and `redirect/wrangler.jsonc` |
@@ -71,6 +73,20 @@ Never hand-edit `.generated/`, `.astro/`, `dist/`, or Dune's `_build/` output.
 Planning documents are repository documentation and are not served by the site.
 
 ## Add a page
+
+Choose a reader task before assigning a section. Public feature destinations are
+Start here, Tools and shell access, Subagents and agent teams, ChatML workflows,
+Complete applications, and Run and operate. Exact references and contributor
+internals remain separate. Keep existing URLs when moving a page in the sidebar.
+Link introductions to useful lessons, exact contracts and complete source bundles;
+publication in the reference section alone does not provide a learning path.
+
+The model authoring primer keeps its installed source unchanged. Website-only
+framing lives in `AuthoringContextIntro.astro`, and recognized inline topic IDs
+link through `authoring-topics.mjs`. Review targets against `authoring_corpus.ml`
+when adding a mapping. Executable fences and source downloads must remain exact.
+Do not present dynamic `reference.tools` or `reference.signatures` as a static
+list of capabilities that every agent receives.
 
 1. Write original Markdown under `docs-src/` and stage it with Git; the importer
    inventories tracked/staged sources. Copy the structure of a nearby manifest
@@ -88,12 +104,53 @@ Planning documents are repository documentation and are not served by the site.
    Do not invent a verification date or call an example live-checked without
    execution evidence for its actual inputs.
 
+## Build a feature lesson or complete application
+
+Begin with a useful outcome and explain when someone would choose this feature.
+Link the feature introduction, a progressive lesson, the exact reference contract,
+and a complete example in both directions. Add terminology people actually search
+for (for example, “subagents” and “persistent agents”) to useful prose and review
+the search queries. Keep transport setup as an optional path when it is not the
+lesson's subject. End with meaningful follow-ups and configuration variants.
+
+A lesson should state its host, setup, expected result and limitations beside its
+launch command. Explain what the model chooses, what ChatML controls and what the
+runtime enforces. Shell examples must distinguish authorization, policy review and
+OS confinement; a reviewer cannot widen delegated authority. Generated children
+select delegated tools rather than inventing stronger shell or file permissions.
+
+For complete applications, include the root ChatMD, scripts, specialists, schemas,
+runtime declarations, sample inputs and required build/setup files in one approved
+bundle. Document the working directory, prerequisites, exact startup commands,
+intermediate states, cleanup and recovery. Reuse the Lantern sample project where
+it supports the learning progression. A test fixture requiring build-tree helpers
+is an advanced recipe until its public bundle and instructions are self-contained.
+Add application associations and feature-page links, not just a catalog record.
+
+Format maintained ChatML with blank lines between functions, expanded records and
+matches, and `let*` for readable task sequencing. Use `chatml` fences, rendered with
+OCaml highlighting. Keep the actual source readable before relying on wrapping.
+Readers must be able to inspect every companion in the browser; preserve entry
+selection, file anchors, keyboard operation, no-JavaScript reading and exact copied
+or downloaded text when changing the source viewer.
+
+Verification must say what was observed: compilation, controlled-provider runtime
+execution, real shell execution, a live model run or hosted behavior are different
+claims. Record commands, tested hashes, platform, revision and concrete limitations.
+Use existing provider-free integration harnesses where possible, including failure,
+cancellation and recovery cases that matter to the application. Never refresh a
+record solely to make its badge green. Batch related implementation changes, run
+their affected checks together, then qualify the finished reader journey.
+
 ## Remove or move a page
 
 Decide whether the old URL should remain a compatibility/bridge page or needs
 an explicit redirect. Update incoming links, related IDs, tutorial/application
 associations, navigation and search benchmarks. Preserve established heading
-anchors with a reviewed `fragmentAliases` mapping when headings change.
+anchors with explicit `<a id="old-heading"></a>` aliases beside their replacement
+sections when headings change. Choose a meaningful destination and check the built
+fragment; the importer rejects nonempty `fragmentAliases` mappings because that
+redirect mechanism is not implemented.
 Do not delete an entire manifest entry while leaving its canonical source
 unaccounted for; choose `repository-only` or `deferred` where appropriate.
 
@@ -113,6 +170,18 @@ downloads must retain the original full text and relative filenames. Run the
 offline semantic documentation checks before refreshing verification hashes.
 Changing a recorded input without rerunning its actual verification must leave
 the example visibly not checked.
+
+Keep one primary `entry` per bundle. Mark an independently selected alternate root
+as `variant`; the reader labels it **Alternate entry**. Record its outgoing import
+and script edges too. A `companion` is a dependency and must be the target of a
+declared edge; do not invent an import from the primary root to an alternate root
+that should only run when explicitly selected.
+
+Markdown sample inputs under `docs-src/examples/` need both a canonical manifest
+entry (normally `repository-only`) and an exact `example-download` supplemental
+rule with a catalog destination. This permits reading/downloading their source
+without publishing them as Ochat articles. Directory rules do not authorize copies;
+ordinary canonical documentation outside the example namespace cannot use this path.
 
 `scripts/record-showcase.py` overwrites the tracked showcase with scripted data
 by default; `--live` makes paid provider calls. Do not run it as a routine build
@@ -137,6 +206,17 @@ start their own temporary previews. For a subset of browser tests, choose an
 existing relevant file/test; that does not replace full release qualification.
 The semantic gate uses the project's qualified OCaml setup and pins from the
 runbook, not a website-installed compiler. It makes no provider calls.
+
+For local iteration on large source bundles, `npm run test:browser -- --workers=2
+--trace=off` retains every assertion while avoiding repeated diagnostic snapshots
+of the full catalog. If a case fails, rerun that case with `--trace=on` when a trace
+is needed to diagnose it. CI/release qualification retains failure traces. The
+bulk catalog source checks in `catalog-sources.spec.ts` omit continuous screenshot
+frames and repeated DOM snapshots because capturing the large static catalog
+dominated execution. They retain action traces, test sources and failure
+diagnostics, and all source, accessibility and native-reading assertions. Other
+browser tests, including reader interactions, use the default full trace settings.
+Turning off local recording does not replace any required check.
 
 ## Upgrade dependencies
 

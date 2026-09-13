@@ -45,8 +45,10 @@ For standalone local stdio, the current binary needs the
 [documented private-data-root workaround](troubleshooting.md#local-stdio-rng-initialization)
 for transient-root RNG startup.
 `--session`, `--new-session`, `--export-file`, `--no-persist`, `--auto-persist`,
-parallel-tool flags and `--authorize-shell-manifest` select the older implicit
-local path. They cannot be combined with explicit `--local`. Daemon `--session`
+and parallel-tool flags select the older implicit local path and cannot be
+combined with explicit `--local`. `--authorize-shell-manifest` supports native
+local mode when combined with `--local`; without it, the flag retains legacy
+compatibility behavior. Daemon `--session`
 instead selects a daemon session. See the [TUI CLI](../bin/chat_tui.doc.md).
 
 ## Prompts, workspaces, and authority

@@ -1,6 +1,15 @@
 # Private Unix daemon and multiple TUI clients
 
 Create a durable session, disconnect its client, and reattach to the same history.
+Choose this host when a conversation must outlive a terminal or be shared by
+several clients. It is an optional operating path; ordinary local file tools,
+shell capabilities and ChatML programs can run without a daemon.
+
+For an authored or generated specialist project, the
+[persistent-specialist](../../tutorials/persistent-specialist.md) and
+[generated-specialist](../../tutorials/generated-specialist.md) lessons include
+their own complete private configuration. You can follow those directly, then
+use this tutorial to learn more about attachment and host lifetime.
 
 ## Prerequisites and command context
 

@@ -1,0 +1,14 @@
+{
+  "type": "array", "minItems": 2, "maxItems": 2,
+  "items": {
+    "type": "object",
+    "properties": {
+      "tutorial_id": {"type": "string", "enum": ["passing", "broken"]},
+      "path": {"type": "string", "enum": ["tutorials/passing.md", "tutorials/broken.md"]},
+      "check": {"type": "string", "enum": ["verification-v1"]},
+      "expected_original": {"type": "string", "enum": ["passed", "failed"]}
+    },
+    "required": ["tutorial_id", "path", "check", "expected_original"],
+    "additionalProperties": false
+  }
+}

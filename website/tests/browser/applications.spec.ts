@@ -1,5 +1,19 @@
 import { test, expect } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
+import fs from 'node:fs';
+
+const applications = JSON.parse(
+  fs.readFileSync(
+    new URL('../../config/applications.json', import.meta.url),
+    'utf8',
+  ),
+);
+const tutorials = JSON.parse(
+  fs.readFileSync(
+    new URL('../../config/tutorials.json', import.meta.url),
+    'utf8',
+  ),
+);
 
 test('application discovery filters by task and restores the filter through back navigation', async ({
   page,
@@ -7,12 +21,17 @@ test('application discovery filters by task and restores the filter through back
   await page.goto('/');
   await page.getByRole('link', { name: 'See what you can build' }).click();
   await expect(page).toHaveURL('/docs/applications/');
-  await expect(page.locator('[data-application]:visible')).toHaveCount(6);
+  await expect(page.locator('[data-application]:visible')).toHaveCount(
+    applications.length,
+  );
   await page.getByRole('button', { name: 'Research', exact: true }).click();
   await expect(page.locator('[data-application]:visible')).toHaveCount(1);
   await expect(page).toHaveURL(/category=Research/);
   await page.getByRole('button', { name: 'Code', exact: true }).click();
-  await expect(page.locator('[data-application]:visible')).toHaveCount(2);
+  await expect(page.locator('[data-application]:visible')).toHaveCount(
+    applications.filter((app: { category: string }) => app.category === 'Code')
+      .length,
+  );
   await page.goBack();
   await expect(
     page.getByRole('button', { name: 'Research', exact: true }),
@@ -37,11 +56,22 @@ test('tutorial hub exposes the curriculum and lessons explain outcomes and next 
   const curriculum = page.getByRole('navigation', {
     name: 'Tutorial curriculum',
   });
-  await expect(curriculum.locator('li')).toHaveCount(10);
+  await expect(curriculum.locator('li')).toHaveCount(tutorials.length);
+  await expect(
+    curriculum.getByRole('heading', { name: 'ChatML workflows' }),
+  ).toBeVisible();
+  await expect(
+    curriculum.getByRole('link', {
+      name: /Summarize reports with a ChatML program/,
+    }),
+  ).toBeVisible();
   await curriculum.getByRole('link').first().click();
   await expect(
     page.getByRole('complementary', { name: 'Lesson outcome and setup' }),
   ).toContainText('You’ll build');
+  await expect(
+    page.getByRole('complementary', { name: 'Lesson outcome and setup' }),
+  ).toContainText('Create and compose · T01');
   await expect(
     page.getByRole('complementary', { name: 'What comes next' }),
   ).toContainText('file tool');
@@ -126,7 +156,9 @@ test('application evidence and source files remain readable without JavaScript',
   try {
     const page = await context.newPage();
     await page.goto('/docs/applications/');
-    await expect(page.locator('[data-application]')).toHaveCount(6);
+    await expect(page.locator('[data-application]')).toHaveCount(
+      applications.length,
+    );
     await page.goto('/docs/applications/documentation-review/');
     await expect(
       page.getByRole('region', { name: 'Recorded review report' }),

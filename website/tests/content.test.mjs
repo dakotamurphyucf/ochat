@@ -98,6 +98,27 @@ test('C08/C09: source title alias is retained; duplicate headings are inventorie
   assert.ok(result.body.startsWith('<a id="original-title"></a>'));
   assert.deepEqual(result.headings, ['original-title', 'one', 'one-1']);
 });
+test('authoring topic references become links without changing executable fences or existing links', () => {
+  const topic = {
+    ...other,
+    source: 'docs-src/guide/chatml-authoring-language.md',
+  };
+  const topicContext = {
+    ...context,
+    bySource: new Map([...context.bySource, [topic.source, topic]]),
+    tracked: new Set([...context.tracked, topic.source]),
+  };
+  const fence = '```chatml\nlet topic = "chatml.programs"\n```';
+  const input = `# A\n\nRead \`chatml.programs\`. Keep \`unknown.topic\`.\n\n[\`chatml.programs\`](b.md)\n\n${fence}\n`;
+  const output = transformMarkdown(input, entry, topicContext).body;
+  assert.ok(output.includes('[`chatml.programs`](/docs/b/)'));
+  assert.ok(output.includes('Keep `unknown.topic`.'));
+  assert.ok(output.includes(fence));
+  assert.equal(
+    (output.match(/\[\`chatml.programs\`\]\(\/docs\/b\/\)/g) || []).length,
+    2,
+  );
+});
 test('C13/C14: only allowlisted images and encoded paths are published', () => {
   assert.equal(
     resolveLink(

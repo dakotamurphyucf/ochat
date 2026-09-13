@@ -9,6 +9,8 @@ import Default from '@astrojs/starlight/components/MarkdownContent.astro';
 import report from '../../.generated/content-report.json';
 import DocsOverview from './DocsOverview.astro';
 import CapabilityOverview from './CapabilityOverview.astro';
+import AuthoringContextIntro from './AuthoringContextIntro.astro';
+import PracticalWorkflowIntro from './PracticalWorkflowIntro.astro';
 import ExampleCatalog from './ExampleCatalog.astro';
 import TutorialRecord from './TutorialRecord.astro';
 import examples from '../../.generated/examples-report.json';
@@ -30,8 +32,13 @@ const diagrams =
 ---
 
 {Astro.url.pathname === '/docs/' && <DocsOverview />}
-{Astro.url.pathname === '/docs/' && <CapabilityOverview />}
+{
+  Astro.url.pathname === '/docs/reference/chatml/authoring-primer/' && (
+    <AuthoringContextIntro />
+  )
+}
 {isTutorial && <LessonOverview />}
+<PracticalWorkflowIntro />
 {isApplication && <ApplicationIntro />}
 {Astro.url.pathname === '/docs/applications/' && <ApplicationGallery />}
 {Astro.url.pathname === '/docs/tutorials/' && <TutorialCurriculum />}
@@ -72,6 +79,7 @@ const diagrams =
 >
   <Default><slot /></Default>
 </div>
+{Astro.url.pathname === '/docs/' && <CapabilityOverview />}
 {
   hasResources && (
     <div id="lesson-resources">
@@ -83,6 +91,32 @@ const diagrams =
 
 {isTutorial && <LessonOverview next />}
 <script>
+  document
+    .querySelectorAll<HTMLElement>('.expressive-code')
+    .forEach((block) => {
+      const pre = block.querySelector<HTMLElement>('pre');
+      if (!pre || pre.dataset.language === 'mermaid') return;
+      const lines = [...block.querySelectorAll<HTMLElement>('.ec-line .code')];
+      if (
+        lines.length < 12 &&
+        !lines.some((line) => (line.textContent?.length || 0) > 80)
+      )
+        return;
+      const actions = document.createElement('div');
+      actions.className = 'code-reading-actions';
+      const wrap = document.createElement('button');
+      wrap.type = 'button';
+      wrap.textContent = 'Wrap lines';
+      wrap.setAttribute('aria-pressed', 'false');
+      wrap.addEventListener('click', () => {
+        const wrapped = wrap.getAttribute('aria-pressed') !== 'true';
+        wrap.setAttribute('aria-pressed', String(wrapped));
+        block.dataset.wrap = String(wrapped);
+      });
+      actions.append(wrap);
+      block.prepend(actions);
+    });
+
   // Some WebKit versions focus a scroll region without arrow-scrolling it.
   // Handle only the region itself; links and nested controls keep native keys.
   document

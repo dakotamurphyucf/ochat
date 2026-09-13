@@ -15,7 +15,20 @@ reads; a coding agent may also need patching and carefully configured commands.
 | Built-in tools | Files, patches, web ingestion, search, and other packaged capabilities | [Available built-ins](../overview/tools.md#built-in-catalog-code-correct) |
 | Agent tools | Delegate a focused task to another ChatMD prompt | [Tool declarations and agent composition](../overview/tools.md) |
 | Shell tools | Run configured commands or interactive processes | [Shell access](../shell/README.md) |
+| Standalone ChatML tools | Reuse deterministic logic and sequence selected existing tools | [Script-tool contracts](../guide/chatml-authoring-runtime.md#standalone-tools-and-explicit-outcomes) |
+| Moderator-handled tools | Implement a custom operation that uses retained workflow state | [Stateful tool contracts](../guide/chatml-authoring-runtime.md#moderator-tools-and-session-owned-state) |
 | MCP tools | Connect to tool catalogs served by external MCP servers | [MCP selection, authentication, and discovery](../overview/tools.md) |
+
+Agent tools can make one-off requests or keep specialist conversations. A parent
+can also create a task-specific child from a generated definition. The
+[subagent decision guide](../guide/subagents.md) explains those choices and the
+[inherited-tool boundary](../guide/delegated-tools.md).
+
+For command-line integrations, design the shell tool and its runtime together:
+the model-facing operation can be convenient while the runtime specifies custom
+capabilities and guardrails. For script tools, choose whether state belongs to
+one invocation or to the conversation; [ChatML execution forms](../chatml/README.md)
+explain that distinction.
 
 MCP tool integration is maintained. It is distinct from Ochat's deprecated MCP
 prompt-serving host, and from the new Ochat agent-server protocol.

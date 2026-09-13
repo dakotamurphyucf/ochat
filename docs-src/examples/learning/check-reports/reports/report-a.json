@@ -1,0 +1,5 @@
+[
+  { "check": "setup instructions", "status": "failed" },
+  { "check": "source links", "status": "passed" },
+  { "check": "verification steps", "status": "failed" }
+]

@@ -2,9 +2,14 @@
 
 Production domain: **https://ochatlabs.com**. The protected Website workflow builds for this origin, retains the tested artifact, and publishes only after the main release gate passes. See [the production launch record](planning/p11-launch.md) and [release runbook](planning/release-runbook.md).
 
-A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample.
+A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Progressive lessons lead to three complete applications: a guarded engineering assistant, a persistent review team, and a living documentation lab. Smaller examples, configurable templates, and an inspectable recorded workflow remain available alongside them.
 
-The extensibility update adds authoring, script-tool, background-work and child-session guides. The inventory contains 340 canonical documents: 136 published, 4 compatibility, 9 bridges, 181 repository-only and 10 deferred. It produces 149 documentation routes; search includes 140 approved pages. Generated migration/content reports are authoritative for a particular build. The former shell-resource-runner URL now explains linked child-process setup, preserving existing links without requiring that removed executable.
+The documentation is organized around tools and shell access, subagents and teams,
+ChatML workflows, complete applications, and running agents. Exact reference and
+contributor internals remain separately accessible. Generated migration/content
+reports describe the exact inventory, routes, and search policy for each build.
+The former shell-resource-runner URL explains linked child-process
+setup, preserving existing links without requiring that removed executable.
 
 The recorded demo retains its original live capture and authenticates runtime hashes against its recorded Git revision. Changed current runtime files are labeled as such; they do not turn old model output into current-runtime verification. Build with full Git history. Recording regeneration and optional live-provider calls are never implicit website-build steps.
 
@@ -102,7 +107,8 @@ unimplemented alias declarations fail instead of being silently ignored.
 Git provenance is computed from the original sources. Local edits are labeled
 in preview; production generation rejects uncommitted published source bytes.
 Shallow history and modified/new source files do not receive a last-updated
-date. A verification label is effective only for its recorded current revision.
+date. A current verification label requires matching revision and source hashes;
+earlier observations remain visible as explicitly recorded evidence.
 The migration report lists highlighting fallbacks and per-source hashes.
 
 Mermaid loads only when a reader chooses **Show rendered diagram**. The diagram
@@ -142,15 +148,20 @@ and mobile software keyboards have been reviewed. Manual assistive-technology an
 
 Keep source examples in `docs-src/examples/`; the catalog is canonical there so
 the offline Dune gate can check the exact selected files without including npm
-dependencies in the OCaml build. `website/config/tutorials.json` maps T01–T10 to
+dependencies in the OCaml build. `website/config/tutorials.json` maps stable lesson IDs to
 existing canonical page IDs, host scopes, examples, and verification. It drives
 actual previous/next navigation and the context shown on each tutorial.
 
 The shared `src/components/ExampleSource.astro` reader displays the approved source
 files inside tutorials, associated reference pages, and catalog cards. Tutorials initially show the first
 example’s entrypoint; native details controls expose companions and notices even
-without JavaScript. ChatMD is highlighted as source (XML), ChatML as OCaml, and
-OCaml/NDJSON with their own grammars; highlighting does not execute or validate
+without JavaScript. With JavaScript, a desktop file tree or mobile picker selects
+one file at a time and preserves its direct fragment link. Copy and wrap controls
+sit above the code. On wide screens, **Expand reader** temporarily reclaims the
+contents sidebar for the source while preserving the article's reading width;
+**Restore width** or closing the reader restores the layout.
+ChatMD uses XML highlighting and ChatML uses OCaml. JSON/NDJSON, shell, Markdown,
+and S-expression files use appropriate grammars; highlighting does not execute or validate
 these languages. The importer decodes the exact download bytes as strict UTF-8
 into `files[].content`; malformed text fails generation. Astro escapes source
 tags. The reader uses both site themes and keyboard-scrollable code regions.
@@ -158,6 +169,9 @@ Markdown `chatml` fences also use the OCaml grammar. Astro’s snippet highlight
 removes a final newline; the reader restores the original full-file text through
 Shiki’s preprocessing hook so selecting code preserves its contents.
 Source bodies are excluded from Pagefind to avoid duplicating tutorial prose.
+Long ordinary article code blocks also offer **Wrap lines**. These controls only
+change presentation: source text and the existing clipboard/download bytes remain
+unchanged. Without JavaScript, code and native file disclosures remain readable.
 
 Each downloadable entry declares its entrypoint, local companions/data/build
 files, dependency edges, prerequisites, and original license. Directory-level
@@ -189,7 +203,10 @@ After affected checks pass, update the record and exact SHA-256 values; never
 refresh hashes merely to suppress a stale label. Commands containing PRIVATE_ROOT
 or AVAILABLE_PORT record temporary contexts; use the complete helper or tutorial
 to reproduce them. A mismatched hash/revision downgrades the visible state to
-`not-checked`. T09 retains `known-limitation` for its explicit data-root workaround.
+`not-checked`. The reader separately preserves the recorded state and observations,
+and explains whether required evidence is missing, hashed sources have changed,
+or only the build revision differs. Matching source hashes alone do not qualify
+unrecorded runtime changes. T09 retains its recorded `known-limitation` for its explicit data-root workaround.
 No P06 record claims a live provider run. Verification details/hashes are excluded
 from Pagefind; example descriptions and host/capability metadata remain searchable.
 
@@ -216,9 +233,11 @@ the query in that page's local history entry. Quotes request an exact phrase;
 unquoted queries retain Pagefind's default prefix/fuzzy behavior.
 
 After building, `npm run evaluate:search` starts its own temporary preview and
-checks all 21 benchmark queries, exact index ownership, current-before-compatibility
+checks the configured benchmark queries, exact index ownership, current-before-compatibility
 ordering, context/excerpts, and real heading destinations. It requires Playwright
-Chromium. Reports are `.generated/search-index-report.json` and
+Chromium. Queries with `maxRank` are individual required gates (the new feature
+queries require a relevant destination in the top three); they cannot be hidden
+by the overall benchmark's 90% top-five threshold. Reports are `.generated/search-index-report.json` and
 `.generated/search-report.{json,md}`; the evaluation records the built artifact's
 SHA-256. CI runs this gate and uploads the reports. Browser tests additionally
 exercise dialog controls, mobile layouts, safe rendering, and network failures

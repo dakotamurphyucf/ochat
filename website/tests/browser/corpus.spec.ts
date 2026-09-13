@@ -51,7 +51,7 @@ test('all nine TUI bridges retain every historical heading without JavaScript', 
   }
 });
 
-test('the framework map exposes all fourteen capabilities and reaches maintained MCP integration', async ({
+test('the framework map exposes the capability catalog and reaches maintained MCP integration', async ({
   browser,
 }) => {
   const context = await browser.newContext({
@@ -65,7 +65,7 @@ test('the framework map exposes all fourteen capabilities and reaches maintained
     const navigation = page.getByRole('navigation', {
       name: 'Framework capabilities',
     });
-    await expect(navigation.getByRole('link')).toHaveCount(14);
+    await expect(navigation.getByRole('link')).toHaveCount(16);
     await navigation
       .getByRole('link', { name: 'MCP tools and authentication' })
       .click();

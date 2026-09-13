@@ -1,26 +1,29 @@
 # ChatMD shell runtime extensions
 
-Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` is a legacy
-local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 Shell runtimes can delegate project-specific decisions to ChatML scripts or
 custom executables without adding OCaml code. Extensions remain subordinate to
 manifest authorization, administrative ceilings, worker-runtime confinement,
 resource limits, typed protocols, and output redaction.
 
+Start with [custom shell decisions](../tutorials/shell-customization.md) for a
+complete project: enforce full-report evidence, retain review state, and defer
+later requests to a user. The alternate entry point demonstrates the stock
+tool-free model reviewer. Use the contracts below when adapting those examples.
+
+For a larger composition, inspect the [engineering assistant](../applications/guarded-engineering.md).
+Follow [host authorization and administration](chatmd-shell-host-integration.md)
+when starting your reviewed configuration.
+
 ## Extension points
 
-| Extension | Input | Result |
+| Extension | Use it when you need | Input → result |
 |---|---|---|
-| Dynamic matcher | Normalized command context | Match/no-match. |
-| Reviewer | Approval request and allowed scopes | Defer, approve, deny, or rewrite. |
-| Before-interceptor | Prepared command context | Continue, rewrite, synthesize result, or reject. |
-| After-interceptor | Finalized command result | Replace result or reject. |
-| Effect analyzer | Command context | Add or explicitly replace effects. |
-| Audit filter | Already-redacted event | Remove/redact mutable fields. |
+| [Dynamic matcher](#dynamic-matchers) | A policy condition based on project-specific command context | Normalized context → match/no-match |
+| [Reviewer](#chatml-reviewers) | Stateful approval decisions or contextual judgment from a [reviewer agent](#model-reviewers) | Approval request and allowed scopes → defer, approve, deny or rewrite |
+| [Before-interceptor](#interceptors) | Validate or transform a prepared command | Command context → continue, rewrite, synthesize result or reject |
+| [After-interceptor](#interceptors) | Transform a completed result before it is returned | Finalized result → replacement result or rejection |
+| [Effect analyzer](#effect-analyzers) | Describe the effects of a project-specific executable | Command context → added or explicitly replaced effects |
+| [Audit filter](#audit-filters) | Further reduce sensitive data retained in an audit event | Already-redacted event → mutable fields removed/redacted |
 
 Hard policy denial runs before an interceptor. A rewrite always restarts the
 complete resolution, effect, capability, policy, approval, planning, and
@@ -172,15 +175,17 @@ timeouts follow `failure`, which may not widen access.
     id="model-security"
     kind="model"
     agent="security-reviewer"
-    model="gpt-5"
+    model="gpt-6-astra"
     failure="deny"/>
 ```
 
 The reviewer receives a bounded redacted prompt and must produce one strict
-versioned JSON decision. Markdown fences, prose, duplicate/unknown fields,
+JSON decision. Markdown fences, prose, duplicate/unknown fields,
 unsupported scopes/actions, malformed expiration, excessive output, timeout,
-or transport failure fail closed. Tools are disabled by default; a reviewer
-must not use the shell request it is evaluating.
+or transport failure fail closed. The stock adapter runs a fixed tool-free prompt;
+`agent` labels the reviewer and does not load a ChatMD file or resolve an agent
+tool. Custom hosts can supply a different model-completion adapter. The native
+example does not grant the reviewer tools or access to the shell being reviewed.
 
 ## Interceptors
 

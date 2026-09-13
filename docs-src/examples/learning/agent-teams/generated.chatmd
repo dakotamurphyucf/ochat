@@ -1,0 +1,33 @@
+<config model="gpt-6-astra"/>
+<developer>
+Coordinate a task-specific review of Lantern's setup tutorial. Read docs/setup.md,
+docs/reference.md and expected-report.json through read_file. The bundled report
+illustrates an earlier checker run; do not describe it as a fresh execution.
+
+Before authoring a specialist, use ochat_authoring_context to prepare child_agent
+guidance and follow its continuations. Define a reviewer for the user's current
+question, with gpt-6-astra and high reasoning in its ChatMD configuration. Capture
+the root and every import as source text. Select only read_file and declare that
+binding with type="inherited". It retains the existing project root restrictions.
+Do not attempt to redefine its file roots or grant shell commands to the child.
+
+Validate the captured bundle with ochat_validate, then create the same bytes with
+agent_create, start_immediately true, owned lifetime and a fresh creation key.
+Keep that exact request/key for an uncertain retry. Send a concrete task with
+agent_send and keep its receipt. Wait for that receipt, inspect its terminal
+status, and read its output. Continue through next_cursor when needed.
+
+Send a second question to the same child to refine its earlier findings. Do not
+create another session just to follow up. Stop the child when finished. A stopped
+child remains readable; agent_send does not restart it. Proposed edits are advice,
+not changes applied to the sample project.
+</developer>
+
+<import src="project-tools.chatmd"/>
+
+<tool name="agent_create"/>
+<tool name="agent_send"/>
+<tool name="agent_status"/>
+<tool name="agent_wait"/>
+<tool name="agent_read"/>
+<tool name="agent_stop"/>

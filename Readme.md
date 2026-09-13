@@ -2,7 +2,7 @@
 
 **Your instructions. Your tools. Your workflow.**
 
-[Website and documentation](https://ochatlabs.com/) · [Run your first agent](https://ochatlabs.com/docs/start/first-agent/) · [Explore applications](https://ochatlabs.com/applications/)
+[Website and documentation](https://ochatlabs.com/) · [Run your first agent](https://ochatlabs.com/docs/start/first-agent/) · [Explore applications](https://ochatlabs.com/docs/applications/)
 
 Ochat lets you define an AI agent in a text file and run it against your project.
 Use it to understand unfamiliar code, review changes, update documentation, or
@@ -393,6 +393,11 @@ a reusable custom tool, and a stateful moderator that coordinates a conversation
 You can write these yourself or expose authoring tools so an agent can generate
 programs when the task calls for them.
 
+Start with [ChatML execution choices](https://ochatlabs.com/docs/concepts/chatml/),
+[subagent patterns](https://ochatlabs.com/docs/guides/subagents/), or
+[custom shell capabilities and guardrails](https://ochatlabs.com/docs/concepts/shell-access/)
+to choose the pieces for your workflow. The table below links their exact contracts.
+
 | Capability | What you can build | Guide and examples |
 |---|---|---|
 | **Tool-using programs** with `run_chatml` | Read several reports, validate their contents, and aggregate results with explicit program logic in one tool invocation. | [One-off computations](docs-src/guide/chatml-authoring-runtime.md#one-off-tool-using-computations) |
@@ -416,15 +421,19 @@ ownership and restart behavior. Generated children select from the parent's
 delegable tools and retain their file and shell restrictions, while choosing
 their own instructions and model settings.
 
-One application is a **living documentation lab**: a coordinator assigns tutorials
+The complete [living documentation lab](https://ochatlabs.com/docs/applications/documentation-lab/)
+shows a coordinator that assigns tutorials
 to persistent reviewers, runs approved example commands as background jobs,
 collects failures, and asks a writer to propose corrections. A moderator tracks
 which checks and reviews are complete and delivers updates as results arrive.
-These are building blocks for your workflow; the lab itself is an application
-you can build with them.
+Its walkthrough includes the complete source, private host setup, staged rechecks
+and an evidence-linked report. Compare the
+[guarded engineering assistant](https://ochatlabs.com/docs/applications/guarded-engineering/)
+and [persistent review team](https://ochatlabs.com/docs/applications/persistent-review-team/)
+for smaller compositions you can adapt first.
 
 Start with the [ChatML workflow overview](docs-src/chatml/README.md) or inspect
-the [complete example bundles](test/chatml_extensibility_fixtures/README.md).
+the [complete example bundles](docs-src/examples/README.md).
 Authoring tools are opt-in through ChatMD declarations. By default, declaring
 tools such as `run_chatml` or `agent_create` also supplies a shared authoring
 primer and documentation/validation helpers; authors can choose manual guidance

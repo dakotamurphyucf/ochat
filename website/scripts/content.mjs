@@ -37,6 +37,11 @@ import {
   supplementalInventory,
   capabilityCoverage,
 } from './publication-policy.mjs';
+import {
+  tutorialNeighbors,
+  resolveTutorialPaths,
+} from '../config/tutorial-paths.mjs';
+
 export const websiteRoot = fileURLToPath(new URL('../', import.meta.url));
 export const languageAliases = {
   chatml: 'ocaml',
@@ -54,7 +59,8 @@ export function pageMetadata(
     return { link: e.route, label: e.title };
   };
   const related = entry.related || [];
-  const lesson = tutorials.findIndex((t) => t.page === entry.id);
+  const isLesson = tutorials.some((t) => t.page === entry.id);
+  const lesson = isLesson ? tutorialNeighbors(entry.id) : undefined;
   return {
     title: entry.title,
     description: entry.description,
@@ -66,13 +72,12 @@ export function pageMetadata(
     lastUpdated: provenance.lastUpdated
       ? new Date(provenance.lastUpdated)
       : false,
-    prev: lesson > 0 ? neighbor(tutorials[lesson - 1].page) : false,
-    next:
-      lesson >= 0 && lesson < tutorials.length - 1
-        ? neighbor(tutorials[lesson + 1].page)
-        : related.length
-          ? neighbor(related[0])
-          : false,
+    prev: lesson?.previous ? neighbor(lesson.previous) : false,
+    next: lesson
+      ? neighbor(lesson.next)
+      : related.length
+        ? neighbor(related[0])
+        : false,
     head:
       !isProduction || entry.noindex
         ? [
@@ -286,6 +291,7 @@ export async function generate({
         entries,
         { root, tracked, revision: facts.revision },
       );
+      resolveTutorialPaths(tutorials);
       for (const tutorial of tutorials) {
         const page = pages.find((p) => p.id === tutorial.page);
         page.effectiveVerification = tutorial.verification.state;

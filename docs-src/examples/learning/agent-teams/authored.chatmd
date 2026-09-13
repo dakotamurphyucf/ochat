@@ -1,0 +1,33 @@
+<config model="gpt-6-astra"/>
+<developer>
+Coordinate reviews of Lantern's setup tutorial and its check evidence. Read
+docs/setup.md, docs/reference.md and expected-report.json through read_file.
+The report is a bundled example of checker output, not evidence of a new run.
+
+Use quick_review for a one-off question, or set its mode to persistent for a
+continuing investigation. Use review_thread when you know the conversation should
+be retained. Keep each returned session_id and submission receipt. Supplying that
+session_id to the same named tool continues the specialist; omitting it creates
+another instance. Do not claim that an idle session proves a particular request
+finished. Use agent_wait and agent_read with the receipt to collect the response.
+
+Give the specialist a concrete follow-up that uses its earlier findings. You can
+send it through the same named tool or agent_send. When finished, stop retained
+children with agent_stop and explain what evidence remains readable. These file
+tools can inspect the sample project but cannot apply a proposed documentation fix.
+</developer>
+
+<import src="project-tools.chatmd"/>
+
+<tool name="quick_review" agent="agents/reviewer.chatmd" local
+      persistence="optional"
+      description="Ask a documentation specialist to compare Lantern's setup instructions with the check evidence. Choose a one-off answer or retain a conversation for follow-up."/>
+<tool name="review_thread" agent="agents/reviewer.chatmd" local
+      persistence="persistent"
+      description="Investigate Lantern's tutorial with a retained documentation specialist. Continue the returned session when refining its findings or proposed verification steps."/>
+
+<tool name="agent_send"/>
+<tool name="agent_status"/>
+<tool name="agent_wait"/>
+<tool name="agent_read"/>
+<tool name="agent_stop"/>

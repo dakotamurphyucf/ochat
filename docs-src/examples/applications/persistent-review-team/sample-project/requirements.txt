@@ -1,0 +1,12 @@
+Lantern tutorial release requirements
+
+1. State the working directory and exact check command.
+2. Explain the current expected result, including the deliberate failing check.
+3. Propose a verification section with evidence for its wording.
+4. Before claiming the corrected tutorial passes, apply the proposal in a separate
+   working copy and capture a new real check result.
+5. Keep reviewer disagreement and missing evidence visible in the final report.
+
+The bundled expected-report.json records the original sample result. It is not
+evidence that this review session ran the checker. This agent team has read access
+only; corrections and a new run must be performed separately.

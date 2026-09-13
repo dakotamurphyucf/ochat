@@ -1,6 +1,22 @@
 # Tools – built-ins, agent tools, shell wrappers & MCP
 
-This page documents **tool calling** in ochat/ChatMD: how you declare tools in a prompt, what built-ins ship with ochat, and how to extend capabilities via **agent tools**, **shell wrappers**, and **MCP** (Model Context Protocol).
+Use tools to turn an agent's instructions into useful actions. ChatMD can select
+built-ins, configure shell capabilities, call specialists, expose ChatML programs
+and connect MCP services.
+
+| What you want to add | Tool form | Learn by building |
+| --- | --- | --- |
+| An existing Ochat capability | Built-in tool | [Read project files](../tutorials/file-tool.md) |
+| A command with custom capabilities and guardrails | Shell tool bound to a named runtime | [Separate inspection and check runtimes](../tutorials/shell-guardrails.md) |
+| Another model's expertise | Authored agent tool, one-off or persistent | [Call a specialist](../tutorials/specialist.md), then [keep its conversation](../tutorials/persistent-specialist.md) |
+| Deterministic reusable tool logic | Standalone ChatML script tool | [Build a report tool](../tutorials/chatml-tool.md) |
+| A custom action that depends on retained workflow state | Moderator-handled tool | [Build a stateful review ledger](../tutorials/stateful-workflow.md) |
+| An existing external tool service | MCP integration | [Connect an MCP server](#mcp-tool-catalogs) |
+
+An agent can also use the [authoring tools](../guide/authoring-context-tool.md)
+to write a one-off tool-using program or define a generated specialist. Those
+requests use the capabilities delegated by their caller; they do not invent new
+shell implementations or widen file access.
 
 Tools are **opt-in** through ChatMD declarations. Selecting an authoring tool can
 also select its documentation helpers under the configured
@@ -343,6 +359,8 @@ See [ChatMD shell tools](chatmd-shell-tools.md), the
 [worked examples](../guide/chatmd-shell-examples.md).
 
 ---
+
+<a id="mcp-tool-catalogs"></a>
 
 ## MCP tools – import remote tool catalogs
 

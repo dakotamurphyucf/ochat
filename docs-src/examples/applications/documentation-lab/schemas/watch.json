@@ -1,0 +1,11 @@
+{
+  "type":"object",
+  "properties":{
+    "tutorial_id":{"type":"string","enum":["passing","broken"]},
+    "role":{"type":"string","enum":["reviewer","writer"]},
+    "session_id":{"type":"string"},
+    "receipt_id":{"type":"string"}
+  },
+  "required":["tutorial_id","role","session_id","receipt_id"],
+  "additionalProperties":false
+}

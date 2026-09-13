@@ -1,0 +1,23 @@
+<shell_access id="checks-base" extends="builtin:workspace-development@1"
+              cwd="${workspace}/sample-project">
+  <capabilities sandbox="required" network="false" child_processes="true"
+                arbitrary_code="true" privilege_change="false" merge="replace">
+    <read path="${workspace}/sample-project"/>
+    <read path="/bin"/>
+    <read path="/usr/bin"/>
+    <write path="${workspace}/reports"/>
+  </capabilities>
+
+  <environment inherit="selected">
+    <set name="PATH" value="/usr/bin:/bin"/>
+    <set name="LC_ALL" value="C"/>
+  </environment>
+
+  <limits wall_time="10s" max_stdin="0B" stdout="16KiB" stderr="4KiB"
+          total_output="20KiB"/>
+
+  <policy default="deny" merge="replace">
+    <rule id="run-checker" action="allow"><basename value="sh"/></rule>
+    <rule id="review-report" action="ask"><argument value="--write-report"/></rule>
+  </policy>
+</shell_access>

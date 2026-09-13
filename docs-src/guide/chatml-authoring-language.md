@@ -90,8 +90,10 @@ signatures, module type declarations or module-local type declarations.
 <!-- ochat-authoring-example: {"id":"language.closures-loops-recursion","surface":"one_off_v1","result":"6:10:true"} -->
 ```ocaml
 let offset = 10
+
 module Totals = struct
   let captured () = offset
+
   let sum values =
     let index = ref(0) in
     let total = ref(0) in
@@ -101,12 +103,19 @@ module Totals = struct
     done;
     !total
 end
+
 let offset = 99
+
 let rec even n = if n == 0 then true else odd(n - 1)
 and odd n = if n == 0 then false else even(n - 1)
+
 let main input =
   let total = Totals.sum([1, 2, 3]) in
-  Task.pure(`String(to_string(total) ++ ":" ++ to_string(Totals.captured()) ++ ":" ++ to_string(even(total))))
+  Task.pure(`String(
+    to_string(total) ++ ":" ++
+    to_string(Totals.captured()) ++ ":" ++
+    to_string(even(total))
+  ))
 ```
 
 ## Matching and explicit data types
@@ -137,18 +146,23 @@ written as explicit annotation syntax.
 <!-- ochat-authoring-example: {"id":"language.recursive-data-and-record-patterns","surface":"one_off_v1","result":"total=7"} -->
 ```ocaml
 type expression = [ `Value(int) | `Add(expression, expression) ]
+
 let rec evaluate : expression -> int =
   fun expression ->
     match expression with
     | `Value(value) -> value
     | `Add(left, right) -> evaluate(left) + evaluate(right)
+
 let label record =
   match record with
   | {name = name; _} -> name
+
 let main input =
   let expression = `Add(`Value(3), `Value(4)) in
   let details = {name = "total"; expression = expression} in
-  Task.pure(`String(label(details) ++ "=" ++ to_string(evaluate(details.expression))))
+  Task.pure(`String(
+    label(details) ++ "=" ++ to_string(evaluate(details.expression))
+  ))
 ```
 
 Do not treat successful inference as validation of a tool's JSON arguments or

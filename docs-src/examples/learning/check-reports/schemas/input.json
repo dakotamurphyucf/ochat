@@ -1,0 +1,12 @@
+{
+  "type": "object",
+  "properties": {
+    "files": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Report filenames relative to the reports root."
+    }
+  },
+  "required": ["files"],
+  "additionalProperties": false
+}

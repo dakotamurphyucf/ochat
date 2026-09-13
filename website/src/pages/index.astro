@@ -17,7 +17,11 @@ import {
 import hero from '../../.generated/hero.json';
 import '../styles/home.css';
 const capabilities = applications.applications.filter((a) =>
-  ['repository-onboarding', 'research-brief', 'headless-report'].includes(a.id),
+  [
+    'guarded-engineering',
+    'persistent-review-team',
+    'documentation-lab',
+  ].includes(a.id),
 );
 ---
 
@@ -168,7 +172,10 @@ const capabilities = applications.applications.filter((a) =>
         <div class="section-intro">
           <p class="eyebrow">Build around your work</p>
           <h2 id="build-title">What would you like to get done?</h2>
-          <p>Three ways to start. More applications when you’re ready.</p>
+          <p>
+            Three complete projects, from useful tools to continuing agent
+            workflows.
+          </p>
         </div>
         <div class="capability-grid">
           {
@@ -209,27 +216,27 @@ const capabilities = applications.applications.filter((a) =>
         <div class="benefits-grid">
           <article>
             <WorkflowIcon kind="Documentation" /><h3>
-              Keep the workflow with the work.
+              Give tools useful guardrails.
             </h3><p>
-              Review and share changes to an agent’s instructions and tools
-              alongside your project.
-            </p><a href="/docs/concepts/chatmd/">Understand ChatMD →</a>
+              Define reusable shell runtimes for inspection, builds, and tests.
+              Customize decisions with ChatML rules and reviewer agents.
+            </p><a href="/docs/concepts/shell-access/">Design shell access →</a>
           </article>
           <article>
             <WorkflowIcon /><h3>Give specialists a reusable role.</h3><p>
-              Define a reviewer once. Call it from another agent, with its own
-              instructions and selected tools.
-            </p><a href="/docs/tutorials/specialist/">Connect two agents →</a>
+              Keep a reviewer conversation for follow-up, or let an agent create
+              a specialist for the task with selected inherited tools.
+            </p><a href="/docs/guides/subagents/"
+              >Choose a delegation pattern →</a
+            >
           </article>
           <article>
             <WorkflowIcon kind="Automation" /><h3>
               Add control as you need it.
             </h3><p>
-              Run a request from a script, react to events with ChatML, or let a
-              daemon host own longer work.
-            </p><a href="/docs/applications/background-workflow/"
-              >Explore hosted workflows →</a
-            >
+              Sequence tools, retain workflow state, and deliver background
+              results through ChatML scripts and conversation moderators.
+            </p><a href="/docs/concepts/chatml/">Program the workflow →</a>
           </article>
         </div>
       </section>

@@ -1,14 +1,11 @@
 # ChatMD shell runtime security
 
-Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
-The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` is a legacy
-local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
-management does not accept daemon IDs as a way to select daemon state.
-
 This guide explains how ochat decides whether a shell request may run and what
 the operating system actually confines. It complements the
 [language reference](../overview/chatmd-shell-runtime.md).
+Start with the [guardrails lesson](../tutorials/shell-guardrails.md) for a runnable
+example, and use [host-specific authorization](chatmd-shell-host-integration.md)
+for native-local, legacy or daemon startup.
 
 ## Four separate security questions
 
@@ -140,6 +137,14 @@ commands over the same tree. See
   state changes. It remains subject to hard denies.
 
 ### Sandbox modes
+
+On macOS Seatbelt, enabling child processes allows their executable paths within
+the runtime's admitted read roots, writable roots and system support roots.
+Declare any additional executable directories needed by a shell or build tool,
+such as `/bin` and `/usr/bin`; permission to fork alone is not enough to run a
+helper. Child processes inherit the sandbox's filesystem and network restrictions.
+Command policy reviews the requested top-level command, not every subprocess it
+may launch. See the [complete checker example](../tutorials/shell-guardrails.md).
 
 - `required`: only a backend recognized for confinement may run. No direct
   fallback exists.

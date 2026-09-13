@@ -1,0 +1,10 @@
+{
+  "type": "object",
+  "properties": {
+    "ready": {"type": "boolean"},
+    "wait": {"type": "object"},
+    "output": {"type": ["object", "null"]}
+  },
+  "required": ["ready", "wait", "output"],
+  "additionalProperties": false
+}

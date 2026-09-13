@@ -9,31 +9,31 @@
     "page": "tutorials/file-tool",
     "outcome": "Read a real file through an explicitly configured tool root.",
     "requires": "The first-agent lesson and the bundled Lantern reference directory.",
-    "nextBenefit": "Connect a specialist with its own review instructions."
+    "nextBenefit": "Connect a specialist or add a shell tool with explicit guardrails."
   },
   {
     "page": "tutorials/specialist",
     "outcome": "Delegate a documentation review from one agent to another.",
     "requires": "File-tool basics; keep both agent definitions beside one another.",
-    "nextBenefit": "Save an entire request and response from a script."
+    "nextBenefit": "Choose another learning path or explore persistent and generated specialists."
   },
   {
     "page": "cli/chat-completion",
     "outcome": "Save a ChatMD conversation from one headless request.",
     "requires": "Installed Ochat, configured provider, and a fresh output filename.",
-    "nextBenefit": "Add a small script that controls when a session ends."
+    "nextBenefit": "Host continuing work in a daemon when it should outlive a client connection."
   },
   {
     "page": "tutorials/workflow",
     "outcome": "Ask the host to stop after three completed turns.",
     "requires": "Local-agent basics, both bundled files, and a compatible ChatML host.",
-    "nextBenefit": "Learn how a specific shell command is declared and authorized."
+    "nextBenefit": "Keep workflow state behind a named moderator-handled tool."
   },
   {
     "page": "agent-server/tutorials/shell-agent",
-    "outcome": "Inspect and authorize one fixed working-directory command.",
-    "requires": "Installed Ochat, supported shell runtime, and the host-specific authorization path.",
-    "nextBenefit": "Move an agent into a private daemon host."
+    "outcome": "Read real setup instructions through a fixed shell tool and an explicit runtime.",
+    "requires": "Installed Ochat, required sandbox backend, provider setup and the complete Lantern bundle.",
+    "nextBenefit": "Add a checker with its own output permissions and approval policy."
   },
   {
     "page": "agent-server/tutorials/unix-daemon",
@@ -45,7 +45,7 @@
     "page": "background",
     "outcome": "Observe a timer owned by the host rather than the terminal.",
     "requires": "The private-daemon setup; the included timer itself needs no model request.",
-    "nextBenefit": "Connect through the local stdio protocol."
+    "nextBenefit": "Run real background checks or return to the learning paths."
   },
   {
     "page": "stdio",
@@ -58,5 +58,53 @@
     "outcome": "Initialize an authenticated HTTP connection to a local daemon.",
     "requires": "The private HTTP daemon configuration and generated bearer-token file.",
     "nextBenefit": "Choose an application and adapt its complete source bundle."
+  },
+  {
+    "page": "tutorials/chatml-program",
+    "outcome": "Count repeated failures across project reports using a one-off program and admitted file tools.",
+    "requires": "File-tool basics, the complete extracted bundle, and native local Ochat with provider configuration.",
+    "nextBenefit": "Give this calculation a stable tool name, input schema and selected tool dependencies."
+  },
+  {
+    "page": "tutorials/chatml-tool",
+    "outcome": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
+    "requires": "File-tool basics, the complete extracted bundle, and native local Ochat with provider configuration.",
+    "nextBenefit": "Use a moderator when behavior must react to conversation events."
+  },
+  {
+    "page": "tutorials/shell-guardrails",
+    "outcome": "Run project checks and approve report writes using separate shell runtimes.",
+    "requires": "Shell inspection basics, the complete bundle, /bin/sh and awk, and an empty reports directory.",
+    "nextBenefit": "Customize decisions with ChatML hooks and reviewer agents."
+  },
+  {
+    "page": "tutorials/shell-customization",
+    "outcome": "Enforce a report rule with ChatML and retain decisions before deferring to a user.",
+    "requires": "The guardrails lesson, complete bundle, configured provider and required shell backend.",
+    "nextBenefit": "Combine custom capabilities with specialist agents and larger workflows."
+  },
+  {
+    "page": "tutorials/persistent-specialist",
+    "outcome": "Choose one-off or persistent review, send follow-up context, and track the same specialist through receipts and lifecycle tools.",
+    "requires": "One-off specialist basics, the complete Lantern bundle, provider configuration and its private durable daemon.",
+    "nextBenefit": "Let the parent define a specialist for the current task."
+  },
+  {
+    "page": "tutorials/generated-specialist",
+    "outcome": "Discover authoring guidance, validate a captured reviewer, and keep a child with inherited project file access.",
+    "requires": "One-off specialist basics, the complete Lantern bundle, provider configuration and its private durable daemon.",
+    "nextBenefit": "Coordinate several retained specialists using ChatML workflows."
+  },
+  {
+    "page": "tutorials/stateful-workflow",
+    "outcome": "Record and revise findings across turns using a moderator-handled tool with retained state.",
+    "requires": "File tools, reusable tool schemas, the three-turn moderator, and the complete Lantern bundle.",
+    "nextBenefit": "Start a real check in the background and deliver its result later."
+  },
+  {
+    "page": "tutorials/background-results",
+    "outcome": "Start the real documentation checker, inspect or cancel its job, and deliver terminal evidence as a separate notification.",
+    "requires": "Stateful moderator tools, shell guardrails, the complete Lantern bundle and explicit shell-manifest authorization.",
+    "nextBenefit": "Combine checks with continuing specialists and a durable host."
   }
 ]

@@ -1,0 +1,32 @@
+(version 1)
+(server
+ ((data_dir ./private-data)
+  (unix_socket ./agent.sock)
+  (http ((enabled false)))))
+(workspaces
+ (((id lantern)
+   (source (physical ./sample-project))
+   (access read_only)
+   (prompt_limits
+    (((prompt authored) (max_root_agents 2) (overflow queue))
+     ((prompt generated) (max_root_agents 2) (overflow queue)))))))
+(prompts
+ (((id authored)
+   (path ./authored.chatmd)
+   (description "Keep a conversation with an authored Lantern specialist")
+   (allowed_workspaces (lantern))
+   (permission_profile reader)
+   (enabled true))
+  ((id generated)
+   (path ./generated.chatmd)
+   (description "Create a task-specific Lantern specialist")
+   (allowed_workspaces (lantern))
+   (permission_profile reader)
+   (enabled true))))
+(permission_profiles
+ (((id reader)
+   (tool_default allow)
+   (approval_timeout none)
+   (approval_fallback deny)
+   (manifest_authorization require_grant))))
+(manifest_grants ())

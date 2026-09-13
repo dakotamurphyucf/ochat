@@ -178,7 +178,7 @@ let implementation_sources =
   ; ( "lib/agent_server/session_helper_policy.ml"
     , "e88605f0d6f0fc512589ccd9546e5f8e741216dfa321ec66919b64c88d2958e1" )
   ; ( "lib/shell_access/shell_access_v2.ml"
-    , "e9988ac61d5d9c4791593524a8720fe2cdcdcb9859e41668e6ee5501fe90d669" )
+    , "e10c5709588bca7998686a275ea3b3620d809ae50f51549af56343a4248f1e87" )
   ; ( "lib/agent_server/delegated_runtime.ml"
     , "b2f4ae578f7dddd08bb5503f16af4a9c86c5b87c2c5250f318a425103297c374" )
   ; ( "lib/agent_server/delegation_lifecycle.ml"
@@ -253,87 +253,87 @@ let implementation_sources =
 let topic_contracts =
   [ ( "one_off_v1"
     , "runtime.native.requests"
-    , "09c7bedf200f0fe211e45bcc5cd455698a1aa0efbc51d29b8989c9f6b14ac7dc" )
+    , "4e0611511a4a060a1d9825bc414f6227b81c7129cd30952150d75e458249da90" )
   ; ( "one_off_v1"
     , "authoring.reference"
     , "551884bf0e3eec7b15c19abef77502c75744211a8a51494ca79cf603e9c56e97" )
   ; ( "one_off_v1"
     , "runtime.delegation.generated"
-    , "d8daa181939191567d90d55c2e25259be9370301244dfe3eb9151ec701bd538d" )
+    , "51825c9cdf0c8e1b9565bd5a3d4fd128e199f143106c1e0cd6d1c87226b6330e" )
   ; ( "one_off_v1"
     , "runtime.delegation.creation"
-    , "543010592ea159f7dddb6cdbfb6dae2ccf7c4bb1905d4d0b8189003cf1d190a8" )
+    , "c9f79dadcfb5990b44148869e667f79c5bf0ba3be5bf8f6e6b4d6b794bebe77a" )
   ; ( "one_off_v1"
     , "runtime.delegation.submissions"
-    , "dcf30943d314154d12de52f2cc8900e63aaf75f20d210b545bc330909a8d0c16" )
+    , "7fe70ca8323053796cb17998911a0df79e4d723b2fb420c15943eb0e5ec1e178" )
   ; ( "one_off_v1"
     , "runtime.delegation.output"
-    , "fd167a0da6ef40b429c7ad12156ffb47bb565486d7abb8e696c367ee3d92fcf0" )
+    , "59fd80e10afdbe32cb8cf4f71e786b4ae0c7b0b9fd7ecf54ab64b970b70ddd36" )
   ; ( "one_off_v1"
     , "runtime.delegation.stop-helper"
-    , "c12f043839e9f184e7f2395e13ac402e0e82d1bdf166eec7b9dead8bd96c6494" )
+    , "5f36e18640b9c6d3aef770083de9cb563e6497f33473d855d5dde83ecd8b65e0" )
   ; ( "tool_v1"
     , "runtime.native.requests"
-    , "d084b1608c50650c32353aead7cfaed7445fed84d884db9611ecaa5ab89b5ebf" )
+    , "02325a15bb50a98d9798c025a0a1b0e03d2e13f69390081944d9edef6cfcf5b4" )
   ; ( "tool_v1"
     , "authoring.reference"
     , "dd874d6d66ab4fd587ad87e581c41eb6600770a503fd9194ced62ae506e0f4ca" )
   ; ( "tool_v1"
     , "runtime.delegation.generated"
-    , "70ff2d002d3573bfd7731e16751c6d6ec5577f74c809c684cc4b936e3d39eedd" )
+    , "6194fe03328947d9fa4a4515cb7a293ea373f96e326b5a3345e59126820599d4" )
   ; ( "tool_v1"
     , "runtime.delegation.creation"
-    , "3ec1ca9287381c7c029ea8c8f804afa190d48efc24534a3c94c503b99e0fd083" )
+    , "7e6f09d2b34d59b254cafd7c7a1712dd0106d4040f750e85e9d3c4aff9488c04" )
   ; ( "tool_v1"
     , "runtime.delegation.submissions"
-    , "95ec4c4d739147c94a4757a9ccc028b8a40bb6b9379517339973357b5dfaade3" )
+    , "b340aa765c9878f39461d51e9177e575ada9606e4170ac7736f3e9399f95736b" )
   ; ( "tool_v1"
     , "runtime.delegation.output"
-    , "b07919d4dbe728cb99eb37079c878cf31af2a9db6f6170414a4f5f7f5b479e7a" )
+    , "88f216873e967bc650ac9e19bba62f4b4ce2a5a98c61aa961915edbae7fa72a8" )
   ; ( "tool_v1"
     , "runtime.delegation.stop-helper"
-    , "54e1b1da0217ef6d8eb5917509290d35d2ffc5cad321ad8e32cbde279b43704d" )
+    , "75b0cb98767b3a7a6716266bd2b297471a7f492afbbab29267cb77510c080370" )
   ; ( "moderator_v1"
     , "runtime.native.requests"
-    , "512b52de2fc45cae058c6494f75fe076526b9d8d07002f89db269cf04c65b000" )
+    , "a53edf3b450b1e3bc159be090d9dae6bc3f17ec6ca299dac919da9e59346a09a" )
   ; ( "moderator_v1"
     , "authoring.reference"
     , "ad8e067d874c286eb4b067084b9558113617985ba0a190284290c15c583c3294" )
   ; ( "moderator_v1"
     , "runtime.delegation.generated"
-    , "b6241b4833bceacec70ef91bda6b3c87bccef0a3b62111b592ea42084a322fd4" )
+    , "b25d5553c8cbdb15258451a2967df007cf89669345cb89e8c26f8174942c59c1" )
   ; ( "moderator_v1"
     , "runtime.delegation.creation"
-    , "5356e63f99f7e28e22d4412e87ca6761ec2524cf04b10b3aaad0220cdafb2b52" )
+    , "c0d6f7b97036ab1774f39e1d252f0ef8a1d7cfe642668451d9b4e6f561deffbd" )
   ; ( "moderator_v1"
     , "runtime.delegation.submissions"
-    , "7d1731bb4554cbeba5140b6c1e38ec2ebe9e4282715680275b3ee06414356308" )
+    , "c00a9a96e46108ac8e925ad16a0e5e23e3da5a44ed91075278b42ade6e515e3e" )
   ; ( "moderator_v1"
     , "runtime.delegation.output"
-    , "c3c851b850dbb289dd70a0d2bd04551297676dcf8bb5e721e40bc8c37f670e3c" )
+    , "d0eb68cb1c23a1683bdb63d3ad1f451c430b91f4b7feba42053f063b1390698d" )
   ; ( "moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "dae6fcbd8731910084a8c7c3d883c6faedafecb8296cca15b7b3dbf0c57e3039" )
+    , "cbeec59ca7da50494458c68aff150786458b6cc0d73e70b41b983b3e9ea879c5" )
   ; ( "delegated_moderator_v1"
     , "runtime.native.requests"
-    , "43eb24a817ff7cce9cb717e88013f2cb32f3ee32d1749bc341ce1966c88bbb91" )
+    , "4649c8a1085768c7496e036df2e710439927d2df79826fe0d73a5a95e0e7fd61" )
   ; ( "delegated_moderator_v1"
     , "authoring.reference"
     , "4abe98ad1b9f860a28a97775f1c35c2e232f41f4c8c93e6e3c7ceb78ba38bd40" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.generated"
-    , "015407d4e4540f4cca2adcdc2876a8f7176c3a76e6544f8d68e7f328f0d7109d" )
+    , "f8cff031f2db36753e411d0fcc70ad74e5ef800049a87eb5aff60e6f2bbb44bc" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.creation"
-    , "3be4eb8770de4bb8511db71d015d517e2e264fbc933a5fa5276f8f43e015a5ec" )
+    , "ef170f487b64aa45c346d7190e35042cc1eb7f1a6c62ec96a82e1fd64c984d6f" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.submissions"
-    , "c858150743613938e6f2fc76fad0077bc5600fd83807bd384a402574613e35fb" )
+    , "c6a17f744e2aebc362b21ec13db375e64998abfa1ac10ce7a4d10598b4675940" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.output"
-    , "bb9f7dfd0cd3c0432f9147e22c451a3a015226baa4cca0fb6fe4660593580a94" )
+    , "6a909102631cb52501d44b2e42a438efa8a8f2d23847dd4885fd3596b4451720" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "d69d35d2ae84329aed3318440dbaada8e2f63fa1c97b338367c531ab649456ed" )
+    , "4a31e0e615c6205a34881181ec4a5b1c3c2291f808aff4b633c03817272e7827" )
   ]
 ;;

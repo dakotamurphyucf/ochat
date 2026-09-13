@@ -86,28 +86,28 @@ let%expect_test "runtime native catalog contracts remain paired with reviewed re
     {|
     (run_chatml runtime.native.requests
      cedc80aa5b6589d7acbe45078be963eaecb5058bfe69daf19bf896e668d68985
-     b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)
+     03b43e5e07a806af197119ecdf058e7e39d1ca6b66a9855f4ca96510b620c735)
     (agent_create runtime.delegation.creation
      f50060c1bdd22759d368f8962e1f21f2f347fdcc2bb5383d392d99025f5dd664
-     6a6783530e01cfe406cedecad6cb9642437cbce0ba98545af12c2504f74aa57f)
+     90f540279a8c721ce8a07eb86673b8f819cbc35cf63041ad3f2ac93932859a14)
     (agent_status runtime.delegation.submissions
      c948e863b277175b367e349d6edd845405843173ab2845a17dd220a0bcbe1273
-     2f8d1fd0a800aa31b2795aeecda363415d68bd80fa1bf7928f09a4821d673e25)
+     f7b0633cf01dbdaaa3e5724045cc349c4b22893c8ec9fe206bdc7ea95f84cce2)
     (agent_send runtime.delegation.submissions
      ebd399228691c35671afa1fe353623284f6eabd788c95748e7e6b38f3ebdbf0e
-     2f8d1fd0a800aa31b2795aeecda363415d68bd80fa1bf7928f09a4821d673e25)
+     f7b0633cf01dbdaaa3e5724045cc349c4b22893c8ec9fe206bdc7ea95f84cce2)
     (agent_read runtime.delegation.output
      7b7763f30e055fcc0a81a0578b08d75c7d90ccc5b7e524ead6e99b450fe8d946
-     f28bd62a783a22ef96071060afdfd1c6e0bf28af60997033cfe5030d60d73f36)
+     daadc115d9d492d0035479a4b937bfe7d114ae2ca558dbb66f10bb3ccafed2f3)
     (agent_wait runtime.delegation.output
      88196ca1f4dc34e34441e8687ffff3557e8e48215205e4cdcd0303b50a2be722
-     f28bd62a783a22ef96071060afdfd1c6e0bf28af60997033cfe5030d60d73f36)
+     daadc115d9d492d0035479a4b937bfe7d114ae2ca558dbb66f10bb3ccafed2f3)
     (agent_stop runtime.delegation.stop-helper
      d10ebc8001ca0ea8e709be0a4ee5a3d64de024e9fcff086774aba2463a9d1a6d
-     f3eb8929a24eb98735ec67a35507117fe598732b6b2c68ef7bb8a6931e485c89)
+     36142a98e010864dbed582588a5846cfcd0a032c12fcdf98790136c4fb48fb13)
     (ochat_validate runtime.native.requests
      f151690e0f4692e8aaf9aa6b4454b1306d8bcf1f4432c6759fecf5cbb1cce4f8
-     b5be857191687d720a8f68514679407a824c6603f01038ca783c9b16180fd16f)
+     03b43e5e07a806af197119ecdf058e7e39d1ca6b66a9855f4ca96510b620c735)
     (ochat_authoring_context authoring.reference
      5af75d5c259034e3e5ed36b55716575412a4b6633fc35b771a260e4ef4a3a9f3
      7684a3aa2f943911039a35d1430b4922b9383c015a1293dbaa2c18e370dcb7f7)

@@ -1,7 +1,9 @@
-import { test, expect, type Browser, type Page } from '@playwright/test';
+import { test, expect } from '@playwright/test';
+import { withNativeSourceReader } from './native-source-reader';
 import AxeBuilder from '@axe-core/playwright';
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
+import { resolveTutorialPaths } from '../../config/tutorial-paths.mjs';
 const report = JSON.parse(
   fs.readFileSync(
     new URL('../../.generated/examples-report.json', import.meta.url),
@@ -9,41 +11,44 @@ const report = JSON.parse(
   ),
 );
 
-test('all ten lessons expose their host, verification, source bundles, and real previous/next links without JavaScript', async ({
-  browser,
-}) => {
-  const context = await browser.newContext({ javaScriptEnabled: false });
-  try {
-    const page = await context.newPage();
-    await page.goto(report.tutorials[0].route);
-    for (const [index, t] of report.tutorials.entries()) {
-      await expect(page).toHaveURL(t.route);
-      const record = page.getByRole('complementary', {
-        name: 'Tutorial context and verification',
-      });
-      await expect(record).toContainText(t.host);
-      await record.locator('summary').click();
-      await expect(record).toContainText('No live provider calls');
-      await expect(record).toContainText(t.verification.platform);
-      if (index)
-        await expect(
-          page.getByRole('link', {
-            name: new RegExp(
-              'Previous.*' +
-                report.tutorials[index - 1].title.replace(
-                  /[.*+?^${}()|[\]\\]/g,
-                  '\\$&',
-                ),
-            ),
-          }),
-        ).toHaveAttribute('href', report.tutorials[index - 1].route);
-      await page.getByRole('link', { name: /Next / }).click();
+for (const learningPath of resolveTutorialPaths(report.tutorials)) {
+  test(`${learningPath.title} lessons expose host, verification and navigation without JavaScript`, async ({
+    browser,
+  }) => {
+    const context = await browser.newContext({ javaScriptEnabled: false });
+    try {
+      const page = await context.newPage();
+      for (const t of learningPath.tutorials) {
+        await page.goto(t.route);
+        await expect(page).toHaveURL(t.route);
+        const record = page.getByRole('complementary', {
+          name: 'Tutorial context and verification',
+        });
+        await expect(record).toContainText(t.host);
+        await record.locator('summary').click();
+        await expect(record).toContainText('No live provider calls');
+        await expect(record).toContainText(t.verification.platform);
+        if (t.previous)
+          await expect(
+            page.getByRole('link', {
+              name: new RegExp(
+                'Previous.*' +
+                  t.previous.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
+              ),
+            }),
+          ).toHaveAttribute('href', t.previous.route);
+        else
+          await expect(
+            page.getByRole('link', { name: /Previous / }),
+          ).toHaveCount(0);
+        await page.getByRole('link', { name: /Next / }).click();
+        await expect(page).toHaveURL(t.next.route);
+      }
+    } finally {
+      await context.close();
     }
-    await expect(page).toHaveURL('/docs/examples/');
-  } finally {
-    await context.close();
-  }
-});
+  });
+}
 
 test('catalog distinguishes complete examples, configured templates and illustrative output without JavaScript', async ({
   browser,
@@ -77,11 +82,46 @@ test('catalog distinguishes complete examples, configured templates and illustra
       page.locator('#example-search-output a[download]'),
     ).toHaveCount(0);
     await expect(page.locator('#example-narrow-shell')).toContainText(
-      'Do not combine native --local',
+      'Use --local --authorize-shell-manifest',
     );
   } finally {
     await context.close();
   }
+});
+
+test('verification retains earlier observations separately from current check status without JavaScript', async ({
+  browser,
+}) => {
+  await withNativeSourceReader(browser, async (page) => {
+    const tutorial = report.tutorials.find(
+      (item: { route: string }) => item.route === '/docs/tutorials/file-tool/',
+    );
+    await page.goto(tutorial.route);
+    await page.locator('.tutorial-record summary').click();
+    const evidence = page.locator('.tutorial-record .verification-evidence');
+    await expect(evidence).toContainText('Current check status:');
+    await expect(evidence).toContainText('Recorded evidence:');
+    await expect(evidence).toContainText(tutorial.verification.scope);
+    await expect(evidence).toContainText(tutorial.verification.observed);
+    await expect(evidence).toContainText(tutorial.verification.limitations);
+
+    await page.setViewportSize({ width: 320, height: 800 });
+    await page.goto('/docs/examples/#example-documentation-lab');
+    const application = report.examples.find(
+      (item: { id: string }) => item.id === 'documentation-lab',
+    );
+    const card = page.locator('#example-documentation-lab');
+    await card.locator('.source-details > summary').click();
+    const recorded = card.locator('.verification-evidence');
+    await expect(recorded).toContainText(application.verification.scope);
+    await expect(recorded).toContainText(application.verification.observed);
+    await expect(recorded).toContainText(application.verification.limitations);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+  });
 });
 
 test('every served source file and archive matches the declared bytes and has a working download', async ({
@@ -125,6 +165,8 @@ test('new lessons and catalog retain readable narrow layouts and accessible expa
       '/docs/tutorials/file-tool/',
       '/docs/tutorials/specialist/',
       '/docs/tutorials/workflow/',
+      '/docs/tutorials/chatml-program/',
+      '/docs/tutorials/chatml-tool/',
       '/docs/examples/',
     ]) {
       await page.goto(route);
@@ -139,9 +181,10 @@ test('new lessons and catalog retain readable narrow layouts and accessible expa
           .locator('#example-specialist .example-source > summary')
           .click();
       const source = page.locator('.example-source[open]').first();
-      await source
-        .locator('.source-file[data-source-path="LICENSE.txt"] > summary')
-        .click();
+      await source.getByRole('combobox').selectOption('LICENSE.txt');
+      await expect(
+        source.locator('[data-source-path="LICENSE.txt"] pre'),
+      ).toBeVisible();
       await page.evaluate(() => document.fonts.ready);
       expect(
         await page.evaluate(
@@ -176,59 +219,6 @@ test('tutorial instructions preserve tool, batch, and source-context qualificati
     await expect(page.locator('.sl-markdown-content')).toContainText(expected);
   }
 });
-
-// Keep catalog and guide checks independent as the example inventory grows.
-// Every case retains literal-byte, native-reading, and no-download coverage.
-async function withNativeSourceReader(
-  browser: Browser,
-  read: (page: Page) => Promise<void>,
-) {
-  const context = await browser.newContext({ javaScriptEnabled: false });
-  try {
-    const page = await context.newPage();
-    const downloads: string[] = [];
-    page.on('download', (download) =>
-      downloads.push(download.suggestedFilename()),
-    );
-    await read(page);
-    expect(downloads).toEqual([]);
-  } finally {
-    await context.close();
-  }
-}
-
-for (const example of report.examples.filter(
-  (e: { files: unknown[] }) => e.files.length,
-)) {
-  test(`catalog ${example.id} preserves all inline files without JavaScript or downloads`, async ({
-    browser,
-  }) => {
-    await withNativeSourceReader(browser, async (page) => {
-      await page.goto('/docs/examples/');
-      const viewer = page.locator(`[data-example-source="${example.id}"]`);
-      await viewer.locator(':scope > summary').click();
-      for (const file of example.files) {
-        const panel = viewer.locator(`[data-source-path="${file.path}"]`);
-        if ((await panel.getAttribute('open')) === null)
-          await panel.locator(':scope > summary').click();
-        const code = panel.locator('pre');
-        await expect(code).toBeVisible();
-        expect(await code.locator('code').textContent()).toBe(file.content);
-        await expect(code).toHaveAttribute('tabindex', '0');
-        if (file.path.endsWith('.chatml')) {
-          await expect(code).toHaveAttribute('data-language', 'ocaml');
-          expect(await code.locator('span[style]').count()).toBeGreaterThan(0);
-        }
-        await expect(code).toHaveAccessibleName(
-          `${example.title}: ${file.path} source`,
-        );
-        await expect(code.locator('user, tool, developer, script')).toHaveCount(
-          0,
-        );
-      }
-    });
-  });
-}
 
 test('tutorial entrypoints preserve inline source without JavaScript or downloads', async ({
   browser,
@@ -281,14 +271,34 @@ test('associated guide entrypoints preserve inline source without JavaScript or 
 
 test('inline reader supports keyboard file expansion and horizontal source scrolling', async ({
   page,
+  browserName,
 }) => {
+  // macOS WebKit uses Option+Tab to include buttons and links in keyboard navigation.
+  const next =
+    browserName === 'webkit' && process.platform === 'darwin'
+      ? 'Alt+Tab'
+      : 'Tab';
   await page.setViewportSize({ width: 320, height: 800 });
   await page.goto('/docs/tutorials/specialist/');
+  const picker = page.locator('.example-source select');
+  await picker.selectOption('docs-reviewer.chatmd');
   const companion = page.locator('[data-source-path="docs-reviewer.chatmd"]');
   await companion.locator('summary').focus();
   await page.keyboard.press('Enter');
+  await expect(companion.locator('pre')).not.toBeVisible();
+  await page.keyboard.press('Enter');
   await expect(companion.locator('pre')).toBeVisible();
-  await page.keyboard.press('Tab');
+  await page.keyboard.press(next);
+  await expect(
+    companion.getByRole('button', { name: 'Copy source' }),
+  ).toBeFocused();
+  await page.keyboard.press(next);
+  await expect(
+    companion.getByRole('button', { name: 'Wrap lines' }),
+  ).toBeFocused();
+  await page.keyboard.press(next);
+  await page.keyboard.press(next);
+  await page.keyboard.press(next);
   const code = companion.locator('pre');
   await expect(code).toBeFocused();
   await page.keyboard.press('ArrowRight');
@@ -298,4 +308,97 @@ test('inline reader supports keyboard file expansion and horizontal source scrol
   await companion.locator('summary').focus();
   await page.keyboard.press('Space');
   await expect(code).not.toBeVisible();
+});
+
+test('catalog keeps readers collapsed and expands only one source at a time', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await page.goto('/docs/examples/');
+  await expect(
+    page.locator('.example-source[data-enhanced="true"]').first(),
+  ).toBeAttached();
+  await expect(page.locator('.example-source[open]')).toHaveCount(0);
+  for (const id of ['guarded-engineering', 'documentation-lab']) {
+    const viewer = page.locator(`[data-example-source="${id}"]`);
+    await viewer.locator(':scope > summary').click();
+    await viewer.getByRole('button', { name: 'Expand reader' }).click();
+    await expect(
+      page.locator('.example-source[data-expanded="true"]'),
+    ).toHaveCount(1);
+    await expect(viewer).toHaveAttribute('data-expanded', 'true');
+  }
+  const active = page.locator('[data-example-source="documentation-lab"]');
+  await expect(page.locator('.right-sidebar-container')).not.toBeVisible();
+  await active.locator(':scope > summary').click();
+  await expect(page.locator('.right-sidebar-container')).toBeVisible();
+});
+
+test('expanded source preserves the selected file, wrapping, exact text and prose width', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 950 });
+  await page.goto('/docs/applications/documentation-lab/');
+  const viewer = page.locator('.tutorial-sources .example-source');
+  await viewer.locator('[data-file-link="scripts/coordinator.chatml"]').click();
+  const file = viewer.locator(
+    '[data-source-path="scripts/coordinator.chatml"]',
+  );
+  const code = file.locator('pre');
+  const original = await file.locator('pre code').textContent();
+  const fragment = new URL(page.url()).hash;
+  const width = (await code.boundingBox())!.width;
+  const proseWidth = await page
+    .locator('.sl-markdown-content')
+    .evaluate((node) => node.getBoundingClientRect().width);
+  await file.getByRole('button', { name: 'Wrap lines' }).click();
+  const expand = viewer.getByRole('button', { name: 'Expand reader' });
+  await expand.click();
+  await expect(
+    viewer.getByRole('button', { name: 'Restore width' }),
+  ).toHaveAttribute('aria-pressed', 'true');
+  await expect
+    .poll(async () => (await code.boundingBox())!.width)
+    .toBeGreaterThan(width + 100);
+  expect(new URL(page.url()).hash).toBe(fragment);
+  await expect(file).toHaveAttribute('data-wrap', 'true');
+  expect(await file.locator('pre code').textContent()).toBe(original);
+  expect(
+    await page
+      .locator('.sl-markdown-content')
+      .evaluate((node) => node.getBoundingClientRect().width),
+  ).toBeCloseTo(proseWidth, 0);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
+  const actions = (await file.locator('.file-actions').boundingBox())!;
+  expect(actions.y + actions.height).toBeLessThanOrEqual(
+    (await code.boundingBox())!.y + 1,
+  );
+  await viewer.getByRole('button', { name: 'Restore width' }).click();
+  await expect
+    .poll(async () => (await code.boundingBox())!.width)
+    .toBeCloseTo(width, 0);
+  await page.setViewportSize({ width: 390, height: 950 });
+  await expect(
+    viewer.getByRole('button', { name: 'Expand reader' }),
+  ).not.toBeVisible();
+  await viewer.getByRole('combobox').selectOption('schemas/watch.json');
+  const schema = viewer.locator('[data-source-path="schemas/watch.json"]');
+  await expect(schema.locator('pre')).toBeVisible();
+  await expect(file).not.toBeVisible();
+  expect(await schema.locator('pre code .line span').count()).toBeGreaterThan(
+    1,
+  );
+  const expected = report.examples
+    .find((e: { id: string }) => e.id === 'documentation-lab')!
+    .files.find((f: { path: string }) => f.path === 'schemas/watch.json')!;
+  expect(await schema.locator('pre code').textContent()).toBe(expected.content);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth > innerWidth,
+    ),
+  ).toBe(false);
 });

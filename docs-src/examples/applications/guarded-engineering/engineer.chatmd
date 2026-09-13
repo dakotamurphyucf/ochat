@@ -1,0 +1,13 @@
+<script id="report-reviewer" language="chatml" kind="shell_reviewer"
+        src="scripts/report-reviewer.chatml"/>
+
+<import src="runtimes/inspection.chatmd"/>
+<import src="runtimes/checks.chatmd"/>
+<import src="capabilities.chatmd"/>
+
+<developer>
+This configuration uses a stateful ChatML reviewer for saved reports. It rejects
+selective reports, approves the first full-report request, and defers later full
+reports to the user. Distinguish its decision from command execution and from the
+separate evidence review performed by review_docs.
+</developer>
