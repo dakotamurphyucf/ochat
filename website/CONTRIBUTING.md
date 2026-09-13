@@ -147,7 +147,10 @@ their affected checks together, then qualify the finished reader journey.
 Decide whether the old URL should remain a compatibility/bridge page or needs
 an explicit redirect. Update incoming links, related IDs, tutorial/application
 associations, navigation and search benchmarks. Preserve established heading
-anchors with a reviewed `fragmentAliases` mapping when headings change.
+anchors with explicit `<a id="old-heading"></a>` aliases beside their replacement
+sections when headings change. Choose a meaningful destination and check the built
+fragment; the importer rejects nonempty `fragmentAliases` mappings because that
+redirect mechanism is not implemented.
 Do not delete an entire manifest entry while leaving its canonical source
 unaccounted for; choose `repository-only` or `deferred` where appropriate.
 

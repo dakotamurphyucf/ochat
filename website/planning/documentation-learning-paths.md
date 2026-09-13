@@ -9,6 +9,9 @@ The learning paths, three complete applications and presentation/reference work
 are implemented locally. The final reader-journey and release-artifact audit is
 still in progress. Sections below retain the evidence from each implementation
 checkpoint; their historical next-step statements are not the current status.
+The [acceptance audit](documentation-overhaul-acceptance.md) maps the final
+capabilities and application requirements to their implementations and tracks
+remaining D06 qualification.
 
 ## Navigation and source ownership
 

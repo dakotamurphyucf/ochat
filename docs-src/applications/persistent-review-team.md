@@ -56,6 +56,18 @@ their findings. The parent coordinates assignments and writes the final report.
 ChatML gathers observations; the runtime manages durable sessions, permissions,
 receipt correlation and output publication.
 
+| Capability | Binding and permitted work | Approval behavior in this bundle |
+| --- | --- | --- |
+| Parent `read_file` | Named `project` root at the configured `sample-project/` workspace. | The private reader profile allows reads; paths outside that root remain unavailable. |
+| Three authored reviewer tools | Each companion definition has its own file reader scoped to the same workspace. | The profile allows the calls. Each specialist can read sample evidence, but has no shell, editing or sibling-history tool. |
+| `collect_reviews` | Selects only `agent_status`, `agent_wait` and `agent_read`. | Allowed lifecycle observations still require the caller's owned-child relationship; the script cannot send, create or stop a session. |
+| `agent_send`, `agent_status`, `agent_wait`, `agent_read`, `agent_stop` | The parent manages its retained children and their correlated output. | The profile permits these operations; knowing an unrelated ID cannot extend that authority or answer a child's approval request. |
+
+The [private server configuration](../examples/applications/persistent-review-team/server.sexp)
+keeps its store and configuration outside the readable workspace. Model requests
+are separate provider operations; a file-reader permission does not configure
+provider credentials or make those requests free.
+
 ```mermaid
 flowchart TD
     Parent[Parent assigns three reviews] --> Correctness[Correctness conversation]
@@ -208,3 +220,24 @@ working directories and the daemon socket before changing workspace permissions.
 Continue with [generated specialists](../tutorials/generated-specialist.md) when
 the parent should define a task-specific role instead of selecting an authored
 one. Both patterns use the same lifecycle tools and inherited authority rules.
+
+## Adapt the team without broadening access
+
+For a **two-specialist team**, remove `integration_review` from
+[team.chatmd](../examples/applications/persistent-review-team/team.chatmd) and update
+the parent's assignments accordingly. Pass only the two retained reviewer records
+to the collector; its existing schema accepts one to three. Stop any previously
+created third reviewer before moving to a new parent definition. Editing the root
+does not revoke an already running captured session by itself.
+
+For a **tool-free authored specialist**, remove `read_file` from that companion's
+ChatMD and change its instructions to use the evidence supplied in `input`.
+The parent must include the relevant file contents and later changes. Authored
+companions declare their own tools: changing only the parent's reader does not
+rewrite their definitions. Revalidate the complete bundle and start a fresh
+parent when testing the modified role.
+
+To add automated checks or modifications, start from the
+[engineering assistant's separate runtimes](guarded-engineering.md#know-what-each-tool-can-do)
+instead of treating a review recommendation as an access grant. The existing
+team intentionally produces advice and evidence without changing project files.

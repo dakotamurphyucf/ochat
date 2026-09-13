@@ -1,5 +1,7 @@
 # Give an agent a useful shell command
 
+<a id="a-narrow-shell-agent"></a>
+
 An agent needs project facts before it can give useful advice. Give it a command
 that reads Lantern's setup tutorial, inside a reusable shell runtime with explicit
 read access, no project write access and no network access.

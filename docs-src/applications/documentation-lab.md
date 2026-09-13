@@ -73,6 +73,31 @@ confinement, no network and staging-only writes. Review those files before
 starting it. For a human-approval walkthrough, use the
 [guarded engineering assistant](guarded-engineering.md).
 
+## Know what the lab can access
+
+The [root definition](../examples/applications/documentation-lab/lab.chatmd)
+binds the following capabilities. The included daemon profile allows these
+declared tools; there is no per-command human approval in this configuration.
+Nested calls retain their selected dependencies and current runtime checks.
+
+| Tool or group | Implementation and permitted work | Decision boundary |
+| --- | --- | --- |
+| `read_file` | Named `project` root at `workspace/sample-project/`; reads inventory, tutorials and staged evidence. | Does not expose private configuration or the session store. |
+| `check_one_tutorial` | Fixed checker through the `tutorial-checks` shell runtime. | Required confinement, read-only execution, no network; accepts known phase/tutorial arguments. |
+| `apply_proposal` | Fixed stager through the `tutorial-staging` runtime. | Required confinement permits staging-directory writes; the command selects only `staging/broken.md` and treats proposal text literally. |
+| `check_tutorials` | Standalone script selecting `read_file` and `check_one_tutorial`. | Validates the known inventory before checking; cannot select the staging tool. |
+| `probe_review` | Standalone script selecting `agent_wait` and `agent_read`. | Observes a specific owned child receipt and bounded output; creates no child and writes no file. |
+| `begin_lab_checks`, `stage_lab_proposal` | Moderator-handled tools start the corresponding job and retain its evidence. | The coordinator admits one pending check/stage run; an acknowledgement does not prove its effect succeeded. |
+| `watch_lab_review`, `lab_report`, `close_lab` | The same moderator retains watches, reports their results and requests cleanup. | Watch ownership, deadlines and record limits remain explicit; reading the report starts no checks. |
+| `agent_create` and the lifecycle tools | Captured-definition admission, messages, status, output, waiting and stop requests. | Direct owned-child relationships and delegated tool authority apply; an ID does not grant access to another session. |
+| `propose_fix` | Authored persistent writer with its own scoped reader. | Returns proposed wording; no shell or editing capability. |
+
+Authoring documentation and validation helpers accompany the declared creation
+capability. They provide syntax/runtime guidance and non-executing validation,
+not permission to execute an unadmitted candidate. A generated reviewer receives
+only the explicitly selected `read_file` binding; it does not receive this entire
+table of parent capabilities.
+
 ## Follow the evidence through the workflow
 
 Ask the parent:
@@ -250,3 +275,23 @@ For the individual techniques, revisit
 [background results](../tutorials/background-results.md),
 [generated specialists](../tutorials/generated-specialist.md) and the
 [persistent review team](persistent-review-team.md).
+
+## Adapt the lab's authority deliberately
+
+For a **proposal-only lab**, remove `stage_lab_proposal` and `apply_proposal`
+from the root and remove the `tutorial-staging` declaration from the imported
+runtime file. Update the parent and writer instructions to finish with proposed
+text and original check evidence. Keep the checker in original phase; a proposal without
+a staged file cannot support a staged recheck. Reinspect the changed manifest
+and validate the configuration before creating a fresh session.
+
+For a **tool-free generated reviewer**, pass an empty `tools` selection and omit
+the inherited reader from the captured child source. Supply the tutorial and
+check evidence in its message instead. Validate and create the same captured
+bytes, and keep the usual session/receipt watcher. This narrows the reviewer
+without changing the parent's own checker or writer capabilities.
+
+For a different project, replace the fixed inventory/checker and their schemas
+together, then review the actual executable, read roots, writable roots and
+policy in [tutorial-checks.chatmd](../examples/applications/documentation-lab/runtimes/tutorial-checks.chatmd).
+Changing a schema or model instruction alone does not change shell authority.
