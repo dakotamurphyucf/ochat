@@ -9,6 +9,7 @@ import Default from '@astrojs/starlight/components/MarkdownContent.astro';
 import report from '../../.generated/content-report.json';
 import DocsOverview from './DocsOverview.astro';
 import CapabilityOverview from './CapabilityOverview.astro';
+import AuthoringContextIntro from './AuthoringContextIntro.astro';
 import ExampleCatalog from './ExampleCatalog.astro';
 import TutorialRecord from './TutorialRecord.astro';
 import examples from '../../.generated/examples-report.json';
@@ -30,7 +31,11 @@ const diagrams =
 ---
 
 {Astro.url.pathname === '/docs/' && <DocsOverview />}
-{Astro.url.pathname === '/docs/' && <CapabilityOverview />}
+{
+  Astro.url.pathname === '/docs/reference/chatml/authoring-primer/' && (
+    <AuthoringContextIntro />
+  )
+}
 {isTutorial && <LessonOverview />}
 {isApplication && <ApplicationIntro />}
 {Astro.url.pathname === '/docs/applications/' && <ApplicationGallery />}
@@ -72,6 +77,7 @@ const diagrams =
 >
   <Default><slot /></Default>
 </div>
+{Astro.url.pathname === '/docs/' && <CapabilityOverview />}
 {
   hasResources && (
     <div id="lesson-resources">

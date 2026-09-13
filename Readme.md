@@ -2,7 +2,7 @@
 
 **Your instructions. Your tools. Your workflow.**
 
-[Website and documentation](https://ochatlabs.com/) · [Run your first agent](https://ochatlabs.com/docs/start/first-agent/) · [Explore applications](https://ochatlabs.com/applications/)
+[Website and documentation](https://ochatlabs.com/) · [Run your first agent](https://ochatlabs.com/docs/start/first-agent/) · [Explore applications](https://ochatlabs.com/docs/applications/)
 
 Ochat lets you define an AI agent in a text file and run it against your project.
 Use it to understand unfamiliar code, review changes, update documentation, or
@@ -392,6 +392,11 @@ ChatML now supports three distinct uses: a one-off program over selected tools,
 a reusable custom tool, and a stateful moderator that coordinates a conversation.
 You can write these yourself or expose authoring tools so an agent can generate
 programs when the task calls for them.
+
+Start with [ChatML execution choices](https://ochatlabs.com/docs/concepts/chatml/),
+[subagent patterns](https://ochatlabs.com/docs/guides/subagents/), or
+[custom shell capabilities and guardrails](https://ochatlabs.com/docs/concepts/shell-access/)
+to choose the pieces for your workflow. The table below links their exact contracts.
 
 | Capability | What you can build | Guide and examples |
 |---|---|---|

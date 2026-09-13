@@ -1,5 +1,99 @@
 [
   {
+    "query": "subagents",
+    "expected": [
+      "/docs/guides/subagents/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "persistent agents",
+    "expected": [
+      "/docs/guides/subagents/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "optional persistence",
+    "expected": [
+      "/docs/guides/subagents/",
+      "/docs/reference/chatml/chatmd-definitions/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "create an agent",
+    "expected": [
+      "/docs/guides/subagents/",
+      "/docs/start/first-agent/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "shell permissions",
+    "expected": [
+      "/docs/concepts/shell-access/",
+      "/docs/guides/shell-security/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "custom shell access",
+    "expected": [
+      "/docs/concepts/shell-access/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "shell reviewers",
+    "expected": [
+      "/docs/concepts/shell-access/",
+      "/docs/guides/shell-extensions/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "ChatML orchestration",
+    "expected": [
+      "/docs/concepts/chatml/",
+      "/docs/guides/agent-orchestration/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "run_chatml",
+    "expected": [
+      "/docs/concepts/chatml/",
+      "/docs/reference/chatml/execution-contracts/",
+      "/docs/reference/chatml/native-requests/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "stateful tools",
+    "expected": [
+      "/docs/concepts/chatml/",
+      "/docs/reference/chatml/execution-contracts/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "background results",
+    "expected": [
+      "/docs/concepts/chatml/",
+      "/docs/reference/chatml/background-work/"
+    ],
+    "maxRank": 3
+  },
+  {
+    "query": "inherited tools",
+    "expected": [
+      "/docs/guides/delegated-tools/",
+      "/docs/guides/subagents/"
+    ],
+    "maxRank": 3
+  },
+  {
     "query": "install",
     "expected": [
       "/docs/start/installation/",

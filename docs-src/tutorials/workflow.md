@@ -79,6 +79,12 @@ Press Esc, type `:q`, and press Enter after work stops. Native local state is
 process-bound and is not resumed on the next launch; a new session resets this
 counter. Archive or remove only the recorded temporary directory after exit.
 
+To grow beyond a turn counter, use the
+[ChatML execution-form guide](../chatml/README.md): add a reusable script tool,
+retain state behind a custom tool, or deliver a result from background work.
+For several continuing reviewers, compare
+[subagent coordination patterns](../guide/subagents.md#coordinate-a-team-without-hiding-the-work).
+
 For tools with explicit command authority, continue to
 [the narrow shell tutorial](../agent-server/tutorials/shell-agent.md). For a
 session that survives the client, use [the Unix daemon tutorial](../agent-server/tutorials/unix-daemon.md)

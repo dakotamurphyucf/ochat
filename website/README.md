@@ -4,7 +4,13 @@ Production domain: **https://ochatlabs.com**. The protected Website workflow bui
 
 A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample.
 
-The extensibility update adds authoring, script-tool, background-work and child-session guides. The inventory contains 340 canonical documents: 136 published, 4 compatibility, 9 bridges, 181 repository-only and 10 deferred. It produces 149 documentation routes; search includes 140 approved pages. Generated migration/content reports are authoritative for a particular build. The former shell-resource-runner URL now explains linked child-process setup, preserving existing links without requiring that removed executable.
+The documentation is organized around tools and shell access, subagents and teams,
+ChatML workflows, complete applications, and running agents. Exact reference and
+contributor internals remain separately accessible. The inventory currently has
+343 canonical documents and produces 152 documentation routes; search includes
+143 approved pages. Generated migration/content reports are authoritative for a
+particular build. The former shell-resource-runner URL explains linked child-process
+setup, preserving existing links without requiring that removed executable.
 
 The recorded demo retains its original live capture and authenticates runtime hashes against its recorded Git revision. Changed current runtime files are labeled as such; they do not turn old model output into current-runtime verification. Build with full Git history. Recording regeneration and optional live-provider calls are never implicit website-build steps.
 
@@ -216,9 +222,11 @@ the query in that page's local history entry. Quotes request an exact phrase;
 unquoted queries retain Pagefind's default prefix/fuzzy behavior.
 
 After building, `npm run evaluate:search` starts its own temporary preview and
-checks all 21 benchmark queries, exact index ownership, current-before-compatibility
+checks the configured benchmark queries, exact index ownership, current-before-compatibility
 ordering, context/excerpts, and real heading destinations. It requires Playwright
-Chromium. Reports are `.generated/search-index-report.json` and
+Chromium. Queries with `maxRank` are individual required gates (the new feature
+queries require a relevant destination in the top three); they cannot be hidden
+by the overall benchmark's 90% top-five threshold. Reports are `.generated/search-index-report.json` and
 `.generated/search-report.{json,md}`; the evaluation records the built artifact's
 SHA-256. CI runs this gate and uploads the reports. Browser tests additionally
 exercise dialog controls, mobile layouts, safe rendering, and network failures

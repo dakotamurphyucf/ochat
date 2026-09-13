@@ -180,7 +180,7 @@ test('supplemental policy rejects untracked, escaping, overlapping, and unclassi
   );
 });
 
-test('all fourteen required capabilities have searchable reader destinations and explicit deferred detail', () => {
+test('required capabilities have searchable reader destinations and explicit deferred detail', () => {
   const coverage = capabilityCoverage(capabilities, entries);
   assert.deepEqual(
     coverage.map((c) => c.id).sort(),
@@ -193,6 +193,8 @@ test('all fourteen required capabilities have searchable reader destinations and
       'refinement',
       'compaction',
       'chatml',
+      'subagents',
+      'script-tools',
       'background',
       'tui',
       'shell',

@@ -10,6 +10,7 @@ import GithubSlugger from 'github-slugger';
 import { parseFragment } from 'parse5';
 import { parse as parseYaml } from 'yaml';
 import { manifestSchema } from './manifest-schema.mjs';
+import { authoringTopicLinks } from '../config/authoring-topics.mjs';
 
 export const parser = unified().use(remarkParse).use(remarkGfm);
 export const rendered = (e) =>
@@ -371,6 +372,26 @@ export function transformMarkdown(text, entry, context) {
     }
     if (node.type === 'code')
       fences.push({ lang: node.lang || 'text', value: node.value });
+    if (
+      node.type === 'inlineCode' &&
+      Object.hasOwn(authoringTopicLinks, node.value)
+    ) {
+      const [target, fragment] = authoringTopicLinks[node.value].split('#');
+      const relative = path.posix.relative(
+        path.posix.dirname(entry.source),
+        target,
+      );
+      const href = resolveLink(
+        relative + (fragment ? `#${fragment}` : ''),
+        entry.source,
+        context,
+      );
+      edits.push({
+        start: node.position.start.offset,
+        end: node.position.end.offset,
+        text: `[\`${node.value}\`](${href})`,
+      });
+    }
     if (['link', 'image', 'definition'].includes(node.type)) {
       // Rewrite only parsed link nodes. The rest of the source, including fenced
       // examples and their line endings, is copied without reserialization.

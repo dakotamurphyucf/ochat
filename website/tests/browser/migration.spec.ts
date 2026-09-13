@@ -6,8 +6,11 @@ test('documentation paths lead through search setup to labeled sample output', a
 }) => {
   await page.goto('/docs/');
   const paths = page.getByRole('navigation', { name: 'Documentation paths' });
-  await expect(paths.getByRole('link')).toHaveCount(4);
-  await paths.getByRole('link', { name: /Build something useful/ }).click();
+  await expect(paths.getByRole('link')).toHaveCount(3);
+  await page
+    .getByRole('navigation', { name: 'Applications and reference' })
+    .getByRole('link', { name: 'Explore applications →' })
+    .click();
   await page.locator('[data-application="research-brief"] h3 a').click();
   await page
     .locator('.sl-markdown-content')
@@ -38,6 +41,8 @@ test('new topic pages and docs paths reflow in both themes and pass axe', async 
   await page.setViewportSize({ width: 320, height: 800 });
   for (const route of [
     '/docs/',
+    '/docs/guides/subagents/',
+    '/docs/guides/delegated-tools/',
     '/docs/reference/agent-server/environment/',
     '/docs/operations/',
   ]) {
@@ -58,6 +63,47 @@ test('new topic pages and docs paths reflow in both themes and pass axe', async 
   }
 });
 
+test('readers discover shell, teams and workflows before opening the reference catalog', async ({
+  page,
+}) => {
+  for (const [name, route] of [
+    ['Build tools with guardrails', '/docs/concepts/shell-access/'],
+    ['Work with a team of specialists', '/docs/guides/subagents/'],
+    ['Program the workflow', '/docs/concepts/chatml/'],
+  ]) {
+    await page.goto('/docs/');
+    const link = page
+      .getByRole('navigation', { name: 'Documentation paths' })
+      .getByRole('link', { name: new RegExp(name) });
+    await expect(link).toBeVisible();
+    await link.click();
+    await expect(page).toHaveURL(route);
+  }
+  await page.goto('/docs/tutorials/specialist/');
+  await page
+    .locator('.sl-markdown-content')
+    .getByRole('link', {
+      name: 'persistent and optionally persistent specialists',
+    })
+    .click();
+  await expect(page).toHaveURL(
+    /\/docs\/guides\/subagents\/#authored-specialists/,
+  );
+  await page.goto('/docs/reference/chatml/authoring-primer/');
+  await expect(
+    page.getByRole('complementary', {
+      name: 'About the model authoring primer',
+    }),
+  ).toContainText('introduction Ochat supplies to authoring agents');
+  await page
+    .locator('.sl-markdown-content')
+    .getByRole('link', { name: 'runtime.invocations.standalone', exact: true })
+    .click();
+  await expect(page).toHaveURL(
+    '/docs/reference/chatml/execution-contracts/#standalone-tools-and-explicit-outcomes',
+  );
+});
+
 test('docs paths and hosting links work without JavaScript', async ({
   browser,
 }) => {
@@ -66,8 +112,8 @@ test('docs paths and hosting links work without JavaScript', async ({
     const page = await context.newPage();
     await page.goto('/docs/');
     await page
-      .getByRole('navigation', { name: 'Documentation paths' })
-      .getByRole('link', { name: /Build something useful/ })
+      .getByRole('navigation', { name: 'Applications and reference' })
+      .getByRole('link', { name: 'Explore applications →' })
       .click();
     await page.locator('[data-application="background-workflow"] h3 a').click();
     await page

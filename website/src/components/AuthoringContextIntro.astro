@@ -1,0 +1,43 @@
+---
+// Website framing only: installed model guidance remains canonical source.
+---
+
+<aside class="authoring-intro" aria-label="About the model authoring primer">
+  <p>
+    <strong>This is the introduction Ochat supplies to authoring agents.</strong
+    >
+    It helps a model discover the installed language and runtime contracts before
+    writing a program or a child definition. The topic names below link to their maintained
+    documentation.
+  </p>
+  <p>
+    To learn the workflow yourself, start with
+    <a href="/docs/concepts/chatml/">ChatML execution forms</a> or
+    <a href="/docs/guides/subagents/">subagent patterns</a>.
+    <a href="/docs/reference/chatml/authoring-context/"
+      >Configure authoring guidance</a
+    >
+    explains how the model queries these topics. Tool and signature results depend
+    on the invoking agent's actual bindings and execution surface.
+  </p>
+</aside>
+<style>
+  .authoring-intro {
+    padding: 1rem 1.25rem;
+    margin-bottom: 2rem;
+    border-left: 3px solid var(--ochat-accent);
+    background: var(--ochat-panel);
+    border-radius: 0 var(--ochat-radius-panel) var(--ochat-radius-panel) 0;
+  }
+  p {
+    margin: 0;
+    line-height: 1.7;
+  }
+  p + p {
+    margin-top: 0.75rem;
+  }
+  a {
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+  }
+</style>

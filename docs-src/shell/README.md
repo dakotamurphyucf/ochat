@@ -1,14 +1,14 @@
 # Shell access and permissions
 
-Shell access lets an agent use command-line programs: inspect a repository,
-run a test, or interact with a configured process. It is powerful enough to
-deserve an explicit design, not just an instruction telling the model to be
-careful.
+Give an agent the command-line capabilities its work requires. Define reusable
+shell runtimes that control commands, files, environment, network access,
+approvals and resource limits. Add ChatML logic or reviewer agents when decisions
+depend on project-specific context.
 
-Ochat's shell declarations describe runtimes and tools in ChatMD. The host
-decides which authority it will admit, and approval policy determines when an
-operation needs another decision. Begin with a narrow command and expand only
-when the task requires more access.
+A repository assistant might inspect source with one runtime, run builds with
+another, and send unusual requests through a custom reviewer. The model sees
+useful tools; the author defines the capabilities and guardrails behind them.
+The host then admits and enforces the supported configuration.
 
 ## Start with a complete example
 
@@ -27,10 +27,54 @@ before copying a command from one execution mode to another.
 |---|---|---|
 | Runtime declaration | Where and under what execution settings do commands run? | [Runtime reference](../overview/chatmd-shell-runtime.md) |
 | Tool declaration | What command interface does the agent see? | [Shell tools](../overview/chatmd-shell-tools.md) |
+| Input/output schemas | What structured data does a tool accept or return? | [Tool declarations](../overview/chatmd-shell-tools.md) |
 | Authority and confinement | What resources and effects are actually permitted? | [Security guide](../guide/chatmd-shell-security.md) |
 | Host authorization | How does this local runner or daemon admit the declared access? | [Host integration](../guide/chatmd-shell-host-integration.md) |
 | Review and approval | Which requests need a decision, and who or what makes it? | [Extensions and reviewers](../guide/chatmd-shell-extensions.md) |
 | Durable records | What is retained, audited, or interrupted across restarts? | [Persistence and audit](../guide/chatmd-shell-persistence-and-audit.md) |
+
+A schema describes data, not permission. A tool declaration exposes an operation;
+its named `<shell_access>` runtime supplies the command capability and policy.
+The configured backend determines which boundaries the operating system can
+enforce. Review all three when adapting a shell example.
+
+## Design access around the work
+
+| Operation | Configuration to consider | Why it matters |
+| --- | --- | --- |
+| Inspect repository state | Fixed arguments, required read locations, no unnecessary write capability | The tool exposes a useful bounded operation. |
+| Run a build or test | Explicit targets, output locations, environment, network and child-process needs | Build scripts execute project code and can have effects beyond the initial command. |
+| Produce generated documentation | Declared inputs and writable output directory | The result can be checked without granting unrelated file modification. |
+| Use a project-specific command | Structured arguments, appropriate policy and review hook | The interface and decision rules stay understandable as the capability grows. |
+
+One agent can expose tools backed by different runtimes. This makes an inspection
+capability distinct from a build capability instead of giving every shell tool
+the same broad configuration. Versioned built-in profiles are starting
+declarations; they are not evidence that every requested operation is authorized
+or that a backend is installed.
+
+## Customize decisions with scripts and agents
+
+Use the [shell extension contracts](../guide/chatmd-shell-extensions.md) to add
+project rules where static declarations need help:
+
+- A **matcher** recognizes a command/effect pattern for policy selection.
+- A **ChatML reviewer** applies a deterministic project-specific decision.
+- A **reviewer agent** adds contextual judgment through a configured, bounded
+  request and structured response.
+- A **before interceptor** can handle or rewrite a request within the contract;
+  an **after interceptor** controls supported result transformation/disclosure.
+- **Effect analysis and audit filtering** support the corresponding capability
+  and audit decisions.
+
+These extension kinds have different inputs and return contracts. Shell ChatML
+hooks receive a narrow normalized context; do not assume they can call arbitrary
+general tools or make model/network requests. A model reviewer is a separately
+configured agent.
+
+Custom decisions remain within the admitted authority. A hook cannot turn a
+hard denial into broader permission. Rewritten requests go through the applicable
+resolution, policy and verification checks again.
 
 The workspace supplies a location, not a security boundary by itself. Review
 the declared filesystem and network access, the actual confinement backend,

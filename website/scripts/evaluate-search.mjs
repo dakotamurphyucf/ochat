@@ -122,6 +122,10 @@ try {
   for (const row of measured.results) {
     row.rank = row.top.findIndex((r) => row.expected.includes(r.url)) + 1;
     row.passed = row.rank > 0;
+    if (row.maxRank && (!row.passed || row.rank > row.maxRank))
+      failures.push(
+        `Required feature query outside top ${row.maxRank}: ${row.query} (rank ${row.rank || 'missing'})`,
+      );
     row.excerptPresent = row.passed && !!row.top[row.rank - 1].excerpt.trim();
     for (const result of row.top) {
       checkUrl(result.url);

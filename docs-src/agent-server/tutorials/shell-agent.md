@@ -4,7 +4,13 @@ Give a model exactly one declared `/bin/pwd` command and inspect its authority b
 
 ## Prerequisites and command context
 
-Complete [installation](../quickstart.md) and [the first local agent](local-tui.md). Commands below use `dune exec` from the repository root and its active opam environment. Interactive execution uses the legacy local host; the daemon variant needs private example setup. A supported Seatbelt or bubblewrap backend and the resource helper are platform prerequisites. Native `--local` must not be combined with `--authorize-shell-manifest`.
+Complete [installation](../quickstart.md) and [the first local agent](local-tui.md).
+Commands below use `dune exec` from the repository root and its active opam
+environment. Interactive execution uses the legacy local host; the daemon variant
+needs private example setup. A supported Seatbelt or bubblewrap backend is a
+platform prerequisite. Resource-limit setup is linked into Ochat; it does not
+require a separate helper executable. Native `--local` must not be combined with
+`--authorize-shell-manifest`.
 
 Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
 before model work or deployment. [Build troubleshooting](../troubleshooting.md)
@@ -19,7 +25,7 @@ Read [host integration](../../guide/chatmd-shell-host-integration.md) first.
 
 ## Inspect without executing
 
-From the repository root, with required platform backend/helper installed:
+From the repository root, with the required platform backend available:
 
 ```sh
 dune build bin/main.exe bin/chat_tui.exe
@@ -30,8 +36,9 @@ dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd
 Inspection must either show the expected authority or a specific configuration/
 platform error. Do not weaken a required sandbox to make an example pass. Check
 the exact cwd, executable resolution, roots, source/manifest identity and limits.
-The helper applies resource limits; Seatbelt/bubblewrap enforce their own supported
-OS boundaries. A direct backend does not enforce filesystem/network roots.
+Ochat's linked child-process setup applies configured resource limits;
+Seatbelt/bubblewrap enforce their own supported OS boundaries. A direct backend
+does not enforce filesystem/network roots.
 
 ## Legacy local interactive authorization
 
@@ -81,4 +88,15 @@ all safe copy-and-run deployment scripts.
 
 ## Checkpoint, troubleshooting, and next step
 
-Success means inspection matches the fixed executable/argv and a requested tool call returns the workspace directory. A model naming the directory without a tool result does not verify execution. For backend/helper errors consult [shell diagnostics](../../guide/chatmd-shell-host-integration.md); keep required confinement enabled. A permission denial is separate from parsing and model prose. Wait for work to finish, quit the TUI with Esc then `:q` and Enter, and stop any daemon before removing its private directory. Legacy caches/store records and provider logs can remain separately; inspect their configured locations. Continue to [durable Unix sessions](unix-daemon.md).
+Success means inspection matches the fixed executable/argv and a requested tool
+call returns the workspace directory. A model naming the directory without a tool
+result does not verify execution. For backend or resource-setup errors consult
+[shell diagnostics](../../guide/chatmd-shell-host-integration.md); keep required
+confinement enabled. A permission denial is separate from parsing and model prose.
+Wait for work to finish, quit the TUI with Esc then `:q` and Enter, and stop any
+daemon before removing its private directory. Legacy caches/store records and
+provider logs can remain separately; inspect their configured locations.
+To design a more useful command interface, explore
+[reusable shell capabilities and guardrails](../../shell/README.md#design-access-around-the-work)
+and [custom decisions with ChatML and reviewer agents](../../shell/README.md#customize-decisions-with-scripts-and-agents).
+For client-independent hosting, continue to [durable Unix sessions](unix-daemon.md).

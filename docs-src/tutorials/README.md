@@ -1,8 +1,8 @@
 # Learn Ochat by building
 
-Start with a local conversation, give the agent a file tool, and connect a
-specialist. Then choose a path into scripting or hosted agents. Each lesson
-shows its outcome, prerequisites, and complete example files.
+This tutorial curriculum starts with a local conversation, adds a file tool,
+and connects a specialist. Then choose a path into scripting or hosted agents.
+Each lesson shows its outcome, prerequisites, and complete example files.
 
 ## Before your first lesson
 

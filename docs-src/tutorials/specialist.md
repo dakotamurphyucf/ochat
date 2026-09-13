@@ -99,6 +99,16 @@ After exit, archive it or remove only the recorded `OCHAT_REVIEW` directory.
 Provider logs and runtime caches may exist separately.
 
 You now have evidence of a parent reading data and delegating a bounded review.
-Next, [run a request from a script](../cli/chat-completion.md). Use that tutorial's
-tool-free prompt: batch relative source context follows the output transcript,
-so relocating this specialist template requires preserving its companions there.
+Choose what the specialist should do next:
+
+- For follow-up questions in the same conversation, explore
+  [persistent and optionally persistent specialists](../guide/subagents.md#authored-specialists-define-the-role-once).
+- To let the parent define a reviewer for the current task, learn about
+  [generated subagents](../guide/subagents.md#generated-specialists-adapt-the-role-to-the-task)
+  and [inherited tools](../guide/delegated-tools.md).
+- To control review stages or collect results later, explore
+  [ChatML workflows](../chatml/README.md).
+- For a headless request, [run a request from a script](../cli/chat-completion.md).
+  Use that tutorial's tool-free prompt: batch relative source context follows the
+  output transcript, so relocating this specialist template requires preserving
+  its companions there.

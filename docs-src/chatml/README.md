@@ -10,14 +10,15 @@ that should not depend only on the model following prose instructions.
 
 ## What belongs in a script?
 
-Examples include stopping after a chosen number of turns, requesting a review
-at a particular stage, reacting to a completed background job, or scheduling
-a later event that starts more work. A script can maintain workflow state and
-use the capabilities its host makes available.
+A documentation workflow can read a tutorial inventory, run the supported checks,
+send failures to specialists, and assemble their findings. A conversational
+assistant can acknowledge a slow check immediately and return to the user when
+the result is ready. ChatML makes those coordination rules explicit.
 
-The script lives with the ChatMD definition through its script declaration.
-The host delivers events and executes requested effects. This keeps the workflow
-definition separate from whether you interact through a TUI or a daemon client.
+Use deterministic code for calculations, result transformation and repeatable
+decisions. Let models supply judgment where it helps: explaining an ambiguous
+failure or reviewing a proposed change. Tools connect both to the operations
+the author and host have made available.
 
 ## Understand the two layers
 
@@ -27,9 +28,18 @@ Choose the smallest execution form that fits the work:
 |---|---|
 | Let an agent write deterministic logic over its existing tools | [`run_chatml` and one-off scripts](../guide/chatml-authoring-runtime.md) |
 | Expose a reusable script as a tool | [Standalone ChatML handlers](../guide/chatml-authoring-runtime.md#standalone-tools-and-explicit-outcomes) |
+| React to conversation events and control progression | [Conversation moderator](../guide/chatml-moderator-runtime.md) |
 | Implement a tool that depends on conversation state | [Moderator-handled tools](../guide/chatml-authoring-runtime.md) |
-| Delegate a continuing conversation to a specialist | [Persisted child sessions](../guide/chatml-authoring-children.md) |
 | Return promptly and notify the agent when work finishes | [Jobs, subscriptions and notifications](../guide/chatml-authoring-background.md) |
+
+A continuing specialist is another **agent session**, not another script form.
+Use the [delegation guide](../guide/subagents.md) to choose its lifetime, then
+coordinate it through the tools available to the script.
+
+Standalone tools get fresh script globals for each invocation. For a custom
+tool that must remember workflow state, use a moderator-handled tool: its
+`Tool_invoked` event is handled by the conversation's moderator, which resolves
+the specific invocation. Declaring a tool alone does not implement its handler.
 
 An agent can learn these contracts from the installed
 [authoring documentation tool](../guide/authoring-context-tool.md), then validate
@@ -47,7 +57,44 @@ The term *moderator* here means workflow logic participating in the agent loop;
 it does not necessarily mean a human approval step. Some capabilities require
 a suitable UI or host. Check host support before moving a script between modes.
 
+## Who decides what happens next?
+
+| Participant | Responsibility |
+| --- | --- |
+| Model | Interpret the task, request available tools, assess evidence and explain results. |
+| Script | Apply deterministic rules, sequence selected tools, retain supported state and request actions. |
+| Runtime | Execute admitted tasks, deliver supported events, check permissions and manage work/session lifecycles. |
+
+ChatML task operations describe work for the runtime to execute. `let*` makes
+dependent operations read in sequence without nesting task expressions. Returning
+a task is different from a script having unrestricted access to the host.
+
+In a **conversational coordinator**, the user asks a question, the model requests
+a check, and the moderator records its state and arranges the next step. A later
+result can become a new input for the model to explain.
+
+In an **unattended coordinator**, the initial input/configuration starts a
+workflow and the moderator may perform all coordination through tools and child
+agents. It need not call its own model. This is an agent workflow whose script
+does the coordination, not a separate ChatMD file type. It still depends on the
+actual declared tools and supported host services.
+
+For example, a report task can sequence file reads as a one-off program. A named
+report tool can reuse that logic. A moderator can retain several report jobs and
+notify the agent as results arrive. Start with the form that owns the state and
+lifetime you actually need.
+
 ## Background work and persistence
+
+An initial tool acknowledgement, eventual work completion and a notification
+that requests another model turn are separate events. A pending result should
+identify the work being tracked; a notification should connect the later evidence
+to that request. Cancellation and unsuccessful work also need explicit handling.
+
+For child responses, the current
+[watcher example](../../test/chatml_extensibility_fixtures/x06-response-watcher/README.md)
+uses timers and lifecycle polling. It does not introduce a native push
+subscription for arbitrary child conversations.
 
 For work that must continue after you close a client, use an appropriately
 configured daemon session. A script running in a process-bound local host does

@@ -62,6 +62,7 @@ and public revision links; use the protected workflow for publication.
 | Themes, typography, shared UI | `src/styles/tokens.css`, other `src/styles/`, and `src/components/` |
 | Images, fonts and license notices | `public/`, `config/media.json`, and approved repository mappings in `config/assets.json` |
 | Search ranking and regression queries | `config/search.mjs`, `config/search-queries.json`, and `scripts/search-index.mjs` |
+| Website links for model-facing topic IDs | `config/authoring-topics.mjs`; targets follow the installed corpus's maintained source excerpts |
 | Sitemap/social metadata | `config/presentation.mjs`, manifest policy and `config/site.mjs` |
 | HTTP headers and asset routing | `scripts/deployment-policy.mjs` and `wrangler.jsonc` |
 | www-to-apex redirect | `redirect/worker.mjs` and `redirect/wrangler.jsonc` |
@@ -71,6 +72,20 @@ Never hand-edit `.generated/`, `.astro/`, `dist/`, or Dune's `_build/` output.
 Planning documents are repository documentation and are not served by the site.
 
 ## Add a page
+
+Choose a reader task before assigning a section. Public feature destinations are
+Start here, Tools and shell access, Subagents and agent teams, ChatML workflows,
+Complete applications, and Run and operate. Exact references and contributor
+internals remain separate. Keep existing URLs when moving a page in the sidebar.
+Link introductions to useful lessons, exact contracts and complete source bundles;
+publication in the reference section alone does not provide a learning path.
+
+The model authoring primer keeps its installed source unchanged. Website-only
+framing lives in `AuthoringContextIntro.astro`, and recognized inline topic IDs
+link through `authoring-topics.mjs`. Review targets against `authoring_corpus.ml`
+when adding a mapping. Executable fences and source downloads must remain exact.
+Do not present dynamic `reference.tools` or `reference.signatures` as a static
+list of capabilities that every agent receives.
 
 1. Write original Markdown under `docs-src/` and stage it with Git; the importer
    inventories tracked/staged sources. Copy the structure of a nearby manifest
