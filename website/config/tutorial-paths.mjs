@@ -13,7 +13,7 @@ export const tutorialPaths = [
     title: 'Tools and shell access',
     description:
       'Give an agent command-line capabilities with explicit guardrails.',
-    pages: ['agent-server/tutorials/shell-agent'],
+    pages: ['agent-server/tutorials/shell-agent', 'tutorials/shell-guardrails'],
   },
   {
     id: 'chatml',

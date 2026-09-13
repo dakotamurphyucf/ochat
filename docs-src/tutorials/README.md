@@ -16,7 +16,8 @@ The background timer lesson can demonstrate scheduling without a model request.
 The first three lessons form the authoring foundation. Then choose a capability
 to add; lesson numbers are stable identifiers, not a required global sequence.
 
-- **Tools and shell access:** expose a specific command through an explicit runtime.
+- **Tools and shell access:** [inspect a real project](../agent-server/tutorials/shell-agent.md),
+  then [run checks with separate capabilities and approved report writes](shell-guardrails.md).
 - **ChatML workflows:** [summarize project reports](chatml-program.md),
   [turn the program into a reusable tool](chatml-tool.md), then learn how a
   [moderator controls a conversation](workflow.md).

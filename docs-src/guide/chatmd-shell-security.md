@@ -141,6 +141,14 @@ commands over the same tree. See
 
 ### Sandbox modes
 
+On macOS Seatbelt, enabling child processes allows their executable paths within
+the runtime's admitted read roots, writable roots and system support roots.
+Declare any additional executable directories needed by a shell or build tool,
+such as `/bin` and `/usr/bin`; permission to fork alone is not enough to run a
+helper. Child processes inherit the sandbox's filesystem and network restrictions.
+Command policy reviews the requested top-level command, not every subprocess it
+may launch. See the [complete checker example](../tutorials/shell-guardrails.md).
+
 - `required`: only a backend recognized for confinement may run. No direct
   fallback exists.
 - `preferred`: prefer confinement and allow a separately declared direct

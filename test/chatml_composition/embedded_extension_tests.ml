@@ -29,7 +29,23 @@ let send embedded text =
   |> ignore
 ;;
 
-let with_host ?(package_files = []) ?authoring_budget ~durable ~sources ~daemon_options f =
+let with_host
+      ?(package_files = [])
+      ?(workspace_files =
+        [ "reports/report-a.json", Fixtures.report_a
+        ; "reports/report-b.json", Fixtures.report_b
+        ])
+      ?authoring_budget
+      ?(permission_profile =
+        { Embedded.default_permission_profile with
+          tool_default = Allow
+        ; manifest_authorization = Assume_authorized
+        })
+      ~durable
+      ~sources
+      ~daemon_options
+      f
+  =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -43,6 +59,10 @@ let with_host ?(package_files = []) ?authoring_budget ~durable ~sources ~daemon_
           ~perm:0o700
           Eio.Path.(Eio.Stdenv.fs env / workspace / "reports");
         let save path source =
+          Eio.Path.mkdirs
+            ~exists_ok:true
+            ~perm:0o700
+            Eio.Path.(Eio.Stdenv.fs env / Filename.dirname path);
           Eio.Path.save
             ~create:(`Exclusive 0o600)
             Eio.Path.(Eio.Stdenv.fs env / path)
@@ -50,8 +70,8 @@ let with_host ?(package_files = []) ?authoring_budget ~durable ~sources ~daemon_
         in
         List.iter sources ~f:(fun (name, source) ->
           save (Filename.concat root name) source);
-        save (Filename.concat workspace "reports/report-a.json") Fixtures.report_a;
-        save (Filename.concat workspace "reports/report-b.json") Fixtures.report_b;
+        List.iter workspace_files ~f:(fun (name, source) ->
+          save (Filename.concat workspace name) source);
         let options : Embedded.options =
           { prompt_file = Filename.concat root "agent.chatmd"
           ; workspace
@@ -59,11 +79,7 @@ let with_host ?(package_files = []) ?authoring_budget ~durable ~sources ~daemon_
           ; home = root
           ; data_root = Option.some_if durable (Filename.concat root "data")
           ; start_immediately = true
-          ; permission_profile =
-              { Embedded.default_permission_profile with
-                tool_default = Allow
-              ; manifest_authorization = Assume_authorized
-              }
+          ; permission_profile
           ; attachment_mode = Read_write
           ; event_capacity = 512
           }

@@ -106,3 +106,42 @@ Firefox and WebKit. No live-provider validation or remote publication is claimed
 Legacy retirement remains future work. It does not require importing, exporting
 or migrating old alpha session stores. That decision does not remove legacy
 functionality in this change.
+
+## Useful shell learning checkpoints
+
+T06 keeps its existing URL and now starts the Lantern learning project with a
+fixed setup-file inspection tool and a reusable read-only shell runtime. T13
+adds a real documentation checker, a separate runtime for project code, a scoped
+report directory, selected environment, required confinement, and approval before
+report writes. Both are independently complete downloads with every maintained
+file visible in the browser, including Markdown sample inputs. Literal input
+schemas, command effects, policy decisions and OS enforcement are explained as
+separate parts of the same execution path. A deliberately missing verification
+section produces useful failure evidence instead of a trivial successful command.
+
+Canonical sample Markdown can be displayed as source only when its exact example
+path has an approved download rule and a canonical manifest disposition. Ordinary
+documentation is still not implicitly copied into downloads. Existing source
+URLs and the earlier shell authorization fragment remain available.
+
+Execution exposed a Seatbelt prerequisite defect: the child-process capability
+allowed fork but did not admit helper executable paths. It now permits execution
+inside the already admitted readable roots, retaining denial outside those roots.
+The real-backend regression checks both outcomes and disabled child capability.
+No separate resource-helper executable is required.
+
+Local evidence on macOS includes the complete composition and authoring-source
+suites, canonical documentation checks, real shell helper lifecycle regressions,
+and the shell boundary expect tests. Deterministic provider fixtures drive actual
+shell execution and verify both approval and denial while other tool outputs
+complete. Both built archives were extracted, compared byte-for-byte with their
+maintained sources, admitted through the shell inspector, and exercised with the
+sample checker. Website checks passed 83 tests; the build checked 157 HTML pages
+and 702 files; search passed 33 queries; 96 tutorial and reading browser tests
+passed across Chromium, Firefox and WebKit. Desktop lessons and the mobile source
+reader were visually reviewed. Catalog records identify exact source hashes and
+the limits of this evidence; no live provider or Linux execution is claimed.
+
+Custom shell reviewers, persistent and generated specialist lessons, stateful and
+background workflows, the three complete applications, and the final presentation
+and reader-journey audit remain separate unfinished work in the full plan.

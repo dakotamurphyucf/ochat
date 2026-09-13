@@ -122,6 +122,38 @@ test('supplemental policy accounts for root prose, prompts, historical sessions,
   );
 });
 
+test('Markdown sample downloads require exact approval and cannot expose ordinary docs', () => {
+  const source =
+    'docs-src/examples/learning/lantern/sample-project/docs/setup.md';
+  const inventory = supplementalInventory(policy, tracked, assets, examples);
+  assert.equal(
+    inventory.find((entry) => entry.source === source).disposition,
+    'example-download',
+  );
+  assert.ok(
+    entries.some(
+      (entry) =>
+        entry.source === source && entry.disposition === 'repository-only',
+    ),
+  );
+  const missing = structuredClone(policy);
+  missing.files = missing.files.filter((entry) => entry.source !== source);
+  assert.throws(
+    () => supplementalInventory(missing, tracked, assets, examples),
+    /exact example download approval/,
+  );
+  const ordinary = structuredClone(policy);
+  ordinary.files.push({
+    source: 'docs-src/README.md',
+    disposition: 'example-download',
+    reason: 'Attempt to copy canonical prose outside the example namespace.',
+  });
+  assert.throws(
+    () => supplementalInventory(ordinary, tracked, assets, examples),
+    /Canonical docs belong/,
+  );
+});
+
 test('supplemental policy rejects untracked, escaping, overlapping, and unclassified source links', () => {
   const rule = {
     source: 'missing.md',

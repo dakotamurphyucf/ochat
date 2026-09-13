@@ -31,9 +31,9 @@
   },
   {
     "page": "agent-server/tutorials/shell-agent",
-    "outcome": "Inspect and authorize one fixed working-directory command.",
-    "requires": "Installed Ochat, supported shell runtime, and the host-specific authorization path.",
-    "nextBenefit": "Return to the learning paths to add scripts, specialists or hosted operation."
+    "outcome": "Read real setup instructions through a fixed shell tool and an explicit runtime.",
+    "requires": "Installed Ochat, required sandbox backend, provider setup and the complete Lantern bundle.",
+    "nextBenefit": "Add a checker with its own output permissions and approval policy."
   },
   {
     "page": "agent-server/tutorials/unix-daemon",
@@ -70,5 +70,11 @@
     "outcome": "Expose the same report calculation as a named tool with schemas and selected dependencies.",
     "requires": "File-tool basics, the complete extracted bundle, and native local Ochat with provider configuration.",
     "nextBenefit": "Use a moderator when behavior must react to conversation events."
+  },
+  {
+    "page": "tutorials/shell-guardrails",
+    "outcome": "Run project checks and approve report writes using separate shell runtimes.",
+    "requires": "Shell inspection basics, the complete bundle, /bin/sh and awk, and an empty reports directory.",
+    "nextBenefit": "Customize decisions with ChatML hooks and reviewer agents."
   }
 ]

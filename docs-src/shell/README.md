@@ -13,8 +13,10 @@ The host then admits and enforces the supported configuration.
 ## Start with a complete example
 
 Follow the [shell-agent walkthrough](../agent-server/tutorials/shell-agent.md).
-It uses a limited `pwd` tool and explains how to run it with the appropriate
-authorization. The [declaration examples](../guide/chatmd-shell-examples.md)
+It reads Lantern's actual setup tutorial through a fixed command and a reusable
+read-only runtime. Continue with [separate checker capabilities and approved report writes](../tutorials/shell-guardrails.md)
+to run real checks against that project. Both lessons include complete source
+bundles you can inspect in the browser. The [declaration examples](../guide/chatmd-shell-examples.md)
 cover more patterns, but are not all standalone prompts or universal policies.
 
 Local and daemon hosts do not use interchangeable authorization switches.

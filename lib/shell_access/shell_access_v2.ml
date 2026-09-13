@@ -1903,7 +1903,12 @@ module Backend = struct
                    (seatbelt_escape executable)
                ]
                @ (if context.capabilities.allow_child_processes
-                  then [ "(allow process-fork)" ]
+                  then
+                    (* Child processes may execute within the same admitted read
+                       roots. Fork alone cannot run an interpreter's helpers or a
+                       build command's subprocesses. Other paths remain denied. *)
+                    "(allow process-fork)"
+                    :: List.map read_roots ~f:(seatbelt_rule "process-exec")
                   else [])
                @ List.map read_roots ~f:(seatbelt_rule "file-read*")
                @ List.map

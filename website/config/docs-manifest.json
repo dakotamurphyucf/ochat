@@ -1069,16 +1069,17 @@
     "id": "agent-server/tutorials/shell-agent",
     "source": "docs-src/agent-server/tutorials/shell-agent.md",
     "disposition": "publish",
-    "title": "Run a narrow shell agent",
-    "reviewNote": "P05 hosting publication group: Reviewed tracked /bin/pwd prompt, legacy interactive authorization versus daemon bootstrap, backend limitations, and policy boundaries. Model request not executed.",
+    "title": "Give an agent a useful shell command",
+    "reviewNote": "D03 useful shell checkpoint: complete Lantern source bundle, native authorization and required confinement. Behavior evidence is maintained with the tutorial catalog.",
     "provenance": "authored",
     "route": "/docs/tutorials/shell-agent/",
-    "description": "Inspect a fixed-command tool and follow the authorization path for its execution host.",
+    "description": "Read actual project instructions through a fixed command and a reusable shell runtime.",
     "section": "Tools and shell access",
     "kind": "tutorial",
     "order": 3,
     "related": [
-      "agent-server/tutorials/unix-daemon"
+      "tutorials/shell-guardrails",
+      "shell/README"
     ],
     "navigation": true,
     "search": true,
@@ -2027,7 +2028,7 @@
     "route": "/docs/guides/shell-extensions/",
     "description": "Add ChatML resolution, review, interception, and audit hooks to shell execution.",
     "section": "Tools and shell access",
-    "order": 4,
+    "order": 5,
     "kind": "guide",
     "status": "experimental",
     "related": [
@@ -4631,5 +4632,47 @@
     "related": [
       "tutorials/workflow"
     ]
+  },
+  {
+    "id": "tutorials/shell-guardrails",
+    "source": "docs-src/tutorials/shell-guardrails.md",
+    "disposition": "publish",
+    "title": "Design shell capabilities and guardrails",
+    "reviewNote": "D03 complete two-runtime checkpoint: real check evidence, bounded literal inputs, scoped output directory and user approval. See catalog for qualification status.",
+    "provenance": "authored",
+    "route": "/docs/tutorials/shell-guardrails/",
+    "description": "Use separate inspection and checker runtimes, then approve or decline report writes.",
+    "section": "Tools and shell access",
+    "kind": "tutorial",
+    "order": 4,
+    "related": [
+      "agent-server/tutorials/shell-agent",
+      "guide/chatmd-shell-extensions"
+    ],
+    "navigation": true,
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "not-checked",
+    "audience": [
+      "author"
+    ]
+  },
+  {
+    "id": "examples/learning/lantern/sample-project/docs/setup",
+    "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+    "disposition": "repository-only",
+    "title": "Lantern sample setup",
+    "reviewNote": "Sample project input displayed and downloaded through the complete example bundle; not an independent Ochat documentation page.",
+    "provenance": "authored"
+  },
+  {
+    "id": "examples/learning/lantern/sample-project/docs/reference",
+    "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+    "disposition": "repository-only",
+    "title": "Lantern sample reference",
+    "reviewNote": "Sample project input displayed and downloaded through the complete example bundle; not an independent Ochat documentation page.",
+    "provenance": "authored"
   }
 ]

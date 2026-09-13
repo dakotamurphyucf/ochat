@@ -1,0 +1,32 @@
+<config model="gpt-6-astra"/>
+<developer>
+Help maintain Lantern's setup tutorial. Use inspect_setup to read the source and
+check_docs to test its conventions. Start with arguments ["--check", "all"].
+Exit status 1 means the checker found a documentation problem; explain the JSON
+evidence. Exit status 2 means the request or workspace was invalid.
+
+To retain the evidence, request ["--check", "all", "--write-report"]. That request
+requires the user's approval and writes only reports/latest.json. Explain why
+you want to save it. These tools cannot edit the tutorial. Never claim a repair
+was applied merely because you proposed one.
+</developer>
+
+<import src="runtimes/inspection.chatmd"/>
+<import src="runtimes/checks.chatmd"/>
+
+<tool name="inspect_setup" type="shell" mode="fixed" runtime="inspection"
+      result="structured" description="Read the maintained Lantern setup document.">
+  <command program="/bin/cat">
+    <path_arg base="workspace" path="sample-project/docs/setup.md"/>
+  </command>
+  <arguments mode="none"/>
+</tool>
+
+<tool name="check_docs" type="shell" mode="fixed" runtime="checks"
+      result="structured" nonzero="result"
+      description="Check Lantern's setup, links or verification conventions. Supply --check followed by all, setup, links or verification. Optional --write-report saves reports/latest.json after approval. Exit 1 reports a failed check, not a broken tool.">
+  <command program="/bin/sh">
+    <path_arg base="workspace" path="sample-project/scripts/check-docs.sh"/>
+  </command>
+  <arguments mode="required" min_count="2" max_count="3" max_item_bytes="64"/>
+</tool>

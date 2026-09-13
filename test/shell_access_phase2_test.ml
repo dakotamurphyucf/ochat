@@ -43,6 +43,79 @@ let executor_ok = function
   | Error error -> failwith (S.Executor.error_to_string error)
 ;;
 
+let%expect_test "confined child executables stay within admitted readable roots" =
+  Eio_main.run (fun env ->
+    let fs = Eio.Stdenv.fs env in
+    let backend =
+      List.find_exn
+        [ S.Backend.macos_seatbelt; S.Backend.linux_bubblewrap () ]
+        ~f:(fun backend -> S.Backend.available backend ~fs)
+    in
+    let root = Eio.Path.(Eio.Stdenv.cwd env / "child-executable-boundary") in
+    Eio.Path.mkdir ~perm:0o700 root;
+    Exn.protect
+      ~finally:(fun () -> Eio.Path.rmtree root)
+      ~f:(fun () ->
+        let allowed = Eio.Path.(root / "allowed") in
+        let blocked = Eio.Path.(root / "blocked") in
+        let absolute path = Eio_posix.Low_level.realpath (Eio.Path.native_exn path) in
+        List.iter [ allowed; blocked ] ~f:(fun directory ->
+          Eio.Path.mkdir ~perm:0o700 directory;
+          Eio.Path.save
+            ~create:(`Exclusive 0o700)
+            Eio.Path.(directory / "echo")
+            "#!/bin/bash\nprintf '%s\\n' \"$1\"\n");
+        let run ~children directory =
+          let capabilities =
+            S.Capabilities.
+              { (development ~workspace:(absolute allowed)) with
+                sandbox = Required
+              ; read_roots = [ absolute allowed; "/bin"; "/usr/bin" ]
+              ; write_roots = []
+              ; allow_child_processes = children
+              }
+          in
+          let config =
+            S.Executor.config
+              ~env
+              ~runtime_id:"child-boundary"
+              ~manifest_sha256:"child-boundary"
+              ~policy:(S.Policy.create ~default:Allow [])
+              ~capabilities
+              ~backends:[ backend ]
+              ()
+          in
+          S.Executor.run
+            config
+            (invocation
+               (S.Request.command
+                  (S.Command.create
+                     "/bin/bash"
+                     [ "--noprofile"
+                     ; "--norc"
+                     ; "-c"
+                     ; "exec \"$1\" capability-check"
+                     ; "boundary"
+                     ; absolute Eio.Path.(directory / "echo")
+                     ])))
+        in
+        let accepted = run ~children:true allowed |> executor_ok in
+        [%test_eq: int] 0 (status_code accepted.status);
+        [%test_eq: string] "capability-check\n" accepted.stdout;
+        let rejected = run ~children:true blocked |> executor_ok in
+        assert (status_code rejected.status <> 0);
+        [%test_eq: string] "" rejected.stdout;
+        (match run ~children:false allowed with
+         | Error (Capability_violation _) -> ()
+         | Error error -> failwith (S.Executor.error_to_string error)
+         | Ok _ -> failwith "child execution bypassed disabled capability");
+        print_endline
+          "confined helper executes; outside-root helper and disabled child capability \
+           reject"));
+  [%expect
+    {| confined helper executes; outside-root helper and disabled child capability reject |}]
+;;
+
 let%expect_test "sandbox launcher resolves host PATH before changing child cwd" =
   Eio_main.run
   @@ fun env ->

@@ -68,8 +68,8 @@
     },
     {
       "source": "docs-src/examples/agent-server/shell/pwd.chatmd",
-      "disposition": "example-download",
-      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+      "disposition": "repository-only",
+      "reason": "Retained minimal declaration example; the complete Lantern bundle is the public learning checkpoint."
     },
     {
       "source": "docs-src/examples/chatml/moderator.chatml",
@@ -220,6 +220,51 @@
       "source": "docs-src/examples/learning/check-reports/schemas/output.json",
       "disposition": "example-download",
       "reason": "Maintained report-program tutorial companion, captured by the example catalog and in-browser source viewer."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-inspection/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-inspection/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/runtimes/inspection.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
+    },
+    {
+      "source": "docs-src/examples/learning/shell-guardrails/runtimes/checks.chatmd",
+      "disposition": "example-download",
+      "reason": "Exact maintained file for a complete Lantern shell learning checkpoint and inline source reader."
     }
   ],
   "directories": [

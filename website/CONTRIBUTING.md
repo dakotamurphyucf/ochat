@@ -130,6 +130,12 @@ offline semantic documentation checks before refreshing verification hashes.
 Changing a recorded input without rerunning its actual verification must leave
 the example visibly not checked.
 
+Markdown sample inputs under `docs-src/examples/` need both a canonical manifest
+entry (normally `repository-only`) and an exact `example-download` supplemental
+rule with a catalog destination. This permits reading/downloading their source
+without publishing them as Ochat articles. Directory rules do not authorize copies;
+ordinary canonical documentation outside the example namespace cannot use this path.
+
 `scripts/record-showcase.py` overwrites the tracked showcase with scripted data
 by default; `--live` makes paid provider calls. Do not run it as a routine build
 or replace the real capture to clear stale verification. An intentional capture

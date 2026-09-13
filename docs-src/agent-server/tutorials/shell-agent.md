@@ -1,105 +1,154 @@
-# A narrow shell agent
+# Give an agent a useful shell command
 
-Give a model exactly one declared `/bin/pwd` command and inspect its authority before use.
+An agent needs project facts before it can give useful advice. Give it a command
+that reads Lantern's setup tutorial, inside a reusable shell runtime with explicit
+read access, no project write access and no network access.
+
+This starts a larger workflow: inspect a tutorial, run its checks, save the
+evidence, then ask specialists to improve it. A fixed operation makes the tool
+interface and its runtime easy to understand before adding more capabilities.
 
 ## Prerequisites and command context
 
 Complete [installation](../quickstart.md) and [the first local agent](local-tui.md).
-Commands below use `dune exec` from the repository root and its active opam
-environment. Interactive execution uses the native local host; the daemon variant
-needs private example setup. A supported Seatbelt or bubblewrap backend is a
-platform prerequisite. Resource-limit setup is linked into Ochat; it does not
-require a separate helper executable. Use native `--local` together with
-`--authorize-shell-manifest` after inspecting the prompt.
+Use installed Ochat, provider configuration with access to `gpt-6-astra`, and a
+supported macOS Seatbelt or Linux bubblewrap backend. Interactive requests use
+your provider; the offline verification uses deterministic provider fixtures.
 
-Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
-before model work or deployment. [Build troubleshooting](../troubleshooting.md)
-includes the Apple Silicon/OpenBLAS setup path.
+Inspect every file in the **Lantern shell inspection** source reader below.
+Download and extract the complete bundle when ready to run it:
 
+```text
+narrow-shell/
+  agent.chatmd
+  runtimes/inspection.chatmd
+  sample-project/
+    docs/setup.md
+    docs/reference.md
+    scripts/check-docs.sh
+    expected-report.json
+  LICENSE.txt
+```
 
-Use a disposable workspace. This example publishes exactly one fixed command,
-`/bin/pwd`, with no model-supplied arguments. The
-[tracked prompt](../../examples/agent-server/shell/pwd.chatmd) extends the versioned
-read-only workspace profile and defaults shell policy to deny except this command.
-Read [host integration](../../guide/chatmd-shell-host-integration.md) first.
+Work from the extracted `narrow-shell` directory containing `agent.chatmd`.
+That directory becomes `${workspace}`. If you built without installing, use
+absolute paths to `_build/default/bin/main.exe` and `_build/default/bin/chat_tui.exe`
+in place of `ochat` and `chat-tui`, keeping the bundle as your working directory.
+
+Resource-limit setup is linked into Ochat; no separate helper executable is needed.
+The sandbox backend is a separate platform requirement. See
+[build troubleshooting](../troubleshooting.md) for backend or installation errors.
+
+## Read the tool and its runtime
+
+The root imports a reusable runtime, then binds a named tool to it:
+
+```xml
+<import src="runtimes/inspection.chatmd"/>
+
+<tool name="inspect_setup" type="shell" mode="fixed" runtime="inspection"
+      result="structured" description="Read the maintained Lantern setup document.">
+  <command program="/bin/cat">
+    <path_arg base="workspace" path="sample-project/docs/setup.md"/>
+  </command>
+  <arguments mode="none"/>
+</tool>
+```
+
+`inspect_setup` is the model-visible action; `inspection` is its runtime.
+The author fixes the executable and file path. The model supplies `{}` and cannot
+append arguments or select another file. `result="structured"` returns status,
+stdout, stderr and runtime metadata.
+
+Open `runtimes/inspection.chatmd` in the reader:
+
+| Setting | Effect in this example |
+| --- | --- |
+| Working directory | Commands run in `sample-project`. |
+| Read roots | The sample project is readable within supported backend boundaries. |
+| Write/network capabilities | No project writes or network access are declared. |
+| Policy | Allow `cat`; deny other top-level commands. |
+| Environment | Select declared values, including a fixed `PATH`. |
+| Limits | Stop after 10 seconds and bound returned output. |
+| Confinement | Require the supported OS sandbox. |
+
+The tool interface is narrower than the runtime's read root: this tool exposes
+only `docs/setup.md`. Another tool can reuse the runtime with a different fixed
+operation. A file reader is also appropriate for reading files; this lesson
+teaches the shell binding you can reuse for existing CLI programs and a real checker.
 
 ## Inspect without executing
 
-From the repository root, with the required platform backend available:
+From the extracted directory:
 
 ```sh
-dune build bin/main.exe bin/chat_tui.exe
-dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd.chatmd
-dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd.chatmd -canonical
+ochat shell inspect agent.chatmd
+ochat shell inspect agent.chatmd -canonical
 ```
 
-Inspection must either show the expected authority or a specific configuration/
-platform error. Do not weaken a required sandbox to make an example pass. Check
-the exact cwd, executable resolution, roots, source/manifest identity and limits.
-Ochat's linked child-process setup applies configured resource limits;
-Seatbelt/bubblewrap enforce their own supported OS boundaries. A direct backend
-does not enforce filesystem/network roots.
+Check the imported runtime, `/bin/cat`, resolved setup path, read roots, working
+directory, policy and limits. Inspection compiles the requested authority; it
+does not execute the tool. Resolve unexpected paths or errors before authorizing it.
 
-## Legacy local interactive authorization
+<a id="legacy-local-interactive-authorization"></a>
 
-The historical heading remains for existing links; this walkthrough now uses
-native local mode. Omit `--local` only to use the legacy compatibility host.
+## Run the agent locally
 
-After reviewing the manifest, the supported local CLI bootstrap is:
+After reviewing the prompt and inspection output:
 
 ```sh
-dune exec bin/chat_tui.exe -- --no-config --local \
-  -file docs-src/examples/agent-server/shell/pwd.chatmd --authorize-shell-manifest
+chat-tui --no-config --local -file agent.chatmd --authorize-shell-manifest
 ```
 
-This selects native local mode with explicit manifest authorization. Ask for the
-working directory; this is a billable model request. The published tool can only
-invoke its fixed argv. Requests for another command cannot be expressed through
-this tool. Shell policy denial is separate from the model refusing in prose.
+The flag authorizes loading the compiled shell manifest in this native process.
+There is no separate manifest file to create. Without authorization, a fresh
+shell-enabled prompt rejects startup. Policy, approvals and confinement still apply.
 
-Inspect Shell Security overview/runtime/audit state. Per-command approval appears
-only when policy asks; the example's single allowed command need not ask again.
-Quit normally and verify terminal restoration. For a bounded automated denial/
-approval audit check use the existing shell E2E tier, not a destructive command.
+Send:
+
+> Read Lantern's setup instructions with inspect_setup. Tell me how to run the
+> checker and what a reader still needs to know to verify success. Do not run it yet.
+
+Submit with Meta+Enter, or Esc then `:w` and Enter as described in the
+[keyboard guide](../../guide/chat_tui.md). Tool activity should show exit 0 and
+stdout containing the actual setup instructions and reference link. The tutorial
+deliberately lacks a verification section. A model naming that omission without a
+tool result does not prove the command ran.
+
+## Check the boundary
+
+The valid call is `{}`. This attempted call is invalid:
+
+```json
+{ "arguments": ["../reports/latest.json"] }
+```
+
+Extra arguments fail the tool schema before execution. Asking in prose to read
+another file does not change the declaration. Command policy and OS confinement
+are additional layers: a schema alone is not a sandbox. This checkpoint's allowed
+command needs no per-command approval; the next lesson adds one that does.
 
 ## Daemon authorization
 
-In a separate private tutorial config, point the `hello` prompt path at the same
-absolute shell prompt. Choose one explicit bootstrap policy:
+No daemon is needed here. For that optional host, configure the same bundle as a
+prompt with the bundle directory as its workspace, and use an operator grant or
+explicit reviewed-prompt authorization policy. The local flag is not a daemon
+setting. Follow [host integration](../../guide/chatmd-shell-host-integration.md)
+and [private Unix setup](unix-daemon.md) for the exact differences.
 
-- `require_grant`: configure an exact source/manifest operator grant for the
-  intended daemon path/principal/workspace context. A standalone inspection digest
-  with different runtime variables is not interchangeable.
-- `assume_authorized`: an operator's deliberate trust of this reviewed prompt.
-  For this disposable example it avoids inventing a grant-creation CLI; shell
-  capabilities, policy, backend and administrative checks remain enforced.
-- `deny`: useful to verify startup/tool authority rejection, not to execute it.
-
-Validate, start and connect as in [the Unix tutorial](unix-daemon.md). Use daemon
-`permission.list/respond`, `grant.list/revoke`, and `audit.read` or the connected
-Shell Security page. Do not supply a daemon ID to `ochat shell grants ...`:
-those commands target the legacy store.
-
-The generic tool gate delegates shell calls to shell review; do not expect two
-approval dialogs for one request. Audit replay is non-executing. A revoked grant
-or changed manifest must not silently authorize future different commands.
-
-See [the 17 shell declaration examples](../../guide/chatmd-shell-examples.md)
-for structured/chain/raw/script tools, hooks, model reviewers, secrets and backend
-failure cases. Those examples have explicit dependencies/placeholders and are not
-all safe copy-and-run deployment scripts.
+The old [pwd source](../../examples/agent-server/shell/pwd.chatmd) remains a minimal
+repository example. The URL of this upgraded lesson is unchanged.
 
 ## Checkpoint, troubleshooting, and next step
 
-Success means inspection matches the fixed executable/argv and a requested tool
-call returns the workspace directory. A model naming the directory without a tool
-result does not verify execution. For backend or resource-setup errors consult
-[shell diagnostics](../../guide/chatmd-shell-host-integration.md); keep required
-confinement enabled. A permission denial is separate from parsing and model prose.
-Wait for work to finish, quit the TUI with Esc then `:q` and Enter, and stop any
-daemon before removing its private directory. Native local state ends with the
-process; daemon state and provider logs have their own configured locations.
-To design a more useful command interface, explore
-[reusable shell capabilities and guardrails](../../shell/README.md#design-access-around-the-work)
-and [custom decisions with ChatML and reviewer agents](../../shell/README.md#customize-decisions-with-scripts-and-agents).
-For client-independent hosting, continue to [durable Unix sessions](unix-daemon.md).
+You should have a real setup-file result and an explanation of the missing
+verification instructions. For path errors, confirm your working directory and
+keep the complete bundle layout. For backend errors, consult
+[shell diagnostics](../../guide/chatmd-shell-host-integration.md); do not change
+`sandbox="required"` to bypass the problem. Truncated output is incomplete evidence.
+
+Quit with Esc, then `:q` and Enter after work finishes. Native local state ends
+with the process; source files remain. No background work was started.
+
+Next, [run checks with separate capabilities and approved report writes](../../tutorials/shell-guardrails.md).
+The next bundle includes the same project and all its companion files.

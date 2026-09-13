@@ -8,13 +8,20 @@ not need a daemon, shell access, or an orchestration script to try Ochat.
 1. [Run your first local agent](../agent-server/tutorials/local-tui.md): setup, one request, and clean exit.
 2. [Give it a file tool](../tutorials/file-tool.md): a complete read declaration and a named sample file.
 3. [Add a specialist reviewer](../tutorials/specialist.md): a parent, companion prompt, and observable delegation.
-4. [Run a request from a script](../cli/chat-completion.md): initialize and continue a file-backed conversation.
-5. [Add bounded ChatML workflow logic](../tutorials/workflow.md): stop after three completed turns.
-6. [Give it a narrow shell command](../agent-server/tutorials/shell-agent.md): inspect authority and select a supported host.
-7. [Run a durable daemon session](../agent-server/tutorials/unix-daemon.md): detach, reconnect, and shut down.
-8. [Respond to a background event](../agent-server/tutorials/background-agent.md): a timer without model work.
-9. [Connect a stdio client](../agent-server/tutorials/stdio-client.md): initialization, attachment, and streamed completion.
-10. [Connect an HTTP client](../agent-server/tutorials/http-client.md): authenticated RPCs and event subscriptions.
+
+Then choose the capabilities your project needs:
+
+| Learning path | Progression |
+| --- | --- |
+| Shell access | [Inspect a real project](../agent-server/tutorials/shell-agent.md), then [run checks with separate runtimes and approved report writes](../tutorials/shell-guardrails.md). |
+| ChatML | [Compute over reports](../tutorials/chatml-program.md), [package a reusable tool](../tutorials/chatml-tool.md), then [control a conversation](../tutorials/workflow.md). |
+| Agent teams | [Choose a delegation pattern](../guide/subagents.md), from a one-off specialist to persistent or generated children. |
+| Run and operate | [Batch requests](../cli/chat-completion.md), [durable daemon sessions](../agent-server/tutorials/unix-daemon.md), and [background scheduling](../agent-server/tutorials/background-agent.md). |
+| External clients | [Local stdio](../agent-server/tutorials/stdio-client.md) and [authenticated HTTP](../agent-server/tutorials/http-client.md). |
+
+Hosting and transport lessons are optional branches, not prerequisites for every
+shell tool or ChatML program. Persistent child workflows still require their
+documented durable host.
 
 Each tutorial records its host, prerequisites, verification scope, and persistence.
 Read the associated ChatMD and companion files directly in each tutorial’s source
@@ -51,7 +58,8 @@ for the supported learning progression.
 | Read project files or add editing tools | [Tool declarations and catalog](../overview/tools.md) |
 | Compose a larger assistant from prompts and tools | [General agent workflow](../guide/general-agent-workflow.md) |
 | Search code and documentation | [Search setup](../guide/search-and-indexing.md) and [illustrative output samples](../guide/search-examples/README.md) |
-| Give an agent a narrow command | [Complete shell tutorial](../agent-server/tutorials/shell-agent.md) |
+| Give an agent a useful fixed command | [Complete shell inspection tutorial](../agent-server/tutorials/shell-agent.md) |
+| Separate inspection and check permissions | [Complete shell guardrails tutorial](../tutorials/shell-guardrails.md) |
 | Explore other shell configurations | [Shell declaration patterns](../guide/chatmd-shell-examples.md) |
 | Respond to a scheduled background event | [ChatML background agent](../agent-server/tutorials/background-agent.md) |
 | Implement a custom OCaml tool with progress | [Tool registration guide](../lib/gpt_function.doc.md) and [compiled offline example](tools/custom_tool.ml) |
