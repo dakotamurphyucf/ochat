@@ -86,9 +86,7 @@ test('readers discover shell, teams and workflows before opening the reference c
       name: 'persistent and optionally persistent specialists',
     })
     .click();
-  await expect(page).toHaveURL(
-    /\/docs\/guides\/subagents\/#authored-specialists/,
-  );
+  await expect(page).toHaveURL('/docs/tutorials/persistent-specialist/');
   await page.goto('/docs/reference/chatml/authoring-primer/');
   await expect(
     page.getByRole('complementary', {

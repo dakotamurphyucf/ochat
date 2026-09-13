@@ -1,8 +1,7 @@
 # Documentation overhaul acceptance audit
 
-Status: local D06 qualification in progress. D01–D05 are implemented. Publication
-and hosted verification are separate, conditional steps; this document does not
-authorize either. The implementation/evidence history and existing-page review
+Status: D01–D06 complete locally. Publication and hosted verification are separate,
+conditional steps; this document does not authorize either. The implementation/evidence history and existing-page review
 are in [documentation-learning-paths.md](documentation-learning-paths.md).
 
 ## Capability coverage
@@ -88,7 +87,7 @@ The sample's eight-record limits and polling intervals are application choices,
 not intrinsic language restrictions. Private host configuration preauthorizes the
 fixed staging capability; it does not pretend to request per-command human approval.
 
-## Reader tasks inspected so far
+## Reader tasks inspected
 
 Actual built pages were walked at 1440px and 390px. The shell introduction is one
 ordinary click from the documentation landing page. Its runtime/schema/authority
@@ -103,7 +102,8 @@ desktop expansion, exact clipboard copy and a permalink restoring its selected
 file. Native-local, daemon and stdio pages retain their distinct lifetime guidance.
 The baseline manifest's 149 published routes all retain their original URLs and
 publication dispositions. All 1,493 historical source headings resolve in the
-built pages; the renamed shell tutorial now retains its earlier title anchor.
+built pages, as do 25 explicit historical anchors; the renamed shell tutorial now
+retains its earlier title anchor.
 The contributor guide describes the supported explicit-anchor mechanism instead
 of recommending the currently rejected `fragmentAliases` field.
 
@@ -118,16 +118,76 @@ passed with live-provider opt-in and credentials excluded. The initial forced
 ordinary run found eight stale reference-hash expectations after D05 formatting;
 only the reviewed documentation hashes changed, and the follow-up suite passed.
 The nine native API hashes were unchanged. The offline semantic documentation
-gate also passed. Search, full browser checks and artifact provenance remain in
-progress; this is not yet a claim that D06 is complete.
+gate also passed. Its recorded revision predates the final commit, but the exact
+semantic-input hash still matches the qualified sources; the original report is
+retained without rewriting its provenance.
 
-## Remaining qualification
+All 309 browser cases were exercised across Chromium, Firefox and WebKit. The
+initial run passed 298, skipped the two existing clipboard cases, and found three
+stale navigation expectations in each engine. Updating the homepage destination,
+direct persistent-specialist link and optional hosting-to-stdio path made all nine
+affected cases pass with traces enabled. The result is 307 passing cases and two
+existing skips, with initial failures and follow-up evidence retained separately.
+The full local run disabled trace recording for speed; CI trace policy is unchanged.
 
-- Final canonical, website, search, semantics, full browser and presentation gates.
-- Final application/lesson bundle and source/verification reconciliation.
-- Old fragment/source links, README/homepage routes and artifact revision checks.
-- Final branch review, evidence/limitations, committed handoff and local artifact.
-- Separately authorized protected publication, followed by hosted revision checks.
+Search passed all 33 queries across 154 indexed pages and 2,555 checked fragment
+destinations. All twelve required feature queries reached an intended destination
+in the top three. Seven throttled mobile performance samples passed the existing
+JavaScript/CSS/font, layout-shift and reflow budgets. These diagnostic samples are
+not field measurements or a performance claim for every application page.
+
+## Qualified artifact and publication boundary
+
+The retained local production artifact was built from
+`f097ab6acd0e3503e4ded9fd8f67cf4470ca33e2` for `https://ochatlabs.com`:
+165 HTML pages, 861 files, SHA-256
+`3cb0a51100b92a325997b5408878581d74c3de19a69406a82aa86721993bcbc8`.
+It lives at
+`scratch/agents/docs-overhaul-root-20260913/d06-qualified-artifact-f097ab6a/`.
+Retention and an independent verification both passed. Search/performance reports
+identify that exact artifact hash. Browser, reader, source and semantic evidence
+are retained beside its inventory. This final handoff changes tests and repository
+planning prose only; it does not relabel the earlier artifact as a later revision.
+
+The final branch review found no unrelated tracked paths, generated outputs,
+new credentials or CI workflow changes. Per-batch review and meaningful runtime
+tests cover the source changes; an added-line credential-pattern check supplements
+that review. Pre-existing untracked local guidance/sample files remain untouched.
+
+D06.09 and D06.10 remain conditional: after separate authorization, publish through
+the protected PR/release-gate workflow, then inspect the actual deployed revision,
+pages, search and downloads. The locally verified Git source objects are not proof
+that an unpublished branch revision is available on GitHub. Nothing was pushed,
+merged, deployed or sent to a live model provider during this overhaul.
 
 No live provider quality, Linux confinement execution, physical TUI session or
 hosted deployment is implied by local deterministic/browser evidence.
+
+## Acceptance scenario evidence
+
+These are reader outcomes from plan section 14, not counts of files written.
+Local evidence is kept under `scratch/agents/docs-overhaul-root-20260913/`.
+
+| Scenario | Observed path or execution | Evidence |
+| --- | --- | --- |
+| 1. Discover shell capabilities | `/docs/` → shell feature, one ordinary click; tool/runtime/schema distinctions visible | `d06-reader-journeys.json` |
+| 2. Configure guardrails | Shell feature → guardrails lesson → inspection/check runtime files and request decisions | Reader journeys; `d06-extractions.log`; shell integration expect tests |
+| 3. Customize decisions | Guardrails → customization → deterministic hook and model-review variant | Reader journeys; extraction; model-review adapter test uses a controlled response, not a live reviewer |
+| 4. Continue a specialist | Old specialist lesson → persistent lesson, with a direct generated-specialist alternative | Reader journeys; persistent/generated lesson integration |
+| 5. Generate a specialist | Parent declarations, captured source, validation and creation request; send/status/read/wait/stop | Reader journeys; lab generated-reviewer and authority integration |
+| 6. Choose a script form | Concept decision table → each of the four complete form lessons | Reader journeys; program, standalone and stateful integration |
+| 7. Understand async results | Background lesson → lab acknowledgement, completion, notification and receipt polling | Reader journeys; lab repeated-poll, failed-child and cleanup coverage |
+| 8. Inspect full applications | Every root/runtime/agent/script/schema selected in all three source readers | Reader source text compared with maintained bytes, desktop/mobile |
+| 9. Run a bundle | All eight lesson/application extraction batches; real sample commands from stated directories | `d06-extractions.log`; no provider run |
+| 10. Read long code | Lab coordinator wrap, expanded desktop width, clipboard bytes and restored file permalink | Reader journeys and inspected desktop/mobile screenshots |
+| 11. Search naturally | Required twelve feature queries in the top three; all 33 benchmarks pass | Retained `evidence/search-report.json` |
+| 12. Trace the lab | Inventory → check → reviewer/watch → proposal → literal staging → recheck → retained report | Reader journeys, extraction and lab integration/recovery expect tests |
+| 13. Understand hosts | Native-local, daemon and stdio instructions distinguish process lifetime, durable state and disconnect | Reader journeys; embedded/daemon runtime checks |
+| 14. Follow old links | 149 retained routes, 1,493 old source headings, nine README website links and 869 immutable source objects | Historical-heading and source-link audits; public revision availability remains conditional on publication |
+
+Verification records retain their actual revision, source hashes, observations and
+limitations. All 25 catalog entries have complete record coverage. A changed HEAD
+or recorded input invalidates the current status while leaving the historical
+evidence readable; final qualification does not rewrite old captures or stamp
+every example as live-checked. The original recorded documentation-review demo
+retains its original provider/model and historical input evidence.
