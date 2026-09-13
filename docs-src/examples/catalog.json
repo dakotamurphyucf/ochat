@@ -341,12 +341,12 @@
     "title": "Narrow shell command",
     "summary": "Declare exactly /bin/pwd, then inspect and authorize the manifest in the supported host.",
     "tutorial": "agent-server/tutorials/shell-agent",
-    "host": "Legacy local TUI or configured daemon",
+    "host": "Native local TUI or daemon",
     "capabilities": [
       "Shell command"
     ],
     "required": [
-      "Supported OS sandbox backend and resource helper, inspected manifest, explicit host authorization, configured provider. Do not combine native --local with --authorize-shell-manifest."
+      "Supported OS sandbox backend, inspected manifest, explicit host authorization and configured provider. Use --local --authorize-shell-manifest for native local mode. Resource setup is linked into Ochat."
     ],
     "kind": "template",
     "entry": "pwd.chatmd",

@@ -63,7 +63,8 @@
       – [--textmate-grammar FILE] · load an additional TextMate grammar before
                                     starting the TUI; may be repeated.
       – [--authorize-shell-manifest] · authorize the exact canonical shell
-        manifest compiled from the prompt for this process only.
+        manifest compiled from the prompt for this process only; supported
+        with native [--local] as well as legacy interactive mode.
       – [--parallel-tool-calls] / [--no-parallel-tool-calls] · toggle parallel
         execution of function-callable tools.
       – [--auto-persist] / [--no-persist] · control whether the snapshot is
@@ -424,7 +425,8 @@ Notes:
       - --export-file only applies to interactive mode.
       - --prompt-file only applies to --reset-session.
       - --authorize-shell-manifest only applies to interactive mode and grants
-        one-process authorization to the exact compiled manifest.
+        one-process authorization to the exact compiled manifest. Combine with
+        --local for native mode; omit --local for legacy compatibility.
       - --parallel-tool-calls / --no-parallel-tool-calls and
         --auto-persist / --no-persist only apply to interactive mode.
   • For scripting, --list-sessions and --session-info support JSON output
@@ -1333,6 +1335,7 @@ module Cli = struct
         ; authoring_package_files : string list
         ; authoring_budget : Chat_response.Authoring_validation.context_budget option
         ; textmate_grammar_files : string list
+        ; authorize_shell_manifest : bool
         }
 
   type selector =
@@ -1493,7 +1496,7 @@ module Cli = struct
       || t.read_only
     then Or_error.error_string "Error: daemon session flags require --connect."
     else (
-      let legacy_requested =
+      let legacy_only_requested =
         Option.is_some t.session_id
         || t.new_session
         || Option.is_some t.export_file
@@ -1501,14 +1504,13 @@ module Cli = struct
         || t.auto_persist
         || t.parallel_tool_calls
         || t.no_parallel_tool_calls
-        || t.authorize_shell_manifest
       in
-      if t.local && legacy_requested
+      if t.local && legacy_only_requested
       then
         Or_error.error_string
           "Error: legacy session/export/runtime flags are not supported with explicit \
            --local."
-      else if t.local || not legacy_requested
+      else if t.local || not (legacy_only_requested || t.authorize_shell_manifest)
       then (
         let%map authoring_budget =
           Agent_server.Authoring_options.resolve t.authoring_options
@@ -1518,6 +1520,7 @@ module Cli = struct
           ; authoring_package_files = t.authoring_package_files
           ; authoring_budget
           ; textmate_grammar_files = t.textmate_grammar_files
+          ; authorize_shell_manifest = t.authorize_shell_manifest
           })
       else (
         let%bind persist_mode = derive_persist_mode t in
@@ -2073,6 +2076,7 @@ module Embedded_interactive = struct
         ~textmate_grammar_files
         ~authoring_package_files
         ~authoring_budget
+        ~authorize_shell_manifest
     =
     Eio.Switch.run
     @@ fun sw ->
@@ -2086,7 +2090,7 @@ module Embedded_interactive = struct
         ; home
         ; data_root = None
         ; start_immediately = true
-        ; permission_profile = default_permission_profile
+        ; permission_profile = interactive_permission_profile ~authorize_shell_manifest
         ; attachment_mode = Agent_protocol.Session.Read_write
         ; event_capacity = 4096
         }
@@ -2183,8 +2187,12 @@ let run_action ~typeahead_config (action : Cli.action) =
   | Daemon_admin { connect; bearer_token_file; command } ->
     Env.with_env (fun env -> Daemon_admin.run ~env ~connect ~bearer_token_file ~command)
   | Embedded_interactive
-      { prompt_file; textmate_grammar_files; authoring_package_files; authoring_budget }
-    ->
+      { prompt_file
+      ; textmate_grammar_files
+      ; authoring_package_files
+      ; authoring_budget
+      ; authorize_shell_manifest
+      } ->
     Env.with_env (fun env ->
       Embedded_interactive.run
         ~typeahead_config
@@ -2192,7 +2200,8 @@ let run_action ~typeahead_config (action : Cli.action) =
         ~prompt_file
         ~textmate_grammar_files
         ~authoring_package_files
-        ~authoring_budget)
+        ~authoring_budget
+        ~authorize_shell_manifest)
   | _ ->
     Env.with_env (fun env -> run_env_action ~env action);
     Ok ()

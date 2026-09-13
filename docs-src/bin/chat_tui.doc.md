@@ -35,11 +35,14 @@ raw protocol clients must discover catalog IDs.
 | `--export-file FILE` | Legacy interactive transcript export. |
 | `--auto-persist`, `--no-persist` | Legacy interactive snapshot persistence controls. |
 | `--parallel-tool-calls`, `--no-parallel-tool-calls` | Legacy interactive execution controls, not native/connected runtime overrides. |
-| `--authorize-shell-manifest` | Legacy interactive exact-manifest authorization for this process. |
+| `--authorize-shell-manifest` | Authorize the prompt's compiled shell manifest for this interactive process. Supported with native `--local`; without `--local`, preserves the legacy path. Command approvals and confinement remain enforced. |
 | `--textmate-grammar FILE` | Repeatable additional grammar files for interactive rendering. |
 
 The legacy-only flags select the implicit legacy path if `--local` is absent.
 Explicit `--local` rejects them. Do not silently combine mode examples.
+
+Shell-manifest authorization is supported by both interactive local modes; it is
+not one of the legacy-only persistence/execution controls.
 
 ## Administration
 

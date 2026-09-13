@@ -6,7 +6,7 @@ policy/approval, and OS confinement. Allowing one does not bypass the others.
 
 | Host | Bootstrap and state | Administration |
 |---|---|---|
-| Native local TUI | Embedded default requires grants; transient process-bound host. Native `--local` does not accept legacy authorization/persistence flags. | Client Shell Security projection; use a supported legacy/daemon mode if its bootstrap needs a CLI option absent here. |
+| Native local TUI | Use `--local --authorize-shell-manifest` after reviewing the prompt; without authorization a fresh shell-enabled session rejects startup. State is transient and process-bound. | Client Shell Security and command approvals; legacy persistence flags remain unsupported. |
 | Legacy local TUI | `--authorize-shell-manifest` authorizes the exact manifest for that process; legacy session persistence is separate. | `ochat shell` legacy-store commands and local Shell Security views. |
 | Local stdio | Embedded default profile requires grants; optional durable data root does not provide a manifest-authorize CLI flag. | Protocol views; custom embedding for different bootstrap policy. |
 | Daemon | Pinned permission profile and exact persisted/operator grants, or explicit `assume_authorized`/`deny`. | Protocol `permission.*`, `grant.*`, `audit.read`; connected Shell Security views. |
@@ -29,14 +29,21 @@ Inspection compiles declarations; it does not run their tools. Check executable
 identities, source/import versions, variables, capabilities, policy, backend,
 secret descriptors, hooks/reviewers, resource limits and audit behavior.
 
-For legacy interactive use, after reviewing the actual prompt:
+For native local interactive use, after reviewing the actual prompt:
 
 ```sh
-chat-tui --no-config -file /absolute/path/agent.chatmd --authorize-shell-manifest
+chat-tui --no-config --local -file /absolute/path/agent.chatmd --authorize-shell-manifest
 ```
 
-Do not add `--local`: authorization is a legacy-only mode flag. A successful
-bootstrap is not approval for every future command. Hard denial still wins.
+This explicitly authorizes loading the prompt's compiled shell capabilities for
+this process. It does not bypass command policy, approval, administrative checks,
+or OS confinement, and does not install a reusable operator grant. Without the
+flag, the default embedded profile requires a grant and rejects an unapproved
+shell manifest before the session opens. The manifest is compiled from ChatMD;
+it is not a separate authorization file you must create.
+
+Omitting `--local` with this flag retains the legacy interactive path for
+compatibility. Native and legacy stores remain separate.
 
 For a daemon, configure [operator manifest grants](../agent-server/configuration.md#operator-manifest-grants)
 or deliberately select another manifest authorization mode. Grants compare the

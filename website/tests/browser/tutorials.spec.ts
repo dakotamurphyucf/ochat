@@ -78,7 +78,7 @@ test('catalog distinguishes complete examples, configured templates and illustra
       page.locator('#example-search-output a[download]'),
     ).toHaveCount(0);
     await expect(page.locator('#example-narrow-shell')).toContainText(
-      'Do not combine native --local',
+      'Use --local --authorize-shell-manifest',
     );
   } finally {
     await context.close();

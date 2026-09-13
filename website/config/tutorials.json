@@ -206,7 +206,7 @@
   {
     "id": "T06",
     "page": "agent-server/tutorials/shell-agent",
-    "host": "Legacy local TUI or configured daemon",
+    "host": "Native local TUI or daemon",
     "examples": [
       "narrow-shell"
     ],

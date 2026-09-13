@@ -2,8 +2,8 @@
 
 Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
 The declaration language is shared, but bootstrap grants, approvers, persistence
-owners and management commands differ. `--authorize-shell-manifest` is a legacy
-local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+owners and management commands differ. `--authorize-shell-manifest` authorizes a reviewed prompt in native
+`--local` or legacy interactive TUI mode; it is not a daemon flag. Legacy `Session_store`
 management does not accept daemon IDs as a way to select daemon state.
 
 Shell security state is explicit, typed, versioned, and separate from

@@ -6,11 +6,11 @@ Give a model exactly one declared `/bin/pwd` command and inspect its authority b
 
 Complete [installation](../quickstart.md) and [the first local agent](local-tui.md).
 Commands below use `dune exec` from the repository root and its active opam
-environment. Interactive execution uses the legacy local host; the daemon variant
+environment. Interactive execution uses the native local host; the daemon variant
 needs private example setup. A supported Seatbelt or bubblewrap backend is a
 platform prerequisite. Resource-limit setup is linked into Ochat; it does not
-require a separate helper executable. Native `--local` must not be combined with
-`--authorize-shell-manifest`.
+require a separate helper executable. Use native `--local` together with
+`--authorize-shell-manifest` after inspecting the prompt.
 
 Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
 before model work or deployment. [Build troubleshooting](../troubleshooting.md)
@@ -42,14 +42,17 @@ does not enforce filesystem/network roots.
 
 ## Legacy local interactive authorization
 
+The historical heading remains for existing links; this walkthrough now uses
+native local mode. Omit `--local` only to use the legacy compatibility host.
+
 After reviewing the manifest, the supported local CLI bootstrap is:
 
 ```sh
-dune exec bin/chat_tui.exe -- --no-config \
+dune exec bin/chat_tui.exe -- --no-config --local \
   -file docs-src/examples/agent-server/shell/pwd.chatmd --authorize-shell-manifest
 ```
 
-This deliberately selects the legacy local host, not native `--local`. Ask for the
+This selects native local mode with explicit manifest authorization. Ask for the
 working directory; this is a billable model request. The published tool can only
 invoke its fixed argv. Requests for another command cannot be expressed through
 this tool. Shell policy denial is separate from the model refusing in prose.
@@ -94,8 +97,8 @@ result does not verify execution. For backend or resource-setup errors consult
 [shell diagnostics](../../guide/chatmd-shell-host-integration.md); keep required
 confinement enabled. A permission denial is separate from parsing and model prose.
 Wait for work to finish, quit the TUI with Esc then `:q` and Enter, and stop any
-daemon before removing its private directory. Legacy caches/store records and
-provider logs can remain separately; inspect their configured locations.
+daemon before removing its private directory. Native local state ends with the
+process; daemon state and provider logs have their own configured locations.
 To design a more useful command interface, explore
 [reusable shell capabilities and guardrails](../../shell/README.md#design-access-around-the-work)
 and [custom decisions with ChatML and reviewer agents](../../shell/README.md#customize-decisions-with-scripts-and-agents).

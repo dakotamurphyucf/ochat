@@ -78,3 +78,31 @@ honest execution evidence. Generated children select inherited tools; response
 notifications use the supported watcher/polling pattern. These are documentation
 compositions of existing runtime features, not permission to invent broader
 authority or unsupported session APIs.
+
+## Native shell prerequisite correction
+
+The shell learning path exposed a startup gap: native local TUI required a shell
+manifest grant but rejected the interactive authorization flag. Native
+`--local --authorize-shell-manifest` now explicitly admits the reviewed prompt's
+compiled manifest for that process. The ordinary default remains fail-closed;
+command policy, approval and required confinement continue to apply. Omitting
+`--local` with this flag retains the existing legacy selection behavior.
+
+The native regression also exposed a concurrent publication bug. A completed
+tool could fail to publish its result while another tool in the same foreground
+batch awaited permission. Publication now accepts that waiting state for the
+matching running operation; execution admission and other safe points retain
+their checks. The regression requires nonreviewed results before responding to
+the pending approval, then verifies the subsequent model request. The runtime
+source coverage pin was reviewed for this publication correction; lifecycle,
+recovery, moderator and notification contracts did not change.
+
+Local validation on macOS: native startup/exit without a model request; required
+sandbox execution, hard denial and approval using deterministic provider fixtures;
+the session, composition and authoring-source suites; canonical documentation
+checks; website checks/build and six affected browser checks across Chromium,
+Firefox and WebKit. No live-provider validation or remote publication is claimed.
+
+Legacy retirement remains future work. It does not require importing, exporting
+or migrating old alpha session stores. That decision does not remove legacy
+functionality in this change.

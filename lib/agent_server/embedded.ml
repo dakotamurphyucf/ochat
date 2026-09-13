@@ -35,6 +35,12 @@ let default_permission_profile =
     }
 ;;
 
+let interactive_permission_profile ~authorize_shell_manifest =
+  match authorize_shell_manifest with
+  | false -> default_permission_profile
+  | true -> { default_permission_profile with manifest_authorization = Assume_authorized }
+;;
+
 let protocol_of_store error =
   Agent_protocol.Error.create
     Persistence_error
