@@ -751,6 +751,51 @@ let%expect_test "shutdown gives admitted timer delivery a bounded grace before r
   List.iter [ false; true ] ~f:(fun exceed_grace ->
     Eio_main.run (fun env ->
       Mirage_crypto_rng_unix.use_default ();
+      (* Scheduler polling and storage still use real I/O. Only persisted time
+         and the shutdown fiber's grace sleep are controlled by the test. This
+         keeps a slow machine from expiring grace while we release the gate. *)
+      let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
+      let mono_clock, pause_mono, _resume_mono, advance_mono =
+        controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+      in
+      pause_mono ();
+      let grace_sleep = Eio.Fiber.create_key () in
+      let module Clock = struct
+        type t = unit
+        type time = float
+
+        let now () = !logical_now
+
+        let sleep_until () deadline =
+          match Eio.Fiber.get grace_sleep with
+          | Some (registered, expire) ->
+            Eio.Promise.resolve registered deadline;
+            Eio.Promise.await expire
+          | None ->
+            Eio.Time.sleep
+              (Eio.Stdenv.clock env)
+              (Float.max 0. (deadline -. !logical_now))
+        ;;
+      end
+      in
+      let clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
+      let daemon_env =
+        object
+          method fs = env#fs
+          method cwd = env#cwd
+          method stdin = env#stdin
+          method stdout = env#stdout
+          method stderr = env#stderr
+          method net = env#net
+          method domain_mgr = env#domain_mgr
+          method process_mgr = env#process_mgr
+          method clock = clock
+          method mono_clock = mono_clock
+          method secure_random = env#secure_random
+          method debug = env#debug
+          method backend_id = env#backend_id
+        end
+      in
       let root = temporary_root env in
       Exn.protect
         ~finally:(fun () ->
@@ -777,7 +822,7 @@ let on_event ctx state event = match event with
             let start () =
               D.start
                 ~sw
-                ~env
+                ~env:daemon_env
                 ~config:configuration
                 ~tool_dir:root
                 ~home:root
@@ -816,47 +861,66 @@ let on_event ctx state event = match event with
                       in
                       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
                         ignore (wait (fun state -> not (List.is_empty state.schedules)));
-                        let shutdown =
-                          A.with_moderator_checkpoint entry.actor (fun () ->
-                            ignore
-                              (wait (fun state ->
-                                 List.exists state.schedules ~f:(fun timer ->
-                                   match timer.status with
-                                   | Delivering -> true
-                                   | _ -> false)));
+                        let registered, register = Eio.Promise.create () in
+                        let expire, expire_grace = Eio.Promise.create () in
+                        Exn.protect
+                          ~finally:(fun () ->
+                            match Eio.Promise.is_resolved expire with
+                            | true -> ()
+                            | false -> Eio.Promise.resolve expire_grace ())
+                          ~f:(fun () ->
                             let shutdown =
-                              Eio.Fiber.fork_promise ~sw (fun () ->
-                                D.shutdown daemon |> protocol_ok)
-                            in
-                            let rec draining () =
-                              match D.status daemon with
-                              | Draining -> ()
-                              | _ ->
-                                Eio.Fiber.yield ();
-                                draining ()
-                            in
-                            draining ();
-                            (match exceed_grace with
-                             | false ->
-                               Agent_server.Runtime_owner.ensure_loaded entry.runtime
-                               |> protocol_ok;
-                               (match (A.state entry.actor |> protocol_ok).schedules with
-                                | [ { status = Delivering; _ } ] -> ()
-                                | _ ->
-                                  failwith "shutdown cancelled delivery before its grace")
-                             | true ->
-                               (* The held gate prevents enqueue; grace expiry must
+                              A.with_moderator_checkpoint entry.actor (fun () ->
+                                (* The timer cannot become due until the checkpoint
+                               is held, so even its initial admission is ordered. *)
+                                logical_now := !logical_now +. 1.;
+                                advance_mono 1.;
+                                ignore
+                                  (wait (fun state ->
+                                     List.exists state.schedules ~f:(fun timer ->
+                                       match timer.status with
+                                       | Delivering -> true
+                                       | _ -> false)));
+                                let shutdown =
+                                  Eio.Fiber.fork_promise ~sw (fun () ->
+                                    Eio.Fiber.with_binding
+                                      grace_sleep
+                                      (register, expire)
+                                      (fun () -> D.shutdown daemon |> protocol_ok))
+                                in
+                                (* Await actual timeout registration, not just the
+                               Draining flag, before deciding whether to expire. *)
+                                let grace_deadline = Eio.Promise.await registered in
+                                assert (
+                                  Float.(
+                                    abs (grace_deadline -. !logical_now -. 0.1) < 0.000001));
+                                (match exceed_grace with
+                                 | false ->
+                                   Agent_server.Runtime_owner.ensure_loaded entry.runtime
+                                   |> protocol_ok;
+                                   (match
+                                      (A.state entry.actor |> protocol_ok).schedules
+                                    with
+                                    | [ { status = Delivering; _ } ] -> ()
+                                    | _ ->
+                                      failwith
+                                        "shutdown cancelled delivery before its grace")
+                                 | true ->
+                                   (* The held gate prevents enqueue; grace expiry must
                               cancel that delivery and restore its pending claim. *)
-                               ignore
-                                 (wait (fun state ->
-                                    List.exists state.schedules ~f:(fun timer ->
-                                      match timer.status with
-                                      | Scheduled -> true
-                                      | _ -> false))));
-                            Ok shutdown)
-                          |> protocol_ok
-                        in
-                        Eio.Promise.await_exn shutdown);
+                                   logical_now := grace_deadline;
+                                   advance_mono 0.1;
+                                   Eio.Promise.resolve expire_grace ();
+                                   ignore
+                                     (wait (fun state ->
+                                        List.exists state.schedules ~f:(fun timer ->
+                                          match timer.status with
+                                          | Scheduled -> true
+                                          | _ -> false))));
+                                Ok shutdown)
+                              |> protocol_ok
+                            in
+                            Eio.Promise.await_exn shutdown));
                       session.id))
             in
             let recovered = start () in

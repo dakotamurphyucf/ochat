@@ -1,5 +1,51 @@
 open! Core
 
+(* Keep actual polling/I/O waits while controlling the time observed by durable
+   deadline bookkeeping. Resuming excludes time spent paused; it never jumps
+   past deadlines merely because fixture work was slow. *)
+let controlled_monotonic_clock real_clock =
+  let logical_now = ref (Eio.Time.Mono.now real_clock) in
+  let last_real = ref !logical_now in
+  let paused = ref false in
+  let now () =
+    let actual = Eio.Time.Mono.now real_clock in
+    (match !paused with
+     | true -> ()
+     | false ->
+       logical_now
+       := Mtime.add_span !logical_now (Mtime.span !last_real actual) |> Option.value_exn);
+    last_real := actual;
+    !logical_now
+  in
+  let module Clock = struct
+    type t = unit
+    type time = Mtime.t
+
+    let now = now
+
+    let sleep_until () deadline =
+      let current = now () in
+      match Mtime.compare deadline current <= 0 with
+      | true -> Eio.Fiber.yield ()
+      | false -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline)
+    ;;
+  end
+  in
+  let pause () =
+    ignore (now ());
+    paused := true
+  in
+  let resume () =
+    ignore (now ());
+    paused := false
+  in
+  let advance seconds =
+    let span = Mtime.Span.of_float_ns (seconds *. 1_000_000_000.) |> Option.value_exn in
+    logical_now := Mtime.add_span (now ()) span |> Option.value_exn
+  in
+  Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance
+;;
+
 let protocol_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]

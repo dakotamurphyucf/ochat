@@ -305,12 +305,16 @@ let run env helper ~native_watch =
       (* Advance the daemon's wall clock at completed waits, rather than charging
          unrelated fixture serialization and parallel test CPU time to a watch.
          Concurrent waits advance to their deadline, never add their durations.
-         Scheduler waits still perform real I/O sleeps; real monotonic process
+         Scheduler and process waits still perform real I/O sleeps; OS resource
          limits and the outer test timeout remain unchanged. Deadline/backoff
          branches are separately checked with the compiled watcher recording host. *)
       (* A different epoch also catches callbacks that accidentally bypass the
          host clock and compare process wall time with persisted host deadlines. *)
       let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env) -. 86_400.) in
+      let freeze_deadlines = ref false in
+      let mono_clock, pause_mono, resume_mono, advance_mono =
+        controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+      in
       let module Clock = struct
         type t = unit
         type time = float
@@ -320,7 +324,11 @@ let run env helper ~native_watch =
         let sleep_until () deadline =
           let delay = Float.max 0. (deadline -. !logical_now) in
           Eio.Time.sleep (Eio.Stdenv.clock env) delay;
-          logical_now := Float.max !logical_now deadline
+          (* Polling and real helper I/O continue while the test holds deadlines
+             fixed. Check after sleeping, including waits begun before freezing. *)
+          match !freeze_deadlines with
+          | true -> ()
+          | false -> logical_now := Float.max !logical_now deadline
         ;;
       end
       in
@@ -336,7 +344,7 @@ let run env helper ~native_watch =
           method domain_mgr = env#domain_mgr
           method process_mgr = env#process_mgr
           method clock = clock
-          method mono_clock = env#mono_clock
+          method mono_clock = mono_clock
           method secure_random = env#secure_random
           method debug = env#debug
           method backend_id = env#backend_id
@@ -536,6 +544,15 @@ let run env helper ~native_watch =
         | status ->
           raise_s
             [%sexp "watch did not return a subscription", (status : P.Invocation.status)]
+      in
+      let cancel_watch sw daemon client parent subscription_id =
+        invoke
+          sw
+          daemon
+          client
+          parent
+          "cancel_response_watch"
+          (`Object [ "subscription_id", P.Id.Subscription.to_json subscription_id ])
       in
       let await_timer daemon parent subscription_id =
         await (fun () ->
@@ -953,35 +970,61 @@ let run env helper ~native_watch =
           let cursor_watch = start_watch sw daemon client parent.id cursor_query in
           await_timer daemon parent.id cursor_watch;
           cursor_step "watch armed";
-          let cancelled_watch = start_watch sw daemon client parent.id cursor_query in
-          await_timer daemon parent.id cancelled_watch;
-          cursor_step "cancellation watch armed";
           let calls_before_cancel = !child_calls in
-          let cancellation =
-            invoke
-              sw
-              daemon
-              client
-              parent.id
-              "cancel_response_watch"
-              (`Object [ "subscription_id", P.Id.Subscription.to_json cancelled_watch ])
+          let cancelled_watch, cancelled_timer =
+            freeze_deadlines := true;
+            pause_mono ();
+            Exn.protect
+              ~finally:(fun () ->
+                freeze_deadlines := false;
+                resume_mono ())
+              ~f:(fun () ->
+                let id = start_watch sw daemon client parent.id cursor_query in
+                (* The committed timer is the barrier: the real probe returned
+                   pending, and no subsequent poll or expiry can become due. *)
+                await_timer daemon parent.id id;
+                let timer =
+                  (watch_subscription daemon parent.id id).timer_id |> Option.value_exn
+                in
+                [%test_eq: string]
+                  "cancelled"
+                  (cancel_watch sw daemon client parent.id id);
+                (match await_watch daemon parent.id id with
+                 | Cancelled _ -> ()
+                 | result ->
+                   raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
+                id, timer)
           in
           cursor_step "cancellation tool returned";
-          (match cancellation with
-           | "cancelled" -> ()
-           | cancellation ->
+          let cancelled_result =
+            (watch_subscription daemon parent.id cancelled_watch).result
+          in
+          let timer =
+            List.find_exn (state daemon parent.id).schedules ~f:(fun timer ->
+              P.Id.Schedule.equal timer.id cancelled_timer)
+          in
+          (match timer.status with
+           | Cancelled -> ()
+           | _ ->
              raise_s
                [%sexp
-                 "response watch was not cancelled"
-               , (native_watch : bool)
-               , (cancellation : string)
-               , (!cursor_steps : (string * float) list)
-               , (watch_subscription daemon parent.id cancelled_watch : P.Subscription.t)
-               , ((state daemon parent.id).jobs : P.Job.t list)]);
-          (match await_watch daemon parent.id cancelled_watch with
-           | Cancelled _ -> ()
-           | result ->
-             raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
+                 "watch cancellation did not cancel its pending timer"
+               , (timer : P.Schedule.t)
+               , (watch_subscription daemon parent.id cancelled_watch : P.Subscription.t)]);
+          (* Cross the cancelled timer's old due point, then let the real
+             scheduler deliver the other watch below. Late work must not replace
+             cancellation or publish a second notification. *)
+          logical_now
+          := Float.max
+               !logical_now
+               (P.Timestamp.to_time_ns timer.next_due_at
+                |> Time_ns.to_span_since_epoch
+                |> Time_ns.Span.to_sec
+                |> fun due -> due +. 0.001);
+          advance_mono
+            (((P.Timestamp.diff_ns timer.next_due_at timer.created_at |> Int64.to_float)
+              /. 1_000_000_000.)
+             +. 0.001);
           [%test_eq: int] calls_before_cancel !child_calls;
           cursor_step "second watch cancelled";
           assert (
@@ -1014,6 +1057,22 @@ let run env helper ~native_watch =
                  "cursor watch failed"
                , (result : P.Completion.t)
                , (List.rev !cursor_steps : (string * float) list)]);
+          assert (
+            Option.equal
+              P.Completion.equal
+              cancelled_result
+              (watch_subscription daemon parent.id cancelled_watch).result);
+          let delivered_result =
+            (watch_subscription daemon parent.id cursor_watch).result
+          in
+          [%test_eq: string]
+            "delivered"
+            (cancel_watch sw daemon client parent.id cursor_watch);
+          assert (
+            Option.equal
+              P.Completion.equal
+              delivered_result
+              (watch_subscription daemon parent.id cursor_watch).result);
           check_watch_notifications daemon parent.id;
           let foreign, _ =
             create_session ~start_immediately:true ~key:"foreign-parent" client
@@ -1031,6 +1090,17 @@ let run env helper ~native_watch =
              raise_s
                [%sexp
                  "foreign response watcher was not denied", (result : P.Completion.t)]);
+          let failed_result =
+            (watch_subscription daemon foreign.id foreign_watch).result
+          in
+          [%test_eq: string]
+            "failed"
+            (cancel_watch sw daemon client foreign.id foreign_watch);
+          assert (
+            Option.equal
+              P.Completion.equal
+              failed_result
+              (watch_subscription daemon foreign.id foreign_watch).result);
           check_watch_notifications daemon foreign.id;
           ignore
             (bridge
