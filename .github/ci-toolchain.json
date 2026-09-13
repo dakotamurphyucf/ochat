@@ -2,7 +2,7 @@
   "compiler": "5.3.0",
   "opam": "2.5.2",
   "repository": "git+https://github.com/ocaml/opam-repository.git#68b60fff1b58efb22b2d55d83812c8565718aaf6",
-  "opamFileSha256": "4de50de7f417b2f737516c8546a12bfaf15a505122846b269815ab6ba3138fed",
+  "opamFileSha256": "aa65d4d12340847077ebf4b1f57107a0fd3b39a4b59b59a07dbc29cd735ee82d",
   "sourcePins": {
     "piaf": "git+https://github.com/anmonteiro/piaf.git#c7428ec14dc681e0ef13375cdf657b2727143678",
     "textmate-language": "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf"
