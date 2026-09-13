@@ -10,10 +10,88 @@ module Input = struct
 end
 
 module Capabilities = struct
+  type event_handler =
+    executing:Agent_protocol.Moderator_execution.t
+    -> retirement_reason:string option
+    -> event:Session.Snapshot.t
+    -> execute:
+         (invocation:Agent_protocol.Invocation.t
+          -> (dispatched:Agent_protocol.Invocation.t
+              -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+          -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
+    -> commit:
+         (snapshot:Session.Moderator_state.Identity_snapshot.t
+          -> requests:Agent_protocol.Invocation.follow_up
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (unit, Agent_protocol.Error.t) result
+
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; prepare_authoring_input :
+        Chat_response.Authoring_materialization.t
+        -> history:History_entry.t list
+        -> effective:Chat_response.Moderation.Effective_entry.t list
+        -> (History_entry.t list, Agent_protocol.Error.t) result
+    ; commit_invocation_call :
+        invocation:Agent_protocol.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
+    ; publish_invocation_output :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
+    ; with_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+        -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+    ; with_moderator_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+    ; with_moderator_observation :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+    ; with_next_moderator_observation :
+        observer:Agent_protocol.Invocation.observer
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (bool, Agent_protocol.Error.t) result
+    ; with_moderator_event :
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> event:Chat_response.Moderation.Event.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+    ; with_queued_moderator_event :
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+    ; manage_moderator_follow_up :
+        observer:Agent_protocol.Invocation.observer
+        -> (unit, Agent_protocol.Error.t) result
+    ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
+    ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

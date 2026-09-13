@@ -9,7 +9,9 @@ open! Core
     Reconciliation considers both revision and durable sequence because one
     commit may contain several visible changes. Durable terminal observations
     close Agent-page calls even when transient finish events were coalesced away;
-    starting another operation clears the previous operation's transient calls. *)
+    starting another operation clears the previous operation's transient calls.
+    Work metadata is replaced on every projection, including scope/generation
+    changes. The returned damage still describes Chat history layout only. *)
 
 type t
 

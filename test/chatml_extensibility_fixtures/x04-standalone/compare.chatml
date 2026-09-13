@@ -1,0 +1,32 @@
+(* Each invocation must start with a fresh mutable global. *)
+let calls = [0.0]
+
+let field input name = match Json.get_field(input, name) with
+  | `Some(`String(value)) -> value
+  | _ -> fail("expected a filename")
+
+let read file = Tool.call("read_file", `Object([
+  { key = "root"; value = `String("reports") },
+  { key = "file"; value = `String(file) }
+]))
+
+let run ctx input =
+  let left = field(input, "left") in
+  let right = field(input, "right") in
+  if left == right then Task.pure(`Fail({
+    code = "reports.same_file"; message = "Choose two different reports.";
+    retryable = false; details = `Null
+  }))
+  else
+    let ignored = calls[0] <- calls[0] +. 1.0 in
+    let* first = read(left) in
+    let* second = read(right) in
+      match first with
+      | `Error(code) -> Task.fail(code)
+      | `Ok(left_text) -> (match second with
+          | `Error(code) -> Task.fail(code)
+          | `Ok(right_text) -> Task.pure(`Complete(`Object([
+              { key = "invocation_count"; value = `Number(calls[0]) },
+              { key = "left"; value = left_text },
+              { key = "right"; value = right_text }
+            ]))))

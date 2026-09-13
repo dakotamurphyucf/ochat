@@ -16,11 +16,18 @@ type choice =
   | Deny
 [@@deriving compare, equal, sexp]
 
+(** An operation-owned legacy request or a request from an actual persisted
+    tool invocation. Invocation ownership does not require a model operation. *)
+type owner =
+  | Operation of Id.Operation.t
+  | Invocation of Id.Invocation.t
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Permission.t
   ; session_id : Id.Session.t
   ; generation : int
-  ; operation_id : Id.Operation.t
+  ; owner : owner
   ; call_id : string
   ; tool_name : string
   ; runtime_identity : string option
@@ -51,6 +58,9 @@ module Resolution : sig
 end
 
 val to_json : t -> Jsonaf.t
+
+(** Accept legacy [operation_id] or [invocation_id], exactly one. The S-expression
+    reader also accepts the old [operation_id] record field. *)
 val of_json : Jsonaf.t -> (t, Error.t) result
 
 module List_request : sig

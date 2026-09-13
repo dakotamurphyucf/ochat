@@ -9,6 +9,9 @@ context. Instruction helper compatibility names emit developer-role messages.
 This document is the implementation-faithful specification of ChatML as it
 exists in the current codebase.
 
+For a shorter starting point with compiler-checked examples, see
+[ChatML differences from OCaml](chatml-ocaml-differences.md).
+
 It describes the language and runtime pipeline implemented by:
 
 - `lib/chatml/chatml_lexer.mll`
@@ -216,8 +219,47 @@ After this pass:
 
 The evaluator uses:
 
-- a mutable hash-table environment for top-level/module/global bindings
+- an environment containing mutable binding cells and optional host execution
+  control for top-level/module/global bindings
 - a stack of frames for local lexical bindings
+
+Copied closure/module environments retain the same host control. The generic
+evaluator has no resource budget by default; bounded agent execution installs
+host-selected checks. Resource policy and tool authority are separate.
+
+`Chatml_execution` supplies bounded execution for hosts that need it. Its checks
+cover pure evaluation, task interpretation, nested execution and estimated
+allocations. Preflight checks reserve space for array copies, maps and filters,
+JSON object edits, and hash-table updates before those operations run. JSON parsing and validation scan nesting
+before entering the native parser, with cancellation checkpoints during that
+scan; quoted brackets and escaped quotes do not count as nesting. Rendering with
+`to_string` or `print` checks deferred task payloads as well as ordinary values,
+and pretty JSON reserves additional space for indentation.
+
+These are conservative resource estimates, not an OCaml heap sandbox or hard
+preemption of a native builtin. An estimate can exceed the actual output size.
+Trusted root execution may select `Unrestricted`; nested execution cannot remove
+an ancestor's limits. The language itself does not impose these host budgets.
+
+One-off and standalone handlers share one execution scope across input/context
+projection, evaluation and outcome conversion. Stateful tool invocations open the
+moderator's owned scope before projecting their context. Controlled JSON imports
+check the projected variant/array/object-entry structure before conversion;
+exports reserve an escaping-aware conversion/serialization estimate. Host error
+adapters preserve budget exhaustion as a control failure. These scopes do not
+grant tools or change invocation ownership.
+
+Ordinary lifecycle events and tool observations use the same owned-scope rule.
+Event/history projection and state/queue snapshot preparation are budgeted before
+the transaction installer runs. A projection or snapshot budget failure leaves
+the prior state intact. A moderator that observes an intentionally large request
+needs sufficient context limits even when the target tool rejects that request
+under stricter input limits.
+
+Host runtime debug logging uses separate, lazy previews capped by bytes, visited
+nodes and depth. Disabled logging does not format values. Enabled logging can
+truncate large or cyclic values without consuming script fuel after a state
+commit. Normal language `to_string` output is unchanged by these debug previews.
 
 Function calls use a trampoline. Tail calls are now **tail-position-aware**:
 
@@ -1736,6 +1778,9 @@ Parses JSON text into a `json` value. Raises a runtime failure on invalid JSON i
 Like parse, but returns `None` instead of raising on parse errors.
 - Json.stringify : json -> string
 Produces a compact JSON string representation.
+Finite numeric values use valid JSON number syntax, including whole-valued
+floats (`1.0` becomes `1`). Non-finite values cannot be exported as JSON. Numeric
+spelling is not preserved when JSON passes through ChatML's float representation.
 - Json.pretty : json -> string
 Produces a human-readable formatted JSON representation.
 - Json.validate : string -> bool
@@ -1900,6 +1945,14 @@ after the current turn completes. In v1 it is only valid in phases:
 
 - `turn_end`
 - `internal_event`
+
+The internal `extensibility-v1` moderator surface also permits this request in
+`tool_observed` and `tool_invoked`. Qualified daemon hosts persist the request with
+the observation or handler result before scheduling it. Background handler requests
+wait for their owning job to complete; cancelled or interrupted jobs discard them.
+Handler and observation requests retain independent disposition, and an applied
+request is not replayed on restart. General feature availability remains gated on
+authoring-support qualification.
 
 The host interprets this request after `turn_end` handling finishes; it does not
 directly invoke a side model call.
@@ -2908,7 +2961,8 @@ Current default behavior is intentionally conservative:
   the host supplies handlers. 
 - `Runtime.request_turn` is a local transactional operation and is phase-restricted in v1
 (see above). It is surfaced to the host as a runtime request and interpreted by the
-host conversation loop after `turn_end`.
+host conversation loop after `turn_end`, or by a qualified daemon at the persisted
+handler/observation boundary described in section 13.4.7.
 
 Named model recipes are host-defined. `Model.call("recipe", payload)` and
 `Model.spawn("recipe", payload)` do not select arbitrary provider model names;

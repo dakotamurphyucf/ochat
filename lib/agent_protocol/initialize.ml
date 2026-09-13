@@ -306,6 +306,7 @@ module Response = struct
     ; implementation : Implementation.t
     ; server_id : Id.Server.t
     ; enabled_features : string list
+    ; extensions : Extension_capabilities.t option [@sexp.option]
     ; principal : Principal.t
     ; limits : Limits.t
     ; event_retention : Event_retention.t
@@ -320,6 +321,7 @@ module Response = struct
         ~implementation
         ~server_id
         ~enabled_features
+        ~extensions
         ~principal
         ~limits
         ~event_retention
@@ -328,12 +330,26 @@ module Response = struct
     =
     let open Result.Let_syntax in
     let%bind protocol_name = validate_nonempty "protocol name" protocol_name in
-    let%map enabled_features = validate_features enabled_features in
+    let%bind enabled_features = validate_features enabled_features in
+    let%map () =
+      match extensions with
+      | Some metadata
+        when not
+               (List.equal
+                  String.equal
+                  enabled_features
+                  (Extension_capabilities.filter_available metadata enabled_features)) ->
+        Error
+          (Protocol_error.invalid_request
+             "enabled extension features exceed host capabilities")
+      | _ -> Ok ()
+    in
     { protocol_name
     ; selected_version
     ; implementation
     ; server_id
     ; enabled_features
+    ; extensions
     ; principal
     ; limits
     ; event_retention
@@ -344,17 +360,19 @@ module Response = struct
 
   let to_json t =
     `Object
-      [ "protocol_name", `String t.protocol_name
-      ; "selected_version", Version.to_json t.selected_version
-      ; "implementation", Implementation.to_json t.implementation
-      ; "server_id", Id.Server.to_json t.server_id
-      ; "enabled_features", `Array (List.map t.enabled_features ~f:(fun x -> `String x))
-      ; "principal", Principal.to_json t.principal
-      ; "limits", Limits.to_json t.limits
-      ; "event_retention", Event_retention.to_json t.event_retention
-      ; "timing", Timing.to_json t.timing
-      ; "server_time", Timestamp.to_json t.server_time
-      ]
+      ([ "protocol_name", `String t.protocol_name
+       ; "selected_version", Version.to_json t.selected_version
+       ; "implementation", Implementation.to_json t.implementation
+       ; "server_id", Id.Server.to_json t.server_id
+       ; "enabled_features", `Array (List.map t.enabled_features ~f:(fun x -> `String x))
+       ; "principal", Principal.to_json t.principal
+       ; "limits", Limits.to_json t.limits
+       ; "event_retention", Event_retention.to_json t.event_retention
+       ; "timing", Timing.to_json t.timing
+       ; "server_time", Timestamp.to_json t.server_time
+       ]
+       @ Option.to_list
+           (optional_field "extensions" t.extensions Extension_capabilities.to_json))
   ;;
 
   let decode_identity fields =
@@ -389,6 +407,9 @@ module Response = struct
       decode_identity fields
     in
     let%bind enabled_features, principal, limits = decode_capabilities fields in
+    let%bind extensions =
+      Json_codec.optional_as fields "extensions" Extension_capabilities.of_json
+    in
     let%bind event_retention =
       Json_codec.required_as fields "event_retention" Event_retention.of_json
     in
@@ -402,6 +423,7 @@ module Response = struct
       ~implementation
       ~server_id
       ~enabled_features
+      ~extensions
       ~principal
       ~limits
       ~event_retention

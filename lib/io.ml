@@ -104,7 +104,7 @@ let ensure_chatmd_dir ~cwd : _ Eio.Path.t =
   (* [Path.exists] doesn’t exist directly; we check for directory status. *)
   (match Path.is_directory datadir with
    | true -> ()
-   | false -> Path.mkdirs ~perm:0o700 datadir);
+   | false -> Path.mkdirs ~exists_ok:true ~perm:0o700 datadir);
   datadir
 ;;
 

@@ -733,6 +733,138 @@ let%expect_test
     |}]
 ;;
 
+let%test_unit "rejected UI suspension restores state and retains no continuation" =
+  let session =
+    compile_session_with_surface
+      ~surface:Chatml_builtin_surface.ui_moderator_surface
+      {|let initial_state = [0]
+        let on_event = fun ctx state event ->
+          let ignored = state[0] <- state[0] + 1 in
+          match event with
+          | `Suspend ->
+            Task.bind(Turn.prepend_system("uncommitted"), fun ignored ->
+            Task.bind(Runtime.emit(`Buffered), fun ignored ->
+            Task.bind(Approval.ask_text("continue?"), fun answer -> Task.pure(state))))
+          | _ -> Task.pure(state)|}
+  in
+  let copy_state = function
+    | L.VArray values -> Ok (L.VArray (Array.copy values))
+    | _ -> assert false
+  in
+  let rejected = ref 0 in
+  let result =
+    Runtime.handle_event
+      session
+      ~context:(context ~phase:"turn_start" ())
+      ~event:(L.VVariant ("Suspend", []))
+      ~copy_state
+      ~validate_suspension:(fun () ->
+        Int.incr rejected;
+        Error "suspension forbidden")
+      ~prepare_transaction:(fun _ -> assert false)
+  in
+  assert (Poly.equal result (Error "suspension forbidden"));
+  assert (!rejected = 1);
+  assert (Poly.equal (Runtime.current_state session) (L.VArray [| L.VInt 0 |]));
+  assert (Option.is_none (Runtime.pending_ui_request session));
+  assert (List.is_empty (Runtime.pending_local_effects session));
+  assert (List.is_empty (Runtime.committed_local_effects session));
+  assert (List.is_empty (Runtime.queued_events session));
+  assert (Result.is_error (Runtime.resume_ui_request session ~response:"late"));
+  Runtime.handle_event
+    session
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Continue", []))
+  |> ok_or_fail;
+  assert (Poly.equal (Runtime.current_state session) (L.VArray [| L.VInt 1 |]))
+;;
+
+let%test_unit "transaction preparation runs last and rejection skips every installer" =
+  let session = compile_session local_ops_script in
+  let installed = ref false in
+  let order = ref [] in
+  let old_state = Runtime.current_state session in
+  let prepare_commit ~local_effects:_ =
+    order := !order @ [ "legacy" ];
+    Ok (fun () -> installed := true)
+  in
+  let prepare_transaction (proposal : Runtime.transaction) =
+    order := !order @ [ "transaction" ];
+    assert (String.equal (show_value proposal.new_state) "{ count = 1 }");
+    assert (phys_equal (Runtime.current_state session) old_state);
+    assert (List.is_empty (Runtime.committed_local_effects session));
+    assert (List.is_empty (Runtime.queued_events session));
+    assert proposal.halted;
+    assert (not (Runtime.is_halted session));
+    Error "storage rejected"
+  in
+  (match
+     Runtime.handle_event
+       session
+       ~prepare_commit
+       ~prepare_transaction
+       ~context:(context ~phase:"turn_start" ())
+       ~event:(L.VVariant ("Tick", []))
+   with
+   | Error "storage rejected" -> ()
+   | _ -> assert false);
+  assert (Poly.equal !order [ "legacy"; "transaction" ]);
+  assert (not !installed);
+  assert (phys_equal (Runtime.current_state session) old_state);
+  assert (List.is_empty (Runtime.queued_events session));
+  assert (not (Runtime.is_halted session));
+  let prepared = ref None in
+  Runtime.handle_event
+    session
+    ~prepare_commit
+    ~prepare_transaction:(fun proposal ->
+      prepared := Some proposal;
+      Ok
+        (fun () ->
+          assert !installed;
+          assert (phys_equal (Runtime.current_state session) proposal.new_state)))
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Tick", []))
+  |> ok_or_fail;
+  let proposal = Option.value_exn !prepared in
+  assert (Poly.equal (Runtime.queued_events session) proposal.queued_events);
+  assert (Poly.equal (Runtime.committed_local_effects session) proposal.local_effects);
+  assert (Bool.equal (Runtime.is_halted session) proposal.halted)
+;;
+
+let%test_unit "resumed UI transaction includes events queued during suspension" =
+  let session =
+    compile_session_with_surface
+      ~surface:Chatml_builtin_surface.ui_moderator_surface
+      approval_suspend_script
+  in
+  Runtime.handle_event
+    session
+    ~prepare_transaction:(fun _ -> failwith "must not prepare a suspended task")
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Tick", []))
+  |> ok_or_fail;
+  let queued = L.VVariant ("Queued", [ L.VString "host" ]) in
+  Runtime.enqueue_internal_event session queued |> ok_or_fail;
+  let prepared = ref None in
+  Runtime.resume_ui_request
+    session
+    ~response:"approved"
+    ~prepare_transaction:(fun proposal ->
+      assert (Poly.equal (Runtime.queued_events session) [ queued ]);
+      prepared := Some proposal;
+      Ok ignore)
+  |> ok_or_fail;
+  let proposal = Option.value_exn !prepared in
+  assert (
+    Poly.equal
+      proposal.queued_events
+      [ queued; L.VVariant ("Queued", [ L.VString "buffered" ]) ]);
+  assert (phys_equal (Runtime.current_state session) proposal.new_state);
+  assert (Poly.equal (Runtime.queued_events session) proposal.queued_events);
+  assert (Poly.equal (Runtime.committed_local_effects session) proposal.local_effects)
+;;
+
 let%expect_test "moderator runtime rejects nested approval during resume" =
   let session =
     compile_session_with_surface
@@ -904,4 +1036,217 @@ let%expect_test "moderator runtime default unconfigured external operation fails
     queue=[]
     effects=[]
     |}]
+;;
+
+let%test_unit "entrypoint contracts check final types without executing source" =
+  let module S = Chatml_builtin_spec in
+  let required_bindings = [ "main", S.TFun ([ S.json_ty ], S.task_ty S.json_ty) ] in
+  let compile source =
+    Runtime.compile_script
+      ~surface:Builtin_surface.core_surface
+      ~required_bindings
+      ~source
+      ()
+  in
+  (* Both an initializer and an uncalled body would fail if validation evaluated
+     either of them. Type checking alone is sufficient and must succeed. *)
+  assert (
+    Result.is_ok
+      (compile
+         {|let poison = fail("initializer ran")
+let main = fun input -> Task.pure(input)|}));
+  assert (Result.is_ok (compile {|let main = fun input -> fail("body ran")|}));
+  List.iter
+    [ "let other = 1"
+    ; "let main = 1"
+    ; "let main = fun input extra -> Task.pure(input)"
+    ; "let main = fun input -> input"
+    ; "let main = fun input -> Task.pure(42)"
+    ; "let main = fun input -> Task.pure(input + 1)"
+    ; "let main = fun input -> Task.pure(input)\nlet main = 42"
+    ; "type json = int\nlet main : json -> json task = fun input -> Task.pure(input)"
+    ]
+    ~f:(fun source -> assert (Result.is_error (compile source)))
+;;
+
+let%test_unit "entrypoint contracts share state constraints across required bindings" =
+  let module S = Chatml_builtin_spec in
+  let required_bindings =
+    [ "initial_state", S.TVar "state"
+    ; "on_event", S.TFun ([ S.TUnit; S.TVar "state"; S.TUnit ], S.task_ty (S.TVar "state"))
+    ]
+  in
+  let compile source =
+    Runtime.compile_script
+      ~surface:Builtin_surface.core_surface
+      ~required_bindings
+      ~source
+      ()
+  in
+  assert (
+    Result.is_ok
+      (compile
+         {|let initial_state = 0
+let on_event = fun ctx state event -> Task.pure(state + 1)|}));
+  assert (
+    Result.is_error
+      (compile
+         {|let initial_state = "wrong state"
+let on_event = fun ctx state event -> Task.pure(state + 1)|}));
+  assert (
+    Result.is_error
+      (compile
+         {|let initial_state = 0
+let on_event = fun ctx state event -> Task.pure("wrong result")|}));
+  assert (
+    Result.is_error
+      (Runtime.compile_script
+         ~required_bindings:[ "main", S.TInt; "main", S.TInt ]
+         ~source:"let main = 1"
+         ()))
+;;
+
+let%test_unit "restricted extension surfaces expose computation without ambient effects" =
+  let module X = Chatml_extension_surface in
+  let compile source =
+    Runtime.compile_script
+      ~surface:X.tool_v1
+      ~required_bindings:X.tool_entrypoints
+      ~source
+      ()
+  in
+  List.iter
+    [ {|let run : tool_context -> json -> tool_outcome task = fun ctx input -> Task.pure(`Complete(input))|}
+    ; {|let run = fun ctx input -> Task.bind(Tool.call("selected", input), fun result -> Task.pure(`Complete(input)))|}
+    ; {|let run = fun ctx input -> Task.pure(`Pending(`Job("job_owned"), input))|}
+    ; {|let run = fun ctx input -> Task.pure(`Fail({code="example"; message="failed"; retryable=false; details=input}))|}
+    ; {|let run = fun ctx input -> Task.bind(Log.info(ctx.invocation_id), fun ignored -> Task.pure(`Complete(input)))|}
+    ]
+    ~f:(fun source ->
+      match compile source with
+      | Ok _ -> ()
+      | Error message -> failwith message);
+  List.iter
+    [ "print(\"stdout\")"
+    ; "Process.run(\"sh\", input)"
+    ; "Model.call(\"agent\", input)"
+    ; "Tool.approve()"
+    ; "Tool.spawn(\"selected\", input)"
+    ; "Turn.append_notice(\"message\")"
+    ; "Runtime.request_turn()"
+    ; "Schedule.after_ms(1, input)"
+    ; "Ui.notify(\"message\")"
+    ; "Approval.ask_text(\"question\")"
+    ]
+    ~f:(fun expression ->
+      assert (Result.is_error (compile ("let run = fun ctx input -> " ^ expression))));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Cancelled("forged"))|}));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Pending("job_owned", input))|}));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Complete(ctx.items))|}));
+  assert (
+    Result.is_ok
+      (Runtime.compile_script
+         ~surface:X.one_off_v1
+         ~required_bindings:X.one_off_entrypoints
+         ~source:"let main = fun input -> Task.pure(input)"
+         ()));
+  assert (
+    Result.is_error
+      (Runtime.compile_script
+         ~surface:X.one_off_v1
+         ~required_bindings:X.one_off_entrypoints
+         ~source:"let main = fun input -> Task.pure(`Complete(input))"
+         ()))
+;;
+
+let%test_unit
+    "versioned moderator contracts type invocations and keep legacy surfaces intact"
+  =
+  let module X = Chatml_extension_surface in
+  let compile source =
+    Runtime.compile_script
+      ~surface:X.moderator_v1
+      ~required_bindings:X.moderator_entrypoints
+      ~source
+      ()
+  in
+  let valid =
+    {|let initial_state = 0
+let on_event = fun ctx state event ->
+  match event with
+  | `Tool_invoked(invocation) ->
+      Task.bind(Invocation.resolve(invocation.context.invocation_id, `Complete(invocation.input)),
+        fun ignored -> Task.pure(state + 1))
+  | _ -> Task.pure(state)|}
+  in
+  (match compile valid with
+   | Ok _ -> ()
+   | Error message -> failwith message);
+  assert (Result.is_error (Runtime.compile_script ~source:valid ()));
+  List.iter
+    [ "let initial_state = 0"
+    ; "let on_event = fun ctx state event -> Task.pure(state)"
+    ; "let initial_state = 0\nlet on_event = fun ctx state -> Task.pure(state)"
+    ; "let initial_state = 0\n\
+       let on_event = fun ctx state event -> Task.pure(\"different state\")"
+    ; "type event = [ `Turn_start ]\n\
+       let initial_state = 0\n\
+       let on_event : context -> int -> event -> int task = fun ctx state event -> \
+       Task.pure(state)"
+    ]
+    ~f:(fun source -> assert (Result.is_error (compile source)))
+;;
+
+let%test_unit "v1 emit and timers cannot carry forged native event constructors" =
+  let module X = Chatml_extension_surface in
+  let source expression =
+    "let initial_state = 0\nlet on_event = fun ctx state event -> Task.bind("
+    ^ expression
+    ^ ", fun ignored -> Task.pure(state))"
+  in
+  List.iter
+    [ "Runtime.emit(`Turn_start)"; "Schedule.after_ms(1, `Session_start)" ]
+    ~f:(fun expression ->
+      assert (Result.is_ok (Runtime.compile_script ~source:(source expression) ()));
+      assert (
+        Result.is_error
+          (Runtime.compile_script
+             ~surface:X.moderator_v1
+             ~required_bindings:X.moderator_entrypoints
+             ~source:(source expression)
+             ())));
+  List.iter [ "Runtime.emit(`Null)"; "Schedule.after_ms(1, `Null)" ] ~f:(fun expression ->
+    match
+      Runtime.compile_script
+        ~surface:X.moderator_v1
+        ~required_bindings:X.moderator_entrypoints
+        ~source:(source expression)
+        ()
+    with
+    | Ok _ -> ()
+    | Error message -> failwith message);
+  let find module_name name =
+    let module_ =
+      List.find_exn X.moderator_v1.modules ~f:(fun value ->
+        String.equal value.name module_name)
+    in
+    List.find_exn module_.exports ~f:(fun value -> String.equal value.name name)
+  in
+  let payload =
+    Chatml_value_codec.jsonaf_to_value (`Object [ "type", `String "Tool_invoked" ])
+  in
+  (match (find "Runtime" "emit").impl [ payload ] with
+   | L.VTask (TPerform { op = "Runtime.emit_json"; args = [ value ] }) ->
+     assert (phys_equal value payload)
+   | _ -> assert false);
+  match (find "Schedule" "after_ms").impl [ L.VInt 1; payload ] with
+  | L.VTask (TMap (TPerform { op = "Schedule.after_ms_json"; args = [ _; value ] }, _)) ->
+    assert (phys_equal value payload)
+  | _ -> assert false
 ;;

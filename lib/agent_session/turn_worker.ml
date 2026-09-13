@@ -188,11 +188,17 @@ let require_ok = function
   | Error failure -> raise (Worker_failure failure)
 ;;
 
-let safe_point_input capabilities =
+let safe_point_input ?notification_input capabilities =
   Chat_response.In_memory_stream.Safe_point_input.
     { consume_entries =
         (fun () ->
-          capabilities.Operation_worker.Capabilities.consume_deferred () |> require_ok)
+          capabilities.Operation_worker.Capabilities.consume_deferred ()
+          |> require_ok
+          |> user_entries
+          |> fun users ->
+          match notification_input with
+          | None -> users
+          | Some consume -> append users (consume () |> require_ok))
     ; consume_compatibility_text = (fun () -> None)
     }
 ;;
@@ -243,7 +249,7 @@ let permission_request config input ~call_id invocation =
     { id = Agent_protocol.Id.Permission.create ()
     ; session_id = input.Operation_worker.Input.session_id
     ; generation = input.session_generation
-    ; operation_id = input.operation.id
+    ; owner = Operation input.operation.id
     ; call_id
     ; tool_name = invocation.Permission_policy.tool_name
     ; runtime_identity = Some invocation.identity_digest
@@ -349,23 +355,52 @@ let moderator_snapshot = function
              ]))
 ;;
 
+let moderate_appended_history config history on_runtime_request =
+  Chat_response.In_memory_stream.handle_item_appended_entries
+    ~moderator:config.Config.moderator
+    ~on_runtime_request
+    ~available_tools:config.tools
+    ~now_ms:(Eio.Time.now (Eio.Stdenv.clock config.env) *. 1_000. |> Float.to_int)
+    ~history
+  |> Result.map_error ~f:(fun message ->
+    Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
+  |> require_ok
+;;
+
 let moderate_submission config input on_runtime_request =
   match input.Operation_worker.Input.operation.kind with
-  | Turn User_submit ->
-    Chat_response.In_memory_stream.handle_item_appended_entries
-      ~moderator:config.Config.moderator
-      ~on_runtime_request
-      ~available_tools:config.tools
-      ~now_ms:(Eio.Time.now (Eio.Stdenv.clock config.env) *. 1_000. |> Float.to_int)
-      ~history:input.history
-    |> Result.map_error ~f:(fun message ->
-      Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
-    |> require_ok
+  | Turn User_submit -> moderate_appended_history config input.history on_runtime_request
   | Turn (Moderator_request | Idle_followup | Recovery_retry | Administrative)
   | Compaction -> ()
 ;;
 
-let run config ~sw ~input capabilities =
+let run
+      ?runtime_policy
+      ?authoring_context
+      ?dispatch_tool
+      ?moderator_events
+      ?notification_input
+      ?initial_notification_input
+      config
+      ~sw
+      ~input
+      capabilities
+  =
+  let config =
+    match config.Config.moderator, moderator_events with
+    | Some moderator, Some make ->
+      let handlers = make ~input ~capabilities |> require_ok in
+      { config with moderator = Some { moderator with event_handlers = Some handlers } }
+    | _, None -> config
+    | None, Some _ ->
+      raise
+        (Worker_failure
+           (Agent_protocol.Error.create
+              Invalid_state
+              ~message:"owned event routing requires a moderator"
+              ~retryable:false
+              ()))
+  in
   let runtime_requests = ref [] in
   moderate_submission config input (fun request ->
     runtime_requests := request :: !runtime_requests);
@@ -374,24 +409,60 @@ let run config ~sw ~input capabilities =
     capabilities.commit_moderator (moderator_snapshot config.moderator) |> require_ok
   in
   checkpoint_moderator ();
+  let ended () =
+    Option.is_some (Chat_response.Runtime_semantics.should_end_session !runtime_requests)
+  in
+  let initial_entries =
+    match ended (), initial_notification_input with
+    | true, _ | _, None -> []
+    | false, Some prepare ->
+      (prepare ~input () |> require_ok)
+        .Chat_response.In_memory_stream.Safe_point_input.entries
+  in
+  let history = input.Operation_worker.Input.history @ initial_entries in
+  let rec notify seen = function
+    | [] -> ()
+    | _ when ended () -> ()
+    | entry :: remaining ->
+      let seen = seen @ [ entry ] in
+      moderate_appended_history config seen (fun request ->
+        runtime_requests := request :: !runtime_requests);
+      notify seen remaining
+  in
+  notify input.history initial_entries;
+  (match initial_entries with
+   | [] -> ()
+   | _ -> checkpoint_moderator ());
   let final_history =
+    let prepare_model_input =
+      Option.map authoring_context ~f:(fun make ->
+        let materialization = make ~input |> require_ok in
+        fun ~history ~effective ->
+          checkpoint_moderator ();
+          capabilities.prepare_authoring_input materialization ~history ~effective
+          |> require_ok)
+    in
     if
       Option.is_some
         (Chat_response.Runtime_semantics.should_end_session !runtime_requests)
-    then input.Operation_worker.Input.history
+    then history
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
         ~datadir:config.response_dir
         ~allocator:(allocator capabilities)
         ~id_source:capabilities.id_source
-        ~history:input.Operation_worker.Input.history
+        ~history
         ~tools:(Some config.tools)
         ~tool_tbl:config.tool_tbl
         ?temperature:config.temperature
         ?max_output_tokens:config.max_output_tokens
         ?reasoning:config.reasoning
         ?moderator:config.moderator
+        ?runtime_policy
+        ~before_model_call:(fun () ->
+          capabilities.admit_notification_turn () |> require_ok)
+        ?prepare_model_input
         ~on_sourced_event:(fun event ->
           checkpoint_moderator ();
           publish_live ~kind:Sourced_stream ~payload:(sourced_payload event))
@@ -407,12 +478,18 @@ let run config ~sw ~input capabilities =
             ~kind:(tool_event_kind event)
             ~payload:(tool_event_payload config event))
         ~authorize_tool:(authorize_tool config input capabilities)
+        ?dispatch_tool:
+          (Option.map dispatch_tool ~f:(fun make -> make ~input ~capabilities))
         ~redact_tool_payload:config.redact_tool_payload
         ~on_runtime_request:(fun request ->
           runtime_requests := request :: !runtime_requests)
         ~history_compaction:config.history_compaction
         ~parallel_tool_calls:config.parallel_tool_calls
-        ~safe_point_input:(safe_point_input capabilities)
+        ~safe_point_input:
+          (safe_point_input
+             ?notification_input:
+               (Option.map notification_input ~f:(fun make -> make ~input))
+             capabilities)
         ~model:config.model
         ?prompt_cache_key:config.prompt_cache_key
         ?prompt_cache_retention:config.prompt_cache_retention
@@ -427,9 +504,47 @@ let run config ~sw ~input capabilities =
     }
 ;;
 
-let create config =
+let create
+      ?runtime_policy
+      ?authoring_context
+      ?dispatch_tool
+      ?moderator_events
+      ?notification_input
+      ?initial_notification_input
+      config
+  =
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-    match run config ~sw ~input capabilities with
+    match
+      run
+        ?runtime_policy
+        ?authoring_context
+        ?dispatch_tool
+        ?moderator_events
+        ?notification_input
+        ?initial_notification_input
+        config
+        ~sw
+        ~input
+        capabilities
+    with
     | outcome -> outcome
-    | exception Worker_failure failure -> Operation_worker.Failed failure)
+    | exception Worker_failure failure -> Operation_worker.Failed failure
+    | exception
+        ( Moderator_tool_dispatch.Dispatch_error failure
+        | Native_tool_dispatch.Dispatch_error failure
+        | Standalone_tool_dispatch.Dispatch_error failure ) ->
+      Operation_worker.Failed failure
+    | exception Chat_response.In_memory_stream.Post_tool_moderation_failed (entry, _) ->
+      Operation_worker.Failed
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"Post-tool moderation failed after the initial result was committed."
+           ~retryable:false
+           ~data:
+             (`Object
+                 [ "phase", `String "post_tool_response"
+                 ; ( "output_entry_id"
+                   , Agent_protocol.History.Id.to_json (History_entry.id entry) )
+                 ])
+           ()))
 ;;

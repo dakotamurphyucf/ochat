@@ -75,6 +75,7 @@ module Page_id = struct
     | Chat
     | Agent
     | Shell_security
+    | Work
 end
 
 module Chat_page_state = struct
@@ -393,6 +394,8 @@ type t =
   ; mutable animation_frame : int
   ; mutable normal_input_enabled : bool
   ; mutable connection_status : Connection_status.t option
+  ; mutable session_work : Agent_work_view.t option
+  ; mutable work_offset : int
   ; projected : Projected_state.t
   }
 [@@deriving fields ~getters ~setters]
@@ -549,6 +552,8 @@ let create
   ; animation_frame = 0
   ; normal_input_enabled = true
   ; connection_status = None
+  ; session_work = None
+  ; work_offset = 0
   ; projected = Projected_state.empty ()
   }
 ;;
@@ -1623,6 +1628,29 @@ let shell_interaction_uses_cursor t =
 ;;
 
 let chat_page t = t.pages.chat
+
+let update_session_work t next =
+  match Option.equal Agent_work_view.equal t.session_work (Some next) with
+  | true -> false
+  | false ->
+    let offset =
+      match t.session_work with
+      | Some previous
+        when String.equal previous.session_id next.session_id
+             && Int.equal previous.generation next.generation
+             && t.work_offset > 0
+             && t.work_offset < Array.length previous.rows ->
+        let key = previous.rows.(t.work_offset).key in
+        (match Array.findi next.rows ~f:(fun _ row -> String.equal row.key key) with
+         | Some (index, _) -> index
+         | None -> Int.min t.work_offset (Int.max 0 (Array.length next.rows - 1)))
+      | _ -> 0
+    in
+    t.session_work <- Some next;
+    t.work_offset <- offset;
+    true
+;;
+
 let agent_page t = t.pages.agent
 let scroll_box t = (chat_page t).scroll_box
 let agent_scroll_box t = (agent_page t).scroll_box
@@ -2353,7 +2381,9 @@ let clear_agent_calls t =
     invalidate_render_metadata_by_id t ~id);
   Hashtbl.clear t.tool_call_id_by_id;
   Hashtbl.clear t.tool_call_outcome_by_call_id;
-  t.active_page <- Page_id.Chat
+  match t.active_page with
+  | Work -> ()
+  | Chat | Agent | Shell_security -> t.active_page <- Page_id.Chat
 ;;
 
 (* ------------------------------------------------------------------------- *)

@@ -8,6 +8,7 @@
   catalog
   admin
   in_memory
+  ingress
   blob_download
   session_handle
   reconnect)

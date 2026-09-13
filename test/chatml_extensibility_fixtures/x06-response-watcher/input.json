@@ -1,0 +1,22 @@
+{
+  "anyOf": [
+    {
+      "type": "object",
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "receipt_id": { "type": "string", "minLength": 1 }
+      },
+      "required": ["session_id", "receipt_id"],
+      "additionalProperties": false
+    },
+    {
+      "type": "object",
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1 },
+        "cursor": { "type": "string", "minLength": 1 }
+      },
+      "required": ["session_id", "cursor"],
+      "additionalProperties": false
+    }
+  ]
+}

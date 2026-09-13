@@ -84,6 +84,7 @@ module Page_id : sig
     | Chat
     | Agent
     | Shell_security
+    | Work
 end
 
 module Chat_page_state : sig
@@ -307,6 +308,8 @@ type t =
   ; mutable animation_frame : int
   ; mutable normal_input_enabled : bool
   ; mutable connection_status : Connection_status.t option
+  ; mutable session_work : Agent_work_view.t option
+  ; mutable work_offset : int
   ; projected : Projected_state.t
   }
 [@@deriving fields ~getters ~setters]
@@ -633,6 +636,11 @@ val connection_status : t -> Connection_status.t option
 (** [set_connection_status t status] changes only local presentation state. *)
 val set_connection_status : t -> Connection_status.t option -> unit
 
+(** Replace principal-projected work metadata. Preserve the current visible row
+    where possible; reset navigation when the session or generation changes.
+    Returns whether the display changed. Does not alter history or runtime work. *)
+val update_session_work : t -> Agent_work_view.t -> bool
+
 (** [active_page t] indicates which full-screen page is currently shown.
     Initially this is always {!Page_id.Chat}. *)
 val active_page : t -> Page_id.t
@@ -750,7 +758,7 @@ val agent_call_finished
 
 (** [clear_agent_calls t] clears current-operation Agent calls and transient
     Chat tool-completion decorations, resets Agent scrolling, then activates
-    Chat. Canonical history is unchanged. *)
+    Chat unless the persistent Work overview is open. Canonical history is unchanged. *)
 val clear_agent_calls : t -> unit
 
 (** [active_agent_calls t] returns calls in accepted start order. *)

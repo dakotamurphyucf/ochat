@@ -6,6 +6,7 @@ type sourced_node =
   { node : Ast.node
   ; source : Source_ref.t
   ; source_node : Source_loader.source
+  ; children : sourced_node list option
   }
 
 type context =
@@ -18,20 +19,29 @@ type context =
   ; source : string
   ; active_imports : String.Set.t
   ; import_depth : int
+  ; canonical_sources : bool
+  ; mutable cached_source : Source_ref.t option
   }
 
 let source_attribute = "ochat-source-context"
 
 let source_ref (context : context) =
-  let position : Source_ref.position = { offset = 0; line = 1; column = 1 } in
-  Source_ref.create
-    ~file:context.file
-    ~source_dir:(Eio.Path.native_exn context.dir)
-    ~prompt_dir:context.prompt_dir
-    ~namespace:context.namespace
-    ~start_pos:position
-    ~end_pos:{ position with offset = String.length context.source }
-    ~source:context.source
+  match context.cached_source with
+  | Some source -> source
+  | None ->
+    let position : Source_ref.position = { offset = 0; line = 1; column = 1 } in
+    let source =
+      Source_ref.create
+        ~file:context.file
+        ~source_dir:(Eio.Path.native_exn context.dir)
+        ~prompt_dir:context.prompt_dir
+        ~namespace:context.namespace
+        ~start_pos:position
+        ~end_pos:{ position with offset = String.length context.source }
+        ~source:context.source
+    in
+    context.cached_source <- Some source;
+    source
 ;;
 
 let can_have_imports = function
@@ -131,12 +141,15 @@ let import_context (context : context) attributes =
   { dir
   ; loader = context.loader
   ; source_node
-  ; file = src
+  ; file =
+      (if context.canonical_sources then Source_loader.relative_path source_node else src)
   ; prompt_dir = context.prompt_dir
   ; namespace
   ; source
   ; active_imports = Set.add context.active_imports key
   ; import_depth = context.import_depth + 1
+  ; canonical_sources = context.canonical_sources
+  ; cached_source = None
   }
 ;;
 
@@ -151,43 +164,68 @@ let validate_namespace_aliases nodes =
   | Some alias -> failwithf "Duplicate ChatMD import namespace %S." alias ()
 ;;
 
-let rec expand_nodes ~parse (context : context) nodes : sourced_node list =
-  validate_namespace_aliases nodes;
-  List.concat_map nodes ~f:(expand_node ~parse context)
+let rec check_generated_depth depth = function
+  | Ast.Text _ -> ()
+  | Ast.Element (_, _, children) ->
+    if depth >= 128 then failwith "generated expanded markup nesting limit exceeded";
+    List.iter children ~f:(check_generated_depth (depth + 1))
+;;
 
-and expand_node ~parse context = function
+let rec expand_nodes ~parse ~depth (context : context) nodes : sourced_node list =
+  validate_namespace_aliases nodes;
+  List.concat_map nodes ~f:(expand_node ~parse ~depth context)
+
+and expand_node ~parse ~depth context node =
+  if context.canonical_sources then check_generated_depth depth node;
+  match node with
   | Ast.Element (Ast.Import, attributes, _) ->
     let imported = import_context context attributes in
-    expand_nodes ~parse imported (parse imported.source)
+    expand_nodes ~parse ~depth imported (parse imported.source)
   | Ast.Element (Ast.Msg, attributes, children) as node ->
     let role = List.Assoc.find attributes ~equal:String.equal "role" in
     (match role with
      | Some (Some "user") | Some (Some "system") | Some (Some "developer") ->
-       sourced_parent ~parse context Ast.Msg attributes children
+       sourced_parent ~parse ~depth context Ast.Msg attributes children
      | _ -> [ sourced context node ])
   | Ast.Element (tag, attributes, children) when can_have_imports tag ->
-    sourced_parent ~parse context tag attributes children
+    sourced_parent ~parse ~depth context tag attributes children
   | node -> [ sourced context node ]
 
-and sourced_parent ~parse (context : context) tag attributes children =
-  let children =
-    expand_nodes ~parse context children |> List.map ~f:(fun child -> child.node)
+and sourced_parent ~parse ~depth (context : context) tag attributes children =
+  let children = expand_nodes ~parse ~depth:(depth + 1) context children in
+  let parent =
+    sourced
+      context
+      (Ast.Element (tag, attributes, List.map children ~f:(fun child -> child.node)))
   in
-  [ sourced context (Ast.Element (tag, attributes, children)) ]
+  [ { parent with children = Some children } ]
 
 and sourced (context : context) node : sourced_node =
-  let source = source_ref context in
-  { node; source; source_node = context.source_node }
+  { node
+  ; source = source_ref context
+  ; source_node = context.source_node
+  ; children = None
+  }
 ;;
 
-let expand ~parse ~loader ~root_source ~dir ~file ~source document =
+let expand
+      ?(canonical_sources = false)
+      ~parse
+      ~loader
+      ~root_source
+      ~dir
+      ~file
+      ~source
+      document
+  =
   let active_imports =
     if String.is_prefix file ~prefix:"<"
     then String.Set.empty
     else String.Set.singleton (Source_loader.relative_path root_source)
   in
   let context =
-    { dir
+    { dir =
+        (if canonical_sources then Source_loader.materialized_dir root_source else dir)
     ; loader
     ; source_node = root_source
     ; file
@@ -196,7 +234,9 @@ let expand ~parse ~loader ~root_source ~dir ~file ~source document =
     ; source
     ; active_imports
     ; import_depth = 0
+    ; canonical_sources
+    ; cached_source = None
     }
   in
-  expand_nodes ~parse context document
+  expand_nodes ~parse ~depth:0 context document
 ;;

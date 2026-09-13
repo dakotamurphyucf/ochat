@@ -3,7 +3,10 @@
     The evaluator itself operates on the resolved AST emitted by the
     resolver.  Most embedders use {!eval_program}; host runtimes that
     interpret {!Chatml_lang.task} values also use {!apply_value_result}
-    to invoke ChatML closures or builtin functions from OCaml. *)
+    to invoke ChatML closures or builtin functions from OCaml. An environment's
+    optional execution control follows copied closure/module environments.
+    Its checkpoint runs at each expression; control exceptions propagate rather
+    than becoming ordinary catchable script failures. *)
 
 open Chatml_lang
 

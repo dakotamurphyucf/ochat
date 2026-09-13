@@ -12,9 +12,77 @@
   prompt_definition
   prompt_revision
   prompt_revision_builder
+  generated_definition
+  generated_session_request
+  generated_session_tool
+  extensibility_native_tools
+  managed_session_service
+  authored_agent_call
+  authored_agent_source
+  authored_agent_binding
+  session_management
+  session_management_channel
+  session_management_native
+  managed_session_tool
+  managed_send_tool
+  managed_read_tool
+  managed_wait_tool
+  managed_stop_tool
+  managed_submission
+  managed_stop
+  managed_submission_tracking
   prompt_catalog
   security_grant
   session_state
+  moderator_checkpoint
+  delegation_authority
+  automatic_turn_budget
+  external_ingress
+  ingress_submission
+  extension_invariants
+  extension_stop
+  extension_clock
+  job_launch
+  background_job_event
+  job_dependency
+  schedule_ownership
+  delivery_ownership
+  job_progress_buffer
+  staged_jobs
+  staged_mutations
+  staged_subscriptions
+  staged_ingress
+  staged_notifications
+  staged_schedules
+  script_job_service
+  script_subscription_service
+  script_notification_service
+  script_ingress_service
+  script_schedule_service
+  invocation_history
+  invocation_recovery
+  moderator_tool_dispatch
+  managed_moderator_dispatch
+  standalone_tool_dispatch
+  standalone_completion_contract
+  standalone_delivery
+  one_off_execution
+  background_execution
+  run_chatml_tool
+  authoring_validation_tool
+  authoring_context_tool
+  authoring_services
+  authoring_runtime
+  moderator_observation
+  moderator_event
+  observation_follow_up
+  stream_invocation
+  native_tool_dispatch
+  fork_tool_dispatch
+  native_tool_invocation
+  authoring_reference_scope
+  native_tool_moderation
+  script_tool_calls
   compaction_archive
   administration
   session_delta
@@ -22,6 +90,9 @@
   subscriber
   history_id_source
   history_codec
+  notification_history
+  notification_readiness
+  notification_delivery
   chatmd_export
   durable_event_log
   live_event_buffer
@@ -29,12 +100,15 @@
   operation_worker
   turn_worker
   runtime_builder
+  runtime_activity
+  queued_moderator_event
   permission_reviewer
   permission_policy
   session_transition
   session_actor
   memory_backend
   session_persistence
+  retained_history
   quota_key
   quota_manager
   start_queue)
@@ -47,6 +121,8 @@
   ochat.agent_store
   chatmd
   chat_response
+  chatml_execution
+  mtime
   context_compaction
   ochat.chatmd_shell_spec)
  (preprocess

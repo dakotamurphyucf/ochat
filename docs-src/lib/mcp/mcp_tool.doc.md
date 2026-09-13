@@ -51,8 +51,7 @@ let () =
 ```
 
 With a compatible echo server installed, the program prints its reply and exits.
-The wrapper's background fiber currently consumes notifications silently; it
-does not print them to stdout.
+The wrapper leaves notification routing to the connected client's owner.
 
 ---
 
@@ -100,20 +99,21 @@ val ochat_function_of_remote_tool :
   [`tools/call`] RPC and returns whatever the server responded with (after
   flattening).
 
-• **Notifications** – each wrapper starts a background consumer that silently
-  discards notifications. This competes with the host's discovery listener.
+• **Notifications** – wrappers do not start notification consumers. The owning
+  host handles the client's shared queue; the `sw` argument remains for API
+  compatibility.
 
 ---
 
 ## 3  Notifications and debugging
 
-`Mcp_client.notifications` returns a shared queue, not an independent broadcast
-subscription. The wrapper's print call is commented out, but its consumer still
-runs. Adding another reader does not provide reliable observation: readers divide
-messages among themselves. In particular, a wrapper can consume a catalog-change
-notification before the host invalidates discovery. A single dispatcher with
-explicit fan-out is needed to fix this; see the
-[implementation audit](../../development/code-documentation-audit.md#mcp-discovery-and-notifications).
+`Mcp_client.notifications` returns a shared queue. The owning host must provide one
+consumer and explicitly route any notifications it supports. `Chat_response.Tool`
+owns that consumer for its connected declaration and uses list-change events to
+invalidate discovery. It also guards its captured wrappers against changed or
+removed descriptors before dispatch. Calling `Mcp_tool` directly provides only the
+RPC wrapper, so a custom host must supply its own discovery and notification policy.
+General notification fan-out/progress routing is not added by this wrapper.
 
 ---
 
@@ -127,7 +127,7 @@ explicit fan-out is needed to fix this; see the
   caller as plain strings.  A helper that retries idempotent calls could be
   added later.
 
-* **Notification handling/catalog refresh** – shared-queue competition can lose
-  invalidations, and constructed wrappers do not hot-reload schemas. Recreate
+* **Notification handling/catalog refresh** – constructed wrappers do not
+  hot-reload schemas. Recreate
   the runtime after catalog changes; progress notification forwarding is not
   supplied by this wrapper.

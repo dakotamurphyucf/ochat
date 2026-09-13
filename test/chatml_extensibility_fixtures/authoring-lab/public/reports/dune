@@ -1,0 +1,2 @@
+(rule (target report-a.json) (action (copy ../../../x01-report/report-a.json %{target})))
+(rule (target report-b.json) (action (copy ../../../x01-report/report-b.json %{target})))

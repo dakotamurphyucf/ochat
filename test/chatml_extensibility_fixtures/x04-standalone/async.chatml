@@ -1,0 +1,9 @@
+(* The selected implementation owns its two read_file calls. This wrapper admits
+   one durable job and returns its initial acknowledgement in the same transaction.
+   A notification/wake policy is a separate host delivery concern. *)
+let run ctx input =
+  Task.bind(Job.start_tool("compare_reports", input), fun job ->
+    Task.pure(`Pending(`Job(job), `Object([
+      { key = "job_id"; value = `String(job) },
+      { key = "status"; value = `String("accepted") }
+    ]))))

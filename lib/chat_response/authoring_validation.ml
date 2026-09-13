@@ -1,0 +1,965 @@
+open Core
+module C = Tool_capability
+module Compiler = Chatml_compilation
+module D = Chatmd_shell_spec.Diagnostic
+module Source_ref = Chatmd_shell_spec.Source_ref
+module Schema = Chatmd_shell_spec.Tool_schema
+module Metadata = Chatmd_shell_spec.Authoring_metadata
+
+type target =
+  | One_off_script
+  | Standalone_tool
+  | Moderator
+  | Generated_chatmd
+[@@deriving sexp, equal]
+
+type moderator_surface =
+  | Ordinary
+  | Delegated
+[@@deriving sexp, equal]
+
+type context_budget =
+  { default_tokens : int
+  ; max_tokens : int
+  ; preload_tokens : int
+  }
+[@@deriving compare, equal, sexp]
+
+let context_budget ~default_tokens ~max_tokens ~preload_tokens =
+  match
+    default_tokens > 0
+    && default_tokens <= max_tokens
+    && max_tokens <= 1_000_000
+    && preload_tokens > 0
+    && preload_tokens <= 1_000_000
+  with
+  | true -> Ok { default_tokens; max_tokens; preload_tokens }
+  | false ->
+    Error
+      "authoring context budgets must be positive, at most 1000000, with default_tokens \
+       <= max_tokens"
+;;
+
+let default_context_budget =
+  { default_tokens = 12000; max_tokens = 32000; preload_tokens = 32000 }
+;;
+
+type host =
+  { runtime_identity : string
+  ; targets : target list
+  ; moderator_surface : moderator_surface
+  ; compilation : Compiler.limits
+  ; bundle_limits : Chatmd_source_bundle.limits
+  ; catalog : Authoring_policy.catalog option
+  ; delegated_catalog : Authoring_policy.catalog option
+  ; corpus : Authoring_corpus.t option
+  ; persisted_children_unavailable : bool
+  ; context_budget : context_budget option
+  }
+
+let create_host ~runtime_identity ~targets ~moderator_surface ~compilation =
+  let open Result.Let_syntax in
+  let%bind () =
+    Compiler.validate_limits compilation
+    |> Result.map_error ~f:(fun error -> error.Compiler.message)
+  in
+  match
+    String.is_empty runtime_identity
+    || String.length runtime_identity > 256
+    || not (Stdlib.String.is_valid_utf_8 runtime_identity)
+  with
+  | true -> Error "runtime identity must contain between 1 and 256 bytes of valid UTF-8"
+  | false ->
+    Ok
+      { runtime_identity
+      ; targets
+      ; moderator_surface
+      ; compilation
+      ; bundle_limits = Chatmd_source_bundle.default_limits
+      ; catalog = None
+      ; delegated_catalog = None
+      ; corpus = None
+      ; persisted_children_unavailable = false
+      ; context_budget = None
+      }
+;;
+
+let configured_context_budget host = host.context_budget
+
+let configure_context_budget host budget =
+  Result.map
+    (context_budget
+       ~default_tokens:budget.default_tokens
+       ~max_tokens:budget.max_tokens
+       ~preload_tokens:budget.preload_tokens)
+    ~f:(fun budget -> { host with context_budget = Some budget })
+;;
+
+let for_delegated host =
+  { host with
+    moderator_surface = Delegated
+  ; catalog = Option.first_some host.delegated_catalog host.catalog
+  }
+;;
+
+let compilation_limits host = host.compilation
+let bundle_limits host = host.bundle_limits
+let catalog host = host.catalog
+let delegated_catalog host = catalog (for_delegated host)
+let corpus host = host.corpus
+let runtime_identity host = host.runtime_identity
+let targets host = host.targets
+let moderator_surface host = host.moderator_surface
+let without_persisted_children host = { host with persisted_children_unavailable = true }
+
+let execution_unavailable_reason host = function
+  | Metadata.Child_agent when host.persisted_children_unavailable ->
+    Some
+      "Persisted child sessions are unavailable in this session. Use a daemon or a \
+       durable embedded session."
+  | _ -> None
+;;
+
+let task_surface host task =
+  let target, surface =
+    match task with
+    | Metadata.One_off_script -> One_off_script, "one_off_v1"
+    | Standalone_tool -> Standalone_tool, "tool_v1"
+    | Child_agent -> Generated_chatmd, "delegated_moderator_v1"
+    | Moderator_tool | Background_workflow ->
+      ( Moderator
+      , (match host.moderator_surface with
+         | Ordinary -> "moderator_v1"
+         | Delegated -> "delegated_moderator_v1") )
+  in
+  match List.mem host.targets target ~equal:equal_target with
+  | true -> Ok surface
+  | false -> Error "authoring task is unavailable on the invoking host"
+;;
+
+let configure_generated host ~limits ~catalog =
+  let open Result.Let_syntax in
+  let%bind _ =
+    Chatmd_source_bundle.create
+      ~limits
+      ~root_file:"root.chatmd"
+      ~sources:[ "root.chatmd", "" ]
+      ()
+  in
+  let%map () =
+    match host.corpus with
+    | None -> Ok ()
+    | Some _ ->
+      (match
+         Option.equal
+           String.equal
+           (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint)
+           (Option.map catalog ~f:Authoring_policy.catalog_fingerprint)
+       with
+       | true -> Ok ()
+       | false ->
+         Error "captured reference catalogs must be configured with their source packages")
+  in
+  { host with bundle_limits = limits; catalog }
+;;
+
+let target_id = function
+  | One_off_script -> "one_off_script"
+  | Standalone_tool -> "standalone_tool"
+  | Moderator -> "moderator"
+  | Generated_chatmd -> "generated_chatmd"
+;;
+
+let entrypoint_topic = function
+  | One_off_script -> "runtime.invocations.one-off"
+  | Standalone_tool -> "runtime.invocations.standalone"
+  | Moderator -> "runtime.invocations.moderator"
+  | Generated_chatmd -> "runtime.delegation.generated"
+;;
+
+let topics =
+  [ "chatml.syntax.calls", "guide/chatml-ocaml-differences.md"
+  ; "chatml.types", "guide/chatml-ocaml-differences.md"
+  ; "chatml.inference", "guide/chatml-inference.md"
+  ; "chatml.tasks", "guide/chatml-ocaml-differences.md"
+  ; "chatmd.declarations.schemas", "guide/chatml-authoring-runtime.md"
+  ; "chatmd.definitions", "guide/chatmd-authoring-definitions.md"
+  ; "runtime.invocations.one-off", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.standalone", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.moderator", "guide/chatml-authoring-runtime.md"
+  ; "runtime.invocations.validation", "guide/chatml-authoring-runtime.md"
+  ; "runtime.authority.tool-selection", "guide/chatml-authoring-runtime.md"
+  ; "runtime.delegation.generated", "guide/chatml-authoring-children.md"
+  ]
+;;
+
+let help target =
+  let task =
+    match target with
+    | One_off_script -> Metadata.One_off_script
+    | Standalone_tool -> Metadata.Standalone_tool
+    | Moderator -> Metadata.Moderator_tool
+    | Generated_chatmd -> Metadata.Child_agent
+  in
+  Metadata.
+    { version = 1
+    ; package = "ochat.authoring." ^ Metadata.task_id task ^ ".v1"
+    ; tasks = [ task ]
+    ; topics =
+        ([ "chatml.syntax.calls"
+         ; "chatml.types"
+         ; "chatml.tasks"
+         ; entrypoint_topic target
+         ; "runtime.authority.tool-selection"
+         ; "runtime.invocations.validation"
+         ]
+         @
+         match target with
+         | Standalone_tool | Generated_chatmd -> [ "chatmd.declarations.schemas" ]
+         | _ -> [])
+        (* These execution contracts do not call a helper. Auto/preload policy adds
+       reference and validation tools; manual policy leaves their exposure to the
+       author. Custom tools may still declare genuine required dependencies. *)
+    ; required_helpers = []
+    }
+;;
+
+let catalog_of_corpus host corpus =
+  let open Result.Let_syntax in
+  let module Corpus = Authoring_corpus in
+  let task_surfaces =
+    List.filter_map
+      [ Metadata.One_off_script
+      ; Standalone_tool
+      ; Moderator_tool
+      ; Child_agent
+      ; Background_workflow
+      ]
+      ~f:(fun task ->
+        Result.ok (task_surface host task) |> Option.map ~f:(fun surface -> task, surface))
+  in
+  let%bind topics =
+    List.map (Corpus.topics corpus) ~f:(fun topic ->
+      let tasks =
+        List.filter_map task_surfaces ~f:(fun (task, surface) ->
+          Option.some_if
+            (List.mem topic.Corpus.specification.surfaces surface ~equal:String.equal)
+            task)
+      in
+      let%map closure =
+        Corpus.assemble
+          corpus
+          ~surface_id:(List.hd_exn topic.specification.surfaces)
+          ~roots:[ topic.specification.id ]
+      in
+      let owners =
+        List.filter_map closure ~f:(fun topic ->
+          match topic.Corpus.origin with
+          | Installed -> None
+          | Authored owner -> Some owner.package)
+        |> List.dedup_and_sort ~compare:String.compare
+      in
+      topic.specification.id, tasks, owners)
+    |> Result.all
+  in
+  let packages =
+    (List.map host.targets ~f:help
+     |> List.dedup_and_sort ~compare:(fun a b ->
+       String.compare a.Metadata.package b.package))
+    @ Corpus.authored_packages corpus
+    |> List.filter_map ~f:(fun package ->
+      let tasks =
+        List.filter package.Metadata.tasks ~f:(fun task ->
+          List.Assoc.mem task_surfaces task ~equal:Metadata.equal_task)
+      in
+      Option.some_if (not (List.is_empty tasks)) { package with tasks })
+  in
+  let rec compatible packages =
+    let names = List.map packages ~f:(fun package -> package.Metadata.package) in
+    let topics =
+      List.filter topics ~f:(fun (_, tasks, owners) ->
+        (not (List.is_empty tasks))
+        && List.for_all owners ~f:(List.mem names ~equal:String.equal))
+    in
+    let retained =
+      List.filter packages ~f:(fun package ->
+        List.for_all package.Metadata.topics ~f:(fun id ->
+          List.exists topics ~f:(fun (topic, tasks, _) ->
+            String.equal id topic
+            && List.exists tasks ~f:(List.mem package.tasks ~equal:Metadata.equal_task))))
+    in
+    match List.length retained = List.length packages with
+    | true -> retained, topics
+    | false -> compatible retained
+  in
+  let packages, topics = compatible packages in
+  Authoring_policy.catalog_with_ownership
+    ~identity:(Corpus.identity corpus)
+    ~packages
+    ~topics:(List.map topics ~f:(fun (id, tasks, _) -> id, tasks))
+    ~topic_packages:
+      (List.filter_map topics ~f:(fun (id, _, owners) ->
+         Option.some_if (not (List.is_empty owners)) (id, owners)))
+  |> Result.map_error ~f:(fun error -> error.Authoring_policy.message)
+;;
+
+let configure_authored ?max_bytes host ~packages =
+  let open Result.Let_syntax in
+  let%bind sources = Authoring_sources.installed () in
+  let%bind installed = Authoring_corpus.runtime_foundation ~sources in
+  let%bind corpus = Authoring_corpus.extend_authored ?max_bytes installed packages in
+  let%bind catalog = catalog_of_corpus host corpus in
+  let%map delegated_catalog = catalog_of_corpus (for_delegated host) corpus in
+  { host with
+    corpus = Some corpus
+  ; catalog = Some catalog
+  ; delegated_catalog = Some delegated_catalog
+  }
+;;
+
+let helper_metadata = Metadata.{ authoring = None; helper = Some Validation }
+
+type diagnostic =
+  { diagnostic : D.t
+  ; topic_ids : string list
+  }
+[@@deriving sexp]
+
+type report =
+  { target : target option
+  ; source : Source_ref.t option
+  ; validation_id : string option
+  ; compiler_contract : string option
+  ; capability_fingerprint : string option
+  ; runtime_identity : string
+  ; diagnostics : diagnostic list
+  ; checked : string list
+  ; deferred : string list
+  }
+[@@deriving sexp]
+
+let valid report = List.is_empty report.diagnostics
+let strings xs = `Array (List.map xs ~f:(fun x -> `String x))
+
+let optional f = function
+  | None -> `Null
+  | Some x -> f x
+;;
+
+let to_json report =
+  `Object
+    [ "version", `Number "1"
+    ; ( "scope"
+      , `String
+          (match report.target with
+           | Some Generated_chatmd -> "generated_bundle"
+           | _ -> "inline_script") )
+    ; ("valid", if valid report then `True else `False)
+    ; "target", optional (fun t -> `String (target_id t)) report.target
+    ; "source", optional Source_ref.jsonaf_of_t report.source
+    ; "validation_id", optional (fun x -> `String x) report.validation_id
+    ; "compiler_contract", optional (fun x -> `String x) report.compiler_contract
+    ; ( "capability_fingerprint"
+      , optional (fun x -> `String x) report.capability_fingerprint )
+    ; "runtime_identity", `String report.runtime_identity
+    ; ( "diagnostics"
+      , `Array
+          (List.map report.diagnostics ~f:(fun d ->
+             `Object
+               [ "diagnostic", D.jsonaf_of_t d.diagnostic
+               ; "topic_ids", strings d.topic_ids
+               ])) )
+    ; "checked", strings report.checked
+    ; "deferred", strings report.deferred
+    ]
+;;
+
+let inline_parameters =
+  `Object
+    [ "type", `String "object"
+    ; ( "properties"
+      , `Object
+          [ "version", `Object [ "const", `Number "1" ]
+          ; "target", `Object [ "type", `String "string" ]
+          ; "source", `Object [ "type", `String "string" ]
+          ; ( "tools"
+            , `Object
+                [ "type", `String "array"
+                ; "maxItems", `Number "128"
+                ; ( "items"
+                  , `Object
+                      [ "type", `String "string"
+                      ; "minLength", `Number "1"
+                      ; "maxLength", `Number "256"
+                      ] )
+                ] )
+          ; "input_schema", `True
+          ; "output_schema", `True
+          ] )
+    ; "required", strings [ "version"; "target"; "source"; "tools" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+let request_schema =
+  match Schema.compile inline_parameters with
+  | Ok schema -> schema
+  | Error _ -> failwith "invalid authoring validation request schema"
+;;
+
+type request =
+  { target : target
+  ; source : string
+  ; tools : string list
+  ; input_schema : Jsonaf.t option
+  ; output_schema : Jsonaf.t option
+  }
+
+let bounded_text max_bytes text =
+  let decode_prefix text =
+    Utf8_ingest.add (Utf8_ingest.create ()) (String.prefix text max_bytes)
+  in
+  (* Drop an incomplete trailing character. A second bounded pass also confines
+     replacement expansion if a compiler/host diagnostic contains malformed bytes. *)
+  decode_prefix (decode_prefix text)
+;;
+
+let issue ?source ?(path = []) ~topics code message =
+  let path = List.take path 16 |> List.map ~f:(bounded_text 256) in
+  { diagnostic = D.error ?source ~path ~code (bounded_text 4096 message)
+  ; topic_ids = topics
+  }
+;;
+
+let invalid ?(path = []) message =
+  Error
+    [ issue
+        ~path
+        ~topics:[ "runtime.invocations.validation" ]
+        "authoring.invalid_request"
+        message
+    ]
+;;
+
+let decode json =
+  let open Result.Let_syntax in
+  let%bind () =
+    Schema.validate request_schema json
+    |> Result.map_error ~f:(fun errors ->
+      List.take errors 16
+      |> List.map ~f:(fun error ->
+        issue
+          ~path:error.Schema.path
+          ~topics:[ "runtime.invocations.validation" ]
+          "authoring.invalid_request"
+          error.message))
+  in
+  let%bind target =
+    match Jsonaf.member_exn "target" json |> Jsonaf.string_exn with
+    | "one_off_script" -> Ok One_off_script
+    | "standalone_tool" -> Ok Standalone_tool
+    | "moderator" -> Ok Moderator
+    | _ ->
+      Error
+        [ issue
+            ~path:[ "target" ]
+            ~topics:[ "runtime.invocations.validation" ]
+            "authoring.unsupported_target"
+            "unsupported inline-script validation target"
+        ]
+  in
+  let tools =
+    Jsonaf.member_exn "tools" json |> Jsonaf.list_exn |> List.map ~f:Jsonaf.string_exn
+  in
+  let%bind () =
+    match List.find_a_dup tools ~compare:String.compare with
+    | None -> Ok ()
+    | Some _ -> invalid ~path:[ "tools" ] "selected tool names must be unique"
+  in
+  let input_schema = Jsonaf.member "input_schema" json
+  and output_schema = Jsonaf.member "output_schema" json in
+  let%map () =
+    match target, input_schema, output_schema with
+    | Standalone_tool, Some _, Some _ -> Ok ()
+    | Standalone_tool, _, _ -> invalid "standalone validation requires both schemas"
+    | (One_off_script | Moderator), None, None -> Ok ()
+    | _ -> invalid "schemas are only accepted for standalone-tool validation"
+  in
+  { target
+  ; source = Jsonaf.member_exn "source" json |> Jsonaf.string_exn
+  ; tools
+  ; input_schema
+  ; output_schema
+  }
+;;
+
+let compiler_target host = function
+  | One_off_script -> Compiler.One_off_v1
+  | Standalone_tool -> Compiler.Tool_v1
+  | Moderator ->
+    (match host.moderator_surface with
+     | Ordinary -> Compiler.Moderator_v1
+     | Delegated -> Compiler.Delegated_moderator_v1)
+  | Generated_chatmd -> Compiler.Delegated_moderator_v1
+;;
+
+let host_fingerprint (host : host) =
+  let contract =
+    [%sexp
+      ("ochat.authoring.validation.host.v1" : string)
+    , (host.runtime_identity : string)
+    , (host.moderator_surface : moderator_surface)
+    , (host.compilation.max_source_bytes : int)
+    , (host.compilation.wall_seconds : float)
+    , (host.bundle_limits.max_source_bytes : int)
+    , (host.bundle_limits.max_bundle_bytes : int)
+    , (host.bundle_limits.max_files : int)
+    , (Option.map host.catalog ~f:Authoring_policy.catalog_fingerprint : string option)
+    , (List.map host.targets ~f:(fun target ->
+         target, Compiler.contract (compiler_target host target))
+       : (target * Sexp.t) list)]
+  in
+  let contract =
+    match host.corpus with
+    | None -> contract
+    | Some corpus ->
+      [%sexp
+        ("ochat.authoring.captured-host.v1" : string)
+      , (contract : Sexp.t)
+      , (Authoring_corpus.identity corpus : string)
+      , (Option.map host.delegated_catalog ~f:Authoring_policy.catalog_fingerprint
+         : string option)]
+  in
+  let contract =
+    match host.context_budget with
+    | None -> contract
+    | Some budget ->
+      [%sexp
+        ("ochat.authoring.context-budget.v1" : string)
+      , (contract : Sexp.t)
+      , (budget : context_budget)]
+  in
+  (match host.persisted_children_unavailable with
+   | false -> contract
+   | true ->
+     [%sexp ("ochat.authoring.no-persisted-children.v1" : string), (contract : Sexp.t)])
+  |> Sexp.to_string
+  |> Source_ref.digest
+;;
+
+let source_ref source =
+  let line = ref 1
+  and column = ref 0 in
+  String.iter source ~f:(function
+    | '\n' ->
+      incr line;
+      column := 0
+    | _ -> incr column);
+  let source_sha256 = Source_ref.digest source in
+  Source_ref.
+    { file = "candidate-" ^ source_sha256 ^ ".chatml"
+    ; source_dir = "."
+    ; prompt_dir = "."
+    ; namespace = None
+    ; start_pos = { offset = 0; line = 1; column = 0 }
+    ; end_pos = { offset = String.length source; line = !line; column = !column }
+    ; source_sha256
+    }
+;;
+
+let compile_diagnostic target source (error : Compiler.error) =
+  let code, message, source, topic_ids =
+    match error.diagnostic with
+    | None -> error.code, error.message, source, [ "runtime.invocations.validation" ]
+    | Some diagnostic ->
+      let source =
+        match diagnostic.span with
+        | None -> source
+        | Some span ->
+          let position (p : Source.position) : Source_ref.position =
+            { offset = p.offset; line = p.line; column = p.column }
+          in
+          { source with
+            Source_ref.start_pos = position span.left
+          ; end_pos = position span.right
+          }
+      in
+      let code, topic =
+        match diagnostic.stage with
+        | Parse -> "chatml.parse_error", "chatml.syntax.calls"
+        | Typecheck -> "chatml.type_error", "chatml.types"
+      in
+      ( code
+      , diagnostic.message
+      , source
+      , (match diagnostic.stage with
+         | Parse -> [ topic; entrypoint_topic target ]
+         | Typecheck ->
+           [ topic; "chatml.inference"; "chatml.syntax.calls"; entrypoint_topic target ])
+      )
+  in
+  issue ~source ~path:[ "source" ] ~topics:topic_ids code message
+;;
+
+let validate_inline ~env ~(host : host) ~capabilities json =
+  let report =
+    ref
+      { target = None
+      ; source = None
+      ; validation_id = None
+      ; compiler_contract = None
+      ; capability_fingerprint = None
+      ; runtime_identity = host.runtime_identity
+      ; diagnostics = []
+      ; checked = []
+      ; deferred = []
+      }
+  in
+  let check name = report := { !report with checked = !report.checked @ [ name ] } in
+  let run () =
+    let open Result.Let_syntax in
+    let%bind request = decode json in
+    check "request";
+    report := { !report with target = Some request.target };
+    let%bind () =
+      match List.mem host.targets request.target ~equal:equal_target with
+      | true -> Ok ()
+      | false ->
+        Error
+          [ issue
+              ~path:[ "target" ]
+              ~topics:[ "runtime.invocations.validation" ]
+              "authoring.unavailable_target"
+              "target is unavailable on this host"
+          ]
+    in
+    let%bind () =
+      match String.length request.source > host.compilation.max_source_bytes with
+      | false -> Ok ()
+      | true ->
+        Error
+          [ issue
+              ~path:[ "source" ]
+              ~topics:[ "runtime.invocations.validation" ]
+              "chatml.source_limit"
+              "script exceeds the host compiler source limit"
+          ]
+    in
+    let source = source_ref request.source in
+    report := { !report with source = Some source };
+    let%bind selected =
+      C.select capabilities ~names:request.tools
+      |> Result.map_error ~f:(fun error ->
+        [ issue
+            ~path:[ "tools" ]
+            ~topics:[ "runtime.authority.tool-selection" ]
+            error.C.code
+            error.message
+        ])
+    in
+    check "selected_capabilities";
+    let%bind () =
+      List.filter_map
+        [ "input_schema", request.input_schema; "output_schema", request.output_schema ]
+        ~f:(fun (name, schema) -> Option.map schema ~f:(fun schema -> name, schema))
+      |> List.map ~f:(fun (name, schema) ->
+        Schema.compile schema
+        |> Result.map ~f:(fun _ -> check name)
+        |> Result.map_error ~f:(fun errors ->
+          List.take errors 16
+          |> List.map ~f:(fun error ->
+            issue
+              ~path:(name :: error.Schema.path)
+              ~topics:[ "chatmd.declarations.schemas" ]
+              error.code
+              error.message)))
+      |> Result.all
+      |> Result.map ~f:(fun _ -> ())
+    in
+    let target = compiler_target host request.target in
+    let contract = Compiler.contract target |> Sexp.to_string |> Source_ref.digest in
+    let fingerprint = C.fingerprint selected in
+    let schema_identity = function
+      | None -> "absent"
+      | Some json -> Jsonaf.to_string json |> Source_ref.digest
+    in
+    let identity =
+      [%sexp
+        ("ochat.authoring.validation.v1" : string)
+      , (source.source_sha256 : string)
+      , (target_id request.target : string)
+      , (contract : string)
+      , (fingerprint : string)
+      , (host.runtime_identity : string)
+      , (host_fingerprint host : string)
+      , (host.compilation.max_source_bytes : int)
+      , (host.compilation.wall_seconds : float)
+      , (host.targets : target list)
+      , (schema_identity request.input_schema : string)
+      , (schema_identity request.output_schema : string)]
+      |> Sexp.to_string
+      |> Source_ref.digest
+    in
+    report
+    := { !report with
+         validation_id = Some identity
+       ; compiler_contract = Some contract
+       ; capability_fingerprint = Some fingerprint
+       };
+    let%map _ =
+      Compiler.compile ~limits:host.compilation ~env ~target ~source:request.source ()
+      |> Result.map_error ~f:(fun error ->
+        [ compile_diagnostic request.target source error ])
+    in
+    List.iter [ "syntax"; "types"; "entrypoints" ] ~f:check;
+    report
+    := { !report with
+         deferred =
+           ([ "initializer_evaluation"
+            ; "runtime_tool_calls"
+            ; "current_permissions"
+            ; "external_effects"
+            ; "runtime_input_output"
+            ; "chatmd_declarations"
+            ]
+            @
+            match request.target with
+            | Moderator -> [ "state_serialization" ]
+            | _ -> [])
+       }
+  in
+  match run () with
+  | Ok () -> !report
+  | Error diagnostics -> { !report with diagnostics }
+;;
+
+let generated_parameters =
+  `Object
+    [ "type", `String "object"
+    ; ( "properties"
+      , `Object
+          [ "version", `Object [ "const", `Number "1" ]
+          ; "target", `Object [ "const", `String "generated_chatmd" ]
+          ; "root_file", `Object [ "type", `String "string"; "maxLength", `Number "1024" ]
+          ; ( "sources"
+            , `Object
+                [ "type", `String "array"
+                ; "maxItems", `Number "256"
+                ; ( "items"
+                  , `Object
+                      [ "type", `String "object"
+                      ; ( "properties"
+                        , `Object
+                            [ ( "path"
+                              , `Object
+                                  [ "type", `String "string"
+                                  ; "maxLength", `Number "1024"
+                                  ] )
+                            ; "text", `Object [ "type", `String "string" ]
+                            ] )
+                      ; "required", strings [ "path"; "text" ]
+                      ; "additionalProperties", `False
+                      ] )
+                ] )
+          ; ( "tools"
+            , Jsonaf.member_exn "tools" (Jsonaf.member_exn "properties" inline_parameters)
+            )
+          ] )
+    ; "required", strings [ "version"; "target"; "root_file"; "sources"; "tools" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+(* Keep an object-shaped tool schema; target-specific required/forbidden fields
+   are validated again by the service, including duplicate keys. *)
+let parameters =
+  let fields schema = Jsonaf.member_exn "properties" schema |> Jsonaf.assoc_list_exn in
+  let common = fields inline_parameters in
+  let generated =
+    List.filter (fields generated_parameters) ~f:(fun (key, _) ->
+      not (List.Assoc.mem common key ~equal:String.equal))
+  in
+  `Object
+    [ "type", `String "object"
+    ; "properties", `Object (common @ generated)
+    ; "required", strings [ "version"; "target"; "tools" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+let generated_schema =
+  Schema.compile generated_parameters
+  |> Result.map_error ~f:(fun _ -> "invalid generated validation schema")
+  |> Result.ok_or_failwith
+;;
+
+let validate_generated ~env ~(host : host) ~capabilities json =
+  let report =
+    ref
+      { target = Some Generated_chatmd
+      ; source = None
+      ; validation_id = None
+      ; compiler_contract = None
+      ; capability_fingerprint = None
+      ; runtime_identity = host.runtime_identity
+      ; diagnostics = []
+      ; checked = []
+      ; deferred = []
+      }
+  in
+  let check name = report := { !report with checked = !report.checked @ [ name ] } in
+  let diagnostic ?source ?(path = []) code message =
+    issue
+      ?source
+      ~path
+      ~topics:
+        [ "runtime.delegation.generated"
+        ; "chatmd.definitions"
+        ; "runtime.authority.tool-selection"
+        ]
+      code
+      message
+  in
+  let run () =
+    let open Result.Let_syntax in
+    let%bind () =
+      Schema.validate generated_schema json
+      |> Result.map_error ~f:(fun errors ->
+        List.take errors 16
+        |> List.map ~f:(fun error ->
+          diagnostic ~path:error.Schema.path "authoring.invalid_request" error.message))
+    in
+    check "request";
+    let%bind () =
+      match List.mem host.targets Generated_chatmd ~equal:equal_target with
+      | true -> Ok ()
+      | false ->
+        Error
+          [ diagnostic
+              "authoring.unavailable_target"
+              "generated bundle validation is unavailable on this host"
+          ]
+    in
+    let tools =
+      Jsonaf.member_exn "tools" json |> Jsonaf.list_exn |> List.map ~f:Jsonaf.string_exn
+    in
+    let%bind () =
+      match List.find_a_dup tools ~compare:String.compare with
+      | None -> Ok ()
+      | Some _ -> invalid ~path:[ "tools" ] "selected tool names must be unique"
+    in
+    let root_file = Jsonaf.member_exn "root_file" json |> Jsonaf.string_exn in
+    let sources =
+      Jsonaf.member_exn "sources" json
+      |> Jsonaf.list_exn
+      |> List.map ~f:(fun item ->
+        ( Jsonaf.member_exn "path" item |> Jsonaf.string_exn
+        , Jsonaf.member_exn "text" item |> Jsonaf.string_exn ))
+    in
+    let%bind bundle =
+      Chatmd_source_bundle.create ~limits:host.bundle_limits ~root_file ~sources ()
+      |> Result.map_error ~f:(fun message ->
+        [ diagnostic "delegation.invalid_source" message ])
+    in
+    check "bounded_source_bundle";
+    let source =
+      { (source_ref (List.Assoc.find_exn sources root_file ~equal:String.equal)) with
+        Source_ref.file = root_file
+      }
+    in
+    report := { !report with source = Some source };
+    let%bind selected =
+      C.select capabilities ~names:tools
+      |> Result.map_error ~f:(fun e ->
+        [ diagnostic ~path:[ "tools" ] e.C.code e.message ])
+    in
+    check "selected_capabilities";
+    let contract =
+      [%sexp
+        ("ochat.generated-validation.v1" : string)
+      , (Compiler.contract Compiler.Delegated_moderator_v1 : Sexp.t)]
+      |> Sexp.to_string
+      |> Source_ref.digest
+    in
+    let selection = C.fingerprint selected in
+    let identity =
+      [%sexp
+        ("ochat.authoring.generated-validation.v1" : string)
+      , (Chatmd_source_bundle.fingerprint bundle : string)
+      , (selection : string)
+      , (contract : string)
+      , (host_fingerprint host : string)]
+      |> Sexp.to_string
+      |> Source_ref.digest
+    in
+    report
+    := { !report with
+         validation_id = Some identity
+       ; compiler_contract = Some contract
+       ; capability_fingerprint = Some selection
+       };
+    let%map admission =
+      Generated_admission.prepare
+        ~limits:host.compilation
+        ?catalog:(delegated_catalog host)
+        ~env
+        ~dir:(Eio.Stdenv.cwd env)
+        ~ceiling:selected
+        ~requested_names:tools
+        bundle
+      |> Result.map_error ~f:(fun errors ->
+        List.take errors 16
+        |> List.map ~f:(fun error ->
+          issue
+            ?source:error.D.source
+            ~path:error.path
+            ~topics:
+              [ "runtime.delegation.generated"
+              ; "chatmd.definitions"
+              ; "chatmd.declarations.schemas"
+              ; "chatml.syntax.calls"
+              ; "chatml.types"
+              ; "chatml.inference"
+              ; "runtime.authority.tool-selection"
+              ]
+            error.code
+            error.message))
+    in
+    List.iter
+      [ "captured_source_closure"
+      ; "chatmd_declarations"
+      ; "inherited_bindings"
+      ; "authoring_policy"
+      ; "delegated_surface"
+      ; "syntax"
+      ; "types"
+      ; "entrypoints"
+      ]
+      ~f:check;
+    let fingerprint = C.fingerprint (Generated_admission.capabilities admission) in
+    report
+    := { !report with
+         capability_fingerprint = Some fingerprint
+       ; deferred =
+           [ "initializer_evaluation"
+           ; "state_serialization"
+           ; "runtime_tool_calls"
+           ; "current_permissions"
+           ; "external_effects"
+           ; "runtime_input_output"
+           ; "session_creation"
+           ; "parent_moderation"
+           ; "lifetime_and_revocation"
+           ]
+       }
+  in
+  match run () with
+  | Ok () -> !report
+  | Error diagnostics -> { !report with diagnostics }
+;;
+
+let validate ~env ~host ~capabilities json =
+  match Jsonaf.member "target" json with
+  | Some (`String "generated_chatmd") -> validate_generated ~env ~host ~capabilities json
+  | _ -> validate_inline ~env ~host ~capabilities json
+;;

@@ -56,6 +56,24 @@ type t
 val open_or_create : env:Eio_unix.Stdenv.base -> path:string -> (t, Store_error.t) result
 val lookup : t -> key:Key.t -> request_digest:string -> lookup
 
+(** Validate and scan both the durable file and current memory map, preserving
+    references across failed write acknowledgements. The record/byte budgets cover
+    both views. Decode successful JSON before scanning so escaped IDs remain visible.
+    Any pending response defers collection (Ok None) without calling f; corruption,
+    missing/linked files, duplicate durable keys or budget excess return an error.
+
+    On success, call f with retained candidate IDs while holding the store mutex.
+    Acquire the owning actor checkpoint before entering. The callback must not
+    reenter this store or await an actor: actor commits can need this mutex.
+    The callback must establish all other roots before deleting anything. *)
+val with_retained_references
+  :  t
+  -> candidates:Agent_protocol.Id.Blob.t list
+  -> max_records:int
+  -> max_bytes:int
+  -> f:(Agent_protocol.Id.Blob.t list -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
 (** [record] durably inserts a record. An existing key with another request
     digest returns a typed conflict without replacing the original. *)
 val record : t -> record -> (record, Store_error.t) result

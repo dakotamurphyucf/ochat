@@ -8,8 +8,12 @@ for a completion or timer.
 
 See the [moderator language/runtime reference](../guide/chatml-moderator-runtime.md)
 for full builtin signatures, event constructors, task syntax and helper modules.
-The older phase documents describe shared or compatibility hosts; their statement
-that no generalized job API existed must not be applied to the newer agent host.
+The agent host has durable model, tool and script jobs with inspection and
+cancellation. On the extensibility-v1 surface, `Job.start_tool` and
+`Job.start_script` stage owned background work; `Tool.spawn` uses the same
+transactional job-start path. See the
+[background workflow guide](../guide/chatml-authoring-background.md) for
+acknowledgement, completion and notification patterns.
 
 ## Async work and timers
 
@@ -34,6 +38,13 @@ terminal/failed-start paths. Reviewers also use durable, non-redeliverable jobs.
 Unknown external effects after restart require reconciliation; persisted records
 and pending delivery are not serialized OCaml stacks or running child processes.
 
+Worker completion and interruption identify both the session generation and the
+claimed job attempt. A late callback from an older retry cannot complete or
+interrupt the current attempt, nor write a new state transaction. The scheduler
+retains that identity through cleanup and waits for the prior worker to release
+ownership before claiming a retry. Session-wide job cancellation still targets
+the current job, and terminal results retain the existing first-winner behavior.
+
 ## Safe points and state
 
 The moderator's state/effects commit transactionally. Canonical history,
@@ -41,6 +52,14 @@ effective overlay, safe-point changes, deferred steering and internal wakeups
 are separate surfaces. The host drains wakeups while idle and serializes changes
 through the actor. UI capabilities are host-provided; a headless host is not
 guaranteed to have an interactive approval widget or local TUI callback.
+
+The extensibility-v1 [event ownership and persistence internals](extensibility-foundations.md#actor-and-worker-handoff)
+describe the separate queued-event receipt, actor borrow and checkpoint handoff.
+The default daemon and embedded runtime install this path. Tools remain selected
+by their ChatMD declarations, and execution still requires the host's permissions.
+Embedded work ends with its hosting process; a durable data directory alone does
+not provide detached execution. Transient local hosts reject persisted child
+creation explicitly.
 
 Instruction helpers retain compatibility names but construct developer messages:
 `Item.system_text`, `Turn.prepend_system`, notice helpers, and
@@ -53,6 +72,12 @@ dollar billing cap across arbitrary providers/tools. Unattended `ask` behavior
 must be intentional; select timeout/fallback/reviewer policy before leaving an
 agent disconnected. Cancellation/stop must propagate to owned work rather than
 only hiding a loading indicator.
+
+A persisted session created from a ChatML call has its own execution lifetime.
+Its actor event loop does not retain the creator's temporary lexical execution
+budget after that call returns. Later turns and moderator events enter their own
+configured scopes; inherited tool, file, shell and parent-moderation authority
+still applies. Ordinary nested script/tool calls retain the caller's budget.
 
 Try the [offline timer tutorial](tutorials/background-agent.md). For a model-spawn
 example, the [background E2E scenario](../../test/agent_server_e2e/scenarios/background_scenario.ml)

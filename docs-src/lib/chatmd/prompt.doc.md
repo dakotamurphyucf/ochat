@@ -1,6 +1,11 @@
 # ChatMarkdown prompt parsing (`prompt.ml`)
 
-Current parsing retains source-loader provenance across imports/scripts and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+Current parsing retains source-loader provenance across imports/scripts, extension schemas and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+
+Versioned extension declarations and their current runtime limits are described in
+[extension foundations](../../agent-server/extensibility-foundations.md). The parser
+uses [strict extension declaration helpers](../../../lib/chatmd/chatmd_extension_declaration.mli)
+and [bounded source loading](../../../lib/chatmd/source_loader.mli).
 
 See [agent-host integration](../../agent-server/embedding.md) and
 [orchestration semantics](../../agent-server/chatml-orchestration.md).
@@ -129,3 +134,12 @@ Manifest compilation, authorization, filesystem probing, and live runtime
 instantiation are deliberately outside `prompt.ml`; they belong to
 `Chatmd_shell_spec` and `Shell_runtime`. This keeps the already-large Prompt
 module a dispatch/assembly boundary pending a broader future refactor.
+
+## Generated bundles
+
+The separate `Chat_markdown.parse_source_bundle` entry point parses bounded,
+captured-only sources without invoking preprocessing. It preserves canonical
+source provenance through inline imports and returns the root plus uniquely
+reachable local agent definitions. See [generated source bundle contracts](../../agent-server/extensibility-foundations.md#generated-source-bundles)
+for limits and the execution-admission work still required before using these
+declarations to create a runtime.

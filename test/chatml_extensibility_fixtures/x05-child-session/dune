@@ -1,0 +1,5 @@
+(alias
+ (name bundle)
+ (deps README.md agent.chatmd authored-agent.chatmd researcher.chatmd helper-child.chatmd
+  create.json input.json output.json server.sexp public/value.txt
+  public/reports/report-a.json public/reports/report-b.json))

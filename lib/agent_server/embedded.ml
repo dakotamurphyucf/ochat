@@ -19,6 +19,7 @@ type t =
   ; attachment : Agent_protocol.Session.Attachment.t
   ; principal : Agent_protocol.Principal.t
   ; event_capacity : int
+  ; max_attachments : int
   ; temporary_root : string option
   ; env : Eio_unix.Stdenv.base
   ; mutable closed : bool
@@ -78,6 +79,9 @@ let data_root env options =
 let server_config data_root =
   Config.Server.
     { data_dir = data_root
+    ; session_helpers = []
+    ; authoring_packages = []
+    ; authoring_budget = None
     ; unix_socket = Filename.concat data_root "agent.sock"
     ; http =
         { enabled = false
@@ -168,6 +172,7 @@ let all_scopes =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
 ;;
 
@@ -179,7 +184,7 @@ let principal () =
     ~attributes:[]
 ;;
 
-let make_connection daemon principal event_capacity =
+let make_connection daemon principal event_capacity ~max_attachments =
   let notifications = Eio.Stream.create event_capacity in
   let context =
     Connection_context.create
@@ -188,8 +193,7 @@ let make_connection daemon principal event_capacity =
       ~principal
       ~transport:In_memory
       ~publish_notification:(Eio.Stream.add notifications)
-      ~max_attachments:
-        Daemon.default_options.protocol_limits.max_attachments_per_connection
+      ~max_attachments
   in
   Agent_client.In_memory.create
     ~request:(fun command ->
@@ -209,7 +213,7 @@ let initialize connection =
     Agent_protocol.Initialize.Request.create
       ~implementation
       ~protocol_min:Agent_protocol.Version.initial
-      ~protocol_max:Agent_protocol.Version.initial
+      ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
@@ -285,14 +289,37 @@ let close_partial env temporary_root daemon connection =
   cleanup_root env temporary_root
 ;;
 
-let start ~sw ~env options =
+let start
+      ~sw
+      ~env
+      ?(daemon_options = Daemon.default_options)
+      ?(authoring_package_files = [])
+      ?authoring_budget
+      options
+  =
+  Mirage_crypto_rng_unix.use_default ();
   let open Result.Let_syntax in
+  let%bind authoring_packages =
+    Chat_response.Authoring_package_file.load_many ~env ~paths:authoring_package_files
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
   let%bind data_root, temporary_root = data_root env options in
+  let config = config options data_root in
+  let config =
+    { config with server = { config.server with authoring_packages; authoring_budget } }
+  in
   let daemon_result =
     Daemon.start
       ~sw
       ~env
-      ~config:(config options data_root)
+      ~options:
+        { daemon_options with
+          extension_host =
+            (if Option.is_some options.data_root
+             then Embedded_durable
+             else Embedded_transient)
+        }
+      ~config
       ~tool_dir:options.tool_dir
       ~home:options.home
       ~process_start_identity:None
@@ -308,7 +335,12 @@ let start ~sw ~env options =
        close_partial env temporary_root (Some daemon) None;
        failure
      | Ok principal ->
-       let connection = make_connection daemon principal options.event_capacity in
+       let max_attachments =
+         daemon_options.protocol_limits.max_attachments_per_connection
+       in
+       let connection =
+         make_connection daemon principal options.event_capacity ~max_attachments
+       in
        (match initialize connection >>= fun () -> create_session connection options with
         | Error _ as failure ->
           close_partial env temporary_root (Some daemon) (Some connection);
@@ -326,6 +358,7 @@ let start ~sw ~env options =
                ; attachment
                ; principal
                ; event_capacity = options.event_capacity
+               ; max_attachments
                ; temporary_root
                ; env
                ; closed = false
@@ -337,7 +370,11 @@ let session_id t = t.session_id
 let attachment t = t.attachment
 let dispatcher t = Daemon.dispatcher t.daemon
 let principal t = t.principal
-let connect t = make_connection t.daemon t.principal t.event_capacity
+
+let connect t =
+  make_connection t.daemon t.principal t.event_capacity ~max_attachments:t.max_attachments
+;;
+
 let close_connection t = Daemon.close_connection t.daemon
 
 let close t =

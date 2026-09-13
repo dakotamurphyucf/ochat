@@ -11,7 +11,6 @@ targets described in each reference.
 | `ochat` | File-backed completion, shell management, indexing, and other workflows | [Command overview](main.doc.md), [completion](../cli/chat-completion.md), [shell management](../cli/shell-runtime-management.md) |
 | `ochat-agent-server` | Durable daemon over private Unix sockets and optional HTTP | [Server CLI](ochat_agent_server.doc.md) |
 | `ochat-agent-stdio` | Local subprocess agent host or daemon gateway | [Stdio CLI](ochat_agent_stdio.doc.md) |
-| `ochat-shell-resource-runner` | Runtime-owned resource-limit helper, not a general agent launcher | [Helper reference](ochat_shell_resource_runner.doc.md) |
 | `md-index` / `md-search` | Build and query Markdown documentation indexes | [Indexer](md_index.doc.md), [search](md_search.doc.md) |
 | `odoc-index` / `odoc-search` | Build and query OCaml API documentation indexes | [Indexer](odoc_index.doc.md), [search](odoc_search.doc.md) |
 | `mp-refine-run` | Generate, score, and refine prompts | [CLI](mp_refine_run.doc.md), [library guide](../lib/meta_prompting.doc.md) |

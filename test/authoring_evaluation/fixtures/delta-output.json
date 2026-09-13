@@ -1,0 +1,1 @@
+{"type":"object","properties":{"added":{"type":"array","items":{"type":"string"}},"removed":{"type":"array","items":{"type":"string"}}},"required":["added","removed"],"additionalProperties":false}

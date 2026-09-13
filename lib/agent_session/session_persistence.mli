@@ -28,6 +28,16 @@ val commit
 val actor_persistence : t -> Session_actor.persistence
 val transaction_hash : t -> string option
 
+(** Host-owned private staging directory, before atomic session installation.
+    Uses the same snapshot encoding/validation as a live handle. *)
+val install_snapshot_at
+  :  env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> max_payload_length:int
+  -> transaction_hash:string option
+  -> Session_state.t
+  -> (Agent_store.Snapshot.installed, Agent_store.Store_error.t) result
+
 val install_snapshot
   :  env:Eio_unix.Stdenv.base
   -> handle:Agent_store.Session_store.Handle.t

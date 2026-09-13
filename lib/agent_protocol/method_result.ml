@@ -341,6 +341,7 @@ type t =
   | Schedule_get of Schedule.t
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
+  | Ingress_submit of Ingress.Acknowledgement.t
 [@@deriving sexp]
 
 let method_name = function
@@ -382,6 +383,7 @@ let method_name = function
   | Schedule_get _ -> "schedule.get"
   | Schedule_create _ -> "schedule.create"
   | Schedule_cancel _ -> "schedule.cancel"
+  | Ingress_submit _ -> "ingress.submit"
 ;;
 
 let to_json = function
@@ -424,6 +426,7 @@ let to_json = function
   | Job_cancel value -> Job.Cancel_result.to_json value
   | Schedule_list value -> Page.to_json Schedule.to_json value
   | Schedule_get value -> Schedule.to_json value
+  | Ingress_submit value -> Ingress.Acknowledgement.to_json value
   | Schedule_create value | Schedule_cancel value ->
     Schedule.Mutation_response.to_json value
 ;;
@@ -484,6 +487,7 @@ let decoders =
   ; "schedule.get", map Schedule.of_json (fun x -> Schedule_get x)
   ; "schedule.create", map Schedule.Mutation_response.of_json (fun x -> Schedule_create x)
   ; "schedule.cancel", map Schedule.Mutation_response.of_json (fun x -> Schedule_cancel x)
+  ; "ingress.submit", map Ingress.Acknowledgement.of_json (fun x -> Ingress_submit x)
   ]
 ;;
 

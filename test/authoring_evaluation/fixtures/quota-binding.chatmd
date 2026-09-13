@@ -1,0 +1,2 @@
+<tool name="reserve" type="moderator" moderator="quota"
+      input_schema="input.json" output_schema="output.json"/>

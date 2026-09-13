@@ -17,15 +17,40 @@ type limits =
   ; event_replay_capacity : int
   ; max_attachments_per_session : int
   ; subscriber_queue_capacity : int
+  ; job_result_inline_bytes : int
+  ; job_result_max_bytes : int
+  ; job_result_recovery_max_count : int
+  ; job_result_recovery_max_bytes : int
+  ; delegation_recovery_max_count : int
+  ; delegation_recovery_max_bytes : int
+  ; delegation_artifact_max_entries : int
+  ; delegation_artifact_max_bytes : int
+  ; delegation_max_depth : int
+  ; managed_submission_max_count : int option
+  ; managed_stop_max_count : int option
+  ; managed_message_max_bytes : int option
+  ; managed_output_page_max_bytes : int
+  ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
+  ; subscriptions : Agent_session.Staged_subscriptions.limits
+  ; schedules : Agent_session.Staged_schedules.limits
+  ; notifications : Agent_session.Staged_notifications.limits
+  ; ingress : Agent_session.Staged_ingress.limits
   }
 
 type t
+
+type generated_lifetime =
+  | Owned
+  | Independent
+[@@deriving equal, sexp_of]
 
 val create
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> store:Agent_store.Session_store.t
+  -> registry:Session_registry.t
   -> idempotency_store:Agent_store.Idempotency_store.t
+  -> blob_store:Agent_store.Blob_store.t
   -> prompts:Agent_session.Prompt_catalog.t
   -> workspaces:Agent_session.Workspace_catalog.t
   -> permission_profiles:Agent_session.Permission_policy.t list
@@ -35,6 +60,11 @@ val create
   -> tool_dir:string
   -> home:string
   -> model_post_stream:Agent_session.Runtime_builder.model_post_stream option
+  -> qualify_chatml_extensions:bool
+  -> session_helpers:Agent_session.Session_management_channel.grant list
+  -> independent_lifetime_policy:string option
+  -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
+  -> authoring_validation_host:Chat_response.Authoring_validation.host option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t
@@ -78,9 +108,69 @@ val import_legacy
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
-(** Loads every indexed non-archived durable session required at daemon
-    startup. Corrupt sessions fail closed and are not partially registered. *)
+(** Loads and registers indexed durable sessions required at startup, in private
+    parent-before-child dependency order. Includes needed ancestors, rejects cycles
+    and excessive depth, and rolls back loaded entries on failure. Stopped generated
+    inspection does not require loading a deleted/revoked parent. *)
 val recover_sessions : t -> (Session_registry.entry list, Agent_protocol.Error.t) result
+
+(** Startup, before accepting commands or starting schedulers. Validate unfinished
+    creation artifacts and complete linking for installed stopped children against
+    current parent authority. Intents without a child await a keyed retry; missing
+    or stopped parents revoke their incomplete admissions. No generated initializer
+    or model call runs here. Corrupt installed data fails closed. *)
+val reconcile_generated_creations : t -> (unit, Agent_protocol.Error.t) result
+
+(** Qualified internal host creation of a generated child.
+    Revalidates the prepared definition against the loaded parent's exact native
+    bindings, persists a protected retry mapping and complete initial journal/
+    snapshot before publication, then links under the parent's actor checkpoint.
+    Defaults to stopped. [start_immediately] persists an initial activation intent
+    before linking, then loads and starts the child. Retries and startup recovery
+    resume this intent, but never restart a subsequently stopped child. Permanent
+    activation failure is retained on the inspectable child. Does not start a model
+    turn or grant caller access.
+    External adapters must authenticate their invoking parent before calling.
+    Uses the parent's durable principal, workspace and permission profile.
+    [lifetime] defaults to [Owned]. [Independent] requires the configured trusted
+    [independent_lifetime_policy]; its digest is recorded and checked on every
+    restoration/invocation. Independent resource ancestry currently rejects
+    stateful parent moderation rather than omitting that parent's rules. Creation
+    itself still needs an active parent through the durable link checkpoint.
+    Failed/ambiguous installs retain their private reservation for reconciliation. *)
+val create_generated_session
+  :  ?start_immediately:bool
+  -> ?lifetime:generated_lifetime
+  -> t
+  -> parent_session_id:Agent_protocol.Id.Session.t
+  -> idempotency_key:Agent_protocol.Idempotency_key.t
+  -> display_name:string option
+  -> Agent_session.Generated_definition.t
+  -> (Session_registry.entry, Agent_protocol.Error.t) result
+
+(** Resume indexed pending generated starts under the daemon scheduler. Temporary
+    ancestor unavailability leaves the intent pending; terminal activation errors
+    are committed to the child. Persistence failures remain pending for retry. *)
+val resume_generated_initial_starts : t -> unit
+
+(** Reconcile a generated child's acknowledged parent stop and join old work
+    before an authorized explicit start. Must run outside runtime-owner locks.
+    Current parent policy and linkage are checked before changing child state. *)
+val prepare_session_start
+  :  t
+  -> Session_registry.entry
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Conservatively retain an inherited workspace while a privately linked
+    Independent child is running or has a durable initial-start intent, including
+    the interval before native resource borrowing. Uses bounded private records
+    and published index hints; never enters another actor or activates a runtime.
+    Call under the workspace owner's maintenance lock and propagate read errors.
+    This supplies retention, not execution authority. *)
+val workspace_retained
+  :  t
+  -> Agent_session.Session_state.t
+  -> (bool, Agent_protocol.Error.t) result
 
 (** [complete_index_recovery t entries] checkpoints reconciled actor metadata
     and accurate scheduling hints before clearing the durable rebuild marker.

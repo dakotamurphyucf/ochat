@@ -11,8 +11,14 @@
   journal
   snapshot
   session_index
+  delegation_store
   session_store
   blob_store
+  blob_reference_scan
+  blob_retention
+  retention_reader
+  job_result_intent
+  job_result_store
   transaction
   commit_writer
   recovery

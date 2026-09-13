@@ -596,17 +596,17 @@ let%expect_test "json parse example" =
   print_endline "Json parse code completed successfully.";
   [%expect
     {|
-    in:  {"a":1.,"b":[2.,3.],"c":{"d":4.}}
-    out: {"a":2.,"b":[3.,4.],"c":{"d":5.}}
+    in:  {"a":1,"b":[2,3],"c":{"d":4}}
+    out: {"a":2,"b":[3,4],"c":{"d":5}}
     pretty:
     {
-      "a": 2.,
+      "a": 2,
       "b": [
-        3.,
-        4.
+        3,
+        4
       ],
       "c": {
-        "d": 5.
+        "d": 5
       }
     }
     Json parse code completed successfully.

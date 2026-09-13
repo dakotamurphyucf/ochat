@@ -1,0 +1,7 @@
+<script id="session_request_script" language="chatml" kind="tool" src="helper-request.chatml"/>
+<tool name="session_request" type="chatml" script="session_request_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json">
+  <uses tool="session_bridge"/>
+  <uses tool="read_file"/>
+</tool>
+<script id="session_manager" language="chatml" kind="moderator" api="extensibility-v1" src="helper-moderator.chatml"/>
+<tool name="manage_agent" type="moderator" moderator="session_manager" input_schema="helper-any.json" output_schema="helper-any.json" completion_schema="helper-any.json"/>

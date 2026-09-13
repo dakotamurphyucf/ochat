@@ -45,11 +45,24 @@ let of_protocol entry =
   if entry.Agent_protocol.History.redacted
   then Error (invalid "redacted history cannot be used as canonical model input")
   else
-    Result.map (decode_item entry.payload) ~f:(fun item ->
-      History_entry.create_with_id ~id:entry.id item)
+    let open Result.Let_syntax in
+    let%bind () = Agent_protocol.History.validate_entry entry in
+    let%map item = decode_item entry.payload in
+    History_entry.create_with_id ~id:entry.id item
 ;;
 
-let all_to_protocol entries = List.map entries ~f:to_protocol
+let canonical_encoder ~previous =
+  let provenance = Hashtbl.create (module History_entry.Id) in
+  List.iter previous ~f:(fun entry ->
+    Hashtbl.set provenance ~key:entry.Agent_protocol.History.id ~data:entry.provenance);
+  fun entry ->
+    to_protocol ?provenance:(Hashtbl.find provenance (History_entry.id entry)) entry
+;;
+
+let all_to_protocol ?(previous = []) entries =
+  List.map entries ~f:(canonical_encoder ~previous)
+;;
+
 let all_of_protocol entries = Result.all (List.map entries ~f:of_protocol)
 
 let user_text ~id text =

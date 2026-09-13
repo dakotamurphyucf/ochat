@@ -5,6 +5,21 @@ type t = Time_ns.t [@@deriving compare, equal]
 let now = Time_ns.now
 let of_time_ns time = time
 let to_time_ns t = t
+let nanoseconds t = Time_ns.to_int63_ns_since_epoch t |> Int63.to_int64
+let diff_ns t since = Int64.(nanoseconds t - nanoseconds since)
+
+let add_ms t delay_ms =
+  let available = Int64.(Int63.to_int64 Int63.max_value - nanoseconds t) in
+  match delay_ms >= 0 && Int64.(of_int delay_ms <= available / 1_000_000L) with
+  | false -> Error (Protocol_error.invalid_request "delay exceeds timestamp range")
+  | true ->
+    (* The bound above proves both operations fit, even when the duration spans
+       more than a signed Int63. Only the final timestamp needs to fit Int63. *)
+    Int64.(nanoseconds t + (of_int delay_ms * 1_000_000L))
+    |> Int63.of_int64_exn
+    |> Time_ns.of_int63_ns_since_epoch
+    |> Result.return
+;;
 
 let has_rfc3339_utc_shape encoded =
   let length = String.length encoded in

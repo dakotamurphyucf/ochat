@@ -12,7 +12,7 @@ module Generator : sig
 end
 
 module type S = sig
-  type t [@@deriving compare, hash, sexp]
+  type t [@@deriving compare, equal, hash, sexp]
 
   (** [create ()] creates a cryptographically random identifier. *)
   val create : unit -> t
@@ -40,6 +40,12 @@ module Operation : S
 module Event_cursor : S
 module Transaction : S
 module Job : S
+module Invocation : S
+module Moderator_execution : S
+module Subscription : S
+module Delivery : S
+module Capability : S
+module Ingress_event : S
 module Schedule : S
 module Permission : S
 module Grant : S

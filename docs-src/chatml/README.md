@@ -21,6 +21,22 @@ definition separate from whether you interact through a TUI or a daemon client.
 
 ## Understand the two layers
 
+Choose the smallest execution form that fits the work:
+
+| Need | Use |
+|---|---|
+| Let an agent write deterministic logic over its existing tools | [`run_chatml` and one-off scripts](../guide/chatml-authoring-runtime.md) |
+| Expose a reusable script as a tool | [Standalone ChatML handlers](../guide/chatml-authoring-runtime.md#standalone-tools-and-explicit-outcomes) |
+| Implement a tool that depends on conversation state | [Moderator-handled tools](../guide/chatml-authoring-runtime.md) |
+| Delegate a continuing conversation to a specialist | [Persisted child sessions](../guide/chatml-authoring-children.md) |
+| Return promptly and notify the agent when work finishes | [Jobs, subscriptions and notifications](../guide/chatml-authoring-background.md) |
+
+An agent can learn these contracts from the installed
+[authoring documentation tool](../guide/authoring-context-tool.md), then validate
+its candidate without executing it. The
+[complete source bundles](../../test/chatml_extensibility_fixtures/README.md)
+show each pattern and include required scripts, schemas and example inputs.
+
 - **Language:** values, functions, pattern matching, task syntax, and parsing
   rules are defined by the [ChatML language specification](../guide/chatml-language-spec.md).
 - **Agent runtime:** entrypoints, events, context, and capabilities such as

@@ -22,7 +22,7 @@ Read [host integration](../../guide/chatmd-shell-host-integration.md) first.
 From the repository root, with required platform backend/helper installed:
 
 ```sh
-dune build bin/main.exe bin/chat_tui.exe bin/ochat_shell_resource_runner.exe
+dune build bin/main.exe bin/chat_tui.exe
 dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd.chatmd
 dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd.chatmd -canonical
 ```

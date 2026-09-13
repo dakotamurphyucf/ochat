@@ -45,3 +45,9 @@ resource ownership, return types and cancellation/error behavior.
 | `timestamp` | [contract](../../../lib/agent_protocol/timestamp.mli) | [source](../../../lib/agent_protocol/timestamp.ml) |
 | `version` | [contract](../../../lib/agent_protocol/version.mli) | [source](../../../lib/agent_protocol/version.ml) |
 | `workspace` | [contract](../../../lib/agent_protocol/workspace.mli) | [source](../../../lib/agent_protocol/workspace.ml) |
+| `invocation` | [contract](../../../lib/agent_protocol/invocation.mli) | [source](../../../lib/agent_protocol/invocation.ml) |
+| `completion` | [contract](../../../lib/agent_protocol/completion.mli) | [source](../../../lib/agent_protocol/completion.ml) |
+| `subscription` | [contract](../../../lib/agent_protocol/subscription.mli) | [source](../../../lib/agent_protocol/subscription.ml) |
+| `delivery` | [contract](../../../lib/agent_protocol/delivery.mli) | [source](../../../lib/agent_protocol/delivery.ml) |
+| `extension_status` | [contract](../../../lib/agent_protocol/extension_status.mli) | [source](../../../lib/agent_protocol/extension_status.ml) |
+| `extension_capabilities` | [contract](../../../lib/agent_protocol/extension_capabilities.mli) | [source](../../../lib/agent_protocol/extension_capabilities.ml) |

@@ -37,7 +37,8 @@ let save environment native body =
 let exists environment native = Eio.Path.is_file (path environment native)
 
 type t =
-  { environment : Temporary_environment.t
+  { env : Eio_unix.Stdenv.base
+  ; environment : Temporary_environment.t
   ; sessions : Store.t
   ; blobs : Blobs.t
   ; idempotency : Idempotency.t
@@ -74,7 +75,8 @@ let create ~sw env environment =
   let blobs = blob_store env root in
   let idempotency_path = Filename.concat root "idempotency.sexp" in
   let idempotency = Idempotency.open_or_create ~env ~path:idempotency_path |> store_ok in
-  { environment
+  { env
+  ; environment
   ; sessions
   ; blobs
   ; idempotency
@@ -187,6 +189,8 @@ let receipt t now name retention expires_at =
 
 let maintenance t ~now ~protected =
   Agent_server.Maintenance.run_once
+    ~registry:None
+    ~env:t.env
     ~idempotency_store:t.idempotency
     ~blob_store:t.blobs
     ~session_store:t.sessions

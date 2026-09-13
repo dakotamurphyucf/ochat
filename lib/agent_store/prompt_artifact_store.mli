@@ -58,6 +58,18 @@ val install
     Missing, altered, unexpected or symlinked tree files fail closed. *)
 val load : t -> Agent_protocol.Id.Prompt_revision.t -> (Artifact.t, Store_error.t) result
 
+(** Bounded inventory/digest verification against an independently retained
+    admission digest. Uses the caller's aggregate reader budget, rejects links,
+    unknown/missing files and mismatched identity, and does not compile sources.
+    The caller must own and serialize the artifact root. Verification alone does
+    not prove that the artifact is unreferenced or authorize deletion. *)
+val verify_retained
+  :  t
+  -> reader:Retention_reader.t
+  -> revision_id:Agent_protocol.Id.Prompt_revision.t
+  -> manifest_sha256:string
+  -> (unit, Store_error.t) result
+
 (** [verify_materialized_tree t artifact] verifies the exact materialized file
     inventory and contents against [artifact], without following symbolic links.
     Cancellation propagates. This is load-time verification, not continuous

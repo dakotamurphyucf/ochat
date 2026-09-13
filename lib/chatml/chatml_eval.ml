@@ -7,6 +7,10 @@ type eval_result =
 
 let slot_matches_value = Chatml_slot_layout.matches_value
 
+let allocate env bytes =
+  Option.iter env.control ~f:(fun control -> control.allocate bytes)
+;;
+
 let assert_recursive_slots_are_objects =
   Chatml_slot_layout.assert_recursive_slots_are_objects
 ;;
@@ -70,6 +74,7 @@ let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result)
       if List.length cl.param_slots <> List.length args
       then failwith "internal: closure param_slots length mismatch with call-site";
       let slots = cl.param_slots in
+      allocate cl.env (16 * List.length slots);
       let param_frame = Frame_env.alloc_packed slots in
       List.iteri args ~f:(fun idx v ->
         let slot = List.nth_exn slots idx in
@@ -88,6 +93,7 @@ and eval_expr_tail
       (e : resolved_expr node)
   : eval_result
   =
+  Option.iter env.control ~f:(fun control -> control.checkpoint ());
   match e.value with
   | REUnit -> Value VUnit
   | REInt i -> Value (VInt i)
@@ -127,7 +133,10 @@ and eval_expr_tail
      | BFloatDiv, VFloat _, VFloat y when Float.equal y 0.0 ->
        raise_runtime_error ~span:e.span "Division by zero"
      | BFloatDiv, VFloat x, VFloat y -> Value (VFloat (x /. y))
-     | BStringConcat, VString x, VString y -> Value (VString (x ^ y))
+     | BStringConcat, VString x, VString y ->
+       Option.iter env.control ~f:(fun control ->
+         control.before_builtin ~name:"String.concat" [ lhs_val; rhs_val ]);
+       Value (VString (x ^ y))
      | BIntLt, VInt x, VInt y -> Value (VBool (x < y))
      | BIntGt, VInt x, VInt y -> Value (VBool (x > y))
      | BIntLe, VInt x, VInt y -> Value (VBool (x <= y))
@@ -136,8 +145,16 @@ and eval_expr_tail
      | BFloatGt, VFloat x, VFloat y -> Value (VBool Float.(x > y))
      | BFloatLe, VFloat x, VFloat y -> Value (VBool Float.(x <= y))
      | BFloatGe, VFloat x, VFloat y -> Value (VBool Float.(x >= y))
-     | BEq, _, _ -> Value (VBool (equal_value lhs_val rhs_val))
-     | BNeq, _, _ -> Value (VBool (not (equal_value lhs_val rhs_val)))
+     | (BEq | BNeq), _, _ ->
+       Option.iter env.control ~f:(fun control ->
+         control.check_value lhs_val;
+         control.check_value rhs_val);
+       let equal = equal_value lhs_val rhs_val in
+       Value
+         (VBool
+            (match prim with
+             | BEq -> equal
+             | _ -> not equal))
      | (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe), _, _
        ->
        raise_runtime_error
@@ -163,6 +180,7 @@ and eval_expr_tail
   | RELambda (params, slots, body) ->
     Value (VClosure { params; body; env = copy_env env; frames; param_slots = slots })
   | RELetBlock (bindings, slots, body) ->
+    allocate env (16 * List.length slots);
     if List.length bindings <> List.length slots
     then failwith "internal: slot list length mismatch in RELetBlock";
     let block_frame = Frame_env.alloc_packed slots in
@@ -209,6 +227,7 @@ and eval_expr_tail
     in
     loop ()
   | RELetRec (bindings, slots, body) ->
+    allocate env (16 * List.length slots);
     if List.length bindings <> List.length slots
     then failwith "internal: slot list length mismatch in RELetRec";
     assert_recursive_slots_are_objects slots;
@@ -226,6 +245,7 @@ and eval_expr_tail
     let sv = finish_eval frames (eval_expr_tail ~tail:false env frames scrut_expr) in
     match_eval ~tail env frames e.span sv cases
   | RERecord fields ->
+    allocate env (64 * List.length fields);
     let record_fields =
       List.fold fields ~init:String.Map.empty ~f:(fun acc (fld, fe) ->
         let fv = finish_eval frames (eval_expr_tail ~tail:false env frames fe) in
@@ -251,12 +271,15 @@ and eval_expr_tail
             (Printf.sprintf "No field '%s' in module" field))
      | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
   | REVariant (tag, exprs) ->
+    allocate env (16 * (List.length exprs + 1));
     let vals =
       List.map exprs ~f:(fun ex ->
         finish_eval frames (eval_expr_tail ~tail:false env frames ex))
     in
     Value (VVariant (tag, vals))
   | REArray elts ->
+    Option.iter env.control ~f:(fun control ->
+      control.before_builtin ~name:"Array.literal" [ VInt (List.length elts) ]);
     let arr_vals =
       List.map elts ~f:(fun ex ->
         finish_eval frames (eval_expr_tail ~tail:false env frames ex))
@@ -284,6 +307,7 @@ and eval_expr_tail
          Value VUnit)
      | _ -> raise_runtime_error ~span:e.span "Invalid array set")
   | RERef e1 ->
+    allocate env 16;
     let v1 = finish_eval frames (eval_expr_tail ~tail:false env frames e1) in
     Value (VRef (ref v1))
   | RESetRef (ref_expr, new_expr) ->
@@ -310,6 +334,7 @@ and eval_expr_tail
       | _ -> raise_runtime_error ~span:e.span "Record extension base is not a record"
     in
     let new_fields =
+      allocate env (64 * (Map.length base_fields + List.length fields));
       List.fold fields ~init:base_fields ~f:(fun acc (fld, fe) ->
         let fv = finish_eval frames (eval_expr_tail ~tail:false env frames fe) in
         Map.set acc ~key:fld ~data:fv)
@@ -351,9 +376,11 @@ and import_module_bindings ?span (target_env : env) (mname : string) : string li
   match find_var target_env mname with
   | Some (VModule menv) ->
     let imports =
-      Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc -> (key, !data) :: acc)
+      Hashtbl.fold menv.bindings ~init:[] ~f:(fun ~key ~data acc -> (key, !data) :: acc)
     in
-    (match List.find imports ~f:(fun (key, _value) -> Hashtbl.mem target_env key) with
+    (match
+       List.find imports ~f:(fun (key, _value) -> Hashtbl.mem target_env.bindings key)
+     with
      | Some (key, _value) ->
        raise_runtime_error
          ?span
@@ -371,7 +398,7 @@ and eval_module_value
   : env
   =
   let module_eval_env = copy_env outer_env in
-  let module_export_env = create_env () in
+  let module_export_env = create_env ?control:outer_env.control () in
   define_var module_eval_env mname (VModule module_export_env);
   let exported_names =
     List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)

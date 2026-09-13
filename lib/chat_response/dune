@@ -17,17 +17,50 @@
   in_memory_stream
   model_executor
   runtime_semantics
+  automatic_turn_policy
+  runtime_request_scope
   fetch
   chatml_turn_driver
   chatml_moderator
   chatml_moderation
   moderation
   moderator_manager
+  moderator_invocation
+  execution_gate
   tool_call
   response_loop
   shell_tool
   agent_runtime
   tool
+  agent_tool_contract
+  tool_capability
+  authoring_policy
+  authoring_tool_description
+  authoring_presence
+  authoring_publication
+  authoring_fragment_coverage
+  authoring_reference_index
+  authoring_rediscovery
+  authoring_materialization
+  authoring_validation
+  authoring_package_file
+  authoring_context
+  generated_admission
+  initial_prompt_history
+  authoring_registration
+  extension_compiler
+  managed_tool_registry
+  one_off_script
+  one_off_request
+  background_request
+  background_job_operations
+  background_delivery
+  subscription_operations
+  notification_operations
+  schedule_operations
+  schedule_delivery
+  ingress_delivery
+  ingress_operations
   mcp_discovery_cache
   fork
   compact_history)
@@ -38,11 +71,14 @@
   jsonaf
   io
   ochat_function
+  agent_protocol
   definitions
   functions
   chatmd
   chatml
   chatml_runtime
+  chatml_compilation
+  chatml_execution
   chatml_moderator_runtime
   session
   lru_cache
@@ -58,6 +94,10 @@
   mcp_types
   webpage_markdown
   history_entry
-  ochat.shell_runtime)
+  ochat.shell_runtime
+  ochat.authoring_sources
+  ochat.authoring_corpus
+  digestif
+  base64)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

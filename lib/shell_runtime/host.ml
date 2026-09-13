@@ -13,7 +13,6 @@ type t =
   ; source_dirs : Eio.Fs.dir_ty Eio.Path.t String.Map.t
   ; process_environment : string array
   ; session_id : string
-  ; resource_runner : string option
   }
 
 type error =

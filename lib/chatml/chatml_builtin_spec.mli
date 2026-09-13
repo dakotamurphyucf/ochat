@@ -22,6 +22,7 @@ type row =
   | TRow_empty
   | TRow_var of string
   | TRow_extend of (string * ty) list * row
+[@@deriving sexp_of]
 
 (** The builtin type language mirrored by {!Chatml_typechecker}. *)
 and ty =
@@ -40,6 +41,7 @@ and ty =
   | TFun of ty list * ty
   | TMu of string * ty
   | TRec_var of string
+[@@deriving sexp_of]
 
 (** A top-level builtin value binding along with its type scheme. *)
 type builtin =
@@ -60,6 +62,24 @@ val module_scheme : builtin_module -> ty
 (** Render a runtime value into a stable debugging string shared by tests
     and host tooling. *)
 val value_to_string : value -> string
+
+(** Bounded diagnostic previews, independent of execution policy. Stop at byte,
+    node or depth budgets (defaults 4096/256/16) and mark truncation with [...].
+    Cyclic references/tasks cannot cause unbounded traversal; closures/modules
+    remain opaque. These do not change the language's [to_string] semantics. *)
+val value_to_debug_string
+  :  ?max_bytes:int
+  -> ?max_nodes:int
+  -> ?max_depth:int
+  -> value
+  -> string
+
+val values_to_debug_string
+  :  ?max_bytes:int
+  -> ?max_nodes:int
+  -> ?max_depth:int
+  -> value list
+  -> string
 
 (** Render a runtime value using a multiline layout intended for logs and
     debugging. *)

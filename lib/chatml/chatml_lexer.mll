@@ -59,7 +59,7 @@ rule token = parse
     (* Whitespace and comments *)
 | white  { token lexbuf }
 | newline { new_line lexbuf; token lexbuf }
-| "(*"                     { comment lexbuf }
+| "(*"                     { comment 1 lexbuf }
 
     (* Keywords *)
 | "fun"                    { FUN }
@@ -156,10 +156,12 @@ rule token = parse
         c pos.Lexing.pos_lnum (pos.Lexing.pos_cnum - pos.Lexing.pos_bol))
     }
 
-and comment = parse
-| "*)" { token lexbuf }
+and comment depth = parse
+| "(*" { comment (depth + 1) lexbuf }
+| "*)" { if depth = 1 then token lexbuf else comment (depth - 1) lexbuf }
+| newline { new_line lexbuf; comment depth lexbuf }
 | eof  { failwith "Unterminated comment" }
-| _    { comment lexbuf }
+| _    { comment depth lexbuf }
 
 and string_lit buf = parse
 | '"'                           { Buffer.contents buf }

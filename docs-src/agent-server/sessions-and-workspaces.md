@@ -167,6 +167,11 @@ attachment checks, even for old state. Arbitrary journal revisions are not
 exportable. `history.replaced` events do not carry the archive inventory; refresh
 the snapshot when you need that inventory.
 
+Reset and rebuild retire the old generation's subscriptions and external-event
+registrations together. The pre-change archive keeps the original registration
+records and accepted receipts. An old ingress submission, including a retry with
+the same idempotency key, is denied in the new generation.
+
 Administrative `session.updated` events additionally carry a
 `replacement_snapshot`, filtered for the receiving principal and bound to that
 event's revision and cursor. The common client replaces its complete projection,

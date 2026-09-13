@@ -42,6 +42,12 @@ For a specific declaration, go directly to the
 - [Built-in tools, file roots, and maintained MCP tools](overview/tools.md)
 - [ChatML moderator runtime](guide/chatml-moderator-runtime.md)
 - [ChatML language](guide/chatml-language-spec.md)
+- [Build script tools and moderator handlers](guide/chatml-authoring-runtime.md)
+- [Create persisted child agents](guide/chatml-authoring-children.md)
+- [Compose background work and notifications](guide/chatml-authoring-background.md)
+- [Give agents installed authoring documentation](guide/authoring-context-tool.md)
+- [ChatML execution limits, cancellation and state](guide/chatml-execution-limits.md)
+- [Session lifecycle and workflow recovery](guide/chatml-session-lifecycle.md)
 - [Background agent tutorial](agent-server/tutorials/background-agent.md)
 - [Interactive TUI keys and views](guide/chat_tui.md)
 - [File-backed completion CLI](cli/chat-completion.md)
@@ -56,7 +62,7 @@ For a specific declaration, go directly to the
 - [Persistence and audit](guide/chatmd-shell-persistence-and-audit.md)
 - [Examples](guide/chatmd-shell-examples.md)
 - [Management CLI](cli/shell-runtime-management.md)
-- [Resource-limit helper](bin/ochat_shell_resource_runner.doc.md)
+- [Child process setup](lib/shell_access/process_spawn.doc.md)
 - [Complete shell-agent walkthrough](agent-server/tutorials/shell-agent.md)
 
 ## Operate and develop

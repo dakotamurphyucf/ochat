@@ -25,8 +25,22 @@ val discard_reserved : t -> unit
 val remaining : t -> int
 val namespace : t -> string
 val next_reserved_sequence : t -> int
-val validate : t -> History_entry.t list -> (unit, Agent_protocol.Error.t) result
+
+(** An actor-owned validation ceiling can cover other allocators using the same
+    session namespace, including concurrent deferred user input. It must come
+    from committed session state, never from the entries being validated. Without
+    it, validation uses this source's own committed allocation ceiling. *)
+val validate
+  :  ?reserved_through:int64
+  -> t
+  -> History_entry.t list
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Adapts the durable source for the shared response engine. Allocation waits
-    for the actor-backed reservation callback before exposing an ID. *)
-val as_history_entry_source : t -> History_entry.Id_source.t
+    for the actor-backed reservation callback before exposing an ID. Validation
+    may read the actor's shared ceiling outside the allocator mutex; this does
+    not give allocation access to another source's reserved IDs. *)
+val as_history_entry_source
+  :  ?committed_through:(unit -> (int64, Agent_protocol.Error.t) result)
+  -> t
+  -> History_entry.Id_source.t

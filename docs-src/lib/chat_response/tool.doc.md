@@ -26,12 +26,19 @@ authenticated identities. An Eio clock controls expiry and a mutex serializes
 loading. Failed/cancelled loads release the mutex, allowing later retries.
 Closing the runtime closes its discovery lifetime.
 
-The listener is intended to invalidate on `notifications/tools/list_changed`,
-but tool wrappers currently consume and discard from the same notification queue;
-delivery to the invalidation listener is not guaranteed. Moreover, wrappers and
-schemas are built once: expiry/invalidation does not refresh the active runtime's
-advertised tools. Recreate the runtime after catalog changes. See the
-[tracked implementation gaps](../../development/code-documentation-audit.md#mcp-discovery-and-notifications).
+One declaration-owned listener invalidates on `notifications/tools/list_changed`;
+individual wrappers do not consume that shared notification queue. Before silent
+or progress-enabled execution, the wrapper reads the cache and verifies that its
+captured name has exactly one matching descriptor, including description and input
+schema. A changed or removed descriptor raises `mcp.catalog_changed` before
+`tools/call`; discovery failure also prevents the call. This applies to inherited
+wrappers, which retain the original client and cache.
+
+The advertised tool list remains pinned until runtime recreation. Invalidation
+and five-minute expiry trigger lookup refresh, not hot replacement of provider
+schemas. This detects changes reported by discovery; it cannot prove that a remote
+server's implementation remains unchanged between listing and execution. See the
+[remaining refresh work](../../development/code-documentation-audit.md#mcp-discovery-and-notifications).
 
 MCP tool integration is maintained. Only the old MCP server exposing ChatMD
 prompts is deprecated; this outbound tool client is not legacy functionality.

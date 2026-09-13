@@ -343,6 +343,14 @@ Tool.call         : string -> json -> [ `Ok(json) | `Error(string) ] task
 Tool.spawn        : string -> json -> string task
 ```
 
+Extensibility-v1 compiler surfaces compile `Tool.spawn` as the transactional
+`Job.start_tool` operation. Its host service is installed for internally qualified
+standalone, one-off and moderator execution. Actual daemon tests cover moderator
+lifecycle/event/invocation launch commits, including the Tool.spawn alias.
+See [qualified script job operations](../agent-server/extensibility-foundations.md#qualified-script-job-operations)
+for launch commits, rollback, status and cancellation. The legacy moderator surface
+continues to use its existing asynchronous host handler.
+
 ### `Model`
 
 Host-managed model recipes:
@@ -350,12 +358,15 @@ Host-managed model recipes:
 ```ocaml
 Model.call       : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
 Model.spawn      : string -> json -> string task
-Model.call_text  : string -> string -> string task
+Model.call_text  : string -> string -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
 Model.call_json  : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
 Model.spawn_text : string -> string -> string task
 ```
 
 Recipe names are host-defined. They are not raw provider/model identifiers.
+The text helpers wrap the input as a JSON string; `call_text` does not unwrap
+the result. See [model, process and runtime control](chatml-runtime-control.md)
+for result handling, host bindings and differences between execution surfaces.
 
 ### `Process`
 
@@ -364,6 +375,10 @@ Host-managed subprocess execution:
 ```ocaml
 Process.run : string -> string array -> string task
 ```
+
+The standard shell-runtime adapter waits for execution and returns stdout followed
+by stderr. The string is not a background-job ID. Use owned jobs for background
+work with later status/result inspection.
 
 ### `Schedule`
 

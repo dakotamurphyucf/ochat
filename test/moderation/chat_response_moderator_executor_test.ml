@@ -167,6 +167,88 @@ let moderator_artifact () =
   compiled
 ;;
 
+let%test_unit
+    "background completion waits for an active moderator without false recursion"
+  =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let cwd = Eio.Stdenv.cwd env in
+        let tmp = Eio.Path.(cwd / "_tmp_model_spawn_active_owner") in
+        Eio.Path.mkdirs ~perm:0o700 tmp;
+        let cache = Cache.load ~file:Eio.Path.(tmp / "cache.bin") ~max_size:10 () in
+        let ctx = Ctx.create ~env ~dir:tmp ~tool_dir:tmp ~cache in
+        let exec_context : Model_executor.exec_context =
+          { ctx
+          ; run_agent =
+              (fun ?history_compaction:_ ?prompt_dir:_ ?session_id:_ ~ctx:_ _ _ -> "ok")
+          ; fetch_prompt = (fun ~ctx:_ ~prompt ~is_local:_ -> Ok (prompt, None))
+          }
+        in
+        let executor = Model_executor.create ~sw ~exec_context () in
+        let recipe =
+          Model_executor.recipe_agent_prompt_v1 executor ~session_id:"active-owner"
+        in
+        let job = ref None in
+        let capabilities =
+          { Moderation.Capabilities.default with
+            on_tool_call =
+              (fun ~name:_ ~args:_ ->
+                let id =
+                  recipe.spawn
+                    ~payload:
+                      (`Object [ "prompt", `String "<prompt/>"; "input", `String "hi" ])
+                  |> ok_or_fail
+                in
+                job := Some id;
+                let rec await_business_result () =
+                  match Model_executor.job_state executor ~job_id:id with
+                  | Some (`Succeeded _) -> ()
+                  | Some `Pending ->
+                    Eio.Fiber.yield ();
+                    await_business_result ()
+                  | _ -> failwith "expected successful background model result"
+                in
+                await_business_result ();
+                Ok (Tool_ok `Null))
+          }
+        in
+        let script =
+          CM.
+            { id = "active-owner"
+            ; language = "chatml"
+            ; kind = "moderator"
+            ; source =
+                Inline
+                  {|
+          type event = [ `Session_start ]
+          let initial_state = 0
+          let on_event : context -> int -> event -> int task = fun ctx st ev ->
+            Task.bind(Tool.call("spawn", `Null), fun ignored -> Task.pure(st + 1))
+        |}
+            }
+        in
+        let _, artifact =
+          Manager.Registry.compile_script Manager.Registry.empty script |> ok_or_fail
+        in
+        let manager = Manager.create ~artifact ~capabilities () |> ok_or_fail in
+        Model_executor.register_session executor ~session_id:"active-owner" ~manager;
+        Manager.handle_event
+          manager
+          ~session_id:"active-owner"
+          ~now_ms:0
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Moderation.Event.Session_start
+        |> ok_or_fail
+        |> ignore;
+        Model_executor.await_job executor ~job_id:(Option.value_exn !job) |> ok_or_fail;
+        let snapshot = Manager.snapshot manager |> ok_or_fail in
+        assert (Poly.equal snapshot.current_state (Session.Snapshot.Int 1));
+        assert (List.length snapshot.queued_internal_events = 1))))
+;;
+
 let%expect_test "spawn completion encodes stable internal event variants" =
   Eio_main.run
   @@ fun env ->

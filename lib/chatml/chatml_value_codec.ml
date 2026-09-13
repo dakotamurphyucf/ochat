@@ -45,18 +45,17 @@ let rec jsonaf_to_value (json : Jsonaf.t) : value =
 
 let json_shape_error = "expected Json.t (`Null/`Bool/`Number/`String/`Array/`Object)"
 
-let rec list_map_result (items : 'a list) ~(f : 'a -> ('b, string) result)
+let list_map_result (items : 'a list) ~(f : 'a -> ('b, string) result)
   : ('b list, string) result
   =
-  match items with
-  | [] -> Ok []
-  | hd :: tl ->
-    (match f hd with
-     | Error msg -> Error msg
-     | Ok value ->
-       (match list_map_result tl ~f with
-        | Ok rest -> Ok (value :: rest)
-        | Error msg -> Error msg))
+  let rec loop reversed = function
+    | [] -> Ok (List.rev reversed)
+    | hd :: tl ->
+      (match f hd with
+       | Error msg -> Error msg
+       | Ok value -> loop (value :: reversed) tl)
+  in
+  loop [] items
 ;;
 
 let rec value_to_jsonaf_result (value : value) : (Jsonaf.t, string) result =
@@ -65,7 +64,10 @@ let rec value_to_jsonaf_result (value : value) : (Jsonaf.t, string) result =
   | VVariant ("Bool", [ VBool true ]) -> Ok `True
   | VVariant ("Bool", [ VBool false ]) -> Ok `False
   | VVariant ("String", [ VString s ]) -> Ok (`String s)
-  | VVariant ("Number", [ VFloat f ]) -> Ok (`Number (Float.to_string f))
+  | VVariant ("Number", [ VFloat f ]) ->
+    (match Float.is_finite f with
+     | true -> Ok (Jsonaf.Export.jsonaf_of_float f)
+     | false -> Error "JSON numbers must be finite")
   | VVariant ("Array", [ VArray values ]) ->
     values
     |> Array.to_list
@@ -94,6 +96,20 @@ let rec value_to_jsonaf_result (value : value) : (Jsonaf.t, string) result =
     |> list_map_result ~f:field_of_entry
     |> Result.map ~f:(fun fields -> `Object fields)
   | _ -> Error json_shape_error
+;;
+
+let import_json ?control json =
+  Option.iter control ~f:(fun c -> c.before_json_import json);
+  let value = jsonaf_to_value json in
+  Option.iter control ~f:(fun c -> c.checkpoint ());
+  value
+;;
+
+let export_json ?control value =
+  Option.iter control ~f:(fun c -> c.before_json_export value);
+  let result = value_to_jsonaf_result value in
+  Option.iter control ~f:(fun c -> c.checkpoint ());
+  result
 ;;
 
 let value_to_jsonaf_exn (value : value) : Jsonaf.t =

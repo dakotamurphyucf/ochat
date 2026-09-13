@@ -6,6 +6,19 @@ ownership. The installed libraries are `ochat.agent_protocol`, `agent_session`,
 `agent_transport_stdio`, `agent_transport_http` and `agent_transport_client`
 with the `ochat.` prefix on each public library name.
 
+`Agent_server.Embedded.start` accepts optional `~authoring_package_files` containing
+absolute paths to [custom authoring packages](../guide/authoring-context-tool.md).
+It validates and captures the complete set before creating a store, using the
+same loader and host configuration as a daemon. Package text stays immutable for
+the host's lifetime and is visible only through matching selected tool metadata.
+This configuration does not grant tools or enable the gated extension rollout.
+
+`~authoring_budget` configures documentation query defaults/ceilings and the total
+automatic primer/preload budget. Construct it with
+`Chat_response.Authoring_validation.context_budget`; the shared daemon host passes
+it to native/helper queries, context insertion and delegated sessions. See the
+[budget contract](../guide/authoring-context-tool.md#budgets-and-continuation).
+
 ## Client integration
 
 The complete [compiled client](../examples/agent-server/clients/docs_example.ml)
@@ -32,10 +45,22 @@ optional durable data root, start intent, permission profile, attachment mode an
 event capacity. No data root means a private transient root. `data_root = Some`
 does not change process-bound liveness into detached daemon liveness.
 
-Initialize the cryptographic RNG before calling `Embedded.start`, for example
-with `Mirage_crypto_rng_unix.use_default ()` in an owning Unix executable. The
-transient-root path allocates random IDs before `Daemon.start`'s initialization.
-See the [stock stdio limitation](troubleshooting.md#local-stdio-rng-initialization).
+Trusted embedding applications can also pass `~daemon_options` to install the
+shared daemon's provider adapter, policy, reviewer resolvers and runtime options.
+The default remains `Daemon.default_options`. Embedded startup derives its host
+identity from `data_root` even if those options specify another host, and applies
+the configured attachment limit to each in-memory connection. It starts no network
+listener. ChatML extensions are enabled by default, with individual tools selected
+by the ChatMD definition and constrained by its execution authority. Durable
+embedded hosts advertise the same five extension services as the daemon;
+transient hosts omit persisted child delegation. An embedding application can
+set `qualify_chatml_extensions = false` as a compatibility override, which also
+suppresses extension discovery. This override has no CLI/configuration-file flag.
+
+`Embedded.start` initializes the Unix cryptographic RNG before allocating its
+transient root or any session IDs. Callers do not need to initialize it first.
+Older builds had a [local stdio startup defect](troubleshooting.md#local-stdio-rng-initialization)
+when no data root was supplied.
 
 Use `Embedded.session_id`, `attachment`, `connection`, or `connect` as documented
 in its interface. Close each extra connection and finally `Embedded.close`;

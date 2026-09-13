@@ -35,6 +35,13 @@ val default_home : Eio_unix.Stdenv.base -> Eio.Fs.dir_ty Eio.Path.t
 
 type t =
   { functions : Ochat_function.t list
+    (** Lazily bind the exact constructed implementations, including dynamically
+      expanded MCP names. Forcing requires the host's secure ID generator.
+      Selection never rebuilds tool declarations; invocation policy remains
+      the owning service's responsibility. *)
+  ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
+    (** Extension preparation includes source-bound managed capabilities here;
+        [functions] continues to contain only actual native implementations. *)
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
   ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option
@@ -75,7 +82,7 @@ val moderator_process_handler
        option
 
 (** [host ~env ~workspace ~tool_dir ~prompt_dir ~session_dir ~cache_dir ~home
-    ~session_id ~resource_runner ~prompt_elements] creates the explicit host
+    ~session_id ~prompt_elements] creates the explicit host
     capabilities used by shell runtime instantiation. Source-relative roots
     are derived only from declaration provenance retained by the ChatMD
     parser. *)
@@ -88,7 +95,6 @@ val host
   -> cache_dir:Eio.Fs.dir_ty Eio.Path.t
   -> home:Eio.Fs.dir_ty Eio.Path.t
   -> session_id:string
-  -> resource_runner:string option
   -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
   -> (Shell_runtime.Host.t, diagnostic list) result
 
@@ -99,9 +105,12 @@ val host
 
     Documents without shell or legacy command declarations do not invoke the
     manifest authorizer and return no shell registry. All resources remain
-    owned by [sw]. *)
+    owned by [sw]. [native_service_revision] optionally binds trusted host-service
+    policy to resource/capability identity. Hosts restoring those resources must
+    supply the same policy identity; omission preserves legacy fingerprints. *)
 val create
-  :  sw:Eio.Switch.t
+  :  ?native_service_revision:string
+  -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
   -> platform:Chatmd_shell_spec.Shell_spec.platform
@@ -123,4 +132,87 @@ val create
         -> string)
   -> unit
   -> (t, diagnostic list) result
+
+(** Native resources plus the complete captured, non-evaluated extension
+    definition. Extension declarations are not backed by a dummy native runner
+    and are not added to [native.functions]. The owning session host must install
+    the prepared dispatcher and moderator event services before advertising them. *)
+type extension_resources =
+  { native : t
+  ; definition : Extension_compiler.definition
+  ; managed : Managed_tool_registry.t
+  }
+
+(** Select exact live native bindings from an already constructed parent runtime.
+    Retains their runners, resource context, shell redaction and classifications;
+    constructs no resources and exposes no unselected tools. [managed] retains
+    checked standalone handlers and their private dependency closure; the host
+    must install their inherited dispatcher. Stateful dependencies reject. Private
+    shell classification is retained for execution, without advertising those
+    tools or adding native runners for managed declarations. Disables the
+    child's direct moderator Process route. The host must still establish actual
+    delegability, ongoing parent policy mediation and parent resource lifetime. *)
+val inherit_native
+  :  ?managed:Managed_tool_registry.delegation
+  -> parent:t
+  -> capabilities:Tool_capability.t
+  -> unit
+  -> (t, diagnostic list) result
+
+(** Trusted host implementations selected only by an explicit Builtin or
+    persistence-enabled agent declaration of the same name. Authored agent
+    registrations must bind that exact captured declaration and its admitted
+    private resources; ordinary one-off Agent declarations retain the legacy path.
+    Unselected registrations are never exposed. Revision and
+    result contract participate in capability identity; duplicate supplied names
+    are rejected. This does not grant invocation or authoring authority. *)
+type native_registration =
+  { implementation : Ochat_function.t
+  ; implementation_revision : string
+  ; result_contract : Tool_capability.result_contract
+  ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
+    (** Trusted metadata on this implementation, retained in its capability
+        identity and selection. The host still must fulfill the corresponding
+        authoring policy before general model-visible exposure. *)
+  }
+
+(** Prepare a definition for an extensibility-aware host. Validates the captured
+    declarations, constructs native resources through the same shell authorization
+    and resource bindings as [create], then compiles all versioned scripts in an
+    Eio domain against those exact live capabilities. No script initializer or
+    handler runs here. Cross-kind collisions include dynamically expanded native
+    tool names. Inherited/generated and authoring declarations still require their
+    respective host services and are rejected. Resources remain owned by [sw];
+    the caller must release that scope after failed preparation or runtime teardown.
+    [native_service_revision] has the same resource-identity meaning as in [create].
+    [delegated_moderator] defaults to false; true compiles moderators and their
+    managed handlers against the tool-mediated delegated contract. The host still
+    must enforce inherited execution authority when constructing the live runtime.
+    This internal preparation entrypoint does not enable public feature flags. *)
+val prepare_extensions
+  :  ?native_service_revision:string
+  -> ?native_registrations:native_registration list
+  -> ?delegated_moderator:bool
+  -> sw:Eio.Switch.t
+  -> ctx:Eio_unix.Stdenv.base Ctx.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> ?extension_snapshots:Session.Shell_state.Extension_snapshot.t list
+  -> ?persist_extension_snapshots:
+       (Session.Shell_state.Extension_snapshot.t list -> (unit, string) result)
+  -> run_agent:
+       (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+        -> ?session_id:string
+        -> ?observer:Agent_response_loop.observer
+        -> source:string
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
+        -> string
+        -> Prompt.Chat_markdown.content_item list
+        -> string)
+  -> unit
+  -> (extension_resources, diagnostic list) result
 ```

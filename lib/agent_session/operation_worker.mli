@@ -14,12 +14,168 @@ module Input : sig
 end
 
 module Capabilities : sig
+  type event_handler =
+    executing:Agent_protocol.Moderator_execution.t
+    -> retirement_reason:string option
+    -> event:Session.Snapshot.t
+    -> execute:
+         (invocation:Agent_protocol.Invocation.t
+          -> (dispatched:Agent_protocol.Invocation.t
+              -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+          -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
+    -> commit:
+         (snapshot:Session.Moderator_state.Identity_snapshot.t
+          -> requests:Agent_protocol.Invocation.follow_up
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (unit, Agent_protocol.Error.t) result
+
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; prepare_authoring_input :
+        Chat_response.Authoring_materialization.t
+        -> history:History_entry.t list
+        -> effective:Chat_response.Moderation.Effective_entry.t list
+        -> (History_entry.t list, Agent_protocol.Error.t) result
+      (** Reconcile the actual model input with persisted provenance, then reserve
+          IDs and append missing installed guidance in one transaction. Requires
+          a running operation and the exact session/generation scope. Returns
+          only newly committed entries; no observer, provider or tool executes. *)
+    ; commit_invocation_call :
+        invocation:Agent_protocol.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
+      (** Atomically retain a model call and its Admitted invocation before any
+          observer or dispatch runs. Failed persistence saves neither. Identical
+          retries do not change a recorded outcome. This records intent, not tool
+          authorization; dispatch still needs current ownership/policy checks. *)
+    ; publish_invocation_output :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
+      (** Atomically append a bound model invocation's initial result and retain
+          its publication receipt. Requires a running owning operation and a
+          recorded, validated/disclosed outcome. Same-occurrence retries are
+          no-ops even after history compaction; another occurrence is rejected.
+          Does not execute handlers or post-tool observations. *)
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
       (** Checkpoint committed moderator state for this active operation.
             Identical snapshots are no-ops; stale/cancelled workers are rejected. *)
+    ; with_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+        -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+      (** Host-only foreground invocation lifecycle for native/standalone calls.
+          Admits and dispatches, or dispatches an exact previously saved model-call
+          intent. Runs the callback outside the actor and persists its validated/
+          disclosed outcome. Does not borrow moderator
+          state, serialize unrelated calls, authorize tools or publish history.
+          A parent invocation must be a live callback of the same operation;
+          background-job ownership uses a separate service. Callback errors and
+          exceptions retain a bounded terminal failure; cancellation retains a
+          cancelled result. Failed outcome persistence leaves interruption evidence
+          for worker/restart cleanup, never retries external work. The host must
+          recheck current capability, policy and disclosure in the callback. *)
+    ; with_moderator_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+      (** Scoped exclusive moderator handoff for an already authorized call.
+          Atomically admits/dispatches the invocation, or dispatches an exact
+          previously saved model-call intent, then runs the callback outside the
+          actor. [commit] saves the resolution and proposed snapshot
+          together before returning; call it from the manager's preparation hook.
+          Successful preparation must be followed immediately by infallible,
+          non-yielding runtime installation. The borrow remains held until the
+          callback returns. Failure/cancellation records a terminal outcome if
+          no resolution was committed. No provider output is published here.
+          Current capability/policy admission must precede this trusted service;
+          it supplies operation ownership, not tool authorization. Independent
+          callers queue outside the actor and recheck operation ownership before
+          admission. The callback must revalidate current authority before effects
+          after any wait. Same-owner recursion and cross-owner acquisition cycles
+          fail before admission through the shared execution coordinator. *)
+    ; with_moderator_observation :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+      (** Exclusive foreground observation handoff. The actor reads retained
+          Awaiting intent, checks current generation/operation and parent completion,
+          and saves Observing before running the callback outside its mailbox.
+          [commit] accepts only Observed with the exact observer source identity and
+          saves receipt plus prospective moderator snapshot atomically. Call from
+          the manager's preparation hook, then install without yielding. Failure
+          or cancellation records a separate observation failure; native outcomes
+          are never replaced. Same-owner recursion/cross-owner wait cycles fail.
+          The receipt's source must match the installed durable moderator source
+          before claiming; stale managers cannot reinstate an earlier snapshot.
+          This does not install an idle drain or authorize tool calls by observers. *)
+    ; with_next_moderator_observation :
+        observer:Agent_protocol.Invocation.observer
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (bool, Agent_protocol.Error.t) result
+      (** Atomically select and claim the next eligible observation for this exact
+          source under the same gate as explicit observation claims. Orders by
+          creation time, then invocation ID. True means the callback completed;
+          false means no eligible record (including a halted session). Unresolved
+          invocations, old generations, other sources and active parents are skipped.
+          A caller using a source other than the committed moderator is rejected
+          before selection, without consuming an observation.
+          A recorded [Pending] initial tool outcome is eligible.
+          Concurrent drainers cannot both receive the same record. Each claim
+          revalidates operation ownership; this is not an idle-session API. *)
+    ; with_moderator_event :
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> event:Chat_response.Moderation.Event.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+      (** Capture an ordinary moderator event for this exact active operation.
+          Read [snapshot] under exclusive moderator ownership, outside the actor
+          mailbox, so competing tool commits cannot make a queued read stale.
+          Executes outside the actor under the shared moderator gate, with an
+          event-owned native executor. Checkpoint/outcome/request intent commit
+          before local installation. This does not consume scheduling intent. *)
+    ; with_queued_moderator_event :
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+      (** Consume one queued event under this operation, using the same native
+          scope and transaction as ordinary boundary events. Failed heads are
+          retained and block automatic replay across later operations. *)
+    ; manage_moderator_follow_up :
+        observer:Agent_protocol.Invocation.observer
+        -> (unit, Agent_protocol.Error.t) result
+      (** Bind the foreground stream's request-consumption contract to its exact
+          installed moderator. Terminal cleanup settles unadmitted requests with
+          the operation outcome. Call before emitting any owned stream events. *)
+    ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
+      (** Persist acceptance of pending turn-only requests immediately before
+          provider dispatch. Requires managed foreground routing and the same
+          active operation/source. Failed persistence must prevent dispatch. *)
+    ; admit_notification_turn : unit -> (unit, Agent_protocol.Error.t) result
+      (** Every root provider request checks the running operation and atomically
+          accepts its consumed notification wakes, including without a moderator.
+          A failed save prevents provider dispatch. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

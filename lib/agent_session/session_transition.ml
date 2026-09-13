@@ -59,7 +59,65 @@ let apply ~now state ~delta ~payloads =
   let open Result.Let_syntax in
   let previous = state in
   let%bind state = Session_delta.apply state delta in
+  let%bind state, delta =
+    Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now
+  in
+  let%bind state, delta =
+    match delta with
+    | Session_delta.Created _ ->
+      let%map managed_stops =
+        List.fold_result
+          previous.managed_stops
+          ~init:state.managed_stops
+          ~f:(fun receipts receipt ->
+            match List.find receipts ~f:(Managed_stop.same_key receipt) with
+            | Some retained when Managed_stop.equal receipt retained -> Ok receipts
+            | Some _ ->
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "replacement changed an immutable stop receipt")
+            | None -> Ok (receipts @ [ receipt ]))
+      in
+      let state = { state with managed_stops } in
+      state, Session_delta.Created state
+    | _ -> Ok (state, delta)
+  in
+  let%bind state, delta =
+    match previous.lifecycle.desired, state.lifecycle.desired with
+    | Running, Stopped ->
+      let%map stop_epoch = increment "stop epoch" previous.stop_epoch in
+      let state = { state with stop_epoch } in
+      let delta =
+        match delta with
+        | Session_delta.Created _ -> Session_delta.Created state
+        | _ -> Session_delta.Batch [ delta; Stop_epoch_changed stop_epoch ]
+      in
+      state, delta
+    | _ -> Ok (state, delta)
+  in
   let payloads = projected_payloads ~previous state payloads in
+  let statuses = Session_state.extension_status state in
+  let statuses_changed =
+    not
+      (List.equal
+         Agent_protocol.Extension_status.equal
+         (Session_state.extension_status previous)
+         statuses)
+  in
+  let payloads =
+    if
+      statuses_changed
+      && not
+           (List.exists payloads ~f:(function
+              | Agent_protocol.Event.Durable.Payload.Session_updated _ -> true
+              | _ -> false))
+    then
+      payloads
+      @ [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ]
+    else payloads
+  in
   let%bind revision = increment "session revision" state.counters.revision in
   let%bind transaction_sequence =
     increment "transaction sequence" state.counters.transaction_sequence
@@ -72,6 +130,13 @@ let apply ~now state ~delta ~payloads =
   let state = { state with identity; counters } in
   let%map () = Session_state.validate state in
   let events = replacement_events state delta events in
+  let events =
+    if statuses_changed
+    then
+      List.map events ~f:(fun event ->
+        Agent_protocol.Event.Durable.with_extension_status event statuses)
+    else events
+  in
   { state; delta; events }
 ;;
 

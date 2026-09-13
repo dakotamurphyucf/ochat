@@ -1,7 +1,18 @@
 open Core
 
+(* Retry identity includes JSON field order; use that contract for derived equality. *)
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
+type delivery_id = Id.Delivery.t [@@deriving equal, sexp]
+
+module Delivery_id = Id.Delivery
+
 module Id = struct
-  type t = History_entry.Id.t [@@deriving compare, hash, sexp]
+  type t = History_entry.Id.t [@@deriving compare, equal, hash, sexp]
 
   let of_string encoded =
     Result.map_error (History_entry.Id.of_string encoded) ~f:(fun message ->
@@ -36,7 +47,9 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
-[@@deriving sexp]
+  | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
+[@@deriving equal, sexp]
 
 type entry =
   { id : Id.t
@@ -46,7 +59,14 @@ type entry =
   ; provenance : provenance
   ; redacted : bool
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
+
+let validate_entry entry =
+  match entry.provenance with
+  | Runtime_authoring guidance -> Authoring_guidance.validate guidance
+  | Canonical | Moderator_inserted | Moderator_replaced _ | Runtime_notification _ ->
+    Ok ()
+;;
 
 let role_to_string = function
   | System -> "system"
@@ -83,6 +103,14 @@ let kind_of_json =
 let provenance_to_json = function
   | Canonical -> `Object [ "type", `String "canonical" ]
   | Moderator_inserted -> `Object [ "type", `String "moderator_inserted" ]
+  | Runtime_authoring guidance ->
+    `Object
+      [ "type", `String "runtime_authoring"
+      ; "guidance", Authoring_guidance.to_json guidance
+      ]
+  | Runtime_notification id ->
+    `Object
+      [ "type", `String "runtime_notification"; "delivery_id", Delivery_id.to_json id ]
   | Moderator_replaced id ->
     `Object [ "type", `String "moderator_replaced"; "canonical_id", Id.to_json id ]
 ;;
@@ -94,6 +122,14 @@ let provenance_of_json json =
   match encoded with
   | "canonical" -> Ok Canonical
   | "moderator_inserted" -> Ok Moderator_inserted
+  | "runtime_authoring" ->
+    Result.map
+      (Json_codec.required_as fields "guidance" Authoring_guidance.of_json)
+      ~f:(fun guidance -> Runtime_authoring guidance)
+  | "runtime_notification" ->
+    Result.map
+      (Json_codec.required_as fields "delivery_id" Delivery_id.of_json)
+      ~f:(fun id -> Runtime_notification id)
   | "moderator_replaced" ->
     Result.map (Json_codec.required_as fields "canonical_id" Id.of_json) ~f:(fun id ->
       Moderator_replaced id)

@@ -32,6 +32,13 @@
  (preprocess
   (pps ppx_jane)))
 
+(executable
+ (package ochat)
+ (public_name ochat-agent-helper)
+ (name ochat_agent_helper)
+ (modules ochat_agent_helper)
+ (libraries core core_unix jsonaf ochat.shell_access))
+
 ;; ---------------------------------------------------------------------------
 ;; ODoc index executables
 ;; ---------------------------------------------------------------------------
@@ -185,13 +192,6 @@
  (libraries core core_unix.command_unix ochat.chat_tui)
  (preprocess
   (pps ppx_jane)))
-
-(executable
- (package ochat)
- (name ochat_shell_resource_runner)
- (public_name ochat-shell-resource-runner)
- (modules ochat_shell_resource_runner)
- (libraries core core_unix))
 
 (executable
  (package ochat)

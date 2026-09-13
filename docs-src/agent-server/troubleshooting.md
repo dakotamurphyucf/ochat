@@ -39,20 +39,17 @@ unless you have explicitly reviewed their sensitivity.
 
 ## Local stdio RNG initialization
 
-In the current checkout, `ochat-agent-stdio --local --prompt FILE` without
-`--data-root` fails with “The default generator is not yet initialized.”
-`Embedded.create_temporary_root` allocates an ID before `Daemon.start` initializes
-the cryptographic RNG. This was reproduced with freshly built binaries and no
-provider key, before protocol initialization or any model request.
+Older builds could fail with “The default generator is not yet initialized.”
+when `ochat-agent-stdio --local --prompt FILE` omitted `--data-root`. Transient-root
+allocation requested an ID before the RNG was initialized. `Embedded.start` now
+initializes the RNG first; a cold-executable test checks protocol initialization,
+transient/process-bound metadata and temporary-root cleanup on EOF.
 
-Until the runtime is fixed, give standalone local stdio a dedicated private
-`--data-root`, as in the [stdio tutorial](tutorials/stdio-client.md), or use the
-daemon gateway. The explicit root changes persistence to durable but liveness
-stays process-bound. Do not reuse a normal daemon's active data directory.
-Custom embedders should initialize the RNG before `Embedded.start`.
-
-This is an implementation defect, not a missing provider credential or a bad
-ChatML script. A test harness that initializes the RNG globally can mask it.
+Rebuild or update if this error occurs before protocol initialization. It does not
+indicate missing provider credentials or invalid ChatML. On an older build, a
+dedicated private `--data-root` or daemon gateway avoids the affected path. That
+root preserves data while liveness stays process-bound; do not reuse a normal
+daemon's active data directory. See the [stdio tutorial](tutorials/stdio-client.md).
 
 For a reproducible report include version/build context, host mode, transport,
 redacted config, exact command, typed error, timestamps and whether an isolated

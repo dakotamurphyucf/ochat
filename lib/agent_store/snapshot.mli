@@ -40,6 +40,10 @@ val read_file
   -> filename:string
   -> (installed, Store_error.t) result
 
+(** Decode already bounded file bytes, checking framing and payload. Callers that
+    use their own reader must also validate the filename and decoded session state. *)
+val decode_file : max_payload_length:int -> string -> (t, Store_error.t) result
+
 (** [prune_older ~env ~directory ~keep] retains the newest [keep] snapshot
     files and removes older checkpoints. [keep] must be positive so callers
     can preserve a validated fallback checkpoint. *)

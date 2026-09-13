@@ -12,27 +12,21 @@ who prefer markdown over generated API docs.
 
 ## 1  Overview
 
-`Chatml_lang` is the reference interpreter for the **ChatML** language – a
-small, statically-typed, expression-oriented dialect used internally to
-script prompts, smoke-test chat agents, and prototype new features.
-
-Why roll our own language?  Because embedding snippets of OCaml or Lua in
-prompt files proved too heavyweight for non-programmers while plain text
-string interpolation was not expressive enough.  ChatML sits in the sweet
-spot: it is easy to parse, trivially serialisable, and – thanks to this
-module – runnable inside any OCaml program without C stubs or external
-processes.
+`Chatml_lang` defines syntax, runtime values and environment helpers for
+**ChatML**, a statically typed, expression-oriented language. The evaluator is
+implemented separately in `Chatml_eval`; task effects are interpreted by the
+owning host. Runtime closures and host functions are not serializable values.
 
 The interpreter is split in several passes:
 
 1. **Parsing** (`chatml_parser.ml`) and **lexing** (`chatml_lexer.mll`).
-2. **Resolver** (`chatml_resolver.ml`): resolves identifiers and pre-computes
-   frame layouts.
-3. **Type-checker** (`chatml_typechecker.ml`).
-4. **Evaluation** – *this* file.
+2. **Type-checker** (`chatml_typechecker.ml`).
+3. **Resolver** (`chatml_resolver.ml`): resolves identifiers and pre-computes
+   frame layouts using inferred types.
+4. **Evaluation** (`chatml_eval.ml`).
 
-Only step 4 is documented here; refer to the other `.doc.md` files for the
-remaining passes.
+This page describes the values and environments used by evaluation; refer to the
+other `.doc.md` files for the compiler passes.
 
 ---
 
@@ -78,17 +72,25 @@ shape of the value is known in advance.  When it is not, we fall back to
 ### `create_env` – create a fresh module environment
 
 ```ocaml
-val create_env : unit -> env
+val create_env : ?control:execution_control -> unit -> env
 ```
 
-Allocates an empty hash-table mapping identifiers to runtime values.
-Passing distinct environments to independent scripts provides "module"
-isolation.
+Allocates an environment containing a hash table of binding cells and an optional
+host execution control. Use `define_var`, `find_var` and `update_var` to access
+bindings. A fresh environment gives each program its own globals.
+
+Execution control supplies checkpoints, allocation accounting, builtin admission,
+value checks and host-effect boundaries. Before dispatch, the host runtime reports
+the operation name and whether it is spawned; returned values pass the after-effect
+hook before debug rendering or continuation use. With no control, the evaluator
+installs no resource budgets.
+These callbacks implement host policy; they do not grant tools or permissions.
 
 ### `copy_env` – shallow clone an environment
 
-Useful when you need to evaluate code in a sandbox that should not mutate
-the parent bindings.
+Copies the binding table while retaining existing binding cells and the same
+execution control. Closures therefore preserve lexical sharing and the caller's
+budget. This shallow copy is not isolation from mutations to shared cells.
 
 <a id="eval_program"></a>
 
@@ -98,9 +100,8 @@ the parent bindings.
 val eval_program : env -> program -> unit
 ```
 
-See the extended example in the inline odoc comment attached to the
-function definition.  After running, the environment is updated with every
-binding declared by the script.
+This function belongs to `Chatml_eval` and accepts a resolved program. After
+running, the environment is updated with the bindings declared by the script.
 
 ---
 
@@ -109,21 +110,21 @@ binding declared by the script.
 ### 4.1  Evaluating a simple expression
 
 ```ocaml
-open Chatochat.Chatml
+open Chatml
 
 let () =
   let env = Chatml_lang.create_env () in
   (* Provide a print built-in *)
-  Hashtbl.set env ~key:"print" ~data:(VBuiltin (function
+  Chatml_lang.define_var env "print" (VBuiltin (function
     | [ VString s ] -> print_endline s; VUnit | _ -> failwith "arity"));
 
   (* Parse & resolve *)
   let program =
-    "print (\"Hello ChatML!\");"                      (* source *)
-    |> Chatml_parser.parse_string                         (* stmt list *)
-    |> Chatml_resolver.resolve_module "Main"             (* stmt list, name *)
+    "print(\"Hello ChatML!\")"
+    |> Chatml_parse.parse_program_exn
+    |> Chatml_resolver.resolve_program
   in
-  Chatml_lang.eval_program env program
+  Chatml_eval.eval_program env program
 ```
 
 Expected output:
@@ -136,10 +137,9 @@ Hello ChatML!
 
 ```ocaml
 let source = {|
-let rec even n = if n = 0 then true else odd (n - 1)
-and odd  n = if n = 0 then false else even (n - 1)
-in
-print (if even 13 then "even" else "odd");
+let rec even n = if n == 0 then true else odd(n - 1)
+and odd n = if n == 0 then false else even(n - 1)
+let result = if even(13) then "even" else "odd"
 |}
 ```
 

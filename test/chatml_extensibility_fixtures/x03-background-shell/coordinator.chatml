@@ -1,0 +1,46 @@
+let initial_state = `Empty
+let rec find_field fields name index =
+  if index == Array.length(fields) then `Null else
+  let entry = fields[index] in
+  if entry.key == name then entry.value else find_field(fields, name, index + 1)
+let field json name = match json with
+| `Object(fields) -> find_field(fields, name, 0)
+| _ -> `Null
+let string json = match json with | `String(value) -> value | _ -> ""
+let rec owner state job = match state with
+| `Empty -> `None
+| `Work(work, rest) ->
+  if work.job == job then `Some(work.invocation) else owner(rest, job)
+let completion result = match field(result, "type") with
+| `String("succeeded") -> Task.pure(`Succeeded(field(result, "value")))
+| `String("cancelled") -> Task.pure(`Cancelled(string(field(result, "reason"))))
+| `String("expired") -> Task.pure(`Expired)
+| `String("failed") ->
+  let retryable = match field(result, "retryable") with | `Bool(value) -> value | _ -> false in
+  Task.pure(`Failed({ code = string(field(result, "code")); message = string(field(result, "message"));
+    retryable = retryable; details = field(result, "details") }))
+| _ -> Task.fail("expected a terminal job result")
+let on_event ctx state event = match event with
+| `Tool_invoked(p) ->
+  let* job = Job.start_tool("fixture_work", `Object([])) in
+  let* () = Invocation.resolve(p.context.invocation_id,
+    `Pending(`Job(job), `Object([
+      { key = "job_id"; value = `String(job) },
+      { key = "status"; value = `String("accepted") }
+    ]))) in
+  Task.pure(`Work({ job = job; invocation = p.context.invocation_id }, state))
+| `Internal_event(payload) ->
+  (match field(payload, "kind") with
+  | `String("background_job_completed") ->
+    let job = string(field(payload, "job_id")) in
+    (match owner(state, job) with
+    | `None -> Task.pure(state)
+    | `Some(invocation) ->
+      let* result = Job.read_result(job) in
+      let* terminal = completion(result) in
+      let wake = match terminal with | `Succeeded(_) -> `Request_turn | _ -> `No_wake in
+      let reference = { key = "shell-result"; invocation_id = `Some(invocation); work = `Some(`Job(job)) } in
+      let* delivery = Notification.publish(reference, terminal, wake) in
+      Task.pure(state))
+  | _ -> Task.pure(state))
+| _ -> Task.pure(state)

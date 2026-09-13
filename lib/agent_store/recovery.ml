@@ -139,6 +139,82 @@ let validate_recovery_chain ~session_id snapshot transactions =
   | Some installed -> validate_from_snapshot ~session_id installed transactions
 ;;
 
+let validate_retained ~session_id ~snapshots ~transactions =
+  let open Result.Let_syntax in
+  let%bind _ =
+    List.fold_result
+      transactions
+      ~init:(None, None)
+      ~f:(fun (previous, last_event) transaction ->
+        let%bind () = Transaction.validate transaction in
+        let%bind () =
+          match same_session transaction.session_id session_id with
+          | true -> Ok ()
+          | false ->
+            Error (Store_error.Corrupt "retained transaction belongs to another session")
+        in
+        let%bind () =
+          match previous with
+          | None -> Ok ()
+          | Some previous ->
+            (match
+               Int64.(previous.Transaction.transaction_sequence < max_value)
+               && Int64.equal
+                    transaction.transaction_sequence
+                    Int64.(previous.transaction_sequence + one)
+               && Option.equal
+                    String.equal
+                    transaction.previous_transaction_hash
+                    (Some (Transaction.hash previous))
+               && transaction.generation >= previous.generation
+               && Int64.(transaction.session_revision >= previous.session_revision)
+             with
+             | true -> Ok ()
+             | false ->
+               Error (Store_error.Corrupt "retained transaction chain is discontinuous"))
+        in
+        let%bind () =
+          match last_event, transaction.first_event_sequence with
+          | Some previous, Some next
+            when not
+                   (Int64.(previous < max_value)
+                    && Int64.equal next Int64.(previous + one)) ->
+            Error (Store_error.Corrupt "retained event sequence is discontinuous")
+          | _ -> Ok ()
+        in
+        Ok (Some transaction, Option.first_some transaction.last_event_sequence last_event))
+  in
+  let anchor =
+    List.max_elt snapshots ~compare:(fun a b ->
+      Int64.compare
+        a.Snapshot.snapshot.transaction_sequence
+        b.Snapshot.snapshot.transaction_sequence)
+  in
+  let%bind head = validate_recovery_chain ~session_id anchor transactions in
+  let%map () =
+    List.fold_result snapshots ~init:() ~f:(fun () snapshot ->
+      let%bind () =
+        match snapshot.Snapshot.snapshot with
+        | { transaction_sequence = 0L; event_sequence; transaction_hash; _ }
+          when not (Int64.equal event_sequence 0L && Option.is_none transaction_hash) ->
+          Error (Store_error.Corrupt "initial retained snapshot has noninitial counters")
+        | _ -> Ok ()
+      in
+      let%bind restored_head = validate_from_snapshot ~session_id snapshot transactions in
+      match
+        Int64.equal head.transaction_sequence restored_head.transaction_sequence
+        && Option.equal String.equal head.transaction_hash restored_head.transaction_hash
+        && Int64.equal head.session_revision restored_head.session_revision
+        && Int64.equal head.event_sequence restored_head.event_sequence
+        && Int.equal head.generation restored_head.generation
+      with
+      | true -> Ok ()
+      | false ->
+        Error (Store_error.Corrupt "fallback snapshots recover different journal heads"))
+  in
+  head
+;;
+
 let replay_from snapshot transactions =
   let covered =
     Option.value_map snapshot ~default:Int64.zero ~f:(fun installed ->

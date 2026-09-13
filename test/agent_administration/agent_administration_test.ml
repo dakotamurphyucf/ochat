@@ -337,7 +337,7 @@ let seeded_permission state =
     { id = Agent_protocol.Id.Permission.create ()
     ; session_id
     ; generation = state.identity.generation
-    ; operation_id = Agent_protocol.Id.Operation.create ()
+    ; owner = Operation (Agent_protocol.Id.Operation.create ())
     ; call_id = "seed"
     ; tool_name = "private-tool"
     ; runtime_identity = None
@@ -384,6 +384,8 @@ let seeded_job state =
     ; completed_at = Some state.identity.updated_at
     ; result = None
     ; delivery = Not_required
+    ; launch = None
+    ; progress = None
     }
 ;;
 
@@ -399,6 +401,8 @@ let seeded_schedule state =
     ; status = Cancelled
     ; delivery_count = 0
     ; last_delivery_at = None
+    ; delivery_cancellation = None
+    ; ownership = None
     }
 ;;
 

@@ -1,0 +1,16 @@
+<config model="gpt-6-astra"/>
+<developer>
+Use the task-specific E10 composition guide attached to read_file. Read the
+primer's feature overview, prepare the selected task, and follow all reference
+continuations before generating code. The examples root contains curated source
+files; reports contains sample inputs. Read the relevant files to see exact code,
+then validate your proposal before executing it. Model authoring is a live provider
+operation; the examples' offline transcripts establish runtime integration only.
+</developer>
+<tool name="read_file">
+  <read id="examples" path="${workspace}"/>
+  <read id="reports" path="${workspace}/reports"/>
+</tool>
+<tool name="run_chatml"/>
+<tool name="agent_create"/><tool name="agent_send"/><tool name="agent_read"/>
+<tool name="agent_status"/><tool name="agent_wait"/><tool name="agent_stop"/>

@@ -54,5 +54,11 @@ let render ~width ~(model : Model.t) =
     Option.value_map (Model.typeahead_status model) ~default:I.empty ~f:(fun status ->
       I.string bar_attr ("  [" ^ status ^ "]"))
   in
-  I.hcat [ base; activity; typeahead; hint ] |> I.hsnap ~align:`Left width
+  let work =
+    match Model.session_work model with
+    | None -> I.empty
+    | Some view ->
+      I.string bar_attr (Printf.sprintf "  [%d jobs · :work]" view.active_jobs)
+  in
+  I.hcat [ base; activity; work; typeahead; hint ] |> I.hsnap ~align:`Left width
 ;;

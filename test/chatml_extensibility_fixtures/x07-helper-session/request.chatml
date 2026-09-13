@@ -1,0 +1,26 @@
+let field json name = match Json.get_field(json, name) with
+| `Some(value) -> value
+| `None -> `Null
+let string json = match json with | `String(value) -> value | _ -> ""
+let failed code message retryable details = `Fail({
+  code = code; message = message; retryable = retryable; details = details
+})
+
+let run ctx input =
+  let* response = Tool.call("session_bridge", `Object([
+    { key = "stdin"; value = `String(Json.stringify(input)) }
+  ])) in
+  match response with
+  | `Error(message) ->
+    Task.pure(failed("agent.helper.transport", message, true, `Null))
+  | `Ok(`String(text)) ->
+    (match Json.parse_opt(text) with
+    | `None -> Task.pure(failed("agent.helper.transport", "Invalid helper JSON.", true, `Null))
+    | `Some(result) ->
+      (match field(result, "type") with
+      | `String("complete") -> Task.pure(`Complete(field(result, "value")))
+      | `String("fail") ->
+        let retryable = match field(result, "retryable") with | `Bool(value) -> value | _ -> false in
+        Task.pure(failed(string(field(result, "code")), string(field(result, "message")), retryable, field(result, "details")))
+      | _ -> Task.pure(failed("agent.helper.transport", "Helper did not return an operation outcome.", true, `Null))))
+  | `Ok(_) -> Task.pure(failed("agent.helper.transport", "Expected helper stdout.", true, `Null))

@@ -7,6 +7,7 @@ module Entry = struct
     ; deliverable_job_count : int
     ; earliest_schedule_due : Agent_protocol.Timestamp.t option
     ; owner_grace_deadline : Agent_protocol.Timestamp.t option
+    ; pending_initial_start : bool [@sexp.default false]
     ; archived : bool
     }
   [@@deriving sexp]

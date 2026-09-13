@@ -1,0 +1,51 @@
+let after_line text = match String.find(text, "\n") with
+  | `Some(index) -> String.slice(text, index + 1, String.length(text) - index - 1)
+  | `None -> fail("read failed or incomplete response")
+
+let account value = match Json.get_field(value, "account") with
+  | `Some(`String(name)) -> name
+  | _ -> fail("expected account")
+
+let balance value = match Json.get_field(value, "balance") with
+  | `Some(`Number(amount)) -> amount
+  | _ -> fail("expected balance")
+
+let add groups entry =
+  let name = account(entry) in
+  let amount = balance(entry) in
+  if Array.exists(groups, fun group -> group.account == name) then
+    Array.map(groups, fun group -> if group.account == name then
+      { account = name; balance = group.balance +. amount } else group)
+  else Array.append(groups, [{ account = name; balance = amount }])
+
+let insert sorted entry = Array.append(
+  Array.append(Array.filter(sorted, fun item -> less(item.account, entry.account)), [entry]),
+  Array.filter(sorted, fun item -> less(entry.account, item.account)))
+
+let rec collect files index groups =
+  if index == Array.length(files) then Task.pure(groups)
+  else match files[index] with
+    | `String(file) ->
+      let* result = Tool.call("read_file", `Object([
+        { key = "root"; value = `String("ledgers") },
+        { key = "file"; value = `String(file) }
+      ])) in
+      (match result with
+        | `Error(code) -> Task.fail(code)
+        | `Ok(`String(text)) ->
+          (match Json.parse(after_line(after_line(text))) with
+            | `Array(entries) -> collect(files, index + 1, Array.fold(entries, groups, add))
+            | _ -> Task.fail("expected ledger array"))
+        | `Ok(_) -> Task.fail("expected file text"))
+    | _ -> Task.fail("expected filename")
+
+let main input = match input with
+  | `Array(files) ->
+    let+ groups = collect(files, 0, []) in
+    let nonzero = Array.filter(groups, fun group -> group.balance == 0.0 == false) in
+    let sorted = Array.fold(nonzero, [], insert) in
+    `Array(Array.map(sorted, fun group -> `Object([
+      { key = "account"; value = `String(group.account) },
+      { key = "balance"; value = `Number(group.balance) }
+    ])))
+  | _ -> Task.fail("expected filenames")

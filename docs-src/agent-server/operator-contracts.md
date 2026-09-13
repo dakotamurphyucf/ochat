@@ -17,7 +17,7 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/chat_tui.ml).
 
-`--archive`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
+`--archive`, `--authoring-package`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
 
 ## ochat_agent_server.ml flag inventory
 
@@ -29,7 +29,7 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/ochat_agent_stdio.ml).
 
-`--bearer-token-file`, `--connect`, `--data-root`, `--local`, `--prompt`, `--workspace`
+`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--local`, `--prompt`, `--workspace`
 
 ## HTTP route inventory
 
@@ -119,6 +119,16 @@ module Server : sig
 
   type t =
     { data_dir : string
+    ; session_helpers : Session_helper_policy.t list [@sexp.list]
+      (** Explicit operator grants for optional external helpers. Changes require
+          restart. The helpers still require declared shell tools and normal
+          execution authorization. *)
+    ; authoring_packages : Chat_response.Authoring_package_file.t list [@sexp.list]
+      (** Captured host conventions loaded during configuration validation.
+          Changes require restart; package presence never enables extensions. *)
+    ; authoring_budget : Chat_response.Authoring_validation.context_budget option
+          [@sexp.option]
+      (** Explicit query/default/preload estimates; changes require restart. *)
     ; unix_socket : string
     ; http : http
     ; shutdown_grace_ms : int
@@ -279,6 +289,7 @@ module T = struct
     | Delete_sessions
     | Administer_configuration
     | Diagnostics
+    | Submit_ingress
   [@@deriving compare, equal, sexp]
 end
 
@@ -300,6 +311,7 @@ let to_string = function
   | Delete_sessions -> "session.delete"
   | Administer_configuration -> "configuration.admin"
   | Diagnostics -> "diagnostics.read"
+  | Submit_ingress -> "ingress.submit"
 ;;
 
 let of_string = function
@@ -317,6 +329,7 @@ let of_string = function
   | "session.delete" -> Ok Delete_sessions
   | "configuration.admin" -> Ok Administer_configuration
   | "diagnostics.read" -> Ok Diagnostics
+  | "ingress.submit" -> Ok Submit_ingress
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 

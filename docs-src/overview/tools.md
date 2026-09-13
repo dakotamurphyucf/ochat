@@ -2,7 +2,10 @@
 
 This page documents **tool calling** in ochat/ChatMD: how you declare tools in a prompt, what built-ins ship with ochat, and how to extend capabilities via **agent tools**, **shell wrappers**, and **MCP** (Model Context Protocol).
 
-Tools are **opt-in**: the model can only call what your prompt declares via `<tool .../>`.
+Tools are **opt-in** through ChatMD declarations. Selecting an authoring tool can
+also select its documentation helpers under the configured
+[authoring policy](../guide/authoring-context-tool.md); ordinary agents receive
+no additional tools or guidance.
 
 ---
 
@@ -68,6 +71,20 @@ Some tools have **declaration aliases** for compatibility.
 | `meta_refine` | `meta_refine` | meta | Recursive meta-prompt refinement flow. |
 | `import_image` | `import_image` | vision | Load a local image file and return a vision input item (data URI). |
 | `fork` | `fork` | agent | Run a nested agent branch through the host's fork handling; see the [fork runtime](../lib/chat_response/fork.doc.md). This is not a separate root daemon session. |
+| `run_chatml` | `run_chatml` | workflow | Compile and run a one-off script using selected existing tools and the caller's authority. |
+| `ochat_authoring_context` | `ochat_authoring_context` | docs | Search or retrieve installed, versioned ChatML/ChatMD/runtime guidance and task packages. |
+| `ochat_validate` | `ochat_validate` | authoring | Check script or captured agent definitions without executing candidate initializers or tools. |
+| `agent_create` | `agent_create` | agent | Create a persisted child with its own instructions/settings and inherited execution authority. Requires a supported durable host. |
+| `agent_send` | `agent_send` | agent | Submit a message with a retry key and receive a durable submission receipt. |
+| `agent_read` | `agent_read` | agent | Read child output using scoped receipts and paged cursors. |
+| `agent_status` | `agent_status` | agent | Inspect a child's lifecycle and active work without starting it. |
+| `agent_wait` | `agent_wait` | agent | Wait for output or receipt completion; timing out does not stop the child. |
+| `agent_stop` | `agent_stop` | agent | Request graceful or cancelling stop with a retained retry identity. |
+
+The [execution guide](../guide/chatml-authoring-runtime.md),
+[authoring query guide](../guide/authoring-context-tool.md) and
+[child-session guide](../guide/chatml-authoring-children.md) describe request and
+result contracts. Tool names alone do not make unavailable host services usable.
 
 #### Built-in behavior notes (practical gotchas)
 
@@ -262,11 +279,21 @@ Agent tools mount a `*.chatmd` prompt as a callable tool. This is the fastest wa
 <tool name="triage" agent="prompts/triage.chatmd" local/>
 ```
 
-Behavior:
+For the default one-off declaration:
 
 - Input schema is fixed: `{ "input": "..." }`.
 - The agent runs in a fresh sub-conversation (no inherited message history), but with the same execution context (filesystem root, network access, etc.).
 - The tool returns the agent’s final answer as tool output.
+
+An authored tool may instead declare `persistence="optional"` or
+`persistence="persistent"` on a supported durable host. Optional tools default to
+one-off calls; the model can request persistent mode and then explicitly supply
+the returned `session_id` to continue that instance. Separate calls without an ID
+create separate instances. Persistent results include a submission receipt and
+available output; the same `agent_send/read/status/wait/stop` tools can manage
+those sessions. See the
+[authored persistence contract](../agent-server/extensibility-foundations.md#authored-agent-tool-persistence-contract)
+and [runnable specialists](../../test/chatml_extensibility_fixtures/x05-child-session/README.md).
 
 When to use:
 
@@ -395,6 +422,12 @@ There are multiple extension routes depending on how you want to ship capabiliti
 2. **Agent tool** (`<tool agent="…"/>`): fastest way to expose a workflow encoded in ChatMD.
 3. **MCP tool catalog** (`<tool mcp_server="…"/>`): best for sharing tools across environments and for sandboxing.
 4. **Embedding ochat as a library**: register arbitrary `Ochat_function.t` values directly in your host program.
+5. **Standalone ChatML tool** (`type="chatml"`): bind a compiled handler to explicit input/output schemas, without requiring a moderator.
+6. **Moderator-handled tool** (`type="moderator"`): deliver a dedicated invocation event to a stateful moderator, which resolves its result explicitly.
+
+The two ChatML forms can compose existing tools and owned background work. See
+the [execution contracts](../guide/chatml-authoring-runtime.md) and
+[background patterns](../guide/chatml-authoring-background.md).
 
 Important note: a plain ChatMD declaration `<tool name="…"/>` (without `command=`, `agent=`, or `mcp_server=`) is treated as a **built-in**. Unknown built-in names are rejected unless you add them to ochat’s built-in dispatcher or expose them via MCP.
 

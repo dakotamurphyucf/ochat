@@ -1,0 +1,140 @@
+type response_watch = {
+  id : string; invocation : string; query : json; epoch : int;
+  job : string; timer : string; status : string; deadline : int;
+  delay : int; retries : int; last_identity : string
+}
+let watch_initial_state : response_watch array = []
+let watch_timeout_ms = 30000
+let watch_initial_delay_ms = 25
+let watch_max_delay_ms = 1000
+let watch_transport_retries = 2
+let watch_retry_interrupted_probe = true
+let watch_permission_policy = "wait"
+let watch_stopped_policy = "fail"
+let watch_field json name = match Json.get_field(json, name) with
+| `Some(value) -> value
+| `None -> `Null
+let watch_string json = match json with | `String(value) -> value | _ -> ""
+let watch_error code message = { code = code; message = message; retryable = false; details = `Null }
+let watch_completion result = match watch_field(result, "type") with
+| `String("succeeded") -> `Succeeded(watch_field(result, "value"))
+| `String("cancelled") -> `Cancelled(watch_string(watch_field(result, "reason")))
+| `String("expired") -> `Expired
+| `String("failed") ->
+  let retryable = match watch_field(result, "retryable") with | `Bool(value) -> value | _ -> false in
+  `Failed({ code = watch_string(watch_field(result, "code"));
+    message = watch_string(watch_field(result, "message")); retryable = retryable;
+    details = watch_field(result, "details") })
+| _ -> fail("Expected terminal watcher completion.")
+let watch_replace state updated =
+  let updated : response_watch = updated in
+  Array.map(state, fun item -> let item : response_watch = item in
+    if item.id == updated.id then updated else item)
+
+let watch_finish item completion =
+  let item : response_watch = item in
+  let* () = if item.timer == "" then Task.pure(()) else Schedule.cancel(item.timer) in
+  let* finished = match completion with
+  | `Succeeded(value) -> Subscription.complete(item.id, item.epoch, value)
+  | `Failed(error) -> Subscription.fail(item.id, item.epoch, error)
+  | `Cancelled(reason) -> Subscription.cancel(item.id, item.epoch, reason)
+  | `Expired -> Subscription.fail(item.id, item.epoch, watch_error("watcher.timeout", "Response deadline expired.")) in
+  let actual = watch_completion(watch_field(finished, "result")) in
+  let wake = match actual with | `Cancelled(_) -> `No_wake | _ -> `Request_turn in
+  let* delivery = Notification.publish(
+    { key = "child-response"; invocation_id = `Some(item.invocation); work = `Some(`Subscription(item.id)) },
+    actual, wake) in
+  let status = match actual with | `Succeeded(_) -> "delivered" | `Cancelled(_) -> "cancelled" | _ -> "failed" in
+  let identity = match actual with
+  | `Succeeded(page) -> watch_string(watch_field(page, "next_cursor"))
+  | _ -> watch_string(watch_field(item.query, "receipt_id")) in
+  Task.pure({ item with status = status; job = ""; timer = "";
+    last_identity = identity })
+
+let watch_start_probe item =
+  let item : response_watch = item in
+  let* job = Job.start_tool("watch_probe", item.query) in
+  let* armed = Subscription.arm(item.id, item.epoch, `None, `Some(job)) in
+  Task.pure({ item with epoch = item.epoch + 1; timer = ""; job = job })
+
+let watch_schedule item =
+  let item : response_watch = item in
+  let epoch = item.epoch + 1 in
+  let* timer = Schedule.after_ms_with_policy(item.delay, `Object([
+    { key = "kind"; value = `String("response_watch_tick") },
+    { key = "subscription_id"; value = `String(item.id) },
+    { key = "epoch"; value = `String(to_string(epoch)) }
+  ]), `Deliver_once_immediately) in
+  let* armed = Subscription.arm(item.id, item.epoch, `Some(timer), `None) in
+  let next_delay = if item.delay * 2 > watch_max_delay_ms then watch_max_delay_ms else item.delay * 2 in
+  Task.pure({ item with epoch = epoch; timer = timer; job = ""; delay = next_delay })
+
+let watch_after_probe item result =
+  let item : response_watch = item in
+  match watch_completion(result) with
+  | `Succeeded(probe) ->
+    (match watch_field(probe, "state") with
+    | `String("ready") -> watch_finish(item, `Succeeded(watch_field(probe, "value")))
+    | `String("pending") -> watch_schedule(item)
+    | `String("permission_wait") ->
+      if watch_permission_policy == "wait" then watch_schedule(item)
+      else watch_finish(item, `Failed(watch_error("watcher.permission_wait", "Child needs approval.")))
+    | `String("stopped") ->
+      if watch_stopped_policy == "wait" then watch_schedule(item)
+      else watch_finish(item, `Failed(watch_error("watcher.child_stopped", "Child stopped before the response.")))
+    | _ -> watch_finish(item, `Failed(watch_error("watcher.child_failed", "Child is not able to respond."))))
+  | `Failed(error) ->
+    let retryable = if error.code == "background.interrupted" then watch_retry_interrupted_probe else error.retryable in
+    if (if retryable then item.retries < watch_transport_retries else false) then
+      watch_schedule({ item with retries = item.retries + 1 })
+    else watch_finish(item, `Failed(error))
+  | completion -> watch_finish(item, completion)
+
+let watch_on_event ctx state event =
+  let state : response_watch array = state in
+  match event with
+  | `Tool_invoked(p) ->
+    (match p.context.tool_name with
+    | "notify_when_agent_responds" ->
+      let* id = Subscription.create("child_response", `Some(watch_timeout_ms + 1000), `No_wake) in
+      let item : response_watch = { id = id; invocation = p.context.invocation_id; query = p.input;
+        epoch = 0; job = ""; timer = ""; status = "watching"; deadline = ctx.now_ms + watch_timeout_ms;
+        delay = watch_initial_delay_ms; retries = 0; last_identity = "" } in
+      let* item = watch_start_probe(item) in
+      let* () = Invocation.resolve(p.context.invocation_id,
+        `Pending(`Subscription(id), `Object([{ key = "subscription_id"; value = `String(id) }]))) in
+      Task.pure(Array.append(state, [item]))
+    | "cancel_response_watch" ->
+      let id = watch_string(watch_field(p.input, "subscription_id")) in
+      (match Array.find(state, fun item -> let item : response_watch = item in item.id == id) with
+      | `None ->
+        let* () = Invocation.resolve(p.context.invocation_id,
+          `Fail(watch_error("watcher.not_found", "Response watch is unavailable."))) in Task.pure(state)
+      | `Some(item) ->
+        let* updated = if item.status == "watching" then watch_finish(item, `Cancelled("Watcher cancelled.")) else Task.pure(item) in
+        let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String(updated.status))) in
+        Task.pure(watch_replace(state, updated)))
+    | _ -> Task.pure(state))
+  | `Internal_event(payload) ->
+    let found = match watch_field(payload, "kind") with
+    | `String("background_job_completed") ->
+      Array.find(state, fun item -> let item : response_watch = item in
+        if item.job == "" then false else item.job == watch_string(watch_field(payload, "job_id")))
+    | `String("response_watch_tick") ->
+      Array.find(state, fun item -> let item : response_watch = item in
+        if item.id == watch_string(watch_field(payload, "subscription_id")) then
+          if to_string(item.epoch) == watch_string(watch_field(payload, "epoch")) then item.timer != "" else false
+        else false)
+    | _ -> `None in
+    (match found with
+    | `None -> Task.pure(state)
+    | `Some(item) ->
+      if item.status != "watching" then Task.pure(state) else
+      let* updated = if ctx.now_ms >= item.deadline then
+        watch_finish(item, `Failed(watch_error("watcher.timeout", "Response deadline expired.")))
+      else match watch_field(payload, "kind") with
+      | `String("background_job_completed") ->
+        let* result = Job.read_result(item.job) in watch_after_probe(item, result)
+      | _ -> watch_start_probe(item) in
+      Task.pure(watch_replace(state, updated)))
+  | _ -> Task.pure(state)

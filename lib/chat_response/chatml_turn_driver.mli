@@ -19,13 +19,7 @@ open! Core
 module Moderation = Chatml_moderation
 module Moderator = Chatml_moderator
 module Res = Openai.Responses
-
-module Safe_point_input : sig
-  type t = In_memory_stream.Safe_point_input.t =
-    { consume_entries : unit -> History_entry.t list
-    ; consume_compatibility_text : unit -> string option
-    }
-end
+module Safe_point_input = In_memory_stream.Safe_point_input
 
 type moderator =
   { manager : Moderator.t

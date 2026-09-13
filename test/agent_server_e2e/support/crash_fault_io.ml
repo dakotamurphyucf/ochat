@@ -100,8 +100,16 @@ let wrap_directory
     ;;
   end
   in
+  (* Retain backend interfaces (including the OS-directory provider used when
+     spawning a process with this cwd), replacing only filesystem operations. *)
+  let bindings =
+    Eio.Resource.bindings handler
+    |> List.filter ~f:(function
+      | H (Eio.Fs.Pi.Dir, _) -> false
+      | _ -> true)
+  in
   Eio.Resource.T
-    (directory, Eio.Resource.handler [ H (Eio.Fs.Pi.Dir, (module Directory)) ])
+    (directory, Eio.Resource.handler (H (Eio.Fs.Pi.Dir, (module Directory)) :: bindings))
 ;;
 
 let wrap env ~matches ~boundary ~reached =

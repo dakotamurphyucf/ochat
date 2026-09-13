@@ -19,6 +19,17 @@ The parent UI receives live updates while the forked agent is running,
 so users can monitor progress (or cancel a runaway fork) without waiting
 for completion.
 
+The daemon and local agent-session host use the shared
+[in-memory streaming driver](in_memory_stream.doc.md) for their built-in
+`<tool name="fork"/>`. That path inherits the current model and selected tools
+and returns the child's final assistant message. Its temporary children can call
+native tools, standalone ChatML tools, moderator-handled tools, and `fork` again.
+Each call checks current permissions and parent moderation and records an
+invocation linked to its immediate fork parent. Child calls and outputs stay out
+of the root conversation history. The child acquires no independent persisted
+session or authority to outlive its parent. The lower-level helper APIs described
+below are also retained for older integrations.
+
 ---
 
 ## Public interface

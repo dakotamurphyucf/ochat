@@ -230,7 +230,7 @@ expr:
 
     (* function application: expr(expr, ...) – now allows any *expression* in
        function position, not just an identifier.  This generalisation
-       enables higher-order patterns such as (f x) y and (fun z -> z) 42. *)
+       enables higher-order calls such as f(x)(y) and (fun z -> z)(42). *)
     | expr LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EApp($1, List.map (fun sn -> sn) $3)) }
 
     (* Polymorphic variant: `Variant or `Variant(expr1, expr2) *)

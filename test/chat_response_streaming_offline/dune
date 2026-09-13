@@ -1,10 +1,11 @@
 (library
  (name chat_response_streaming_offline_test)
- (modules chat_response_streaming_offline_test)
+ (modules fixtures chat_response_streaming_offline_test notification_input_tests)
  (libraries
   core
   expect_test_helpers_core
   chat_response
+  ochat.agent_session
   chatmd
   chatml
   ochat.session)

@@ -1,0 +1,16 @@
+<config model="gpt-6-astra"/>
+<developer>Use begin_work to start the bounded fixture. Continue answering while its job runs.</developer>
+<shell_access id="fixture" cwd="${workspace}">
+  <capabilities sandbox="direct_unsafe" network="false" child_processes="true" arbitrary_code="true" privilege_change="false">
+    <read path="${tool_dir}"/>
+    <read path="${workspace}"/>
+    <write path="${workspace}"/>
+  </capabilities>
+  <backends merge="replace"><direct when="macos"/><direct when="linux"/></backends>
+  <limits wall_time="10s" max_stdin="0B" stdout="4KiB" stderr="4KiB" total_output="8KiB"/>
+  <policy default="allow"/>
+  <audit format="none"/>
+</shell_access>
+<tool name="fixture_work" type="shell" mode="script" runtime="fixture" result="structured" script="${tool_dir}/work.sh" interpreter="/bin/sh" executable="false"/>
+<script id="coordinator" language="chatml" kind="moderator" api="extensibility-v1" src="coordinator.chatml"/>
+<tool name="begin_work" type="moderator" moderator="coordinator" input_schema="input.json" output_schema="accepted.json"/>

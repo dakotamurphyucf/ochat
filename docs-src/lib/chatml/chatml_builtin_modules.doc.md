@@ -76,6 +76,14 @@ dependency on the full interpreter pipeline.
 The helper [`value_to_string`] centralises the textual conversion logic
 and is used both by `print` and by unit tests across the code-base.
 
+`create_env_with_surface ?control surface` installs the exact selected builtin
+surface. When execution control is supplied, installed builtins run checkpoints
+and argument/preallocation checks before their implementation, and result checks
+afterward. Higher-order callbacks retain the control captured by their closure
+environment. Omitting control preserves unrestricted resource execution. Host
+callbacks must cooperate with cancellation; these checks are not a hard heap or
+wall-clock sandbox around arbitrary native implementations.
+
 ---
 
 Generated automatically following the guidelines in

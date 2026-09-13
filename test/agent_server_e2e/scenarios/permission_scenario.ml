@@ -632,8 +632,13 @@ let require_failed_reviewer_job jobs marker =
   require_reviewer_job_redacted jobs marker;
   match (List.hd_exn jobs).Agent_protocol.Job.status with
   | Failed _ -> ()
-  | Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _ ->
-    fail "reviewer failure did not persist a failed job"
+  | Queued
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Cancelled
+  | Interrupted _ -> fail "reviewer failure did not persist a failed job"
 ;;
 
 let observed_reviewer reviewer_id kind decision observed =
@@ -789,11 +794,16 @@ let rec await_running_reviewer_job env client session_id attempts =
   | [ job ] ->
     (match job.Agent_protocol.Job.status with
      | Running -> job
-     | (Queued | Waiting_permission _) when attempts > 0 ->
+     | (Queued | Waiting_permission _ | Waiting_completion _) when attempts > 0 ->
        Eio.Time.sleep (Eio.Stdenv.clock env) 0.02;
        await_running_reviewer_job env client session_id (attempts - 1)
-     | Queued | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-       fail "reviewer job did not enter running state")
+     | Queued
+     | Waiting_permission _
+     | Waiting_completion _
+     | Succeeded
+     | Failed _
+     | Cancelled
+     | Interrupted _ -> fail "reviewer job did not enter running state")
   | [] when attempts > 0 ->
     Eio.Time.sleep (Eio.Stdenv.clock env) 0.02;
     await_running_reviewer_job env client session_id (attempts - 1)

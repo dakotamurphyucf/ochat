@@ -72,9 +72,12 @@ let next_reserved_sequence t =
     else Int64.to_int_exn t.reserved_through)
 ;;
 
-let validate t entries =
+let validate ?reserved_through t entries =
   let ids = Hash_set.create (module History_entry.Id) in
-  let reserved_through = Eio.Mutex.use_ro t.mutex (fun () -> t.reserved_through) in
+  let reserved_through =
+    Option.value_or_thunk reserved_through ~default:(fun () ->
+      Eio.Mutex.use_ro t.mutex (fun () -> t.reserved_through))
+  in
   List.fold_result entries ~init:() ~f:(fun () entry ->
     let id = History_entry.id entry in
     let sequence = History_entry.Id.sequence id in
@@ -89,10 +92,17 @@ let validate t entries =
       else Ok ()))
 ;;
 
-let as_history_entry_source t =
+let as_history_entry_source ?committed_through t =
   History_entry.Id_source.create
     ~namespace:t.namespace
     ~allocate:(fun () -> Result.map_error (allocate t) ~f:(fun error -> error.message))
     ~validate:(fun entries ->
-      Result.map_error (validate t entries) ~f:(fun error -> error.message))
+      let result =
+        match committed_through with
+        | None -> validate t entries
+        | Some read ->
+          Result.bind (read ()) ~f:(fun reserved_through ->
+            validate ~reserved_through t entries)
+      in
+      Result.map_error result ~f:(fun error -> error.message))
 ;;

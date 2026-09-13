@@ -112,6 +112,23 @@
  (libraries core eio eio_main jsonaf))
 
 (test
+ (name request_channel_integration_test)
+ (modules request_channel_integration_test)
+ (libraries core core_unix eio eio_main jsonaf ochat.shell_access)
+ (action
+  (run
+   %{test}
+   %{exe:../bin/ochat_agent_helper.exe}
+   %{exe:request_channel_probe.exe}))
+ (preprocess
+  (pps ppx_jane)))
+
+(executable
+ (name request_channel_probe)
+ (modules request_channel_probe)
+ (libraries core core_unix jsonaf ochat.shell_access))
+
+(test
  (name hook_worker_integration_test)
  (modules hook_worker_integration_test)
  (libraries core core_unix eio eio_main ochat.shell_access ochat.shell_runtime)
@@ -143,6 +160,7 @@
  (modules chat_response_shell_tool_test)
  (libraries
   core
+  mirage-crypto-rng.unix
   eio
   eio_main
   chatmd
@@ -523,7 +541,7 @@
 (library
  (name chat_response_cache_test)
  (modules chat_response_cache_test)
- (libraries core expect_test_helpers_core chat_response)
+ (libraries core core_unix eio_main expect_test_helpers_core chat_response)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -558,6 +576,18 @@
  (public_name mcp_stub_server)
  (modules mcp_stub_server)
  (libraries core jsonaf jsonaf_ext ochat.mcp_types))
+
+(executable
+ (name mcp_delegation_peer)
+ (modules mcp_delegation_peer)
+ (libraries core jsonaf jsonaf_ext ochat.mcp_types))
+
+(library
+ (name mcp_delegation_test)
+ (modules mcp_delegation_test)
+ (libraries core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
+ (inline_tests (deps mcp_delegation_peer.exe))
+ (preprocess (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP client high-level tests (uses stub server)
@@ -624,6 +654,27 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_diagnostic_budget_test)
+ (modules chatml_diagnostic_budget_test)
+ (libraries core eio_main chatml_typechecker chatml_compilation chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_type_traversal_test)
+ (modules chatml_type_traversal_test)
+ (libraries core eio eio_main chatml chatml_typechecker chatml_compilation)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_surface_inventory_test)
+ (modules chatml_surface_inventory_test)
+ (libraries core chatml)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name chatml_typechecker_test)
@@ -711,7 +762,7 @@
 
 (library
  (name agent_protocol_test)
- (modules agent_protocol_test)
+ (modules agent_protocol_test agent_invocation_test agent_extension_test)
  (libraries core expect_test_helpers_core ochat.agent_protocol)
  (inline_tests)
  (preprocess
@@ -719,7 +770,7 @@
 
 (library
  (name agent_store_test)
- (modules agent_store_test)
+ (modules agent_store_test agent_store_test_fixtures delegation_store_tests job_store_fixtures job_result_store_tests blob_reference_scan_tests job_result_intent_tests job_result_retry_tests job_result_recovery_tests retention_reader_tests idempotency_retention_tests blob_coordination_tests blob_retention_fixtures blob_retention_tests staged_result_cleanup_tests job_result_collection_tests)
  (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_store)
  (inline_tests)
  (preprocess
@@ -746,13 +797,9 @@
  (preprocess
   (pps ppx_jane ppx_expect)))
 
-(library
- (name agent_session_test)
- (modules agent_session_test)
- (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
+(alias
+ (name runtest-agent_session_test)
+ (deps (alias agent_session/runtest-agent_session_test)))
 
 (library
  (name agent_client_test)
@@ -820,6 +867,7 @@
  (modules chat_tui_agent_client_test)
  (libraries
   core
+  chat_tui_projection_support
   ochat.agent_protocol
   ochat.agent_client
   ochat.chat_tui
@@ -829,6 +877,23 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_projection_support)
+ (modules chat_tui_projection_support)
+ (libraries
+  core ochat.agent_protocol ochat.agent_client ochat.chat_tui openai notty
+  ochat.notty_scroll_box)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chat_tui_work_test)
+ (modules chat_tui_work_test)
+ (libraries
+  core chat_tui_projection_support ochat.agent_protocol ochat.agent_client
+  ochat.agent_server ochat.chat_tui notty)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_server_gap_test)
@@ -853,9 +918,167 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_server_test_support)
+ (modules agent_server_test_support)
+ (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name agent_server_generated_test)
+ (modules agent_server_generated_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(test
+ (name agent_server_helper_test)
+ (modules agent_server_helper_test agent_server_authored_helper_fixture)
+ (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (preprocessor_deps
+  (glob_files chatml_extensibility_fixtures/x07-helper-session/*)
+  (glob_files chatml_extensibility_fixtures/x07-helper-session/bundle/*)
+  (glob_files chatml_extensibility_fixtures/x05-child-session/*)
+  (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
+ (action
+  (run
+   %{test}
+   %{exe:../bin/ochat_agent_helper.exe}))
+ (preprocess
+  (pps ppx_jane ppx_blob)))
+
+(library
+ (name agent_server_authored_shell_test)
+ (modules agent_server_authored_shell_test)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_authored_graph_test)
+ (modules agent_server_authored_graph_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_authored_pending_test)
+ (modules agent_server_authored_pending_test)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_wire_fixture)
+ (modules agent_server_wire_fixture)
+ (libraries agent_server_test_support core eio eio.unix digestif uri ochat.agent_transport_socket ochat.agent_transport_http ochat.agent_transport_stdio)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name agent_server_authored_test)
+ (modules agent_server_authored_test)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocessor_deps (glob_files chatml_extensibility_fixtures/x05-child-session/*))
+ (preprocess (pps ppx_jane ppx_blob ppx_expect)))
+
+(library
+ (name agent_server_creator_test)
+ (modules agent_server_creator_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_response_watcher_test)
+ (modules chatml_response_watcher_test)
+ (libraries core chatml chatml_host_runtime)
+ (inline_tests)
+ (preprocessor_deps (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
+ (preprocess (pps ppx_jane ppx_expect ppx_blob)))
+
+(library
+ (name agent_server_managed_send_test)
+ (modules agent_server_managed_send_test)
+ (libraries agent_server_test_support agent_server_wire_fixture core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_independent_test)
+ (modules agent_server_independent_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_inherited_shell_handler_test)
+ (modules agent_server_inherited_shell_handler_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_mcp_delegation_test)
+ (modules agent_server_mcp_delegation_test)
+ (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests (deps mcp_delegation_peer.exe))
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_artifact_retention_test)
+ (modules agent_server_artifact_retention_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_creation_lock_test)
+ (modules agent_server_creation_lock_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_inherited_standalone_test)
+ (modules agent_server_inherited_standalone_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_generated_validation_test)
+ (modules agent_server_generated_validation_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_parent_policy_test)
+ (modules agent_server_parent_policy_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_generated_shell_test)
+ (modules agent_server_generated_shell_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_delegation_stop_test)
+ (modules agent_server_delegation_stop_test)
+ (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name agent_server_restart_test)
  (modules agent_server_restart_test)
  (libraries
+  agent_server_test_support
   core
   eio
   eio_main
@@ -864,5 +1087,137 @@
   ochat.agent_client
   ochat.agent_server)
  (inline_tests)
+ (preprocessor_deps
+  (file chatml_extensibility_fixtures/x02-review/agent.chatmd)
+  (file chatml_extensibility_fixtures/x02-review/review.chatml)
+  (file chatml_extensibility_fixtures/x02-review/input.json)
+  (file chatml_extensibility_fixtures/x02-review/output.json))
  (preprocess
-  (pps ppx_jane ppx_expect)))
+  (pps ppx_jane ppx_blob ppx_expect)))
+
+(library
+ (name tool_schema_test)
+ (modules tool_schema_test)
+ (libraries core jsonaf ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_extension_test)
+ (modules chatmd_extension_test)
+ (libraries core eio eio_main jsonaf ochat.chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name tool_capability_test)
+ (modules tool_capability_test)
+ (libraries core chat_response ochat_function agent_protocol ochat.chatmd_shell_spec mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name background_request_test)
+ (modules background_request_test)
+ (libraries core jsonaf chat_response chatml_compilation ochat_function openai agent_protocol ochat.chatmd_shell_spec eio eio_main mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name extension_compiler_test)
+ (modules extension_compiler_test)
+ (libraries core eio eio_main chatmd chat_response ochat_function ochat.chatmd_shell_spec mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name managed_tool_registry_test)
+ (modules managed_tool_registry_test)
+ (libraries core eio eio_main chatmd chat_response ochat_function ochat.chatmd_shell_spec mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_standalone_test)
+ (modules chatml_standalone_test)
+ (libraries core eio eio.mock eio_main mtime jsonaf chatml chatml_host_runtime chatml_compilation chatml_execution)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_execution_budget_test)
+ (modules chatml_execution_budget_test)
+ (libraries core eio eio_main jsonaf chatml chatml_host_runtime chatml_compilation chatml_execution)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_projection_budget_test)
+ (modules chatml_projection_budget_test)
+ (libraries core eio eio_main chatml chatml_execution chatml_compilation chatml_host_runtime chat_response)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_rendering_budget_test)
+ (modules chatml_rendering_budget_test)
+ (libraries core eio eio_main jsonaf chatml chatml_host_runtime chatml_execution)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_source_bundle_test)
+ (modules chatmd_source_bundle_test)
+ (libraries core core_unix eio eio_main chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(executable
+ (name chatml_compilation_test)
+ (modules chatml_compilation_test)
+ (libraries core eio eio_main chatml chatml_host_runtime chatml_compilation chatmd chatmd_shell_spec chat_response)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest-chatml-compilation)
+ (action (run %{exe:chatml_compilation_test.exe})))
+
+(alias
+ (name runtest)
+ (deps (alias runtest-chatml-compilation)))
+
+(library
+ (name authoring_policy_test)
+ (modules authoring_policy_test)
+ (libraries core jsonaf chat_response agent_protocol ochat.history_entry chatmd chatmd_shell_spec eio eio_main ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name authoring_validation_test)
+ (modules authoring_validation_test)
+ (libraries core jsonaf chat_response chatmd_shell_spec eio eio_main ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name authoring_materialization_test)
+ (wrapped false)
+ (modules authoring_materialization_test authoring_reference_index_test authoring_rediscovery_test authoring_fragment_coverage_test authoring_surface_rediscovery_test)
+ (libraries core jsonaf eio eio_main chat_response agent_protocol ochat.agent_session ochat.history_entry chatmd_shell_spec ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(executable
+ (name generated_admission_test)
+ (modules generated_admission_test)
+ (libraries core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest-generated-admission)
+ (action (run %{exe:generated_admission_test.exe})))
+
+(alias
+ (name runtest)
+ (deps (alias runtest-generated-admission)))

@@ -45,7 +45,7 @@ type moderator_startup_state =
   | Ready
   | Failed of string
 
-type automatic_turn_decision =
+type automatic_turn_decision = Chat_response.Automatic_turn_policy.decision =
   | Allow_automatic_turn
   | Suppress_automatic_turn of
       { notice_key : string
@@ -638,21 +638,7 @@ let is_followup_turn_reason = function
   | Moderator_request | Idle_followup -> true
 ;;
 
-let has_pause_condition
-      (policy : Runtime_semantics.policy)
-      (condition : Runtime_semantics.pause_condition)
-  =
-  List.exists policy.budget.pause_conditions ~f:(fun candidate ->
-    match condition, candidate with
-    | Runtime_semantics.Pause_followup_turns, Runtime_semantics.Pause_followup_turns ->
-      true
-    | ( Runtime_semantics.Pause_internal_event_drains
-      , Runtime_semantics.Pause_internal_event_drains ) -> true
-    | ( Runtime_semantics.Pause_followup_turns
-      , Runtime_semantics.Pause_internal_event_drains )
-    | ( Runtime_semantics.Pause_internal_event_drains
-      , Runtime_semantics.Pause_followup_turns ) -> false)
-;;
+let has_pause_condition = Chat_response.Automatic_turn_policy.has_pause_condition
 
 let should_pause_internal_event_drains ~(policy : Runtime_semantics.policy) =
   has_pause_condition policy Runtime_semantics.Pause_internal_event_drains
@@ -666,41 +652,15 @@ let decide_automatic_turn
       ~(reason : turn_start_reason)
   : automatic_turn_decision
   =
-  if not (is_followup_turn_reason reason)
-  then Allow_automatic_turn
-  else if has_pause_condition policy Runtime_semantics.Pause_followup_turns
-  then
-    Suppress_automatic_turn
-      { notice_key = "budget:pause-followup-turns"
-      ; notice_text = "Automatic follow-up turns are paused by budget policy."
-      }
-  else (
-    let suppress_for_count () =
-      if followup_turns_started_since_user_submit >= policy.budget.max_followup_turns
-      then
-        Suppress_automatic_turn
-          { notice_key = "budget:max-followup-turns"
-          ; notice_text =
-              "Automatic follow-up turn suppressed after reaching the follow-up limit."
-          }
-      else Allow_automatic_turn
-    in
-    match policy.budget.turn_rate_limit with
-    | None -> suppress_for_count ()
-    | Some { max_turns; window_ms } ->
-      let cutoff_ms = now_ms - window_ms in
-      let recent_turn_count =
-        List.count started_followup_turn_timestamps_ms ~f:(fun started_ms ->
-          started_ms >= cutoff_ms)
-      in
-      if recent_turn_count >= max_turns
-      then
-        Suppress_automatic_turn
-          { notice_key = "budget:turn-rate-limit"
-          ; notice_text =
-              "Automatic follow-up turn suppressed by the follow-up rate limit."
-          }
-      else suppress_for_count ())
+  match is_followup_turn_reason reason with
+  | false -> Allow_automatic_turn
+  | true ->
+    Chat_response.Automatic_turn_policy.decide
+      ~policy
+      ~followup_turns_started_since_user_submit
+      ~started_followup_turn_timestamps_ms:
+        (List.map started_followup_turn_timestamps_ms ~f:Int64.of_int)
+      ~now_ms:(Int64.of_int now_ms)
 ;;
 
 let mark_moderator_dirty t = t.session_controller.moderator_dirty <- true
@@ -757,10 +717,14 @@ let note_started_turn t ~(now_ms : int) ~(reason : turn_start_reason) =
     (match (runtime_policy t).budget.turn_rate_limit with
      | None -> ()
      | Some { window_ms; _ } ->
-       let cutoff_ms = now_ms - window_ms in
+       let cutoff_ms =
+         Chat_response.Automatic_turn_policy.cutoff_ms
+           ~now_ms:(Int64.of_int now_ms)
+           ~window_ms
+       in
        state.started_followup_turn_timestamps_ms
        <- List.filter state.started_followup_turn_timestamps_ms ~f:(fun started_ms ->
-            started_ms >= cutoff_ms);
+            Int64.(of_int started_ms >= cutoff_ms));
        state.started_followup_turn_timestamps_ms
        <- state.started_followup_turn_timestamps_ms @ [ now_ms ])
 ;;
@@ -908,7 +872,10 @@ let render_deferred_user_note ({ entry } : deferred_user_note) =
 let safe_point_input_source t =
   Stream_moderator.Safe_point_input.
     { consume_entries =
-        (fun () -> dequeue_deferred_user_notes t |> List.map ~f:(fun note -> note.entry))
+        (fun () ->
+          dequeue_deferred_user_notes t
+          |> List.map ~f:(fun note -> note.entry)
+          |> user_entries)
     ; consume_compatibility_text = (fun () -> None)
     }
 ;;

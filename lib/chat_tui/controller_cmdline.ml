@@ -85,6 +85,7 @@ let add_rejection_notice model text =
     • `e`, `edit`       → Copy the selected message into the insert buffer
       and return {!Redraw}
     • `c`, `cmp`, `compact` → Summarise conversation context via {!Compact_context}
+    • `work`, `jobs` → Open the attached-session work overview.
 
     Any other input results in {!Redraw} to signal that a screen update is
     needed to hide the prompt again. *)
@@ -101,6 +102,9 @@ let execute_command model line : reaction =
   | "w" -> Submit_input
   | "wq" -> Quit
   | "c" | "cmp" | "compact" -> Compact_context
+  | "work" | "jobs" ->
+    Model.set_active_page model Model.Page_id.Work;
+    Redraw
   | "shell" | "security" ->
     Model.set_active_page model Model.Page_id.Shell_security;
     Shell_management_refresh_requested (Model.begin_shell_management_load model)

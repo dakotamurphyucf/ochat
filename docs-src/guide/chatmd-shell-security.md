@@ -217,7 +217,8 @@ Secret environment values are not printed in manifests or approval displays.
 
 ## Resource limits
 
-Use finite wall, idle, stdin, per-channel, and total-output limits. Optional OS
+Use finite wall, idle, stdin, per-channel, and total-output limits. `max_stdin="0B"`
+permits empty stdin and rejects any input bytes; output limits remain positive. Optional OS
 limits cover CPU time, memory, file size, and open files. Input is rejected
 before approval when it exceeds `max_stdin`. Pipelines stream through bounded
 Eio flows rather than accumulating unbounded upstream output.

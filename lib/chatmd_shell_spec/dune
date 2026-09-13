@@ -4,6 +4,9 @@
  (modules
   source_ref
   diagnostic
+  tool_schema
+  extension_spec
+  authoring_metadata
   chatmd_script_spec
   feature
   path_expr
@@ -16,6 +19,6 @@
   manifest_defaults
   manifest_merge
   manifest_compiler)
- (libraries core digestif jsonaf)
+ (libraries core digestif jsonaf uutf)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

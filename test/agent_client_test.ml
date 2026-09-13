@@ -89,6 +89,7 @@ let snapshot =
     ; permissions = []
     ; grants = []
     ; jobs = []
+    ; extension_status = []
     ; schedules = []
     ; active_tool_calls = []
     ; active_agent_calls = []
@@ -344,4 +345,76 @@ let%expect_test "blob download streams short chunks and verifies the final diges
   in
   print_s [%sexp { downloaded : bool; contents_match : bool; digest_rejected : bool }];
   [%expect {| ((downloaded true) (contents_match true) (digest_rejected true)) |}]
+;;
+
+let%expect_test "extension status update replay, legacy defaults and clearing" =
+  let status =
+    Agent_protocol.Extension_status.of_json
+      (`Object
+          [ "version", `Number "1"
+          ; "kind", `String "subscription"
+          ; "id", `String "sub_client"
+          ; "generation", `Number "0"
+          ; "state", `String "active"
+          ])
+    |> protocol_ok
+  in
+  let event sequence statuses =
+    Agent_protocol.Event.Durable.of_payload
+      ~session_id
+      ~sequence
+      ~revision:sequence
+      ~timestamp
+      (Session_updated session)
+    |> fun event -> Agent_protocol.Event.Durable.with_extension_status event statuses
+  in
+  let future =
+    Agent_protocol.Extension_status.of_json
+      (`Object
+          [ "version", `Number "1"
+          ; "kind", `String "subscription"
+          ; "id", `String "sub_future"
+          ; "generation", `Number "1"
+          ; "state", `String "active"
+          ])
+    |> protocol_ok
+  in
+  assert (
+    Result.is_error (Agent_protocol.Event.Durable.extension_status (event 1L [ future ])));
+  assert (
+    Result.is_error
+      (Agent_protocol.Snapshot.of_json
+         (Agent_protocol.Snapshot.to_json { snapshot with extension_status = [ future ] })));
+  let projection = Agent_client.Projection.install_snapshot snapshot in
+  let projection =
+    Agent_client.Projection.apply_event projection (event 1L [ status ]) |> protocol_ok
+  in
+  let updated = Agent_client.Projection.snapshot projection in
+  assert (Poly.equal updated.extension_status [ status ]);
+  let restored =
+    Agent_protocol.Snapshot.of_json (Agent_protocol.Snapshot.to_json updated)
+    |> protocol_ok
+  in
+  let projection = Agent_client.Projection.install_snapshot restored in
+  assert (
+    Result.is_error (Agent_client.Projection.apply_event projection (event 1L [ status ])));
+  let projection =
+    Agent_client.Projection.apply_event projection (event 2L []) |> protocol_ok
+  in
+  assert (List.is_empty (Agent_client.Projection.snapshot projection).extension_status);
+  let legacy =
+    match Agent_protocol.Snapshot.to_json updated with
+    | `Object fields ->
+      `Object
+        (List.filter fields ~f:(fun (name, _) ->
+           not (String.equal name "extension_status")))
+    | _ -> assert false
+  in
+  assert (
+    List.is_empty (Agent_protocol.Snapshot.of_json legacy |> protocol_ok).extension_status);
+  print_endline
+    "replay and snapshot agree; duplicate cursor rejected; empty update clears; legacy \
+     defaults empty";
+  [%expect
+    {| replay and snapshot agree; duplicate cursor rejected; empty update clears; legacy defaults empty |}]
 ;;

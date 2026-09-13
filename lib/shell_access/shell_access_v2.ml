@@ -1735,6 +1735,8 @@ module Audit = struct
   ;;
 end
 
+module Request_channel = Request_channel
+
 module Execution_plan = struct
   type t =
     { id : string
@@ -1742,7 +1744,7 @@ module Execution_plan = struct
     ; limits : Limits.t
     ; environment : string array
     ; cwd : string
-    ; resource_runner : Executable.t option
+    ; request_channel : bool
     }
 end
 
@@ -1785,10 +1787,12 @@ module Backend = struct
         (Execution_plan.t -> stdin:string -> (simulated, string) Result.t) option
     ; confinement : confinement
     ; eligible_for_required : bool
+    ; request_channel_supported : bool
     }
 
   let name t = t.name
   let confinement t = t.confinement
+  let request_channel_supported t = t.request_channel_supported
 
   let availability t ~fs =
     try
@@ -1802,15 +1806,23 @@ module Backend = struct
 
   let available t ~fs = Result.is_ok (availability t ~fs)
 
-  let command_available ~fs executable =
-    if String.contains executable '/'
-    then Path_util.file_exists ~fs executable
-    else
-      Sys.getenv "PATH"
-      |> Option.value ~default:"/usr/bin:/bin:/usr/sbin:/sbin"
-      |> String.split ~on:':'
-      |> List.exists ~f:(fun directory ->
-        Path_util.file_exists ~fs (Filename.concat directory executable))
+  let command_path ~fs executable =
+    let candidates =
+      match String.contains executable '/' with
+      | true -> [ executable ]
+      | false ->
+        Sys.getenv "PATH"
+        |> Option.value ~default:"/usr/bin:/bin:/usr/sbin:/sbin"
+        |> String.split ~on:':'
+        |> List.map ~f:(fun directory -> Filename.concat directory executable)
+    in
+    List.find_map candidates ~f:(fun candidate ->
+      (* The launcher's PATH belongs to the host. Bind the selected path before
+         spawn changes cwd; explicit execve does not perform PATH lookup. *)
+      let candidate = Path_util.absolute ~cwd:(Core_unix.getcwd ()) candidate in
+      match Path_util.file_exists ~fs candidate with
+      | false -> None
+      | true -> Some (Path_util.canonical ~fs candidate))
   ;;
 
   let has_os_limits limits =
@@ -1820,49 +1832,21 @@ module Backend = struct
     || Option.is_some limits.open_files
   ;;
 
-  let resource_args limits =
-    List.concat
-      [ Option.value_map limits.Limits.cpu_seconds ~default:[] ~f:(fun value ->
-          [ "--cpu"; Int.to_string value ])
-      ; Option.value_map limits.memory_bytes ~default:[] ~f:(fun value ->
-          [ "--memory"; Int.to_string value ])
-      ; Option.value_map limits.file_size_bytes ~default:[] ~f:(fun value ->
-          [ "--file-size"; Int.to_string value ])
-      ; Option.value_map limits.open_files ~default:[] ~f:(fun value ->
-          [ "--open-files"; Int.to_string value ])
-      ]
-  ;;
-
-  let apply_resource_runner plan ~executable ~argv =
-    if not (has_os_limits plan.Execution_plan.limits)
-    then Ok (executable, argv)
-    else (
-      match plan.resource_runner with
-      | None -> Error "OS resource limits require a configured resource runner"
-      | Some runner ->
-        Ok
-          ( runner.Executable.canonical_path
-          , (runner.canonical_path :: resource_args plan.limits)
-            @ [ "--"; executable ]
-            @ List.tl_exn argv ))
-  ;;
-
   let direct =
     { name = "direct-unsafe"
     ; available_fn = (fun _fs -> true)
     ; confinement = Unconfined
+    ; request_channel_supported = false
     ; eligible_for_required = false
     ; simulate_fn = None
     ; prepare_fn =
         (fun _fs plan ->
           let executable = plan.Execution_plan.context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable
-               ~argv:(executable :: plan.context.command.arguments))
-            ~f:(fun (executable, argv) ->
-              { executable; argv; environment = plan.environment }))
+          Ok
+            { executable
+            ; argv = executable :: plan.context.command.arguments
+            ; environment = plan.environment
+            })
     }
   ;;
 
@@ -1876,8 +1860,18 @@ module Backend = struct
     Printf.sprintf "(allow %s (subpath \"%s\"))" operation (seatbelt_escape path)
   ;;
 
+  let macos_read_roots = [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
+  let linux_read_roots = [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
+
+  let request_channel_implicit_read_roots =
+    List.dedup_and_sort
+      ~compare:String.compare
+      (macos_read_roots @ linux_read_roots @ [ "/dev"; "/proc" ])
+  ;;
+
   let macos_seatbelt =
     { name = "macos-seatbelt"
+    ; request_channel_supported = true
     ; available_fn =
         (fun fs ->
           String.equal Sys.os_type "Unix"
@@ -1890,93 +1884,81 @@ module Backend = struct
         (fun _fs plan ->
           let context = plan.Execution_plan.context in
           let executable = context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable
-               ~argv:(executable :: context.command.arguments))
-            ~f:(fun (limited_executable, limited_argv) ->
-              let read_roots =
-                [ "/System"; "/usr/lib"; "/usr/share"; "/private/etc"; "/dev" ]
-                @ context.capabilities.read_roots
-                @ context.capabilities.write_roots
-              in
-              let exec_paths =
-                List.dedup_and_sort
-                  [ executable; limited_executable ]
-                  ~compare:String.compare
-                |> List.map ~f:(fun path ->
-                  Printf.sprintf
-                    "(allow process-exec (literal \"%s\"))"
-                    (seatbelt_escape path))
-              in
-              let profile =
-                String.concat
-                  ~sep:"\n"
-                  ([ "(version 1)"
-                   ; "(deny default)"
-                   ; "(allow file-read-metadata)"
-                   ; "(allow sysctl-read)"
-                   ; "(allow mach-lookup)"
-                   ]
-                   @ exec_paths
-                   @ (if context.capabilities.allow_child_processes
-                      then [ "(allow process-fork)" ]
-                      else [])
-                   @ List.map read_roots ~f:(seatbelt_rule "file-read*")
-                   @ List.map
-                       context.capabilities.write_roots
-                       ~f:(seatbelt_rule "file-write*")
-                   @ if context.capabilities.network then [ "(allow network*)" ] else [])
-              in
-              { executable = "/usr/bin/sandbox-exec"
-              ; argv = "/usr/bin/sandbox-exec" :: "-p" :: profile :: "--" :: limited_argv
-              ; environment = plan.environment
-              }))
+          let read_roots =
+            macos_read_roots
+            @ context.capabilities.read_roots
+            @ context.capabilities.write_roots
+          in
+          let profile =
+            String.concat
+              ~sep:"\n"
+              ([ "(version 1)"
+               ; "(deny default)"
+               ; "(allow file-read-metadata)"
+               ; "(allow file-read-data (literal \"/\"))"
+               ; "(allow sysctl-read)"
+               ; "(allow mach-lookup)"
+               ; Printf.sprintf
+                   "(allow process-exec (literal \"%s\"))"
+                   (seatbelt_escape executable)
+               ]
+               @ (if context.capabilities.allow_child_processes
+                  then [ "(allow process-fork)" ]
+                  else [])
+               @ List.map read_roots ~f:(seatbelt_rule "file-read*")
+               @ List.map
+                   context.capabilities.write_roots
+                   ~f:(seatbelt_rule "file-write*")
+               @ if context.capabilities.network then [ "(allow network*)" ] else [])
+          in
+          Ok
+            { executable = "/usr/bin/sandbox-exec"
+            ; argv =
+                [ "/usr/bin/sandbox-exec"; "-p"; profile; "--"; executable ]
+                @ context.command.arguments
+            ; environment = plan.environment
+            })
     }
   ;;
 
   let linux_bubblewrap ?(executable = "bwrap") () =
     { name = "linux-bubblewrap"
+    ; request_channel_supported = true
     ; available_fn =
         (fun fs ->
           String.equal (Core_unix.Utsname.sysname (Core_unix.uname ())) "Linux"
-          && command_available ~fs executable)
+          && Option.is_some (command_path ~fs executable))
     ; confinement = Verified
     ; eligible_for_required = true
     ; simulate_fn = None
     ; prepare_fn =
         (fun fs plan ->
-          let context = plan.Execution_plan.context in
-          let target = context.executable.canonical_path in
-          Result.map
-            (apply_resource_runner
-               plan
-               ~executable:target
-               ~argv:(target :: context.command.arguments))
-            ~f:(fun (limited_executable, limited_argv) ->
-              let bind flag path = [ flag; path; path ] in
-              let system_roots =
-                List.filter
-                  [ "/usr"; "/bin"; "/sbin"; "/lib"; "/lib64"; "/etc" ]
-                  ~f:(Path_util.file_exists ~fs)
-              in
-              let args =
-                [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
-                @ (if context.capabilities.network then [ "--share-net" ] else [])
-                @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
-                @ List.concat_map system_roots ~f:(bind "--ro-bind")
-                @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
-                @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
-                @ [ "--chdir"; plan.cwd; "--" ]
-                @ limited_argv
-              in
-              { executable; argv = args; environment = plan.environment }))
+          match command_path ~fs executable with
+          | None -> Error "bubblewrap executable is unavailable"
+          | Some executable ->
+            let context = plan.Execution_plan.context in
+            let target = context.executable.canonical_path in
+            let bind flag path = [ flag; path; path ] in
+            let system_roots =
+              List.filter linux_read_roots ~f:(Path_util.file_exists ~fs)
+            in
+            let argv =
+              [ executable; "--die-with-parent"; "--new-session"; "--unshare-all" ]
+              @ (if context.capabilities.network then [ "--share-net" ] else [])
+              @ [ "--proc"; "/proc"; "--dev"; "/dev"; "--tmpfs"; "/tmp" ]
+              @ List.concat_map system_roots ~f:(bind "--ro-bind")
+              @ List.concat_map context.capabilities.read_roots ~f:(bind "--ro-bind")
+              @ List.concat_map context.capabilities.write_roots ~f:(bind "--bind")
+              @ [ "--chdir"; plan.cwd; "--"; target ]
+              @ context.command.arguments
+            in
+            Ok { executable; argv; environment = plan.environment })
     }
   ;;
 
   let fake ~name simulate =
     { name
+    ; request_channel_supported = false
     ; available_fn = (fun _fs -> true)
     ; prepare_fn = (fun _fs _plan -> Error "fake backend has no spawn plan")
     ; simulate_fn = Some simulate
@@ -1986,6 +1968,21 @@ module Backend = struct
   ;;
 
   let repeated { flag } values = List.concat_map values ~f:(fun value -> [ flag; value ])
+
+  (* External backend templates may still forward limits to their own wrapper.
+     The native spawn path enforces these bounds before that wrapper executes. *)
+  let resource_args limits =
+    List.concat
+      [ Option.value_map limits.Limits.cpu_seconds ~default:[] ~f:(fun value ->
+          [ "--cpu"; Int.to_string value ])
+      ; Option.value_map limits.memory_bytes ~default:[] ~f:(fun value ->
+          [ "--memory"; Int.to_string value ])
+      ; Option.value_map limits.file_size_bytes ~default:[] ~f:(fun value ->
+          [ "--file-size"; Int.to_string value ])
+      ; Option.value_map limits.open_files ~default:[] ~f:(fun value ->
+          [ "--open-files"; Int.to_string value ])
+      ]
+  ;;
 
   let expand_atom plan target_argv = function
     | Literal value -> [ value ]
@@ -2010,6 +2007,7 @@ module Backend = struct
       Ok
         { name
         ; available_fn = (fun fs -> Result.is_ok (Resolver.verify ~fs wrapper))
+        ; request_channel_supported = false
         ; confinement
         ; eligible_for_required =
             (match confinement with
@@ -2122,6 +2120,7 @@ module Executor = struct
     ; reviewer : Approval.reviewer option
     ; reviewer_with_metadata : Approval.reviewer_with_metadata option
     ; approval_store : Approval.store
+    ; execution_check : unit -> (unit, string) result
     ; administrative_check : Context.t -> (unit, string) result
     ; analyzers : Analyzer.t list
     ; interceptors : Interceptor.t list
@@ -2130,7 +2129,6 @@ module Executor = struct
     ; cwd : string
     ; process_env : string array
     ; limits : Limits.t
-    ; resource_runner_path : string option
     ; secret_filter : Secret_filter.t
     ; audit : Audit.t
     ; audit_sequence : int Atomic.t
@@ -2138,6 +2136,7 @@ module Executor = struct
     ; pipefail : bool
     ; streaming : streaming option
     ; stream_stdout : bool
+    ; request_channel : (Request_channel.t * (Context.t -> (unit, string) result)) option
     }
 
   type invocation =
@@ -2293,12 +2292,9 @@ module Executor = struct
     then invalid_arg "wall_time_seconds must be positive";
     Option.iter limits.idle_time_seconds ~f:(fun seconds ->
       if Float.(seconds <= 0.) then invalid_arg "idle_time_seconds must be positive");
+    if limits.max_stdin_bytes < 0 then invalid_arg "max_stdin_bytes must be nonnegative";
     List.iter
-      [ limits.max_stdin_bytes
-      ; limits.max_stdout_bytes
-      ; limits.max_stderr_bytes
-      ; limits.max_total_bytes
-      ]
+      [ limits.max_stdout_bytes; limits.max_stderr_bytes; limits.max_total_bytes ]
       ~f:(fun value -> if value <= 0 then invalid_arg "output limits must be positive")
   ;;
 
@@ -2320,7 +2316,6 @@ module Executor = struct
         ?cwd
         ?process_env
         ?(limits = Limits.default)
-        ?resource_runner
         ?(secret_filter = Secret_filter.empty)
         ?(audit = Audit.ignore)
         ?(audit_sequence = Atomic.make 0)
@@ -2350,6 +2345,7 @@ module Executor = struct
     ; reviewer
     ; reviewer_with_metadata
     ; approval_store
+    ; execution_check = (fun () -> Ok ())
     ; administrative_check
     ; analyzers
     ; interceptors
@@ -2358,7 +2354,6 @@ module Executor = struct
     ; cwd
     ; process_env
     ; limits
-    ; resource_runner_path = resource_runner
     ; secret_filter
     ; audit
     ; audit_sequence
@@ -2366,7 +2361,54 @@ module Executor = struct
     ; pipefail
     ; streaming = None
     ; stream_stdout = true
+    ; request_channel = None
     }
+  ;;
+
+  let with_execution_scope config ~session_id ~approval_store ~check =
+    let execution_check () =
+      match config.execution_check () with
+      | Error _ as error -> error
+      | Ok () -> check ()
+    in
+    { config with
+      session_id = Some session_id
+    ; approval_store
+    ; execution_check
+    ; request_channel = None
+    }
+  ;;
+
+  let check_execution config =
+    match config.execution_check () with
+    | Ok () -> ()
+    | Error reason -> raise (Execution_error (Denied reason))
+  ;;
+
+  let with_request_channel config ~channel ~authorize =
+    match config.request_channel with
+    | Some _ -> Error "a request channel is already installed for this execution scope"
+    | None -> Ok { config with request_channel = Some (channel, authorize) }
+  ;;
+
+  let authorize_request_channel config backend (context : Context.t) =
+    match config.request_channel with
+    | None -> ()
+    | Some (_, authorize) ->
+      (match context.capabilities.sandbox, Backend.confinement backend with
+       | Required, Verified
+         when Backend.request_channel_supported backend
+              && (not context.capabilities.network)
+              && not context.capabilities.allow_privilege_change -> ()
+       | _ ->
+         raise
+           (Execution_error
+              (Sandbox_unavailable
+                 "request channels require a supported verified sandbox without network \
+                  or privilege changes")));
+      (match authorize context with
+       | Ok () -> ()
+       | Error reason -> raise (Execution_error (Denied reason)))
   ;;
 
   let streaming_support config =
@@ -2609,27 +2651,6 @@ module Executor = struct
       raise (Execution_error (Script_changed "script file changed after authorization"))
   ;;
 
-  let resolve_resource_runner config =
-    if not (Backend.has_os_limits config.limits)
-    then None
-    else (
-      match config.resource_runner_path with
-      | None -> None
-      | Some runner ->
-        let command = Command.create runner [] in
-        (match
-           Resolver.resolve
-             config.resolver
-             ~fs:config.fs
-             ~cwd:config.cwd
-             ~environment:config.process_env
-             command
-         with
-         | Ok executable -> Some executable
-         | Error error ->
-           raise (Execution_error (Resolution_error ("resource runner: " ^ error)))))
-  ;;
-
   let rec prepare_command_inner
             config
             ~request_id
@@ -2640,6 +2661,7 @@ module Executor = struct
             command
     =
     if depth > 12 then raise (Execution_error (Denied "too many command rewrites"));
+    check_execution config;
     let executable =
       match
         Resolver.resolve
@@ -2793,6 +2815,7 @@ module Executor = struct
                     ; metadata = None
                     }
               in
+              check_execution config;
               let response = review.Approval.response in
               let response_name =
                 match response with
@@ -2824,13 +2847,14 @@ module Executor = struct
                | Rewrite rewritten -> raise (Rewrite_requested rewritten)))
       in
       if not approved then raise (Execution_error (Denied "approval was not granted"));
+      check_execution config;
       Option.iter metadata.script_file ~f:(verify_script_file config);
       let backend =
         match select_backend config with
         | Ok backend -> backend
         | Error error -> raise (Execution_error error)
       in
-      let resource_runner = resolve_resource_runner config in
+      authorize_request_channel config backend context;
       let plan =
         Execution_plan.
           { id = fresh_id ()
@@ -2838,7 +2862,7 @@ module Executor = struct
           ; limits = config.limits
           ; environment = config.process_env
           ; cwd = config.cwd
-          ; resource_runner
+          ; request_channel = Option.is_some config.request_channel
           }
       in
       emit config (Audit.Plan_created (Backend.name backend, plan.id, context));
@@ -2939,8 +2963,7 @@ module Executor = struct
   ;;
 
   let verify_plan config plan =
-    verify_executable config plan.Execution_plan.context.executable;
-    Option.iter plan.resource_runner ~f:(verify_executable config)
+    verify_executable config plan.Execution_plan.context.executable
   ;;
 
   let rec audit_termination config = function
@@ -2964,14 +2987,25 @@ module Executor = struct
       Eio.Switch.run
       @@ fun sw ->
       let count = List.length stages in
+      (match config.request_channel, count with
+       | Some _, 1 | None, _ -> ()
+       | Some _, _ ->
+         raise
+           (Execution_error
+              (Capability_violation
+                 "request channels require a single process, not a pipeline")));
       let edges =
         List.init (Int.max 0 (count - 1)) ~f:(fun _ -> Eio.Process.pipe ~sw manager)
       in
       let stderr_pipes = List.init count ~f:(fun _ -> Eio.Process.pipe ~sw manager) in
       let final_stdout = Eio.Process.pipe ~sw manager in
+      let channels =
+        List.map stages ~f:(fun _ ->
+          Option.map config.request_channel ~f:(fun (channel, _) ->
+            channel, Eio_unix.pipe sw, Eio_unix.pipe sw))
+      in
       let children =
         List.mapi stages ~f:(fun index stage ->
-          verify_plan config stage.plan;
           let stdin_pipe =
             if Int.equal index 0
             then None
@@ -2989,17 +3023,69 @@ module Executor = struct
           in
           let stderr_flow = snd (List.nth_exn stderr_pipes index) in
           try
+            check_execution config;
+            authorize_request_channel config stage.backend stage.plan.context;
+            verify_plan config stage.plan;
+            let manager =
+              match
+                Backend.has_os_limits stage.plan.limits || stage.plan.request_channel
+              with
+              | false -> (manager :> Eio_unix.Process.mgr_ty Eio.Resource.t)
+              | true ->
+                Process_spawn.manager
+                  ~cpu_seconds:stage.plan.limits.cpu_seconds
+                  ~memory_bytes:stage.plan.limits.memory_bytes
+                  ~file_size_bytes:stage.plan.limits.file_size_bytes
+                  ~open_files:stage.plan.limits.open_files
+                  ~close_extra_fds:stage.plan.request_channel
+            in
             let child =
-              Eio.Process.spawn
-                ~sw
-                manager
-                ?cwd:config.cwd_path
-                ~env:stage.spawn.environment
-                ~executable:stage.spawn.executable
-                ~stdin:stdin_flow
-                ~stdout:stdout_flow
-                ~stderr:stderr_flow
-                stage.spawn.argv
+              match List.nth_exn channels index with
+              | Some (_, (_, request_sink), (response_source, _)) ->
+                let input_source, input_sink = Eio_unix.pipe sw in
+                Eio.Fiber.fork ~sw (fun () ->
+                  Exn.protect
+                    ~finally:(fun () -> Eio.Flow.close input_sink)
+                    ~f:(fun () -> Eio.Flow.copy stdin_flow input_sink));
+                let child =
+                  Eio_unix.Process.spawn_unix
+                    ~sw
+                    manager
+                    ?cwd:config.cwd_path
+                    ~env:stage.spawn.environment
+                    ~executable:stage.spawn.executable
+                    ~fds:
+                      [ 0, Eio_unix.Resource.fd input_source, `Blocking
+                      ; ( 1
+                        , Option.value_exn (Eio_unix.Resource.fd_opt stdout_flow)
+                        , `Blocking )
+                      ; ( 2
+                        , Option.value_exn (Eio_unix.Resource.fd_opt stderr_flow)
+                        , `Blocking )
+                      ; ( Request_channel.request_fd
+                        , Eio_unix.Resource.fd request_sink
+                        , `Blocking )
+                      ; ( Request_channel.response_fd
+                        , Eio_unix.Resource.fd response_source
+                        , `Blocking )
+                      ]
+                    stage.spawn.argv
+                in
+                Eio.Flow.close input_source;
+                Eio.Flow.close request_sink;
+                Eio.Flow.close response_source;
+                child
+              | None ->
+                Eio.Process.spawn
+                  ~sw
+                  manager
+                  ?cwd:config.cwd_path
+                  ~env:stage.spawn.environment
+                  ~executable:stage.spawn.executable
+                  ~stdin:stdin_flow
+                  ~stdout:stdout_flow
+                  ~stderr:stderr_flow
+                  stage.spawn.argv
             in
             emit
               config
@@ -3010,7 +3096,8 @@ module Executor = struct
             Eio.Flow.close stderr_flow;
             child
           with
-          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | (Execution_error _ | Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn ->
+            raise exn
           | exn -> raise (Execution_error (Spawn_error (Exn.to_string exn))))
       in
       let stdout_capture = create_capture config.limits.max_stdout_bytes in
@@ -3057,7 +3144,37 @@ module Executor = struct
           let plan = (List.nth_exn stages index).plan in
           emit config (Audit.Finished (plan.id, plan.context, status)))
       in
-      Eio.Fiber.all (readers @ waiters);
+      let channel_workers =
+        List.filter_mapi channels ~f:(fun index -> function
+          | None -> None
+          | Some (channel, (request_source, _), (_, response_sink)) ->
+            Some
+              (fun () ->
+                Exn.protect
+                  ~finally:(fun () ->
+                    Eio.Flow.close request_source;
+                    Eio.Flow.close response_sink)
+                  ~f:(fun () ->
+                    Eio.Fiber.first
+                      (fun () ->
+                         match
+                           Request_channel.serve
+                             channel
+                             ~source:request_source
+                             ~sink:response_sink
+                             ~check:(fun () -> Result.is_ok (config.execution_check ()))
+                             ~on_activity:(fun () ->
+                               last_activity := Eio.Time.now (Eio.Stdenv.clock config.env))
+                         with
+                         | Ok () -> ()
+                         | Error error ->
+                           raise
+                             (Execution_error
+                                (Denied (Request_channel.error_to_string error))))
+                      (fun () ->
+                         Eio.Process.await (List.nth_exn children index) |> ignore))))
+      in
+      Eio.Fiber.all (readers @ waiters @ channel_workers);
       List.mapi stages ~f:(fun index stage ->
         let stdout =
           if Int.equal index (count - 1)
@@ -3086,6 +3203,13 @@ module Executor = struct
     let config =
       if publish_stdout then config else { config with stream_stdout = false }
     in
+    check_execution config;
+    (match config.request_channel, stage with
+     | Some _, (Synthetic_stage _ | Simulated_stage _) ->
+       raise
+         (Execution_error
+            (Sandbox_unavailable "request channels require a real sandboxed process"))
+     | _ -> ());
     match stage with
     | Synthetic_stage result -> publish_result config (fresh_id ()) result
     | Simulated_stage { plan; backend; simulate } ->
@@ -3294,6 +3418,7 @@ module Executor = struct
     let request_id = fresh_id () in
     let input_bytes = Input.byte_length invocation.input in
     try
+      check_execution config;
       if input_bytes > config.limits.max_stdin_bytes
       then raise (Execution_error (Stdin_limit_exceeded input_bytes));
       let stdin = Input.to_string invocation.input in

@@ -56,6 +56,11 @@ val id : t -> string
 val spec : t -> Chatmd_shell_spec.Shell_spec.t
 val executor_config : t -> Shell_access.Executor.config
 
+(** Overlay verified native caller identity/grants on the original configuration.
+    Expired caller services reject instead of using the registration owner's
+    approval store. Other resource, policy and implementation identities remain. *)
+val executor_config_for_call : t -> (Shell_access.Executor.config, string) result
+
 (** [redact t value] applies the runtime's configured secret filter. *)
 val redact : t -> string -> string
 

@@ -1211,6 +1211,8 @@ module Cli = struct
     { typeahead_config : Chat_tui.Type_ahead_config.t Or_error.t
     ; conversation_file : string
     ; local : bool
+    ; authoring_package_files : string list
+    ; authoring_options : Agent_server.Authoring_options.t
     ; connect : string option
     ; bearer_token_file : string option
     ; list_sessions : bool
@@ -1328,6 +1330,8 @@ module Cli = struct
         }
     | Embedded_interactive of
         { prompt_file : string
+        ; authoring_package_files : string list
+        ; authoring_budget : Chat_response.Authoring_validation.context_budget option
         ; textmate_grammar_files : string list
         }
 
@@ -1505,12 +1509,16 @@ module Cli = struct
           "Error: legacy session/export/runtime flags are not supported with explicit \
            --local."
       else if t.local || not legacy_requested
-      then
-        Ok
-          (Embedded_interactive
-             { prompt_file = t.conversation_file
-             ; textmate_grammar_files = t.textmate_grammar_files
-             })
+      then (
+        let%map authoring_budget =
+          Agent_server.Authoring_options.resolve t.authoring_options
+        in
+        Embedded_interactive
+          { prompt_file = t.conversation_file
+          ; authoring_package_files = t.authoring_package_files
+          ; authoring_budget
+          ; textmate_grammar_files = t.textmate_grammar_files
+          })
       else (
         let%bind persist_mode = derive_persist_mode t in
         let%map parallel_tool_calls = derive_parallel_tool_calls t in
@@ -1692,11 +1700,22 @@ module Cli = struct
     let open Or_error.Let_syntax in
     let%bind () = validate_global t in
     let%bind () = validate_export_file_usage t in
-    match selectors t with
-    | [] -> normalize_interactive t
-    | [ sel ] -> normalize_selected t sel
+    let%bind action =
+      match selectors t with
+      | [] -> normalize_interactive t
+      | [ sel ] -> normalize_selected t sel
+      | _ ->
+        Or_error.error_string "Error: multiple session modes selected; choose only one."
+    in
+    let local_authoring =
+      (not (List.is_empty t.authoring_package_files))
+      || Agent_server.Authoring_options.is_configured t.authoring_options
+    in
+    match local_authoring, action with
+    | false, _ | _, Embedded_interactive _ -> Ok action
     | _ ->
-      Or_error.error_string "Error: multiple session modes selected; choose only one."
+      Or_error.error_string
+        "Error: authoring package and budget flags require an embedded local session."
   ;;
 end
 
@@ -2047,7 +2066,14 @@ module Embedded_interactive = struct
     if Filename.is_absolute path then path else Filename.concat cwd path
   ;;
 
-  let run ~typeahead_config ~env ~prompt_file ~textmate_grammar_files =
+  let run
+        ~typeahead_config
+        ~env
+        ~prompt_file
+        ~textmate_grammar_files
+        ~authoring_package_files
+        ~authoring_budget
+    =
     Eio.Switch.run
     @@ fun sw ->
     let workspace = working_directory env in
@@ -2065,7 +2091,15 @@ module Embedded_interactive = struct
         ; event_capacity = 4096
         }
     in
-    Agent_server.Embedded.start ~sw ~env options
+    let authoring_package_files =
+      List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
+    in
+    Agent_server.Embedded.start
+      ~sw
+      ~env
+      ~authoring_package_files
+      ?authoring_budget
+      options
     |> Result.map_error ~f:protocol_error
     |> Or_error.bind ~f:(fun host ->
       Fun.protect
@@ -2148,9 +2182,17 @@ let run_action ~typeahead_config (action : Cli.action) =
         ~textmate_grammar_files)
   | Daemon_admin { connect; bearer_token_file; command } ->
     Env.with_env (fun env -> Daemon_admin.run ~env ~connect ~bearer_token_file ~command)
-  | Embedded_interactive { prompt_file; textmate_grammar_files } ->
+  | Embedded_interactive
+      { prompt_file; textmate_grammar_files; authoring_package_files; authoring_budget }
+    ->
     Env.with_env (fun env ->
-      Embedded_interactive.run ~typeahead_config ~env ~prompt_file ~textmate_grammar_files)
+      Embedded_interactive.run
+        ~typeahead_config
+        ~env
+        ~prompt_file
+        ~textmate_grammar_files
+        ~authoring_package_files
+        ~authoring_budget)
   | _ ->
     Env.with_env (fun env -> run_env_action ~env action);
     Ok ()
@@ -2218,6 +2260,13 @@ let raw_flags_param =
         "--local"
         no_arg
         ~doc:"Run an embedded local session instead of connecting to a daemon."
+    and authoring_options = Agent_server.Authoring_options.param
+    and authoring_package_files =
+      flag
+        "--authoring-package"
+        (listed string)
+        ~doc:
+          "FILE Capture custom documentation for an embedded local session (repeatable)."
     and connect =
       flag
         "--connect"
@@ -2430,6 +2479,8 @@ let raw_flags_param =
            ~max_output_tokens:typeahead_tokens
      ; conversation_file
      ; local
+     ; authoring_package_files
+     ; authoring_options
      ; connect
      ; bearer_token_file
      ; list_sessions

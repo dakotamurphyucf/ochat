@@ -3,6 +3,7 @@ open! Core
 type t =
   { closed : bool Atomic.t
   ; mutable busy : Session_registry.entry list
+  ; idle : Eio.Condition.t
   }
 
 let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
@@ -10,11 +11,6 @@ let failure message = Agent_protocol.Error.create Interrupted ~message ~retryabl
 let is_overdue schedule timestamp =
   Agent_protocol.Timestamp.compare schedule.Agent_protocol.Schedule.next_due_at timestamp
   <= 0
-;;
-
-let is_scheduled = function
-  | Agent_protocol.Schedule.Scheduled -> true
-  | Delivering | Delivered | Cancelled | Failed _ -> false
 ;;
 
 let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedule.t) =
@@ -48,11 +44,13 @@ let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedul
 ;;
 
 let reconcile_entry startup_time entry =
-  Result.bind
-    (Agent_session.Session_actor.state entry.Session_registry.actor)
-    ~f:(fun state ->
-      List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
-        reconcile_schedule entry startup_time schedule))
+  let open Result.Let_syntax in
+  let%bind _ =
+    Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
+  in
+  let%bind state = Agent_session.Session_actor.state entry.actor in
+  List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
+    reconcile_schedule entry startup_time schedule)
 ;;
 
 let reconcile_recovered ~registry ~startup_time =
@@ -96,22 +94,22 @@ let drain_idle_moderator entry =
 ;;
 
 let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
-  match
-    Runtime_owner.enqueue_internal_event entry.Session_registry.runtime schedule.payload
-  with
-  | Error error ->
-    fail_claim entry schedule error;
-    unload_if_stopped entry observed
-  | Ok moderator_snapshot ->
-    (match
-       Agent_session.Session_actor.complete_schedule
+  match Runtime_owner.deliver_schedule entry.Session_registry.runtime schedule with
+  | Error { code = Interrupted; _ } ->
+    (* Runtime retirement can interrupt a delivery before its checkpoint commit.
+       Preserve it for a later runtime/restart. A committed or cancelled schedule
+       rejects retry, so this cannot undo a terminal delivery or explicit stop. *)
+    ignore
+      (Agent_session.Session_actor.retry_schedule
          entry.actor
          ~schedule_id:schedule.id
          ~generation:schedule.generation
-         ~moderator_snapshot
-     with
-     | Ok _ -> ()
-     | Error error -> fail_claim entry schedule error);
+       : (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result);
+    unload_if_stopped entry observed
+  | Error error ->
+    fail_claim entry schedule error;
+    unload_if_stopped entry observed
+  | Ok () ->
     drain_idle_moderator entry;
     unload_if_stopped entry observed
 ;;
@@ -127,52 +125,61 @@ let claim entry observed (schedule : Agent_protocol.Schedule.t) =
   | Ok None | Error _ -> ()
 ;;
 
-let process_entry now entry =
-  match Agent_session.Session_actor.state entry.Session_registry.actor with
+let process_entry t entry =
+  match Agent_session.Session_actor.due_schedules entry.Session_registry.actor with
   | Error _ -> ()
-  | Ok state ->
-    List.iter state.schedules ~f:(fun (schedule : Agent_protocol.Schedule.t) ->
-      if is_scheduled schedule.status && is_overdue schedule now
-      then claim entry state.lifecycle.observed schedule);
-    drain_idle_moderator entry
+  | Ok (observed, schedules) ->
+    List.iter schedules ~f:(fun schedule ->
+      if not (Atomic.get t.closed) then claim entry observed schedule);
+    if not (Atomic.get t.closed) then drain_idle_moderator entry
 ;;
 
-let timestamp clock =
-  Eio.Time.now clock
-  |> Time_ns.Span.of_sec
-  |> Time_ns.of_span_since_epoch
-  |> Agent_protocol.Timestamp.of_time_ns
-;;
-
-let dispatch_entry t sw now entry =
-  if not (List.mem t.busy entry ~equal:phys_equal)
+let dispatch_entry t sw entry =
+  if (not (Atomic.get t.closed)) && not (List.mem t.busy entry ~equal:phys_equal)
   then (
     t.busy <- entry :: t.busy;
     Eio.Fiber.fork ~sw (fun () ->
       Exn.protect
-        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry now entry)
+        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry t entry)
         ~finally:(fun () ->
-          t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry)))))
+          t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry));
+          if List.is_empty t.busy then Eio.Condition.broadcast t.idle)))
 ;;
 
-let process t sw clock registry =
-  let now = timestamp clock in
-  Session_registry.entries registry |> List.iter ~f:(dispatch_entry t sw now)
+let process t sw registry =
+  Session_registry.entries registry
+  |> List.iter ~f:(fun entry ->
+    (* Expiry must keep running while an earlier timer callback owns the runtime.
+       This actor-only sweep does not invoke user code; failed saves retry on the
+       next scheduler pass. *)
+    ignore
+      (Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
+       : (int, Agent_protocol.Error.t) result);
+    dispatch_entry t sw entry)
 ;;
 
 let rec run t sw clock registry =
   if not (Atomic.get t.closed)
   then (
-    process t sw clock registry;
-    Eio.Time.sleep clock 0.05;
+    process t sw registry;
+    Eio.Time.Mono.sleep clock 0.05;
     run t sw clock registry)
 ;;
 
 let start ~sw ~clock ~registry =
-  let t = { closed = Atomic.make false; busy = [] } in
+  let t = { closed = Atomic.make false; busy = []; idle = Eio.Condition.create () } in
   Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
 let close t = Atomic.set t.closed true
+
+let rec await_idle t =
+  match t.busy with
+  | [] -> ()
+  | _ ->
+    Eio.Condition.await_no_mutex t.idle;
+    await_idle t
+;;
+
 let is_running t = not (Atomic.get t.closed)

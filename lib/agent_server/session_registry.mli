@@ -10,6 +10,11 @@ type entry =
   ; capacity : Session_capacity.t option
   ; store_handle : Agent_store.Session_store.Handle.t option
   ; expire_permissions : now:Agent_protocol.Timestamp.t -> unit
+  ; collect_results :
+      unit
+      -> ( Agent_store.Job_result_store.Publisher.collection_stats option
+           , Agent_protocol.Error.t )
+           result
   ; close : unit -> unit
   }
 
@@ -40,7 +45,14 @@ val add
   -> entry
   -> (unit, Agent_protocol.Error.t) result
 
+(** Read one immutable loaded-entry snapshot without entering the loader lock.
+    Allows a child loader to consult an already loaded parent. This does not load
+    an ancestor or retain its runtime; callers still need actor validation and a
+    runtime lease. Mutations and indexed loads remain serialized. *)
 val find : t -> Agent_protocol.Id.Session.t -> entry option
+
+(** Lock-free shutdown observation for dependency cleanup callbacks. *)
+val is_closing : t -> bool
 
 (** Returns a loaded entry or reconstructs an indexed stopped session on
     demand from its durable store. *)
@@ -52,8 +64,14 @@ val load_all : t -> (entry list, Agent_protocol.Error.t) result
 val remove : t -> Agent_protocol.Id.Session.t -> entry option
 val summaries : t -> Agent_protocol.Session.t list
 
-(** Closes actors for stopped sessions with no attachments, runnable work, or
-    active schedules, retaining their durable index entries for lazy reload. *)
+(** Closes actors for stopped sessions with no attachments, runnable work, active
+    schedules, runtime or resource borrows, retaining their durable index entries
+    for lazy reload. Eviction excludes new runtime/resource admission atomically. *)
 val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list -> int
 
+(** Reject new registration/loading, join all runtime dependency cleanup while
+    keeping loaded lookups and actors alive, then close actors and their stores.
+    A failed runtime cleanup retains the loaded graph for a shutdown retry.
+    Once begun, cancellation cannot skip actor/writer closure after runtime
+    cleanup; protected cleanup can exceed the host's grace deadline. *)
 val shutdown : t -> unit

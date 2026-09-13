@@ -14,12 +14,29 @@
   health
   mutation_result
   blob
+  authoring_guidance
+  authoring_reference
   history
   permission
   grant
   audit
   job
+  job_progress
+  job_artifact
+  job_result_reference
+  invocation
+  completion_contract
+  completion_projection
+  moderator_execution
+  extension_codec
+  extension_status
+  extension_capabilities
+  completion
+  stored_completion
+  subscription
+  delivery
   schedule
+  ingress
   scope
   principal
   page
@@ -32,7 +49,7 @@
   event
   command
   method_result)
- (private_modules protocol_error)
- (libraries core jsonaf base64 mirage-crypto-rng uutf ochat.history_entry)
+ (private_modules protocol_error extension_codec)
+ (libraries core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry)
  (preprocess
   (pps ppx_jane)))

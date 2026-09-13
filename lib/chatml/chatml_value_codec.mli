@@ -12,8 +12,20 @@ open Chatml_lang
 val jsonaf_to_value : Jsonaf.t -> value
 
 (** Convert a ChatML value representing builtin JSON into {!Jsonaf.t},
-    returning a descriptive error on shape mismatch. *)
+    returning a descriptive error on shape mismatch or non-finite numbers.
+    Finite floats use valid JSON syntax that round-trips their value; original
+    numeric spelling is not retained. *)
 val value_to_jsonaf_result : value -> (Jsonaf.t, string) result
+
+(** Host-boundary conversions. With [control], preflight projected value bounds
+    and estimated allocation before conversion, then poll cancellation again.
+    Import accounts for numeric parsing text; export reserves an escaping-aware
+    conversion/serialization estimate. These are not actual OCaml heap counters.
+    Control exceptions propagate. Without control these retain the generic
+    codec behavior; shape/protocol validation remains the caller's responsibility. *)
+val import_json : ?control:execution_control -> Jsonaf.t -> value
+
+val export_json : ?control:execution_control -> value -> (Jsonaf.t, string) result
 
 (** Exception-raising wrapper around {!value_to_jsonaf_result}. *)
 val value_to_jsonaf_exn : value -> Jsonaf.t

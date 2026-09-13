@@ -1,0 +1,3 @@
+<config model="o3" reasoning_effort="high"/>
+<import src="instructions.chatmd"/>
+<tool type="inherited" name="read_file"/>

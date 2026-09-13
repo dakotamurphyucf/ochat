@@ -1,0 +1,2 @@
+<import src="base.chatmd"/>
+<authoring_help tool="read_file" package="e10-one-off" tasks="one_off_script" topics="custom.e10-one-off.guide" required_helpers="ochat_authoring_context ochat_validate"/>

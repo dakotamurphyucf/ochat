@@ -119,6 +119,11 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type agent_persistence =
+    | Persistent
+    | Optional
+  [@@deriving jsonaf, sexp, hash, bin_io, compare, equal]
+
   type tool =
     | Builtin of string
     | Read_file of Chatmd_read_file_spec.t
@@ -127,6 +132,9 @@ module Chat_content = struct
     | Agent of agent_tool
     (* A tool exposed by a remote MCP server. *)
     | Mcp of mcp_tool
+    | Extension of Chatmd_shell_spec.Extension_spec.tool
+    | Inherited of string
+    | Persistent_agent of agent_tool * agent_persistence
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   and mcp_tool =
@@ -201,6 +209,9 @@ module Chat_content = struct
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
+    | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -222,6 +233,9 @@ module Chat_markdown = struct
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
+    | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
     | Reasoning of reasoning
     | Summary of reasoning_summary
     | Text of string
@@ -285,7 +299,10 @@ module Chat_markdown = struct
       | Shell_runtime _
       | Moderator_runtime _
       | Script _
-      | Shell_script _ )
+      | Shell_script _
+      | Extension_script _
+      | Authoring_help _
+      | Authoring_context _ )
       :: rest -> content_items_of_elements rest
   ;;
 
@@ -431,8 +448,13 @@ module Chat_markdown = struct
        | Inline body -> Printf.sprintf "<script %s>%s</script>" attrs_string body
        | Src { path; _ } -> Printf.sprintf "<script %s src=\"%s\" />" attrs_string path)
     | Shell_script script -> Chatmd_script_declaration.serialize script
+    | Extension_script script -> Chatmd_extension_declaration.serialize_script script
+    | Authoring_context config -> Chatmd_extension_declaration.serialize_authoring config
+    | Authoring_help help -> Chatmd_extension_declaration.serialize_help help
     | Tool t ->
       (match t with
+       | Extension tool -> Chatmd_extension_declaration.serialize_tool tool
+       | Inherited name -> Printf.sprintf "<tool type=\"inherited\" name=\"%s\"/>" name
        | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
        | Read_file specification -> Chatmd_read_file_declaration.serialize specification
        | Custom { name; description; command; source = _ } ->
@@ -443,18 +465,27 @@ module Chat_markdown = struct
          in
          Printf.sprintf "<tool name=\"%s\"%s command=\"%s\" />" name desc_attr command
        | Shell tool -> Chatmd_shell_serialization.tool tool
-       | Agent { name; description; agent; is_local } ->
+       | ( Agent { name; description; agent; is_local }
+         | Persistent_agent ({ name; description; agent; is_local }, _) ) as declaration
+         ->
          let desc_attr =
            Option.value_map description ~default:"" ~f:(fun d ->
              Printf.sprintf " description=\"%s\"" d)
          in
          let local_attr = if is_local then " local" else "" in
+         let persistence_attr =
+           match declaration with
+           | Persistent_agent (_, Persistent) -> " persistence=\"persistent\""
+           | Persistent_agent (_, Optional) -> " persistence=\"optional\""
+           | _ -> ""
+         in
          Printf.sprintf
-           "<tool name=\"%s\"%s agent=\"%s\"%s />"
+           "<tool name=\"%s\"%s agent=\"%s\"%s%s />"
            name
            desc_attr
            agent
            local_attr
+           persistence_attr
        | Mcp { names; description; mcp_server; strict; _ } ->
          let strict_attr = if strict then " strict" else "" in
          (* If the description is present, add it as an attribute. *)
@@ -536,49 +567,63 @@ module Chat_markdown = struct
   ;;
 
   let parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children =
-    match
-      Chatmd_script_declaration.parse
-        ~dir
-        ~loader
-        ~source_node
-        ~source:source_ref
-        ~attributes:attrs
-        ~inline_source:(script_body_of_children children)
-    with
-    | Error diagnostics -> script_error diagnostics
-    | Ok script ->
-      (match script.kind with
-       | Script_spec.Moderator -> Script (legacy_script script)
-       | _ -> Shell_script script)
+    if
+      List.exists attrs ~f:(function
+        | "api", _ | "kind", Some "tool" -> true
+        | _ -> false)
+    then (
+      match
+        Chatmd_extension_declaration.script
+          ~dir
+          ~loader
+          ~source_node
+          ~source:source_ref
+          ~attributes:attrs
+          ~inline_source:(script_body_of_children children)
+      with
+      | Ok script -> Extension_script script
+      | Error diagnostics -> script_error diagnostics)
+    else (
+      match
+        Chatmd_script_declaration.parse
+          ~dir
+          ~loader
+          ~source_node
+          ~source:source_ref
+          ~attributes:attrs
+          ~inline_source:(script_body_of_children children)
+      with
+      | Error diagnostics -> script_error diagnostics
+      | Ok script ->
+        (match script.kind with
+         | Script_spec.Moderator -> Script (legacy_script script)
+         | _ -> Shell_script script))
   ;;
 
   (*--------------------------------------------------------------------------*)
-  (* Generic tree fold                                                        *)
-  (*--------------------------------------------------------------------------*)
-
-  (** [tree node ~f] traverses [node] depth-first and applies the combining
-    function [f] to each node together with the list of results that were
-    produced for its direct children.  This is analogous to a fold over the
-    tree structure.
-
-    For example, to collect all nodes in a tree one can write
-
-    {[ let all_nodes = tree root ~f:(fun n children -> n :: List.concat children) ]}
-
-    The traversal is depth-first and children are processed from left to right,
-    mirroring their order in the underlying list. *)
-  let rec tree (node : Ast.node) ~(f : Ast.node -> 'a list -> 'a) : 'a =
-    match node with
-    | Text _ -> f node []
-    | Element (_, _, children) ->
-      let child_results = List.map children ~f:(fun child -> tree child ~f) in
-      f node child_results
+  (* Fold the expanded source tree. Generated parsing preserves the provenance
+     of inline imports; the legacy parser retains its existing parent context. *)
+  let rec tree ~preserve_child_sources (sourced : Chatmd_import_expansion.sourced_node) ~f
+    =
+    let children =
+      match preserve_child_sources, sourced.children with
+      | true, Some children -> children
+      | _ ->
+        (match sourced.node with
+         | Ast.Text _ -> []
+         | Ast.Element (_, _, children) ->
+           List.map children ~f:(fun node -> { sourced with node; children = None }))
+    in
+    let results =
+      List.map children ~f:(fun child -> tree ~preserve_child_sources child ~f)
+    in
+    f ~source_ref:sourced.source ~source_node:sourced.source_node sourced.node results
   ;;
 
   (* Convert AST nodes into internal chat elements before exposing top-level values. *)
-  let parse_chat_element ~dir ~loader ~source_node ~source_ref node =
-    let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
-    tree node ~f:(fun node children ->
+  let parse_chat_element ~dir ~loader ~preserve_child_sources sourced =
+    tree ~preserve_child_sources sourced ~f:(fun ~source_ref ~source_node node children ->
+      let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
       match node with
       | Element (Msg, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
@@ -732,6 +777,29 @@ module Chat_markdown = struct
         let mcp_server = Hashtbl.find tbl "mcp_server" in
         let description = Hashtbl.find tbl "description" in
         let is_local = Hashtbl.mem tbl "local" in
+        let persistence =
+          match
+            List.filter attrs ~f:(fun (name, _) -> String.equal name "persistence")
+          with
+          | [] -> None
+          | [ (_, Some "one_off") ] -> Some None
+          | [ (_, Some "persistent") ] -> Some (Some Persistent)
+          | [ (_, Some "optional") ] -> Some (Some Optional)
+          | _ ->
+            failwith
+              "Tool persistence must be one_off, persistent or optional, specified once."
+        in
+        (match
+           ( persistence
+           , agent
+           , command
+           , mcp_server
+           , Hashtbl.find tbl "type"
+           , Hashtbl.find tbl "runtime" )
+         with
+         | None, _, _, _, _, _ -> ()
+         | Some _, Some _, None, None, None, None -> ()
+         | _ -> failwith "Tool persistence is only supported on agent declarations.");
         let is_shell =
           Option.value_map
             (Hashtbl.find tbl "type")
@@ -739,7 +807,54 @@ module Chat_markdown = struct
             ~f:(String.equal "shell")
           || Hashtbl.mem tbl "runtime"
         in
-        if is_shell
+        if
+          List.exists attrs ~f:(function
+            | "type", Some "inherited" -> true
+            | _ -> false)
+        then (
+          let allowed =
+            Chatmd_attributes.create
+              ~source:source_ref
+              ~path:[ "tool" ]
+              ~allowed:[ "name"; "type" ]
+              attrs
+          in
+          let attributes =
+            match allowed with
+            | Ok value -> value
+            | Error d -> script_error [ d ]
+          in
+          let inherited =
+            match Chatmd_attributes.required attributes "name" with
+            | Ok value -> value
+            | Error d -> script_error [ d ]
+          in
+          if
+            String.is_empty inherited
+            || String.length inherited > 256
+            || not
+                 (String.for_all inherited ~f:(function
+                    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.' -> true
+                    | _ -> false))
+          then failwith "invalid inherited tool name";
+          (match node with
+           | Ast.Element (_, _, children)
+             when List.for_all children ~f:(function
+                    | Ast.Text text -> String.for_all text ~f:Char.is_whitespace
+                    | _ -> false) -> ()
+           | _ -> failwith "inherited tool references cannot have children");
+          Tool (Inherited inherited))
+        else if
+          List.exists attrs ~f:(function
+            | "type", Some ("moderator" | "chatml") -> true
+            | _ -> false)
+        then (
+          match
+            Chatmd_extension_declaration.tool ~loader ~source_node ~source:source_ref node
+          with
+          | Ok tool -> Tool (Extension tool)
+          | Error diagnostics -> script_error diagnostics)
+        else if is_shell
         then (
           match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
           | Ok tool -> Tool (Shell tool)
@@ -774,7 +889,10 @@ module Chat_markdown = struct
                 |> Result.ok_or_failwith
               else agent_url
             in
-            Tool (Agent { name; description; agent; is_local })
+            let specification = { name; description; agent; is_local } in
+            (match Option.join persistence with
+             | None -> Tool (Agent specification)
+             | Some policy -> Tool (Persistent_agent (specification, policy)))
           | None, None, Some mcp_uri ->
             let mcp_uri = String.strip mcp_uri in
             if String.is_empty mcp_uri
@@ -837,7 +955,15 @@ module Chat_markdown = struct
              (String.concat
                 ~sep:"; "
                 (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-      | Element (Shell_element _, _, _) -> Text ""
+      | Element (Authoring_help, _, _) ->
+        (match Chatmd_extension_declaration.authoring_help ~source:source_ref node with
+         | Ok help -> Authoring_help help
+         | Error diagnostics -> script_error diagnostics)
+      | Element (Authoring_context, _, _) ->
+        (match Chatmd_extension_declaration.authoring_context ~source:source_ref node with
+         | Ok config -> Authoring_context config
+         | Error diagnostics -> script_error diagnostics)
+      | Element (Uses, _, _) | Element (Shell_element _, _, _) -> Text ""
       | Element (Import, attrs, _) ->
         let attr_to_string (n, v) =
           Printf.sprintf "%s=\"%s\"" n (Option.value v ~default:"")
@@ -866,6 +992,8 @@ module Chat_markdown = struct
       | Element (Tool, _, _)
       | Element (Shell_access, _, _)
       | Element (Moderator_runtime, _, _)
+      | Element (Authoring_context, _, _)
+      | Element (Authoring_help, _, _)
       | Element (Script, _, _) -> true
       | _ -> false)
   ;;
@@ -885,6 +1013,9 @@ module Chat_markdown = struct
     | Moderator_runtime moderator -> Some (Moderator_runtime moderator)
     | Script s -> Some (Script s)
     | Shell_script script -> Some (Shell_script script)
+    | Extension_script script -> Some (Extension_script script)
+    | Authoring_context config -> Some (Authoring_context config)
+    | Authoring_help help -> Some (Authoring_help help)
     | Developer_msg m -> Some (Developer m)
     | System_msg m -> Some (System m) (* System is a legacy alias for Developer *)
     | _ -> None
@@ -901,16 +1032,141 @@ module Chat_markdown = struct
         | Shell_script script -> moderators, script :: shell_scripts
         | _ -> moderators, shell_scripts)
     in
-    let moderator_ids = List.map moderators ~f:(fun script -> script.id) in
+    let module X = Chatmd_shell_spec.Extension_spec in
+    let extension_scripts =
+      List.filter_map elements ~f:(function
+        | Extension_script script -> Some script
+        | _ -> None)
+    in
+    let extensions =
+      List.filter_map elements ~f:(function
+        | Tool (Extension tool) -> Some tool
+        | _ -> None)
+    in
+    let error source code message =
+      script_error [ Chatmd_shell_spec.Diagnostic.error ~source ~code message ]
+    in
+    let extension_moderators =
+      List.filter extension_scripts ~f:(fun script ->
+        X.equal_script_kind script.kind Moderator_script)
+    in
+    let moderator_ids =
+      List.map moderators ~f:(fun script -> script.id)
+      @ List.map extension_moderators ~f:(fun script -> script.id)
+    in
     (match
        Chatmd_script_declaration.validate_prompt_registry ~moderator_ids shell_scripts
      with
      | Ok () -> ()
      | Error diagnostics -> script_error diagnostics);
+    let all_ids =
+      List.map moderators ~f:(fun script -> script.id)
+      @ List.map shell_scripts ~f:(fun script -> script.Script_spec.id)
+      @ List.map extension_scripts ~f:(fun script -> script.id)
+    in
+    (match List.find_a_dup all_ids ~compare:String.compare with
+     | None -> ()
+     | Some id ->
+       script_error
+         [ Chatmd_shell_spec.Diagnostic.error
+             ~code:"chatmd.duplicate_script"
+             ("duplicate script id: " ^ id)
+         ]);
+    let policies =
+      List.filter_map elements ~f:(function
+        | Authoring_context policy -> Some policy
+        | _ -> None)
+    in
+    if List.length policies > 1
+    then
+      error
+        (List.hd_exn policies).source_ref
+        "chatmd.duplicate_authoring_context"
+        "only one authoring_context declaration is permitted";
+    let help_declarations =
+      List.filter_map elements ~f:(function
+        | Authoring_help help -> Some help
+        | _ -> None)
+    in
+    (match
+       List.find_a_dup help_declarations ~compare:(fun a b ->
+         String.compare a.X.tool b.X.tool)
+     with
+     | None -> ()
+     | Some help ->
+       error
+         help.source_ref
+         "chatmd.duplicate_authoring_help"
+         "only one help declaration per tool is permitted");
+    List.iter extensions ~f:(fun tool ->
+      let target, kind =
+        match tool.X.implementation with
+        | Moderator id -> id, X.Moderator_script
+        | Standalone { script; _ } -> script, X.Tool_script
+      in
+      match
+        List.find extension_scripts ~f:(fun script -> String.equal script.id target)
+      with
+      | Some script when X.equal_script_kind script.kind kind -> ()
+      | _ ->
+        error
+          tool.source_ref
+          "chatmd.extension_missing_handler"
+          "extension tool must reference a script of the correct kind and v1 surface");
+    if not (List.is_empty extensions)
+    then (
+      let names =
+        List.concat_map elements ~f:(function
+          | Tool (Builtin name) -> [ name ]
+          | Tool (Read_file _) -> [ "read_file" ]
+          | Tool (Custom tool) -> [ tool.name ]
+          | Tool (Shell tool) -> [ tool.name ]
+          | Tool (Agent tool) -> [ tool.name ]
+          | Tool (Persistent_agent (tool, _)) -> [ tool.name ]
+          | Tool (Mcp tool) -> Option.value tool.names ~default:[]
+          | Tool (Extension tool) -> [ tool.name ]
+          | Tool (Inherited name) -> [ name ]
+          | _ -> [])
+      in
+      List.iter extensions ~f:(fun tool ->
+        if List.count names ~f:(String.equal tool.name) > 1
+        then
+          error
+            tool.source_ref
+            "chatmd.extension_duplicate_tool"
+            "extension tool name conflicts with another declaration");
+      let complete = Hash_set.create (module String) in
+      let rec visit active (tool : X.tool) =
+        if Set.mem active tool.name
+        then
+          error
+            tool.source_ref
+            "chatmd.extension_capability_cycle"
+            "cyclic extension capability dependencies";
+        if not (Hash_set.mem complete tool.name)
+        then (
+          let active = Set.add active tool.name in
+          List.iter tool.uses ~f:(fun name ->
+            Option.iter
+              (List.find extensions ~f:(fun candidate -> String.equal candidate.name name))
+              ~f:(visit active));
+          Hash_set.add complete tool.name)
+      in
+      List.iter extensions ~f:(visit String.Set.empty));
     elements
   ;;
 
-  let parse_chat_inputs ?source ?source_loader ~dir (xml_content : string) =
+  let validate_declarations = validate_scripts
+
+  let parse_inputs
+        ~parse_document
+        ~preprocess
+        ~canonical_sources
+        ?source
+        ?source_loader
+        ~dir
+        (xml_content : string)
+    =
     let source_file = Option.value source ~default:"<prompt>" in
     let loader =
       Option.value source_loader ~default:(Source_loader.filesystem ~root:dir)
@@ -918,11 +1174,12 @@ module Chat_markdown = struct
     let root_source =
       Source_loader.root loader ~file:source_file |> Result.ok_or_failwith
     in
-    let xml_content = Meta_prompting.Preprocessor.preprocess xml_content in
-    let document = parse xml_content in
+    let xml_content = preprocess xml_content in
+    let document = parse_document xml_content in
     let expanded =
       Chatmd_import_expansion.expand
-        ~parse
+        ~canonical_sources
+        ~parse:parse_document
         ~loader
         ~root_source
         ~dir
@@ -933,14 +1190,114 @@ module Chat_markdown = struct
     let chat_elements = chat_elements expanded in
     let parsed_elements =
       List.map chat_elements ~f:(fun sourced ->
-        parse_chat_element
-          ~dir
-          ~loader
-          ~source_node:sourced.source_node
-          ~source_ref:sourced.source
-          sourced.node)
+        parse_chat_element ~dir ~loader ~preserve_child_sources:canonical_sources sourced)
     in
     of_chat_elements parsed_elements |> validate_scripts
+  ;;
+
+  let parse_chat_inputs_without_preprocessing ?source ~source_loader ~dir content =
+    parse_inputs
+      ~parse_document:parse
+      ~preprocess:Fn.id
+      ~canonical_sources:false
+      ?source
+      ~source_loader
+      ~dir
+      content
+  ;;
+
+  let parse_chat_inputs ?source ?source_loader ~dir content =
+    parse_inputs
+      ~parse_document:parse
+      ~preprocess:Meta_prompting.Preprocessor.preprocess
+      ~canonical_sources:false
+      ?source
+      ?source_loader
+      ~dir
+      content
+  ;;
+
+  type parsed_bundle =
+    { root : top_level_elements list
+    ; agents : (string * top_level_elements list) list
+    }
+
+  let parse_source_bundle ~dir bundle =
+    let reads = ref 0
+    and bytes = ref 0
+    and tokens = ref 0 in
+    let queued = Queue.create ()
+    and seen = Hash_set.create (module String) in
+    let loader =
+      Chatmd_source_bundle.loader bundle ~root:dir
+      |> Source_loader.with_observer ~f:(fun _ text ->
+        incr reads;
+        if !reads > 1024 || String.length text > (8 * 1024 * 1024) - !bytes
+        then failwith "generated source expansion limit exceeded";
+        bytes := !bytes + String.length text)
+      |> Source_loader.with_agent_observer ~f:(fun source ->
+        Queue.enqueue queued (Source_loader.relative_path source))
+    in
+    let parse_document content =
+      if not (Stdlib.String.is_valid_utf_8 content)
+      then failwith "generated ChatMD source must be valid UTF-8";
+      Meta_prompting.Preprocessor.validate_inert content |> Result.ok_or_failwith;
+      let depth = ref 0
+      and next = Chatmd_lexer.create () in
+      let token lexbuf =
+        incr tokens;
+        if !tokens > 100_000 then failwith "generated source token limit exceeded";
+        let token = next lexbuf in
+        (match token with
+         | Chatmd_parser.START _ -> incr depth
+         | END _ -> decr depth
+         | _ -> ());
+        if !depth > 128 then failwith "generated markup nesting limit exceeded";
+        token
+      in
+      let document = Chatmd_parser.document token (Lexing.from_string content) in
+      let rec check = function
+        | Ast.Text _ -> ()
+        | Ast.Element (tag, attrs, children) ->
+          let has name = List.exists attrs ~f:(fun (key, _) -> String.equal key name) in
+          if
+            (Ast.tag_equal tag Ast.Agent || (Ast.tag_equal tag Ast.Tool && has "agent"))
+            && not (has "local")
+          then failwith "generated agent definitions must use bundled local sources";
+          List.iter children ~f:check
+      in
+      List.iter document ~f:check;
+      document
+    in
+    let parse_file file =
+      Hash_set.add seen file;
+      let source = Source_loader.root loader ~file |> Result.ok_or_failwith in
+      let content =
+        Source_loader.read_bounded
+          ~max_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
+          loader
+          source
+        |> Result.ok_or_failwith
+      in
+      parse_inputs
+        ~parse_document
+        ~preprocess:Fn.id
+        ~canonical_sources:true
+        ~source:file
+        ~source_loader:loader
+        ~dir
+        content
+    in
+    let root = parse_file (Chatmd_source_bundle.root_file bundle) in
+    let agents = ref [] in
+    while not (Queue.is_empty queued) do
+      let file = Queue.dequeue_exn queued in
+      if not (Hash_set.mem seen file)
+      then (
+        let elements = parse_file file in
+        agents := (file, elements) :: !agents)
+    done;
+    { root; agents = List.rev !agents }
   ;;
 end
 

@@ -57,6 +57,7 @@ let initial_state env workspace =
     Agent_session.Session_state.Spec.
       { protocol
       ; prompt_definition_id = None
+      ; delegation = None
       ; prompt_revision_id = Agent_protocol.Id.Prompt_revision.create ()
       ; workspace_instance
       ; permission_profile = "review"
@@ -84,6 +85,12 @@ let actor ~sw ~env state =
       { now = (fun () -> timestamp env)
       ; create_attachment_id = Agent_protocol.Id.Attachment.create
       ; create_reclaim_token = (fun () -> "review-reclaim-token")
+      ; job_results = None
+      ; monotonic_now = (fun () -> Mtime.min_stamp)
+      ; schedule_limits = Agent_session.Staged_schedules.default_limits
+      ; notification_limits = Agent_session.Staged_notifications.default_limits
+      ; ingress_limits = Agent_session.Staged_ingress.default_limits
+      ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
       ; state_committed = (fun _ _ -> ())
       }
 ;;
@@ -113,15 +120,29 @@ let invocation secret =
 let job_succeeded (job : Agent_protocol.Job.t) =
   match job.status, job.delivery with
   | Succeeded, Not_required -> true
-  | (Queued | Running | Waiting_permission _ | Failed _ | Cancelled | Interrupted _), _
-  | Succeeded, (Pending | Delivered _) -> false
+  | ( ( Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Failed _
+      | Cancelled
+      | Interrupted _ )
+    , _ )
+  | Succeeded, (Pending | Delivered _ | Discarded _) -> false
 ;;
 
 let job_failed (job : Agent_protocol.Job.t) =
   match job.status, job.delivery with
   | Failed _, Not_required -> true
-  | (Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _), _
-  | Failed _, (Pending | Delivered _) -> false
+  | ( ( Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Cancelled
+      | Interrupted _ )
+    , _ )
+  | Failed _, (Pending | Delivered _ | Discarded _) -> false
 ;;
 
 let permission state now secret =
@@ -129,7 +150,7 @@ let permission state now secret =
     { id = Agent_protocol.Id.Permission.create ()
     ; session_id = state.Agent_session.Session_state.identity.session_id
     ; generation = state.identity.generation
-    ; operation_id = Agent_protocol.Id.Operation.create ()
+    ; owner = Operation (Agent_protocol.Id.Operation.create ())
     ; call_id = "review-timeout"
     ; tool_name = "write_file"
     ; runtime_identity = Some "identity-digest"

@@ -17,7 +17,6 @@ the daemon is not permission to disclose it to a tool.
 | `HOME` | Home expansion, cache/config defaults and `${home}`. An explicit embedding path can override the relevant context. |
 | `PWD` | Launch-directory capture in executable adapters; no remote workspace override. Use a consistent physical cwd and environment. |
 | `TMPDIR` | Embedded transient data-root base, default `/tmp`; it is not the configured daemon temporary-workspace catalog. |
-| `OCHAT_SHELL_RESOURCE_RUNNER` | Optional explicit resource-limit helper path used while building shell runtimes. See [helper reference](../bin/ochat_shell_resource_runner.doc.md). |
 
 Sources: [response provider](../../lib/openai/responses.ml),
 [foreground timeout](../../lib/chat_response/agent_response_loop.ml),

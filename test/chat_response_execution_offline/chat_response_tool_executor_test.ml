@@ -41,6 +41,33 @@ let print_output = function
   | Content _ -> failwith "expected text output"
 ;;
 
+let%expect_test "driver fork interception preserves an explicitly selected replacement" =
+  List.iter [ Functions.fork.run_with_progress; runner ] ~f:(fun selected ->
+    let events = Queue.create () in
+    Chat_response.Tool_call.run_tool
+      ~kind:Function
+      ~call_id:"fork-call"
+      ~name:"fork"
+      ~payload:"selected result"
+      ~tool_tbl:(Hashtbl.create (module String))
+      ~runner:selected
+      ~on_fork:(Some (fun ~invocation:_ ~call_id:_ ~arguments:_ -> Text "driver fork"))
+      ~on_tool_execution:(Queue.enqueue events)
+      ()
+    |> print_output;
+    Queue.iter events ~f:(fun event -> print_endline (show_event event)));
+  [%expect
+    {|
+    driver fork
+    started fork-call fork function selected result
+    finished fork-call returned
+    selected result
+    started fork-call fork function selected result
+    progress fork-call append working
+    finished fork-call returned
+    |}]
+;;
+
 let%expect_test "emits ordered lifecycle around progress and final result" =
   let events = Queue.create () in
   Executor.run

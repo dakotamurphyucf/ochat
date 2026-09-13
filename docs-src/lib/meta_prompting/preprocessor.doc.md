@@ -93,3 +93,10 @@ invoked.
 
 _Last updated: {{DATE}}_
 
+
+## Non-executing generated-source validation
+
+`validate_inert` rejects the `<!-- META_REFINE -->` marker without consulting
+environment configuration or invoking refinement. Generated bundle parsing uses
+this check throughout its ChatMD closure and bypasses `preprocess` entirely.
+The ordinary authored-file preprocessing behavior described above is unchanged.

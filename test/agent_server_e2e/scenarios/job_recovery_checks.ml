@@ -28,6 +28,8 @@ let job session retry_policy =
     ; completed_at = None
     ; result = None
     ; delivery = Pending
+    ; launch = None
+    ; progress = None
     }
 ;;
 
@@ -120,6 +122,7 @@ let retry_case env environment name policy =
               owner
               ~job_id:queued.id
               ~generation:queued.generation
+              ~attempt:1
               (Agent_session.Runtime_builder.Model_succeeded `Null)))
         "late completion overwrote a terminal retry";
       let after = Actor.state owner |> F.protocol_ok in

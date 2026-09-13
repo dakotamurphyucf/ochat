@@ -12,6 +12,7 @@ type options =
   { implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
@@ -19,6 +20,11 @@ type options =
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; qualify_chatml_extensions : bool
+  ; session_helpers : Agent_session.Session_management_channel.grant list
+  ; independent_lifetime_policy : string option
+  ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 
@@ -62,6 +68,7 @@ type health_services =
 let default_options =
   { implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
+  ; extension_host = Daemon
   ; features =
       [ "attachments.multi_client"
       ; "events.durable"
@@ -70,6 +77,7 @@ let default_options =
       ; "sessions.durable"
       ; "workspaces.configured"
       ]
+      @ Agent_protocol.Extension_capabilities.known_features
   ; protocol_limits =
       { max_request_bytes = 16 * 1024 * 1024
       ; max_event_bytes = 16 * 1024 * 1024
@@ -97,6 +105,29 @@ let default_options =
       ; event_replay_capacity = 100_000
       ; max_attachments_per_session = 1_024
       ; subscriber_queue_capacity = 512
+      ; job_result_inline_bytes = 64 * 1024
+      ; job_result_max_bytes = 9 * 1024 * 1024
+      ; job_result_recovery_max_count = 4096
+      ; delegation_recovery_max_count = 4096
+      ; delegation_max_depth = 32
+      ; managed_submission_max_count = Some 4096
+      ; managed_stop_max_count = Some 4096
+      ; managed_message_max_bytes = Some (256 * 1024)
+      ; managed_output_page_max_bytes = 256 * 1024
+      ; delegation_recovery_max_bytes = 67108864
+      ; delegation_artifact_max_entries = 65536
+      ; delegation_artifact_max_bytes = 67108864
+      ; job_result_recovery_max_bytes = 64 * 1024 * 1024
+      ; subscriptions = Agent_session.Staged_subscriptions.default_limits
+      ; schedules = Agent_session.Staged_schedules.default_limits
+      ; notifications = Agent_session.Staged_notifications.default_limits
+      ; ingress = Agent_session.Staged_ingress.default_limits
+      ; job_result_collection =
+          { max_intents = 4096
+          ; max_entries = 65_536
+          ; max_bytes = 256 * 1024 * 1024
+          ; max_file_bytes = 64 * 1024 * 1024
+          }
       }
   ; quota_limits =
       { global_running_sessions = 256
@@ -106,6 +137,11 @@ let default_options =
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
   ; model_post_stream = None
+  ; qualify_chatml_extensions = true
+  ; session_helpers = []
+  ; independent_lifetime_policy = None
+  ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
+  ; authoring_validation_host = None
   ; oauth_resolver = None
   }
 ;;
@@ -114,6 +150,7 @@ let status t = !(t.status_ref)
 let dispatcher t = t.dispatcher
 let registry t = t.registry
 let store t = t.store
+let factory t = t.factory
 let blob_store t = t.blob_store
 let prompts t = t.prompts
 let workspaces t = t.workspaces
@@ -199,6 +236,7 @@ let all_scopes =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
 ;;
 
@@ -291,15 +329,42 @@ let implementation options =
     ~version:options.implementation_version
 ;;
 
-let enabled_features options requested =
+(* Discovery describes installed host services, never a session's tool grants.
+   Transient embedded sessions retain the in-process workflow services but cannot
+   create persisted children. Feature strings alone cannot enable a service. *)
+let extension_capabilities options config =
+  let available_features =
+    match options.qualify_chatml_extensions, options.extension_host with
+    | false, _ | true, Direct -> []
+    | true, (Daemon | Embedded_durable) ->
+      Agent_protocol.Extension_capabilities.known_features
+    | true, Embedded_transient ->
+      List.filter Agent_protocol.Extension_capabilities.known_features ~f:(fun name ->
+        not (String.equal name "agent.delegation.v1"))
+  in
+  Agent_protocol.Extension_capabilities.create
+    ~host:options.extension_host
+    ~journal_flush:
+      (match durability config.Config.server with
+       | Flush -> Synced
+       | Buffered -> Buffered)
+    ~available_features
+  |> function
+  | Ok value -> value
+  | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+;;
+
+let enabled_features options capabilities requested =
   List.filter options.features ~f:(fun feature ->
     List.mem requested feature ~equal:String.equal)
+  |> Agent_protocol.Extension_capabilities.filter_available capabilities
 ;;
 
 let initialize
       env
       options
       ~event_replay_capacity
+      ~capabilities
       implementation
       store
       status_ref
@@ -311,7 +376,7 @@ let initialize
     Agent_protocol.Version.negotiate
       ~client_min:request.Agent_protocol.Initialize.Request.protocol_min
       ~client_max:request.protocol_max
-      ~supported:[ Agent_protocol.Version.initial ]
+      ~supported:[ Agent_protocol.Version.initial; Agent_protocol.Version.current ]
   in
   if Poly.equal !status_ref Draining || Poly.equal !status_ref Stopped
   then
@@ -321,13 +386,28 @@ let initialize
          ~message:"server is not accepting new connections"
          ~retryable:true
          ())
-  else
+  else (
+    let principal =
+      match
+        Agent_protocol.Version.compare
+          selected_version
+          Agent_protocol.Version.ingress_minimum
+        < 0
+      with
+      | false -> principal
+      | true ->
+        { principal with
+          Agent_protocol.Principal.scopes =
+            Set.remove principal.Agent_protocol.Principal.scopes Submit_ingress
+        }
+    in
     Agent_protocol.Initialize.Response.create
       ~protocol_name:"ochat.agent"
       ~selected_version
       ~implementation
       ~server_id:(Agent_store.Session_store.server_id store)
-      ~enabled_features:(enabled_features options request.features)
+      ~enabled_features:(enabled_features options capabilities request.features)
+      ~extensions:(Some capabilities)
       ~principal
       ~limits:options.protocol_limits
       ~event_retention:
@@ -336,7 +416,7 @@ let initialize
         ; oldest_replayable_sequence = None
         }
       ~timing:options.timing
-      ~server_time:(timestamp env)
+      ~server_time:(timestamp env))
 ;;
 
 let ready = function
@@ -367,8 +447,11 @@ let server_info (options : options) implementation (config : Config.t) store =
   Agent_protocol.Method_result.Server_info.
     { server_id = Agent_store.Session_store.server_id store
     ; implementation
-    ; protocol_version = Agent_protocol.Version.initial
-    ; features = options.features
+    ; protocol_version = Agent_protocol.Version.current
+    ; features =
+        Agent_protocol.Extension_capabilities.filter_available
+          (extension_capabilities options config)
+          options.features
     ; transports = transports config
     ; limits = options.protocol_limits
     ; unsafe_development_auth =
@@ -523,23 +606,6 @@ let health t ~include_details =
   server_health services Agent_protocol.Health.Request.{ include_details }
 ;;
 
-let register_recovered registry entries =
-  let rec loop registered = function
-    | [] -> Ok ()
-    | entry :: rest ->
-      let open Result.Let_syntax in
-      let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
-      (match
-         Session_registry.add registry ~session_id:state.identity.session_id entry
-       with
-       | Ok () -> loop (entry :: registered) rest
-       | Error _ as failure ->
-         List.iter ((entry :: rest) @ registered) ~f:(fun value -> value.close ());
-         failure)
-  in
-  loop [] entries
-;;
-
 let reload_diagnostic config code message remediation =
   Config.Diagnostic.
     { code
@@ -576,7 +642,8 @@ let config_watcher
         [ reload_diagnostic
             candidate
             "config.restart_required"
-            "server listener, storage, durability, or retention changes require restart"
+            "server listener, storage, durability, retention, or authoring package \
+             changes require restart"
             "Restart the daemon with the new server configuration."
         ]
     else (
@@ -643,6 +710,83 @@ let close_store_on_error store result =
 
 let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built prompts =
   let open Result.Let_syntax in
+  let%bind configured_helpers =
+    Session_helper_policy.grants
+      ~env
+      ~protected_paths:
+        ([ config.source_file; config.server.data_dir; config.server.unix_socket ]
+         @ Option.to_list config.server.http.static_tokens_file)
+      config.server.session_helpers
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    match configured_helpers, options.session_helpers with
+    | _ :: _, _ :: _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "configure session helpers through either server configuration or host \
+            callbacks")
+    | _ -> Ok ()
+  in
+  let options =
+    { options with session_helpers = configured_helpers @ options.session_helpers }
+  in
+  let%bind options =
+    match options.qualify_chatml_extensions with
+    | false -> Ok options
+    | true ->
+      Agent_session.Authoring_runtime.configure_host
+        ?host:options.authoring_validation_host
+        ~policy:Chat_response.One_off_request.default_policy
+        ()
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+      |> Result.bind ~f:(fun host ->
+        match config.server.authoring_budget with
+        | None -> Ok host
+        | Some budget ->
+          (match Chat_response.Authoring_validation.configured_context_budget host with
+           | Some previous
+             when not
+                    (Chat_response.Authoring_validation.equal_context_budget
+                       previous
+                       budget) ->
+             Error
+               (Agent_protocol.Error.invalid_request
+                  "Server authoring budgets conflict with the supplied host budgets.")
+           | None | Some _ ->
+             Chat_response.Authoring_validation.configure_context_budget host budget
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
+      |> Result.bind ~f:(fun host ->
+        match config.server.authoring_packages with
+        | [] -> Ok host
+        | files ->
+          let existing =
+            Chat_response.Authoring_validation.corpus host
+            |> Option.map ~f:Authoring_corpus.authored_packages
+            |> Option.value ~default:[]
+          in
+          (match existing with
+           | _ :: _ ->
+             Error
+               (Agent_protocol.Error.invalid_request
+                  "Configure authoring packages in either server configuration or the \
+                   supplied host, not both.")
+           | [] ->
+             let%bind packages =
+               Chat_response.Authoring_package_file.packages files
+               |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+             in
+             Chat_response.Authoring_validation.configure_authored host ~packages
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
+      |> Result.map ~f:(fun host ->
+        let host =
+          match options.extension_host with
+          | Embedded_transient ->
+            Chat_response.Authoring_validation.without_persisted_children host
+          | _ -> host
+        in
+        { options with authoring_validation_host = Some host })
+  in
   let%bind implementation = implementation options in
   let%bind http_authenticator = http_authenticator ~env config.server in
   let%bind oauth_bearer_validator = oauth_bearer_validator options config.server in
@@ -694,7 +838,9 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~sw
       ~env
       ~store
+      ~registry
       ~idempotency_store
+      ~blob_store
       ~prompts
       ~workspaces:built.Catalog_builder.workspaces
       ~permission_profiles:built.permission_profiles
@@ -704,6 +850,11 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~tool_dir
       ~home
       ~model_post_stream:options.model_post_stream
+      ~qualify_chatml_extensions:options.qualify_chatml_extensions
+      ~session_helpers:options.session_helpers
+      ~independent_lifetime_policy:options.independent_lifetime_policy
+      ~chatml_runtime_policy:options.chatml_runtime_policy
+      ~authoring_validation_host:options.authoring_validation_host
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
@@ -713,24 +864,44 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   in
   Session_registry.index_all registry indexed_sessions;
   Session_registry.install_loader registry (Session_factory.recover_session factory);
-  let%bind recovered = Session_factory.recover_sessions factory in
-  let%bind () = register_recovered registry recovered in
+  let%bind _ = Session_factory.recover_sessions factory in
+  let%bind () = Session_factory.reconcile_generated_creations factory in
   let pinned_revisions =
-    List.filter_map indexed_sessions ~f:(fun entry ->
+    List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
       entry.Agent_store.Session_index.Entry.session.prompt_revision)
   in
   ignore
-    (Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-       prompts
-       ~additional:pinned_revisions
+    (Agent_store.Delegation_store.with_artifact_retention
+       (Agent_store.Session_store.delegations store)
+       ~max_records:factory_limits.delegation_recovery_max_count
+       ~max_bytes:factory_limits.delegation_recovery_max_bytes
+       ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
+       ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
+       ~f:(fun generated_revisions ->
+         Agent_session.Prompt_catalog.prune_unreferenced_artifacts
+           prompts
+           ~additional:(generated_revisions @ pinned_revisions))
      : (int, Agent_store.Store_error.t) result);
   let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
   let startup_time = timestamp env in
-  let%bind () = Job_scheduler.reconcile_recovered ~registry in
+  let%bind () =
+    Job_scheduler.reconcile_recovered
+      ~registry
+      ~max_count:factory_limits.job_result_recovery_max_count
+      ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
+  in
   let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
-  let%bind () = Session_factory.complete_index_recovery factory recovered in
+  let%bind () =
+    Session_factory.complete_index_recovery factory (Session_registry.entries registry)
+  in
   let start_scheduler =
-    Start_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~queue:start_queue
+    Start_scheduler.start
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~queue:start_queue
+      ~resume_initial_starts:(fun () ->
+        Session_factory.resume_generated_initial_starts factory)
   in
   let job_scheduler =
     Job_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~capacity:job_capacity
@@ -739,10 +910,11 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     Permission_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
   in
   let schedule_scheduler =
-    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
+    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.mono_clock env) ~registry
   in
   let maintenance =
     Maintenance.start
+      ~env
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~every:60.
@@ -797,6 +969,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
            env
            options
            ~event_replay_capacity:factory_limits.event_replay_capacity
+           ~capabilities:(extension_capabilities options config)
            implementation
            store
            status_ref)
@@ -805,6 +978,8 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~server_health:(server_health health_services)
       ~cancel_job:(Job_scheduler.cancel job_scheduler)
       ~create_session:(Session_factory.create_session factory)
+      ~prepare_session_start:(Session_factory.prepare_session_start factory)
+      ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
   in
   let dispatcher = Dispatcher.create handler in
@@ -845,6 +1020,13 @@ let start
   =
   Mirage_crypto_rng_unix.use_default ();
   let open Result.Let_syntax in
+  let%bind () =
+    match options.qualify_chatml_extensions with
+    | false -> Ok ()
+    | true ->
+      Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
+      |> Agent_session.Automatic_turn_budget.validate
+  in
   let%bind store =
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store
@@ -885,11 +1067,21 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
 ;;
 
 let shutdown_sessions t =
-  match
-    Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
-      Ok (Session_registry.shutdown t.registry))
-  with
-  | Ok () | Error `Timeout -> ()
+  (* Admission is already closed. Let callbacks that own a checkpoint finish
+     within the configured grace, rather than needlessly leaving an ambiguous
+     interrupted event on an otherwise orderly restart. Never replay such an
+     event: if the grace expires, runtime retirement still cancels it normally.
+     Registry teardown itself is cancellation-protected and must always run. *)
+  Eio.Cancel.protect (fun () ->
+    (match
+       Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.shutdown_grace_seconds (fun () ->
+         Eio.Fiber.both
+           (fun () -> Schedule_scheduler.await_idle t.schedule_scheduler)
+           (fun () -> Job_scheduler.await_deliveries_idle t.job_scheduler);
+         Ok ())
+     with
+     | Ok () | Error `Timeout -> ());
+    Session_registry.shutdown t.registry)
 ;;
 
 let shutdown t =

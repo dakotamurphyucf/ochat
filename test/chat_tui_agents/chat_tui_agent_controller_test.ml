@@ -66,6 +66,7 @@ let page_name model =
   | Chat -> "Chat"
   | Agent -> "Agent"
   | Shell_security -> "Shell_security"
+  | Work -> "Work"
 ;;
 
 let start model =
@@ -174,7 +175,9 @@ let%expect_test "Agent Escape, Ctrl-G, and printable keys preserve Chat state" =
     |}]
 ;;
 
-let%expect_test "Agent Escape returns to Chat before clearing Visual selection and cancelling" =
+let%expect_test
+    "Agent Escape returns to Chat before clearing Visual selection and cancelling"
+  =
   let model = make_model ~mode:Model.Normal () in
   start model;
   Model.set_active_page model Agent;

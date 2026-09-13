@@ -11,10 +11,12 @@ type turn_rate_limit =
   { max_turns : int
   ; window_ms : int
   }
+[@@deriving equal, sexp]
 
 type pause_condition =
   | Pause_followup_turns
   | Pause_internal_event_drains
+[@@deriving equal, sexp]
 
 type budget_policy =
   { max_self_triggered_turns : int
@@ -23,6 +25,7 @@ type budget_policy =
   ; turn_rate_limit : turn_rate_limit option
   ; pause_conditions : pause_condition list
   }
+[@@deriving equal, sexp]
 
 (** Host/runtime continuation policy.
 
@@ -34,6 +37,7 @@ type policy =
   ; honor_request_compaction : bool
   ; budget : budget_policy
   }
+[@@deriving equal, sexp]
 
 type continue_decision =
   [ `Stop

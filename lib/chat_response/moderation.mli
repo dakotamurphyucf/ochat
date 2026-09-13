@@ -31,6 +31,8 @@ module Phase : sig
     | Post_tool_response
     | Turn_end
     | Internal_event
+    | Tool_invoked
+    | Tool_observed
   [@@deriving sexp, compare]
 
   val to_string : t -> string
@@ -110,7 +112,9 @@ module Context : sig
     }
   [@@deriving sexp]
 
-  val to_value : t -> Lang.value
+  (** Optional active control covers incremental JSON projection, record/array
+      allocation estimates and the aggregate context value bound. *)
+  val to_value : ?control:Lang.execution_control -> t -> Lang.value
 end
 
 module Event : sig
@@ -126,6 +130,7 @@ module Event : sig
 
   val phase : t -> Phase.t
   val to_value : t -> Lang.value
+  val to_value_with_control : control:Lang.execution_control option -> t -> Lang.value
 end
 
 module Projection : sig
@@ -148,6 +153,17 @@ module Projection : sig
     -> available_tools:Res.Request.Tool.t list
     -> session_meta:Jsonaf.t
     -> t * Context.t
+
+  val project_context_with_control
+    :  control:Lang.execution_control option
+    -> projection:t
+    -> session_id:string
+    -> now_ms:int
+    -> phase:Phase.t
+    -> history:Res.Item.t list
+    -> available_tools:Res.Request.Tool.t list
+    -> session_meta:Jsonaf.t
+    -> t * Context.t
 end
 
 module Entry_projection : sig
@@ -156,6 +172,18 @@ module Entry_projection : sig
 
   val project_context
     :  session_id:string
+    -> now_ms:int
+    -> phase:Phase.t
+    -> history:History_entry.t list
+    -> available_tools:Res.Request.Tool.t list
+    -> session_meta:Jsonaf.t
+    -> Context.t
+
+  (** Project history incrementally under the caller's execution budget before
+      converting the full context to ChatML values. *)
+  val project_context_with_control
+    :  control:Lang.execution_control option
+    -> session_id:string
     -> now_ms:int
     -> phase:Phase.t
     -> history:History_entry.t list

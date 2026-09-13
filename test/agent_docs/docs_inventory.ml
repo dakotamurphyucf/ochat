@@ -53,7 +53,44 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "shell" ], "../guide/chatmd-shell-host-integration.md"
+    [ [ "authoring_context" ], "../guide/authoring-context-tool.md"
+    ; [ "authoring_corpus" ], "../guide/authoring-topic-corpus.md"
+    ; [ "authoring_sources" ], "../guide/authoring-source-bundle.md"
+    ; ( [ "background_request"
+        ; "background_execution"
+        ; "background_delivery"
+        ; "background_job_event"
+        ; "completion_contract"
+        ; "completion_projection"
+        ; "job_result_reference"
+        ; "standalone_delivery"
+        ; "authoring"
+        ; "generated_admission"
+        ; "generated_definition"
+        ; "generated_session_request"
+        ; "generated_session_tool"
+        ; "managed_session_service"
+        ; "session_management"
+        ; "managed_session_tool"
+        ; "managed_send_tool"
+        ; "managed_read_tool"
+        ; "managed_wait_tool"
+        ; "managed_stop"
+        ; "managed_output_cursor"
+        ; "managed_output_page"
+        ; "managed_submission"
+        ; "agent_tool_contract"
+        ; "authored_agent"
+        ; "delegation_store"
+        ; "delegation_authority"
+        ; "delegation_lifecycle"
+        ; "runtime_activity"
+        ; "delegated_runtime"
+        ; "independent_resources"
+        ]
+      , "../agent-server/extensibility-foundations.md" )
+    ; [ "request_channel" ], "../bin/ochat_agent_helper.doc.md"
+    ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"
     ; ( [ "transport"; "protocol"; "http"; "stdio"; "client" ]
       , "../agent-server/protocol.md" )
     ; ( [ "persist"; "store"; "recovery"; "migration"; "retention" ]
@@ -99,7 +136,8 @@ let module_rows env root =
   |> List.filter ~f:(fun file ->
     String.is_prefix file ~prefix:"lib/agent_"
     || List.exists
-         [ "chat_tui/"
+         [ "authoring_sources/"
+         ; "chat_tui/"
          ; "chat_response/"
          ; "chatmd/"
          ; "chatml/"
@@ -166,7 +204,7 @@ let coverage env root =
      32–34 embedding, security and operations; 35 testing. This is documentation\n\
      coverage, not a fresh assertion that every historical acceptance gate ran here.\n\n\
      ## Contract inventories\n\n\
-     All 38 methods, scopes, events and typed payloads are indexed in the\n\
+     All supported methods, scopes, events and typed payloads are indexed in the\n\
      [protocol](../agent-server/protocol.md) and generated \
      [types](../agent-server/protocol-types.md).\n\
      All eight routes are in [HTTP](../agent-server/transports/http.md).\n\

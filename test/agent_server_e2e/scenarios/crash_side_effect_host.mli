@@ -4,3 +4,14 @@
     before returning to the tool worker, so no tool-completion acknowledgement
     can occur. The parent must SIGKILL/reap this test-only host. *)
 val run : Eio_unix.Stdenv.base -> config_path:string -> marker:string -> unit
+
+(** Shared private host setup for deterministic crash scenarios. *)
+val load_config : Eio_unix.Stdenv.base -> string -> Agent_server.Config.t
+
+val listener
+  :  sw:Eio.Switch.t
+  -> Eio_unix.Stdenv.base
+  -> Agent_server.Daemon.t
+  -> Agent_server.Config.t
+  -> Agent_server.Daemon.options
+  -> unit

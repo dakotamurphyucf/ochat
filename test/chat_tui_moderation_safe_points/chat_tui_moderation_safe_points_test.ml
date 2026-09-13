@@ -210,7 +210,12 @@ let create_moderator
          ())
   in
   Chat_response.In_memory_stream.
-    { manager; session_id = "session-1"; session_meta = `Null; runtime_policy }
+    { manager
+    ; session_id = "session-1"
+    ; session_meta = `Null
+    ; runtime_policy
+    ; event_handlers = None
+    }
 ;;
 
 let runtime_policy_with_budget budget =
@@ -741,6 +746,49 @@ let%expect_test "automatic follow-up turns respect the sliding-window rate limit
   [%expect {| started=1 rate_notice=true |}]
 ;;
 
+let%expect_test "wide rate windows preserve TUI accounting between admission decisions" =
+  let model = model_of_history [ user_message "Hello" ] in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with
+        max_followup_turns = 10
+      ; turn_rate_limit = Some { max_turns = 2; window_ms = Int.max_value }
+      }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history:_ ~op_id:_ -> assert false)
+    (fun ~runtime ~send_internal:_ ~pump_until:_ ~stop ->
+       let attempts = Queue.create () in
+       List.iter [ 1; 2; 3 ] ~f:(fun _ ->
+         let state = runtime.App_runtime.session_controller in
+         let outcome =
+           match
+             App_runtime.decide_automatic_turn
+               ~policy:runtime_policy
+               ~followup_turns_started_since_user_submit:
+                 state.started_followup_turns_since_user_submit
+               ~started_followup_turn_timestamps_ms:
+                 state.started_followup_turn_timestamps_ms
+               ~now_ms:(-10)
+               ~reason:Idle_followup
+           with
+           | Allow_automatic_turn ->
+             App_runtime.note_started_turn runtime ~now_ms:(-10) ~reason:Idle_followup;
+             "allowed"
+           | Suppress_automatic_turn { notice_key; _ } -> notice_key
+         in
+         Queue.enqueue attempts outcome);
+       [%test_eq: int]
+         2
+         (List.length runtime.session_controller.started_followup_turn_timestamps_ms);
+       print_s [%sexp (Queue.to_list attempts : string list)];
+       ignore (stop () : bool));
+  [%expect {| (allowed allowed budget:turn-rate-limit) |}]
+;;
+
 let%expect_test "Pause_followup_turns suppresses automatic follow-up scheduling" =
   let history = [ user_message "Hello" ] in
   let model = model_of_history history in
@@ -892,7 +940,7 @@ let%expect_test "submit while streaming queues a deferred safe-point note" =
     pump_until (fun () -> App_runtime.has_deferred_user_notes runtime);
     print_messages (Chat_tui.Model.messages model);
     let safe_point_input = App_runtime.safe_point_input_source runtime in
-    let entries = safe_point_input.consume_entries () in
+    let entries = (safe_point_input.consume_entries ()).entries in
     List.iter entries ~f:(fun note ->
       print_endline (App_runtime.render_deferred_user_note { entry = note }));
     print_endline

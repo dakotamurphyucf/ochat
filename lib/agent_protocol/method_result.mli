@@ -139,6 +139,7 @@ type t =
   | Schedule_get of Schedule.t
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
+  | Ingress_submit of Ingress.Acknowledgement.t
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)

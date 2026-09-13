@@ -42,6 +42,12 @@ runs:
     - name: Install locked system dependencies
       shell: bash
       run: opam install . --deps-only --with-test --locked --depext-only --yes
+    - name: Install real sandbox for private helper integration tests
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install --yes bubblewrap apparmor apparmor-profiles
+        bash .github/scripts/check-linux-sandbox.sh
     - name: Reconcile locked dependencies
       shell: bash
       run: opam install . --deps-only --with-test --locked --yes

@@ -1,0 +1,17 @@
+<config model="gpt-6-astra" reasoning_effort="high"/>
+<developer>AUTHORED_SPECIALIST: call counter once for each request and return its value.</developer>
+<tool name="read_file"><read id="private" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = [0]
+let on_event ctx state event = match event with
+| `Tool_invoked(p) ->
+    let* result = Tool.call("read_file", `Object([{key = "root"; value = `String("private")}, {key = "file"; value = `String("value.txt")}])) in
+    (match result with
+     | `Ok(_) ->
+         let ignored = state[0] <- state[0] + 1 in
+         let* ignored = Invocation.resolve(p.context.invocation_id, `Complete(`String(String.concat("count-", to_string(state[0]))))) in
+         Task.pure(state)
+     | `Error(code) -> Task.fail(code))
+| _ -> Task.pure(state)
+</script>
+<tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>

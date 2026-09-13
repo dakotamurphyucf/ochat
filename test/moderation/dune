@@ -1,4 +1,11 @@
 (library
+ (name execution_gate_test)
+ (modules execution_gate_test)
+ (libraries core chat_response eio eio_main)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name chat_response_moderation_test)
  (modules chat_response_moderation_test)
  (libraries
@@ -46,7 +53,7 @@
 
 (library
  (name chatml_moderator_runtime_test)
- (modules chatml_moderator_runtime_test)
+ (modules chatml_moderator_runtime_test recorded_result_tests)
  (libraries core chatml chatml_builtin_modules chatml_moderator_runtime)
  (inline_tests)
  (preprocess
@@ -64,3 +71,24 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name moderator_invocation_test)
+ (modules moderator_invocation_test moderator_invocation_fixtures subscription_transaction_tests notification_transaction_tests)
+ (libraries core chat_response chatmd chatmd_shell_spec chatml chatml_host_runtime eio eio_main agent_protocol history_entry session)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name moderator_execution_budget_test)
+ (modules moderator_execution_budget_test)
+ (libraries core chat_response chatmd chatmd_shell_spec chatml chatml_execution eio eio_main history_entry session)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name moderator_native_requests_test)
+ (modules moderator_native_requests_test)
+ (libraries core chat_response chatmd chatml eio eio_main history_entry session)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))

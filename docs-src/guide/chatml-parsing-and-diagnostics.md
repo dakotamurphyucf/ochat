@@ -99,6 +99,27 @@ general style as the ChatML typechecker and runtime:
 This makes parser, typechecker, and runtime errors feel consistent even
 though they originate in different phases.
 
+Type-mismatch diagnostics render each type through a bounded buffer. A small
+in-memory type graph can share subtypes whose full textual expansion is very
+large. Error previews therefore stop at byte, traversal-node or depth limits and
+append `...`; the diagnostic retains its stage and source span. Ordinary
+`Chatml_typechecker.show_type` remains available for unrestricted type display.
+These preview limits do not restrict the language's types or evaluation.
+
+Compiler cancellation checkpoints also run while building these previews,
+including row collection and recursive-type unfolding. Unification passes its
+checkpoint into occurs checks, recursive-type validation and row merging;
+equality validation also cooperates with the inference callback. Cancellation
+exceptions propagate rather than being turned into a type mismatch. The host
+compiler still uses cooperative domain execution, so work between checkpoints
+is not subject to hard preemption.
+
+The same callback follows type inspection, alias and annotation conversion,
+surface and entrypoint-contract setup, value restriction, pattern coverage and
+record joins. Inference-owned callers pass it through the helper chain; direct
+trusted uses of those helpers may omit it. Cancellation of domain work is joined
+before control returns to the caller, and later compilations receive fresh state.
+
 ---
 
 ## 5. Precedence overview

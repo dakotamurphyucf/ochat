@@ -30,7 +30,7 @@ let schedule_delivered = function
 
 let job_delivered = function
   | Agent_protocol.Job.Delivered _ -> true
-  | Not_required | Pending -> false
+  | Not_required | Pending | Discarded _ -> false
 ;;
 
 let temporary_root env =
@@ -62,6 +62,39 @@ let with_fixture f =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)))
 ;;
 
+let%expect_test "invalid authoring files fail before creating an embedded durable store" =
+  with_fixture (fun env root workspace prompt_file ->
+    let file = Filename.concat root "invalid-package.json" in
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / file)
+      {|{"version":1,"packages":[],"grant":"all"}|};
+    let data_root = Filename.concat root "uncreated-store" in
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = Some data_root
+        ; start_immediately = true
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      (match
+         Agent_server.Embedded.start ~sw ~env ~authoring_package_files:[ file ] options
+       with
+       | Error error -> [%test_eq: Agent_protocol.Error.code] Invalid_request error.code
+       | Ok host ->
+         Agent_server.Embedded.close host;
+         failwith "invalid package started a host");
+      assert (not (Eio.Path.is_directory Eio.Path.(Eio.Stdenv.fs env / data_root)))));
+  print_endline "package rejected; durable store not created";
+  [%expect {| package rejected; durable store not created |}]
+;;
+
 let%expect_test "embedded host uses the shared protocol and process-bound session" =
   with_fixture (fun env root workspace prompt_file ->
     Eio.Switch.run (fun sw ->
@@ -79,6 +112,29 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
           }
       in
       let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let probe = Agent_server.Embedded.connect embedded in
+      let initialized =
+        Agent_client.Session_handle.initialize
+          probe
+          ~implementation_name:"host-metadata"
+          ~implementation_version:"test"
+        |> protocol_ok
+      in
+      let metadata = Option.value_exn initialized.extensions in
+      assert (
+        Agent_protocol.Extension_capabilities.equal_host metadata.host Embedded_transient);
+      assert (
+        Agent_protocol.Extension_capabilities.equal_journal_flush
+          metadata.journal_flush
+          Synced);
+      [%test_eq: string list]
+        [ "chatml.authoring.v1"
+        ; "chatml.background.v1"
+        ; "chatml.invocations.v1"
+        ; "chatml.notifications.v1"
+        ]
+        metadata.available_features;
+      Agent_client.Connection.close probe;
       let session_id = Agent_server.Embedded.session_id embedded in
       let response =
         Agent_client.Connection.request
@@ -173,7 +229,7 @@ let%expect_test "session creation returns the requested attachment after session
           }]));
   [%expect
     {|
-    ((attachment_mode Read_only) (first_event_present false) (revision 2)
+    ((attachment_mode Read_only) (first_event_present false) (revision 3)
      (sequence 1))
     |}]
 ;;
@@ -421,6 +477,21 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
       let create payload =
         Agent_client.Connection.request connection (Schedule_create (request payload))
       in
+      let overflow_rejected =
+        Agent_client.Connection.request
+          connection
+          (Schedule_create
+             { (request "overflow") with
+               due = After_ms 9_223_372_037_854
+             ; idempotency_key =
+                 Agent_protocol.Idempotency_key.of_string "schedule-overflow"
+                 |> protocol_ok
+             })
+        |> function
+        | Error error ->
+          Agent_protocol.Error.equal_code error.Agent_protocol.Error.code Invalid_request
+        | Ok _ -> false
+      in
       let first = create "same" |> protocol_ok in
       let second = create "same" |> protocol_ok in
       let first_id, second_id =
@@ -449,9 +520,14 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           { replayed_same_id =
               (Agent_protocol.Id.Schedule.compare first_id second_id = 0 : bool)
           ; conflict : bool
+          ; overflow_rejected : bool
           ; schedule_count = (List.length snapshot.schedules : int)
           }]));
-  [%expect {| ((replayed_same_id true) (conflict true) (schedule_count 1)) |}]
+  [%expect
+    {|
+    ((replayed_same_id true) (conflict true) (overflow_rejected true)
+     (schedule_count 1))
+    |}]
 ;;
 
 let%expect_test "due schedules fail visibly when the prompt has no moderator" =
@@ -640,13 +716,18 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
       let failed =
         match job.Agent_protocol.Job.status with
         | Failed _ -> true
-        | Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _
-          -> false
+        | Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Cancelled
+        | Interrupted _ -> false
       in
       let delivery_not_required =
         match job.delivery with
         | Agent_protocol.Job.Not_required -> true
-        | Pending | Delivered _ -> false
+        | Pending | Delivered _ | Discarded _ -> false
       in
       Agent_server.Embedded.close embedded;
       print_s
@@ -731,8 +812,13 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
       let failed =
         match job.Agent_protocol.Job.status with
         | Failed _ -> true
-        | Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _
-          -> false
+        | Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Cancelled
+        | Interrupted _ -> false
       in
       Agent_server.Embedded.close embedded;
       print_s

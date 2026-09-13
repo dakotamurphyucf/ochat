@@ -436,7 +436,11 @@ let validate_stream runtime (tool : S.t) =
 ;;
 
 let execute runtime (tool : S.t) ~invocation request =
-  let config = Shell_runtime.Runtime.executor_config runtime in
+  let config =
+    match Shell_runtime.Runtime.executor_config_for_call runtime with
+    | Ok config -> config
+    | Error message -> fail "shell.tool_scope_unavailable" message
+  in
   match tool.stream with
   | Finalized -> SA.Executor.run config request
   | Sanitized ->

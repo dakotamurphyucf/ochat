@@ -64,6 +64,8 @@ type pending_ui_request = Moderator_manager.pending_ui_request =
 val create
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t
+  -> ?env:Eio_unix.Stdenv.base
+  -> ?execution_policy:Chatml_execution.policy
   -> ?on_process_run:
        (Chatml_host_runtime.session
         -> command:string

@@ -52,7 +52,7 @@ let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sh
 
 let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256 =
   [%sexp
-    { schema = (1 : int)
+    { schema = (5 : int)
     ; prompt_definition_id =
         (definition.Prompt_definition.id : Agent_protocol.Id.Prompt_definition.t)
     ; canonical_source : string
@@ -78,6 +78,12 @@ let source_capture_loader root_path root captures dependencies =
     then
       failwith
         "captured imports and scripts must remain beneath the root prompt directory";
+    (match Hashtbl.find captures path with
+     | Some previous when not (String.equal previous contents) ->
+       failwith "prompt dependency changed during capture"
+     | None when Hashtbl.length captures >= 255 ->
+       failwith "prompt dependency file count limit exceeded"
+     | _ -> ());
     let previous_bytes =
       Hashtbl.find captures path |> Option.value_map ~default:0 ~f:String.length
     in
@@ -143,29 +149,104 @@ let inspection_diagnostics diagnostics =
 ;;
 
 let install artifact_store ~transaction_id artifact =
-  if
-    Agent_store.Prompt_artifact_store.exists
-      artifact_store
-      artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id
-  then Ok ()
-  else Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id artifact
+  let module Store = Agent_store.Prompt_artifact_store in
+  let open Result.Let_syntax in
+  let%bind () =
+    match Store.exists artifact_store artifact.Store.Artifact.revision_id with
+    | true -> Ok ()
+    | false -> Store.install artifact_store ~transaction_id artifact
+  in
+  let%bind retained = Store.load artifact_store artifact.revision_id in
+  (* Revision IDs are content-derived, while the manifest includes the original
+     creation timestamp. Catalog rebuilds must return the installed manifest,
+     not a candidate with a new timestamp under the same revision ID. Verify all
+     other candidate metadata before reusing that immutable artifact. *)
+  let%bind candidate =
+    Store.Artifact.create
+      ~revision_id:artifact.revision_id
+      ?prompt_definition_id:artifact.prompt_definition_id
+      ?canonical_source:artifact.canonical_source
+      ~root_relative_path:artifact.root_relative_path
+      ~root_chatmd:artifact.root_chatmd
+      ~sources:artifact.sources
+      ~parser_schema_version:artifact.parser_schema_version
+      ~runtime_schema_version:artifact.runtime_schema_version
+      ?shell_manifest_sha256:artifact.shell_manifest_sha256
+      ~created_at:retained.created_at
+      ()
+  in
+  match String.equal candidate.manifest_sha256 retained.manifest_sha256 with
+  | true -> Ok retained
+  | false ->
+    Error
+      (Agent_store.Store_error.Corrupt
+         "existing prompt revision differs from captured source")
 ;;
 
-let parse_artifact artifact_store artifact =
-  Agent_store.Prompt_artifact_store.verify_materialized_tree artifact_store artifact
+(* Use the same declaration/import semantics as restoration, without starting
+   executable preprocessing during the closure-version preflight. *)
+let validate_parser_elements ~parser_version elements =
+  List.iter elements ~f:(function
+    | Prompt.Chat_markdown.Tool (Persistent_agent _) when parser_version < 5 ->
+      failwith "persistent agent declarations require prompt parser schema version 5"
+    | Prompt.Chat_markdown.Authoring_help _ when parser_version < 4 ->
+      failwith "authoring help declarations require prompt parser schema version 4"
+    | Prompt.Chat_markdown.Tool (Inherited _) when parser_version < 3 ->
+      failwith "inherited tool references require prompt parser schema version 3"
+    | (Extension_script _ | Tool (Extension _) | Authoring_context _)
+      when parser_version < 2 ->
+      failwith "extension declarations require prompt parser schema version 2"
+    | _ -> ())
+;;
+
+let validate_parser_closure ~parser_version ~dir loader root_source =
+  let pending = Queue.create ()
+  and visited = Hash_set.create (module String) in
+  let loader = Source_loader.with_agent_observer loader ~f:(Queue.enqueue pending) in
+  Queue.enqueue pending root_source;
+  let bytes = ref 0 in
+  while not (Queue.is_empty pending) do
+    let source = Queue.dequeue_exn pending in
+    let path = Source_loader.relative_path source in
+    if not (Hash_set.mem visited path)
+    then (
+      if Hash_set.length visited >= 256
+      then failwith "prompt source closure limit exceeded";
+      Hash_set.add visited path;
+      let contents =
+        Source_loader.read_bounded ~max_bytes:((8 * 1024 * 1024) - !bytes) loader source
+        |> Result.ok_or_failwith
+      in
+      bytes := !bytes + String.length contents;
+      Prompt.Chat_markdown.parse_chat_inputs_without_preprocessing
+        ~source:path
+        ~source_loader:loader
+        ~dir
+        contents
+      |> validate_parser_elements ~parser_version)
+  done
+;;
+
+let parse_tree tree artifact =
+  let parser_version =
+    artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
+  in
+  if (parser_version < 1 || parser_version > 5) || artifact.runtime_schema_version <> 1
+  then failwith "unsupported prompt parser/runtime schema version";
+  Agent_store.Prompt_artifact_store.verify_tree ~root:tree artifact
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
   |> Result.ok_or_failwith;
-  let tree =
-    Agent_store.Prompt_artifact_store.materialized_tree
-      artifact_store
-      artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id
-  in
   let sources =
     (artifact.root_relative_path, artifact.root_chatmd)
     :: List.map artifact.sources ~f:(fun source -> source.relative_path, source.contents)
   in
   let loader = Source_loader.captured_filesystem ~root:tree ~sources in
+  let root_source =
+    Source_loader.root loader ~file:artifact.root_relative_path |> Result.ok_or_failwith
+  in
+  if parser_version < 5
+  then validate_parser_closure ~parser_version ~dir:tree loader root_source;
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs
       ~source:artifact.root_relative_path
@@ -173,7 +254,25 @@ let parse_artifact artifact_store artifact =
       ~dir:tree
       artifact.root_chatmd
   in
+  validate_parser_elements ~parser_version elements;
   tree, elements
+;;
+
+let parse_artifact artifact_store artifact =
+  parse_tree
+    (Agent_store.Prompt_artifact_store.materialized_tree
+       artifact_store
+       artifact.Agent_store.Prompt_artifact_store.Artifact.revision_id)
+    artifact
+;;
+
+let reparse ~definition ~artifact ~materialized_tree =
+  try
+    let tree, elements = parse_tree materialized_tree artifact in
+    Ok (Prompt_revision.create ~definition ~artifact ~materialized_tree:tree ~elements)
+  with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+  | exn -> Error [ exception_error ~source:definition.Prompt_definition.root_file exn ]
 ;;
 
 let restore ~artifact_store (definition : Prompt_definition.t) revision_id =
@@ -218,18 +317,14 @@ let build
             ~root_relative_path:(Filename.basename definition.root_file)
             ~root_chatmd:root
             ~sources
-            ~parser_schema_version:1
+            ~parser_schema_version:5
             ~runtime_schema_version:1
             ~shell_manifest_sha256
             ~created_at
             ()
           |> Result.map_error ~f:(fun error -> [ error ])
         in
-        let%bind () =
-          install artifact_store ~transaction_id artifact
-          |> Result.map_error ~f:List.return
-        in
-        Ok artifact
+        install artifact_store ~transaction_id artifact |> Result.map_error ~f:List.return
       in
       (match result with
        | Error errors -> Error (List.map errors ~f:store_error)

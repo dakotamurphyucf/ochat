@@ -1,0 +1,3 @@
+<tool name="agent_wait"/><tool name="agent_read"/><tool name="agent_status"/>
+<script id="watch_native_script" language="chatml" kind="tool" src="watch-native.chatml"/>
+<tool name="watch_session_request" type="chatml" script="watch_native_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="agent_wait"/><uses tool="agent_read"/><uses tool="agent_status"/></tool>

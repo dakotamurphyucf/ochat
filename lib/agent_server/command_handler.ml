@@ -28,6 +28,10 @@ type t =
   ; server_health : Agent_protocol.Health.Request.t -> Agent_protocol.Health.Response.t
   ; cancel_job : Agent_protocol.Id.Job.t -> unit
   ; create_session : create_session
+  ; prepare_session_start :
+      Session_registry.entry -> (unit, Agent_protocol.Error.t) result
+  ; workspace_retained :
+      Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result
   ; prepare_administration :
       Session_registry.entry
       -> Agent_session.Session_state.t
@@ -52,6 +56,8 @@ let create
       ~server_health
       ~cancel_job
       ~create_session
+      ~prepare_session_start
+      ~workspace_retained
       ~prepare_administration
   =
   { sw
@@ -72,6 +78,8 @@ let create
   ; server_health
   ; cancel_job
   ; create_session
+  ; prepare_session_start
+  ; workspace_retained
   ; prepare_administration
   }
 ;;
@@ -164,9 +172,9 @@ let has_active_workspace_lease entry ~conflict_domain:_ =
 
 let cleanup_temporary t entry state ~event =
   let instance = state.Agent_session.Session_state.spec.workspace_instance in
-  match instance.source_kind with
-  | Physical | Current -> Ok instance
-  | Temporary _ ->
+  match state.spec.delegation, instance.source_kind with
+  | Some _, _ | None, (Physical | Current) -> Ok instance
+  | None, Temporary _ ->
     let open Result.Let_syntax in
     let%bind _handle, protected_roots, expected_path = cleanup_context t entry instance in
     Agent_session.Workspace_cleanup.cleanup
@@ -247,16 +255,32 @@ let replacement_temporary t entry state =
 
 let cleanup_stopped_workspace t entry =
   let open Result.Let_syntax in
-  let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
-  let original = state.spec.workspace_instance in
   let%bind cleaned =
-    cleanup_temporary t entry state ~event:Agent_session.Workspace_cleanup.Session_stop
+    Runtime_owner.with_unloaded entry.Session_registry.runtime (fun () ->
+      let%bind state = Agent_session.Session_actor.state entry.actor in
+      let%bind retained = t.workspace_retained state in
+      match retained with
+      | true -> Ok (Agent_session.Session_state.summary state)
+      | false ->
+        let original = state.spec.workspace_instance in
+        let%bind cleaned =
+          cleanup_temporary
+            t
+            entry
+            state
+            ~event:Agent_session.Workspace_cleanup.Session_stop
+        in
+        (match cleaned.cleanup_completion with
+         | None -> Ok (Agent_session.Session_state.summary state)
+         | Some _ ->
+           let%bind replacement = resolve_replacement t entry original in
+           install_replacement entry replacement))
   in
-  if Option.is_none cleaned.cleanup_completion
-  then Ok (Agent_session.Session_state.summary state)
-  else (
-    let%bind replacement = resolve_replacement t entry original in
-    install_replacement entry replacement)
+  match cleaned with
+  | Some session -> Ok session
+  | None ->
+    Agent_session.Session_actor.state entry.actor
+    |> Result.map ~f:Agent_session.Session_state.summary
 ;;
 
 type idempotency =
@@ -274,6 +298,9 @@ let protected session_id key =
 ;;
 
 let idempotency = function
+  (* Ingress owns durable per-registration receipts and rechecks current
+     authority on every retry. The generic response cache must not bypass it. *)
+  | Agent_protocol.Command.Ingress_submit _ -> None
   | Agent_protocol.Command.Session_create request ->
     standard None request.Agent_protocol.Session.Create_request.idempotency_key
   | Session_attach request -> standard (Some request.session_id) request.idempotency_key
@@ -577,8 +604,7 @@ let handle_blob_read t context request =
         (Connection_context.principal context)
         (Agent_store.Blob_store.Handle.metadata handle)
     then Ok ()
-    else
-      Error (error Permission_denied "export blob requires its original principal scopes")
+    else Error (error Permission_denied "blob requires additional principal scopes")
   in
   if Int64.(request.offset > blob.byte_length)
   then Error (error Invalid_request "blob read offset exceeds the blob length")
@@ -768,7 +794,7 @@ let session_matches request (summary : Agent_protocol.Session.t) =
   && Option.value_map request.prompt_id ~default:true ~f:(fun prompt_id ->
     match summary.spec.prompt with
     | Catalog actual -> Agent_protocol.Id.Prompt_definition.compare prompt_id actual = 0
-    | Local_path _ -> false)
+    | Local_path _ | Generated _ -> false)
   && Option.value_map request.workspace_id ~default:true ~f:(fun workspace_id ->
     match summary.spec.workspace with
     | Configured actual ->
@@ -902,6 +928,7 @@ let rec handle_session_start t context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
+       let%bind () = t.prepare_session_start entry in
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () =
          Agent_session.Workspace_resolver.verify_available
@@ -920,10 +947,12 @@ let rec handle_session_start t context command_audit request =
            command_audit
            ~plain:(fun () ->
              Agent_session.Session_actor.start
+               ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~attachment_id:request.attachment_id)
            ~audited:(fun command_audit ->
              Agent_session.Session_actor.start_with_command_audit
+               ?expected_parent_stop_epoch:state.parent_stop_epoch
                entry.actor
                ~command_audit
                ~attachment_id:request.attachment_id)
@@ -1028,7 +1057,7 @@ let handle_session_stop t context command_audit request =
        in
        let%bind () =
          match session.observed_state with
-         | Agent_protocol.Session.Stopped -> Runtime_owner.unload entry.runtime
+         | Agent_protocol.Session.Stopped -> Runtime_owner.unload_and_wait entry.runtime
          | Queued_for_slot
          | Starting
          | Recovering
@@ -1187,11 +1216,9 @@ let render_export request snapshot entries =
                 ]
           })
     in
-    Agent_session.History_codec.all_of_protocol entries
+    Agent_session.Chatmd_export.render_protocol entries
     |> Result.map ~f:(fun history ->
-      ( "text/markdown; charset=utf-8"
-      , "session.chatmd"
-      , Agent_session.Chatmd_export.render history ))
+      "text/markdown; charset=utf-8", "session.chatmd", history)
 ;;
 
 let create_export_blob
@@ -1359,6 +1386,9 @@ let handle_session_delete t context request =
   in
   let%bind entry, state = find_visible_entry t context request.session_id in
   let%bind () = validate_delete_state request state in
+  (* Permanent deletion joins independent resource users before removing their
+     roots. Keep the actor registered while their cleanup acknowledges closure. *)
+  Runtime_owner.close_and_wait entry.runtime;
   let%bind (_ : Agent_session.Workspace_instance.t) =
     cleanup_temporary t entry state ~event:Agent_session.Workspace_cleanup.Session_delete
   in
@@ -1424,9 +1454,15 @@ let replacement_workspace t entry state keep_workspace =
   if keep_workspace
   then Ok None
   else (
-    match state.Agent_session.Session_state.spec.workspace_instance.source_kind with
-    | Temporary _ -> Result.map (replacement_temporary t entry state) ~f:Option.some
-    | Physical | Current -> Ok None)
+    match
+      ( state.Agent_session.Session_state.spec.delegation
+      , state.spec.workspace_instance.source_kind )
+    with
+    | Some _, Temporary _ ->
+      Error
+        (error Invalid_state "a generated child cannot replace its inherited workspace")
+    | None, Temporary _ -> Result.map (replacement_temporary t entry state) ~f:Option.some
+    | _, (Physical | Current) -> Ok None)
 ;;
 
 let handle_session_reset t context command_audit request =
@@ -1440,43 +1476,55 @@ let handle_session_reset t context command_audit request =
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let%bind () = validate_stopped_revision state request.expected_revision in
        let%bind () = Runtime_owner.unload entry.runtime in
-       let%bind workspace_instance =
-         replacement_workspace t entry state request.keep_workspace
-       in
-       let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
-       let options =
-         Agent_session.Session_actor.
-           { keep_history = request.keep_history
-           ; keep_tasks = request.keep_tasks
-           ; keep_grants = request.keep_grants
-           ; keep_labels = request.keep_labels
-           ; workspace_instance
-           }
-       in
-       let%bind _ =
-         actor_command
-           command_audit
-           ~plain:(fun () ->
-             Agent_session.Session_actor.reset
-               entry.actor
-               ~attachment_id:request.attachment_id
-               ~expected_revision:request.expected_revision
-               options)
-           ~audited:(fun command_audit ->
-             Agent_session.Session_actor.reset_with_command_audit
-               entry.actor
-               ~command_audit
-               ~attachment_id:request.attachment_id
-               ~expected_revision:request.expected_revision
-               options)
-       in
-       let%bind () =
-         Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
-           update_workspace_capacity entry instance)
-       in
-       let%map state = Agent_session.Session_actor.state entry.actor in
-       Agent_protocol.Method_result.Session_reset
-         (session_mutation (Agent_session.Session_state.summary state)))
+       Eio.Cancel.protect (fun () ->
+         Runtime_owner.with_administration entry.runtime (fun () ->
+           let%bind state = Agent_session.Session_actor.state entry.actor in
+           let%bind () = validate_stopped_revision state request.expected_revision in
+           let%bind retained = t.workspace_retained state in
+           let%bind () =
+             match retained with
+             | false -> Ok ()
+             | true ->
+               Error
+                 (error Conflict "session resources are retained by an independent child")
+           in
+           let%bind workspace_instance =
+             replacement_workspace t entry state request.keep_workspace
+           in
+           let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
+           let options =
+             Agent_session.Session_actor.
+               { keep_history = request.keep_history
+               ; keep_tasks = request.keep_tasks
+               ; keep_grants = request.keep_grants
+               ; keep_labels = request.keep_labels
+               ; workspace_instance
+               }
+           in
+           let%bind _ =
+             actor_command
+               command_audit
+               ~plain:(fun () ->
+                 Agent_session.Session_actor.reset
+                   entry.actor
+                   ~attachment_id:request.attachment_id
+                   ~expected_revision:request.expected_revision
+                   options)
+               ~audited:(fun command_audit ->
+                 Agent_session.Session_actor.reset_with_command_audit
+                   entry.actor
+                   ~command_audit
+                   ~attachment_id:request.attachment_id
+                   ~expected_revision:request.expected_revision
+                   options)
+           in
+           let%bind () =
+             Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
+               update_workspace_capacity entry instance)
+           in
+           let%map state = Agent_session.Session_actor.state entry.actor in
+           Agent_protocol.Method_result.Session_reset
+             (session_mutation (Agent_session.Session_state.summary state)))))
 ;;
 
 let current_prompt_revision t state =
@@ -1733,6 +1781,7 @@ let job_status_name = function
   | Agent_protocol.Job.Queued -> "queued"
   | Running -> "running"
   | Waiting_permission _ -> "waiting_permission"
+  | Waiting_completion _ -> "waiting_completion"
   | Succeeded -> "succeeded"
   | Failed _ -> "failed"
   | Cancelled -> "cancelled"
@@ -1766,8 +1815,7 @@ let handle_job_get t context request =
   let%bind entry, _ =
     find_visible_entry t context request.Agent_protocol.Job.Get_request.session_id
   in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  let%map job = find_job state request.job_id in
+  let%map job = Agent_session.Session_actor.read_job entry.actor ~job_id:request.job_id in
   Agent_protocol.Method_result.Job_get job
 ;;
 
@@ -1841,11 +1889,8 @@ let handle_schedule_get t context request =
 ;;
 
 let schedule_due now = function
-  | Agent_protocol.Schedule.At timestamp -> timestamp
-  | After_ms delay ->
-    Agent_protocol.Timestamp.to_time_ns now
-    |> Fn.flip Time_ns.add (Time_ns.Span.of_ms (Float.of_int delay))
-    |> Agent_protocol.Timestamp.of_time_ns
+  | Agent_protocol.Schedule.At timestamp -> Ok timestamp
+  | After_ms delay -> Agent_protocol.Timestamp.add_ms now delay
 ;;
 
 let handle_schedule_create t context command_audit request =
@@ -1858,6 +1903,7 @@ let handle_schedule_create t context command_audit request =
     (fun entry ->
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let now = now t in
+       let%bind next_due_at = schedule_due now request.due in
        let schedule =
          Agent_protocol.Schedule.
            { id = Agent_protocol.Id.Schedule.create ()
@@ -1865,11 +1911,13 @@ let handle_schedule_create t context command_audit request =
            ; generation = state.identity.generation
            ; payload = request.payload
            ; created_at = now
-           ; next_due_at = schedule_due now request.due
+           ; next_due_at
            ; misfire = request.misfire
            ; status = Scheduled
            ; delivery_count = 0
            ; last_delivery_at = None
+           ; delivery_cancellation = None
+           ; ownership = None
            }
        in
        let%map session =
@@ -1929,6 +1977,36 @@ let handle_schedule_cancel t context command_audit request =
            { schedule; mutation = mutation session })
 ;;
 
+let handle_ingress_submit t context (request : Agent_protocol.Ingress.Submit_request.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match Connection_context.protocol_version context with
+    | Some version
+      when Agent_protocol.Version.compare version Agent_protocol.Version.ingress_minimum
+           >= 0 -> Ok ()
+    | _ -> Error (error Incompatible_protocol "ingress.submit requires protocol 1.1")
+  in
+  let%bind entry, _ = find_visible_entry t context request.session_id in
+  let producer = (Connection_context.principal context).Agent_protocol.Principal.id in
+  let%map receipt =
+    Runtime_owner.submit_ingress
+      entry.runtime
+      ~producer
+      ~registration_id:request.registration_id
+      ~namespace:request.namespace
+      ~key:request.idempotency_key
+      ~payload:request.payload
+  in
+  Agent_protocol.Method_result.Ingress_submit
+    { session_id = request.session_id
+    ; registration_id = request.registration_id
+    ; event_id = receipt.id
+    ; idempotency_key = receipt.key
+    ; payload_sha256 = receipt.payload_sha256
+    ; accepted_at = receipt.accepted_at
+    }
+;;
+
 let mutation_attachment = function
   | Agent_protocol.Command.Session_start r -> Some (r.session_id, r.attachment_id)
   | Session_stop r -> Some (r.session_id, r.attachment_id)
@@ -1960,7 +2038,7 @@ let dispatch_authorized t ~context ~command_audit = function
     Result.map
       (t.initialize ~principal:(Connection_context.principal context) request)
       ~f:(fun response ->
-        Connection_context.mark_initialized context;
+        Connection_context.mark_initialized ~version:response.selected_version context;
         Agent_protocol.Method_result.Protocol_initialize response)
   | Protocol_ping request ->
     Ok (Agent_protocol.Method_result.Protocol_ping (t.ping request))
@@ -2013,6 +2091,7 @@ let dispatch_authorized t ~context ~command_audit = function
   | Schedule_get request -> handle_schedule_get t context request
   | Schedule_create request -> handle_schedule_create t context command_audit request
   | Schedule_cancel request -> handle_schedule_cancel t context command_audit request
+  | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
 let handle_authorized t ~context ~command_audit command =
@@ -2061,6 +2140,7 @@ let command_session_id = function
   | Schedule_get request -> Some request.session_id
   | Schedule_create request -> Some request.session_id
   | Schedule_cancel request -> Some request.session_id
+  | Ingress_submit request -> Some request.session_id
 ;;
 
 let audit_outcome

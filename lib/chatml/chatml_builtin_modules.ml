@@ -65,17 +65,33 @@ let value_to_string = Builtin_spec.value_to_string
 
 module BuiltinModules = struct
   let add_surface (env : env) (surface : Builtin_surface.surface) =
+    let implementation name (builtin : Builtin_spec.builtin) =
+      match env.control with
+      | None -> VBuiltin builtin.impl
+      | Some control ->
+        VBuiltin
+          (fun args ->
+            control.checkpoint ();
+            control.before_builtin ~name args;
+            let result = builtin.impl args in
+            control.check_value result;
+            control.checkpoint ();
+            result)
+    in
     List.iter surface.globals ~f:(fun builtin ->
-      set_var env builtin.name (VBuiltin builtin.impl));
+      set_var env builtin.name (implementation builtin.name builtin));
     List.iter surface.modules ~f:(fun builtin_module ->
-      let menv = create_env () in
+      let menv = create_env ?control:env.control () in
       List.iter builtin_module.exports ~f:(fun builtin ->
-        set_var menv builtin.name (VBuiltin builtin.impl));
+        set_var
+          menv
+          builtin.name
+          (implementation (builtin_module.name ^ "." ^ builtin.name) builtin));
       set_var env builtin_module.name (VModule menv))
   ;;
 
-  let create_env_with_surface (surface : Builtin_surface.surface) : env =
-    let env = create_env () in
+  let create_env_with_surface ?control (surface : Builtin_surface.surface) : env =
+    let env = create_env ?control () in
     add_surface env surface;
     env
   ;;

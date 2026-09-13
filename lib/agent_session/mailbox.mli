@@ -1,9 +1,12 @@
-(** Fiber-safe bounded two-lane mailbox. Priority messages are always removed
-    before normal messages already present. *)
+(** Fiber-safe bounded command mailbox plus a separate bounded transient lane.
+    Priority and normal commands share [capacity] slots; transient updates have
+    another [capacity] slots and cannot crowd out commands. Dequeue order is
+    priority, normal, then transient. Transient callers should use [try_push]. *)
 
 type priority =
   | Priority
   | Normal
+  | Transient
 
 type 'a t
 

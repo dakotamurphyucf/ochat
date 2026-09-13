@@ -38,3 +38,8 @@
     (see above).  Otherwise it runs {!Recursive_mp.refine} on [raw] and
     returns the improved prompt. *)
 val preprocess : string -> string
+
+(** Reject an explicit meta-refinement marker without running preprocessing.
+    Ambient enablement is deliberately ignored. Intended for generated source
+    parsing/validation, where source bytes must remain unchanged. *)
+val validate_inert : string -> (unit, string) result

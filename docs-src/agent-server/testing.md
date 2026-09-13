@@ -56,8 +56,21 @@ dune build @agent-e2e-pr
 
 Normal `runtest` does not require the opt-in E2E runner, live provider, manual TUI,
 load, or soak scenarios. `@agent-docs-check` validates the documentation/examples
-separately. `@agent-e2e-pr` selects smoke, transports, workspaces and multi-client
-checks. Read [the alias definitions](../../test/agent_server_e2e/dune) before
+separately. `@agent-e2e-pr` selects smoke, transports, workspaces, multi-client
+checks and `@agent-e2e-extensibility-pr`. The focused extensibility subset checks
+retained child provider settings across restart, invocation admission/publication
+without replaying an external effect, and recovery of a committed native child
+creation outcome. It also checks that native tool-start and nested trace events
+reach clients with secret arguments redacted. Recursive fork coverage exercises
+native, standalone ChatML and moderator-handled child tools, parent rejection
+before execution, and separation of child history from the root conversation.
+These use offline providers, production hosts and retained E2E artifacts. The
+required framework CI runs this alias in its E2E tier alongside the separate
+forced normal-test tier.
+
+The subset does not replace full runtime, permission, security, persistence and
+crash qualification. Use the affected aliases or `@agent-e2e-safe` for that wider
+matrix. Read [the alias definitions](../../test/agent_server_e2e/dune) before
 selecting a larger tier.
 
 The docs check covers local inline links and heading anchors throughout
@@ -93,6 +106,21 @@ These run under `@agent-docs-check`, without provider requests.
 | `@agent-e2e-load` | Bounded session/command, SSE/backpressure, reconnect, actor-unload and capacity loads. |
 | `@agent-e2e-safe` | Broad offline suite, including load; not a lightweight normal-test alias. |
 | `@agent-e2e-soak` | Explicit gated long-duration workload. |
+
+The crash matrix includes `invocation.admission-publication-no-replay`: an actual
+compiled standalone ChatML tool is interrupted by SIGKILL immediately after the
+invocation admission journal sync, after its outcome sync before provider
+publication, and while a nested native tool awaits approval. Two fresh daemons must preserve the original invocation context and
+publish one stable response. Unstarted handling becomes interrupted; a saved
+successful outcome is published without repeating its real file mutation. Live
+progress is observed through public snapshots; raw checkpoints are inspected only
+after the child has been killed and joined. The approval case must cancel the old
+wait and reject a late approval submitted through a new valid attachment.
+
+`job.committed-intent-launch-once` kills the daemon after a standalone ChatML
+handler saves its selected native job and Pending outcome, before worker launch.
+Recovery must launch that same job once, publish the original acknowledgement,
+deliver its result and retain identical job/receipt/history on a second reopening.
 
 E2E fixtures use private temporary directories, generated tokens and local
 listeners; they should not touch normal stores. Reports are written under

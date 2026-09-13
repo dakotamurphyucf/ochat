@@ -141,15 +141,27 @@ type infer_state =
   ; mutable id_checkpoints : int list
   ; mutable mu_id : int (* NEW: never reset *)
   ; span_types : typ SpanTbl.t
+  ; checkpoint : unit -> unit
+  ; mutable until_checkpoint : int
   }
 
-let create_state () : infer_state =
+let create_state ?(checkpoint = fun () -> ()) () : infer_state =
   { current_id = 0
   ; current_lvl = 0
   ; id_checkpoints = []
   ; mu_id = 0
   ; span_types = SpanTbl.create ()
+  ; checkpoint
+  ; until_checkpoint = 0
   }
+;;
+
+let checkpoint state =
+  state.until_checkpoint <- state.until_checkpoint - 1;
+  if state.until_checkpoint <= 0
+  then (
+    state.until_checkpoint <- 64;
+    state.checkpoint ())
 ;;
 
 let enter_level (state : infer_state) =
@@ -226,33 +238,35 @@ let rec_name_mem (needle : name) (haystack : name list) : bool =
   List.exists haystack ~f:(String.equal needle)
 ;;
 
-let rec substitute_rec_var ~(target : name) ~(replacement : typ) (ty : typ) : typ =
+let rec substitute_rec_var
+          ?(checkpoint = fun () -> ())
+          ~(target : name)
+          ~(replacement : typ)
+          (ty : typ)
+  : typ
+  =
+  checkpoint ();
+  let substitute = substitute_rec_var ~checkpoint ~target ~replacement in
   match ty with
-  | Fun (params, ret) ->
-    Fun
-      ( List.map params ~f:(substitute_rec_var ~target ~replacement)
-      , substitute_rec_var ~target ~replacement ret )
+  | Fun (params, ret) -> Fun (List.map params ~f:substitute, substitute ret)
   | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
-  | Con (name, args) ->
-    Con (name, List.map args ~f:(substitute_rec_var ~target ~replacement))
+  | Con (name, args) -> Con (name, List.map args ~f:substitute)
   | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
-  | Mu (binder, body) -> Mu (binder, substitute_rec_var ~target ~replacement body)
+  | Mu (binder, body) -> Mu (binder, substitute body)
   | Rec_var binder when String.equal binder target -> replacement
   | Rec_var _ -> ty
-  | Ref t -> Ref (substitute_rec_var ~target ~replacement t)
-  | Record row -> Record (substitute_rec_var ~target ~replacement row)
-  | Variant row -> Variant (substitute_rec_var ~target ~replacement row)
-  | Tuple ts -> Tuple (List.map ts ~f:(substitute_rec_var ~target ~replacement))
-  | Array t -> Array (substitute_rec_var ~target ~replacement t)
-  | Row (fields, tail) ->
-    Row
-      ( Env.map fields ~f:(substitute_rec_var ~target ~replacement)
-      , substitute_rec_var ~target ~replacement tail )
+  | Ref t -> Ref (substitute t)
+  | Record row -> Record (substitute row)
+  | Variant row -> Variant (substitute row)
+  | Tuple ts -> Tuple (List.map ts ~f:substitute)
+  | Array t -> Array (substitute t)
+  | Row (fields, tail) -> Row (Env.map fields ~f:substitute, substitute tail)
 ;;
 
-let unfold_mu (ty : typ) : typ =
+let unfold_mu ?checkpoint (ty : typ) : typ =
   match ty with
-  | Mu (binder, body) as mu -> substitute_rec_var ~target:binder ~replacement:mu body
+  | Mu (binder, body) as mu ->
+    substitute_rec_var ?checkpoint ~target:binder ~replacement:mu body
   | other -> other
 ;;
 
@@ -264,7 +278,9 @@ let unfold_mu (ty : typ) : typ =
 
 let instantiate (state : infer_state) ty =
   let table = Hashtbl.create (module String) in
-  let rec inst (seen : tv ref list) = function
+  let rec inst (seen : tv ref list) ty =
+    checkpoint state;
+    match ty with
     | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
     | Generic x ->
       (match Hashtbl.find table x with
@@ -297,7 +313,9 @@ let instantiate (state : infer_state) ty =
   universally-quantified (Generic) type variables.
 *)
 let generalise (state : infer_state) ty =
-  let rec gen (seen : tv ref list) = function
+  let rec gen (seen : tv ref list) ty =
+    checkpoint state;
+    match ty with
     | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
     | Var ({ contents = Bound t } as tvref) ->
       if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
@@ -317,8 +335,10 @@ let generalise (state : infer_state) ty =
   gen [] ty
 ;;
 
-let has_recursive_type (ty : typ) : bool =
-  let rec aux (seen : tv ref list) = function
+let has_recursive_type ?(checkpoint = fun () -> ()) (ty : typ) : bool =
+  let rec aux (seen : tv ref list) ty =
+    checkpoint ();
+    match ty with
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then true else aux (tv :: seen) t
@@ -335,7 +355,7 @@ let has_recursive_type (ty : typ) : bool =
   aux [] ty
 ;;
 
-let check_contractive (ty : typ) : (unit, string) result =
+let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) result =
   let rec check_list
             (seen : tv ref list)
             ~(target : name option)
@@ -367,6 +387,7 @@ let check_contractive (ty : typ) : (unit, string) result =
         (ty : typ)
     : (unit, string) result
     =
+    checkpoint ();
     match ty with
     | Fun (params, ret) ->
       (match check_list seen ~target ~guarded:true ~scope params with
@@ -414,14 +435,16 @@ let check_contractive (ty : typ) : (unit, string) result =
 
 (** --------------------------------------------------------------------- *)
 
-let merge_fields row =
-  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+let merge_fields ?(checkpoint = fun () -> ()) row =
+  let rec aux (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
+    match ty with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen then Env.empty, Var tv else aux (tv :: seen) seen_rec ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else aux seen (binder :: seen_rec) (unfold_mu mu)
+      else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Var _ as var -> Env.empty, var
     | Record r -> aux seen seen_rec r
@@ -442,9 +465,11 @@ let merge_fields row =
 
 (** --------------------------------------------------------------------- *)
 
-let occurs tv ty =
+let occurs ?(checkpoint = fun () -> ()) tv ty =
   let found = ref false in
-  let rec aux (seen : tv ref list) = function
+  let rec aux (seen : tv ref list) ty =
+    checkpoint ();
+    match ty with
     | Fun (ps, r) ->
       List.iter ps ~f:(aux seen);
       aux seen r
@@ -478,27 +503,30 @@ let occurs tv ty =
 
 (** --------------------------------------------------------------------- *)
 
-let ensure_contractive_type (ty : typ) : unit =
-  match check_contractive ty with
+let ensure_contractive_type ?checkpoint (ty : typ) : unit =
+  match check_contractive ?checkpoint ty with
   | Ok () -> ()
   | Error msg -> raise (Type_error msg)
 ;;
 
-let resolve_bound_type (ty : typ) : typ =
-  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+let resolve_bound_type ?(checkpoint = fun () -> ()) (ty : typ) : typ =
+  let rec aux (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
+    match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then mu
-      else aux seen (binder :: seen_rec) (unfold_mu mu)
+      else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | other -> other
   in
   aux [] [] ty
 ;;
 
-let rec can_infer_mu_through (ty : typ) : bool =
-  match resolve_bound_type ty with
+let rec can_infer_mu_through ?(checkpoint = fun () -> ()) (ty : typ) : bool =
+  checkpoint ();
+  match resolve_bound_type ~checkpoint ty with
   (* allow recursive *data* types *)
   | Variant _ | Record _ | Row _ | Tuple _ | Con _ -> true
   (* optionally allow recursion through rows wrapped in Record/Variant already covered *)
@@ -510,7 +538,7 @@ let rec can_infer_mu_through (ty : typ) : bool =
   | TInt | TFloat | Boolean | String | Unit -> false
   | Generic _ -> false
   | Var { contents = Free _ } -> false
-  | Var { contents = Bound t } -> can_infer_mu_through t
+  | Var { contents = Bound t } -> can_infer_mu_through ~checkpoint t
   | Mu _ -> true (* allow cycles involving explicit Mu types *)
   | Rec_var _ ->
     true (* likewise, though Rec_var shouldn't appear without Mu when well-formed *)
@@ -526,10 +554,11 @@ module MuEnv = struct
   let add = Map.set
 end
 
-let ensure_guarded_cycle (target : tv ref) (ty : typ) : unit =
+let ensure_guarded_cycle ?(checkpoint = fun () -> ()) (target : tv ref) (ty : typ) : unit =
   let rec bad (seen_tv : tv ref list) (seen_mu : name list) ~(guarded : bool) (t : typ)
     : bool
     =
+    checkpoint ();
     match t with
     (* If we hit the target var again, it's only OK if we're under a "guard". *)
     | Var tv' when phys_equal target tv' -> not guarded
@@ -546,7 +575,7 @@ let ensure_guarded_cycle (target : tv ref) (ty : typ) : unit =
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_mu
       then false
-      else bad seen_tv (binder :: seen_mu) ~guarded (unfold_mu mu)
+      else bad seen_tv (binder :: seen_mu) ~guarded (unfold_mu ~checkpoint mu)
     | Rec_var _ ->
       (* A well-formed program should not have unbound Rec_var here.
          For guardedness of inferred cycles, ignore it. *)
@@ -580,33 +609,61 @@ let rec unify (state : infer_state) lhs rhs =
       incr counter;
       !counter
   in
-  let rec go (env_l : MuEnv.t) (env_r : MuEnv.t) lhs rhs =
-    if phys_equal lhs rhs
+  let same_scope = Map.equal Int.equal in
+  let same_node lhs rhs =
+    phys_equal lhs rhs
+    ||
+    match lhs, rhs with
+    | Var left, Var right -> phys_equal left right
+    | _ -> false
+  in
+  (* Recursive data types are finite graphs. Retain assumptions only along the
+     current comparison path: siblings must still check their constraints after
+     earlier unifications have bound mutable variables. Binder environments are
+     part of the identity, so revisiting a node in another lexical scope does not
+     discharge a different obligation. Guardedness is checked when cycles form. *)
+  let rec go active (env_l : MuEnv.t) (env_r : MuEnv.t) lhs rhs =
+    checkpoint state;
+    if
+      (same_node lhs rhs && same_scope env_l env_r)
+      || List.exists active ~f:(fun (left, right, scope_l, scope_r) ->
+        same_node lhs left
+        && same_node rhs right
+        && same_scope env_l scope_l
+        && same_scope env_r scope_r)
     then ()
     else (
+      let active = (lhs, rhs, env_l, env_r) :: active in
       match lhs, rhs with
       | Fun (ps1, r1), Fun (ps2, r2) ->
         if List.length ps1 <> List.length ps2
         then raise (Type_error "Function arity mismatch");
-        List.iter2_exn ps1 ps2 ~f:(go env_l env_r);
-        go env_l env_r r1 r2
+        List.iter2_exn ps1 ps2 ~f:(go active env_l env_r);
+        go active env_l env_r r1 r2
       | Con (n1, a1), Con (n2, a2) ->
         if not (String.equal n1 n2) then raise (Type_error "Type constructor mismatch");
         if List.length a1 <> List.length a2
         then raise (Type_error "Type constructor arity mismatch");
-        List.iter2_exn a1 a2 ~f:(go env_l env_r)
+        List.iter2_exn a1 a2 ~f:(go active env_l env_r)
+      (* A free inference variable has no recursive binder interpretation. The
+         same cell remains equal under alpha-renamed Mu scopes; do not pass this
+         identity through the occurs check or relax identity for bound syntax. *)
+      | Var ({ contents = Free _ } as left), Var right when phys_equal left right -> ()
       | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
-        go env_l env_r t1 t2
+        go active env_l env_r t1 t2
       (* KEY CHANGE: Mu/Mu uses environments, not substitution. *)
       | Mu (b1, body1), Mu (b2, body2) ->
         let id = next_mu_id () in
         let env_l' = MuEnv.add env_l ~key:b1 ~data:id in
         let env_r' = MuEnv.add env_r ~key:b2 ~data:id in
-        go env_l' env_r' body1 body2
+        go active env_l' env_r' body1 body2
       (* Keep equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
-      | (Mu _ as mu), t | t, (Mu _ as mu) ->
-        ensure_contractive_type mu;
-        go env_l env_r (unfold_mu mu) t
+      | (Mu _ as mu), t ->
+        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) mu;
+        go active env_l env_r (unfold_mu ~checkpoint:(fun () -> checkpoint state) mu) t
+      | t, (Mu _ as mu) ->
+        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) mu;
+        go active env_l env_r t (unfold_mu ~checkpoint:(fun () -> checkpoint state) mu)
       (* KEY CHANGE: Rec_var equality consults the environments. *)
       | Rec_var x, Rec_var y ->
         (match MuEnv.find env_l x, MuEnv.find env_r y with
@@ -619,19 +676,20 @@ let rec unify (state : infer_state) lhs rhs =
         raise (Type_error "Cannot unify recursive type variable with non-recursive type")
       (* Your occurs-knot case (possibly gated to reject Fun recursion like x(x)) *)
       | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
-        if occurs tv t
+        if occurs ~checkpoint:(fun () -> checkpoint state) tv t
         then (
-          if not (can_infer_mu_through t) then raise (Type_error "Recursive types");
-          ensure_guarded_cycle tv t;
+          if not (can_infer_mu_through ~checkpoint:(fun () -> checkpoint state) t)
+          then raise (Type_error "Recursive types");
+          ensure_guarded_cycle ~checkpoint:(fun () -> checkpoint state) tv t;
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
-      | Ref t1, Ref t2 | Array t1, Array t2 -> go env_l env_r t1 t2
-      | Record r1, Record r2 | Variant r1, Variant r2 -> go env_l env_r r1 r2
+      | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
+      | Record r1, Record r2 | Variant r1, Variant r2 -> go active env_l env_r r1 r2
       | Tuple ts1, Tuple ts2 ->
         if List.length ts1 <> List.length ts2
         then raise (Type_error "Tuple arity mismatch");
-        List.iter2_exn ts1 ts2 ~f:(go env_l env_r)
-      | (Row _ as row1), (Row _ as row2) -> go_rows env_l env_r row1 row2
+        List.iter2_exn ts1 ts2 ~f:(go active env_l env_r)
+      | (Row _ as row1), (Row _ as row2) -> go_rows active env_l env_r row1 row2
       | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
         let lbl, _ = Env.choose fs in
         raise (Type_error (Printf.sprintf "Row does not contain label '%s'" lbl))
@@ -644,17 +702,20 @@ let rec unify (state : infer_state) lhs rhs =
       | _ ->
         raise
           (Type_error
-             (Printf.sprintf "Cannot unify %s with %s" (show_type lhs) (show_type rhs))))
-  and go_rows env_l env_r lhs rhs =
+             (Printf.sprintf
+                "Cannot unify %s with %s"
+                (show_type_for_diagnostic state lhs)
+                (show_type_for_diagnostic state rhs))))
+  and go_rows active env_l env_r lhs rhs =
     (* same as unify_rows but replace calls to [unify state] with [go env_l env_r] *)
-    let map_l, tail_l = merge_fields lhs in
-    let map_r, tail_r = merge_fields rhs in
+    let map_l, tail_l = merge_fields ~checkpoint:(fun () -> checkpoint state) lhs in
+    let map_r, tail_r = merge_fields ~checkpoint:(fun () -> checkpoint state) rhs in
     let rec collect l r missing_l missing_r =
       match l, r with
       | (lbl_l, ty_l) :: tl, (lbl_r, ty_r) :: tr ->
         (match String.compare lbl_l lbl_r with
          | 0 ->
-           go env_l env_r ty_l ty_r;
+           go active env_l env_r ty_l ty_r;
            collect tl tr missing_l missing_r
          | c when c < 0 -> collect tl r missing_l (Env.add lbl_l ty_l missing_r)
          | _ -> collect l tr (Env.add lbl_r ty_r missing_l) missing_r)
@@ -666,22 +727,22 @@ let rec unify (state : infer_state) lhs rhs =
       collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
     in
     match Env.is_empty missing_l, Env.is_empty missing_r with
-    | true, true -> go env_l env_r tail_l tail_r
-    | true, false -> go env_l env_r tail_r (Row (missing_r, tail_l))
-    | false, true -> go env_l env_r tail_l (Row (missing_l, tail_r))
+    | true, true -> go active env_l env_r tail_l tail_r
+    | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
+    | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
     | false, false ->
       (match tail_l with
        | Var ({ contents = Free _ } as tv) ->
          let row_var = new_var state state.current_lvl in
-         go env_l env_r tail_r (Row (missing_r, row_var));
+         go active env_r env_l tail_r (Row (missing_r, row_var));
          (match !tv with
           | Bound _ -> raise (Type_error "Recursive row types")
           | _ -> ());
          tv := Bound (Row (missing_l, row_var))
-       | Empty_row -> go env_l env_r tail_l (Row (missing_l, new_var state 0))
+       | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
        | _ -> assert false)
   in
-  go MuEnv.empty MuEnv.empty lhs rhs
+  go [] MuEnv.empty MuEnv.empty lhs rhs
 
 (** --------------------------------------------------------------------- *)
 (** 8. Pretty printer for types (used in error messages)                   *)
@@ -689,135 +750,184 @@ let rec unify (state : infer_state) lhs rhs =
 
 (* Print human-readable type names used in diagnostics. *)
 
-and show_type ty =
-  let rec show_type_with_seen (seen : tv ref list) (seen_rec : name list) = function
-    | TInt -> "int"
-    | TFloat -> "float"
-    | Boolean -> "bool"
-    | String -> "string"
-    | Unit -> "unit"
-    | Array t -> Printf.sprintf "%s array" (show_postfix_arg seen seen_rec t)
-    | Ref t -> Printf.sprintf "ref(%s)" (show_type_with_seen seen seen_rec t)
+and render_type ?(poll = fun () -> ()) ?bounds ty =
+  let exception Truncated in
+  let output = Buffer.create 128 in
+  let nodes = ref 0 in
+  let step depth =
+    poll ();
+    Int.incr nodes;
+    match bounds with
+    | Some (_, max_nodes, max_depth) when !nodes > max_nodes || depth > max_depth ->
+      raise Truncated
+    | _ -> ()
+  in
+  let add text =
+    match bounds with
+    | Some (max_bytes, _, _) when String.length text > max_bytes - Buffer.length output ->
+      Buffer.add_substring output text ~pos:0 ~len:(max_bytes - Buffer.length output);
+      raise Truncated
+    | _ -> Buffer.add_string output text
+  in
+  let separated separator values f =
+    let first = ref true in
+    List.iter values ~f:(fun value ->
+      (match !first with
+       | true -> first := false
+       | false -> add separator);
+      f value)
+  in
+  let rec show depth seen seen_rec ty =
+    step depth;
+    let child = show (depth + 1) seen seen_rec in
+    match ty with
+    | TInt -> add "int"
+    | TFloat -> add "float"
+    | Boolean -> add "bool"
+    | String -> add "string"
+    | Unit -> add "unit"
+    | Array t ->
+      postfix depth seen seen_rec t;
+      add " array"
+    | Ref t ->
+      add "ref(";
+      child t;
+      add ")"
     | Fun (ps, r) ->
-      let params =
-        ps |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "(%s -> %s)" params (show_type_with_seen seen seen_rec r)
+      add "(";
+      separated ", " ps child;
+      add " -> ";
+      child r;
+      add ")"
     | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then binder
-      else
-        Printf.sprintf
-          "mu %s. %s"
-          binder
-          (show_type_with_seen seen (binder :: seen_rec) body)
-    | Rec_var binder -> binder
-    | Record row -> Printf.sprintf "{%s}" (show_row_with_seen seen seen_rec row)
+      (match rec_name_mem binder seen_rec with
+       | true -> add binder
+       | false ->
+         add "mu ";
+         add binder;
+         add ". ";
+         show (depth + 1) seen (binder :: seen_rec) body)
+    | Rec_var binder -> add binder
+    | Record row ->
+      add "{";
+      show_row_fields depth seen seen_rec false row;
+      add "}"
     | Tuple ts ->
-      ts
-      |> List.map ~f:(show_type_with_seen seen seen_rec)
-      |> String.concat ~sep:" * "
-      |> Printf.sprintf "(%s)"
-    | Variant row -> Printf.sprintf "[%s]" (show_variant_row_with_seen seen seen_rec row)
-    | Row _ as row -> show_row_with_seen seen seen_rec row
-    | Empty_row -> ""
-    | Generic n -> n
-    | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
+      add "(";
+      separated " * " ts child;
+      add ")"
+    | Variant row ->
+      add "[";
+      show_row_fields depth seen seen_rec true row;
+      add "]"
+    | Row _ as row -> show_row_fields depth seen seen_rec false row
+    | Empty_row -> ()
+    | Generic n -> add n
+    | Var { contents = Free (n, _) } ->
+      add "'";
+      add n
     | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then "'rec" else show_type_with_seen (tv :: seen) seen_rec t
+      (match tv_ref_mem tv seen with
+       | true -> add "'rec"
+       | false -> show (depth + 1) (tv :: seen) seen_rec t)
     | Con ("task", [ arg ]) ->
-      Printf.sprintf "%s task" (show_postfix_arg seen seen_rec arg)
-    | Con (n, [ arg ]) ->
-      Printf.sprintf "%s(%s)" n (show_type_with_seen seen seen_rec arg)
+      postfix depth seen seen_rec arg;
+      add " task"
     | Con (n, args) ->
-      let inside =
-        args |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "%s(%s)" n inside
-  and show_postfix_arg (seen : tv ref list) (seen_rec : name list) (ty : typ) =
-    match resolve_bound_type_for_display_with_seen seen ty with
-    | Fun _ -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec ty)
-    | _ -> show_type_with_seen seen seen_rec ty
-  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+      add n;
+      add "(";
+      separated ", " args child;
+      add ")"
+  and postfix depth seen seen_rec ty =
+    match resolve (depth + 1) seen ty with
+    | Fun _ ->
+      add "(";
+      show (depth + 1) seen seen_rec ty;
+      add ")"
+    | _ -> show (depth + 1) seen seen_rec ty
+  and row_fields depth seen seen_rec row =
+    step depth;
     match row with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen
       then Env.empty, Var tv
-      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
+      else row_fields (depth + 1) (tv :: seen) seen_rec ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+      else
+        row_fields
+          (depth + 1)
+          seen
+          (binder :: seen_rec)
+          (unfold_mu ~checkpoint:(fun () -> step depth) mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
-    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Record r | Variant r -> row_fields (depth + 1) seen seen_rec r
     | Row (fs, rest) ->
-      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
-      Env.merge fs rest_fields, tail
+      let rest_fields, tail = row_fields (depth + 1) seen seen_rec rest in
+      let fields =
+        Env.fold fs ~init:rest_fields ~f:(fun ~key ~data acc ->
+          step depth;
+          Env.add key data acc)
+      in
+      fields, tail
     | Empty_row -> Env.empty, Empty_row
     | Var _ as var -> Env.empty, var
     | Generic _ as generic -> Env.empty, generic
     | other -> Env.empty, other
-  and show_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    let fields_str =
-      Env.bindings fields
-      |> List.map ~f:(fun (k, v) ->
-        Printf.sprintf "%s: %s" k (show_type_with_seen seen seen_rec v))
-      |> String.concat ~sep:"; "
-    in
-    let tail_str =
-      match tail with
-      | Empty_row -> ""
-      | _ when String.is_empty fields_str -> "..."
-      | _ -> "; ..."
-    in
-    fields_str ^ tail_str
-  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+  and resolve depth seen ty =
+    step depth;
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Var tv
-      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
+      if tv_ref_mem tv seen then Var tv else resolve (depth + 1) (tv :: seen) bound_ty
     | _ -> ty
-  and variant_payload_components_with_seen
-        (seen : tv ref list)
-        (_seen_rec : name list)
-        payload_ty
-    =
-    match resolve_bound_type_for_display_with_seen seen payload_ty with
-    | Unit -> []
-    | Tuple ts -> ts
-    | ty -> [ ty ]
-  and show_variant_payload_with_seen (seen : tv ref list) (seen_rec : name list) ty =
-    match variant_payload_components_with_seen seen seen_rec ty with
-    | [] -> ""
-    | [ single ] -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec single)
-    | many ->
-      let inside =
-        many |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "(%s)" inside
-  and show_variant_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    let fields_str =
-      Env.bindings fields
-      |> List.map ~f:(fun (tag, payload_ty) ->
-        Printf.sprintf
-          "`%s%s"
-          tag
-          (show_variant_payload_with_seen seen seen_rec payload_ty))
-      |> String.concat ~sep:" | "
-    in
-    let tail_str =
-      match tail with
-      | Empty_row -> ""
-      | _ when String.is_empty fields_str -> "..."
-      | _ -> " | ..."
-    in
-    fields_str ^ tail_str
+  and show_row_fields depth seen seen_rec variant row =
+    let fields, tail = row_fields (depth + 1) seen seen_rec row in
+    let separator = if variant then " | " else "; " in
+    let first = ref true in
+    Env.iter fields ~f:(fun key value ->
+      (match !first with
+       | true -> first := false
+       | false -> add separator);
+      match variant with
+      | false ->
+        add key;
+        add ": ";
+        show (depth + 1) seen seen_rec value
+      | true ->
+        add "`";
+        add key;
+        let payload =
+          match resolve (depth + 1) seen value with
+          | Unit -> []
+          | Tuple ts -> ts
+          | ty -> [ ty ]
+        in
+        (match payload with
+         | [] -> ()
+         | _ ->
+           add "(";
+           separated ", " payload (show (depth + 1) seen seen_rec);
+           add ")"));
+    match tail with
+    | Empty_row -> ()
+    | _ ->
+      if not !first then add separator;
+      add "..."
   in
-  show_type_with_seen [] [] ty
+  match show 0 [] [] ty with
+  | () -> Buffer.contents output
+  | exception Truncated ->
+    let max_bytes, _, _ = Option.value_exn bounds in
+    String.prefix (Buffer.contents output) (Int.max 0 (max_bytes - 3))
+    ^ String.prefix "..." max_bytes
+
+and show_type ty = render_type ty
+
+and show_type_for_diagnostic state ty =
+  (* This limits an error preview, not the type system or trusted evaluation.
+     A shared DAG may have a small representation and exponential full display. *)
+  render_type ~poll:(fun () -> checkpoint state) ~bounds:(8192, 1024, 128) ty
 
 and row_fields_and_tail row =
   let rec aux (seen : tv ref list) (seen_rec : name list) row =
@@ -894,8 +1004,9 @@ and show_variant_row row =
   in
   fields_str ^ tail_str
 
-and ensure_equality_type ty =
+and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
   let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
     match resolve_bound_type_for_display_with_seen seen ty with
     | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
     | Var { contents = Free _ } -> ()
@@ -922,6 +1033,7 @@ and ensure_equality_type ty =
     | Fun _ -> raise (Type_error "Equality is not supported for functions")
     | Row _ | Empty_row -> ensure_equality_row_with_seen seen seen_rec ty
   and ensure_equality_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    checkpoint ();
     let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
     Env.iter fields ~f:(fun _field ty -> ensure_equality_type_with_seen seen seen_rec ty);
     match tail with
@@ -936,6 +1048,7 @@ and ensure_equality_type ty =
       else ensure_equality_row_with_seen (tv :: seen) seen_rec t
     | _ -> ()
   and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+    checkpoint ();
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen
@@ -943,6 +1056,7 @@ and ensure_equality_type ty =
       else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
     | _ -> ty
   and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    checkpoint ();
     match row with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen
@@ -951,7 +1065,8 @@ and ensure_equality_type ty =
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+      else
+        row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Record r -> row_fields_and_tail_with_seen seen seen_rec r
     | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
@@ -997,8 +1112,10 @@ type type_env = typ Env.t
    functions: if we instantiated every lookup we would lose the sharing that
    connects [st.tasks], [st.task_index] and the final [st] returned by the
    helper, causing accidental row narrowing. *)
-let contains_generic (ty : typ) : bool =
-  let rec aux (seen : tv ref list) = function
+let contains_generic ?(checkpoint = fun () -> ()) (ty : typ) : bool =
+  let rec aux (seen : tv ref list) ty =
+    checkpoint ();
+    match ty with
     | Generic _ -> true
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
     | Var ({ contents = Bound t } as tv) ->
@@ -1026,8 +1143,10 @@ let primitive_type_of_name (name : string) : typ option =
   | _ -> None
 ;;
 
-let contains_rec_var_name (target : name) (ty : typ) : bool =
-  let rec aux (seen : tv ref list) = function
+let contains_rec_var_name ?(checkpoint = fun () -> ()) (target : name) (ty : typ) : bool =
+  let rec aux (seen : tv ref list) ty =
+    checkpoint ();
+    match ty with
     | Rec_var name when String.equal name target -> true
     | Rec_var _ -> false
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
@@ -1045,10 +1164,16 @@ let contains_rec_var_name (target : name) (ty : typ) : bool =
   aux [] ty
 ;;
 
-let ensure_unique_type_labels ~(what : string) (labels : string list) : unit =
+let ensure_unique_type_labels
+      ?(checkpoint = fun () -> ())
+      ~(what : string)
+      (labels : string list)
+  : unit
+  =
   let seen = Hash_set.create (module String) in
   match
     List.find labels ~f:(fun label ->
+      checkpoint ();
       if Hash_set.mem seen label
       then true
       else (
@@ -1059,7 +1184,15 @@ let ensure_unique_type_labels ~(what : string) (labels : string list) : unit =
   | Some label -> raise (Type_error (Printf.sprintf "Duplicate %s label '%s'" what label))
 ;;
 
-let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ =
+let rec typ_of_type_expr
+          ?(checkpoint = fun () -> ())
+          ?self_name
+          (types : type_env)
+          (expr : type_expr)
+  : typ
+  =
+  checkpoint ();
+  let convert = typ_of_type_expr ~checkpoint ?self_name types in
   match expr with
   | TEName name ->
     (match primitive_type_of_name name with
@@ -1072,29 +1205,37 @@ let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ 
            | Some ty -> ty
            | None -> raise (Type_error (Printf.sprintf "Unknown type '%s'" name)))))
   | TEArrow (lhs, rhs) ->
-    let lhs_ty = typ_of_type_expr ?self_name types lhs in
-    (match typ_of_type_expr ?self_name types rhs with
-     | Fun (params, ret) ->
-       if Poly.equal lhs_ty Unit then Fun (params, ret) else Fun (lhs_ty :: params, ret)
-     | rhs_ty ->
-       if Poly.equal lhs_ty Unit then Fun ([], rhs_ty) else Fun ([ lhs_ty ], rhs_ty))
+    let lhs_ty = convert lhs in
+    let params, ret =
+      match convert rhs with
+      | Fun (params, ret) -> params, ret
+      | rhs_ty -> [], rhs_ty
+    in
+    (match lhs_ty with
+     | Unit -> Fun (params, ret)
+     | _ -> Fun (lhs_ty :: params, ret))
   | TEConstr (name, args) ->
-    (match name, List.map args ~f:(typ_of_type_expr ?self_name types) with
+    (match name, List.map args ~f:convert with
      | "array", [ arg_ty ] -> Array arg_ty
      | "task", [ arg_ty ] -> Con ("task", [ arg_ty ])
      | _, _ -> raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
   | TERecord fields ->
-    ensure_unique_type_labels ~what:"type record field" (List.map fields ~f:fst);
+    ensure_unique_type_labels
+      ~checkpoint
+      ~what:"type record field"
+      (List.map fields ~f:fst);
     Record
       (Row
          ( Env.of_list
-             (List.map fields ~f:(fun (label, ty_expr) ->
-                label, typ_of_type_expr ?self_name types ty_expr))
+             (List.map fields ~f:(fun (label, ty_expr) -> label, convert ty_expr))
          , Empty_row ))
   | TEVariant cases ->
-    ensure_unique_type_labels ~what:"type variant constructor" (List.map cases ~f:fst);
+    ensure_unique_type_labels
+      ~checkpoint
+      ~what:"type variant constructor"
+      (List.map cases ~f:fst);
     let payload_ty payloads =
-      match List.map payloads ~f:(typ_of_type_expr ?self_name types) with
+      match List.map payloads ~f:convert with
       | [] -> Unit
       | [ ty ] -> ty
       | tys -> Tuple tys
@@ -1106,68 +1247,89 @@ let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ 
          , Empty_row ))
 ;;
 
-let infer_type_decl (types : type_env) (name : string) (body : type_expr) : type_env =
+let infer_type_decl
+      ?(checkpoint = fun () -> ())
+      (types : type_env)
+      (name : string)
+      (body : type_expr)
+  : type_env
+  =
+  checkpoint ();
   if Option.is_some (primitive_type_of_name name)
   then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" name))
   else (
     match Env.find types name with
     | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" name))
     | None ->
-      let body_ty = typ_of_type_expr ~self_name:name types body in
+      let body_ty = typ_of_type_expr ~checkpoint ~self_name:name types body in
       let declared_ty =
-        if contains_rec_var_name name body_ty then Mu (name, body_ty) else body_ty
+        if contains_rec_var_name ~checkpoint name body_ty
+        then Mu (name, body_ty)
+        else body_ty
       in
-      if has_recursive_type declared_ty then ensure_contractive_type declared_ty;
+      if has_recursive_type ~checkpoint declared_ty
+      then ensure_contractive_type ~checkpoint declared_ty;
       Env.add name declared_ty types)
 ;;
 
 let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
 
-let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
+let rec typ_of_builtin_ty ?(checkpoint = fun () -> ()) (ty : Builtin_spec.ty) : typ =
+  checkpoint ();
+  let convert = typ_of_builtin_ty ~checkpoint in
   match ty with
   | Builtin_spec.TVar name -> Generic name
-  | Builtin_spec.TCon (n, args) -> Con (n, List.map args ~f:typ_of_builtin_ty)
+  | Builtin_spec.TCon (n, args) -> Con (n, List.map args ~f:convert)
   | Builtin_spec.TInt -> TInt
   | Builtin_spec.TFloat -> TFloat
   | Builtin_spec.TBool -> Boolean
   | Builtin_spec.TString -> String
   | Builtin_spec.TUnit -> Unit
-  | Builtin_spec.TArray inner -> Array (typ_of_builtin_ty inner)
-  | Builtin_spec.TRef inner -> Ref (typ_of_builtin_ty inner)
-  | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:typ_of_builtin_ty)
-  | Builtin_spec.TRecord row -> Record (typ_of_builtin_row row)
-  | Builtin_spec.TVariant row -> Variant (typ_of_builtin_row row)
-  | Builtin_spec.TFun (params, ret) ->
-    Fun (List.map params ~f:typ_of_builtin_ty, typ_of_builtin_ty ret)
-  | Builtin_spec.TMu (binder, body) -> Mu (binder, typ_of_builtin_ty body)
+  | Builtin_spec.TArray inner -> Array (convert inner)
+  | Builtin_spec.TRef inner -> Ref (convert inner)
+  | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:convert)
+  | Builtin_spec.TRecord row -> Record (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TVariant row -> Variant (typ_of_builtin_row ~checkpoint row)
+  | Builtin_spec.TFun (params, ret) -> Fun (List.map params ~f:convert, convert ret)
+  | Builtin_spec.TMu (binder, body) -> Mu (binder, convert body)
   | Builtin_spec.TRec_var name -> Rec_var name
 
-and typ_of_builtin_row (row : Builtin_spec.row) : typ =
+and typ_of_builtin_row ?(checkpoint = fun () -> ()) (row : Builtin_spec.row) : typ =
+  checkpoint ();
   match row with
   | Builtin_spec.TRow_empty -> Empty_row
   | Builtin_spec.TRow_var name -> Generic (builtin_row_var_name name)
   | Builtin_spec.TRow_extend (fields, tail) ->
     Row
-      ( Env.of_list (List.map fields ~f:(fun (label, ty) -> label, typ_of_builtin_ty ty))
-      , typ_of_builtin_row tail )
+      ( Env.of_list
+          (List.map fields ~f:(fun (label, ty) -> label, typ_of_builtin_ty ~checkpoint ty))
+      , typ_of_builtin_row ~checkpoint tail )
 ;;
 
-let init_env_with_surface (surface : Builtin_surface.surface) : tenv =
+let init_env_with_surface ?(checkpoint = fun () -> ()) (surface : Builtin_surface.surface)
+  : tenv
+  =
   let globals =
     surface.globals
-    |> List.map ~f:(fun builtin -> builtin.name, typ_of_builtin_ty builtin.scheme)
+    |> List.map ~f:(fun builtin ->
+      builtin.name, typ_of_builtin_ty ~checkpoint builtin.scheme)
   in
   let modules =
     surface.modules
     |> List.map ~f:(fun builtin_module ->
-      builtin_module.name, typ_of_builtin_ty (Builtin_spec.module_scheme builtin_module))
+      ( builtin_module.name
+      , typ_of_builtin_ty ~checkpoint (Builtin_spec.module_scheme builtin_module) ))
   in
   Env.of_list (globals @ modules)
 ;;
 
 let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 
-let init_types_with_surface (surface : Builtin_surface.surface) : type_env =
+let init_types_with_surface
+      ?(checkpoint = fun () -> ())
+      (surface : Builtin_surface.surface)
+  : type_env
+  =
   List.fold surface.type_aliases ~init:Env.empty ~f:(fun env alias ->
     if Option.is_some (primitive_type_of_name alias.name)
     then
@@ -1177,8 +1339,9 @@ let init_types_with_surface (surface : Builtin_surface.surface) : type_env =
       | Some _ ->
         raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
       | None ->
-        let alias_ty = typ_of_builtin_ty alias.body in
-        if has_recursive_type alias_ty then ensure_contractive_type alias_ty;
+        let alias_ty = typ_of_builtin_ty ~checkpoint alias.body in
+        if has_recursive_type ~checkpoint alias_ty
+        then ensure_contractive_type ~checkpoint alias_ty;
         Env.add alias.name alias_ty env))
 ;;
 
@@ -1186,24 +1349,29 @@ let init_types_with_surface (surface : Builtin_surface.surface) : type_env =
    returned as-is so that all uses share the same mutable inference variables. *)
 let lookup (state : infer_state) (env : tenv) x =
   match Env.find env x with
-  | Some sc -> if contains_generic sc then instantiate state sc else sc
+  | Some sc ->
+    if contains_generic ~checkpoint:(fun () -> checkpoint state) sc
+    then instantiate state sc
+    else sc
   | None -> raise (Type_error (Printf.sprintf "Unknown variable '%s'" x))
 ;;
 
-let add_mono (env : tenv) x ty : tenv =
-  if has_recursive_type ty then ensure_contractive_type ty;
+let add_mono ?(checkpoint = fun () -> ()) (env : tenv) x ty : tenv =
+  if has_recursive_type ~checkpoint ty then ensure_contractive_type ~checkpoint ty;
   Env.add x ty env
 ;;
 
-let should_generalize_binding (ty : typ) : bool = not (has_recursive_type ty)
+let should_generalize_binding ?checkpoint (ty : typ) : bool =
+  not (has_recursive_type ?checkpoint ty)
+;;
 
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
   (* bindings whose type contains an explicit recursive type
      are kept monomorphic.  We therefore skip HM generalization entirely for
      such bindings and store the checked type as-is. *)
-  if not (should_generalize_binding ty)
+  if not (should_generalize_binding ~checkpoint:(fun () -> checkpoint state) ty)
   then (
-    ensure_contractive_type ty;
+    ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) ty;
     Env.add x ty env)
   else Env.add x (generalise state ty) env
 ;;
@@ -1275,8 +1443,11 @@ let rec is_function_like_expr (expr : expr) : bool =
   | _ -> false
 ;;
 
-let restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
+let restrict_free_vars_to_level ?(checkpoint = fun () -> ()) (max_level : int) (ty : typ)
+  : unit
+  =
   let rec aux (seen : tv ref list) ty =
+    checkpoint ();
     match ty with
     | Fun (params, ret) ->
       List.iter params ~f:(aux seen);
@@ -1310,8 +1481,11 @@ let rec infer_nonrecursive_binding
   if is_non_expansive rhs.value
   then add_generalized state env name rhs_ty
   else (
-    restrict_free_vars_to_level state.current_lvl rhs_ty;
-    add_mono env name rhs_ty)
+    restrict_free_vars_to_level
+      ~checkpoint:(fun () -> checkpoint state)
+      state.current_lvl
+      rhs_ty;
+    add_mono ~checkpoint:(fun () -> checkpoint state) env name rhs_ty)
 
 and infer_recursive_bindings
       (state : infer_state)
@@ -1330,7 +1504,11 @@ and infer_recursive_bindings
     with_new_level state ~f:(fun () ->
       let env_with_placeholders =
         List.fold bindings ~init:env ~f:(fun env_acc (nm, _) ->
-          add_mono env_acc nm (new_var state state.current_lvl))
+          add_mono
+            ~checkpoint:(fun () -> checkpoint state)
+            env_acc
+            nm
+            (new_var state state.current_lvl))
       in
       List.iter bindings ~f:(fun (nm, rhs) ->
         let placeholder_ty = Env.find_exn env_with_placeholders nm in
@@ -1352,7 +1530,9 @@ and infer_record_extend
   let base_ty = infer_expr state env types base_expr in
   let base_row = new_var state state.current_lvl in
   unify state base_ty (Record base_row);
-  let base_fields, base_tail = merge_fields base_row in
+  let base_fields, base_tail =
+    merge_fields ~checkpoint:(fun () -> checkpoint state) base_row
+  in
   let override_fields =
     List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
       let ty = infer_expr state env types expr in
@@ -1442,47 +1622,57 @@ and is_catch_all_pattern (pat : pattern) : bool =
   | PWildcard | PVar _ -> true
   | _ -> false
 
-and record_field_type (row_ty : typ) (label : string) : typ option =
-  match resolve_bound_type row_ty with
-  | Record row -> record_field_type row label
+and record_field_type ?(checkpoint = fun () -> ()) (row_ty : typ) (label : string)
+  : typ option
+  =
+  checkpoint ();
+  match resolve_bound_type ~checkpoint row_ty with
+  | Record row -> record_field_type ~checkpoint row label
   | Row (fields, tail) ->
     (match Env.find fields label with
      | Some ty -> Some ty
-     | None -> record_field_type tail label)
+     | None -> record_field_type ~checkpoint tail label)
   | _ -> None
 
-and is_closed_record_row (row_ty : typ) : bool =
-  match resolve_bound_type row_ty with
-  | Record row -> is_closed_record_row row
-  | Row (_fields, tail) -> is_closed_record_row tail
+and is_closed_record_row ?(checkpoint = fun () -> ()) (row_ty : typ) : bool =
+  checkpoint ();
+  match resolve_bound_type ~checkpoint row_ty with
+  | Record row -> is_closed_record_row ~checkpoint row
+  | Row (_fields, tail) -> is_closed_record_row ~checkpoint tail
   | Empty_row -> true
   | _ -> false
 
-and payload_component_types (payload_ty : typ) : typ list =
-  match resolve_bound_type payload_ty with
+and payload_component_types ?checkpoint (payload_ty : typ) : typ list =
+  match resolve_bound_type ?checkpoint payload_ty with
   | Unit -> []
   | Tuple ts -> ts
   | ty -> [ ty ]
 
-and show_missing_variant_case (tag : string) (payload_ty : typ) : string =
-  match payload_component_types payload_ty with
+and show_missing_variant_case ?checkpoint (tag : string) (payload_ty : typ) : string =
+  match payload_component_types ?checkpoint payload_ty with
   | [] -> Printf.sprintf "`%s" tag
   | components ->
     let placeholders = List.map components ~f:(fun _ -> "_") |> String.concat ~sep:", " in
     Printf.sprintf "`%s(%s)" tag placeholders
 
-and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
+and pattern_totally_covers_type
+      ?(checkpoint = fun () -> ())
+      (pat : pattern)
+      (expected_ty : typ)
+  : bool
+  =
+  checkpoint ();
   match pat with
   | PUnit ->
-    (match resolve_bound_type expected_ty with
+    (match resolve_bound_type ~checkpoint expected_ty with
      | Unit -> true
      | _ -> false)
   | PWildcard | PVar _ -> true
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
       List.for_all fields ~f:(fun (label, subpat) ->
-        match record_field_type expected_ty label with
-        | Some field_ty -> pattern_totally_covers_type subpat field_ty
+        match record_field_type ~checkpoint expected_ty label with
+        | Some field_ty -> pattern_totally_covers_type ~checkpoint subpat field_ty
         | None -> false)
     in
     if not subpatterns_cover_all
@@ -1490,36 +1680,43 @@ and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
     else if is_open
     then true
     else (
-      match resolve_bound_type expected_ty with
+      match resolve_bound_type ~checkpoint expected_ty with
       | Record row ->
-        let row_fields, _tail = merge_fields row in
+        let row_fields, _tail = merge_fields ~checkpoint row in
         let field_names = List.map fields ~f:fst |> String.Set.of_list in
         Set.equal
           field_names
           (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
-        && is_closed_record_row row
+        && is_closed_record_row ~checkpoint row
       | _ -> false)
   | _ -> false
 
-and variant_constructor_info (variant_ty : typ) : ((string * typ) list * typ) option =
-  match resolve_bound_type variant_ty with
+and variant_constructor_info ?checkpoint (variant_ty : typ)
+  : ((string * typ) list * typ) option
+  =
+  match resolve_bound_type ?checkpoint variant_ty with
   | Variant row ->
-    let fields, tail = merge_fields row in
+    let fields, tail = merge_fields ?checkpoint row in
     Some (Env.bindings fields, tail)
   | _ -> None
 
-and pattern_fully_covers_variant_case (pat : pattern) ~(tag : string) ~(payload_ty : typ)
+and pattern_fully_covers_variant_case
+      ?(checkpoint = fun () -> ())
+      (pat : pattern)
+      ~(tag : string)
+      ~(payload_ty : typ)
   : bool
   =
+  checkpoint ();
   match pat with
   | PVariant (tag', subpats) when String.equal tag tag' ->
-    let payload_tys = payload_component_types payload_ty in
+    let payload_tys = payload_component_types ~checkpoint payload_ty in
     List.length subpats = List.length payload_tys
-    && List.for_all2_exn subpats payload_tys ~f:pattern_totally_covers_type
+    && List.for_all2_exn subpats payload_tys ~f:(pattern_totally_covers_type ~checkpoint)
   | _ -> false
 
-and is_closed_variant_tail (tail_ty : typ) : bool =
-  match resolve_bound_type tail_ty with
+and is_closed_variant_tail ?checkpoint (tail_ty : typ) : bool =
+  match resolve_bound_type ?checkpoint tail_ty with
   | Empty_row -> true
   | _ -> false
 
@@ -1581,10 +1778,13 @@ and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
   in
   loop None cases
 
-and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern list)
+and validate_boolean_match_exhaustiveness
+      ?checkpoint
+      (scrut_ty : typ)
+      (patterns : pattern list)
   : unit
   =
-  match resolve_bound_type scrut_ty with
+  match resolve_bound_type ?checkpoint scrut_ty with
   | Boolean ->
     let has_catch_all = List.exists patterns ~f:is_catch_all_pattern in
     if not has_catch_all
@@ -1611,11 +1811,12 @@ and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern l
   | _ -> ()
 
 and validate_typed_match_redundancy
+      ?(checkpoint = fun () -> ())
       (scrut_ty : typ)
       (cases : (pattern * Source.span) list)
   : unit
   =
-  match resolve_bound_type scrut_ty with
+  match resolve_bound_type ~checkpoint scrut_ty with
   | Unit ->
     let seen_unit = ref false in
     List.iter cases ~f:(fun (pat, pat_span) ->
@@ -1648,7 +1849,7 @@ and validate_typed_match_redundancy
       | PBool false -> seen_false := true
       | _ -> ())
   | Variant _ ->
-    (match variant_constructor_info scrut_ty with
+    (match variant_constructor_info ~checkpoint scrut_ty with
      | None -> ()
      | Some (constructors, tail) ->
        let covered_tags = Hash_set.create (module String) in
@@ -1657,7 +1858,7 @@ and validate_typed_match_redundancy
          List.for_all constructors ~f:(fun (tag, _payload_ty) ->
            Hash_set.mem covered_tags tag)
        in
-       let closed_tail = is_closed_variant_tail tail in
+       let closed_tail = is_closed_variant_tail ~checkpoint tail in
        List.iter cases ~f:(fun (pat, pat_span) ->
          (match pat with
           | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
@@ -1668,7 +1869,7 @@ and validate_typed_match_redundancy
                      "Redundant match arm '%s': previous arms already cover variant case \
                       '%s'"
                      (show_pattern_brief pat)
-                     (show_missing_variant_case tag covered_payload)
+                     (show_missing_variant_case ~checkpoint tag covered_payload)
                  , pat_span ))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
@@ -1680,7 +1881,7 @@ and validate_typed_match_redundancy
                  , pat_span ))
           | _ -> ());
          List.iter constructors ~f:(fun (tag, payload_ty) ->
-           if pattern_fully_covers_variant_case pat ~tag ~payload_ty
+           if pattern_fully_covers_variant_case ~checkpoint pat ~tag ~payload_ty
            then Hash_set.add covered_tags tag)))
   | _ -> ()
 
@@ -1690,20 +1891,21 @@ and validate_match_exhaustiveness
       (patterns : pattern list)
   : unit
   =
+  let poll () = checkpoint state in
   if List.exists patterns ~f:is_catch_all_pattern
   then ()
   else (
-    match resolve_bound_type scrut_ty with
-    | Boolean -> validate_boolean_match_exhaustiveness scrut_ty patterns
+    match resolve_bound_type ~checkpoint:poll scrut_ty with
+    | Boolean -> validate_boolean_match_exhaustiveness ~checkpoint:poll scrut_ty patterns
     | Variant _ ->
-      (match variant_constructor_info scrut_ty with
+      (match variant_constructor_info ~checkpoint:poll scrut_ty with
        | None -> ()
        | Some (constructors, tail) ->
          let missing_constructor =
            List.find constructors ~f:(fun (tag, payload_ty) ->
              not
                (List.exists patterns ~f:(fun pat ->
-                  pattern_fully_covers_variant_case pat ~tag ~payload_ty)))
+                  pattern_fully_covers_variant_case ~checkpoint:poll pat ~tag ~payload_ty)))
          in
          (match missing_constructor with
           | Some (tag, payload_ty) ->
@@ -1711,7 +1913,7 @@ and validate_match_exhaustiveness
               (Type_error
                  (Printf.sprintf
                     "Non-exhaustive variant match: missing case '%s'"
-                    (show_missing_variant_case tag payload_ty)))
+                    (show_missing_variant_case ~checkpoint:poll tag payload_ty)))
           | None -> unify state tail Empty_row))
     | TInt -> raise (Type_error "Non-exhaustive match on int: add '_' arm")
     | TFloat -> raise (Type_error "Non-exhaustive match on float: add '_' arm")
@@ -1724,7 +1926,9 @@ and validate_match_exhaustiveness
       else raise (Type_error "Non-exhaustive match on unit: missing case '()'")
     | String -> raise (Type_error "Non-exhaustive match on string: add '_' arm")
     | Record _ ->
-      if List.exists patterns ~f:(fun pat -> pattern_totally_covers_type pat scrut_ty)
+      if
+        List.exists patterns ~f:(fun pat ->
+          pattern_totally_covers_type ~checkpoint:poll pat scrut_ty)
       then ()
       else raise (Type_error "Non-exhaustive match on record: add '_' arm")
     | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
@@ -1732,12 +1936,13 @@ and validate_match_exhaustiveness
 and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
   : tenv
   =
+  checkpoint state;
   match pat with
   | PUnit ->
     unify state expected_ty Unit;
     env
   | PWildcard -> env
-  | PVar x -> add_mono env x expected_ty
+  | PVar x -> add_mono ~checkpoint:(fun () -> checkpoint state) env x expected_ty
   | PInt _ ->
     unify state expected_ty TInt;
     env
@@ -1782,7 +1987,8 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     env_after
 
 and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
-  match resolve_bound_type ty with
+  checkpoint state;
+  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) ty with
   | Record row -> Record (reopen_lambda_row state row)
   | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
   | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
@@ -1798,9 +2004,12 @@ and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ 
   | _ -> reopen_lambda_param_type state ty
 
 and reopen_lambda_row (state : infer_state) (row : typ) : typ =
-  match resolve_bound_type row with
+  checkpoint state;
+  match resolve_bound_type ~checkpoint:(fun () -> checkpoint state) row with
   | Row _ as full_row ->
-    let merged_fields, _merged_tail = merge_fields full_row in
+    let merged_fields, _merged_tail =
+      merge_fields ~checkpoint:(fun () -> checkpoint state) full_row
+    in
     let reopened_fields = Env.map merged_fields ~f:(reopen_lambda_param_type state) in
     (* Lambda parameters should be row-polymorphic by default: if a helper
        touches only a subset of record fields, callers should be able to pass
@@ -1866,12 +2075,12 @@ and infer_binary_prim
     Boolean
   | BEq | BNeq ->
     unify state lhs_ty rhs_ty;
-    ensure_equality_type lhs_ty;
+    ensure_equality_type ~checkpoint:(fun () -> checkpoint state) lhs_ty;
     Boolean
 
-and row_tail_equivalent (lhs : typ) (rhs : typ) : bool =
-  let lhs' = resolve_bound_type lhs in
-  let rhs' = resolve_bound_type rhs in
+and row_tail_equivalent ?checkpoint (lhs : typ) (rhs : typ) : bool =
+  let lhs' = resolve_bound_type ?checkpoint lhs in
+  let rhs' = resolve_bound_type ?checkpoint rhs in
   (* Phase 6 rule: explicit recursive types stay separate from row tails.
      Control-flow joins must not preserve a row tail merely because both
      sides happen to mention the same recursive binder structure. *)
@@ -1898,8 +2107,9 @@ and row_known_fields_subset ~(subset : typ) ~(superset : typ) : bool =
     | None -> false)
 
 and join_record_rows (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  let map_l, tail_l = merge_fields lhs in
-  let map_r, tail_r = merge_fields rhs in
+  let poll () = checkpoint state in
+  let map_l, tail_l = merge_fields ~checkpoint:poll lhs in
+  let map_r, tail_r = merge_fields ~checkpoint:poll rhs in
   let common_fields =
     Env.fold map_l ~init:Env.empty ~f:(fun ~key ~data:lhs_field_ty acc ->
       match Env.find map_r key with
@@ -1907,12 +2117,18 @@ and join_record_rows (state : infer_state) (lhs : typ) (rhs : typ) : typ =
       | Some rhs_field_ty -> Env.add key (join_type state lhs_field_ty rhs_field_ty) acc)
   in
   let shared_tail =
-    if row_tail_equivalent tail_l tail_r then resolve_bound_type tail_l else Empty_row
+    if row_tail_equivalent ~checkpoint:poll tail_l tail_r
+    then resolve_bound_type ~checkpoint:poll tail_l
+    else Empty_row
   in
   build_row_type common_fields shared_tail
 
 and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
-  match resolve_bound_type lhs, resolve_bound_type rhs with
+  checkpoint state;
+  match
+    ( resolve_bound_type ~checkpoint:(fun () -> checkpoint state) lhs
+    , resolve_bound_type ~checkpoint:(fun () -> checkpoint state) rhs )
+  with
   | Record row_l, Record row_r -> Record (join_record_rows state row_l row_r)
   | lhs', rhs' ->
     unify state lhs' rhs';
@@ -1926,13 +2142,15 @@ and infer_expr_against_expected
       (expected_ty : typ)
   : typ
   =
-  match expr.value, resolve_bound_type expected_ty with
+  match
+    expr.value, resolve_bound_type ~checkpoint:(fun () -> checkpoint state) expected_ty
+  with
   | ELambda (params, body), Fun (expected_params, expected_ret)
     when List.length params = List.length expected_params ->
     with_new_level state ~f:(fun () ->
       let env_with_params =
         List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono env_acc param param_ty)
+          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
       in
       let body_ty = infer_expr state env_with_params types body in
       unify state body_ty expected_ret;
@@ -1942,7 +2160,7 @@ and infer_expr_against_expected
     with_new_level state ~f:(fun () ->
       let env_with_params =
         List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
-          add_mono env_acc param param_ty)
+          add_mono ~checkpoint:(fun () -> checkpoint state) env_acc param param_ty)
       in
       let body_ty = infer_expr state env_with_params types body in
       unify state body_ty expected_ret;
@@ -1961,6 +2179,7 @@ and infer_expr_against_expected
     expected_ty
 
 and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
+  checkpoint state;
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
@@ -1981,7 +2200,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.current_lvl in
-              add_mono env_acc p t, t :: tys_rev)
+              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys =
@@ -1994,7 +2213,7 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
           let env_with_params, param_tys_rev =
             List.fold params ~init:(env, []) ~f:(fun (env_acc, tys_rev) p ->
               let t = new_var state state.current_lvl in
-              add_mono env_acc p t, t :: tys_rev)
+              add_mono ~checkpoint:(fun () -> checkpoint state) env_acc p t, t :: tys_rev)
           in
           let body_ty = infer_expr state env_with_params types body in
           let param_tys =
@@ -2095,7 +2314,9 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
         let row_var = new_var state state.current_lvl in
         Variant (Row (Env.singleton tag case_ty, row_var))
       | EAnnot (rhs, type_expr) ->
-        let annotated_ty = typ_of_type_expr types type_expr in
+        let annotated_ty =
+          typ_of_type_expr ~checkpoint:(fun () -> checkpoint state) types type_expr
+        in
         infer_expr_against_expected state env types rhs annotated_ty
       | EMatch (scrut, cases) ->
         let scrut_ty = infer_expr state env types scrut in
@@ -2117,7 +2338,10 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             | Type_error_with_loc _ as exn -> raise exn)
         in
         validate_match_exhaustiveness state scrut_ty (List.map case_spans ~f:fst);
-        validate_typed_match_redundancy scrut_ty case_spans;
+        validate_typed_match_redundancy
+          ~checkpoint:(fun () -> checkpoint state)
+          scrut_ty
+          case_spans;
         (match result_ty with
          | Some ty -> ty
          | None -> new_var state state.current_lvl)
@@ -2141,7 +2365,10 @@ and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
             | Type_error_with_loc _ as exn -> raise exn)
         in
         validate_match_exhaustiveness state scrut_ty (List.map case_spans ~f:fst);
-        validate_typed_match_redundancy scrut_ty case_spans;
+        validate_typed_match_redundancy
+          ~checkpoint:(fun () -> checkpoint state)
+          scrut_ty
+          case_spans;
         (match result_ty with
          | Some ty -> ty
          | None -> new_var state state.current_lvl)
@@ -2174,13 +2401,16 @@ let rec infer_stmt_with_exports
   | SLet (x, e) -> infer_nonrecursive_binding state env types x e, types, [ x ]
   | SLetRec bindings ->
     infer_recursive_bindings state env types bindings, types, List.map bindings ~f:fst
-  | SType (name, body) -> env, infer_type_decl types name body, []
+  | SType (name, body) ->
+    env, infer_type_decl ~checkpoint:(fun () -> checkpoint state) types name body, []
   | SExpr e ->
     ignore (infer_expr state env types e);
     env, types, []
   | SModule (mname, stmts) ->
     let module_placeholder = new_var state state.current_lvl in
-    let mod_env_start = add_mono env mname module_placeholder in
+    let mod_env_start =
+      add_mono ~checkpoint:(fun () -> checkpoint state) env mname module_placeholder
+    in
     let mod_env_final, _mod_types_final, exported_names_rev =
       List.fold
         stmts
@@ -2209,7 +2439,7 @@ let rec infer_stmt_with_exports
   | SOpen mname ->
     (match lookup state env mname with
      | Record row ->
-       let fields, tail = merge_fields row in
+       let fields, tail = merge_fields ~checkpoint:(fun () -> checkpoint state) row in
        (match tail with
         | Empty_row | Var { contents = Free _ } -> ()
         | _ -> ());
@@ -2245,20 +2475,47 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
 
     The snapshot produced on success is the only source of type information
     consulted by the resolver in production. *)
-let check_program_with_surface (surface : Builtin_surface.surface) (prog : program)
+let check_program_with_surface
+      ?checkpoint:compiler_checkpoint
+      ?(required_bindings : (string * Builtin_spec.ty) list = [])
+      (surface : Builtin_surface.surface)
+      (prog : program)
   : (checked_program, diagnostic) result
   =
-  let state = create_state () in
+  let state = create_state ?checkpoint:compiler_checkpoint () in
   try
-    let env = init_env_with_surface surface in
-    let types : type_env = init_types_with_surface surface in
+    let env = init_env_with_surface ~checkpoint:(fun () -> checkpoint state) surface in
+    let types : type_env =
+      init_types_with_surface ~checkpoint:(fun () -> checkpoint state) surface
+    in
     (* Each element of [prog] now carries its own source span.  The current
        type-checker, however, does not yet make use of that information.  We
        therefore simply discard the annotation for the time being. *)
-    let _final_env, _final_types =
+    let final_env, _final_types =
       List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
         infer_stmt state env_acc types_acc stmt_node.value)
     in
+    (* Instantiate the entire contract together: repeated type variables relate
+       bindings such as initial_state and on_event. Checking inferred bindings
+       avoids evaluating initializers or introducing shadowable source wrappers. *)
+    (match
+       List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare
+     with
+     | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
+     | None -> ());
+    let required_types =
+      Tuple
+        (List.map required_bindings ~f:(fun (_, ty) ->
+           typ_of_builtin_ty ~checkpoint:(fun () -> checkpoint state) ty))
+      |> instantiate state
+    in
+    (match required_types with
+     | Tuple types ->
+       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+         try unify state (lookup state final_env name) expected with
+         | Type_error message ->
+           raise (Type_error ("Invalid entrypoint '" ^ name ^ "': " ^ message)))
+     | _ -> assert false);
     Ok { span_types = Hashtbl.copy state.span_types }
   with
   | Type_error msg -> Error { message = msg; span = None }

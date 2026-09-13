@@ -48,6 +48,173 @@ module Read_request : sig
 end
 ```
 
+## authoring_guidance
+
+[JSON codec](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
+
+```ocaml
+(** Host-owned provenance for guidance, never inferred from message text. Source
+    identities are content hashes, not paths, credentials or executable grants. *)
+type source =
+  | Installed of string
+  | Authored of string
+[@@deriving equal, sexp]
+
+type purpose =
+  | Primer
+  | Preload
+  | Reference
+  | Rediscovery
+[@@deriving equal, sexp]
+
+type topic =
+  { id : string
+  ; document_sha256 : string
+  ; source : source
+  ; complete : bool
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { version : int
+  ; context_identity : string
+  ; policy_fingerprint : string
+  ; payload_sha256 : string
+  ; purpose : purpose
+  ; topics : topic list
+  ; fragments : fragment list [@sexp.list]
+  ; surface_id : string option [@sexp.option]
+  }
+
+and part =
+  { index : int
+  ; item_sha256 : string
+  }
+
+and fragment =
+  { topic_id : string
+  ; total_parts : int
+  ; parts : part list
+  }
+[@@deriving equal, sexp]
+
+(** [context_identity] binds installed language/runtime, target and effective
+    capability identities. [policy_fingerprint] comes from resolved author policy.
+    The payload digest binds the complete provider item, including its role.
+    Rediscovery pointers must not claim to contain complete topic content. *)
+val create
+  :  context_identity:string
+  -> policy_fingerprint:string
+  -> purpose:purpose
+  -> topics:topic list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** Version-2 reference provenance. Every topic has exactly one coverage record;
+    indexes are ordered and unique, and per-page [complete] requires every part.
+    At most 1024 topics and 4096 parts are recorded, matching query-receipt bounds.
+    Version-1 primer/preload/reference/pointer
+    records remain readable and do not acquire fragment metadata. The host must
+    derive this evidence from a verified query receipt and the actual provider
+    item; model-supplied labels are not an authority to create provenance. *)
+val create_reference
+  :  context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
+  -> fragments:fragment list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** Version-3 references preserve the queried compiler surface. Version-1/2
+    records remain readable without inventing a surface for legacy evidence. *)
+val create_surface_reference
+  :  surface_id:string
+  -> context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
+  -> fragments:fragment list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+(** A surface-specific pointer contains no topic content or fragment coverage. *)
+val create_surface_rediscovery
+  :  surface_id:string
+  -> context_identity:string
+  -> policy_fingerprint:string
+  -> topics:topic list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+val validate : t -> (unit, Error.t) result
+val valid_topic : topic -> bool
+val topic_to_json : topic -> Jsonaf.t
+val topic_of_json : Jsonaf.t -> (topic, Error.t) result
+val matches_payload : t -> Jsonaf.t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## authoring_reference
+
+[JSON codec](../../lib/agent_protocol/authoring_reference.ml) · [interface](../../lib/agent_protocol/authoring_reference.mli)
+
+```ocaml
+(** Persisted evidence of an exact documentation response, not an execution grant
+    or proof of model delivery. Decode only as part of trusted persisted state. *)
+type part =
+  { index : int
+  ; item_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+type topic =
+  { topic : Authoring_guidance.topic
+  ; total_parts : int
+  ; parts : part list
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { version : int
+  ; query_identity : string
+  ; host_identity : string
+  ; capability_fingerprint : string
+  ; scope : string
+  ; surface_id : string
+  ; corpus_identity : string
+  ; response_sha256 : string
+  ; topics : topic list
+  }
+[@@deriving equal, sexp]
+
+val create
+  :  query_identity:string
+  -> host_identity:string
+  -> capability_fingerprint:string
+  -> scope:string
+  -> surface_id:string
+  -> corpus_identity:string
+  -> response_sha256:string
+  -> topics:topic list
+  -> (t, Error.t) result
+
+(** Version/closed-shape, identity and coverage validation. At most 1024 topics,
+    4096 total recorded parts and 1 MiB encoded metadata. Per-topic indexes must
+    be strictly increasing and within the declared total. Complete means all
+    parts occur in this response, never just that this is the last query page. *)
+val validate : t -> (unit, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Digest of the actual response JSON. Neither comparison nor decoding gives a
+    caller permission to attach the receipt to an invocation/history entry. *)
+val matches_response : t -> Jsonaf.t -> bool
+
+val matches_output : t -> Jsonaf.t -> bool
+val scope_for : session_id:Id.Session.t -> generation:int -> string
+```
+
 ## blob
 
 [JSON codec](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
@@ -188,6 +355,7 @@ type t =
   | Schedule_get of Schedule.Get_request.t
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
+  | Ingress_submit of Ingress.Submit_request.t
 [@@deriving sexp]
 
 (** [method_name t] returns the stable protocol method. *)
@@ -201,6 +369,196 @@ val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) res
 
 (** [supported_methods] contains every method accepted by the closed dispatcher. *)
 val supported_methods : string list
+```
+
+## completion
+
+[JSON codec](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
+
+```ocaml
+(** Terminal background outcomes, separate from initial tool acknowledgements. *)
+type t =
+  | Succeeded of Jsonaf.t
+  | Failed of Invocation.tool_error
+  | Cancelled of string
+  | Expired
+[@@deriving equal, sexp]
+
+type wake =
+  | Request_turn
+  | Next_turn
+  | No_wake
+[@@deriving compare, equal, sexp]
+
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val wake_to_json : wake -> Jsonaf.t
+val wake_of_json : Jsonaf.t -> (wake, Error.t) result
+```
+
+## completion_contract
+
+[JSON codec](../../lib/agent_protocol/completion_contract.ml) · [interface](../../lib/agent_protocol/completion_contract.mli)
+
+```ocaml
+open Core
+
+(** Host-captured standalone completion contract. It does not authorize execution
+    or delivery: the runtime must rebind the pinned publisher/tool ceiling and
+    verify the owning invocation's actual Pending acknowledgement. *)
+type t =
+  { tool_name : string
+  ; tool_fingerprint : string
+  ; capability_pins : (string * string) list
+  ; completion_schema : Jsonaf.t option
+  ; max_output_bytes : int
+  ; max_output_depth : int
+  }
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Protocol_error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Protocol_error.t) result
+```
+
+## completion_projection
+
+[JSON codec](../../lib/agent_protocol/completion_projection.ml) · [interface](../../lib/agent_protocol/completion_projection.mli)
+
+```ocaml
+(** Evidence retained by a host-managed standalone completion adapter. The hashes
+    bind the original immutable invocation contract and terminal job storage; a
+    rejected projection never replaces the job's business result. This DTO alone
+    does not authorize publication. Admission must validate the materialized
+    completion against both the stored result and the original contract. *)
+type t =
+  { job_attempt : int
+  ; contract_sha256 : string
+  ; result_sha256 : string
+  ; rejected : bool
+  ; result_reference : Job_result_reference.t option [@sexp.option]
+    (** Version2: the accepted original result is retained, and the bounded
+        delivery contains its reference. Invalid original results never expose it. *)
+  }
+[@@deriving equal, sexp]
+
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Hash the exact canonical protocol representation, including an artifact's
+    owner, outcome and content digest when the result is stored externally. *)
+val contract_digest : Completion_contract.t -> string
+
+val result_digest : Stored_completion.t -> string
+
+(** Fixed, bounded public error, without rejected business data. *)
+val rejection : Invocation.tool_error
+```
+
+## delivery
+
+[JSON codec](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
+
+```ocaml
+(** Durable notification intent. Committing a delivery is only valid in the
+    actor transaction that inserts its matching history entry. *)
+type source =
+  | Moderator
+  | Job_adapter
+  | External_ingress
+[@@deriving compare, equal, sexp]
+
+(** Actual creating moderator source and execution. An absent owner identifies
+    a legacy/host-adapter record, never implicit authority for a current script. *)
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  }
+[@@deriving equal, sexp]
+
+type context =
+  { id : Id.Delivery.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; invocation_id : Id.Invocation.t option
+  ; work : Invocation.work option
+  ; correlation : string
+  ; source : source
+  ; completion : Completion.t
+  ; wake : Completion.wake
+  ; created_at : Timestamp.t
+  ; ownership : ownership option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
+type status =
+  | Pending
+  | Committed of
+      { history_id : History_entry.Id.t
+      ; at : Timestamp.t
+      }
+  | Failed of Invocation.tool_error
+[@@deriving equal, sexp]
+
+(** A durable request to wake after history insertion. Accepted binds the actual
+    foreground operation admitted by the actor; it does not claim model success.
+    Discarded retains a bounded explanation for policy/lifecycle rejection. *)
+type wake_disposition =
+  | Pending_wake
+  | Accepted_wake of Id.Operation.t
+  | Discarded_wake of string
+[@@deriving equal, sexp]
+
+type t = private
+  { context : context
+  ; attempt : int
+  ; status : status
+  ; wake_disposition : wake_disposition option [@sexp.option]
+    (** Envelope3, or Envelope4 with disclosure pins. Only committed Request_turn deliveries carry
+        this receipt. Source ownership is independent of wake tracking.
+        Historical absent values do not acquire a new wake. *)
+  ; disclosure_pins : (string * string) list option [@sexp.option]
+    (** Envelope4: immutable ordered configuration pins for the publisher's exact
+        tool ceiling. None is historical/untracked, not authority to use the whole
+        current registry. Some [] is an explicitly empty ceiling. *)
+  ; completion_projection : Completion_projection.t option [@sexp.option]
+    (** Envelope5: immutable original-result evidence for a standalone adapter.
+        The host validates the contract and actual job before admission. *)
+  }
+[@@deriving equal, sexp]
+
+val create
+  :  ?disclosure_pins:(string * string) list
+  -> ?completion_projection:Completion_projection.t
+  -> context
+  -> (t, Error.t) result
+
+val validate : t -> (unit, Error.t) result
+
+(** New execution services opt into durable wake tracking with [track_wake:true].
+    It creates Pending_wake only for Request_turn, for moderators or approved host
+    adapters. The default preserves legacy publication behavior; reading or
+    recommitting an existing record never synthesizes a new wake. *)
+val commit
+  :  ?track_wake:bool
+  -> t
+  -> history_id:History_entry.Id.t
+  -> now:Timestamp.t
+  -> (t, Error.t) result
+
+(** Settle once, idempotently for the same disposition. The host must commit
+    acceptance with admission of the named operation, using Delivery_wake_changed;
+    these pure transitions alone neither authorize nor start a turn. *)
+val accept_wake : t -> operation_id:Id.Operation.t -> (t, Error.t) result
+
+val discard_wake : t -> reason:string -> (t, Error.t) result
+val fail : t -> Invocation.tool_error -> (t, Error.t) result
+val retry : t -> max_attempts:int -> (t, Error.t) result
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## envelope
@@ -375,6 +733,12 @@ module Durable : sig
   (** [to_json t] encodes the parameters of a [session.event] notification. *)
   val to_json : t -> Jsonaf.t
 
+  (** Optional complete status projection on [Session_updated]. Older clients
+      ignore this field; an empty list explicitly clears previously held state. *)
+  val with_extension_status : t -> Extension_status.t list -> t
+
+  val extension_status : t -> (Extension_status.t list option, Error.t) result
+
   (** [with_replacement_snapshot event snapshot] adds complete replacement state
       to a [Session_updated] event and binds its session revision/sequence to the
       event. Other event kinds are unchanged. Filter the snapshot for the reader
@@ -437,6 +801,85 @@ module Recoverable : sig
   (** [to_notification t] wraps the live event in a JSON-RPC notification. *)
   val to_notification : t -> Envelope.t
 end
+```
+
+## extension_capabilities
+
+[JSON codec](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
+
+```ocaml
+(** Versioned host qualification, separate from record-codec support. Presence of
+    this metadata does not enable any model-visible tool or authorize effects. *)
+
+type host =
+  | Daemon
+  | Embedded_durable
+  | Embedded_transient
+  | Direct
+[@@deriving compare, equal, sexp]
+
+type journal_flush =
+  | Synced
+  | Buffered
+  | Memory
+[@@deriving compare, equal, sexp]
+
+type t = private
+  { host : host
+  ; journal_flush : journal_flush
+  ; available_features : string list
+  }
+[@@deriving sexp]
+
+val known_features : string list
+
+val create
+  :  host:host
+  -> journal_flush:journal_flush
+  -> available_features:string list
+  -> (t, Error.t) result
+
+(** Filter only the extension namespace; preserve unrelated protocol features.
+    Host options cannot advertise an extension that has not been qualified. *)
+val filter_available : t -> string list -> string list
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## extension_status
+
+[JSON codec](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
+
+```ocaml
+(** Payload-free extension lifecycle summaries. These deliberately omit arguments,
+    results, errors, schemas, capability identities and arbitrary correlation text.
+    Servers must still filter them by the principal's security-view scope. *)
+
+type kind =
+  | Invocation
+  | Subscription
+  | Delivery
+  | Moderator_execution
+[@@deriving compare, equal, sexp]
+
+type t = private
+  { kind : kind
+  ; id : string
+  ; generation : int
+  ; state : string
+  }
+[@@deriving equal, sexp]
+
+val invocation : Invocation.t -> t
+val subscription : Subscription.t -> t
+val delivery : Delivery.t -> t
+val moderator_execution : Moderator_execution.t -> t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Rejects duplicate identities, including ambiguous updates in one event. *)
+val list_of_json : Jsonaf.t -> (t list, Error.t) result
 ```
 
 ## grant
@@ -567,10 +1010,13 @@ end
 [JSON codec](../../lib/agent_protocol/history.ml) · [interface](../../lib/agent_protocol/history.mli)
 
 ```ocaml
-(** Presentation-neutral canonical and moderated transcript projections. *)
+(** Presentation-neutral canonical and moderated transcript projections.
+    Entry equality preserves exact JSON payload structure and object field order. *)
+
+type delivery_id = Id.Delivery.t [@@deriving equal, sexp]
 
 module Id : sig
-  type t = History_entry.Id.t [@@deriving compare, hash, sexp]
+  type t = History_entry.Id.t [@@deriving compare, equal, hash, sexp]
 
   val of_string : string -> (t, Error.t) result
   val to_string : t -> string
@@ -597,7 +1043,9 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
-[@@deriving sexp]
+  | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
+[@@deriving equal, sexp]
 
 type entry =
   { id : Id.t
@@ -607,9 +1055,15 @@ type entry =
   ; provenance : provenance
   ; redacted : bool
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 val entry_to_json : entry -> Jsonaf.t
+
+(** Validate host provenance metadata. This does not decode a provider item or
+    claim the original guidance payload is still present; use the presence hook
+    after applying effective-history edits to determine that. *)
+val validate_entry : entry -> (unit, Error.t) result
+
 val entry_of_json : Jsonaf.t -> (entry, Error.t) result
 
 module Window_request : sig
@@ -666,7 +1120,7 @@ module Generator : sig
 end
 
 module type S = sig
-  type t [@@deriving compare, hash, sexp]
+  type t [@@deriving compare, equal, hash, sexp]
 
   (** [create ()] creates a cryptographically random identifier. *)
   val create : unit -> t
@@ -694,6 +1148,12 @@ module Operation : S
 module Event_cursor : S
 module Transaction : S
 module Job : S
+module Invocation : S
+module Moderator_execution : S
+module Subscription : S
+module Delivery : S
+module Capability : S
+module Ingress_event : S
 module Schedule : S
 module Permission : S
 module Grant : S
@@ -726,6 +1186,45 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 (** [to_json t] encodes a JSON string key. *)
 val to_json : t -> Jsonaf.t
+```
+
+## ingress
+
+[JSON codec](../../lib/agent_protocol/ingress.ml) · [interface](../../lib/agent_protocol/ingress.mli)
+
+```ocaml
+(** Scoped external DATA admission. A registration ID is not a credential.
+    The server authenticates the producer separately; callers cannot supply it. *)
+module Submit_request : sig
+  type t =
+    { session_id : Id.Session.t
+    ; registration_id : Id.Capability.t
+    ; namespace : string
+    ; idempotency_key : Idempotency_key.t
+    ; payload : Jsonaf.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+(** Durable acceptance acknowledgement, not handler execution or model completion.
+    Matching retries return the same event identity, digest and acceptance time. *)
+module Acknowledgement : sig
+  type t =
+    { session_id : Id.Session.t
+    ; registration_id : Id.Capability.t
+    ; event_id : Id.Ingress_event.t
+    ; idempotency_key : Idempotency_key.t
+    ; payload_sha256 : string
+    ; accepted_at : Timestamp.t
+    }
+  [@@deriving equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## initialize
@@ -824,6 +1323,7 @@ module Response : sig
     ; implementation : Implementation.t
     ; server_id : Id.Server.t
     ; enabled_features : string list
+    ; extensions : Extension_capabilities.t option [@sexp.option]
     ; principal : Principal.t
     ; limits : Limits.t
     ; event_retention : Event_retention.t
@@ -838,6 +1338,7 @@ module Response : sig
     -> implementation:Implementation.t
     -> server_id:Id.Server.t
     -> enabled_features:string list
+    -> extensions:Extension_capabilities.t option
     -> principal:Principal.t
     -> limits:Limits.t
     -> event_retention:Event_retention.t
@@ -848,6 +1349,291 @@ module Response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## invocation
+
+[JSON codec](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
+
+```ocaml
+(** Versioned tool invocation records. These pure transitions do not grant
+    authority: the actor must admit the caller and validate referenced work
+    ownership before committing a resolution. Derived equality preserves exact
+    JSON structure, including object field order, for immutable identity/results. *)
+
+type origin =
+  | Model
+  | Moderator
+  | Script
+  | Delegated_agent
+  | External_adapter
+[@@deriving compare, equal, sexp]
+
+type work =
+  | Job of Id.Job.t
+  | Subscription of Id.Subscription.t
+[@@deriving compare, equal, sexp]
+
+type tool_error =
+  { code : string
+  ; message : string
+  ; retryable : bool
+  ; details : Jsonaf.t
+  }
+[@@deriving equal, sexp]
+
+type outcome =
+  | Complete of Jsonaf.t
+  | Pending of work * Jsonaf.t
+  | Fail of tool_error
+  | Cancelled of string
+[@@deriving equal, sexp]
+
+type context =
+  { id : Id.Invocation.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; origin : origin
+  ; provider_call_id : string option
+  ; call_entry_id : History.Id.t option [@sexp.option]
+    (** Host-only canonical call occurrence binding. Absent in legacy records;
+        required by the actor's canonical publication service. Only model origin
+        may carry this field. The ChatML context ABI is unchanged. *)
+  ; parent_invocation : Id.Invocation.t option
+  ; parent_job : Id.Job.t option
+  ; tool_name : string
+  ; implementation_revision : string
+  ; capability_fingerprint : string
+  ; input : Jsonaf.t
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t option
+  }
+[@@deriving equal, sexp]
+
+type status =
+  | Admitted
+  | Dispatching
+  | Resolved of outcome
+  | Published of outcome
+[@@deriving equal, sexp]
+
+type call_kind =
+  | Function
+  | Custom
+[@@deriving sexp, equal]
+
+type payload_fingerprint =
+  { sha256 : string
+  ; byte_length : int
+  }
+[@@deriving sexp, equal]
+
+type preparation =
+  | Passed
+  | Invalid_input
+  | Pre_tool_rejected
+  | Pre_tool_failed
+  | Session_ended
+  (** Stopped before execution, potentially after rewriting the call. Original
+        and final routing may differ; successful outcomes are forbidden. *)
+[@@deriving equal, sexp]
+
+(** Host-retained routing provenance. Fingerprints describe exact raw bytes;
+    canonical_payload describes the separately redacted/displayed call. No extra
+    plaintext arguments are retained. The final target is context.tool_name.
+    [Passed] records completion of original-input/pre-tool preparation, not
+    final-target authorization or successful execution. This is audit evidence,
+    not authority or a claim that the handler executed. *)
+type routing =
+  { kind : call_kind
+  ; original_name : string
+  ; original_payload : payload_fingerprint
+  ; final_payload : payload_fingerprint
+  ; canonical_payload : payload_fingerprint option [@sexp.option]
+  ; preparation : preparation
+  }
+[@@deriving equal, sexp]
+
+(** Stable source identity, independent of process-local tool capability IDs. *)
+type observer =
+  { script_id : string
+  ; source_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+type observation_status =
+  | Awaiting
+  | Observing
+  | Observed
+  | Observation_failed of string
+[@@deriving equal, sexp]
+
+(** Runtime actions requested by an observation handler. These are scheduling
+    intents, separate from native tool outcomes and observer execution. *)
+type follow_up =
+  { request_turn : bool
+  ; request_compaction : bool
+  ; end_session : string option
+  }
+[@@deriving equal, sexp]
+
+type follow_up_status =
+  | Pending_follow_up of follow_up
+  | Compaction_accepted_follow_up of follow_up
+  | Applied_follow_up of follow_up
+  | Discarded_follow_up of follow_up * string
+[@@deriving equal, sexp]
+
+type handler_intent =
+  { follow_up : follow_up_status
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
+type observation =
+  { observer : observer
+  ; status : observation_status
+  ; follow_up : follow_up_status option [@sexp.option]
+    (** Codec 6. Present only after acknowledgement; retained after application. *)
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
+    (** Codec 8. The compaction whose outcome controls the dependent turn.
+        Retained after application/discard. Absent on legacy receipts. *)
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { context : context
+  ; status : status
+  ; output_entry_id : History.Id.t option [@sexp.option]
+  ; routing : routing option [@sexp.option]
+  ; publication_discarded : string option [@sexp.option]
+    (** Durable reason that no provider result will be published. The recorded
+        outcome is preserved. Present only on resolved model invocations; codec 4. *)
+  ; observation : observation option [@sexp.option]
+    (** Non-authorizing nested script/moderator observation intent, fixed at admission.
+        Handling disposition is independent of the tool outcome; codec 5. *)
+  ; parent_event : Id.Moderator_execution.t option [@sexp.option]
+    (** Direct ordinary-event owner; exclusive with invocation/job parents. Codec 9.
+        Requires matching moderator observation intent and actor admission. *)
+  ; handler_intent : handler_intent option [@sexp.option]
+    (** Codec10. Actions requested by the tool implementation, recorded atomically
+        with its original outcome. Independent of post-tool observation intent. *)
+  ; completion_contract : Completion_contract.t option [@sexp.option]
+    (** Schema11. Immutable eventual-result policy captured from a standalone
+        model tool at admission. Presence alone never requests a delivery. *)
+  ; authoring_reference : Authoring_reference.t option [@sexp.option]
+    (** Host-produced receipt bound to the successful disclosed output. Its
+        existence alone does not mean documentation reached provider history. *)
+  }
+[@@deriving equal, sexp]
+
+(** Routing, when present, is fixed at admission and uses JSON codec version 3.
+    Legacy records without routing remain readable. *)
+val create
+  :  ?routing:routing
+  -> ?observer:observer
+  -> ?completion_contract:Completion_contract.t
+  -> ?parent_event:Id.Moderator_execution.t
+  -> context
+  -> (t, Error.t) result
+
+val validate : t -> (unit, Error.t) result
+
+(** Attach actions to a locally resolved invocation before committing it. The
+    actor transition permits first attachment only with Dispatching -> Resolved;
+    this pure function grants no authority to schedule the action. *)
+val record_handler_intent : t -> requests:follow_up -> (t, Error.t) result
+
+val apply_handler_intent : t -> (t, Error.t) result
+val accept_handler_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
+val discard_handler_intent : t -> reason:string -> (t, Error.t) result
+val dispatch : t -> (t, Error.t) result
+
+(** Records one outcome for a dispatched invocation after checking its owner
+    and generation. A duplicate resolution fails, even for identical output.
+    Referenced job/subscription ownership requires actor service validation. *)
+val resolve
+  :  ?authoring_reference:Authoring_reference.t
+  -> t
+  -> session_id:Id.Session.t
+  -> generation:int
+  -> outcome
+  -> (t, Error.t) result
+
+(** Attach trusted query evidence while preparing a successful resolution for its
+    first commit. This does not mutate persisted state: [validate_transition]
+    rejects adding a receipt to an already committed resolution. An identical
+    prepared annotation is idempotent; replacing it or annotating publication fails. *)
+val record_authoring_reference : t -> Authoring_reference.t -> (t, Error.t) result
+
+(** Host cancellation may resolve admitted or dispatched work. It never
+    replaces an already recorded outcome and does not cancel a pending job. *)
+val cancel : t -> reason:string -> (t, Error.t) result
+
+(** Marks delivery of the initial result. Idempotent after publication; no
+    provider-history insertion or external effects are performed here. *)
+val publish : t -> (t, Error.t) result
+
+(** Publish a canonically bound model invocation with a retained output receipt.
+    Repeating the same occurrence is idempotent; another occurrence is rejected.
+    The actor must validate and atomically append the actual history entry.
+    Routing records use JSON codec 3. Without routing, bound records use codec 2
+    and unbound legacy records retain codec 1. *)
+val publish_with_history : t -> output_entry_id:History.Id.t -> (t, Error.t) result
+
+(** Record removal/unavailability of the canonical call without changing the
+    outcome or fabricating a provider output. The host must prove that the call
+    is not retained. Idempotent for the same reason; cannot later publish. *)
+val discard_publication : t -> reason:string -> (t, Error.t) result
+
+(** Pure transitions: the host must exclusively claim and durably save Observing
+    before running the observer. Only terminal invocation outcomes are eligible.
+    Claim is not idempotent: after interruption an Observing receipt must fail,
+    never replay potentially effectful handler execution. *)
+val claim_observation : t -> (t, Error.t) result
+
+(** The host must save this receipt atomically with the prospective moderator
+    state/effects. Failure leaves the tool outcome intact. These functions do not
+    run handlers, authorize callers or install an observation drain. *)
+val complete_observation : ?follow_up:follow_up -> t -> (t, Error.t) result
+
+(** Mark requested runtime actions durably accepted. The host must commit this
+    receipt atomically with the scheduling/stop transition, after releasing live
+    moderator ownership. It does not claim that an operation finished. Idempotent;
+    never reruns the handler or changes its outcome. Pending actions survive
+    interruption between observation acknowledgement and scheduling.
+    This primitive does not install a dispatcher or infer actions from snapshots. *)
+val apply_observation_follow_up : t -> (t, Error.t) result
+
+(** Codec 8 intermediate receipt: compaction is durably scheduled, and the
+    requested turn remains pending. Save atomically with compaction admission.
+    Repeating acceptance is idempotent and must not start another compaction. *)
+val accept_observation_compaction
+  :  t
+  -> operation_id:Id.Operation.t
+  -> (t, Error.t) result
+
+(** Terminally discard unaccepted actions, e.g. when a session is stopped.
+    Preserve the request and native outcome; never rearm it on restart.
+    Repeating the same reason is idempotent. Save with the stop transition. *)
+val discard_observation_follow_up : t -> reason:string -> (t, Error.t) result
+
+(** May also discard an Awaiting observation whose owner is no longer available.
+    Repeating the same failure is idempotent; successful handling is immutable. *)
+val fail_observation : t -> reason:string -> (t, Error.t) result
+
+(** Checks a proposed durable replacement, including immutable context and
+    outcome. New records must be admitted; transitions cannot skip dispatch
+    except for host cancellation. *)
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+
+val outcome_to_json : outcome -> Jsonaf.t
+val validate_outcome : outcome -> (unit, Error.t) result
+val work_to_json : work -> Jsonaf.t
+val work_of_json : Jsonaf.t -> (work, Error.t) result
+val outcome_of_json : Jsonaf.t -> (outcome, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## job
@@ -866,10 +1652,27 @@ type kind =
   | Compaction
 [@@deriving compare, equal, sexp]
 
+(** A saved target invocation returned Pending backed by owned work. The parent
+    waits without a worker, retaining its original deadline across restart.
+    Job targets retain waiting-status JSON version 1 and legacy [job_id]
+    S-expression encoding. Subscription targets use JSON version 2 with tagged
+    [work]; their records must bind the actual creating parent job attempt. *)
+type dependency =
+  { invocation_id : Id.Invocation.t
+  ; work : Invocation.work
+  ; deadline : Timestamp.t
+  ; completion_schema : Jsonaf.t option [@sexp.option]
+    (** Captured from the admitted target definition, never supplied by a script. *)
+  ; max_output_bytes : int
+  ; max_output_depth : int
+  }
+[@@deriving equal, sexp]
+
 type status =
   | Queued
   | Running
   | Waiting_permission of Id.Permission.t
+  | Waiting_completion of dependency
   | Succeeded
   | Failed of Error.t
   | Cancelled
@@ -889,11 +1692,32 @@ type retry_policy =
       }
 [@@deriving sexp]
 
+type discard_reason = Authority_changed [@@deriving equal, sexp]
+
 type delivery =
   | Not_required
   | Pending
   | Delivered of Timestamp.t
-[@@deriving sexp]
+  | Discarded of
+      { at : Timestamp.t
+      ; reason : discard_reason
+      }
+[@@deriving equal, sexp]
+
+type launch_owner =
+  | Invocation of Id.Invocation.t
+  | Moderator_event of Id.Moderator_execution.t
+[@@deriving equal, sexp]
+
+type launch =
+  { owner : launch_owner
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+  ; nested_depth : int
+  ; moderator_source : Invocation.observer option [@sexp.option]
+    (** Optional schema2 source captured under the creating moderator's live
+        borrow. Absence never acquires the source of a subsequently loaded script. *)
+  }
+[@@deriving equal, sexp]
 
 type t =
   { id : Id.Job.t
@@ -910,11 +1734,45 @@ type t =
   ; completed_at : Timestamp.t option
   ; result : Jsonaf.t option
   ; delivery : delivery
+  ; launch : launch option [@sexp.option]
+    (** Optional versioned launch provenance. Legacy jobs omit this field.
+        Host admission binds the invocation/event owner and actual parent attempt;
+        user scripts cannot choose their nesting depth. *)
+  ; progress : Job_progress.t option [@sexp.option]
+    (** Transient read projection only. Durable job records omit progress, and
+        terminal results never depend on retaining these display updates. *)
   }
 [@@deriving sexp]
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Validate artifact result ownership and discarded-delivery lifecycle, including
+    values restored from non-JSON snapshots. Legacy result representations remain
+    unchanged. *)
+val validate_result : t -> (unit, Error.t) result
+
+(** A discarded delivery preserves its terminal job exactly and cannot be revived.
+    This checks incremental journal changes; decoding a retained snapshot does not
+    require the previous pending record. *)
+val validate_delivery_transition : previous:t option -> t -> (unit, Error.t) result
+
+(** Read the inline completion or explicit artifact descriptor without loading
+    any bytes. Validates exact artifact session/job/generation/attempt ownership. *)
+val terminal_result : t -> (Stored_completion.t option, Error.t) result
+
+(** Interpret terminal results at the completion/delivery boundary. Async_tool
+    results must contain a valid Completion envelope matching their terminal
+    status. Other kinds retain the legacy raw-success/error-status encoding;
+    JSON that resembles an envelope is still ordinary model output. Nonterminal
+    jobs return None, including queued retries retaining an earlier failure.
+    Artifact results require a host loader; absence fails explicitly rather than
+    treating a reference as the business result. This read neither changes delivery
+    ownership nor executes work. *)
+val terminal_completion
+  :  ?load_artifact:(Job_artifact.t -> (Completion.t, Error.t) result)
+  -> t
+  -> (Completion.t option, Error.t) result
 
 module List_request : sig
   type t =
@@ -963,6 +1821,101 @@ module Cancel_result : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## job_artifact
+
+[JSON codec](../../lib/agent_protocol/job_artifact.ml) · [interface](../../lib/agent_protocol/job_artifact.mli)
+
+```ocaml
+(** Versioned reference to a complete serialized terminal result. The reference
+    binds its blob to one session, job generation and attempt; it is not authority
+    to read a different session or bypass capability/disclosure checks. *)
+type t = private
+  { session_id : Id.Session.t
+  ; job_id : Id.Job.t
+  ; generation : int
+  ; attempt : int
+  ; blob : Blob.Metadata.t
+  }
+[@@deriving sexp]
+
+val media_type : string
+
+val create
+  :  session_id:Id.Session.t
+  -> job_id:Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> blob:Blob.Metadata.t
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val allowed_use : t -> string
+```
+
+## job_progress
+
+[JSON codec](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
+
+```ocaml
+(** Best-effort transient display state. It is not a terminal result, canonical
+    history or a durable replay stream. Channels retain bounded text suffixes. *)
+type channel =
+  | Assistant
+  | Reasoning
+  | Stdout
+  | Stderr
+  | Activity
+[@@deriving compare, equal, sexp]
+
+type item =
+  { channel : channel
+  ; text : string
+  ; truncated : bool
+  }
+[@@deriving sexp]
+
+type t =
+  { sequence : int
+  ; channels : item list
+  }
+[@@deriving sexp]
+
+val max_update_bytes : int
+val max_channel_bytes : int
+val max_updates : int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## job_result_reference
+
+[JSON codec](../../lib/agent_protocol/job_result_reference.ml) · [interface](../../lib/agent_protocol/job_result_reference.mli)
+
+```ocaml
+(** Bounded reference to an exact retained terminal result, whether inline or
+    artifact-backed. A reference does not grant read authority. Consumers use
+    the owning session/job service, which rechecks current access and identity. *)
+type t = private
+  { session_id : Id.Session.t
+  ; job_id : Id.Job.t
+  ; generation : int
+  ; attempt : int
+  ; outcome : Stored_completion.outcome
+  ; byte_length : int64
+  ; sha256 : string
+  ; artifact : Job_artifact.t option
+  }
+[@@deriving sexp]
+
+val equal : t -> t -> bool
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val of_job : Job.t -> (t, Error.t) result
+val validate_job : t -> Job.t -> (unit, Error.t) result
 ```
 
 ## json_codec
@@ -1185,6 +2138,7 @@ type t =
   | Schedule_get of Schedule.t
   | Schedule_create of Schedule.Mutation_response.t
   | Schedule_cancel of Schedule.Mutation_response.t
+  | Ingress_submit of Ingress.Acknowledgement.t
 [@@deriving sexp]
 
 (** [method_name t] returns the request method associated with [t]. *)
@@ -1198,6 +2152,141 @@ val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
 
 (** [supported_methods] contains every method with a typed success decoder. *)
 val supported_methods : string list
+```
+
+## moderator_execution
+
+[JSON codec](../../lib/agent_protocol/moderator_execution.ml) · [interface](../../lib/agent_protocol/moderator_execution.mli)
+
+```ocaml
+(** Durable execution receipts for ordinary moderator events. These are distinct
+    from model operations, tool invocations and conversation deliveries. Records
+    confer no authority; the actor owns source/checkpoint admission and execution. *)
+type phase =
+  | Session_start
+  | Session_resume
+  | Turn_start
+  | Message_appended
+  | Pre_tool_call
+  | Post_tool_response
+  | Turn_end
+  | Internal_event
+[@@deriving equal, sexp]
+
+type job_attempt =
+  { job_id : Id.Job.t
+  ; attempt : int
+  ; deadline : Timestamp.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
+type context =
+  { id : Id.Moderator_execution.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; source : Invocation.observer
+  ; operation_id : Id.Operation.t option
+  ; job : job_attempt option [@sexp.option]
+    (** Background tool event provenance. Mutually exclusive with operation_id;
+        only an actor-owned claimed job attempt may admit this context. *)
+  ; phase : phase
+  ; event : Jsonaf.t
+    (** Captured engine event data. The actor validates its encoding and phase
+        against the selected event; this pure codec only checks JSON bounds. *)
+  ; checkpoint_sha256 : string
+  ; created_at : Timestamp.t
+  }
+[@@deriving equal, sexp]
+
+type status =
+  | Running
+  | Completed of string
+  | Failed of Invocation.tool_error
+  | Interrupted of string
+[@@deriving equal, sexp]
+
+type intent =
+  | Pending
+  | Waiting_compaction of Id.Operation.t
+  | Applied
+  | Discarded of string
+[@@deriving equal, sexp]
+
+(** Separate disposition for a consumed failed queue head. The original execution
+    outcome remains unchanged. Commit this with the resulting checkpoint. *)
+type retirement =
+  { checkpoint_sha256 : string
+  ; reason : string
+  }
+[@@deriving equal, sexp]
+
+(** Cross-session provenance for a parent policy check of an already admitted
+    child invocation. The host must validate the private delegation and actual
+    child invocation; these identifiers grant no authority by themselves. *)
+type delegation =
+  { child_session_id : Id.Session.t
+  ; child_generation : int
+  ; child_invocation_id : Id.Invocation.t
+  ; admission_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+module Decision : sig
+  type t =
+    | Approve
+    | Reject of string
+    | Rewrite_args of Jsonaf.t
+    | Redirect of string * Jsonaf.t
+  [@@deriving equal, sexp]
+
+  val validate : t -> (unit, Error.t) result
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t = private
+  { context : context
+  ; status : status
+  ; requests : Invocation.follow_up option
+  ; intent : intent option
+  ; compaction_operation_id : Id.Operation.t option
+    (** Retained after application/discard for provenance and recovery checks. *)
+  ; retirement : retirement option [@sexp.option]
+  ; delegation : delegation option [@sexp.option]
+  ; decision : Decision.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
+val create : context -> (t, Error.t) result
+
+(** Only pre-tool checks without parent operation/job ownership may carry this
+    provenance. Completed checks require a decision in the same receipt as the
+    committed parent checkpoint. Failed/interrupted checks carry no decision.
+    JSON codec4; ordinary/job receipts keep their existing codec2/3 encoding. *)
+val create_delegated : delegation:delegation -> context -> (t, Error.t) result
+
+val validate : t -> (unit, Error.t) result
+
+val complete
+  :  ?decision:Decision.t
+  -> t
+  -> checkpoint_sha256:string
+  -> requests:Invocation.follow_up
+  -> (t, Error.t) result
+
+val fail : t -> Invocation.tool_error -> (t, Error.t) result
+val interrupt : t -> reason:string -> (t, Error.t) result
+val retire : t -> checkpoint_sha256:string -> reason:string -> (t, Error.t) result
+
+(** Atomically pair intent transitions with their actual actor scheduling or
+    stop transition. Waiting_compaction retains the exact dependent operation. *)
+val accept_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
+
+val apply_intent : t -> (t, Error.t) result
+val discard_intent : t -> reason:string -> (t, Error.t) result
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## mutation_result
@@ -1355,11 +2444,18 @@ type choice =
   | Deny
 [@@deriving compare, equal, sexp]
 
+(** An operation-owned legacy request or a request from an actual persisted
+    tool invocation. Invocation ownership does not require a model operation. *)
+type owner =
+  | Operation of Id.Operation.t
+  | Invocation of Id.Invocation.t
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Permission.t
   ; session_id : Id.Session.t
   ; generation : int
-  ; operation_id : Id.Operation.t
+  ; owner : owner
   ; call_id : string
   ; tool_name : string
   ; runtime_identity : string option
@@ -1390,6 +2486,9 @@ module Resolution : sig
 end
 
 val to_json : t -> Jsonaf.t
+
+(** Accept legacy [operation_id] or [invocation_id], exactly one. The S-expression
+    reader also accepts the old [operation_id] record field. *)
 val of_json : Jsonaf.t -> (t, Error.t) result
 
 module List_request : sig
@@ -1649,6 +2748,15 @@ type due =
   | After_ms of int
 [@@deriving sexp]
 
+(** Host-captured moderator authority and optional one-time subscription epoch
+    binding. A legacy schedule without this record grants no script authority. *)
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  ; subscription : (Id.Subscription.t * int) option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Schedule.t
   ; session_id : Id.Session.t
@@ -1660,11 +2768,28 @@ type t =
   ; status : status
   ; delivery_count : int
   ; last_delivery_at : Timestamp.t option
+  ; ownership : ownership option [@sexp.option]
+    (** Owned schedules use a version-2 JSON envelope. Legacy records retain
+        their original flat encoding; old readers reject the owned envelope. *)
+  ; delivery_cancellation : string option [@sexp.option]
+    (** Immutable cancellation of an enqueued callback, separate from the retained
+        Delivered status/count/time. Present only on owned Delivered records with
+        one delivery. These records require JSON envelope version 3; prior records
+        keep their existing encoding and cannot silently lose a cancellation. *)
   }
 [@@deriving sexp]
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Validate owned records and their lifecycle without changing the legacy
+    unowned schedule contract. Binding is allowed once while still scheduled;
+    source, creator, identity, payload and due time stay immutable. An enqueued
+    owned callback may acquire one immutable delivery cancellation without changing
+    the schedule's delivered status, count, timestamp or payload. *)
+val validate : t -> (unit, Error.t) result
+
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
 
 module List_request : sig
   type t =
@@ -1751,6 +2876,7 @@ type t =
   | Delete_sessions
   | Administer_configuration
   | Diagnostics
+  | Submit_ingress
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t
@@ -1840,6 +2966,10 @@ module Prompt_ref : sig
   type t =
     | Catalog of Id.Prompt_definition.t
     | Local_path of string
+    | Generated of Id.Prompt_revision.t
+    (** Pinned generated definition, identified in session summaries. This is not
+        an execution grant; ordinary session.create cannot admit this reference.
+        Generated creation requires the scoped delegation service. *)
   [@@deriving sexp]
 
   val to_json : t -> Jsonaf.t
@@ -2220,6 +3350,7 @@ type t =
   ; permissions : Permission.t list
   ; grants : Grant.t list
   ; jobs : Job.t list
+  ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
@@ -2236,6 +3367,111 @@ val to_json : t -> Jsonaf.t
 
 (** [of_json json] rejects snapshots whose top-level revision differs from the
     embedded session summary. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## stored_completion
+
+[JSON codec](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
+
+```ocaml
+(** Explicit async-job completion storage. Inline values retain their existing
+    Completion encoding. Artifact envelopes occur only at this storage boundary,
+    never by interpreting an arbitrary business JSON object's shape. *)
+type outcome =
+  | Succeeded
+  | Failed
+  | Cancelled
+  | Expired
+[@@deriving equal, sexp]
+
+type t =
+  | Inline of Completion.t
+  | Artifact of
+      { outcome : outcome
+      ; reference : Job_artifact.t
+      }
+[@@deriving sexp]
+
+val outcome : t -> outcome
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Bind an actual validated completion to a prepared artifact, verifying its
+    serialized length and digest. Does not grant read or publication authority. *)
+val artifact : Job_artifact.t -> Completion.t -> (t, Error.t) result
+
+(** Compare a validated completion with an inline value or the artifact's outcome,
+    byte length and digest. Does not read files or run effects. *)
+val matches : t -> Completion.t -> (bool, Error.t) result
+
+(** Load and revalidate an artifact's exact outcome and content. The host loader
+    must enforce ownership, disclosure, bounded reads and raw byte verification. *)
+val materialize
+  :  load:(Job_artifact.t -> (Completion.t, Error.t) result)
+  -> t
+  -> (Completion.t, Error.t) result
+```
+
+## subscription
+
+[JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
+
+```ocaml
+(** Durable moderator subscription identity and terminal state. Workflow-specific
+    state lives in the moderator. These functions do not execute timers or jobs. *)
+type context =
+  { id : Id.Subscription.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; invocation_id : Id.Invocation.t
+  ; source : Invocation.observer option [@sexp.option]
+    (** Codec 2 binds the creating moderator source. Codec 1 records decode with
+        None and must not acquire current-moderator authority implicitly. *)
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+    (** Codec 3 pins the actor-owned creating job attempt. Absence on older
+        records must not be upgraded to the current attempt implicitly. *)
+  ; kind : string
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t
+  ; completion_schema : Jsonaf.t option
+  ; wake : Completion.wake
+  ; ingress_capability : Id.Capability.t option
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { context : context
+  ; epoch : int
+  ; timer_id : Id.Schedule.t option
+  ; job_id : Id.Job.t option
+  ; result : Completion.t option
+  ; completed_at : Timestamp.t option
+  }
+[@@deriving equal, sexp]
+
+val create : context -> (t, Error.t) result
+val validate : t -> (unit, Error.t) result
+
+val arm
+  :  t
+  -> expected_epoch:int
+  -> timer_id:Id.Schedule.t option
+  -> job_id:Id.Job.t option
+  -> (t, Error.t) result
+
+(** First terminal commit wins. A repeat returns the retained winner and [false].
+    A stale epoch cannot complete a still-active subscription. Expiry cannot be
+    recorded before the deadline. Actual work cancellation is a host action. *)
+val finish
+  :  t
+  -> expected_epoch:int
+  -> now:Timestamp.t
+  -> Completion.t
+  -> (t * bool, Error.t) result
+
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
@@ -2256,6 +3492,14 @@ val of_time_ns : Core.Time_ns.t -> t
 
 (** [to_time_ns t] returns the underlying absolute time. *)
 val to_time_ns : t -> Core.Time_ns.t
+
+(** [diff_ns t since] returns the signed nanosecond difference without narrowing
+    it to a Time_ns span. The difference of two timestamps fits in int64. *)
+val diff_ns : t -> t -> int64
+
+(** [add_ms t delay_ms] adds a nonnegative millisecond delay. Rejects negative
+    delays and unrepresentable endpoints without wrapping or float rounding. *)
+val add_ms : t -> int -> (t, Error.t) result
 
 (** [of_string encoded] parses an RFC 3339 timestamp with an uppercase UTC [Z] suffix. *)
 val of_string : string -> (t, Error.t) result
@@ -2285,6 +3529,13 @@ type t =
 
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
+
+(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
+    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+val current : t
+
+(** Minimum negotiated version for ingress submission and its scope vocabulary. *)
+val ingress_minimum : t
 
 (** [create ~major ~minor] creates a non-negative protocol version. *)
 val create : major:int -> minor:int -> (t, Error.t) result

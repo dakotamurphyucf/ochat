@@ -1,0 +1,195 @@
+(executable
+ (name embed_documents)
+ (modules embed_documents)
+ (libraries core))
+
+(executable
+ (name embed_grammar)
+ (modules embed_grammar)
+ (libraries core menhirSdk digestif))
+
+(executable
+ (name embed_contracts)
+ (modules embed_contracts)
+ (libraries core digestif))
+
+(rule
+ (targets bundled_implementation.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_contracts.exe}
+    lib/chatml/chatml_lexer.mll %{dep:../chatml/chatml_lexer.mll}
+    lib/chatml/chatml_parser.mly %{dep:../chatml/chatml_parser.mly}
+    lib/chatml/chatml_typechecker.ml %{dep:../chatml/chatml_typechecker.ml}
+    lib/chatml/chatml_resolver.ml %{dep:../chatml/chatml_resolver.ml}
+    lib/chatml/chatml_eval.ml %{dep:../chatml/chatml_eval.ml}
+    lib/chatml/chatml_lang.ml %{dep:../chatml/chatml_lang.ml}
+    lib/chatml/chatml_value_codec.ml %{dep:../chatml/chatml_value_codec.ml}
+    lib/chatml/chatml_compilation.ml %{dep:../chatml/chatml_compilation.ml}
+    lib/chatml/chatml_execution.ml %{dep:../chatml/chatml_execution.ml}
+    lib/agent_protocol/delivery.ml %{dep:../agent_protocol/delivery.ml}
+    lib/agent_protocol/job.ml %{dep:../agent_protocol/job.ml}
+    lib/agent_protocol/stored_completion.ml %{dep:../agent_protocol/stored_completion.ml}
+    lib/agent_protocol/subscription.ml %{dep:../agent_protocol/subscription.ml}
+    lib/agent_server/job_scheduler.ml %{dep:../agent_server/job_scheduler.ml}
+    lib/agent_server/schedule_scheduler.ml %{dep:../agent_server/schedule_scheduler.ml}
+    lib/agent_session/background_execution.ml %{dep:../agent_session/background_execution.ml}
+    lib/agent_session/background_job_event.ml %{dep:../agent_session/background_job_event.ml}
+    lib/agent_session/external_ingress.ml %{dep:../agent_session/external_ingress.ml}
+    lib/agent_session/moderator_tool_dispatch.ml %{dep:../agent_session/moderator_tool_dispatch.ml}
+    lib/agent_session/notification_delivery.ml %{dep:../agent_session/notification_delivery.ml}
+    lib/agent_session/notification_history.ml %{dep:../agent_session/notification_history.ml}
+    lib/agent_session/notification_readiness.ml %{dep:../agent_session/notification_readiness.ml}
+    lib/agent_session/script_ingress_service.ml %{dep:../agent_session/script_ingress_service.ml}
+    lib/agent_session/script_job_service.ml %{dep:../agent_session/script_job_service.ml}
+    lib/agent_session/script_notification_service.ml %{dep:../agent_session/script_notification_service.ml}
+    lib/agent_session/script_schedule_service.ml %{dep:../agent_session/script_schedule_service.ml}
+    lib/agent_session/script_subscription_service.ml %{dep:../agent_session/script_subscription_service.ml}
+    lib/agent_session/session_actor.ml %{dep:../agent_session/session_actor.ml}
+    lib/agent_session/administration.ml %{dep:../agent_session/administration.ml}
+    lib/agent_server/command_handler.ml %{dep:../agent_server/command_handler.ml}
+    lib/agent_server/runtime_owner.ml %{dep:../agent_server/runtime_owner.ml}
+    lib/agent_session/staged_jobs.ml %{dep:../agent_session/staged_jobs.ml}
+    lib/agent_session/staged_notifications.ml %{dep:../agent_session/staged_notifications.ml}
+    lib/agent_session/staged_subscriptions.ml %{dep:../agent_session/staged_subscriptions.ml}
+    lib/chat_response/background_delivery.ml %{dep:../chat_response/background_delivery.ml}
+    lib/chat_response/background_job_operations.ml %{dep:../chat_response/background_job_operations.ml}
+    lib/chat_response/background_request.ml %{dep:../chat_response/background_request.ml}
+    lib/chat_response/ingress_operations.ml %{dep:../chat_response/ingress_operations.ml}
+    lib/chat_response/moderator_invocation.ml %{dep:../chat_response/moderator_invocation.ml}
+    lib/chat_response/moderator_manager.ml %{dep:../chat_response/moderator_manager.ml}
+    lib/chat_response/notification_operations.ml %{dep:../chat_response/notification_operations.ml}
+    lib/chat_response/runtime_semantics.ml %{dep:../chat_response/runtime_semantics.ml}
+    lib/chat_response/schedule_operations.ml %{dep:../chat_response/schedule_operations.ml}
+    lib/chat_response/subscription_operations.ml %{dep:../chat_response/subscription_operations.ml}
+    lib/chatml/chatml_host_runtime.ml %{dep:../chatml/chatml_host_runtime.ml}
+    lib/chat_response/agent_tool_contract.ml %{dep:../chat_response/agent_tool_contract.ml}
+    lib/chat_response/authoring_policy.ml %{dep:../chat_response/authoring_policy.ml}
+    lib/chat_response/generated_admission.ml %{dep:../chat_response/generated_admission.ml}
+    lib/chat_response/initial_prompt_history.ml %{dep:../chat_response/initial_prompt_history.ml}
+    lib/chatmd/chatmd_ast.ml %{dep:../chatmd/chatmd_ast.ml}
+    lib/chatmd/chatmd_extension_declaration.ml %{dep:../chatmd/chatmd_extension_declaration.ml}
+    lib/chatmd/chatmd_import_expansion.ml %{dep:../chatmd/chatmd_import_expansion.ml}
+    lib/chatmd/chatmd_lexer.mll %{dep:../chatmd/chatmd_lexer.mll}
+    lib/chatmd/chatmd_parser.mly %{dep:../chatmd/chatmd_parser.mly}
+    lib/chatmd/chatmd_script_declaration.ml %{dep:../chatmd/chatmd_script_declaration.ml}
+    lib/chatmd/chatmd_source_bundle.ml %{dep:../chatmd/chatmd_source_bundle.ml}
+    lib/chatmd/prompt.ml %{dep:../chatmd/prompt.ml}
+    lib/chatmd/source_loader.ml %{dep:../chatmd/source_loader.ml}
+    lib/chatmd_shell_spec/authoring_metadata.ml %{dep:../chatmd_shell_spec/authoring_metadata.ml}
+    lib/chatmd_shell_spec/extension_spec.ml %{dep:../chatmd_shell_spec/extension_spec.ml}
+    lib/chatmd_shell_spec/tool_schema.ml %{dep:../chatmd_shell_spec/tool_schema.ml}
+    lib/meta_prompting/preprocessor.ml %{dep:../meta_prompting/preprocessor.ml}
+    lib/chatmd/chatmd_attributes.ml %{dep:../chatmd/chatmd_attributes.ml}
+    lib/chatmd_shell_spec/duration.ml %{dep:../chatmd_shell_spec/duration.ml}
+    lib/chatmd_shell_spec/source_ref.ml %{dep:../chatmd_shell_spec/source_ref.ml}
+    lib/agent_protocol/invocation.ml %{dep:../agent_protocol/invocation.ml}
+    lib/agent_server/delegated_runtime.ml %{dep:../agent_server/delegated_runtime.ml}
+    lib/agent_server/delegation_lifecycle.ml %{dep:../agent_server/delegation_lifecycle.ml}
+    lib/agent_server/managed_output_cursor.ml %{dep:../agent_server/managed_output_cursor.ml}
+    lib/agent_server/managed_output_page.ml %{dep:../agent_server/managed_output_page.ml}
+    lib/agent_server/session_factory.ml %{dep:../agent_server/session_factory.ml}
+    lib/agent_session/authoring_context_tool.ml %{dep:../agent_session/authoring_context_tool.ml}
+    lib/agent_session/authoring_reference_scope.ml %{dep:../agent_session/authoring_reference_scope.ml}
+    lib/agent_session/authoring_services.ml %{dep:../agent_session/authoring_services.ml}
+    lib/agent_session/authoring_validation_tool.ml %{dep:../agent_session/authoring_validation_tool.ml}
+    lib/agent_session/delegation_authority.ml %{dep:../agent_session/delegation_authority.ml}
+    lib/agent_session/generated_definition.ml %{dep:../agent_session/generated_definition.ml}
+    lib/agent_session/generated_session_request.ml %{dep:../agent_session/generated_session_request.ml}
+    lib/agent_session/generated_session_tool.ml %{dep:../agent_session/generated_session_tool.ml}
+    lib/agent_session/managed_read_tool.ml %{dep:../agent_session/managed_read_tool.ml}
+    lib/agent_session/managed_send_tool.ml %{dep:../agent_session/managed_send_tool.ml}
+    lib/agent_session/managed_session_service.ml %{dep:../agent_session/managed_session_service.ml}
+    lib/agent_session/managed_session_tool.ml %{dep:../agent_session/managed_session_tool.ml}
+    lib/agent_session/managed_stop.ml %{dep:../agent_session/managed_stop.ml}
+    lib/agent_session/managed_stop_tool.ml %{dep:../agent_session/managed_stop_tool.ml}
+    lib/agent_session/managed_submission.ml %{dep:../agent_session/managed_submission.ml}
+    lib/agent_session/managed_submission_tracking.ml %{dep:../agent_session/managed_submission_tracking.ml}
+    lib/agent_session/managed_wait_tool.ml %{dep:../agent_session/managed_wait_tool.ml}
+    lib/agent_session/native_tool_invocation.ml %{dep:../agent_session/native_tool_invocation.ml}
+    lib/agent_session/one_off_execution.ml %{dep:../agent_session/one_off_execution.ml}
+    lib/agent_session/run_chatml_tool.ml %{dep:../agent_session/run_chatml_tool.ml}
+    lib/agent_session/script_tool_calls.ml %{dep:../agent_session/script_tool_calls.ml}
+    lib/agent_session/session_management.ml %{dep:../agent_session/session_management.ml}
+    lib/agent_session/session_management_native.ml %{dep:../agent_session/session_management_native.ml}
+    lib/agent_session/session_management_channel.ml %{dep:../agent_session/session_management_channel.ml}
+    lib/agent_server/session_helper_policy.ml %{dep:../agent_server/session_helper_policy.ml}
+    lib/shell_access/shell_access_v2.ml %{dep:../shell_access/shell_access_v2.ml}
+    lib/agent_store/delegation_store.ml %{dep:../agent_store/delegation_store.ml}
+    lib/chat_response/authoring_context.ml %{dep:../chat_response/authoring_context.ml}
+    lib/chat_response/authoring_validation.ml %{dep:../chat_response/authoring_validation.ml}
+    lib/chat_response/one_off_request.ml %{dep:../chat_response/one_off_request.ml}
+    lib/chat_response/one_off_script.ml %{dep:../chat_response/one_off_script.ml}
+    lib/chat_response/converter.ml %{dep:../chat_response/converter.ml}
+    lib/chat_response/fetch.ml %{dep:../chat_response/fetch.ml}
+    lib/chat_response/mcp_discovery_cache.ml %{dep:../chat_response/mcp_discovery_cache.ml}
+    lib/chat_response/shell_tool.ml %{dep:../chat_response/shell_tool.ml}
+    lib/chat_response/tool.ml %{dep:../chat_response/tool.ml}
+    lib/chatmd/chatmd_read_file_declaration.ml %{dep:../chatmd/chatmd_read_file_declaration.ml}
+    lib/chatmd/chatmd_read_file_spec.ml %{dep:../chatmd/chatmd_read_file_spec.ml}
+    lib/chatmd/chatmd_shell_declaration.ml %{dep:../chatmd/chatmd_shell_declaration.ml}
+    lib/chatmd_shell_spec/manifest_compiler.ml %{dep:../chatmd_shell_spec/manifest_compiler.ml}
+    lib/chatmd_shell_spec/path_expr.ml %{dep:../chatmd_shell_spec/path_expr.ml}
+    lib/chatmd_shell_spec/shell_tool_spec.ml %{dep:../chatmd_shell_spec/shell_tool_spec.ml}
+    lib/functions.ml %{dep:../functions.ml}
+    lib/mcp/mcp_tool.ml %{dep:../mcp/mcp_tool.ml}))))
+
+(rule
+ (targets bundled_grammar.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_grammar.exe} %{dep:../chatml/chatml_parser.cmly}))))
+
+(rule
+ (targets bundled_documents.ml)
+ (action
+  (with-stdout-to %{targets}
+   (run %{exe:embed_documents.exe}
+    guide/chatml-language-spec.md %{dep:../../docs-src/guide/chatml-language-spec.md}
+    guide/chatml-authoring-language.md %{dep:../../docs-src/guide/chatml-authoring-language.md}
+    guide/chatml-inference.md %{dep:../../docs-src/guide/chatml-inference.md}
+    guide/chatml-evaluation.md %{dep:../../docs-src/guide/chatml-evaluation.md}
+    guide/chatml-execution-limits.md %{dep:../../docs-src/guide/chatml-execution-limits.md}
+    guide/chatml-session-lifecycle.md %{dep:../../docs-src/guide/chatml-session-lifecycle.md}
+    guide/chatmd-authoring-definitions.md %{dep:../../docs-src/guide/chatmd-authoring-definitions.md}
+    guide/chatmd-authoring-capabilities.md %{dep:../../docs-src/guide/chatmd-authoring-capabilities.md}
+    guide/chatml-task-effects.md %{dep:../../docs-src/guide/chatml-task-effects.md}
+    guide/chatml-strings.md %{dep:../../docs-src/guide/chatml-strings.md}
+    guide/chatml-collections.md %{dep:../../docs-src/guide/chatml-collections.md}
+    guide/chatml-json.md %{dep:../../docs-src/guide/chatml-json.md}
+    guide/chatml-tables.md %{dep:../../docs-src/guide/chatml-tables.md}
+    guide/chatml-global-helpers.md %{dep:../../docs-src/guide/chatml-global-helpers.md}
+    guide/chatml-moderator-data.md %{dep:../../docs-src/guide/chatml-moderator-data.md}
+    guide/chatml-host-effects.md %{dep:../../docs-src/guide/chatml-host-effects.md}
+    guide/chatml-runtime-control.md %{dep:../../docs-src/guide/chatml-runtime-control.md}
+    guide/chatml-background-values.md %{dep:../../docs-src/guide/chatml-background-values.md}
+    guide/chatml-invocation-context.md %{dep:../../docs-src/guide/chatml-invocation-context.md}
+    guide/chatml-authoring-primer.md %{dep:../../docs-src/guide/chatml-authoring-primer.md}
+    guide/authoring-context-tool.md %{dep:../../docs-src/guide/authoring-context-tool.md}
+    guide/chatml-native-requests.md %{dep:../../docs-src/guide/chatml-native-requests.md}
+    guide/chatml-authoring-runtime.md %{dep:../../docs-src/guide/chatml-authoring-runtime.md}
+    guide/chatml-authoring-children.md %{dep:../../docs-src/guide/chatml-authoring-children.md}
+    guide/chatml-authoring-background.md %{dep:../../docs-src/guide/chatml-authoring-background.md}
+    guide/chatml-ocaml-differences.md %{dep:../../docs-src/guide/chatml-ocaml-differences.md}
+    guide/chatml-match-semantics.md %{dep:../../docs-src/guide/chatml-match-semantics.md}
+    guide/chatml-moderator-runtime.md %{dep:../../docs-src/guide/chatml-moderator-runtime.md}
+    guide/chatml-surface-inventory.md %{dep:../../docs-src/guide/chatml-surface-inventory.md}
+    overview/chatmd-language.md %{dep:../../docs-src/overview/chatmd-language.md}
+    guide/chatmd-shell-extensions.md %{dep:../../docs-src/guide/chatmd-shell-extensions.md}
+    agent-server/extensibility-foundations.md %{dep:../../docs-src/agent-server/extensibility-foundations.md}))))
+
+(library
+ (name authoring_sources)
+ (public_name ochat.authoring_sources)
+ (modules authoring_sources bundled_documents bundled_grammar bundled_implementation)
+ (private_modules bundled_documents bundled_grammar bundled_implementation)
+ (libraries core jsonaf ochat.chatml ochat.chatmd_shell_spec)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name authoring_corpus)
+ (public_name ochat.authoring_corpus)
+ (modules authoring_corpus grammar_coverage_data semantic_coverage_data declaration_coverage_data native_coverage_data runtime_coverage_data)
+ (private_modules grammar_coverage_data semantic_coverage_data declaration_coverage_data native_coverage_data runtime_coverage_data)
+ (libraries core ochat.authoring_sources ochat.chatmd_shell_spec)
+ (preprocess (pps ppx_jane)))

@@ -1,11 +1,11 @@
 (executable
  (name docs_check)
- (modules docs_check docs_inventory docs_smoke docs_links docs_links_test docs_chatml docs_library
+ (modules docs_check docs_inventory docs_smoke docs_links docs_links_test docs_chatml docs_chatml_authoring docs_chatmd_authoring docs_chatmd_capabilities docs_chatml_effects docs_chatml_control docs_child_authoring docs_library
   docs_observer docs_tutorials docs_examples docs_example_environment docs_example_source docs_example_webpage
   docs_example_completions docs_example_crawler)
  (libraries core eio eio_main eio.unix eio_posix jsonaf re mirage-crypto-rng.unix
-  ochat.agent_protocol ochat.agent_server ochat.agent_client ochat.chatmd ochat.chatmd_shell_spec
-  ochat.chatml ochat.chatml_host_runtime ochat.shell_runtime ochat.io ochat.session ochat.lru_cache
+  ochat.agent_protocol ochat.agent_server ochat.agent_client ochat.agent_session ochat.chatmd ochat.chatmd_shell_spec
+  ochat.chatml ochat.chatml_host_runtime ochat.chat_response ochat.authoring_sources ochat.authoring_corpus ochat.shell_runtime ochat.io ochat.session ochat.lru_cache
   ochat.ttl_lru_cache ochat.template ochat.tikitoken ochat.vector_db ochat.bm25 owl base64
   ochat.functions ochat.environment ochat.source ochat.webpage_markdown ochat.odoc_crawler ochat.ochat_function)
  (preprocess (pps ppx_jane)))

@@ -7,13 +7,20 @@ module Eval = Chatml.Chatml_eval
 module Builtin_surface = Chatml.Chatml_builtin_surface
 module Builtin_modules = Chatml_builtin_modules
 module Builtin_spec = Chatml.Chatml_builtin_spec
-module Debug_log = Chatml.Chatml_debug_log
+
+module Debug_log = struct
+  (* Ordinary diagnostic failures must not invalidate a committed transaction.
+     Unrecognized exceptions (including host cancellation) still propagate. *)
+  let emit render =
+    try Chatml.Chatml_debug_log.emit render with
+    | Failure _ | Invalid_argument _ | Sys_error _ -> ()
+  ;;
+end
+
 module Value_codec = Chatml.Chatml_value_codec
 
 type compiled_script =
   { surface : Builtin_surface.surface
-  ; program : Lang.program
-  ; checked : Typechecker.checked_program
   ; resolved : Lang.resolved_program
   ; source_text : string
   }
@@ -55,6 +62,7 @@ type pending_ui_request =
 
 type op_kind =
   | Local_transactional
+  | Local_transactional_with_result of { rollback : Lang.value list -> unit }
   | External_sync
   | External_async
   | Diagnostic
@@ -108,9 +116,8 @@ and exec_ctx =
   ; mutable local_effects_rev : Lang.eff list
   ; mutable emitted_rev : Lang.value list
   ; mutable end_session_requested : string option
-  ; mutable fuel : int
-  ; mutable tasks : int
-  ; max_tasks : int
+  ; mutable fuel : int option
+  ; mutable remaining_tasks : int option
   }
 
 and continuation_frame =
@@ -180,10 +187,10 @@ let string_of_log_level (level : log_level) : string =
   | Error_level -> "error"
 ;;
 
-let value_to_string = Builtin_spec.value_to_pretty_string
+let value_to_string value = Builtin_spec.value_to_debug_string value
 
 let values_to_string (values : Lang.value list) : string =
-  values |> List.map ~f:value_to_string |> String.concat ~sep:", "
+  Builtin_spec.values_to_debug_string values
 ;;
 
 let allow_all_phases (_phase : string) : (unit, string) result = Ok ()
@@ -203,7 +210,11 @@ let not_configured (name : string) : (unit, string) result =
 let default_handlers : default_handlers =
   { on_log =
       (fun _session ~level ~message ->
-        Debug_log.emitf "[chatml-log][%s] %s" (string_of_log_level level) message;
+        Debug_log.emit (fun () ->
+          Printf.sprintf
+            "[chatml-log][%s] %s"
+            (string_of_log_level level)
+            (String.prefix message 4096));
         Ok ())
   ; on_turn_effect = (fun _session _effect -> Ok ())
   ; on_tool_moderation = (fun _session _action -> Ok ())
@@ -678,7 +689,8 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
     }
   ; { name = "Runtime.request_turn"
     ; kind = Local_transactional
-    ; phase_check = require_phases [ "turn_end"; "internal_event" ]
+    ; phase_check =
+        require_phases [ "turn_end"; "internal_event"; "tool_observed"; "tool_invoked" ]
     ; perform =
         with_nullary "Runtime.request_turn" (fun session ->
           wrap_unit_result (handlers.on_request_turn session))
@@ -752,17 +764,67 @@ let expect_callable (name : string) (value : Lang.value) : (Lang.value, string) 
   | _ -> Error (Printf.sprintf "Entrypoint '%s' is not callable" name)
 ;;
 
-let compile_script ?(surface = Builtin_surface.moderator_surface) ~(source : string) ()
-  : (compiled_script, string) result
+type compilation_stage =
+  | Parse
+  | Typecheck
+[@@deriving sexp, equal]
+
+type compilation_diagnostic =
+  { stage : compilation_stage
+  ; message : string
+  ; span : Source.span option
+  ; formatted : string
+  }
+[@@deriving sexp]
+
+let compile_script_detailed
+      ?(checkpoint = fun () -> ())
+      ?(surface = Builtin_surface.moderator_surface)
+      ?(required_bindings = [])
+      ~(source : string)
+      ()
+  : (compiled_script, compilation_diagnostic) result
   =
-  match Parse.parse_program source with
-  | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
-  | Ok program ->
-    (match Typechecker.check_program_with_surface surface program with
-     | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
-     | Ok checked ->
-       let resolved = Resolver.resolve_checked_program checked program in
-       Ok { surface; program; checked; resolved; source_text = source })
+  checkpoint ();
+  let parsed = Parse.parse_program source in
+  checkpoint ();
+  let result =
+    match parsed with
+    | Error diagnostic ->
+      Error
+        { stage = Parse
+        ; message = diagnostic.message
+        ; span = diagnostic.span
+        ; formatted = Parse.format_diagnostic source diagnostic
+        }
+    | Ok program ->
+      let checked =
+        Typechecker.check_program_with_surface
+          ~checkpoint
+          ~required_bindings
+          surface
+          program
+      in
+      checkpoint ();
+      (match checked with
+       | Error diagnostic ->
+         Error
+           { stage = Typecheck
+           ; message = diagnostic.message
+           ; span = diagnostic.span
+           ; formatted = Typechecker.format_diagnostic source diagnostic
+           }
+       | Ok checked ->
+         let resolved = Resolver.resolve_checked_program checked program in
+         Ok { surface; resolved; source_text = source })
+  in
+  checkpoint ();
+  result
+;;
+
+let compile_script ?checkpoint ?surface ?required_bindings ~source () =
+  compile_script_detailed ?checkpoint ?surface ?required_bindings ~source ()
+  |> Result.map_error ~f:(fun diagnostic -> diagnostic.formatted)
 ;;
 
 let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
@@ -770,6 +832,7 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
 ;;
 
 let instantiate_session
+      ?control
       (config : runtime_config)
       (compiled : compiled_script)
       ~(entrypoints : compiled_entrypoints)
@@ -785,7 +848,7 @@ let instantiate_session
     (match operations_map config.operations with
      | Error msg -> Error msg
      | Ok operations ->
-       let env = Builtin_modules.create_env_with_surface config.surface in
+       let env = Builtin_modules.create_env_with_surface ?control config.surface in
        (try
           Eval.eval_program env compiled.resolved;
           match Lang.find_var env entrypoints.initial_state_name with
@@ -805,12 +868,15 @@ let instantiate_session
                (match expect_callable entrypoints.on_event_name on_event with
                 | Error msg -> Error msg
                 | Ok on_event ->
-                  Debug_log.emitf
-                    "[chatml-runtime] instantiate_session initial_state=%s \
-                     entrypoints={initial_state=%s; on_event=%s}"
-                    (value_to_string initial_state)
-                    entrypoints.initial_state_name
-                    entrypoints.on_event_name;
+                  Option.iter control ~f:(fun control ->
+                    control.check_value initial_state);
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] instantiate_session initial_state=%s \
+                       entrypoints={initial_state=%s; on_event=%s}"
+                      (value_to_string initial_state)
+                      entrypoints.initial_state_name
+                      entrypoints.on_event_name);
                   Ok
                     { env
                     ; state = initial_state
@@ -854,6 +920,7 @@ let committed_local_effects (session : session) : Lang.eff list =
 ;;
 
 let queued_events (session : session) : Lang.value list = Queue.to_list session.queue
+let peek_queued_event (session : session) : Lang.value option = Queue.peek session.queue
 
 let take_queued_event (session : session) : Lang.value option =
   Queue.dequeue session.queue
@@ -873,11 +940,12 @@ let restore
     Error "Cannot restore moderator runtime during active task interpretation"
   | None, Some _ -> Error "Cannot restore moderator runtime while waiting for UI input"
   | None, None ->
-    Debug_log.emitf
-      "[chatml-runtime] restore state=%s queued_events=[%s] halted=%b"
-      (value_to_string state)
-      (values_to_string queued_events)
-      halted;
+    Debug_log.emit (fun () ->
+      Printf.sprintf
+        "[chatml-runtime] restore state=%s queued_events=[%s] halted=%b"
+        (value_to_string state)
+        (values_to_string queued_events)
+        halted);
     session.state <- state;
     Queue.clear session.queue;
     List.iter queued_events ~f:(fun event -> Queue.enqueue session.queue event);
@@ -989,12 +1057,19 @@ let dispatch_effect
       (eff : Lang.eff)
   : (effect_result, string) result
   =
-  Debug_log.emitf
-    "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
-    exec.phase
-    spawned
-    eff.op
-    (values_to_string eff.args);
+  Option.iter session.env.control ~f:(fun control ->
+    control.before_effect ~name:eff.op ~spawned;
+    List.iter eff.args ~f:control.check_value);
+  let check_result value =
+    Option.iter session.env.control ~f:(fun control -> control.after_effect value)
+  in
+  Debug_log.emit (fun () ->
+    Printf.sprintf
+      "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
+      exec.phase
+      spawned
+      (String.prefix eff.op 256)
+      (values_to_string eff.args));
   if spawned
   then (
     match decode_pending_ui_request eff with
@@ -1017,18 +1092,21 @@ let dispatch_effect
              | External_async ->
                (match op.perform session eff.args with
                 | Ok value ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  check_result value;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value)
                 | Error msg ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
-                    exec.phase
-                    eff.op
-                    msg;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (String.prefix msg 4096));
                   Error msg)
              | _ -> Error (Printf.sprintf "Operation '%s' is not spawnable" op.name)))))
   else (
@@ -1054,33 +1132,60 @@ let dispatch_effect
             (match op.kind with
              | External_async ->
                Error (Printf.sprintf "Operation '%s' must be spawned" op.name)
-             | Local_transactional ->
+             | Local_transactional | Local_transactional_with_result _ ->
                (match op.perform session eff.args with
                 | Error msg -> Error msg
                 | Ok value ->
-                  exec.local_effects_rev <- eff :: exec.local_effects_rev;
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  check_result value;
+                  let recorded =
+                    match op.kind with
+                    | Local_transactional_with_result _ ->
+                      { eff with args = value :: eff.args }
+                    | _ -> eff
+                  in
+                  exec.local_effects_rev <- recorded :: exec.local_effects_rev;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value))
              | External_sync | Diagnostic ->
                (match op.perform session eff.args with
                 | Ok value ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  check_result value;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value)
                 | Error msg ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
-                    exec.phase
-                    eff.op
-                    msg;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (String.prefix msg 4096));
                   Error msg)))))
+;;
+
+let perform_local_effect (session : session) (eff : Lang.eff) =
+  with_current_exec session ~name:"perform_local_effect" ~f:(fun exec ->
+    let open Result.Let_syntax in
+    let%bind operation = find_operation session eff.op in
+    let%bind () =
+      match operation.kind with
+      | Local_transactional | Local_transactional_with_result _ -> Ok ()
+      | External_sync | External_async | Diagnostic ->
+        Error "host local-effect delivery requires a transactional operation"
+    in
+    let%bind result = dispatch_effect session exec ~spawned:false eff in
+    match result with
+    | Effect_value _ -> Ok ()
+    | Effect_suspend _ -> Error "host local-effect delivery cannot suspend")
 ;;
 
 let rec continue_with_value
@@ -1114,9 +1219,19 @@ and continue_with_error
   | Bind_frame _ :: rest | Map_frame _ :: rest ->
     continue_with_error session exec ~frames:rest msg
   | Catch_frame catch_frame :: rest ->
+    let discarded =
+      List.take
+        exec.local_effects_rev
+        (List.length exec.local_effects_rev
+         - List.length catch_frame.saved_local_effects_rev)
+    in
     exec.local_effects_rev <- catch_frame.saved_local_effects_rev;
     exec.emitted_rev <- catch_frame.saved_emitted_rev;
     exec.end_session_requested <- catch_frame.saved_end_session_requested;
+    List.iter discarded ~f:(fun eff ->
+      match find_operation session eff.Lang.op with
+      | Ok { kind = Local_transactional_with_result { rollback }; _ } -> rollback eff.args
+      | _ -> ());
     let open Result.Let_syntax in
     let%bind next_task =
       continuation_task_result session catch_frame.handler [ Lang.VString msg ]
@@ -1130,11 +1245,17 @@ and interpret_task
       (task : Lang.task)
   : (task_result, string) result
   =
-  if exec.fuel <= 0
-  then Error "ChatML task fuel exhausted"
-  else (
-    exec.fuel <- exec.fuel - 1;
-    match task with
+  Option.iter session.env.control ~f:(fun control -> control.checkpoint ());
+  let open Result.Let_syntax in
+  let%bind () =
+    match exec.fuel with
+    | Some remaining when remaining <= 0 -> Error "ChatML task fuel exhausted"
+    | Some remaining ->
+      exec.fuel <- Some (remaining - 1);
+      Ok ()
+    | None -> Ok ()
+  in
+  match task with
   | Lang.TPure value -> continue_with_value session exec ~frames value
   | Lang.TFail msg -> continue_with_error session exec ~frames msg
   | Lang.TBind (next_task, k) ->
@@ -1157,17 +1278,105 @@ and interpret_task
      | Ok (Effect_value value) -> continue_with_value session exec ~frames value
      | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
   | Lang.TSpawn eff ->
-    if exec.tasks >= exec.max_tasks
-    then continue_with_error session exec ~frames "ChatML task limit exceeded"
-    else (
-      exec.tasks <- exec.tasks + 1;
-      match dispatch_effect session exec ~spawned:true eff with
-      | Error msg -> continue_with_error session exec ~frames msg
-      | Ok (Effect_value value) -> continue_with_value session exec ~frames value
-      | Ok (Effect_suspend _) -> assert false))
+    (match exec.remaining_tasks with
+     | Some remaining when remaining <= 0 ->
+       continue_with_error session exec ~frames "ChatML task limit exceeded"
+     | remaining ->
+       exec.remaining_tasks <- Option.map remaining ~f:(fun remaining -> remaining - 1);
+       (match dispatch_effect session exec ~spawned:true eff with
+        | Error msg -> continue_with_error session exec ~frames msg
+        | Ok (Effect_value value) -> continue_with_value session exec ~frames value
+        | Ok (Effect_suspend _) -> assert false))
 ;;
 
-let commit_exec (session : session) (exec : exec_ctx) ~(new_state : Lang.value) : unit =
+let run_entrypoint
+      ?control
+      ?limits
+      ?prepare_result
+      (config : runtime_config)
+      (compiled : compiled_script)
+      ~entrypoint
+      ~arguments
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    ensure_surface_compatible
+      ~compiled_surface:compiled.surface
+      ~runtime_surface:config.surface
+  in
+  let%bind operations =
+    List.filter config.operations ~f:(fun operation ->
+      match operation.kind with
+      | Diagnostic | External_sync -> true
+      | Local_transactional_with_result _ -> Option.is_some prepare_result
+      | Local_transactional | External_async -> false)
+    |> operations_map
+  in
+  let env = Builtin_modules.create_env_with_surface ?control config.surface in
+  try
+    Eval.eval_program env compiled.resolved;
+    let%bind fn =
+      match Lang.find_var env entrypoint with
+      | None -> Error (Printf.sprintf "Missing entrypoint '%s'" entrypoint)
+      | Some value -> expect_callable entrypoint value
+    in
+    let exec =
+      { phase = "standalone"
+      ; local_effects_rev = []
+      ; emitted_rev = []
+      ; end_session_requested = None
+      ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+      ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
+      }
+    in
+    let session =
+      { env
+      ; state = Lang.VUnit
+      ; on_event = fn
+      ; queue = Queue.create ()
+      ; operations
+      ; source_text = compiled.source_text
+      ; current_exec = Some exec
+      ; suspended_exec = None
+      ; committed_local_effects_rev = []
+      ; ui_resume_active = false
+      ; halted = false
+      }
+    in
+    Exn.protect
+      ~finally:(fun () -> session.current_exec <- None)
+      ~f:(fun () ->
+        let%bind value =
+          Eval.apply_value_result fn arguments
+          |> Result.map_error ~f:(format_runtime_error session)
+        in
+        let%bind task = expect_task_value value in
+        let%bind outcome = interpret_task session exec ~frames:[] task in
+        match outcome with
+        | Task_value value ->
+          let%map install =
+            match prepare_result with
+            | None -> Ok ignore
+            | Some prepare ->
+              prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
+          in
+          install ();
+          value
+        | Task_suspend _ -> Error "Standalone execution cannot suspend for UI input")
+  with
+  | Lang.Runtime_error error ->
+    Error (Lang.format_runtime_error compiled.source_text error)
+;;
+
+let commit_exec
+      ?(consume_queued = false)
+      (session : session)
+      (exec : exec_ctx)
+      ~(new_state : Lang.value)
+  : unit
+  =
+  if consume_queued then ignore (Queue.dequeue_exn session.queue : Lang.value);
   session.state <- new_state;
   session.committed_local_effects_rev
   <- exec.local_effects_rev @ session.committed_local_effects_rev;
@@ -1183,29 +1392,73 @@ let log_committed_exec
       ~(new_state : Lang.value)
   : unit
   =
-  Debug_log.emitf
-    "[chatml-runtime] handle_event_ok phase=%s old_state=%s new_state=%s effects=[%s] \
-     emitted=[%s] halted=%b"
-    exec.phase
-    (value_to_string old_state)
-    (value_to_string new_state)
-    (List.map (List.rev exec.local_effects_rev) ~f:(fun eff ->
-       Printf.sprintf "%s(%s)" eff.op (values_to_string eff.args))
-     |> String.concat ~sep:"; ")
-    (values_to_string (List.rev exec.emitted_rev))
-    session.halted
+  Debug_log.emit (fun () ->
+    Printf.sprintf
+      "[chatml-runtime] handle_event_ok phase=%s old_state=%s new_state=%s \
+       recent_effects=[%s] recent_emitted=[%s] halted=%b"
+      exec.phase
+      (value_to_string old_state)
+      (value_to_string new_state)
+      (List.take exec.local_effects_rev 16
+       |> List.rev_map ~f:(fun eff ->
+         Printf.sprintf "%s(%s)" (String.prefix eff.op 256) (values_to_string eff.args))
+       |> String.concat ~sep:"; "
+       |> fun text -> String.prefix text 4096)
+      (values_to_string (List.rev (List.take exec.emitted_rev 32)))
+      session.halted)
 ;;
 
 type prepare_commit = local_effects:Lang.eff list -> (unit -> unit, string) result
 
-let prepare_runtime_commit prepare_commit exec =
-  prepare_commit ~local_effects:(List.rev exec.local_effects_rev)
+type transaction =
+  { new_state : Lang.value
+  ; local_effects : Lang.eff list
+  ; queued_events : Lang.value list
+  ; halted : bool
+  }
+
+type prepare_transaction = transaction -> (unit -> unit, string) result
+
+let prepare_runtime_commit
+      ?(consume_queued = false)
+      prepare_commit
+      prepare_transaction
+      session
+      exec
+      ~new_state
+  =
+  let open Result.Let_syntax in
+  let local_effects = List.rev exec.local_effects_rev in
+  let retained_events =
+    match consume_queued with
+    | false -> Queue.to_list session.queue
+    | true -> List.tl_exn (Queue.to_list session.queue)
+  in
+  let%bind install_legacy = prepare_commit ~local_effects in
+  let%map install_transaction =
+    match prepare_transaction with
+    | None -> Ok ignore
+    | Some prepare ->
+      prepare
+        { new_state
+        ; local_effects
+        ; queued_events = retained_events @ List.rev exec.emitted_rev
+        ; halted = session.halted || Option.is_some exec.end_session_requested
+        }
+  in
+  fun () ->
+    install_legacy ();
+    install_transaction ()
 ;;
 
-let handle_event
+let handle_event_impl
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
+      ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
-      ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
+      ?(validate_suspension = fun () -> Ok ())
+      ?(copy_state = fun state -> Ok state)
+      ?limits
+      ~consume_queued
       (session : session)
       ~(context : Lang.value)
       ~(event : Lang.value)
@@ -1221,63 +1474,128 @@ let handle_event
     match phase_of_context context with
     | Error msg -> Error msg
     | Ok phase ->
-      Debug_log.emitf
-        "[chatml-runtime] handle_event_start phase=%s state=%s event=%s context=%s"
-        phase
-        (value_to_string session.state)
-        (value_to_string event)
-        (value_to_string context);
+      Option.iter session.env.control ~f:(fun control ->
+        control.check_value session.state);
+      Debug_log.emit (fun () ->
+        Printf.sprintf
+          "[chatml-runtime] handle_event_start phase=%s state=%s event=%s context=%s"
+          phase
+          (value_to_string session.state)
+          (value_to_string event)
+          (value_to_string context));
       let exec =
         { phase
         ; local_effects_rev = []
         ; emitted_rev = []
         ; end_session_requested = None
-        ; fuel = limits.fuel
-        ; tasks = 0
-        ; max_tasks = limits.max_tasks
+        ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+        ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
         }
       in
       let old_state = session.state in
-      session.current_exec <- Some exec;
-      let result =
-        match Eval.apply_value_result session.on_event [ context; old_state; event ] with
-        | Error err -> Error (format_runtime_error session err)
-        | Ok value ->
-          (match expect_task_value value with
-           | Error msg -> Error msg
-           | Ok task -> interpret_task session exec ~frames:[] task)
-      in
-      session.current_exec <- None;
-      (match result with
-       | Error msg ->
-         Debug_log.emitf
-           "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
-           phase
-           (value_to_string old_state)
-           (value_to_string event)
-           msg;
-         Error msg
-       | Ok (Task_value new_state) ->
-         let open Result.Let_syntax in
-         let%bind () = validate_state new_state in
-         let%map commit_host = prepare_runtime_commit prepare_commit exec in
-         commit_exec session exec ~new_state;
-         commit_host ();
-         log_committed_exec session exec ~old_state ~new_state
-       | Ok (Task_suspend suspended_exec) ->
-         session.suspended_exec <- Some suspended_exec;
-         Debug_log.emitf
-           "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
-           phase
-           (value_to_string old_state)
-           (match suspended_exec.request with
-            | Ask_text { prompt } -> "ask_text:" ^ prompt
-            | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt);
-         Ok ()))
+      let open Result.Let_syntax in
+      let%bind execution_state = copy_state old_state in
+      let committed = ref false in
+      Exn.protect
+        ~finally:(fun () ->
+          session.current_exec <- None;
+          if not !committed then session.state <- old_state)
+        ~f:(fun () ->
+          session.current_exec <- Some exec;
+          let result =
+            Exn.protect
+              ~f:(fun () ->
+                match
+                  Eval.apply_value_result
+                    session.on_event
+                    [ context; execution_state; event ]
+                with
+                | Error err -> Error (format_runtime_error session err)
+                | Ok value ->
+                  (match expect_task_value value with
+                   | Error msg -> Error msg
+                   | Ok task -> interpret_task session exec ~frames:[] task))
+              ~finally:(fun () -> session.current_exec <- None)
+          in
+          match result with
+          | Error msg ->
+            Debug_log.emit (fun () ->
+              Printf.sprintf
+                "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
+                phase
+                (value_to_string old_state)
+                (value_to_string event)
+                (String.prefix msg 4096));
+            Error msg
+          | Ok (Task_value new_state) ->
+            let open Result.Let_syntax in
+            Option.iter session.env.control ~f:(fun control ->
+              control.check_value new_state);
+            let%bind () = validate_state new_state in
+            let%map commit_host =
+              prepare_runtime_commit
+                ~consume_queued
+                prepare_commit
+                prepare_transaction
+                session
+                exec
+                ~new_state
+            in
+            commit_exec ~consume_queued session exec ~new_state;
+            commit_host ();
+            committed := true;
+            log_committed_exec session exec ~old_state ~new_state
+          | Ok (Task_suspend suspended_exec) ->
+            let open Result.Let_syntax in
+            let%map () = validate_suspension () in
+            session.suspended_exec <- Some suspended_exec;
+            Debug_log.emit (fun () ->
+              Printf.sprintf
+                "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
+                phase
+                (value_to_string old_state)
+                (match suspended_exec.request with
+                 | Ask_text { prompt } -> "ask_text:" ^ String.prefix prompt 4096
+                 | Ask_choice { prompt; _ } -> "ask_choice:" ^ String.prefix prompt 4096))))
+;;
+
+let handle_event = handle_event_impl ~consume_queued:false
+
+let handle_next_queued_event
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~copy_event
+  =
+  let open Result.Let_syntax in
+  match peek_queued_event session with
+  | None -> Ok None
+  | Some event ->
+    let%bind event = copy_event event in
+    let%map () =
+      handle_event_impl
+        ?prepare_commit
+        ?prepare_transaction
+        ?validate_state
+        ?copy_state
+        ?limits
+        ~consume_queued:true
+        ~validate_suspension:(fun () ->
+          Error "Queued event cannot retain a UI continuation")
+        session
+        ~context
+        ~event
+    in
+    Some ()
 ;;
 
 let resume_ui_request
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
+      ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
       ?limits:_
       (session : session)
@@ -1308,7 +1626,14 @@ let resume_ui_request
      | Error msg -> Error msg
      | Ok (Task_value new_state) ->
        let%bind () = validate_state new_state in
-       let%map commit_host = prepare_runtime_commit prepare_commit suspended_exec.exec in
+       let%map commit_host =
+         prepare_runtime_commit
+           prepare_commit
+           prepare_transaction
+           session
+           suspended_exec.exec
+           ~new_state
+       in
        commit_exec session suspended_exec.exec ~new_state;
        commit_host ();
        log_committed_exec session suspended_exec.exec ~old_state ~new_state
@@ -1317,15 +1642,20 @@ let resume_ui_request
        Ok ())
 ;;
 
+let prepare_enqueue_internal_event (session : session) (event : Lang.value) =
+  match session.halted with
+  | true -> Error "Session has ended"
+  | false -> Ok (fun () -> Queue.enqueue session.queue event)
+;;
+
 let enqueue_internal_event (session : session) (event : Lang.value)
   : (unit, string) result
   =
-  if session.halted
-  then Error "Session has ended"
-  else (
-    Debug_log.emitf
+  let open Result.Let_syntax in
+  let%map install = prepare_enqueue_internal_event session event in
+  Debug_log.emit (fun () ->
+    Printf.sprintf
       "[chatml-runtime] enqueue_internal_event event=%s"
-      (value_to_string event);
-    Queue.enqueue session.queue event;
-    Ok ())
+      (value_to_string event));
+  install ()
 ;;

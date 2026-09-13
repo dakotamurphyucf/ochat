@@ -173,7 +173,6 @@ module Setup = struct
       ~cache_dir:response_dir
       ~home:(Agent_runtime.default_home (Ctx.env ctx))
       ~session_id
-      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
       ~prompt_elements
     |> Result.map_error ~f:(fun diagnostics ->
       List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
@@ -316,7 +315,13 @@ module Setup = struct
         ~session_id
         ~manager;
       let moderator =
-        Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+        Stream_moderator.
+          { manager
+          ; session_id
+          ; session_meta = `Null
+          ; runtime_policy
+          ; event_handlers = None
+          }
       in
       let startup_event =
         match identity_snapshot, legacy_snapshot with
@@ -435,7 +440,7 @@ module Ui = struct
     match Model.shell_interaction_id model, Model.active_page model with
     | Some _, _ when Model.shell_interaction_uses_cursor model -> Some cursor
     | Some _, _ -> None
-    | None, (Model.Page_id.Agent | Shell_security) -> None
+    | None, (Model.Page_id.Agent | Shell_security | Work) -> None
     | None, Chat ->
       (match Model.chat_materialization model with
        | Model.Chat_page_state.Loading | Resizing -> None
@@ -445,7 +450,7 @@ module Ui = struct
   let input_capability_for_frame ~model : input_capability =
     match Model.shell_interaction_id model, Model.active_page model with
     | Some id, _ -> App_events.Interaction id
-    | None, (Model.Page_id.Agent | Shell_security) -> App_events.Normal
+    | None, (Model.Page_id.Agent | Shell_security | Work) -> App_events.Normal
     | None, Chat ->
       (match Model.chat_materialization model with
        | Model.Chat_page_state.Loading | Resizing -> App_events.Disabled
@@ -568,7 +573,7 @@ module Ui = struct
             Renderer_page_chat.render_with_layout ~size ~layout ~model
           in
           Renderer.decorate ~size ~model image, cursor
-        | Agent | Shell_security -> Renderer.render_full ~size ~model
+        | Agent | Shell_security | Work -> Renderer.render_full ~size ~model
       in
       submit_frame presenter ~origin:Resize ~size ~image ~cursor ~model
     in

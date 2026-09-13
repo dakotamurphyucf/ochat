@@ -1,0 +1,2 @@
+<tool name="begin_work" type="moderator" moderator="observer"
+      input_schema="input.json" output_schema="output.json"/>

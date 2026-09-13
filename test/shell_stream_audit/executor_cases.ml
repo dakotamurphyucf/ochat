@@ -304,11 +304,34 @@ let combined_secret env root =
 ;;
 
 let finish_timeout env root =
+  let clock = Eio_mock.Clock.make () in
+  let timed_env =
+    object
+      method fs = env#fs
+      method cwd = env#cwd
+      method stdin = env#stdin
+      method stdout = env#stdout
+      method stderr = env#stderr
+      method net = env#net
+      method domain_mgr = env#domain_mgr
+      method process_mgr = env#process_mgr
+      method clock = (clock :> float Eio.Time.clock_ty Eio.Resource.t)
+      method mono_clock = env#mono_clock
+      method secure_random = env#secure_random
+      method debug = env#debug
+      method backend_id = env#backend_id
+    end
+  in
   let limits = S.Limits.{ default with wall_time_seconds = 0.1 } in
-  let config = F.config ~limits ~secret_filter env root echo_backend in
+  let config = F.config ~limits ~secret_filter timed_env root echo_backend in
   let called = ref false in
   let on_progress _ =
     called := true;
+    (* Expire only after reaching the final held tail. Real-time setup may exceed
+       100ms under a parallel test run; that would test preparation, not the
+       observer's inclusion in the invocation deadline. The outer real clock
+       still guards against a missing cancellation. *)
+    Eio_mock.Clock.set_time clock limits.wall_time_seconds;
     Eio.Fiber.await_cancel ()
   in
   let result =

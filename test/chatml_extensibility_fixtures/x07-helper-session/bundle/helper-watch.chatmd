@@ -1,0 +1,1 @@
+<tool name="watch_session_request" type="chatml" script="session_request_script" entrypoint="run" input_schema="helper-any.json" output_schema="helper-any.json"><uses tool="session_bridge"/></tool>

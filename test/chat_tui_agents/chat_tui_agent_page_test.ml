@@ -41,6 +41,7 @@ let page_name model =
   | Chat -> "Chat"
   | Agent -> "Agent"
   | Shell_security -> "Shell_security"
+  | Work -> "Work"
 ;;
 
 let call_ids model = Model.active_agent_calls model |> List.map ~f:Model.agent_call_id

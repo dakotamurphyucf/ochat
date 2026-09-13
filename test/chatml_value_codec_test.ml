@@ -7,6 +7,34 @@ module Builtin_modules = Chatml_builtin_modules
 
 let show_value = Builtin_modules.value_to_string
 
+let%expect_test
+    "JSON numbers use valid round-trippable syntax and reject non-finite values"
+  =
+  let number f = Lang.VVariant ("Number", [ Lang.VFloat f ]) in
+  List.iter
+    [ 0.; -0.; 1.; -2.; 1.25; 1e-300; Float.max_finite_value; 1.0000000000000002 ]
+    ~f:(fun value ->
+      let json = Codec.value_to_jsonaf_result (number value) |> Result.ok_or_failwith in
+      let parsed = Jsonaf.to_string json |> Jsonaf.of_string |> Jsonaf.float_exn in
+      [%test_eq: float] value parsed);
+  print_endline "finite values survive strict JSON serialization/parsing";
+  let pair = Lang.VVariant ("Array", [ Lang.VArray [| number 1.; number (-2.) |] ]) in
+  print_endline
+    (Codec.value_to_jsonaf_result pair |> Result.ok_or_failwith |> Jsonaf.to_string);
+  List.iter [ Float.nan; Float.infinity; Float.neg_infinity ] ~f:(fun value ->
+    match Codec.value_to_jsonaf_result (number value) with
+    | Error message -> print_endline message
+    | Ok _ -> failwith "non-finite value escaped through the JSON codec");
+  [%expect
+    {|
+    finite values survive strict JSON serialization/parsing
+    [1,-2]
+    JSON numbers must be finite
+    JSON numbers must be finite
+    JSON numbers must be finite
+    |}]
+;;
+
 let print_snapshot_round_trip (value : Lang.value) =
   match Codec.Snapshot.of_value value with
   | Error msg -> print_endline ("ERR: " ^ msg)

@@ -94,6 +94,39 @@ let get client session_id =
   | _ -> fail "session.get returned wrong result"
 ;;
 
+let await_notifications env child client session ~provider_prefix ~calls ~count =
+  let observed_calls () =
+    String.split_lines (Process_manager.stdout child).contents
+    |> List.count ~f:(String.is_prefix ~prefix:provider_prefix)
+  in
+  let settled (snapshot : Agent_protocol.Snapshot.t) =
+    let deliveries =
+      List.filter snapshot.extension_status ~f:(fun status ->
+        Agent_protocol.Extension_status.equal_kind status.kind Delivery)
+    in
+    Option.is_none snapshot.session.active_operation
+    && List.length deliveries = count
+    && List.for_all deliveries ~f:(fun status -> String.equal status.state "committed")
+  in
+  ignore
+    (Support.Background_fixture.await_snapshot
+       env
+       client
+       session
+       "notification recovery settlement"
+       (fun snapshot -> settled snapshot && observed_calls () >= calls)
+     : Agent_protocol.Snapshot.t);
+  for _ = 1 to 10 do
+    Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
+    require (observed_calls () = calls) "saved wake was lost or repeated after restart"
+  done;
+  let snapshot = get client session.summary.id in
+  require
+    (settled snapshot && Option.is_none snapshot.failure)
+    "notification recovery did not remain settled";
+  snapshot
+;;
+
 let require_equal label sexp_of expected actual =
   if not (Sexp.equal (sexp_of expected) (sexp_of actual))
   then
@@ -222,18 +255,25 @@ let self_executable env =
   else Filename.concat (Eio.Path.native_exn (Eio.Stdenv.cwd env)) executable
 ;;
 
-let child ~sw env environment ~case ~arguments =
+let child ~sw ?(environment_overrides = []) env environment ~case ~arguments =
   let overrides =
-    "OCHAT_E2E_CRASH_ARGUMENTS=" ^ Sexp.to_string_mach ([%sexp_of: string list] arguments)
+    ("OCHAT_E2E_CRASH_ARGUMENTS", Sexp.to_string_mach ([%sexp_of: string list] arguments))
+    :: environment_overrides
   in
   let inherited =
     Temporary_environment.child_environment environment ~base:(Core_unix.environment ())
-    |> Array.filter ~f:(Fn.non (String.is_prefix ~prefix:"OCHAT_E2E_CRASH_ARGUMENTS="))
+    |> Array.filter ~f:(fun entry ->
+      not
+        (List.exists overrides ~f:(fun (name, _) ->
+           String.is_prefix entry ~prefix:(name ^ "="))))
   in
   Process_manager.spawn
     ~sw
     ~env
-    ~environment:(Array.append inherited [| overrides |])
+    ~environment:
+      (Array.append
+         inherited
+         (Array.of_list (List.map overrides ~f:(fun (name, value) -> name ^ "=" ^ value))))
     ~max_output_bytes:(1024 * 1024)
     [ self_executable env; "--scenario"; "crash-matrix"; "--case"; "child." ^ case ]
 ;;

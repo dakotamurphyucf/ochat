@@ -319,6 +319,14 @@ Opening or editing an overlay therefore does not invalidate message rendering.
 
 ## Additional implementation notes
 
+`session_work` contains the metadata-only `Agent_work_view` derived from a
+principal-projected session snapshot. `update_session_work` replaces it, preserves
+the visible work-row identity when possible, and resets navigation for a different
+session/generation. `work_offset` is independent of Chat and Agent scrolling.
+Clearing a foreground operation's transient calls preserves an open Work page.
+These fields are client presentation state; they are not persisted session state,
+tool arguments, result content, execution authority, or model input.
+
 The following retained notes describe the original local/controller implementation.
 For native/daemon ownership and projections use [the current integration guide](../../agent-server/embedding.md).
 Shared rendering APIs remain useful; legacy persistence/controller assumptions

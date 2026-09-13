@@ -1221,12 +1221,12 @@ let%expect_test "builtin modules smoke test" =
     <none>
     false
     == Json ==
-    [1.,2.,3.]
+    [1,2,3]
     [1.25,2.5,true,null,"x"]
     `Some(`Number(20.))
     `None
     [|a|]
     `None
-    {"b":99.,"c":"new"}
+    {"b":99,"c":"new"}
     |}]
 ;;

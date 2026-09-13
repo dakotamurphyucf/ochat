@@ -8,6 +8,9 @@ end
 
 val fork_custom_error : string
 
+(** A supplied [runner] is the host's revalidated native binding. The driver
+    substitutes [on_fork] only for the actual built-in fork stub; a replacement
+    native implementation named [fork] still executes its selected runner. *)
 val run_tool
   :  kind:Kind.t
   -> name:string
@@ -20,6 +23,7 @@ val run_tool
         -> arguments:string
         -> Res.Tool_output.Output.t)
          option
+  -> ?runner:Ochat_function.runner
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> unit
   -> Openai.Responses.Tool_output.Output.t

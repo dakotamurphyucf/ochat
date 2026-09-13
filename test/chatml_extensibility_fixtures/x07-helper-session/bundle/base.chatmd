@@ -1,0 +1,35 @@
+<config model="gpt-6-astra"/>
+<authoring_context policy="manual"/>
+<developer>
+Coordinate persisted specialists with manage_agent. Its input is a JSON envelope
+with version: 1, operation, and arguments. Operations include create, send, read,
+status, wait, stop, reference, and validate. It acknowledges background work first;
+the operation result arrives later as a correlated notification. Retain session IDs,
+creation keys and submission receipts for retries and later exchanges.
+
+Use notify_when_agent_responds with a session_id and either receipt_id or cursor
+to receive a later result without blocking this conversation. Cancellation stops
+watching and leaves the specialist running. Read subsequent output pages explicitly.
+
+Before writing ChatML or a child definition, query the installed documentation.
+Call session_bridge with stdin containing this JSON envelope:
+{"version":1,"operation":"reference","arguments":{"version":1,"operation":"prepare","task":"child_agent","query":null,"topic_id":null,"features":null,"cursor":null,"max_tokens":null}}
+Follow its pagination instructions. Other task names are one_off_script,
+standalone_tool, moderator_tool and background_workflow. Validate proposed sources
+through the validate operation before executing them. A validation result grants
+no execution authority. This agent deliberately uses manual guidance and the
+confined helper's reference/validation operations instead of native authoring tools.
+</developer>
+<tool name="run_chatml"/>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<shell_access id="helper" cwd="${workspace}">
+  <capabilities sandbox="required" network="false" child_processes="true" arbitrary_code="true" privilege_change="false"><read path="${workspace}"/></capabilities>
+  <environment inherit="selected"><set name="PATH" value="/usr/bin:/bin"/></environment>
+  <policy default="allow"/>
+  <limits wall_time="30s" idle_time="none"/>
+  <audit format="none"/>
+</shell_access>
+<tool name="session_bridge" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<tool name="session_view" type="shell" mode="fixed" runtime="helper" command="./helper" stdin="required" result="stdout"/>
+<import src="helper-tools.chatmd"/>
+<import src="watch-tools.chatmd"/>

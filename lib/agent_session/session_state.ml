@@ -18,6 +18,7 @@ module Spec = struct
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
     ; permission_profile_digest : string
@@ -35,11 +36,20 @@ module Compaction_archive = struct
     | Upgrade
   [@@deriving equal, sexp]
 
+  type invocation_disposition =
+    { invocation_id : Agent_protocol.Id.Invocation.t
+    ; interruption_reason : string option [@sexp.option]
+    ; output_entry_id : Agent_protocol.History.Id.t option [@sexp.option]
+    ; publication_discarded : string option [@sexp.option]
+    }
+  [@@deriving sexp]
+
   type t =
     { operation_id : Agent_protocol.Id.Operation.t
     ; revision : int64
     ; sha256 : string
     ; kind : kind [@sexp.default Compaction]
+    ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
 end
@@ -55,6 +65,9 @@ module Conversation = struct
     ; kv_store : (string * string) list
     ; compaction_generation : int
     ; compaction_archives : Compaction_archive.t list [@sexp.list]
+    ; authoring_reference_index : Jsonaf.t option [@sexp.option]
+    ; authoring_publication : Chat_response.Authoring_publication.context option
+          [@sexp.option]
     }
   [@@deriving sexp]
 end
@@ -82,12 +95,23 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; pending_initial_start : bool [@sexp.default false]
+  ; stop_epoch : int64 [@sexp.default 0L]
+  ; parent_stop_epoch : int64 option [@sexp.option]
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
+  ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
+  ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
+  ; managed_submissions : Managed_submission.t list [@sexp.list]
+  ; managed_stops : Managed_stop.t list [@sexp.list]
+  ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
+  ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
+  ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
+  ; ingress_registrations : External_ingress.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
@@ -98,7 +122,207 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 2
+let current_schema_version = 20
+
+let upgrade_schema t =
+  if t.schema_version = current_schema_version
+  then Ok t
+  else if Option.is_some t.conversation.authoring_publication
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring publication context requires session schema 20"
+         ~retryable:false
+         ())
+  else if t.schema_version = 19
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    List.exists t.invocations ~f:(fun invocation ->
+      Option.is_some invocation.Agent_protocol.Invocation.authoring_reference)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"invocation authoring references require session schema 19"
+         ~retryable:false
+         ())
+  else if t.schema_version = 18
+  then Ok { t with schema_version = current_schema_version }
+  else if Option.is_some t.conversation.authoring_reference_index
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring reference index requires session schema 18"
+         ~retryable:false
+         ())
+  else if t.schema_version = 17
+  then Ok { t with schema_version = current_schema_version }
+  else if not (List.is_empty t.managed_stops)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"managed stop receipts require session schema 17"
+         ~retryable:false
+         ())
+  else if t.schema_version = 16
+  then Ok { t with schema_version = current_schema_version }
+  else if not (List.is_empty t.managed_submissions)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"managed submission receipts require session schema 16"
+         ~retryable:false
+         ())
+  else if t.schema_version = 15
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    List.exists t.moderator_executions ~f:(fun event ->
+      Option.is_some event.Agent_protocol.Moderator_execution.delegation
+      || Option.is_some event.decision)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"delegated moderator receipts require session schema 15"
+         ~retryable:false
+         ())
+  else if t.schema_version = 14
+  then Ok { t with schema_version = current_schema_version }
+  else if Option.is_some t.parent_stop_epoch
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"parent stop acknowledgement requires session schema 14"
+         ~retryable:false
+         ())
+  else if t.schema_version = 13
+  then Ok { t with schema_version = current_schema_version }
+  else if not (Int64.equal t.stop_epoch 0L)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"durable stop epochs require session schema 13"
+         ~retryable:false
+         ())
+  else if t.schema_version = 12
+  then Ok { t with schema_version = current_schema_version }
+  else if t.pending_initial_start
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"generated initial start intent requires session schema 12"
+         ~retryable:false
+         ())
+  else if t.schema_version = 11
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version < current_schema_version
+    && (Option.is_some t.spec.delegation
+        ||
+        match t.spec.protocol.prompt with
+        | Generated _ -> true
+        | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"generated delegation references require session schema 11"
+         ~retryable:false
+         ())
+  else if t.schema_version = 10
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version < current_schema_version
+    && List.exists
+         (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+         ~f:(fun entry ->
+           match entry.Agent_protocol.History.provenance with
+           | Runtime_authoring _ -> true
+           | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring guidance provenance requires session schema 10"
+         ~retryable:false
+         ())
+  else if t.schema_version = 9
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    List.exists t.jobs ~f:(fun job ->
+      match job.Agent_protocol.Job.delivery with
+      | Discarded _ -> true
+      | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"discarded job deliveries require session schema 9"
+         ~retryable:false
+         ())
+  else if t.schema_version = 8
+  then Ok { t with schema_version = current_schema_version }
+  else if not (List.is_empty t.ingress_registrations)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"external ingress registrations require session schema 8"
+         ~retryable:false
+         ())
+  else if
+    List.exists t.permissions ~f:(fun permission ->
+      match permission.owner with
+      | Invocation _ -> true
+      | Operation _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"invocation-owned permissions require session schema 8"
+         ~retryable:false
+         ())
+  else if t.schema_version = 7
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    List.exists t.invocations ~f:(fun invocation ->
+      Option.is_some invocation.parent_event)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"event-owned invocations require session schema 7"
+         ~retryable:false
+         ())
+  else if t.schema_version = 6
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    t.schema_version = 5
+    && List.for_all t.moderator_executions ~f:(fun event ->
+      Option.is_none event.retirement)
+  then Ok { t with schema_version = current_schema_version }
+  else if
+    List.is_empty t.moderator_executions
+    && (t.schema_version = 4
+        || ((t.schema_version = 3 || (t.schema_version = 2 && List.is_empty t.invocations))
+            && List.is_empty t.subscriptions
+            && List.is_empty t.deliveries))
+  then Ok { t with schema_version = current_schema_version }
+  else
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"unsupported session state schema or inconsistent legacy records"
+         ~retryable:false
+         ())
+;;
 
 let create ~identity ~spec ~initial_history =
   let desired =
@@ -110,6 +334,9 @@ let create ~identity ~spec ~initial_history =
   ; identity
   ; spec
   ; lifecycle = { desired; observed = Stopped }
+  ; pending_initial_start = false
+  ; stop_epoch = 0L
+  ; parent_stop_epoch = None
   ; conversation =
       { canonical_history = initial_history
       ; deferred_user_entries = []
@@ -120,12 +347,22 @@ let create ~identity ~spec ~initial_history =
       ; kv_store = []
       ; compaction_generation = 0
       ; compaction_archives = []
+      ; authoring_reference_index = None
+      ; authoring_publication = None
       }
   ; active_operation = None
+  ; automatic_turn_budget = None
   ; permissions = []
   ; grants = []
   ; jobs = []
   ; schedules = []
+  ; invocations = []
+  ; managed_submissions = []
+  ; managed_stops = []
+  ; moderator_executions = []
+  ; subscriptions = []
+  ; deliveries = []
+  ; ingress_registrations = []
   ; attachments = []
   ; moderator = None
   ; shell = Session.Shell_state.empty
@@ -141,6 +378,18 @@ let create ~identity ~spec ~initial_history =
   }
 ;;
 
+let authoring_references t =
+  let module R = Chat_response.Authoring_reference_index in
+  let scope =
+    Chat_response.Authoring_materialization.session_scope
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+  in
+  match t.conversation.authoring_reference_index with
+  | None -> R.empty ~scope ()
+  | Some json -> R.of_json ~scope json
+;;
+
 let nonnegative name value =
   if Int64.(value >= 0L)
   then Ok ()
@@ -153,13 +402,371 @@ let nonnegative name value =
          ())
 ;;
 
+let validate_delegation t =
+  let module D = Agent_store.Delegation_store in
+  let invalid () =
+    Error
+      (Agent_protocol.Error.create
+         Journal_corrupt
+         ~message:"generated session identity or delegation reference is inconsistent"
+         ~retryable:false
+         ())
+  in
+  match t.spec.protocol.prompt, t.spec.delegation with
+  | (Catalog _ | Local_path _), None -> Ok ()
+  | Generated revision, Some reference ->
+    let open Result.Let_syntax in
+    let%bind () =
+      D.validate_reference reference
+      |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+    in
+    (match
+       Option.is_none t.spec.prompt_definition_id
+       && Agent_protocol.Session.equal_persistence t.spec.protocol.persistence Durable
+       && Agent_protocol.Id.Prompt_revision.equal revision t.spec.prompt_revision_id
+       && Agent_protocol.Id.Prompt_revision.equal revision reference.revision_id
+       && Agent_protocol.Id.Session.equal t.identity.session_id reference.child_session_id
+     with
+     | true -> Ok ()
+     | false -> invalid ())
+  | _ -> invalid ()
+;;
+
 let validate t =
   let open Result.Let_syntax in
+  let%bind () = validate_delegation t in
+  let%bind () =
+    List.fold_result
+      (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+      ~init:()
+      ~f:(fun () entry -> Agent_protocol.History.validate_entry entry)
+  in
+  let%bind () =
+    match t.automatic_turn_budget with
+    | None -> Ok ()
+    | Some budget -> Automatic_turn_budget.validate budget
+  in
+  let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
+  let%bind () =
+    List.fold_result t.invocations ~init:() ~f:(fun () invocation ->
+      let%bind () = Agent_protocol.Invocation.validate invocation in
+      let%bind () =
+        Extension_invariants.invocation_event_owner
+          ~events:t.moderator_executions
+          invocation
+      in
+      let%bind () =
+        Invocation_history.validate_retained
+          ~history:t.conversation.canonical_history
+          invocation
+      in
+      let context = invocation.context in
+      if
+        Agent_protocol.Id.Session.compare context.session_id t.identity.session_id <> 0
+        || context.generation > t.identity.generation
+        || Hash_set.mem seen_invocations context.id
+      then
+        Error
+          (Agent_protocol.Error.create
+             Journal_corrupt
+             ~message:"invocation owner, generation or uniqueness is invalid"
+             ~retryable:false
+             ())
+      else (
+        Hash_set.add seen_invocations context.id;
+        Ok ()))
+  in
+  let%bind () =
+    let seen = Hash_set.create (module Agent_protocol.Id.Moderator_execution) in
+    let running = ref false in
+    List.fold_result t.moderator_executions ~init:() ~f:(fun () execution ->
+      let module E = Agent_protocol.Moderator_execution in
+      let%bind () = E.validate execution in
+      let c = execution.E.context in
+      let%bind () =
+        match c.job with
+        | None -> Ok ()
+        | Some _ when c.generation < t.identity.generation -> Ok ()
+        | Some reference ->
+          (match
+             List.find t.jobs ~f:(fun job ->
+               Agent_protocol.Id.Job.equal job.id reference.job_id)
+           with
+           | Some job
+             when job.generation = c.generation
+                  && Agent_protocol.Id.Session.equal job.session_id c.session_id
+                  && reference.attempt <= job.attempt -> Ok ()
+           | _ ->
+             Error
+               (Agent_protocol.Error.create
+                  Journal_corrupt
+                  ~message:"moderator event references an unknown or newer job attempt"
+                  ~retryable:false
+                  ()))
+      in
+      if
+        (not (Agent_protocol.Id.Session.equal c.session_id t.identity.session_id))
+        || c.generation > t.identity.generation
+        || Hash_set.mem seen c.id
+      then
+        Error
+          (Agent_protocol.Error.create
+             Journal_corrupt
+             ~message:"invalid moderator execution ownership or duplicate identity"
+             ~retryable:false
+             ())
+      else (
+        Hash_set.add seen c.id;
+        match execution.status with
+        | Running when !running ->
+          Error
+            (Agent_protocol.Error.create
+               Journal_corrupt
+               ~message:"multiple running moderator event executions"
+               ~retryable:false
+               ())
+        | Running ->
+          running := true;
+          Ok ()
+        | Completed _ | Failed _ | Interrupted _ -> Ok ()))
+  in
+  let%bind () =
+    Extension_invariants.validate
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+      ~invocations:t.invocations
+      ~subscriptions:t.subscriptions
+      ~deliveries:t.deliveries
+      ~jobs:t.jobs
+      ~schedules:t.schedules
+      ~events:t.moderator_executions
+  in
+  let%bind () =
+    List.fold_result t.subscriptions ~init:() ~f:(fun () subscription ->
+      Job_launch.validate_subscription
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        subscription)
+  in
+  let%bind () =
+    let registrations = t.ingress_registrations in
+    let duplicate =
+      List.contains_dup registrations ~compare:(fun a b ->
+        Agent_protocol.Id.Capability.compare a.External_ingress.context.id b.context.id)
+      || List.contains_dup
+           (List.concat_map registrations ~f:(fun value ->
+              value.External_ingress.receipts))
+           ~compare:(fun a b -> Agent_protocol.Id.Ingress_event.compare a.id b.id)
+    in
+    match duplicate with
+    | true ->
+      Error (Agent_protocol.Error.invalid_request "duplicate external ingress identity")
+    | false ->
+      List.fold_result registrations ~init:() ~f:(fun () value ->
+        let%bind () = External_ingress.validate value in
+        let%bind () =
+          match
+            Agent_protocol.Id.Session.equal value.context.session_id t.identity.session_id
+            && value.context.generation <= t.identity.generation
+          with
+          | true -> Ok ()
+          | false ->
+            Error (Agent_protocol.Error.invalid_request "foreign external ingress owner")
+        in
+        let%bind subscription =
+          List.find t.subscriptions ~f:(fun subscription ->
+            Agent_protocol.Id.Subscription.equal
+              subscription.context.id
+              value.context.subscription_id)
+          |> Result.of_option
+               ~error:
+                 (Agent_protocol.Error.invalid_request
+                    "missing external ingress subscription")
+        in
+        External_ingress.validate_owner value subscription)
+  in
+  let%bind () =
+    List.fold_result t.schedules ~init:() ~f:(fun () schedule ->
+      Schedule_ownership.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~subscriptions:t.subscriptions
+        schedule)
+  in
+  let%bind () =
+    List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      let%bind () = Agent_protocol.Job.validate_result job in
+      let%bind () =
+        match job.Agent_protocol.Job.progress with
+        | None -> Ok ()
+        | Some _ ->
+          Error
+            (Agent_protocol.Error.create
+               Journal_corrupt
+               ~message:"transient job progress cannot be durable state"
+               ~retryable:false
+               ())
+      in
+      Job_launch.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        job)
+  in
+  let%bind () =
+    List.fold_result t.deliveries ~init:() ~f:(fun () delivery ->
+      Delivery_ownership.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~subscriptions:t.subscriptions
+        delivery)
+  in
+  let%bind () =
+    List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      Job_dependency.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        ~subscriptions:t.subscriptions
+        job)
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.create
+        Journal_corrupt
+        ~message:error.message
+        ~retryable:false
+        ())
+  in
+  let%bind () =
+    List.fold_result t.permissions ~init:() ~f:(fun () permission ->
+      match permission.owner with
+      | Operation _ -> Ok ()
+      | Invocation id ->
+        (match
+           List.find t.invocations ~f:(fun invocation ->
+             Agent_protocol.Id.Invocation.equal invocation.context.id id)
+         with
+         | Some invocation
+           when Agent_protocol.Id.Session.equal
+                  permission.session_id
+                  t.identity.session_id
+                && permission.generation = invocation.context.generation -> Ok ()
+         | _ ->
+           Error
+             (Agent_protocol.Error.create
+                Journal_corrupt
+                ~message:"permission invocation owner is missing or inconsistent"
+                ~retryable:false
+                ())))
+  in
   let%bind () = nonnegative "revision" t.counters.revision in
+  let%bind () = nonnegative "stop epoch" t.stop_epoch in
+  let%bind () =
+    match t.parent_stop_epoch, t.spec.delegation with
+    | None, _ -> Ok ()
+    | Some epoch, Some _ -> nonnegative "parent stop epoch" epoch
+    | Some _, None ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "parent stop acknowledgement requires delegation")
+  in
+  let%bind () =
+    match
+      ( t.pending_initial_start
+      , t.spec.delegation
+      , t.spec.protocol.start_immediately
+      , t.lifecycle.desired
+      , t.active_operation )
+    with
+    | false, _, _, _, _ | true, Some _, true, Stopped, None -> Ok ()
+    | _ ->
+      Error
+        (Agent_protocol.Error.invalid_request "invalid generated initial start intent")
+  in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in
+  let%bind _ =
+    List.fold_result t.managed_submissions ~init:[] ~f:(fun seen receipt ->
+      let%bind () = Managed_submission.validate receipt in
+      let current =
+        match receipt.status with
+        | Terminal _ -> true
+        | Deferred | Ready | Assigned _ ->
+          Int.equal receipt.generation t.identity.generation
+          && Option.exists
+               t.spec.delegation
+               ~f:(Agent_store.Delegation_store.Reference.equal receipt.reference)
+      in
+      let correlation =
+        match receipt.status with
+        | Assigned id ->
+          Option.exists t.active_operation ~f:(fun operation ->
+            Agent_protocol.Id.Operation.equal id operation.id
+            && Int.equal receipt.generation operation.generation
+            &&
+            match operation.kind with
+            | Turn _ -> true
+            | Compaction -> false)
+        | Deferred ->
+          List.exists t.conversation.deferred_user_entries ~f:(fun entry ->
+            Agent_protocol.History.Id.equal entry.id receipt.history_id)
+        | Ready | Terminal _ -> true
+      in
+      match
+        current
+        && correlation
+        && receipt.generation <= t.identity.generation
+        && Agent_protocol.Id.Session.equal
+             receipt.reference.child_session_id
+             t.identity.session_id
+        && not
+             (List.exists seen ~f:(fun previous ->
+                Managed_submission.same_key previous receipt
+                || Agent_protocol.History.Id.equal previous.history_id receipt.history_id))
+      with
+      | true -> Ok (receipt :: seen)
+      | false ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed submission identity/generation is inconsistent"))
+  in
   let%bind () = nonnegative "transaction sequence" t.counters.transaction_sequence in
+  let%bind _ =
+    List.fold_result t.managed_stops ~init:[] ~f:(fun seen receipt ->
+      let%bind () = Managed_stop.validate receipt in
+      match
+        receipt.generation <= t.identity.generation
+        && Int64.(receipt.stop_epoch <= t.stop_epoch)
+        && Agent_protocol.Id.Session.equal
+             receipt.reference.child_session_id
+             t.identity.session_id
+        && not
+             (List.exists seen ~f:(fun previous ->
+                Managed_stop.same_key previous receipt
+                || Agent_protocol.Id.Transaction.equal previous.id receipt.id))
+      with
+      | true -> Ok (receipt :: seen)
+      | false ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "managed stop identity/generation is inconsistent"))
+  in
   let%bind () =
     nonnegative "next history sequence" t.conversation.next_history_sequence
+  in
+  let%bind references = authoring_references t in
+  let%bind () =
+    match t.conversation.authoring_publication with
+    | None -> Ok ()
+    | Some context ->
+      Chat_response.Authoring_publication.validate_context
+        context
+        ~session_id:t.identity.session_id
+        ~generation:t.identity.generation
+  in
+  let%bind _ =
+    Chat_response.Authoring_presence.remember
+      ~previous:(Chat_response.Authoring_reference_index.receipts references)
+      ~history:t.conversation.canonical_history
   in
   if t.schema_version <> current_schema_version
   then
@@ -209,14 +816,13 @@ let history_window entries =
     }
 ;;
 
-let effective_entry (entry : Chat_response.Moderation.Effective_entry.t) =
-  let provenance =
-    match entry.provenance with
-    | Canonical -> Agent_protocol.History.Canonical
-    | Moderator_inserted _ -> Moderator_inserted
-    | Moderator_replacement { target_id; _ } -> Moderator_replaced target_id
-  in
-  History_codec.to_protocol ~provenance entry.entry
+let effective_entry ~canonical (entry : Chat_response.Moderation.Effective_entry.t) =
+  match entry.provenance with
+  | Canonical -> canonical entry.entry
+  | Moderator_inserted _ ->
+    History_codec.to_protocol ~provenance:Moderator_inserted entry.entry
+  | Moderator_replacement { target_id; _ } ->
+    History_codec.to_protocol ~provenance:(Moderator_replaced target_id) entry.entry
 ;;
 
 let effective_history t =
@@ -233,7 +839,12 @@ let effective_history t =
       in
       Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
       |> Result.ok_or_failwith
-      |> List.map ~f:effective_entry
+      |> List.map
+           ~f:
+             (effective_entry
+                ~canonical:
+                  (History_codec.canonical_encoder
+                     ~previous:t.conversation.canonical_history))
       |> history_window
       |> Option.some
     | _ -> None)
@@ -247,6 +858,15 @@ let moderator_projection t =
             "effective_history", Agent_protocol.History.Window.to_json history))
      @ Option.to_list
          (Option.map t.halt_reason ~f:(fun reason -> "halt_reason", `String reason)))
+;;
+
+let extension_status t =
+  List.map t.invocations ~f:Agent_protocol.Extension_status.invocation
+  @ List.map t.moderator_executions ~f:Agent_protocol.Extension_status.moderator_execution
+  @ List.map t.subscriptions ~f:Agent_protocol.Extension_status.subscription
+  @ List.map t.deliveries ~f:Agent_protocol.Extension_status.delivery
+  |> List.sort ~compare:(fun a b ->
+    String.compare a.Agent_protocol.Extension_status.id b.id)
 ;;
 
 let snapshot ~now t =
@@ -268,6 +888,7 @@ let snapshot ~now t =
     ; permissions = t.permissions
     ; grants
     ; jobs = t.jobs
+    ; extension_status = extension_status t
     ; schedules = t.schedules
     ; active_tool_calls = []
     ; active_agent_calls = []

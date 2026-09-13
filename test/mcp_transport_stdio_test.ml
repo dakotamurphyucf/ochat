@@ -3,6 +3,28 @@ open Core
 (* Direct access to the stdio transport implementation under test. *)
 module Stdio = Mcp_transport_stdio
 
+let%expect_test "stdio close during switch release leaves reaping to its owner" =
+  Eio_main.run (fun env ->
+    List.iter [ false; true ] ~f:(fun cancel ->
+      let retained = ref None in
+      (try
+         Eio.Switch.run (fun sw ->
+           let transport = Stdio.connect ~sw ~env "stdio:cat" in
+           retained := Some transport;
+           (* Match the client's release hook, registered after process creation.
+              Eio stops daemon reapers before invoking release hooks. *)
+           Eio.Switch.on_release sw (fun () -> Stdio.close transport);
+           Stdio.send transport (`String "ready");
+           assert (Jsonaf.exactly_equal (Stdio.recv transport) (`String "ready"));
+           match cancel with
+           | true -> Eio.Switch.fail sw Exit
+           | false -> ())
+       with
+       | Exit -> assert cancel);
+      assert (Stdio.is_closed (Option.value_exn !retained))));
+  [%expect {||}]
+;;
+
 let%expect_test "stdio transport round-trip via `cat`" =
   (* We run the test inside an Eio main loop to obtain an environment
      that includes a [process_mgr].  *)

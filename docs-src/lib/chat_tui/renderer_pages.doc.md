@@ -14,5 +14,7 @@ val render
   -> Notty.I.t * (int * int)
 ```
 
-Currently the only page is `Chat`, implemented by `Renderer_page_chat`.
-
+The dispatcher supports `Chat` (`Renderer_page_chat`), transient tool activity
+in `Agent` (`Renderer_page_agent`), `Shell_security`
+(`Renderer_page_shell_security`), and the attached-session `Work` overview
+(`Renderer_page_work`). Page changes affect presentation only.

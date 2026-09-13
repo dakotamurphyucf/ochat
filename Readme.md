@@ -12,6 +12,11 @@ Start with instructions and a few tools. Reuse another agent as a specialist,
 or add a script to control a longer workflow. Those definitions stay in files
 you can edit, share, and version-control alongside your code.
 
+For larger workflows, let agents write tool-using scripts, create persistent
+specialists, and receive results from background work. ChatML gives you explicit
+control over that coordination, including custom tools whose behavior depends
+on the conversation's state. [Explore programmable workflows](#build-programmable-agent-workflows).
+
 The usual starting point is the **local terminal interface**: open a ChatMD
 file in the repository you want to work on. No server setup is needed.
 You can also run agents headlessly from scripts or host them as a background
@@ -42,6 +47,10 @@ for current commands.
   reviewer, researcher, or documentation writer to call when needed.
 - **Start simple, add control later.** Use a plain prompt for everyday tasks;
   add scripted decisions, follow-up work, or background events as you grow.
+- **Give agents programmable tools.** Combine existing tools in a ChatML script,
+  or let an agent generate a small program to transform data and coordinate calls.
+- **Keep specialists involved.** Create a persistent child agent, send follow-up
+  work, and inspect its status and output without rebuilding its conversation.
 - **Choose how to run it.** Work interactively in your terminal, run one request
   from a script, or connect several clients to a long-running agent.
 
@@ -77,6 +86,7 @@ extra setup, such as building a search index; the
 
 - [Run your first local agent](#run-your-first-local-agent)
 - [Make it your own](#make-it-your-own)
+- [Build programmable agent workflows](#build-programmable-agent-workflows)
 - [Run a request without the terminal interface](#run-a-request-without-the-terminal-interface)
 - [Optional: keep agents running in the background](#optional-keep-agents-running-in-the-background)
 - [What else can you build?](#what-else-can-you-build)
@@ -311,8 +321,8 @@ As a small example, append this script to a *copy* of the explorer prompt named
       | `Turn_end ->
         let completed = st + 1 in
         if completed >= 3 then
-          Task.bind(Runtime.end_session("Three-turn session finished"),
-            fun ignored -> Task.pure(completed))
+          let* () = Runtime.end_session("Three-turn session finished") in
+          Task.pure(completed)
         else Task.pure(completed)
 </script>
 ```
@@ -375,6 +385,50 @@ This authorization flag selects the older file-backed local mode, so it is
 intentionally **not combined with `--local`**. The complete
 [shell tutorial](docs-src/agent-server/tutorials/shell-agent.md) explains local
 and daemon authorization, adding build/test tools, and available safeguards.
+
+## Build programmable agent workflows
+
+ChatML now supports three distinct uses: a one-off program over selected tools,
+a reusable custom tool, and a stateful moderator that coordinates a conversation.
+You can write these yourself or expose authoring tools so an agent can generate
+programs when the task calls for them.
+
+| Capability | What you can build | Guide and examples |
+|---|---|---|
+| **Tool-using programs** with `run_chatml` | Read several reports, validate their contents, and aggregate results with explicit program logic in one tool invocation. | [One-off computations](docs-src/guide/chatml-authoring-runtime.md#one-off-tool-using-computations) |
+| **Custom ChatML tools** | Package reusable logic behind input/output schemas, or let a moderator handle a tool using retained workflow state. | [Standalone tools](docs-src/guide/chatml-authoring-runtime.md#standalone-tools-and-explicit-outcomes) · [Invocation contracts](docs-src/guide/chatml-authoring-runtime.md) |
+| **Background jobs and later notifications** | Start a build or review, continue the conversation, then deliver its result and optionally request an agent turn. Combine timers and subscriptions to watch for new output. | [Background work and delivery](docs-src/guide/chatml-authoring-background.md) |
+| **Persistent child agents** | Let an agent define a specialist's instructions, model and moderator, then create, message, read, wait for, inspect and stop that session by ID. | [Child-session lifecycle](docs-src/guide/chatml-authoring-children.md) |
+| **Persistent agents as tools** | Keep a user-defined reviewer available for several rounds of feedback, with optional persistence chosen by the calling model. | [Agent-tool persistence](docs-src/guide/chatmd-authoring-definitions.md#existing-tools-versus-new-tool-definitions) |
+| **Built-in authoring guidance** | Let an agent query the installed language and runtime docs, then validate generated source before execution. | [Documentation and validation tools](docs-src/guide/authoring-context-tool.md) |
+
+For example, the `review_docs` specialist above can offer both one-off calls and
+persistent conversations by changing its declaration to:
+
+```xml
+<tool name="review_docs" agent="docs-reviewer.chatmd" local persistence="optional"/>
+```
+
+The model can call it with `mode: "persistent"`, then reuse the returned
+`session_id` for follow-up feedback. Calls default to one-off behavior. Persistent
+children require a durable session host; see the lifecycle guide for setup,
+ownership and restart behavior. Generated children select from the parent's
+delegable tools and retain their file and shell restrictions, while choosing
+their own instructions and model settings.
+
+One application is a **living documentation lab**: a coordinator assigns tutorials
+to persistent reviewers, runs approved example commands as background jobs,
+collects failures, and asks a writer to propose corrections. A moderator tracks
+which checks and reviews are complete and delivers updates as results arrive.
+These are building blocks for your workflow; the lab itself is an application
+you can build with them.
+
+Start with the [ChatML workflow overview](docs-src/chatml/README.md) or inspect
+the [complete example bundles](test/chatml_extensibility_fixtures/README.md).
+Authoring tools are opt-in through ChatMD declarations. By default, declaring
+tools such as `run_chatml` or `agent_create` also supplies a shared authoring
+primer and documentation/validation helpers; authors can choose manual guidance
+or preload selected topics. Validation checks source without executing it.
 
 ## Run a request without the terminal interface
 

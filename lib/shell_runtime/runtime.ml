@@ -400,11 +400,25 @@ let approval_provider specification configured =
 
 let ui_reviewer specification configured manifest =
   let approvals = Option.value_exn specification.S.approvals in
-  Approval_broker.reviewer
-    (approval_provider specification configured)
-    ~runtime_id:(runtime_id specification)
-    ~manifest_sha256:manifest.M.sha256
-    ~scopes:approvals.scopes
+  let reviewer provider =
+    Approval_broker.reviewer
+      (approval_provider specification provider)
+      ~runtime_id:(runtime_id specification)
+      ~manifest_sha256:manifest.M.sha256
+      ~scopes:approvals.scopes
+  in
+  reviewer configured
+  |> Option.map ~f:(fun original request ->
+    match Call_context.current () with
+    | Error message -> Shell_access.Approval.Deny message
+    | Ok None -> original request
+    | Ok (Some context) ->
+      (match request.Shell_access.Approval.context.session_id with
+       | Some session_id when String.equal session_id context.session_id ->
+         (match reviewer context.approval_provider with
+          | Some current -> current request
+          | None -> Deny "shell approval provider is unavailable for the invoking session")
+       | _ -> Deny "shell approval request does not belong to the invoking session"))
 ;;
 
 let command_of_argv = function
@@ -1204,7 +1218,6 @@ let config
       ~cwd
       ~process_env:environment.values
       ~limits
-      ?resource_runner:host.resource_runner
       ~secret_filter
       ~audit
       ~audit_sequence
@@ -1312,6 +1325,23 @@ let create
 let id t = runtime_id t.spec
 let spec t = t.spec
 let executor_config t = t.executor_config
+
+let executor_config_for_call t =
+  let open Result.Let_syntax in
+  let%bind context = Call_context.current () in
+  let config =
+    match context with
+    | None -> t.executor_config
+    | Some context ->
+      Shell_access.Executor.with_execution_scope
+        t.executor_config
+        ~session_id:context.session_id
+        ~approval_store:context.approval_store
+        ~check:context.check
+  in
+  Call_context.prepare_executor config
+;;
+
 let redact t value = Shell_access.Secret_filter.redact t.secret_filter value
 let max_stdin_bytes t = t.max_stdin_bytes
 let executable t id = Map.find t.executables id

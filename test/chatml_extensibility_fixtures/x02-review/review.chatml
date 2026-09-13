@@ -1,0 +1,26 @@
+type review = { revision : string; reference : string }
+
+let initial_state : review array = []
+
+let on_event = fun ctx state event -> match event with
+| `Tool_invoked(p) ->
+  (match p.context.tool_name with
+  | "begin_review" ->
+    let revision = match Json.get_field(p.input, "revision") with
+      | `Some(`String(value)) -> value
+      | _ -> fail("revision is required")
+    in
+    (match Array.find(state, fun review -> review.revision == revision) with
+    | `Some(review) ->
+      let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String(review.reference))) in
+      Task.pure(state)
+    | `None ->
+      let review = { revision = revision; reference = "review-" ++ to_string(Array.length(state) + 1) } in
+      let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String(review.reference))) in
+      Task.pure(Array.append(state, [review])))
+  | "double_resolve" ->
+    let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String("first"))) in
+    let* () = Invocation.resolve(p.context.invocation_id, `Complete(`String("second"))) in
+    Task.pure(state)
+  | _ -> Task.pure(state))
+| _ -> Task.pure(state)

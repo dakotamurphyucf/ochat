@@ -96,6 +96,12 @@ module Durable : sig
   (** [to_json t] encodes the parameters of a [session.event] notification. *)
   val to_json : t -> Jsonaf.t
 
+  (** Optional complete status projection on [Session_updated]. Older clients
+      ignore this field; an empty list explicitly clears previously held state. *)
+  val with_extension_status : t -> Extension_status.t list -> t
+
+  val extension_status : t -> (Extension_status.t list option, Error.t) result
+
   (** [with_replacement_snapshot event snapshot] adds complete replacement state
       to a [Session_updated] event and binds its session revision/sequence to the
       event. Other event kinds are unchanged. Filter the snapshot for the reader

@@ -865,6 +865,7 @@ let dispatch_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction
   | Some _, _ -> Controller_shell_security.handle_key ~model ~term ev
   | None, Agent -> Controller_agent.handle_key ~model ~term ev
   | None, Shell_security -> Controller_shell_security.handle_key ~model ~term ev
+  | None, Work -> Controller_work.handle_key ~model ~term ev
   | None, Chat ->
     if is_ctrl_g ev then open_agent model else handle_chat_key ~model ~term ev
 ;;

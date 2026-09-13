@@ -24,8 +24,10 @@ transport is ideal for rapid prototyping, unit-tests and CLI-based tools.
    is written to the child’s *stdin* using `Eio.Flow.copy_string`.
 4. `recv` blocks until it can read a full line from the child’s *stdout*
    (`Eio.Buf_read.line`) and parses it with `Jsonaf.of_string`.
-5. `close` shuts both pipe ends **and** waits for the child to exit in
-   order to avoid zombie processes.
+5. `close` shuts both pipe ends and, while the owning switch is active, waits for
+   the child to exit. During switch release, Eio's process hook performs final
+   termination/reaping. Waiting on the cancelled reaper's promise in a later
+   client hook would prevent that process hook from running.
 
 Concurrency safety is achieved with two independent `Eio.Mutex.t` guards:
 one for the **reader** and one for the **writer**.  Multiple fibres can call

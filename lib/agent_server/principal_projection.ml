@@ -38,6 +38,7 @@ let snapshot principal (snapshot : Agent_protocol.Snapshot.t) =
   ; permissions = (if security then snapshot.permissions else [])
   ; grants = (if has principal Manage_grants then snapshot.grants else [])
   ; jobs = (if writer then snapshot.jobs else [])
+  ; extension_status = (if security then snapshot.extension_status else [])
   ; schedules = (if writer then snapshot.schedules else [])
   ; active_tool_calls = (if security then snapshot.active_tool_calls else [])
   ; active_agent_calls = (if security then snapshot.active_agent_calls else [])
@@ -142,7 +143,9 @@ let scope_identity principal =
 let export_use principal = "session_export:" ^ scope_identity principal
 
 let can_read_blob principal (metadata : Agent_store.Blob_store.Metadata.t) =
-  if String.is_prefix metadata.allowed_use ~prefix:"session_export:"
+  if String.is_prefix metadata.allowed_use ~prefix:"job_result:"
+  then has principal Send_messages
+  else if String.is_prefix metadata.allowed_use ~prefix:"session_export:"
   then String.equal metadata.allowed_use (export_use principal)
   else if String.equal metadata.allowed_use "session_export"
   then

@@ -169,7 +169,91 @@ let check_json env root documents =
            failwith
              (file ^ ": " ^ Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)))
       | Ok _ -> ()
-      | Error error -> failwith (file ^ ": " ^ error.message)))
+      | Error error -> failwith (file ^ ": " ^ error.message)));
+  let management_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json session-management-envelope\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all management_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      match
+        Agent_session.Session_management.decode_request
+          (Re.Group.get block 1 |> Jsonaf.of_string)
+      with
+      | Ok _ -> ()
+      | Error error -> failwith (file ^ ": " ^ error.Agent_protocol.Invocation.message)));
+  let validation_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json tool=ochat_validate\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  let module V = Chat_response.Authoring_validation in
+  let host =
+    V.create_host
+      ~runtime_identity:"documentation-validation-target"
+      ~targets:[ One_off_script; Standalone_tool; Moderator; Generated_chatmd ]
+      ~moderator_surface:Ordinary
+      ~compilation:Chatml_compilation.default_limits
+    |> Result.ok_or_failwith
+  in
+  let capabilities =
+    Chat_response.Tool_capability.create
+      ~owner:"documentation-validation"
+      ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "documentation-no-tools")
+      []
+    |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+    |> Result.ok_or_failwith
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all validation_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      let report =
+        V.validate ~env ~host ~capabilities (Re.Group.get block 1 |> Jsonaf.of_string)
+      in
+      require
+        (V.valid report)
+        (file
+         ^ ": invalid readonly validation example: "
+         ^ Jsonaf.to_string (V.to_json report))));
+  let reference_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json tool=ochat_authoring_context\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  let reference =
+    Chat_response.Authoring_context.create
+      ~secret:"documentation-reference-check-fixture"
+      ()
+    |> Result.ok_or_failwith
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all reference_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      let response =
+        Chat_response.Authoring_context.query
+          reference
+          ~host
+          ~capabilities
+          ~scope:"documentation-examples"
+          (Re.Group.get block 1 |> Jsonaf.of_string)
+      in
+      require
+        (Option.is_none (Jsonaf.member "error" response))
+        (file ^ ": invalid authoring reference example: " ^ Jsonaf.to_string response)))
 ;;
 
 let temporary_root env =
@@ -264,6 +348,12 @@ let () =
       check_anchors env root navigation;
       Docs_smoke.shell_actions env root;
       Docs_chatml.run env root;
+      Docs_chatml_authoring.run env root;
+      Docs_chatml_effects.run env root;
+      Docs_chatml_control.run env root;
+      Docs_child_authoring.run env root;
+      Docs_chatmd_authoring.run env root;
+      Docs_chatmd_capabilities.run env root;
       Docs_examples.run env root;
       check_examples env root executable;
       run_example env tools_example [];

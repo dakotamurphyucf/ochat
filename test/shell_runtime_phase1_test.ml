@@ -334,11 +334,10 @@ let live_host env root =
   ; source_dirs = String.Map.singleton "agent.chatmd" root
   ; process_environment = [| "PATH=/usr/bin:/bin"; "TOKEN=super-private-value" |]
   ; session_id = "session-live"
-  ; resource_runner = None
   }
 ;;
 
-let%expect_test "registry instantiation produces an executable redacting runtime" =
+let%expect_test "registered runtime redacts output and expires delegated callers" =
   Eio_main.run
   @@ fun env ->
   Eio.Switch.run
@@ -389,6 +388,39 @@ let%expect_test "registry instantiation produces an executable redacting runtime
     | Ok result -> result
     | Error error -> failwith (Shell_access.Executor.error_to_string error)
   in
+  let released, release = Eio.Promise.create () in
+  let escaped, retained =
+    Shell_runtime.Call_context.with_services
+      (fun () ->
+         Ok
+           Shell_runtime.Call_context.
+             { session_id = "delegated-child"
+             ; approval_store = A.create_store ()
+             ; approval_provider = B.Auto_deny
+             ; check = (fun () -> Ok ())
+             })
+      (fun () ->
+         let retained =
+           Shell_runtime.Runtime.executor_config_for_call runtime |> Result.ok_or_failwith
+         in
+         let escaped =
+           Eio.Fiber.fork_promise ~sw (fun () ->
+             Eio.Promise.await released;
+             Shell_runtime.Call_context.current ())
+         in
+         escaped, retained)
+  in
+  (match
+     Shell_access.Executor.run
+       retained
+       { request; input = Empty; rationale = None; origin = Host "expired" }
+   with
+   | Error (Denied "shell invocation services have expired") -> ()
+   | _ -> failwith "retained executor escaped its delegated caller lifetime");
+  Eio.Promise.resolve release ();
+  (match Eio.Promise.await_exn escaped with
+   | Error "shell invocation services have expired" -> ()
+   | _ -> failwith "escaped fiber reused registration-owner approvals");
   let audit = Eio.Path.load audit_path in
   printf
     "runtimes=%d tools=%d backend=%s output=%saudit-finished=%b audit-secret=%b\n"

@@ -5,14 +5,26 @@ open! Core
 
 type t
 
-(** [reconcile_recovered] applies configured misfire policy to schedules that
-    were already overdue at daemon startup. Propagate actor/persistence failures
+(** [reconcile_recovered] expires overdue subscriptions before applying configured
+    misfire policy to schedules that were already overdue at daemon startup.
+    Propagate actor/persistence failures
     rather than allowing startup to clear an incomplete recovery marker. *)
 val reconcile_recovered
   :  registry:Session_registry.t
   -> startup_time:Agent_protocol.Timestamp.t
   -> (unit, Agent_protocol.Error.t) result
 
-val start : sw:Eio.Switch.t -> clock:_ Eio.Time.clock -> registry:Session_registry.t -> t
+(** Each pass also sweeps subscription deadlines through the actor, independently
+    of any earlier callback holding this entry's runtime. Interrupted runtime
+    delivery retries an uncommitted claim; it does not turn shutdown into a
+    terminal schedule failure or undo a committed/cancelled schedule. *)
+val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
+
 val close : t -> unit
+
+(** After [close], wait for already-dispatched deliveries and moderator callbacks.
+    No new entry is admitted. The caller must bound this cancellable wait; an
+    unresponsive handler must not prevent subsequent runtime cancellation. *)
+val await_idle : t -> unit
+
 val is_running : t -> bool

@@ -1,0 +1,5 @@
+<config model="gpt-6-astra"/>
+<developer>Repair candidates using the installed authoring reference.</developer>
+<authoring_context policy="manual"/>
+<tool name="ochat_validate"/><tool name="ochat_authoring_context"/><tool name="run_chatml"/>
+<tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>

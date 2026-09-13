@@ -34,6 +34,7 @@ let all_scope_names =
     ; Delete_sessions
     ; Administer_configuration
     ; Diagnostics
+    ; Submit_ingress
     ]
   |> List.map ~f:Agent_protocol.Scope.to_string
 ;;

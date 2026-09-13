@@ -48,10 +48,11 @@ module CM = Prompt.Chat_markdown
 let agent_page_classification (decl : CM.tool) =
   match decl with
   | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
+  | CM.Persistent_agent ({ name; _ }, _) -> Some (name, Tool_execution_event.Subagent)
   | CM.Builtin "fork" -> Some ("fork", Tool_execution_event.Subagent)
   | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
-  | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ -> None
+  | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ | CM.Extension _ | CM.Inherited _ -> None
 ;;
 
 module Res = Openai.Responses
@@ -239,7 +240,29 @@ let mcp_tool
         | Error _ -> failwith "MCP tool discovery failed")
   in
   register_invalidation_listener ~sw ~cache ~client;
-  let wrap = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict in
+  let wrap (captured : Mcp_types.Tool.t) =
+    let function_ = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict captured in
+    let check_catalog () =
+      match
+        List.filter (Mcp_discovery_cache.get cache) ~f:(fun current ->
+          String.equal current.Mcp_types.Tool.name captured.name)
+      with
+      | [ current ]
+        when Option.equal String.equal current.description captured.description
+             && Jsonaf.exactly_equal current.input_schema captured.input_schema -> ()
+      | _ -> failwith "mcp.catalog_changed: reload the tool definition before calling it"
+    in
+    { function_ with
+      run =
+        (fun input ->
+          check_catalog ();
+          function_.run input)
+    ; run_with_progress =
+        (fun ~invocation input ->
+          check_catalog ();
+          function_.run_with_progress ~invocation input)
+    }
+  in
   let get_tool name =
     let find () =
       List.find (Mcp_discovery_cache.get cache) ~f:(fun tool ->
@@ -324,6 +347,18 @@ let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl :
   : Ochat_function.t list
   =
   match decl with
+  | CM.Persistent_agent _ ->
+    failwith
+      "agent.persistence_unavailable: authored persistent tools require an admitted \
+       session adapter"
+  | CM.Inherited _ ->
+    failwith
+      "capability.inheritance_required: inherited tool references require an admitted \
+       parent binding"
+  | CM.Extension _ ->
+    failwith
+      "chatml.extension_unavailable: extension tool execution is not yet enabled on this \
+       host"
   | CM.Builtin name ->
     (match name with
      | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.tool_dir ctx) ]

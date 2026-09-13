@@ -1,0 +1,35 @@
+let initial_state = 0
+let on_event ctx state event =
+  match event with
+  | `Session_start ->
+    let* () = Runtime.emit(`String("ready")) in
+    Task.pure(state + 1)
+  | `Internal_event(command) ->
+    (match Json.as_string(command) with
+     | `Some("recover") ->
+       let* () = Runtime.request_compaction() in
+       let* () = Task.catch(
+         (let* () = Runtime.emit(`String("discarded")) in
+          let* () = Runtime.request_turn() in
+          let* () = Runtime.end_session("discarded") in
+          Task.fail("recover")),
+         fun message -> Runtime.emit(`String(message))) in
+       Task.pure(state + 1)
+     | `Some("continue") ->
+       let* () = Runtime.request_turn() in
+       let* () = Runtime.emit(`String("first")) in
+       let* () = Runtime.emit(`String("second")) in
+       Task.pure(state + 1)
+     | `Some("fail") ->
+       let* () = Runtime.end_session("must not commit") in
+       let* () = Runtime.emit(`String("must not publish")) in
+       Task.fail("whole handler failed")
+     | `Some("finish") ->
+       let* () = Runtime.end_session("work complete") in
+       let* () = Log.info("continuation after end_session") in
+       Task.pure(state + 1)
+     | _ -> Task.pure(state))
+  | `Turn_start ->
+    let* () = Runtime.request_turn() in
+    Task.pure(state + 1)
+  | _ -> Task.pure(state)

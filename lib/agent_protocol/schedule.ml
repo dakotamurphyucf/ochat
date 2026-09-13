@@ -19,6 +19,13 @@ type due =
   | After_ms of int
 [@@deriving sexp]
 
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  ; subscription : (Id.Subscription.t * int) option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Schedule.t
   ; session_id : Id.Session.t
@@ -30,6 +37,8 @@ type t =
   ; status : status
   ; delivery_count : int
   ; last_delivery_at : Timestamp.t option
+  ; ownership : ownership option [@sexp.option]
+  ; delivery_cancellation : string option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -110,6 +119,144 @@ let due_of_json json =
   | _ -> Error (Protocol_error.invalid_request "unknown schedule due policy")
 ;;
 
+let ownership_to_json ownership =
+  let kind, id =
+    match ownership.creator with
+    | Job.Invocation id -> "invocation", Id.Invocation.to_json id
+    | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
+  in
+  `Object
+    ([ "schema_version", `Number "1"
+     ; ( "source"
+       , `Object
+           [ "script_id", `String ownership.source.script_id
+           ; "source_sha256", `String ownership.source.source_sha256
+           ] )
+     ; "creator_type", `String kind
+     ; "creator_id", id
+     ]
+     @ Option.to_list
+         (Option.map ownership.subscription ~f:(fun (id, epoch) ->
+            ( "subscription"
+            , `Object
+                [ "id", Id.Subscription.to_json id
+                ; "epoch", `Number (Int.to_string epoch)
+                ] ))))
+;;
+
+let ownership_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    Extension_codec.closed
+      fields
+      [ "schema_version"; "source"; "creator_type"; "creator_id"; "subscription" ]
+  in
+  let%bind version =
+    Json_codec.required_as
+      fields
+      "schema_version"
+      (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+  in
+  let%bind () =
+    match version with
+    | 1 -> Ok ()
+    | _ ->
+      Error
+        (Protocol_error.create
+           Incompatible_protocol
+           ~message:"unsupported schedule ownership version"
+           ~retryable:false
+           ())
+  in
+  let%bind source =
+    Json_codec.required_as fields "source" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () = Extension_codec.closed fields [ "script_id"; "source_sha256" ] in
+      let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
+      let%map source_sha256 =
+        Json_codec.required_as fields "source_sha256" Json_codec.string
+      in
+      Invocation.{ script_id; source_sha256 })
+  in
+  let%bind creator_type =
+    Json_codec.required_as fields "creator_type" Json_codec.string
+  in
+  let%bind creator =
+    match creator_type with
+    | "invocation" ->
+      Json_codec.required_as fields "creator_id" Id.Invocation.of_json
+      |> Result.map ~f:(fun id -> Job.Invocation id)
+    | "moderator_event" ->
+      Json_codec.required_as fields "creator_id" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun id -> Job.Moderator_event id)
+    | _ -> Error (Protocol_error.invalid_request "unknown schedule creator")
+  in
+  let%map subscription =
+    Json_codec.optional_as fields "subscription" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () = Extension_codec.closed fields [ "id"; "epoch" ] in
+      let%bind id = Json_codec.required_as fields "id" Id.Subscription.of_json in
+      let%map epoch =
+        Json_codec.required_as
+          fields
+          "epoch"
+          (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+      in
+      id, epoch)
+  in
+  { source; creator; subscription }
+;;
+
+let validate t =
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.delivery_cancellation, t.ownership, t.status, t.delivery_count with
+    | None, _, _, _ -> Ok ()
+    | Some reason, Some _, Delivered, 1 ->
+      Extension_codec.text ~name:"timer delivery cancellation" ~max:256 reason
+    | Some _, _, _, _ ->
+      Error
+        (Protocol_error.invalid_request
+           "only an enqueued owned timer can cancel delivery")
+  in
+  match t.ownership with
+  | None -> Ok ()
+  | Some ownership ->
+    let open Result.Let_syntax in
+    let%bind _ = ownership_of_json (ownership_to_json ownership) in
+    let%bind () =
+      Extension_codec.text
+        ~name:"schedule moderator ID"
+        ~max:256
+        ownership.source.script_id
+    in
+    let hash = ownership.source.source_sha256 in
+    let%bind () =
+      match
+        String.length hash = 64
+        && String.for_all hash ~f:(function
+          | '0' .. '9' | 'a' .. 'f' -> true
+          | _ -> false)
+      with
+      | true -> Ok ()
+      | false ->
+        Error (Protocol_error.invalid_request "schedule source must be lowercase SHA256")
+    in
+    let%bind () =
+      match t.generation >= 0 && Timestamp.compare t.next_due_at t.created_at >= 0 with
+      | true -> Ok ()
+      | false ->
+        Error
+          (Protocol_error.invalid_request "invalid owned schedule generation or due time")
+    in
+    (match t.status, t.delivery_count, t.last_delivery_at with
+     | (Scheduled | Delivering | Cancelled | Failed _), 0, None | Delivered, 0, None ->
+       Ok ()
+     | Delivered, 1, Some at when Timestamp.compare at t.created_at >= 0 -> Ok ()
+     | _ -> Error (Protocol_error.invalid_request "invalid owned schedule delivery state"))
+;;
+
 let to_json t =
   let fields =
     [ Some ("id", Id.Schedule.to_json t.id)
@@ -125,7 +272,21 @@ let to_json t =
     ]
     |> List.filter_opt
   in
-  `Object fields
+  match t.ownership with
+  | None -> `Object fields
+  | Some ownership ->
+    `Object
+      ([ ( "schema_version"
+         , `Number
+             (match t.delivery_cancellation with
+              | None -> "2"
+              | Some _ -> "3") )
+       ; "schedule", `Object fields
+       ; "ownership", ownership_to_json ownership
+       ]
+       @ Option.to_list
+           (optional_field "delivery_cancellation" t.delivery_cancellation (fun reason ->
+              `String reason)))
 ;;
 
 let decode_identity fields =
@@ -144,6 +305,67 @@ let decode_identity fields =
 let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
+  let%bind fields, ownership, delivery_cancellation =
+    match Json_codec.optional fields "schema_version" with
+    | None ->
+      (match
+         Option.is_some (Json_codec.optional fields "ownership")
+         || Option.is_some (Json_codec.optional fields "schedule")
+         || Option.is_some (Json_codec.optional fields "delivery_cancellation")
+       with
+       | true ->
+         Error
+           (Protocol_error.invalid_request
+              "owned schedule requires its versioned envelope")
+       | false -> Ok (fields, None, None))
+    | Some encoded ->
+      let%bind version = Json_codec.bounded_int ~min:1 ~max:Int.max_value encoded in
+      let%bind () =
+        match version with
+        | 2 | 3 -> Ok ()
+        | _ ->
+          Error
+            (Protocol_error.create
+               Incompatible_protocol
+               ~message:"unsupported schedule version"
+               ~retryable:false
+               ())
+      in
+      let%bind () =
+        Extension_codec.closed
+          fields
+          ([ "schema_version"; "schedule"; "ownership" ]
+           @
+           match version with
+           | 3 -> [ "delivery_cancellation" ]
+           | _ -> [])
+      in
+      let%bind delivery_cancellation =
+        match version with
+        | 3 ->
+          Json_codec.required_as fields "delivery_cancellation" Json_codec.string
+          |> Result.map ~f:Option.some
+        | _ -> Ok None
+      in
+      let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
+      let%bind fields = Json_codec.required_as fields "schedule" Json_codec.fields in
+      let%map () =
+        Extension_codec.closed
+          fields
+          [ "id"
+          ; "session_id"
+          ; "generation"
+          ; "payload"
+          ; "created_at"
+          ; "next_due_at"
+          ; "misfire"
+          ; "status"
+          ; "delivery_count"
+          ; "last_delivery_at"
+          ]
+      in
+      fields, Some ownership, delivery_cancellation
+  in
   let%bind id, session_id, generation = decode_identity fields in
   let%bind payload = Json_codec.required fields "payload" in
   let%bind created_at = Json_codec.required_as fields "created_at" Timestamp.of_json in
@@ -156,20 +378,96 @@ let of_json json =
       "delivery_count"
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
-  let%map last_delivery_at =
+  let%bind last_delivery_at =
     Json_codec.optional_as fields "last_delivery_at" Timestamp.of_json
   in
-  { id
-  ; session_id
-  ; generation
-  ; payload
-  ; created_at
-  ; next_due_at
-  ; misfire
-  ; status
-  ; delivery_count
-  ; last_delivery_at
-  }
+  let value =
+    { id
+    ; session_id
+    ; generation
+    ; payload
+    ; created_at
+    ; next_due_at
+    ; misfire
+    ; status
+    ; delivery_count
+    ; last_delivery_at
+    ; ownership
+    ; delivery_cancellation
+    }
+  in
+  let%map () = validate value in
+  value
+;;
+
+let validate_transition ~previous next =
+  let conflict message =
+    Error (Protocol_error.create Conflict ~message ~retryable:false ())
+  in
+  let open Result.Let_syntax in
+  let%bind () = validate next in
+  match previous with
+  | None ->
+    (match next.ownership, next.status with
+     | None, _ | Some { subscription = None; _ }, Scheduled -> Ok ()
+     | _ -> conflict "owned schedule must start scheduled and unbound")
+  | Some previous ->
+    let%bind () = validate previous in
+    (match previous.ownership, next.ownership with
+     | None, None -> Ok ()
+     | Some before, Some after ->
+       let immutable =
+         Id.Schedule.equal previous.id next.id
+         && Id.Session.equal previous.session_id next.session_id
+         && Int.equal previous.generation next.generation
+         && Jsonaf.exactly_equal previous.payload next.payload
+         && Timestamp.equal previous.created_at next.created_at
+         && Timestamp.equal previous.next_due_at next.next_due_at
+         && equal_misfire previous.misfire next.misfire
+         && Invocation.equal_observer before.source after.source
+         && Job.equal_launch_owner before.creator after.creator
+       in
+       let%bind () =
+         match immutable with
+         | true -> Ok ()
+         | false ->
+           conflict "owned schedule identity, source, creator and timing are immutable"
+       in
+       let%bind () =
+         match before.subscription, after.subscription, previous.status, next.status with
+         | before, after, _, _
+           when Option.equal
+                  (fun (id, epoch) (other, other_epoch) ->
+                     Id.Subscription.equal id other && Int.equal epoch other_epoch)
+                  before
+                  after -> Ok ()
+         | None, Some _, Scheduled, Scheduled -> Ok ()
+         | _ -> conflict "schedule subscription binding cannot be replaced"
+       in
+       let%bind () =
+         match previous.delivery_cancellation, next.delivery_cancellation with
+         | None, None -> Ok ()
+         | None, Some _ ->
+           (match previous.status, next.status with
+            | Delivered, Delivered -> Ok ()
+            | _ -> conflict "delivery cancellation requires an already-enqueued timer")
+         | Some before, Some after when String.equal before after -> Ok ()
+         | Some _, _ ->
+           conflict "timer delivery cancellation cannot be replaced or removed"
+       in
+       (match previous.status, next.status with
+        | Scheduled, (Scheduled | Delivering | Delivered | Cancelled | Failed _)
+        | Delivering, (Scheduled | Delivering | Delivered | Cancelled | Failed _) -> Ok ()
+        | Delivered, Delivered
+          when Option.is_none previous.delivery_cancellation
+               && Option.is_some next.delivery_cancellation
+               && Jsonaf.exactly_equal
+                    (to_json previous)
+                    (to_json { next with delivery_cancellation = None }) -> Ok ()
+        | (Delivered | Cancelled | Failed _), _
+          when Jsonaf.exactly_equal (to_json previous) (to_json next) -> Ok ()
+        | _ -> conflict "terminal schedule cannot change")
+     | _ -> conflict "schedule ownership cannot be attached or removed")
 ;;
 
 module List_request = struct

@@ -39,6 +39,7 @@ type t =
   | Schedule_get of Schedule.Get_request.t
   | Schedule_create of Schedule.Create_request.t
   | Schedule_cancel of Schedule.Cancel_request.t
+  | Ingress_submit of Ingress.Submit_request.t
 [@@deriving sexp]
 
 let method_name = function
@@ -80,6 +81,7 @@ let method_name = function
   | Schedule_get _ -> "schedule.get"
   | Schedule_create _ -> "schedule.create"
   | Schedule_cancel _ -> "schedule.cancel"
+  | Ingress_submit _ -> "ingress.submit"
 ;;
 
 let params = function
@@ -121,6 +123,7 @@ let params = function
   | Schedule_get request -> Schedule.Get_request.to_json request
   | Schedule_create request -> Schedule.Create_request.to_json request
   | Schedule_cancel request -> Schedule.Cancel_request.to_json request
+  | Ingress_submit request -> Ingress.Submit_request.to_json request
 ;;
 
 let method_not_found method_ =
@@ -185,6 +188,7 @@ let decoders =
   ; "schedule.get", map Schedule.Get_request.of_json (fun x -> Schedule_get x)
   ; "schedule.create", map Schedule.Create_request.of_json (fun x -> Schedule_create x)
   ; "schedule.cancel", map Schedule.Cancel_request.of_json (fun x -> Schedule_cancel x)
+  ; "ingress.submit", map Ingress.Submit_request.of_json (fun x -> Ingress_submit x)
   ]
 ;;
 

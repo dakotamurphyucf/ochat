@@ -2,13 +2,7 @@ open! Core
 module Moderation = Chatml_moderation
 module Moderator = Chatml_moderator
 module Res = Openai.Responses
-
-module Safe_point_input = struct
-  type t = In_memory_stream.Safe_point_input.t =
-    { consume_entries : unit -> History_entry.t list
-    ; consume_compatibility_text : unit -> string option
-    }
-end
+module Safe_point_input = In_memory_stream.Safe_point_input
 
 type moderator =
   { manager : Moderator.t
@@ -37,7 +31,7 @@ let to_in_memory_moderator
       ({ manager; session_id; session_meta; runtime_policy } : moderator)
   : In_memory_stream.moderator
   =
-  { manager; session_id; session_meta; runtime_policy }
+  { manager; session_id; session_meta; runtime_policy; event_handlers = None }
 ;;
 
 let map_moderator moderator = Option.map moderator ~f:to_in_memory_moderator

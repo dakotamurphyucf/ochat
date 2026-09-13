@@ -19,7 +19,8 @@ val create
 
 val principal : t -> Agent_protocol.Principal.t
 val initialized : t -> bool
-val mark_initialized : t -> unit
+val mark_initialized : ?version:Agent_protocol.Version.t -> t -> unit
+val protocol_version : t -> Agent_protocol.Version.t option
 val reserve_attachment : t -> (unit, Agent_protocol.Error.t) result
 val release_attachment_reservation : t -> unit
 val register_reserved_attachment : t -> Agent_protocol.Session.Attachment.t -> unit

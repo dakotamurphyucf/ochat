@@ -107,17 +107,27 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
            ex)
   in
   let close_fn () =
+    let await_child =
+      match Eio.Switch.check sw with
+      | () -> true
+      | exception Eio.Cancel.Cancelled _ -> false
+      | exception Invalid_argument _ -> false
+    in
     (* Close our pipe ends first – this should trigger graceful
          shutdown in well-behaved children. *)
     (try Eio.Flow.close stdin_w with
      | _ -> ());
     (try Eio.Flow.close stdout_r with
      | _ -> ());
-    (* Wait for the process to exit to avoid zombies.  We ignore
-         failures, e.g. if the fibre holding [close] is cancelled. *)
-    try ignore (Eio.Process.await child : Eio.Process.exit_status) with
-    | Eio.Cancel.Cancelled _ as exn -> raise exn
-    | _ -> ()
+    (* During switch release, Eio's process-reaper daemon has already stopped.
+       Its earlier release hook will kill/reap the child after this hook returns;
+       awaiting its promise here would prevent that hook from ever running. *)
+    match await_child with
+    | false -> ()
+    | true ->
+      (try ignore (Eio.Process.await child : Eio.Process.exit_status) with
+       | Eio.Cancel.Cancelled _ as exn -> raise exn
+       | _ -> ())
   in
   { send_fn; recv_fn; close_fn; closed = false; disposed = false }
 ;;

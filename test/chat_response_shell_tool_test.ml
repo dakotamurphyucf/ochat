@@ -67,7 +67,6 @@ let registry env sw root =
     ; source_dirs = String.Map.singleton "agent.chatmd" root
     ; process_environment = [| "PATH=/usr/bin:/bin" |]
     ; session_id = "shell-tool-test"
-    ; resource_runner = None
     }
   in
   Shell_runtime.Registry.instantiate
@@ -138,7 +137,7 @@ let agent_runtime_or_fail = function
     |> failwith
 ;;
 
-let agent_runtime env sw root source manifest_authorizer approval_provider =
+let with_agent_runtime_input env root source f =
   let elements = CM.parse_chat_inputs ~source:"agent.chatmd" ~dir:root source in
   let cache = Chat_response.Cache.create ~max_size:1 () in
   let ctx = Chat_response.Ctx.create ~env ~dir:root ~tool_dir:root ~cache in
@@ -152,22 +151,26 @@ let agent_runtime env sw root source manifest_authorizer approval_provider =
       ~cache_dir:root
       ~home:root
       ~session_id:"agent-runtime-test"
-      ~resource_runner:None
       ~prompt_elements:elements
     |> agent_runtime_or_fail
   in
-  Chat_response.Agent_runtime.create
-    ~sw
-    ~ctx
-    ~host
-    ~platform:S.Macos
-    ~prompt_elements:elements
-    ~manifest_authorizer
-    ~approval_provider
-    ~approval_store:(Shell_access.Approval.create_store ())
-    ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
-      failwith "unexpected nested agent")
-    ()
+  f ~ctx ~host ~elements
+;;
+
+let agent_runtime env sw root source manifest_authorizer approval_provider =
+  with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+    Chat_response.Agent_runtime.create
+      ~sw
+      ~ctx
+      ~host
+      ~platform:S.Macos
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store:(Shell_access.Approval.create_store ())
+      ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+        failwith "unexpected nested agent")
+      ())
 ;;
 
 let runtime_function runtime name =
@@ -210,6 +213,30 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
     |> agent_runtime_or_fail
   in
   let function_ = runtime_function runtime "read_file" in
+  Mirage_crypto_rng_unix.use_default ();
+  let module C = Chat_response.Tool_capability in
+  let capability_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : C.error)]
+  in
+  let selected =
+    Lazy.force runtime.capabilities
+    |> capability_ok
+    |> fun registry -> C.select registry ~names:[ "read_file" ] |> capability_ok
+  in
+  let binding = C.find selected ~name:"read_file" |> capability_ok in
+  assert (phys_equal (C.native_implementation binding |> Option.value_exn) function_);
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(root / "outside.txt")
+    "private outside marker";
+  let outside =
+    (C.native_implementation binding |> Option.value_exn).run
+      {|{"root":"source","file":"../outside.txt"}|}
+    |> output_text
+  in
+  assert (not (String.is_substring outside ~substring:"private outside marker"));
+  assert (String.is_substring outside ~substring:"outside the configured read roots");
   let description = request_description function_ in
   let output = function_.run {|{"root":"source","file":"value.ml"}|} |> output_text in
   let source_root_native = Eio.Path.native_exn source_root in
@@ -228,6 +255,230 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
     {|
     description=true true true
     output=true
+    |}]
+;;
+
+let%expect_test
+    "host registrations require explicit selection and preserve result contracts"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    Eio.Switch.run (fun sw ->
+      let module R = Chat_response.Agent_runtime in
+      let module C = Chat_response.Tool_capability in
+      let module Definition = struct
+        type input = string
+
+        let name = "host_echo"
+        let description = Some "Return the input unchanged."
+        let type_ = "function"
+        let parameters = `Object [ "type", `String "object" ]
+        let input_of_string text = text
+      end
+      in
+      let calls = ref 0 in
+      let implementation =
+        Ochat_function.create_function
+          (module Definition)
+          (fun input ->
+             Int.incr calls;
+             Text input)
+      in
+      let registration contract revision =
+        R.
+          { implementation
+          ; result_contract = contract
+          ; authoring_metadata = None
+          ; implementation_revision = Chatmd_shell_spec.Source_ref.digest revision
+          }
+      in
+      let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "host-registration") in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+      let prepare registrations source =
+        with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+          R.prepare_extensions
+            ~native_registrations:registrations
+            ~sw
+            ~ctx
+            ~host
+            ~platform:S.Macos
+            ~prompt_elements:elements
+            ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~approval_store:(Shell_access.Approval.create_store ())
+            ~run_agent:
+              (fun
+                ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+              failwith "unexpected agent")
+            ())
+      in
+      let selected = registration Invocation_v1 "host-echo-v1" in
+      let unused =
+        prepare [ selected ] "<system>No tools.</system>" |> agent_runtime_or_fail
+      in
+      assert (List.is_empty unused.native.functions);
+      let source = {|<tool name="host_echo"/>|} in
+      let resource = prepare [ selected ] source |> agent_runtime_or_fail in
+      let binding resource =
+        Lazy.force resource.R.native.capabilities
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+        |> fun registry ->
+        C.find registry ~name:"host_echo"
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let actual = binding resource in
+      assert (
+        phys_equal (C.native_implementation actual |> Option.value_exn) implementation);
+      assert (C.equal_result_contract (C.result_contract actual) Invocation_v1);
+      let metadata =
+        Chatmd_shell_spec.Authoring_metadata.
+          { authoring = Some (Chat_response.Authoring_validation.help One_off_script)
+          ; helper = None
+          }
+      in
+      let authored = { selected with authoring_metadata = Some metadata } in
+      let authored_binding =
+        prepare [ authored ] source |> agent_runtime_or_fail |> binding
+      in
+      assert (
+        Chatmd_shell_spec.Authoring_metadata.equal (C.metadata authored_binding) metadata);
+      List.iter
+        [ registration Native_output "host-echo-v1"
+        ; registration Invocation_v1 "host-echo-v2"
+        ; authored
+        ]
+        ~f:(fun changed ->
+          let other = prepare [ changed ] source |> agent_runtime_or_fail |> binding in
+          assert (
+            not
+              (String.equal
+                 (C.permission_fingerprint actual)
+                 (C.permission_fingerprint other))));
+      let duplicate =
+        match prepare [ selected; selected ] source with
+        | Error [ { code = "agent.duplicate_tool_name"; _ } ] -> true
+        | _ -> false
+      in
+      let missing = Result.is_error (prepare [] source) in
+      assert (Int.equal !calls 0);
+      let output =
+        (C.native_implementation actual |> Option.value_exn).run "{}" |> output_text
+      in
+      print_s
+        [%sexp
+          { duplicate : bool; missing : bool; output : string; calls = (!calls : int) }]));
+  [%expect {| ((duplicate true) (missing true) (output {}) (calls 1)) |}]
+;;
+
+let%expect_test
+    "extension resources retain captured code and exact approved native bindings"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    Eio.Switch.run (fun sw ->
+      let module R = Chat_response.Agent_runtime in
+      let module C = Chat_response.Tool_capability in
+      let module E = Chat_response.Extension_compiler in
+      let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "extension-resources") in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(root / "allowed");
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root / "allowed" / "value.txt")
+        "bound value";
+      Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "schema.json") "true";
+      let script =
+        {|let poison = fail("initializer must not run")
+let initial_state = 0
+let on_event = fun ctx state event -> match event with
+| `Tool_invoked(p) -> Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(p.input)), fun ignored -> Task.pure(state))
+| _ -> Task.pure(state)|}
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "handler.chatml") script;
+      let source =
+        {|<tool name="read_file"><read id="source" path="allowed"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1" src="handler.chatml"/>
+<tool name="counter" type="moderator" moderator="owner" input_schema="schema.json" output_schema="schema.json"/>|}
+      in
+      let normal_disabled =
+        match
+          agent_runtime
+            env
+            sw
+            root
+            source
+            Shell_runtime.Manifest_authorizer.assume_authorized
+            Shell_runtime.Approval_broker.None_available
+        with
+        | Error [ { code = "chatml.extension_unavailable"; _ } ] -> true
+        | _ -> false
+      in
+      let resources =
+        with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(root / "handler.chatml")
+            "not valid ChatML";
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(root / "schema.json")
+            "not JSON";
+          R.prepare_extensions
+            ~sw
+            ~ctx
+            ~host
+            ~platform:S.Macos
+            ~prompt_elements:elements
+            ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~approval_store:(Shell_access.Approval.create_store ())
+            ~run_agent:
+              (fun
+                ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+              failwith "unexpected nested agent")
+            ()
+          |> agent_runtime_or_fail)
+      in
+      let native = runtime_function resources.native "read_file" in
+      let selected = E.definition_capabilities resources.definition in
+      let binding =
+        C.find selected ~name:"read_file"
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let native_names =
+        List.map resources.native.functions ~f:(fun fn ->
+          fn.Ochat_function.info.function_.name)
+      in
+      let prepared_names =
+        List.map (E.prepared_tools resources.definition) ~f:(fun tool ->
+          (E.declaration tool).name)
+      in
+      let pinned =
+        List.for_all (E.compiled_scripts resources.definition) ~f:(fun (captured, _) ->
+          String.equal (Chatmd_shell_spec.Extension_spec.script_text captured) script)
+      in
+      let output =
+        (C.native_implementation binding |> Option.value_exn).run
+          {|{"root":"source","file":"value.txt"}|}
+        |> output_text
+      in
+      print_s
+        [%sexp
+          { normal_disabled : bool
+          ; native_names : string list
+          ; prepared_names : string list
+          ; exact_native =
+              (phys_equal native (C.native_implementation binding |> Option.value_exn)
+               : bool)
+          ; pinned : bool
+          ; scoped_read = (String.is_substring output ~substring:"bound value" : bool)
+          }]));
+  [%expect
+    {|
+    ((normal_disabled true) (native_names (read_file)) (prepared_names (counter))
+     (exact_native true) (pinned true) (scoped_read true))
     |}]
 ;;
 
@@ -426,7 +677,6 @@ let%expect_test "phase2 shell modes execute through ChatMD and return structured
     ; source_dirs = String.Map.singleton "agent.chatmd" root
     ; process_environment = [| "PATH=/usr/bin:/bin" |]
     ; session_id = "shell-tool-phase2"
-    ; resource_runner = None
     }
   in
   let registry =

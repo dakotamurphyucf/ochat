@@ -1,0 +1,17 @@
+(test
+ (name offline)
+ (modules offline)
+ (libraries core core_unix ochat.authoring_sources ochat.chatmd_shell_spec))
+
+(executable
+ (name review_coverage)
+ (modules review_coverage)
+ (libraries core jsonaf ochat.authoring_corpus ochat.authoring_sources)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name topic_tests)
+ (modules topic_tests coverage_tests authored_tests grammar_tests semantic_tests declaration_tests native_tests runtime_tests)
+ (libraries core ochat.authoring_corpus ochat.authoring_sources)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

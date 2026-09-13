@@ -123,19 +123,20 @@ let process_queue registry queue =
   process_heads registry queue [] (Agent_session.Start_queue.heads queue)
 ;;
 
-let rec run t clock registry queue =
+let rec run t clock registry queue resume_initial_starts =
   if Atomic.get t.stopped
   then ()
   else (
+    resume_initial_starts ();
     (match process_queue registry queue with
      | Retry | Blocked _ -> Eio.Time.sleep clock 0.01
      | Activated | Drop -> Eio.Fiber.yield ());
-    run t clock registry queue)
+    run t clock registry queue resume_initial_starts)
 ;;
 
-let start ~sw ~clock ~registry ~queue =
+let start ~sw ~clock ~registry ~queue ~resume_initial_starts =
   let t = { stopped = Atomic.make false } in
-  Eio.Fiber.fork ~sw (fun () -> run t clock registry queue);
+  Eio.Fiber.fork ~sw (fun () -> run t clock registry queue resume_initial_starts);
   t
 ;;
 

@@ -140,6 +140,13 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  (** Persistence-enabled agent declarations keep the legacy [Agent] representation
+      for the default/explicit [one_off] case, preserving its serialized identity. *)
+  type agent_persistence =
+    | Persistent
+    | Optional
+  [@@deriving jsonaf, sexp, hash, bin_io, compare, equal]
+
   type tool =
     | Builtin of string
     | Read_file of Chatmd_read_file_spec.t
@@ -147,6 +154,9 @@ module Chat_markdown : sig
     | Shell of Chatmd_shell_spec.Shell_tool_spec.t
     | Agent of agent_tool
     | Mcp of mcp_tool
+    | Extension of Chatmd_shell_spec.Extension_spec.tool
+    | Inherited of string
+    | Persistent_agent of agent_tool * agent_persistence
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
@@ -193,6 +203,9 @@ module Chat_markdown : sig
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Chatmd_shell_spec.Chatmd_script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
+    | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the
@@ -210,8 +223,9 @@ module Chat_markdown : sig
         fragment; leading BOM and surrounding whitespace are ignored.
 
       Behaviour:
-      1. Preprocesses the input via {!Preprocessor.preprocess} to strip
-         comments and handle conditional compilation markers.
+      1. Applies optional meta-refinement via {!Preprocessor.preprocess}.
+         Use [parse_source_bundle] for generated source that must not execute
+         preprocessing.
       2. Parses the cleaned source with the Menhir grammar from
          {!module:Chatmd_parser}.
       3. Expands [`<import>`] directives recursively.
@@ -230,6 +244,44 @@ module Chat_markdown : sig
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list
+
+  (** Authored-parser semantics with executable preprocessing disabled. The
+      required loader controls dependency reads; this is not the bounded,
+      canonical generated-bundle admission path. Used to check captured legacy
+      artifact closures without starting refinement. *)
+  val parse_chat_inputs_without_preprocessing
+    :  ?source:string
+    -> source_loader:Source_loader.t
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> string
+    -> top_level_elements list
+
+  type parsed_bundle =
+    { root : top_level_elements list
+    ; agents : (string * top_level_elements list) list
+    }
+
+  (** Recheck the parsed declaration registry, including IDs, handler kinds,
+      dependency cycles and authoring declaration uniqueness. No source reads,
+      preprocessing, compilation or evaluation. Returns the same elements;
+      raises [Failure] on invalid declarations. Source/hash/schema and runtime
+      capability checks remain the admission service's responsibility. *)
+  val validate_declarations : top_level_elements list -> top_level_elements list
+
+  (** Parse the root and the complete reachable local-agent source closure from
+      supplied bytes only. Imports and script/schema sources cannot fall back to
+      disk; external/missing agent definitions reject. No preprocessing runs,
+      including when ambient meta-refinement is enabled; explicit markers fail.
+      Cumulative reads, bytes, tokens and markup depth are bounded. Generated
+      provenance uses canonical root-relative names. [dir] anchors provenance;
+      no files are read from it or materialized into it by this function.
+      This is parsing, not execution/authority admission. Native tool/root/MCP
+      configuration, message resource access and handler compilation still need
+      validation against inherited authority before any runtime consumes results. *)
+  val parse_source_bundle
+    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    -> Chatmd_source_bundle.t
+    -> parsed_bundle
 end
 
 (** {1 Metadata helpers}

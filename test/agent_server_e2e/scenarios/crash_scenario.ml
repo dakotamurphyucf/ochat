@@ -78,10 +78,57 @@ let run_journal_child env count directory =
 
 let run_child env arguments =
   match arguments with
+  | [ "authored-ack"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child
+      ~lose_ack:true
+      env
+      ~root
+      ~boundary
+      ~mode
+      ~recover:false
+  | [ "authored-ack-recover"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child
+      ~lose_ack:true
+      env
+      ~root
+      ~boundary
+      ~mode
+      ~recover:true
+  | [ "authored-create"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child env ~root ~boundary ~mode ~recover:false
+  | [ "authored-recover"; root; boundary; mode ] ->
+    Crash_authored_creation.run_child env ~root ~boundary ~mode ~recover:true
+  | [ "creator"; root; boundary ] ->
+    Crash_creator.run_child env ~root ~boundary ~recover:false
+  | [ "creator-recover"; root; boundary ] ->
+    Crash_creator.run_child env ~root ~boundary ~recover:true
+  | [ "generated-provider"; root ] -> Generated_provider_scenario.run_child env root
+  | [ "owned-stop"; root ] -> Crash_owned_stop.run_child env ~root ~recover:false
+  | [ "owned-stop-recover"; root ] -> Crash_owned_stop.run_child env ~root ~recover:true
+  | [ "owned-stop-recover"; root; boundary ] ->
+    Crash_owned_stop.run_child ~interrupt_recovery:boundary env ~root ~recover:true
   | [ "replace"; name; target ] -> run_replace_child env name target
   | [ "journal"; count; directory ] -> run_journal_child env count directory
+  | [ "generated-create"
+    ; root
+    ; (("collection-prepared" | "collection-partial") as boundary)
+    ] -> Crash_artifact_collection.run_child env ~root ~boundary ~recover:false
+  | [ "generated-recover"
+    ; root
+    ; (("collection-prepared" | "collection-partial") as boundary)
+    ] -> Crash_artifact_collection.run_child env ~root ~boundary ~recover:true
+  | [ "generated-create"; root; boundary ] ->
+    Crash_generated_creation.run_child env ~root ~boundary ~recover:false
+  | [ "generated-recover"; root; boundary ] ->
+    Crash_generated_creation.run_child env ~root ~boundary ~recover:true
   | [ "side-effect"; config_path; marker ] ->
     Crash_side_effect_host.run env ~config_path ~marker
+  | [ "notification"; config_path; boundary ] ->
+    Crash_notification_host.run env ~config_path ~boundary
+  | [ "standalone-notification"; config_path; boundary ] ->
+    Crash_notification_host.run ~standalone:true env ~config_path ~boundary
+  | [ "ingress"; config_path; recover ] ->
+    Crash_ingress_host.run env ~config_path ~recover:(Bool.of_string recover)
   | _ -> F.fail "invalid crash child arguments"
 ;;
 
@@ -260,7 +307,17 @@ let cases =
   ; "io-failure.commit-writer-fail-closed", Persistence_faults.writers
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
+  ; "generated.creation-stage-recovery", Crash_generated_creation.test
+  ; "authored.creation-stage-recovery", Crash_authored_creation.test
+  ; "authored.creation-lost-acknowledgement", Crash_authored_creation.test_lost_ack
+  ; "generated.creator-outcome-recovery", Crash_creator.test
+  ; "generated.owned-stop-recovery", Crash_owned_stop.test
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
+  ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
+  ; "job.committed-intent-launch-once", Crash_queued_launch.test
+  ; "notification.wake-no-replay", Crash_notification_wake.test
+  ; "notification.standalone-no-replay", Crash_standalone_notification.test
+  ; "ingress.lost-ack-no-replay", Crash_ingress_delivery.test
   ; "idempotency.unknown-outcome", test_unknown_outcome
   ; "sigkill.process-supervision", test_forced_process
   ]
@@ -279,7 +336,13 @@ let run_matrix env case =
     let selected = select case in
     List.iter selected ~f:(fun (name, test) ->
       try test env environment with
-      | exn -> raise_s [%sexp "crash E2E case failed", (name : string), (exn : Exn.t)]);
+      | exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        let message =
+          [%sexp "crash E2E case failed", (name : string), (exn : Exn.t)]
+          |> Sexp.to_string_hum
+        in
+        Exn.raise_with_original_backtrace (Failure message) backtrace);
     Eio.Flow.copy_string
       (Sexp.to_string_hum
          [%sexp
@@ -298,6 +361,9 @@ let run env ~case =
       |> Sexp.of_string
       |> [%of_sexp: string list]
     in
+    (* The selected fault is test control, not a change to the host environment
+       delegated to tools. Keep captured authority identical on recovery. *)
+    Core_unix.unsetenv "OCHAT_E2E_CRASH_ARGUMENTS";
     run_child env arguments
   | _ -> run_matrix env case
 ;;

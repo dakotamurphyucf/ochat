@@ -5,11 +5,13 @@
  (modules
   chatmd_ast
   source_loader
+  chatmd_source_bundle
   chatmd_lexer
   chatmd_parser
   chatmd_attributes
   chatmd_import_expansion
   chatmd_script_declaration
+  chatmd_extension_declaration
   chatmd_moderator_runtime_declaration
   chatmd_read_file_spec
   chatmd_read_file_declaration
@@ -18,6 +20,7 @@
   prompt)
  (libraries
   core
+  cstruct
   str
   menhirLib
   jsonaf

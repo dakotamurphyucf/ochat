@@ -244,7 +244,7 @@ let initialize client =
     Agent_protocol.Initialize.Request.create
       ~implementation
       ~protocol_min:Agent_protocol.Version.initial
-      ~protocol_max:Agent_protocol.Version.initial
+      ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
@@ -1181,6 +1181,14 @@ let error_observations connection ~key_prefix =
     ; ( "job-not-found"
       , Job_get
           { session_id = created.session.id; job_id = Agent_protocol.Id.Job.create () } )
+    ; ( "ingress-unavailable"
+      , Ingress_submit
+          { session_id = created.session.id
+          ; registration_id = Agent_protocol.Id.Capability.create ()
+          ; namespace = "external.report"
+          ; idempotency_key = idempotency_key (key_prefix ^ ":ingress")
+          ; payload = `Null
+          } )
     ; ( "blob-offset-invalid"
       , Blob_read
           { session_id = created.session.id
@@ -1269,6 +1277,14 @@ let error_observations connection ~key_prefix =
     List.map error_commands ~f:(fun (name, command) ->
       observe_error connection name command)
   in
+  (* This stock daemon fixture has no qualified ingress moderator. Test the
+     explicit unavailable-host contract, not a successful helper composition. *)
+  let ingress =
+    List.find_exn errors ~f:(fun error -> String.equal error.name "ingress-unavailable")
+  in
+  if not (Agent_protocol.Error.equal_code ingress.code Invalid_request)
+  then
+    raise_s [%sexp "unexpected unavailable ingress error", (ingress : error_observation)];
   let conflicting_spec =
     { (session_spec connection) with display_name = Some "idempotency conflict" }
   in
@@ -1965,6 +1981,7 @@ let method_coverage =
   ; "schedule.get", "conformance.jobs-schedules"
   ; "schedule.create", "conformance.jobs-schedules"
   ; "schedule.cancel", "conformance.jobs-schedules"
+  ; "ingress.submit", "conformance.error-codes"
   ]
 ;;
 

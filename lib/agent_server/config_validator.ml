@@ -528,12 +528,192 @@ let parse_job_limits context path sexp =
         }
 ;;
 
+let parse_authoring_packages context path sexp =
+  let module F = Chat_response.Authoring_package_file in
+  let open Result.Let_syntax in
+  let invalid message =
+    fail
+      context
+      ~code:"config.authoring_packages"
+      ~path
+      ~message
+      ~remediation:"Use valid version-1 authoring package files, then restart the server."
+  in
+  let%bind values = list context path sexp in
+  let%bind () =
+    match List.length values <= 128 with
+    | true -> Ok ()
+    | false -> invalid "at most 128 authoring package files may be configured"
+  in
+  let%bind paths = List.map values ~f:(resolve_path context path) |> Result.all in
+  let%bind paths = require_unique context path paths in
+  F.load_many ~env:context.env ~paths
+  |> Result.map_error ~f:(fun message ->
+    [ diagnostic
+        context
+        ~code:"config.authoring_packages"
+        ~path
+        ~message
+        ~remediation:"Fix the authoring package files and validate again."
+    ])
+;;
+
+let parse_authoring_budget context path sexp =
+  let module V = Chat_response.Authoring_validation in
+  let open Result.Let_syntax in
+  let%bind fields = record context path sexp in
+  let%bind () =
+    ensure_allowed
+      context
+      path
+      fields
+      [ "default_tokens"; "max_tokens"; "preload_tokens" ]
+  in
+  let%bind default_tokens =
+    optional_value
+      context
+      path
+      fields
+      "default_tokens"
+      parse_int
+      ~default:V.default_context_budget.default_tokens
+  in
+  let%bind max_tokens =
+    optional_value
+      context
+      path
+      fields
+      "max_tokens"
+      parse_int
+      ~default:V.default_context_budget.max_tokens
+  in
+  let%bind preload_tokens =
+    optional_value
+      context
+      path
+      fields
+      "preload_tokens"
+      parse_int
+      ~default:V.default_context_budget.preload_tokens
+  in
+  V.context_budget ~default_tokens ~max_tokens ~preload_tokens
+  |> Result.map_error ~f:(fun message ->
+    [ diagnostic
+        context
+        ~code:"config.authoring_budget"
+        ~path
+        ~message
+        ~remediation:
+          "Use positive token estimates up to 1000000 and default_tokens <= max_tokens."
+    ])
+;;
+
+let parse_session_helper context path sexp =
+  let open Result.Let_syntax in
+  let%bind fields = record context path sexp in
+  let%bind () =
+    ensure_allowed
+      context
+      path
+      fields
+      [ "tool_name"
+      ; "executable"
+      ; "executable_sha256"
+      ; "arguments"
+      ; "operations"
+      ; "read_roots"
+      ; "environment"
+      ; "private_paths"
+      ; "max_request_bytes"
+      ; "max_response_bytes"
+      ; "max_requests"
+      ]
+  in
+  let required_value name parse =
+    required context path fields name >>= parse context (path ^ "." ^ name)
+  in
+  let strings context path value = parse_list_values context path value atom in
+  let paths context path value = parse_list_values context path value resolve_path in
+  let%bind tool_name = required_value "tool_name" identifier in
+  let%bind executable = required_value "executable" resolve_path in
+  let%bind executable_sha256 = required_value "executable_sha256" sha256 in
+  let%bind arguments =
+    optional_value context path fields "arguments" strings ~default:[]
+  in
+  let%bind operations =
+    required_value "operations" strings
+    >>= require_nonempty context (path ^ ".operations")
+    >>= require_unique context (path ^ ".operations")
+  in
+  let%bind () =
+    match
+      List.for_all operations ~f:(fun name ->
+        Result.is_ok (Agent_session.Session_management.operation_of_json (`String name)))
+    with
+    | true -> Ok ()
+    | false ->
+      shape_error
+        context
+        (path ^ ".operations")
+        "create, send, read, status, wait, stop, reference or validate"
+  in
+  let%bind read_roots =
+    required_value "read_roots" paths >>= require_nonempty context (path ^ ".read_roots")
+  in
+  let%bind environment = required_value "environment" strings in
+  let%bind () =
+    let names = List.map environment ~f:(fun entry -> String.lsplit2 entry ~on:'=') in
+    match
+      List.for_all names ~f:(function
+        | Some (name, _) -> not (String.is_empty name)
+        | None -> false)
+      && List.for_all environment ~f:(fun entry -> not (String.contains entry '\000'))
+    with
+    | false ->
+      shape_error
+        context
+        (path ^ ".environment")
+        "exact NAME=value strings without NUL bytes"
+    | true ->
+      List.filter_map names ~f:(Option.map ~f:fst)
+      |> require_unique context (path ^ ".environment")
+      |> Result.map ~f:(fun _ -> ())
+  in
+  let%bind private_paths =
+    optional_value context path fields "private_paths" paths ~default:[]
+  in
+  let limits = Shell_access.Request_channel.default_limits in
+  let limit name default =
+    optional_value context path fields name parse_int ~default
+    >>= positive context (path ^ "." ^ name)
+  in
+  let%bind max_request_bytes = limit "max_request_bytes" limits.max_request_bytes in
+  let%bind max_response_bytes = limit "max_response_bytes" limits.max_response_bytes in
+  let%map max_requests = limit "max_requests" limits.max_requests in
+  Session_helper_policy.
+    { tool_name
+    ; executable
+    ; executable_sha256
+    ; arguments
+    ; operations
+    ; read_roots
+    ; environment
+    ; private_paths
+    ; max_request_bytes
+    ; max_response_bytes
+    ; max_requests
+    }
+;;
+
 let parse_server context sexp =
   let path = "server" in
   let open Result.Let_syntax in
   let%bind fields = record context path sexp in
   let allowed =
     [ "data_dir"
+    ; "session_helpers"
+    ; "authoring_packages"
+    ; "authoring_budget"
     ; "unix_socket"
     ; "http"
     ; "shutdown_grace_ms"
@@ -548,6 +728,32 @@ let parse_server context sexp =
   let%bind () = ensure_allowed context path fields allowed in
   let%bind data_dir =
     required context path fields "data_dir" >>= resolve_path context "server.data_dir"
+  in
+  let%bind session_helpers =
+    optional_value
+      context
+      path
+      fields
+      "session_helpers"
+      (fun context path value ->
+         parse_list_values context path value parse_session_helper)
+      ~default:[]
+  in
+  let%bind authoring_packages =
+    optional_value
+      context
+      path
+      fields
+      "authoring_packages"
+      parse_authoring_packages
+      ~default:[]
+  in
+  let%bind authoring_budget =
+    match field fields "authoring_budget" with
+    | None -> Ok None
+    | Some value ->
+      parse_authoring_budget context "server.authoring_budget" value
+      |> Result.map ~f:Option.some
   in
   let%bind unix_socket =
     required context path fields "unix_socket"
@@ -640,7 +846,7 @@ let parse_server context sexp =
           ; max_nested_depth = 8
           }
   in
-  let%map unsafe_allow_unauthenticated_remote_http =
+  let%bind unsafe_allow_unauthenticated_remote_http =
     optional_value
       context
       path
@@ -649,8 +855,29 @@ let parse_server context sexp =
       parse_bool
       ~default:false
   in
+  let%map _ =
+    Session_helper_policy.grants
+      ~env:context.env
+      ~protected_paths:
+        ([ context.source_file; data_dir; unix_socket ]
+         @ Option.to_list http.static_tokens_file)
+      session_helpers
+    |> Result.map_error ~f:(fun message ->
+      [ diagnostic
+          context
+          ~code:"config.session_helpers"
+          ~path:"server.session_helpers"
+          ~message
+          ~remediation:
+            "Use distinct helper tools and dedicated public read directories outside \
+             host state and credentials."
+      ])
+  in
   Config.Server.
     { data_dir
+    ; session_helpers
+    ; authoring_packages
+    ; authoring_budget
     ; unix_socket
     ; http
     ; shutdown_grace_ms

@@ -102,6 +102,13 @@ interrupted, not blindly rerun. Durable jobs/schedules include their own deliver
 state. External side effects may be uncertain; reconcile before retrying them.
 See [orchestration](chatml-orchestration.md).
 
+For retained extension invocations, daemon recovery restores missing initial tool
+outputs from recorded results and marks unfinished invocations interrupted. It
+does not rerun their handlers. Removed calls receive an explicit discarded-output
+disposition. Conflicting output evidence fails recovery. See the
+[invocation recovery contract](extensibility-foundations.md#invocation-recovery-at-daemon-restart)
+for exact history bindings, allocation and worker/reset recovery behavior.
+
 ## Backup and restore
 
 1. Stop accepting new work and gracefully shut down the owning daemon.
@@ -120,6 +127,22 @@ redacted; encryption-at-rest is an operator responsibility.
 
 ## Inspection, migration, and legacy import
 
+The store-container schema and each session's state schema are separate. The
+current store container uses schema 1; the current session state uses schema 20.
+Normal session loading upgrades supported older state shapes and rejects fields
+that could not exist in the declared version. This does not migrate a workflow's
+application-specific moderator state.
+
+For an extensibility upgrade, stop the daemon and back up the complete store,
+configuration and external resources before starting the new binary. Keep the
+matching old binary and backup together for rollback. Inspect recovered sessions,
+interrupted work and pending approvals before resuming them; refresh process-bound
+output cursors after restart. Existing prompt revisions remain pinned. Use an
+explicit stopped-session prompt upgrade when changing a captured definition, and
+review its [workflow migration behavior](../guide/chatml-session-lifecycle.md#source-replacement-is-not-workflow-migration).
+Downgrading the binary against a newly written store is not a supported rollback;
+restore the matching backup instead of editing schema numbers.
+
 ```sh
 ochat-agent-server -inspect-store /absolute/private/store
 ochat-agent-server -migrate-store /absolute/private/store -dry-run
@@ -127,8 +150,8 @@ ochat-agent-server -migrate-store /absolute/private/store
 ```
 
 Inspection reads schema/session-directory information without acquiring daemon
-ownership. Migration planning/application takes the lock. Schema 1 is currently
-the only supported schema; applying unsupported older/newer formats fails without
+ownership. Migration planning/application takes the lock. Store-container schema 1 is currently
+the only supported container schema; applying unsupported older/newer formats fails without
 inventing a conversion. Neither operation is a complete artifact/journal integrity
 scan. A dry-run is not a repair tool. Preserve evidence on corruption and avoid
 manual journal edits.
@@ -154,6 +177,18 @@ records; retained event windows determine whether clients can replay. Journal
 pruning occurs behind installed snapshots, retaining a validated fallback.
 Stopped inactive actors unload while their sessions remain indexed; running
 intent, owner grace, runnable jobs and schedules can keep/load actors.
+
+Managed job-result preparations have separate cleanup. Maintenance preserves
+referenced artifacts, validates retained session/history/cache/blob consumers, and
+removes only private preparations proved unreferenced. It can load an indexed
+stopped session for this work. Loaded runtimes and active execution, uploads or
+reads defer collection; archived sessions remain preserved. Invalid, incomplete,
+linked or oversized roots report an error and retain the affected evidence.
+Collection statistics distinguish discarded results, retired preparation markers
+and deferred attempts. Library hosts can configure the bounded scan through
+`Session_factory.limits.job_result_collection`; this is not a new CLI setting.
+See [the implementation contract](extensibility-foundations.md) for lock order,
+root coverage and the qualified extensibility host scope.
 
 Monitor persistence errors, recovery failures, loaded actors, descriptors, queue
 pressure, permission waits, subscriber disconnects, job/quota saturation, disk

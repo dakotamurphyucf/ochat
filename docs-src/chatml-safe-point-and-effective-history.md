@@ -9,8 +9,8 @@ current `job.*`/`schedule.*` protocol. UI capabilities remain host-specific.
 Instruction helpers with historical system names now construct developer messages;
 old history and raw values are not rewritten.
 
-This guide makes the current safe-point, effective-history, and durable
-moderator-state semantics explicit without changing runtime behavior.
+This guide describes the current safe-point, effective-history, and durable
+moderator-state semantics.
 
 The preferred public boundary is:
 
@@ -229,28 +229,54 @@ except canonical history is not replaced.
 
 ## Deferred steering semantics
 
-Deferred steering is safe-point input only.
+When a user submits during a streamed turn, `chat_tui` queues a user history entry
+with its own stable ID through `App_runtime.enqueue_deferred_user_note`.
+`App_runtime.safe_point_input_source` supplies it through the shared turn-driver
+boundary. The daemon's actor likewise adopts its queued user entries durably before
+returning them to the loop. These are canonical user entries, not transient
+developer instructions.
 
-When the user submits text during an active streamed turn, `chat_tui` does not
-append a new canonical user message mid-turn. Instead it:
+After all outstanding tool results complete, the driver consumes a
+`Safe_point_input.batch`, appends its entries to turn history, and decides whether
+to continue. `user_entries` preserves the existing user-driven continuation path.
+The entries cannot change a request already sent to the provider and become model
+input at a later request boundary. The raw compatibility-text adapter still supports
+transient developer text for legacy embedders; the TUI and daemon entry adapters
+do not use it.
 
-1. stores a stripped deferred user note in the session-controller queue via
-   `App_runtime.enqueue_deferred_user_note`;
-2. exposes queued notes through
-   `App_runtime.consume_deferred_user_notes_for_safe_point`; and
-3. passes that source into the turn driver as
-   `Chat_response.Chatml_turn_driver.Safe_point_input.t`.
+### Notification data and wake requests
 
-The turn driver consumes that input only at request-preparation time through
-the turn-start boundary. The rendered note is wrapped as transient developer input
-for the next request only.
+`notification_entries ~request_turn:false entries` inserts host-committed runtime
+data without causing a model call. With `request_turn:true`, the driver surfaces a
+normal runtime turn request: `honor_request_turn` and the consecutive self-trigger
+budget apply. Notification data does not reset that budget. `append` combines
+batches while retaining the distinction between user input and notification wakes;
+several notifications can produce one continuation.
 
-The consequences are:
+The host owns authorization, canonical provenance, persistence, deduplication and
+durable wake acceptance. The driver does not re-commit supplied entries. The
+notification adapter must use supported runtime-data framing, never the legacy
+developer-text adapter. Idle scheduling, follow-up/rate policy and persisted wake
+disposition remain host responsibilities. Under its internal qualification switch,
+the extensibility daemon now supplies foreground batches after rechecking the
+publisher's captured capability selection and atomically committing data and receipt.
+It accepts a requested wake at actual model admission, or discards it when the
+operation ends without admission. The idle producer also commits quiet data and
+coalesces requested wakes under the retained host scheduling policy. Acceptance
+and operation admission share a save; rejection preserves the data with a discarded
+wake. Restored pending wakes reuse their original history identity.
 
-- deferred steering is request-only;
-- it is not persisted as a canonical user item;
-- it is not spliced into an already running request; and
-- it becomes visible to the model only at the next allowed request boundary.
+A worker that starts before the idle poll claims eligible saved wakes before its
+first provider call. It appends only newly committed entries and emits their data
+callbacks once. Already committed history is neither appended nor re-emitted. The
+current user operation can satisfy the wake without adding an automatic turn.
+Idle-drain policy and the remaining recovery/adapter qualification are still open.
+
+The moderator observes inserted data through `Item_appended`. A script can retain
+state and request a turn from `Turn_end`; requesting a turn directly from
+`Item_appended` remains invalid. End-session requests from data handlers stop further
+callbacks and continuation while preserving all supplied committed entries in
+history. Other valid requests join the turn's normal scheduling decision.
 
 ## Approval suspension is not deferred steering
 
@@ -266,8 +292,8 @@ Approval suspension:
 - leaves `current_state` on the last committed script state,
 - and resumes only through `resume_ui_request` on the same live session.
 
-Unlike deferred steering, approval waiting is not request-only input for a
-future turn boundary. It resumes the same paused script frame and returns a
+Approval waiting resumes the same paused script frame rather than queuing input for a
+future turn boundary. It returns a
 validated response directly to the paused builtin call.
 
 While approval is pending, hosts may still enqueue internal events, but those

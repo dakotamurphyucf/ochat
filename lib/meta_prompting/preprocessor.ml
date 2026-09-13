@@ -41,3 +41,9 @@ let preprocess (prompt_raw : string) : string =
     Prompt_intf.to_string refined)
   else prompt_raw
 ;;
+
+let validate_inert source =
+  if marker_enabled source
+  then Error "generated ChatMD cannot request executable meta preprocessing"
+  else Ok ()
+;;

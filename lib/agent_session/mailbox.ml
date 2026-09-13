@@ -3,6 +3,7 @@ open Core
 type priority =
   | Priority
   | Normal
+  | Transient
 
 type 'a t =
   { capacity : int
@@ -11,6 +12,7 @@ type 'a t =
   ; not_full : Eio.Condition.t
   ; priority : 'a Queue.t
   ; normal : 'a Queue.t
+  ; transient : 'a Queue.t
   ; mutable closed : bool
   }
 
@@ -22,16 +24,19 @@ let create ~capacity =
   ; not_full = Eio.Condition.create ()
   ; priority = Queue.create ()
   ; normal = Queue.create ()
+  ; transient = Queue.create ()
   ; closed = false
   }
 ;;
 
-let length_locked t = Queue.length t.priority + Queue.length t.normal
+let command_length t = Queue.length t.priority + Queue.length t.normal
+let length_locked t = command_length t + Queue.length t.transient
 
 let enqueue t priority value =
   match priority with
   | Priority -> Queue.enqueue t.priority value
   | Normal -> Queue.enqueue t.normal value
+  | Transient -> Queue.enqueue t.transient value
 ;;
 
 let full_error () =
@@ -54,7 +59,10 @@ let push t ~priority value =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if t.closed
     then Error (closed_error ())
-    else if length_locked t >= t.capacity
+    else if
+      match priority with
+      | Transient -> Queue.length t.transient >= t.capacity
+      | Priority | Normal -> command_length t >= t.capacity
     then Error (full_error ())
     else (
       enqueue t priority value;
@@ -67,7 +75,10 @@ let try_push t ~priority value = Result.is_ok (push t ~priority value)
 let dequeue t =
   match Queue.dequeue t.priority with
   | Some value -> Some value
-  | None -> Queue.dequeue t.normal
+  | None ->
+    (match Queue.dequeue t.normal with
+     | Some value -> Some value
+     | None -> Queue.dequeue t.transient)
 ;;
 
 let rec await_value t =

@@ -19,8 +19,78 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+type resources =
+  { native : Agent_runtime.t
+  ; definition : Chat_response.Extension_compiler.definition option
+  ; managed : Chat_response.Managed_tool_registry.t option
+  ; authoring : Authoring_runtime.t option
+  }
+
+type prepare_enqueue =
+  before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (unit, Agent_protocol.Error.t) result
+
+type extension_services =
+  { runtime_policy : Chat_response.Runtime_semantics.policy
+  ; native_service_revision : string option
+  ; script_tools : Agent_runtime.t -> Script_tool_calls.t
+  ; standalone_execution_limits :
+      Chat_response.Extension_compiler.t -> Chatml_execution.limits
+  ; one_off_policy : Chat_response.One_off_request.policy
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
+  ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
+  ; history : unit -> History_entry.t list
+  ; standalone_completion :
+      tools:Script_tool_calls.t
+      -> Agent_protocol.Job.t
+      -> (unit, Agent_protocol.Error.t) result
+  ; idle_notifications :
+      source:Agent_protocol.Invocation.observer option
+      -> tools:Script_tool_calls.t
+      -> unit
+      -> (bool, Agent_protocol.Error.t) result
+  ; notification_input :
+      source:Agent_protocol.Invocation.observer option
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
+  ; initial_notification_input :
+      source:Agent_protocol.Invocation.observer option
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
+  }
+
+type moderator_activation =
+  { pending : unit -> bool
+  ; run : unit -> (bool, Agent_protocol.Error.t) result
+  }
+
+type background_executor =
+  { policy : Chat_response.One_off_request.policy
+  ; now : unit -> Agent_protocol.Timestamp.t
+  ; run :
+      job:Agent_protocol.Job.t
+      -> deadline:Agent_protocol.Timestamp.t
+      -> execute:Native_tool_invocation.executor
+      -> moderator_execute:Native_tool_invocation.moderator_executor
+      -> claim_event:(event:Moderation.Event.t -> Moderator_event.claim)
+      -> is_halted:(unit -> bool)
+      -> request:Chat_response.Background_request.t
+      -> (Background_execution.result, Agent_protocol.Error.t) result
+  }
+
 type t =
   { worker : Operation_worker.t
+  ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
       id:History_entry.Id.t
       -> Agent_protocol.Session.Message_content.t
@@ -29,8 +99,27 @@ type t =
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
   ; mutable moderator_snapshot : Jsonaf.t option
+  ; moderator_manager : Manager.t option
+  ; moderator_tools : Request.Tool.t list
+  ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
+  ; moderator_script_tools : Script_tool_calls.t option
+  ; standalone_completion :
+      (Agent_protocol.Job.t -> (unit, Agent_protocol.Error.t) result) option
+  ; background_executor : background_executor option
+  ; moderator_activation : moderator_activation option
+  ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
+  ; check_execution : (unit -> (unit, Agent_protocol.Error.t) result) option
+  ; ancestor_capabilities :
+      (Agent_protocol.Id.Session.t
+       -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result)
+        option
+  ; activity : Runtime_activity.t option
+  ; native_runtime : Agent_runtime.t option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
-  ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  ; enqueue_internal_event :
+      ?prepare:prepare_enqueue
+      -> Jsonaf.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -38,7 +127,9 @@ type t =
       -> payload:Jsonaf.t
       -> (model_job_outcome, Agent_protocol.Error.t) result
   ; enqueue_model_job_completion :
-      Agent_protocol.Job.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+      ?prepare:prepare_enqueue
+      -> Agent_protocol.Job.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; close : unit -> unit
   }
 
@@ -104,7 +195,6 @@ let host ~env ~paths ~session_id ~elements =
     ~cache_dir:paths.cache_dir
     ~home:paths.home
     ~session_id:(Agent_protocol.Id.Session.to_string session_id)
-    ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
     ~prompt_elements:elements
   |> map_diagnostics
 ;;
@@ -136,6 +226,10 @@ let run_agent
 ;;
 
 let create_agent_runtime
+      ~extensions
+      ~delegated_moderator
+      ~native_registrations
+      ~native_service_revision
       ~sw
       ~ctx
       ~host
@@ -145,18 +239,304 @@ let create_agent_runtime
       ~approval_store
       ~response_dir
   =
-  Agent_runtime.create
+  match extensions with
+  | false ->
+    Agent_runtime.create
+      ?native_service_revision
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
+      ()
+    |> map_diagnostics
+    |> Result.map ~f:(fun native -> native, None, None)
+  | true ->
+    Agent_runtime.prepare_extensions
+      ~delegated_moderator
+      ?native_service_revision
+      ~native_registrations
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
+      ()
+    |> map_diagnostics
+    |> Result.map ~f:(fun resources ->
+      resources.Agent_runtime.native, Some resources.definition, Some resources.managed)
+;;
+
+let build_native_registrations = Extensibility_native_tools.registrations
+let declares_native = Extensibility_native_tools.declares
+
+let create_authored_resources
+      ~additional_native_registrations
+      ~native_service_revision
+      ~delegated_moderator
+      ~env
+      ~sw
+      ~ctx
+      ~host
+      ~elements
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~response_dir
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      delegated_moderator
+      && List.exists elements ~f:(function
+        | Prompt.Chat_markdown.Script _ -> true
+        | _ -> false)
+    with
+    | false -> Ok ()
+    | true -> Error (failure "authored delegation requires an extensibility-v1 moderator")
+  in
+  let%bind authoring_validation_host =
+    match one_off_policy with
+    | None -> Ok authoring_validation_host
+    | Some policy ->
+      Authoring_runtime.configure_host ?host:authoring_validation_host ~policy ()
+      |> Result.map ~f:(fun host ->
+        Some
+          (if delegated_moderator
+           then Chat_response.Authoring_validation.for_delegated host
+           else host))
+      |> Result.map_error ~f:failure
+  in
+  let%bind native_registrations =
+    build_native_registrations ~env ~elements ~one_off_policy ~authoring_validation_host
+  in
+  let native_registrations = native_registrations @ additional_native_registrations in
+  let source_elements = elements in
+  let%bind elements =
+    match authoring_validation_host with
+    | None -> Ok elements
+    | Some _ ->
+      Authoring_runtime.augment ~registrations:native_registrations elements
+      |> Result.map_error ~f:failure
+  in
+  let%bind helpers =
+    let elements =
+      List.filter elements ~f:(function
+        | Prompt.Chat_markdown.Tool (Builtin name) ->
+          not
+            (List.exists native_registrations ~f:(fun current ->
+               String.equal current.Agent_runtime.implementation.info.function_.name name))
+        | _ -> false)
+    in
+    build_native_registrations
+      ~env
+      ~elements
+      ~one_off_policy:None
+      ~authoring_validation_host
+  in
+  let native_registrations =
+    native_registrations
+    @ List.filter helpers ~f:(fun helper ->
+      not
+        (List.exists native_registrations ~f:(fun current ->
+           String.equal
+             current.Agent_runtime.implementation.info.function_.name
+             helper.implementation.info.function_.name)))
+  in
+  let extensions =
+    delegated_moderator
+    || (not (List.is_empty additional_native_registrations))
+    || (Option.is_some one_off_policy
+        && (Extensibility_native_tools.declares_any elements
+            || List.exists elements ~f:(function
+              | Prompt.Chat_markdown.Extension_script _
+              | Tool (Extension _)
+              | Authoring_context _ | Authoring_help _ -> true
+              | _ -> false)))
+  in
+  let%bind native, definition, managed =
+    create_agent_runtime
+      ~extensions
+      ~delegated_moderator
+      ~native_registrations
+      ~native_service_revision
+      ~sw
+      ~ctx
+      ~host
+      ~elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~response_dir
+  in
+  let%map authoring =
+    match authoring_validation_host with
+    | None -> Ok None
+    | Some host ->
+      let%bind capabilities =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      Authoring_runtime.prepare ~host ~elements:source_elements ~capabilities ()
+      |> Result.map_error ~f:failure
+  in
+  { native; definition; managed; authoring }
+;;
+
+let prepare_resources_internal
+      ~native_registrations
+      ~delegated_moderator
+      ~native_service_revision
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~revision
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_store.Prompt_artifact_store.verify_tree
+      ~root:(Prompt_revision.materialized_tree revision)
+      (Prompt_revision.artifact revision)
+    |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+  in
+  let elements = Prompt_revision.elements revision in
+  let response_dir = response_dir storage_paths in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
+  let ctx = context ~env paths (cache storage_paths) in
+  let%bind host = host ~env ~paths ~session_id ~elements in
+  create_authored_resources
+    ~additional_native_registrations:native_registrations
+    ~native_service_revision
+    ~delegated_moderator
+    ~env
     ~sw
     ~ctx
     ~host
-    ~platform:(Agent_runtime.platform ())
-    ~prompt_elements:elements
+    ~elements
+    ~one_off_policy:(Some one_off_policy)
+    ~authoring_validation_host
     ~manifest_authorizer
     ~approval_provider
     ~approval_store
-    ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
-    ()
-  |> map_diagnostics
+    ~response_dir
+;;
+
+let prepare_resources = prepare_resources_internal ~delegated_moderator:false
+
+type authored_resources =
+  { source : Authored_agent_source.t
+  ; revision : Prompt_revision.t
+  ; resources : resources
+  }
+
+let prepare_authored_resources
+      ~native_registrations
+      ~parent_revision
+      ~tool_name
+      ~native_service_revision
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+  =
+  let open Result.Let_syntax in
+  let%bind source = Authored_agent_source.capture ~parent:parent_revision ~tool_name in
+  let%bind revision =
+    Authored_agent_source.resource_revision ~parent:parent_revision source
+  in
+  let paths =
+    { paths with
+      Runtime_paths.prompt_dir =
+        Eio.Path.(
+          Prompt_revision.materialized_tree revision
+          / Filename.dirname (Prompt_revision.root_relative_path revision))
+    }
+  in
+  let%map resources =
+    prepare_resources_internal
+      ~native_registrations
+      ~delegated_moderator:true
+      ~native_service_revision
+      ~env
+      ~sw
+      ~paths
+      ~storage_paths
+      ~revision
+      ~session_id
+      ~one_off_policy
+      ~authoring_validation_host
+      ~manifest_authorizer:(manifest_authorizer revision)
+      ~approval_provider
+      ~approval_store
+  in
+  { source; revision; resources }
+;;
+
+let inherit_prepared_resources ~parent_runtime ~inherited_managed ~definition =
+  let open Result.Let_syntax in
+  let admission = Generated_definition.admission definition in
+  let%map native =
+    Agent_runtime.inherit_native
+      ?managed:inherited_managed
+      ~parent:parent_runtime
+      ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+      ()
+    |> map_diagnostics
+  in
+  { native
+  ; authoring = None
+  ; definition = Some (Chat_response.Generated_admission.definition admission)
+  ; managed =
+      Option.map
+        inherited_managed
+        ~f:Chat_response.Managed_tool_registry.delegation_registry
+  }
+;;
+
+let inherit_resources ~(parent : resources) ~definition =
+  let open Result.Let_syntax in
+  let%bind inherited_managed =
+    match parent.managed with
+    | None -> Ok None
+    | Some managed ->
+      Chat_response.Managed_tool_registry.delegate_standalone
+        managed
+        ~selected:
+          (Chat_response.Generated_admission.capabilities
+             (Generated_definition.admission definition))
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.create
+          Permission_denied
+          ~message:error.Chat_response.Tool_capability.message
+          ~retryable:false
+          ())
+  in
+  inherit_prepared_resources ~parent_runtime:parent.native ~inherited_managed ~definition
 ;;
 
 let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
@@ -225,6 +605,9 @@ let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_di
 ;;
 
 let create_moderator
+      ~definition
+      ~delegated
+      ~runtime_policy
       ~sw
       ~env
       ~ctx
@@ -242,11 +625,22 @@ let create_moderator
       ~snapshot
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
+  let legacy_artifact () =
     Manager.Registry.of_elements
       ~surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       Manager.Registry.empty
       elements
+  in
+  let%bind _, artifact =
+    (match definition with
+     | Some definition ->
+       let%bind registry, artifact =
+         Manager.Registry.of_definition Manager.Registry.empty definition
+       in
+       (match artifact with
+        | Some _ -> Ok (registry, artifact)
+        | None -> legacy_artifact ())
+     | None -> legacy_artifact ())
     |> Result.map_error ~f:failure
   in
   match artifact with
@@ -278,10 +672,13 @@ let create_moderator
     let capabilities =
       { Moderation.Capabilities.default with
         model_recipes =
-          Map.singleton
-            (module String)
-            Chat_response.Model_executor.agent_prompt_v1_name
-            durable_recipe
+          (match delegated with
+           | true -> Map.empty (module String)
+           | false ->
+             Map.singleton
+               (module String)
+               Chat_response.Model_executor.agent_prompt_v1_name
+               durable_recipe)
       ; on_schedule_after_ms =
           (fun ~delay_ms ~payload ->
             let open Result.Let_syntax in
@@ -293,10 +690,14 @@ let create_moderator
     in
     let%bind manager =
       Manager.create_entries
+        ~env
         ~artifact
         ~capabilities
         ~allocator
-        ?on_process_run:(Agent_runtime.moderator_process_handler agent_runtime)
+        ?on_process_run:
+          (match delegated with
+           | true -> None
+           | false -> Agent_runtime.moderator_process_handler agent_runtime)
         ?snapshot
         ()
       |> Result.map_error ~f:failure
@@ -310,7 +711,8 @@ let create_moderator
         { manager
         ; session_id = session_text
         ; session_meta = `Null
-        ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+        ; runtime_policy
+        ; event_handlers = None
         }
     in
     let moderator_pair = moderator, executor in
@@ -329,7 +731,7 @@ let create_moderator
               ]))
     in
     let start () =
-      if !started
+      if Option.is_some (Manager.extension_definition manager) || !started
       then current_snapshot ()
       else (
         let now_ms =
@@ -391,22 +793,7 @@ let moderator_snapshot = function
     |> Result.map ~f:(fun snapshot -> Some (encode_moderator_snapshot snapshot))
 ;;
 
-let decode_moderator_snapshot = function
-  | None -> Ok None
-  | Some (`Object fields) ->
-    (match List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal with
-     | Some (`String encoded) ->
-       (try
-          Ok
-            (Some
-               ([%of_sexp: Session.Moderator_state.Identity_snapshot.t]
-                  (Sexp.of_string encoded)))
-        with
-        | exn ->
-          Error (failure ("moderator snapshot decode failed: " ^ Exn.to_string exn)))
-     | _ -> Error (failure "moderator snapshot is missing identity state"))
-  | Some _ -> Error (failure "moderator snapshot must be an object")
-;;
+let decode_moderator_snapshot = Moderator_checkpoint.decode
 
 let moderator_snapshot_has_queued_events snapshot =
   let open Result.Let_syntax in
@@ -417,21 +804,30 @@ let moderator_snapshot_has_queued_events snapshot =
          snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events))
 ;;
 
-let enqueue_internal_value moderator value =
+let moderator_snapshot_is_halted = Moderator_checkpoint.is_halted
+let moderator_snapshot_observer = Moderator_checkpoint.observer
+
+let enqueue_internal_value ?prepare moderator value =
   match moderator with
   | None -> Error (failure "session prompt has no ChatML moderator")
-  | Some ((moderator, _) as moderator_pair) ->
+  | Some (moderator, _) ->
     let open Result.Let_syntax in
-    let%bind () =
-      Manager.enqueue_internal_event
+    let%map snapshot =
+      Manager.enqueue_internal_event_entries
         moderator.Chat_response.In_memory_stream.manager
-        value
+        ~event:value
+        ~prepare:(fun ~before ~snapshot ->
+          match prepare with
+          | None -> Ok ()
+          | Some prepare ->
+            prepare ~before ~snapshot
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
       |> Result.map_error ~f:failure
     in
-    moderator_snapshot (Some moderator_pair)
+    Some (encode_moderator_snapshot snapshot)
 ;;
 
-let enqueue_internal_event moderator payload =
+let enqueue_internal_event moderator ?prepare payload =
   let open Result.Let_syntax in
   let%bind snapshot =
     Chatml.Chatml_value_codec.Snapshot.of_jsonaf payload |> Result.map_error ~f:failure
@@ -439,7 +835,7 @@ let enqueue_internal_event moderator payload =
   let%bind value =
     Chatml.Chatml_value_codec.Snapshot.to_value snapshot |> Result.map_error ~f:failure
   in
-  enqueue_internal_value moderator value
+  enqueue_internal_value ?prepare moderator value
 ;;
 
 let execute_model_job moderator session_id ~recipe ~payload =
@@ -498,11 +894,12 @@ let model_job_event (job : Agent_protocol.Job.t) =
       (Chatml.Chatml_lang.VVariant
          ( "Model_job_failed"
          , [ VString job_id; VString recipe; VString "job was cancelled" ] ))
-  | Queued | Running | Waiting_permission _ -> Error (failure "model job is not terminal")
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+    Error (failure "model job is not terminal")
 ;;
 
-let enqueue_model_job_completion moderator job =
-  Result.bind (model_job_event job) ~f:(enqueue_internal_value moderator)
+let enqueue_model_job_completion moderator ?prepare job =
+  Result.bind (model_job_event job) ~f:(enqueue_internal_value ?prepare moderator)
 ;;
 
 let collapse_drain_outcomes outcomes =
@@ -614,12 +1011,66 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
     History_entry.create_with_id ~id item
 ;;
 
-let build
+type inherited_managed =
+  { delegation : Chat_response.Managed_tool_registry.delegation
+  ; current : unit -> Chat_response.Tool_capability.t
+  }
+
+type source =
+  | Authored of Prompt_revision.t
+  | Authored_child of
+      { revision : Prompt_revision.t
+      ; prepared : authored_resources
+      ; authority : Delegation_authority.t
+      }
+  | Generated of
+      { definition : Generated_definition.t
+      ; artifact_store : Agent_store.Prompt_artifact_store.t
+      ; parent_runtime : Agent_runtime.t
+      ; inherited_managed : inherited_managed option
+      ; authority : Delegation_authority.t
+      }
+
+let guarded_services authority (services : extension_services) =
+  let checked f =
+    let open Result.Let_syntax in
+    let%bind () = Delegation_authority.check_execution authority in
+    let%bind result = f () in
+    let%map () = Delegation_authority.check_execution authority in
+    result
+  in
+  { services with
+    script_tools =
+      (fun native ->
+        Script_tool_calls.with_authorization_guard
+          (services.script_tools native)
+          ~check:(fun () -> Delegation_authority.check_execution authority))
+  ; claim_lifecycle =
+      (fun ~event ~snapshot f ->
+        checked (fun () -> services.claim_lifecycle ~event ~snapshot f))
+  ; notification_input =
+      (fun ~source ~tools ~operation_id () ->
+        checked (fun () -> services.notification_input ~source ~tools ~operation_id ()))
+  ; initial_notification_input =
+      (fun ~source ~tools ~operation_id () ->
+        checked (fun () ->
+          services.initial_notification_input ~source ~tools ~operation_id ()))
+  ; idle_notifications =
+      (fun ~source ~tools () ->
+        checked (fun () -> services.idle_notifications ~source ~tools ()))
+  ; standalone_completion =
+      (fun ~tools job -> checked (fun () -> services.standalone_completion ~tools job))
+  }
+;;
+
+let build_with_services
+      ~native_registrations
+      ~extension_services
       ~sw
       ~env
       ~paths
       ~storage_paths
-      ~revision
+      ~source
       ~session_id
       ~history_namespace
       ~next_history_sequence
@@ -636,31 +1087,277 @@ let build
       ~job_services
   =
   let open Result.Let_syntax in
-  let elements = Prompt_revision.elements revision in
   let%bind () =
-    Agent_store.Prompt_artifact_store.verify_tree
-      ~root:(Prompt_revision.materialized_tree revision)
-      (Prompt_revision.artifact revision)
+    match source with
+    | Authored _ -> Ok ()
+    | Authored_child { revision; prepared; authority } ->
+      let artifact = Prompt_revision.artifact revision in
+      let%bind expected =
+        Authored_agent_source.artifact
+          prepared.source
+          ~revision_id:artifact.revision_id
+          ~created_at:artifact.created_at
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      in
+      let%bind () =
+        match String.equal expected.manifest_sha256 artifact.manifest_sha256 with
+        | true -> Ok ()
+        | false ->
+          Error (failure "authored runtime source differs from its prepared specialist")
+      in
+      let%bind () =
+        Agent_store.Prompt_artifact_store.verify_tree
+          ~root:(Prompt_revision.materialized_tree prepared.revision)
+          (Prompt_revision.artifact prepared.revision)
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      in
+      let%bind capabilities =
+        Lazy.force prepared.resources.native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      Delegation_authority.check_authored_preparation
+        authority
+        ~origin:
+          { name = (Authored_agent_source.identity prepared.source).tool_name
+          ; source_sha256 = Authored_agent_source.fingerprint prepared.source
+          }
+        ~capabilities
+        ~session_id
+        ~revision_id:artifact.revision_id
+        ~manifest_sha256:artifact.manifest_sha256
+        ~permission_profile
+    | Generated { definition; authority; _ } ->
+      Delegation_authority.check_preparation
+        authority
+        ~session_id
+        ~revision_id:(Generated_definition.artifact definition).revision_id
+        ~manifest_sha256:(Generated_definition.artifact definition).manifest_sha256
+        ~permission_profile
+  in
+  let extension_services =
+    match source, extension_services with
+    | (Generated { authority; _ } | Authored_child { authority; _ }), Some services ->
+      Some (guarded_services authority services)
+    | _, services -> services
+  in
+  let%bind extension_services =
+    match extension_services with
+    | None -> Ok None
+    | Some services ->
+      let%bind host =
+        Authoring_runtime.configure_host
+          ?host:services.authoring_validation_host
+          ~policy:services.one_off_policy
+          ()
+        |> Result.map_error ~f:failure
+      in
+      let host =
+        Some
+          (match source with
+           | Authored _ -> host
+           | Generated _ | Authored_child _ ->
+             Chat_response.Authoring_validation.for_delegated host)
+      in
+      Ok
+        (Some
+           { services with
+             authoring_validation_host = host
+           ; script_tools =
+               (fun native ->
+                 Script_tool_calls.with_authoring_validation_host
+                   ~env
+                   (services.script_tools native)
+                   host)
+           })
+  in
+  let elements, artifact, materialized_tree, delegated =
+    match source with
+    | Authored revision ->
+      ( Prompt_revision.elements revision
+      , Prompt_revision.artifact revision
+      , Prompt_revision.materialized_tree revision
+      , false )
+    | Authored_child { revision; _ } ->
+      ( Prompt_revision.elements revision
+      , Prompt_revision.artifact revision
+      , Prompt_revision.materialized_tree revision
+      , true )
+    | Generated { definition; artifact_store; _ } ->
+      let artifact = Generated_definition.artifact definition in
+      ( Chat_response.Generated_admission.elements
+          (Generated_definition.admission definition)
+      , artifact
+      , Agent_store.Prompt_artifact_store.materialized_tree
+          artifact_store
+          artifact.revision_id
+      , true )
+  in
+  let%bind generation_config =
+    match delegated with
+    | false -> Ok (model_config elements)
+    | true ->
+      (try Ok (model_config elements) with
+       | Failure _ ->
+         Error (failure "unsupported generated model/reasoning configuration"))
+  in
+  let%bind () =
+    Agent_store.Prompt_artifact_store.verify_tree ~root:materialized_tree artifact
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   in
   let response_dir = response_dir storage_paths in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
-  let%bind host = host ~env ~paths ~session_id ~elements in
-  let%bind agent_runtime =
-    create_agent_runtime
-      ~sw
-      ~ctx
-      ~host
-      ~elements
-      ~manifest_authorizer
-      ~approval_provider
-      ~approval_store
-      ~response_dir
+  let declares_one_off = declares_native elements Run_chatml_tool.name in
+  let%bind agent_runtime, definition, managed, authoring =
+    match source with
+    | Authored_child { prepared; _ } ->
+      let resources = prepared.resources in
+      Ok (resources.native, resources.definition, resources.managed, resources.authoring)
+    | Generated { definition; parent_runtime; inherited_managed; _ } ->
+      let%map resources =
+        inherit_prepared_resources
+          ~inherited_managed:
+            (Option.map inherited_managed ~f:(fun inherited -> inherited.delegation))
+          ~parent_runtime
+          ~definition
+      in
+      resources.native, resources.definition, resources.managed, resources.authoring
+    | Authored _ ->
+      let%bind host = host ~env ~paths ~session_id ~elements in
+      let%map resources =
+        create_authored_resources
+          ~additional_native_registrations:native_registrations
+          ~delegated_moderator:false
+          ~native_service_revision:
+            (Option.bind extension_services ~f:(fun services ->
+               services.native_service_revision))
+          ~env
+          ~one_off_policy:
+            (Option.map extension_services ~f:(fun services -> services.one_off_policy))
+          ~authoring_validation_host:
+            (Option.bind extension_services ~f:(fun services ->
+               services.authoring_validation_host))
+          ~sw
+          ~ctx
+          ~host
+          ~elements
+          ~manifest_authorizer
+          ~approval_provider
+          ~approval_store
+          ~response_dir
+      in
+      resources.native, resources.definition, resources.managed, resources.authoring
+  in
+  let%bind authoring =
+    match source with
+    | Authored _ | Authored_child _ -> Ok authoring
+    | Generated { definition; _ } ->
+      let%bind host =
+        Authoring_runtime.configure_host
+          ?host:
+            (Option.bind extension_services ~f:(fun services ->
+               services.authoring_validation_host))
+          ~policy:
+            (Option.value_map
+               extension_services
+               ~default:Chat_response.One_off_request.default_policy
+               ~f:(fun services -> services.one_off_policy))
+          ()
+        |> Result.map_error ~f:failure
+      in
+      let admission = Generated_definition.admission definition in
+      Authoring_runtime.prepare
+        ~admitted:(Chat_response.Generated_admission.authoring admission)
+        ~host:(Chat_response.Authoring_validation.for_delegated host)
+        ~elements
+        ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+        ()
+      |> Result.map_error ~f:failure
+  in
+  let%bind () =
+    match definition with
+    | None -> Ok ()
+    | Some definition ->
+      if
+        (declares_one_off
+         || List.exists
+              (Chat_response.Extension_compiler.prepared_tools definition)
+              ~f:(fun prepared ->
+                match
+                  (Chat_response.Extension_compiler.declaration prepared).implementation
+                with
+                | Standalone _ -> true
+                | Moderator _ -> false))
+        && List.exists elements ~f:(function
+          | Prompt.Chat_markdown.Script _ -> true
+          | _ -> false)
+      then
+        Error
+          (failure
+             "one-off and standalone tools with a legacy moderator require an \
+              extensibility-v1 moderator")
+      else Ok ()
+  in
+  let inherited =
+    match source with
+    | Generated { inherited_managed; _ } -> inherited_managed
+    | Authored _ | Authored_child _ -> None
+  in
+  let standalone_definition =
+    match inherited with
+    | Some inherited ->
+      Some
+        (Chat_response.Managed_tool_registry.delegation_definition inherited.delegation)
+    | None -> definition
   in
   let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
   let tools = Chat_response.Tool.convert_tools comp_tools in
+  let tools =
+    tools
+    @ ((Option.to_list definition
+        @
+        match inherited with
+        | None -> []
+        | Some _ -> Option.to_list standalone_definition)
+       |> List.concat_map ~f:(fun definition ->
+         Chat_response.Extension_compiler.prepared_tools definition
+         |> List.map ~f:(fun prepared ->
+           let tool = Chat_response.Extension_compiler.declaration prepared in
+           Request.Tool.Function
+             { name = tool.name
+             ; description = tool.description
+             ; parameters = Jsonaf.of_string tool.input_schema.source_text
+             ; strict = false
+             ; type_ = "function"
+             })))
+  in
+  let%bind tools =
+    match
+      Option.bind extension_services ~f:(fun services ->
+        services.authoring_validation_host)
+    with
+    | None -> Ok tools
+    | Some host ->
+      let%map capabilities =
+        Lazy.force agent_runtime.capabilities
+        |> Result.map_error ~f:(fun error ->
+          failure error.Chat_response.Tool_capability.message)
+      in
+      List.map tools ~f:(function
+        | Request.Tool.Function tool ->
+          Request.Tool.Function
+            { tool with
+              description =
+                Chat_response.Authoring_tool_description.describe
+                  ~host
+                  ~capabilities
+                  ~name:tool.name
+                  ~description:tool.description
+            }
+        | tool -> tool)
+  in
   let%bind initial_history, initial_end =
     match existing_history with
     | Some history -> Ok (history, next_history_sequence)
@@ -683,6 +1380,13 @@ let build
   in
   let%bind moderator, start_moderator_once =
     create_moderator
+      ~definition
+      ~delegated
+      ~runtime_policy:
+        (Option.value_map
+           extension_services
+           ~default:Chat_response.Runtime_semantics.default_policy
+           ~f:(fun services -> services.runtime_policy))
       ~sw
       ~env
       ~ctx
@@ -700,9 +1404,279 @@ let build
       ~snapshot:restored_moderator_snapshot
   in
   let%bind moderator_snapshot = moderator_snapshot moderator in
-  let config, model, reasoning = model_config elements in
+  let now () =
+    Eio.Time.now (Eio.Stdenv.clock env)
+    |> Time_ns.Span.of_sec
+    |> Time_ns.of_span_since_epoch
+    |> Agent_protocol.Timestamp.of_time_ns
+  in
+  let script_tools =
+    match managed, extension_services with
+    | Some definition, Some services ->
+      let tools_service =
+        match inherited with
+        | Some inherited ->
+          Script_tool_calls.with_inherited_managed_tools
+            (services.script_tools agent_runtime)
+            ~env
+            ~delegation:inherited.delegation
+            ~current:inherited.current
+            ~execution_limits:services.standalone_execution_limits
+        | None ->
+          Script_tool_calls.with_managed_tools
+            (services.script_tools agent_runtime)
+            ~env
+            ~definition
+            ~execution_limits:services.standalone_execution_limits
+      in
+      Some
+        (match moderator with
+         | Some (moderator, _)
+           when (match source with
+                 | Generated _ -> false
+                 | Authored _ | Authored_child _ -> true)
+                && Option.is_some (Manager.extension_definition moderator.manager) ->
+           Script_tool_calls.with_moderator_dispatch
+             tools_service
+             ~dispatch:
+               (Managed_moderator_dispatch.create
+                  ~definition
+                  ~manager:moderator.manager
+                  ~history:services.history
+                  ~available_tools:tools
+                  ~session_meta:`Null
+                  ~now)
+         | _ -> tools_service)
+    | None, Some services -> Some (services.script_tools agent_runtime)
+    | _, None -> None
+  in
+  let lifecycle =
+    match definition, moderator, extension_services with
+    | Some _, Some (moderator, _), Some services
+      when Option.is_some (Manager.extension_definition moderator.manager) ->
+      Some
+        (Moderator_event.Lifecycle.create
+           ~manager:moderator.manager
+           ~resume:
+             (Option.exists
+                (Manager.invocation_observer moderator.manager)
+                ~f:services.lifecycle_started))
+    | _ -> None
+  in
+  let activate lifecycle ~claim ~history =
+    Moderator_event.Lifecycle.run
+      lifecycle
+      ~claim
+      ?script_tools
+      ~history
+      ~available_tools:tools
+      ~session_meta:`Null
+      ~now
+      ()
+  in
+  let moderator_activation =
+    match lifecycle, extension_services with
+    | Some lifecycle, Some services ->
+      Some
+        { pending = (fun () -> Moderator_event.Lifecycle.pending lifecycle)
+        ; run =
+            (fun () ->
+              activate lifecycle ~claim:services.claim_lifecycle ~history:services.history
+              |> Result.map ~f:(function
+                | Activated _ -> true
+                | Unavailable | Already_active -> false))
+        }
+    | _ -> None
+  in
+  let moderator_events =
+    match lifecycle, moderator with
+    | Some lifecycle, Some (moderator, _) ->
+      Some
+        (fun ~input ~capabilities ->
+          let%bind activation =
+            activate
+              lifecycle
+              ~claim:(fun ~event ->
+                capabilities.Operation_worker.Capabilities.with_moderator_event ~event)
+              ~history:(fun () -> input.Operation_worker.Input.history)
+          in
+          match activation with
+          | Unavailable ->
+            Error (failure "foreground moderator activation was not admitted")
+          | Activated _ | Already_active ->
+            Moderator_event.foreground_handlers
+              ?script_tools
+              ~capabilities
+              ~manager:moderator.manager
+              ~session_meta:`Null
+              ~now
+              ())
+    | _ -> None
+  in
+  let%bind advertised_dispatch =
+    match script_tools with
+    | None -> Ok None
+    | Some script_tools ->
+      Lazy.force agent_runtime.capabilities
+      |> Result.map ~f:(fun declared -> Some (script_tools, declared))
+      |> Result.map_error ~f:(fun error ->
+        failure error.Chat_response.Tool_capability.message)
+  in
+  let dispatch_tool =
+    Option.map advertised_dispatch ~f:(fun (script_tools, declared) ->
+      fun ~input ~capabilities ->
+      let event_handlers =
+        Option.map moderator ~f:(fun (moderator, _) ->
+          Moderator_event.foreground_handlers
+            ~script_tools
+            ~capabilities
+            ~manager:moderator.manager
+            ~session_meta:`Null
+            ~now
+            ())
+      in
+      let observer =
+        Option.bind moderator ~f:(fun (moderator, _) ->
+          Manager.invocation_observer moderator.manager)
+      in
+      let moderate_tool call =
+        match event_handlers, extension_services with
+        | None, _ -> Ok None
+        | Some (Error error), _ -> Error error.Agent_protocol.Error.message
+        | Some (Ok handlers), Some services ->
+          handlers.handle
+            ~history:(services.history ())
+            ~available_tools:tools
+            ~now_ms:
+              (Agent_protocol.Timestamp.to_time_ns (now ())
+               |> Time_ns.to_int_ns_since_epoch
+               |> fun n -> n / 1_000_000)
+            ~event:(Moderation.Event.Pre_tool_call call)
+        | Some _, None -> Error "moderator services are not installed"
+      in
+      let native =
+        Script_tool_calls.native_dispatch script_tools ~declared ~input ~capabilities
+      in
+      let native =
+        { native with
+          run =
+            (fun ?run_native request ~authorize ->
+              Native_tool_moderation.with_handler
+                ~observer
+                ~prepare:(fun call ->
+                  let%bind outcome = moderate_tool call in
+                  match outcome with
+                  | None -> Ok None
+                  | Some outcome ->
+                    let%map () =
+                      Chat_response.Runtime_request_scope.emit outcome.runtime_requests
+                    in
+                    (match
+                       Chat_response.Runtime_semantics.should_end_session
+                         outcome.runtime_requests
+                     with
+                     | Some _ ->
+                       Some (Moderation.Tool_moderation.Reject "The session has ended.")
+                     | None -> outcome.tool_moderation))
+                (fun () -> native.run ?run_native request ~authorize))
+        }
+      in
+      let standalone =
+        match standalone_definition, extension_services with
+        | Some definition, Some services ->
+          [ Standalone_tool_dispatch.create
+              ?observer
+              ~env
+              ~definition
+              ~input
+              ~capabilities
+              ~script_tools
+              ~now
+              ~is_halted:(fun () -> Script_tool_calls.is_halted script_tools)
+              ~execution_limits:services.standalone_execution_limits
+              ~admit:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~revalidate:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~prepare_outcome:(fun outcome ->
+                Agent_protocol.Invocation.validate_outcome outcome
+                |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+              ~moderate_tool:(fun _ call -> moderate_tool call)
+              ()
+          ]
+        | _ -> []
+      in
+      let moderator_dispatch =
+        match definition, moderator with
+        | Some definition, Some (moderator, _) ->
+          [ Moderator_tool_dispatch.create
+              ~script_tools
+              ~definition
+              ~manager:moderator.manager
+              ~input
+              ~capabilities
+              ~available_tools:tools
+              ~session_meta:`Null
+              ~now
+              ~validate_work:(fun _ ->
+                Error "background work completion is not installed")
+              ~admit:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~revalidate:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~prepare_outcome:(fun outcome ->
+                Agent_protocol.Invocation.validate_outcome outcome
+                |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+              ()
+          ]
+        | _ -> []
+      in
+      Chat_response.In_memory_stream.Tool_dispatch.chain
+        (standalone @ moderator_dispatch @ [ native ])
+      |> Script_tool_calls.with_model_preparation script_tools ~selected:declared ~input)
+  in
+  let config, model, reasoning = generation_config in
+  let notification_source =
+    Option.bind moderator ~f:(fun (moderator, _) ->
+      Manager.invocation_observer moderator.manager)
+  in
+  let notification_input =
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some
+        (fun ~input ->
+          services.notification_input
+            ~source:notification_source
+            ~tools
+            ~operation_id:input.Operation_worker.Input.operation.id)
+    | _ -> None
+  in
+  let initial_notification_input =
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some
+        (fun ~input ->
+          services.initial_notification_input
+            ~source:notification_source
+            ~tools
+            ~operation_id:input.Operation_worker.Input.operation.id)
+    | _ -> None
+  in
+  let idle_notifications =
+    match extension_services, script_tools with
+    | Some services, Some tools ->
+      Some (services.idle_notifications ~source:notification_source ~tools)
+    | _ -> None
+  in
   let worker =
     Turn_worker.create
+      ?authoring_context:(Option.map authoring ~f:Authoring_runtime.materialize)
+      ?runtime_policy:
+        (Option.map extension_services ~f:(fun services -> services.runtime_policy))
+      ?dispatch_tool
+      ?moderator_events
+      ?notification_input
+      ?initial_notification_input
       { env
       ; response_dir
       ; tools
@@ -720,7 +1694,13 @@ let build
       ; prompt_cache_retention = None
       ; post_stream = model_post_stream
       ; agent_page_classifications = agent_runtime.classifications
-      ; delegated_permission_tools = agent_runtime.shell_tool_names
+      ; delegated_permission_tools =
+          (match script_tools with
+           | None -> agent_runtime.shell_tool_names
+           | Some _ ->
+             String.Set.of_list
+               (List.map agent_runtime.functions ~f:(fun fn ->
+                  fn.Ochat_function.info.function_.name)))
       ; redact_tool_payload =
           (fun ~name payload ->
             Option.value_map
@@ -730,16 +1710,176 @@ let build
                 Shell_runtime.Registry.redact_tool_input registry ~tool_name:name payload))
       }
   in
+  let check_execution =
+    match source with
+    | Authored _ -> None
+    | Generated { authority; _ } | Authored_child { authority; _ } ->
+      Some (fun () -> Delegation_authority.check_execution authority)
+  in
+  let worker =
+    match check_execution with
+    | None -> worker
+    | Some check ->
+      Operation_worker.create ~run:(fun ~sw ~input capabilities ->
+        match check () with
+        | Error error -> Operation_worker.Failed error
+        | Ok () -> Operation_worker.run worker ~sw ~input capabilities)
+  in
+  let activity =
+    match source with
+    | Authored _ -> None
+    | Generated _ | Authored_child _ -> Some (Runtime_activity.create ~sw)
+  in
+  let with_activity f =
+    match activity with
+    | None -> f ()
+    | Some activity -> Runtime_activity.run activity f
+  in
+  let worker =
+    match activity with
+    | None -> worker
+    | Some activity ->
+      Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+        Runtime_activity.with_switch activity (fun ~sw ->
+          Operation_worker.run worker ~sw ~input capabilities))
+  in
   let parse_user_content =
-    parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
+    match delegated with
+    | false ->
+      parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
+    | true ->
+      fun ~id content ->
+        (match
+           content.Agent_protocol.Session.Message_content.kind, content.attachments
+         with
+         | Plain_text, [] ->
+           Ok (History_entry.create_with_id ~id (plain_user_item content.text))
+         | Chatmd, _ | Plain_text, _ :: _ ->
+           Error
+             (failure
+                "generated sessions accept plain_text messages without implicit resource \
+                 loading"))
   in
   let rec runtime =
     { worker
+    ; now
     ; parse_user_content
     ; initial_history
     ; initial_prompt_entry_count = List.length initial_history
     ; reserved_history_through
     ; moderator_snapshot
+    ; moderator_manager =
+        Option.map moderator ~f:(fun (moderator, _) ->
+          moderator.Chat_response.In_memory_stream.manager)
+    ; moderator_tools = tools
+    ; idle_notifications
+    ; moderator_script_tools = script_tools
+    ; standalone_completion =
+        (match extension_services, script_tools with
+         | Some services, Some tools -> Some (services.standalone_completion ~tools)
+         | _ -> None)
+    ; automatic_turn_policy =
+        (match script_tools, extension_services with
+         | Some _, Some services -> Some services.runtime_policy
+         | _ -> None)
+    ; background_executor =
+        (match script_tools, extension_services with
+         | Some script_tools, Some services ->
+           Some
+             { policy = services.one_off_policy
+             ; now
+             ; run =
+                 (fun ~job
+                   ~deadline
+                   ~execute
+                   ~moderator_execute
+                   ~claim_event
+                   ~is_halted
+                   ~request ->
+                   with_activity (fun () ->
+                     let%bind () =
+                       match check_execution with
+                       | None -> Ok ()
+                       | Some check -> check ()
+                     in
+                     let script_tools =
+                       Script_tool_calls.with_lifecycle script_tools ~is_halted
+                       |> Script_tool_calls.with_durable_requests
+                     in
+                     let observer =
+                       Option.bind moderator ~f:(fun (moderator, _) ->
+                         Manager.invocation_observer
+                           moderator.Chat_response.In_memory_stream.manager)
+                     in
+                     let moderate_tool _ call =
+                       match moderator with
+                       | None -> Ok None
+                       | Some (moderator, _) ->
+                         let open Result.Let_syntax in
+                         let event = Moderation.Event.Pre_tool_call call in
+                         let%bind outcome =
+                           Moderator_event.run_ordinary
+                             ~event
+                             ~claim:(claim_event ~event)
+                             ~script_tools
+                             ~manager:moderator.manager
+                             ~history:services.history
+                             ~available_tools:tools
+                             ~session_meta:`Null
+                             ~now
+                             ()
+                         in
+                         (match outcome with
+                          | None ->
+                            Error (failure "background moderator event was not admitted")
+                          | Some outcome ->
+                            let tool_moderation =
+                              match
+                                Chat_response.Runtime_semantics.should_end_session
+                                  outcome.runtime_requests
+                              with
+                              | Some _ ->
+                                Some
+                                  (Moderation.Tool_moderation.Reject
+                                     "The session has ended.")
+                              | None -> outcome.tool_moderation
+                            in
+                            (* The event checkpoint owns these durable requests. Its
+                             follow-up scheduler consumes them exactly once. *)
+                            Ok
+                              (Some
+                                 { outcome with tool_moderation; runtime_requests = [] }))
+                     in
+                     Background_execution.run
+                       ?observer
+                       ~moderator_execute
+                       ~env
+                       ~job
+                       ~deadline
+                       ~execute
+                       ~request
+                       ~policy:services.one_off_policy
+                       ~script_tools
+                       ~now
+                       ~moderate_tool:(fun invocation call ->
+                         moderate_tool invocation call
+                         |> Result.map_error ~f:(fun error ->
+                           error.Agent_protocol.Error.message))
+                       ~prepare_outcome:(fun outcome ->
+                         Agent_protocol.Invocation.validate_outcome outcome
+                         |> Result.map_error ~f:(fun error ->
+                           error.Agent_protocol.Error.message))
+                       ()))
+             }
+         | _ -> None)
+    ; moderator_activation
+    ; check_execution
+    ; ancestor_capabilities = None
+    ; activity
+    ; native_runtime =
+        (match extension_services with
+         | None -> None
+         | Some _ -> Some agent_runtime)
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in
@@ -748,10 +1888,70 @@ let build
           snapshot)
     ; enqueue_internal_event = enqueue_internal_event moderator
     ; drain_internal_events = drain_internal_events ~env ~session_id ~tools moderator
-    ; execute_model_job = execute_model_job moderator session_id
+    ; execute_model_job =
+        (match delegated with
+         | false -> execute_model_job moderator session_id
+         | true ->
+           fun ~recipe:_ ~payload:_ ->
+             Error
+               (failure "generated moderators must use inherited tools for model work"))
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
     ; close = (fun () -> close_runtime cache storage_paths session_id moderator)
     }
   in
   Ok runtime
+;;
+
+let build ~sw ~env ~paths ~storage_paths ~revision =
+  build_with_services
+    ~native_registrations:[]
+    ~sw
+    ~env
+    ~paths
+    ~storage_paths
+    ~source:(Authored revision)
+    ~extension_services:None
+;;
+
+let build_with_extensions
+      ~native_registrations
+      ~services
+      ~sw
+      ~env
+      ~paths
+      ~storage_paths
+      ~revision
+  =
+  build_with_services
+    ~native_registrations
+    ~sw
+    ~env
+    ~paths
+    ~storage_paths
+    ~source:(Authored revision)
+    ~extension_services:(Some services)
+;;
+
+let build_generated
+      ~services
+      ~definition
+      ~artifact_store
+      ~parent_runtime
+      ~inherited_managed
+      ~authority
+  =
+  build_with_services
+    ~native_registrations:[]
+    ~source:
+      (Generated
+         { definition; artifact_store; parent_runtime; inherited_managed; authority })
+    ~extension_services:(Some services)
+;;
+
+let build_authored_child ~services ~revision ~prepared ~authority ~history =
+  build_with_services
+    ~native_registrations:[]
+    ~source:(Authored_child { revision; prepared; authority })
+    ~existing_history:(Some history)
+    ~extension_services:(Some services)
 ;;

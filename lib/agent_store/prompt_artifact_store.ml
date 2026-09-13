@@ -399,3 +399,77 @@ let load t revision_id =
     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn -> Error (Store_error.of_exn ~operation:"load root ChatMD" ~path:root_path exn))
 ;;
+
+let verify_retained t ~reader ~revision_id ~manifest_sha256 =
+  let module R = Retention_reader in
+  let open Result.Let_syntax in
+  let%bind reader = R.at_root reader ~root:(revision_directory t revision_id) in
+  let read path = R.read reader ~path ~max_bytes:Int.max_value in
+  let%bind encoded = read "manifest.sexp" in
+  let%bind checksum = read "manifest.sha256" in
+  let%bind () =
+    match
+      String.equal (sha256 encoded) manifest_sha256
+      && String.equal (String.strip checksum) manifest_sha256
+    with
+    | true -> Ok ()
+    | false ->
+      Error (Store_error.Corrupt "retained artifact does not match its admission")
+  in
+  let%bind manifest =
+    Result.try_with (fun () -> encoded |> Sexp.of_string |> [%of_sexp: Manifest.t])
+    |> Result.map_error ~f:(fun _ ->
+      Store_error.Corrupt "invalid retained artifact manifest")
+  in
+  let%bind () =
+    match
+      Int.equal manifest.version 1
+      && Agent_protocol.Id.Prompt_revision.equal revision_id manifest.revision_id
+      && valid_relative_path manifest.root_relative_path
+      && List.for_all manifest.sources ~f:(fun source ->
+        valid_relative_path source.Manifest.relative_path)
+    with
+    | true -> Ok ()
+    | false -> Error (Store_error.Corrupt "invalid retained artifact identity or paths")
+  in
+  let expected =
+    [ "manifest.sexp", manifest_sha256
+    ; "manifest.sha256", sha256 checksum
+    ; "root.chatmd", manifest.root_sha256
+    ; Filename.concat "tree" manifest.root_relative_path, manifest.root_sha256
+    ]
+    @ List.concat_map manifest.sources ~f:(fun source ->
+      [ Filename.concat "sources" source.Manifest.relative_path, source.sha256
+      ; Filename.concat "tree" source.relative_path, source.sha256
+      ])
+  in
+  let%bind expected =
+    match String.Map.of_alist expected with
+    | `Ok expected -> Ok expected
+    | `Duplicate_key _ -> Error (Store_error.Corrupt "duplicate retained artifact path")
+  in
+  let rec visit relative seen =
+    let%bind kind = R.kind reader ~path:relative in
+    match kind with
+    | `Directory ->
+      let%bind names = R.list reader ~directory:relative in
+      List.fold_result names ~init:seen ~f:(fun seen name ->
+        visit
+          (if String.equal relative "." then name else Filename.concat relative name)
+          seen)
+    | `File ->
+      let%bind wanted =
+        Map.find expected relative
+        |> Result.of_option
+             ~error:(Store_error.Corrupt "unexpected retained artifact file")
+      in
+      let%bind contents = read relative in
+      (match String.equal (sha256 contents) wanted with
+       | true -> Ok (Set.add seen relative)
+       | false -> Error (Store_error.Corrupt "retained artifact source digest mismatch"))
+  in
+  let%bind seen = visit "." String.Set.empty in
+  match Set.equal seen (Map.key_set expected) with
+  | true -> Ok ()
+  | false -> Error (Store_error.Corrupt "retained artifact file is missing")
+;;

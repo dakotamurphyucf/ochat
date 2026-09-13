@@ -1,0 +1,19 @@
+(library
+ (name chatml_composition_test)
+ (libraries
+  core core_unix eio eio_main mirage-crypto-rng.unix agent_server_test_support
+  ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_transport_socket
+  ochat.agent_transport_http)
+ (inline_tests (deps ../../bin/ochat_agent_stdio.exe))
+ (preprocessor_deps
+  (glob_files_rec ../chatml_extensibility_fixtures/authoring-invocation/*)
+  (glob_files ../chatml_extensibility_fixtures/authoring-lab/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x01-report/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x03-background-shell/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x04-standalone/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x09-authoring-discovery/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x10-authoring-compaction/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x11-authoring-repair/*))
+ (preprocess
+  (pps ppx_jane ppx_blob ppx_expect)))

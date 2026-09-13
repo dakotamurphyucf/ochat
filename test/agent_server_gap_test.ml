@@ -81,6 +81,37 @@ let%test_unit "new runtime rejects a changed tree even when the revision is cach
     | Ok _ -> failwith "cached revision accepted an altered materialized tree")
 ;;
 
+let%expect_test
+    "ordinary session create cannot turn a known revision into a generated child"
+  =
+  with_host (fun env root host ->
+    let connection = Agent_server.Embedded.connection host in
+    let initial = snapshot connection (Agent_server.Embedded.session_id host) in
+    let revision = Option.value_exn initial.session.prompt_revision in
+    let sessions = Eio.Path.(Eio.Stdenv.fs env / Filename.concat root "store/sessions") in
+    let before = Eio.Path.read_dir sessions |> List.sort ~compare:String.compare in
+    let result =
+      request
+        connection
+        (Session_create
+           { spec = { initial.session.spec with prompt = Generated revision }
+           ; requested_mode = None
+           ; subscribe = false
+           ; idempotency_key = key "reject-generated-bypass"
+           })
+    in
+    (match result with
+     | Error { code = Permission_denied; _ } -> ()
+     | Error error ->
+       raise_s [%sexp "unexpected creation rejection", (error : Agent_protocol.Error.t)]
+     | Ok _ -> failwith "ordinary create bypassed delegation admission");
+    [%test_eq: string list]
+      before
+      (Eio.Path.read_dir sessions |> List.sort ~compare:String.compare);
+    print_endline "known revision rejected; no child directory created");
+  [%expect {| known revision rejected; no child directory created |}]
+;;
+
 let attach_reader host session_id =
   let reader = Agent_server.Embedded.connect host in
   ignore
@@ -364,6 +395,8 @@ let schedules snapshot count =
       ; status = Scheduled
       ; delivery_count = 0
       ; last_delivery_at = None
+      ; delivery_cancellation = None
+      ; ownership = None
       })
 ;;
 
@@ -656,4 +689,145 @@ let%expect_test "RPC history windows select canonical or effective history expli
     assert (List.length (Option.value_exn effective.effective_history).entries = 2);
     print_endline "RPC canonical/effective tails bounded; full snapshot remains complete");
   [%expect {| RPC canonical/effective tails bounded; full snapshot remains complete |}]
+;;
+
+let%expect_test
+    "extension status filtering matches snapshots, replay and replacement snapshots"
+  =
+  with_host (fun _ _ host ->
+    let initial =
+      snapshot
+        (Agent_server.Embedded.connection host)
+        (Agent_server.Embedded.session_id host)
+    in
+    let status =
+      Agent_protocol.Extension_status.of_json
+        (`Object
+            [ "version", `Number "1"
+            ; "kind", `String "delivery"
+            ; "id", `String "dlv_filtered"
+            ; "generation", `Number "0"
+            ; "state", `String "pending"
+            ])
+      |> ok
+    in
+    let initial = { initial with extension_status = [ status ] } in
+    List.iter
+      Agent_protocol.Scope.
+        [ []; [ Send_messages ]; [ View_session_transcript ]; [ View_security_state ] ]
+      ~f:(fun scopes ->
+        let reader = principal scopes in
+        let allowed = Agent_protocol.Principal.has_scope reader View_security_state in
+        let projected = Agent_server.Principal_projection.snapshot reader initial in
+        assert (Bool.equal (not (List.is_empty projected.extension_status)) allowed);
+        let event =
+          Agent_protocol.Event.Durable.of_payload
+            ~session_id:initial.session.id
+            ~sequence:Int64.(initial.latest_event_sequence + 1L)
+            ~revision:Int64.(initial.revision + 1L)
+            ~timestamp:initial.session.updated_at
+            (Session_updated initial.session)
+          |> fun event ->
+          Agent_protocol.Event.Durable.with_extension_status event [ status ]
+        in
+        List.iter
+          [ event; Agent_protocol.Event.Durable.with_replacement_snapshot event initial ]
+          ~f:(fun event ->
+            let event = Agent_server.Principal_projection.durable reader event in
+            let projection = Agent_client.Projection.install_snapshot projected in
+            let result =
+              Agent_client.Projection.apply_event projection event
+              |> ok
+              |> Agent_client.Projection.snapshot
+            in
+            assert (Bool.equal (not (List.is_empty result.extension_status)) allowed);
+            if not allowed
+            then
+              assert (
+                not
+                  (String.is_substring
+                     (Jsonaf.to_string event.payload)
+                     ~substring:"dlv_filtered")))));
+  print_endline
+    "four scope combinations agree across snapshot, live/replay and replacement paths";
+  [%expect
+    {| four scope combinations agree across snapshot, live/replay and replacement paths |}]
+;;
+
+let%expect_test
+    "initialization reports actual host and flush mode without enabling extension tools"
+  =
+  with_host (fun _ _ host ->
+    let reader = Agent_server.Embedded.connect host in
+    let implementation =
+      Agent_protocol.Initialize.Implementation.create ~name:"extensions" ~version:"test"
+      |> ok
+    in
+    let query =
+      Agent_protocol.Initialize.Request.create
+        ~implementation
+        ~protocol_min:Agent_protocol.Version.initial
+        ~protocol_max:Agent_protocol.Version.initial
+        ~features:Agent_protocol.Extension_capabilities.known_features
+        ~event_encodings:[ Json ]
+        ~max_inbound_event_bytes:65536
+        ()
+      |> ok
+    in
+    let result =
+      match request reader (Protocol_initialize query) |> ok with
+      | Agent_protocol.Method_result.Protocol_initialize result -> result
+      | _ -> failwith "expected initialization"
+    in
+    let metadata = Option.value_exn result.extensions in
+    assert (
+      Agent_protocol.Extension_capabilities.equal_host metadata.host Embedded_durable);
+    assert (
+      Agent_protocol.Extension_capabilities.equal_journal_flush
+        metadata.journal_flush
+        Synced);
+    let expected =
+      List.sort
+        Agent_protocol.Extension_capabilities.known_features
+        ~compare:String.compare
+    in
+    [%test_eq: string list] expected metadata.available_features;
+    [%test_eq: string list]
+      expected
+      (List.sort result.enabled_features ~compare:String.compare);
+    let json = Agent_protocol.Initialize.Response.to_json result in
+    ignore
+      (Agent_protocol.Initialize.Response.of_json json |> ok
+       : Agent_protocol.Initialize.Response.t);
+    let legacy =
+      match json with
+      | `Object fields ->
+        `Object
+          (List.filter fields ~f:(fun (name, _) -> not (String.equal name "extensions")))
+      | _ -> assert false
+    in
+    assert (
+      Option.is_none (Agent_protocol.Initialize.Response.of_json legacy |> ok).extensions);
+    let forged =
+      { result with
+        enabled_features = [ "chatml.invocations.v1" ]
+      ; extensions =
+          Some
+            (Agent_protocol.Extension_capabilities.create
+               ~host:metadata.host
+               ~journal_flush:metadata.journal_flush
+               ~available_features:[]
+             |> ok)
+      }
+    in
+    assert (
+      Result.is_error
+        (Agent_protocol.Initialize.Response.of_json
+           (Agent_protocol.Initialize.Response.to_json forged)));
+    Agent_client.Connection.close reader);
+  print_endline
+    "embedded durable/synced reported; installed features negotiated; legacy response \
+     accepted";
+  [%expect
+    {| embedded durable/synced reported; installed features negotiated; legacy response accepted |}]
 ;;

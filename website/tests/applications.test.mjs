@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { applicationReport } from '../scripts/applications.mjs';
 import { sourceFileId } from '../config/source-links.mjs';
+import { gitFacts } from '../scripts/provenance.mjs';
 const siteRoot = new URL('../', import.meta.url).pathname;
 const read = async (name) =>
   JSON.parse(await fs.readFile(path.join(siteRoot, name), 'utf8'));
@@ -38,11 +39,28 @@ test('application publishing rejects stale or misrepresented recording evidence'
         entries,
         examples,
         isProduction: false,
+        facts: gitFacts(path.join(siteRoot, '..')),
       });
     };
     const report = await check(original);
     assert.equal(report.applications.length, 6);
     assert.equal(report.recording.steps.length, 3);
+    // Runtime evolution does not rewrite a historical live recording. Its exact
+    // original Git sources must still authenticate the retained hashes.
+    const runtimePath = Object.keys(original.runtimeSources)[0];
+    await fs.writeFile(path.join(root, runtimePath), 'a later implementation');
+    assert.equal((await check(original)).recording.runtimeChanged, true);
+    await fs.rm(path.join(root, runtimePath));
+    assert.equal((await check(original)).recording.runtimeChanged, true);
+    const forgedRuntime = structuredClone(original);
+    forgedRuntime.runtimeSources[runtimePath] = '0'.repeat(64);
+    await assert.rejects(
+      check(forgedRuntime),
+      /differs from its captured revision/,
+    );
+    const missingRuntime = structuredClone(original);
+    missingRuntime.runtimeSources = {};
+    await assert.rejects(check(missingRuntime), /original runtime revision/);
     const stale = structuredClone(original);
     stale.sourceHashes['explorer.chatmd'] = '0'.repeat(64);
     await assert.rejects(check(stale), /Stale recording source/);

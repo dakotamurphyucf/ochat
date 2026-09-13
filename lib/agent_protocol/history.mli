@@ -1,7 +1,10 @@
-(** Presentation-neutral canonical and moderated transcript projections. *)
+(** Presentation-neutral canonical and moderated transcript projections.
+    Entry equality preserves exact JSON payload structure and object field order. *)
+
+type delivery_id = Id.Delivery.t [@@deriving equal, sexp]
 
 module Id : sig
-  type t = History_entry.Id.t [@@deriving compare, hash, sexp]
+  type t = History_entry.Id.t [@@deriving compare, equal, hash, sexp]
 
   val of_string : string -> (t, Error.t) result
   val to_string : t -> string
@@ -28,7 +31,9 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
-[@@deriving sexp]
+  | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
+[@@deriving equal, sexp]
 
 type entry =
   { id : Id.t
@@ -38,9 +43,15 @@ type entry =
   ; provenance : provenance
   ; redacted : bool
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 val entry_to_json : entry -> Jsonaf.t
+
+(** Validate host provenance metadata. This does not decode a provider item or
+    claim the original guidance payload is still present; use the presence hook
+    after applying effective-history edits to determine that. *)
+val validate_entry : entry -> (unit, Error.t) result
+
 val entry_of_json : Jsonaf.t -> (entry, Error.t) result
 
 module Window_request : sig

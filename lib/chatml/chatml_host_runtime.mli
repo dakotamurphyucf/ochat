@@ -87,9 +87,40 @@ type local_effect =
     host-owned state immediately after the runtime commit. *)
 type prepare_commit = local_effects:eff list -> (unit -> unit, string) result
 
+(** Prospective committed state, including retained queued events followed by
+    events emitted in this transaction. [handle_next_queued_event] excludes the
+    consumed head. Values are borrowed, not copied; the
+    callback must not mutate them or re-enter the runtime. *)
+type transaction =
+  { new_state : value
+  ; local_effects : eff list
+  ; queued_events : value list
+  ; halted : bool
+  }
+
+(** Runs after state validation and the legacy [prepare_commit] callback, before
+    any runtime commit or installer. A durable host can serialize this proposal
+    and persist it atomically with its own records here. All fallible validation
+    must precede that persistence. On success, return an infallible installer
+    that does not yield. The host owns cancellation-safe persistence and must
+    serialize access throughout the callback. On failure no installer runs.
+    When combined with this hook, [prepare_commit] must only validate/prepare,
+    not publish or persist independently. *)
+type prepare_transaction = transaction -> (unit -> unit, string) result
+
 (** Runtime classification of task operations. *)
 type op_kind =
   | Local_transactional
+  | Local_transactional_with_result of { rollback : value list -> unit }
+  (** Records [result :: original_arguments] under the same operation name.
+        Useful for host-issued reservation IDs that must be associated with the
+        precise surviving effect after Task.catch rollback. The operation may
+        reserve resources but must not materialize external work before commit.
+        [rollback] receives the recorded arguments, newest first, for effects
+        discarded by Task.catch, before its recovery handler runs. It must be
+        infallible, idempotent and only release provisional resources. The host
+        still owns cleanup on whole-transaction failure, cancellation or rejection.
+        Like other transactional operations, this kind cannot be spawned. *)
   | External_sync
   | External_async
   | Diagnostic
@@ -168,24 +199,92 @@ val default_runtime_config
   -> unit
   -> runtime_config
 
-(** Parse, typecheck, and resolve a script once.  The default surface is
-    {!Builtin_surface.moderator_surface}. *)
+(** Parse, typecheck, and resolve a script once without evaluating initializers
+    or performing tasks. The default surface is {!Builtin_surface.moderator_surface}.
+    [required_bindings] checks final bindings against host-provided type schemes;
+    repeated type variables share one instantiation across the whole contract.
+    Missing bindings, wrong arity and incompatible argument/result types fail
+    compilation. Requirements use the host type language, so source aliases cannot
+    replace the expected types. This check does not authorize execution or bound
+    compiler work. [checkpoint] runs before and between compiler stages, including
+    after diagnostic formatting. Its exceptions propagate to the caller; it must
+    not mutate compiler state. Hosts can use it for cooperative cancellation. *)
 val compile_script
-  :  ?surface:Builtin_surface.surface
+  :  ?checkpoint:(unit -> unit)
+  -> ?surface:Builtin_surface.surface
+  -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
   -> source:string
   -> unit
   -> (compiled_script, string) result
+
+type compilation_stage =
+  | Parse
+  | Typecheck
+[@@deriving sexp, equal]
+
+(** Original parser/typechecker location and message, plus the legacy rendered
+    diagnostic. Spans refer to the exact submitted source, with no path loading. *)
+type compilation_diagnostic =
+  { stage : compilation_stage
+  ; message : string
+  ; span : Source.span option
+  ; formatted : string
+  }
+[@@deriving sexp]
+
+(** Same non-executing compilation as [compile_script], retaining structured
+    diagnostic data for validation/authoring consumers. *)
+val compile_script_detailed
+  :  ?checkpoint:(unit -> unit)
+  -> ?surface:Builtin_surface.surface
+  -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> source:string
+  -> unit
+  -> (compiled_script, compilation_diagnostic) result
 
 (** Surface recorded on a compiled script artifact. *)
 val compiled_surface : compiled_script -> Builtin_surface.surface
 
 (** Instantiate a compiled script in a fresh per-session environment and
-    load the configured entrypoints. *)
+    load the configured entrypoints. [control] follows closures into later
+    events. A persistent owner must supply a control valid for every execution,
+    such as a dynamically scoped host proxy, rather than retaining an expired
+    initializer budget. Initial state is checked before diagnostic rendering. *)
 val instantiate_session
-  :  runtime_config
+  :  ?control:execution_control
+  -> runtime_config
   -> compiled_script
   -> entrypoints:compiled_entrypoints
   -> (session, string) result
+
+(** Evaluate a fresh program instance and invoke a task-returning entrypoint
+    directly, without initial_state/on_event conventions or lifecycle events.
+    Only diagnostic and synchronous external operations are installed by default.
+    Supplying [prepare_result] also installs result-recording transactional
+    operations. After interpretation, the callback receives the final value and
+    surviving effects, with recorded results prepended to their arguments. It must
+    validate the value/effects and prepare their owning commit before returning an
+    infallible, non-yielding installer. Rejection skips installation. The host owns
+    abort/release of uncommitted reservations on whole-execution failure; catch
+    rollback invokes each operation's provisional-resource cleanup callback.
+    Ordinary local session effects, background task dispatch and UI suspension
+    remain unavailable.
+    [control] follows the environment into closures, builtin callbacks and task
+    continuations. Host cancellation/control exceptions propagate after cleanup.
+    The host must compile against the intended surface and enforce authority,
+    value/allocation/output limits and result validation. No persistent session
+    or model request is created by this function. *)
+val run_entrypoint
+  :  ?control:execution_control
+  -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
+  -> runtime_config
+  -> compiled_script
+  -> entrypoint:string
+  -> arguments:value list
+  -> unit
+  -> (value, string) result
 
 (** Current durable script state for the session. *)
 val current_state : session -> value
@@ -217,6 +316,10 @@ val decode_local_effects : eff list -> (local_effect list, string) result
 (** Buffered internal events currently queued for later delivery. *)
 val queued_events : session -> value list
 
+(** Borrow the oldest queued value without removing it. The caller must not
+    mutate it and must serialize access through event execution and commit. *)
+val peek_queued_event : session -> value option
+
 (** Remove and return the oldest queued internal event, if one exists. *)
 val take_queued_event : session -> value option
 
@@ -241,24 +344,69 @@ val emit_internal_event : session -> value -> (unit, string) result
     transactional context. *)
 val request_session_end : session -> reason:string -> (unit, string) result
 
+(** Deliver a host-selected local operation into the current transaction using
+    the same declared operation, phase checks, execution controls and effect
+    buffer as script dispatch. External/diagnostic operations are rejected before
+    execution. The owner must call this on its active interpreter context after
+    joining native work; it is not an asynchronous session mutation API.
+    Effects participate in Task.catch restoration, handler rollback, prospective
+    snapshot preparation and commit. Outside active interpretation it fails. *)
+val perform_local_effect : session -> eff -> (unit, string) result
+
 (** Handle one event:
 
     - invokes [on_event],
     - interprets the returned task,
     - commits buffered state/effects on success,
-    - or rolls back local transactional buffers on failure. *)
+    - or rolls back local transactional buffers on failure.
+
+    [copy_state] optionally makes a defensive copy for handler execution, leaving
+    the original state untouched until commit. This also prevents mutation of
+    older queued payloads sharing state arrays. Failure (including exceptions/
+    cancellation) retains the original state. By default state is used by reference
+    for legacy callers. This does not undo mutable globals or external effects.
+    [prepare_commit]'s returned installer must remain infallible.
+    [validate_suspension] runs before installing a legacy UI continuation. An
+    error rejects suspension and rolls back the handler just like other failures;
+    no pending request is retained. The default preserves legacy UI behavior. *)
 val handle_event
   :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
   -> ?validate_state:(value -> (unit, string) result)
+  -> ?validate_suspension:(unit -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
   -> ?limits:execution_limits
   -> session
   -> context:value
   -> event:value
   -> (unit, string) result
 
+(** Handle the oldest queued event, removing it only in the successful state/
+    effects commit. Returns [Ok None] for an empty queue. The prospective
+    transaction excludes that head and retains the tail followed by new emits.
+    Failure leaves the queue untouched; there is no automatic retry.
+
+    [copy_event] must return a detached execution value without mutating the
+    borrowed head. Supply [copy_state] for mutable data state too. UI suspension
+    is rejected. The caller must serialize queue/state access for the whole
+    operation, including host callbacks, and make persistence cancellation-safe.
+    A durable host must claim work before external effects and record failure
+    disposition; retaining a queue entry alone is not permission to replay it. *)
+val handle_next_queued_event
+  :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> context:value
+  -> copy_event:(value -> (value, string) result)
+  -> (unit option, string) result
+
 (** Resume a suspended UI approval request with a host-supplied response. *)
 val resume_ui_request
   :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
   -> ?validate_state:(value -> (unit, string) result)
   -> ?limits:execution_limits
   -> session
@@ -269,3 +417,8 @@ val resume_ui_request
     replay mechanism. Unlike [Runtime.emit], this is host-driven and does not
     require an active handler execution. *)
 val enqueue_internal_event : session -> value -> (unit, string) result
+
+(** Prepare a queue append without changing live state. The owning host must
+    serialize state/queue access until it invokes the non-yielding installer,
+    exactly once after successful durable preparation. No script executes. *)
+val prepare_enqueue_internal_event : session -> value -> (unit -> unit, string) result

@@ -242,6 +242,15 @@ let apply_event t event =
         apply_payload t.snapshot event payload, Some payload)
   in
   let%bind snapshot = apply_moderator_projection snapshot payload in
+  let%bind statuses =
+    if Agent_protocol.Event.Durable.equal_visibility event.visibility Hidden
+    then Ok None
+    else Agent_protocol.Event.Durable.extension_status event
+  in
+  let snapshot =
+    Option.value_map statuses ~default:snapshot ~f:(fun extension_status ->
+      { snapshot with extension_status })
+  in
   let live_events, operation_sequences =
     Option.value_map
       payload

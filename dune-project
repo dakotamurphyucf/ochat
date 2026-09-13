@@ -27,7 +27,7 @@
  (depends
   (ocaml
    (>= 5.1.0))
-  eio
+  (eio (>= 1.3))
   dune
   omd
   lambdasoup
@@ -42,9 +42,9 @@
   optint
   textmate-language
   owl
-  eio
   eio_main
   cohttp-eio
+  (ca-certs :with-test)
   ezgzip
   lwt_eio
   base64
@@ -71,6 +71,7 @@
   ppx_blob
   menhir
   menhirLib
+  (menhirSdk :build)
   piaf)
  (tags
   (topics "to describe" your project)))

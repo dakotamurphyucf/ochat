@@ -4,6 +4,8 @@
  (modules
   config
   config_parser
+  authoring_options
+  session_helper_policy
   authenticator
   config_validator
   config_diff
@@ -12,11 +14,18 @@
   operator_manifest_grant
   catalog_builder
   runtime_owner
+  delegated_runtime
+  independent_resources
+  authored_resources
+  result_retention
   session_registry
+  delegation_lifecycle
   connection_context
   authorization
   principal_projection
   pagination
+  managed_output_cursor
+  managed_output_page
   catalog_projection
   session_capacity
   start_scheduler

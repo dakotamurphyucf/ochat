@@ -9,7 +9,7 @@ module Generator = struct
 end
 
 module type S = sig
-  type t [@@deriving compare, hash, sexp]
+  type t [@@deriving compare, equal, hash, sexp]
 
   val create : unit -> t
   val create_with : Generator.t -> t
@@ -22,7 +22,7 @@ end
 module Make (Name : sig
     val prefix : string
   end) : S = struct
-  type t = string [@@deriving compare, hash, sexp]
+  type t = string [@@deriving compare, equal, hash, sexp]
 
   let maximum_length = 96
   let random_byte_count = 18
@@ -95,6 +95,30 @@ module Transaction = Make (struct
 
 module Job = Make (struct
     let prefix = "job"
+  end)
+
+module Invocation = Make (struct
+    let prefix = "inv"
+  end)
+
+module Moderator_execution = Make (struct
+    let prefix = "mex"
+  end)
+
+module Subscription = Make (struct
+    let prefix = "sub"
+  end)
+
+module Delivery = Make (struct
+    let prefix = "dlv"
+  end)
+
+module Capability = Make (struct
+    let prefix = "cap"
+  end)
+
+module Ingress_event = Make (struct
+    let prefix = "ige"
   end)
 
 module Schedule = Make (struct

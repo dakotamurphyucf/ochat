@@ -1,221 +1,9 @@
 open! Core
-
-let protocol_ok = function
-  | Ok value -> value
-  | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
-;;
-
-let observed_idle = function
-  | Agent_protocol.Session.Idle -> true
-  | Stopped
-  | Queued_for_slot
-  | Starting
-  | Recovering
-  | Running_turn _
-  | Compacting _
-  | Waiting_for_permission _
-  | Stopping
-  | Failed _ -> false
-;;
-
-let temporary_root env =
-  let name =
-    Agent_protocol.Id.Transaction.create ()
-    |> Agent_protocol.Id.Transaction.to_string
-    |> fun value -> "ochat-restart-test-" ^ value
-  in
-  let path = Filename.concat "/tmp" name in
-  Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / path);
-  path
-;;
-
-let permission_profile =
-  Agent_server.Config.Permission_profile.
-    { id = "restart.permission"
-    ; tool_default = Allow
-    ; approval_timeout_ms = None
-    ; approval_fallback = Deny
-    ; manifest_authorization = Assume_authorized
-    }
-;;
-
-let config
-      ?(profile = permission_profile)
-      ?(manifest_grants = [])
-      root
-      workspace
-      prompt_file
-  =
-  Agent_server.Config.
-    { version = current_version
-    ; source_file = Filename.concat root "server.sexp"
-    ; server =
-        { data_dir = Filename.concat root "data"
-        ; unix_socket = Filename.concat root "agent.sock"
-        ; http =
-            { enabled = false
-            ; address = "127.0.0.1"
-            ; port = 8787
-            ; require_auth = true
-            ; static_tokens_file = None
-            ; oauth_validator = None
-            ; reverse_proxy = None
-            ; max_connections = 1_024
-            ; idle_connection_timeout_ms = 300_000
-            }
-        ; shutdown_grace_ms = 5_000
-        ; max_attachments_per_session = 1_024
-        ; subscriber_queue_capacity = 512
-        ; event_retention =
-            { completed_stream_ms = 3_600_000
-            ; response_artifact_ms = 3_600_000
-            ; max_events_per_session = 100_000
-            }
-        ; durability =
-            { journal_flush = Each
-            ; journal_flush_ms = 1
-            ; snapshot_every_events = 100
-            ; snapshot_every_ms = 5_000
-            }
-        ; job_limits =
-            { daemon_total = 16
-            ; per_principal = 8
-            ; per_prompt = 8
-            ; per_workspace = 8
-            ; per_session = 4
-            ; per_kind = 16
-            ; max_nested_depth = 8
-            }
-        ; unsafe_allow_unauthenticated_remote_http = false
-        }
-    ; workspaces =
-        [ { id = "restart.workspace"
-          ; source = Physical workspace
-          ; access = Shared_write
-          ; conflict_domain = None
-          ; prompt_limits =
-              [ { prompt = "restart.prompt"; max_root_agents = 1; overflow = Reject } ]
-          }
-        ]
-    ; prompts =
-        [ { id = "restart.prompt"
-          ; path = prompt_file
-          ; description = None
-          ; allowed_workspaces = [ "restart.workspace" ]
-          ; permission_profile = profile.id
-          ; runtime_policy = None
-          ; enabled = true
-          }
-        ]
-    ; permission_profiles = [ profile ]
-    ; manifest_grants
-    }
-;;
-
-let scopes =
-  Agent_protocol.Scope.Set.of_list
-    [ List_prompts
-    ; List_workspaces
-    ; Create_sessions
-    ; View_session_transcript
-    ; Send_messages
-    ; Own_sessions
-    ; Answer_approvals
-    ; View_security_state
-    ; Manage_grants
-    ; Read_audit
-    ; Stop_sessions
-    ; Delete_sessions
-    ; Administer_configuration
-    ; Diagnostics
-    ]
-;;
-
-let principal_with_scopes id scopes =
-  Agent_protocol.Principal.create
-    ~id:(Agent_protocol.Id.Principal.of_string id |> protocol_ok)
-    ~authentication_kind:"test"
-    ~scopes
-    ~attributes:[]
-  |> protocol_ok
-;;
-
-let principal_with_id id = principal_with_scopes id scopes
-let principal () = principal_with_id "pri_restart_test"
-
-let connection daemon principal =
-  let notifications = Eio.Stream.create 256 in
-  let context =
-    Agent_server.Connection_context.create
-      ~connection_id:
-        (Agent_protocol.Id.Attachment.create () |> Agent_protocol.Id.Attachment.to_string)
-      ~principal
-      ~transport:In_memory
-      ~publish_notification:(Eio.Stream.add notifications)
-      ~max_attachments:64
-  in
-  Agent_client.In_memory.create
-    ~request:(fun command ->
-      Agent_server.Dispatcher.dispatch_command
-        (Agent_server.Daemon.dispatcher daemon)
-        ~context
-        command)
-    ~notifications
-    ~close:(fun () -> Agent_server.Daemon.close_connection daemon context)
-;;
-
-let initialize connection =
-  Agent_client.Session_handle.initialize
-    connection
-    ~implementation_name:"restart-test"
-    ~implementation_version:"dev"
-  |> protocol_ok
-  |> ignore
-;;
-
-let session_spec
-      ?(start_immediately = false)
-      ?(liveness = Agent_protocol.Session.Detached)
-      ()
-  =
-  Agent_protocol.Session.Spec.create
-    ~execution_host:Daemon
-    ~prompt:(Catalog (Agent_server.Catalog_identity.prompt_definition "restart.prompt"))
-    ~workspace:
-      (Configured (Agent_server.Catalog_identity.workspace_definition "restart.workspace"))
-    ~liveness
-    ~persistence:Durable
-    ~permission_profile:permission_profile.id
-    ~start_immediately
-    ~labels:[ "suite", "restart" ]
-    ()
-  |> protocol_ok
-;;
-
-let create_request ?(start_immediately = false) ?(key = "restart-create") () =
-  let idempotency_key = Agent_protocol.Idempotency_key.of_string key |> protocol_ok in
-  Agent_protocol.Session.Create_request.
-    { spec = session_spec ~start_immediately ()
-    ; requested_mode = Some Read_write
-    ; subscribe = false
-    ; idempotency_key
-    }
-;;
-
-let create_session ?(start_immediately = false) ?(key = "restart-create") connection =
-  Agent_client.Connection.request
-    connection
-    (Session_create (create_request ~start_immediately ~key ()))
-  |> protocol_ok
-  |> function
-  | Agent_protocol.Method_result.Session_create result ->
-    result.session, (Option.value_exn result.attachment).attachment
-  | _ -> failwith "unexpected create response"
-;;
+open Agent_server_test_support
 
 let job_delivered = function
   | Agent_protocol.Job.Delivered _ -> true
-  | Not_required | Pending -> false
+  | Not_required | Pending | Discarded _ -> false
 ;;
 
 let reset_session connection session attachment =
@@ -327,6 +115,1146 @@ let start_daemon sw env config root =
   |> protocol_ok
 ;;
 
+let%expect_test
+    "qualified moderator lifecycle uses daemon permissions and survives restart"
+  =
+  let module A = Agent_session.Session_actor in
+  let module E = Agent_protocol.Moderator_execution in
+  let module H = Agent_client.Session_handle in
+  List.iter [ `Allow; `Ask; `Deny; `Cancel ] ~f:(fun mode ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let workspace = Filename.concat root "workspace" in
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / workspace / "value.txt")
+            "approved value";
+          let prompt_file = Filename.concat root "root.chatmd" in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+            {|<developer>Offline persisted lifecycle fixture.</developer>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let read = fun () -> Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("value.txt")}]))
+let advance = fun state amount -> Task.bind(read(), fun result -> match result with
+  | `Error(code) -> Task.fail(code)
+  | `Ok(value) -> Task.pure(state + amount))
+let on_event = fun ctx state event -> match event with
+  | `Session_start -> advance(state, 10)
+  | `Session_resume -> advance(state, 100)
+  | _ -> Task.pure(state)
+</script>|};
+          let profile =
+            { permission_profile with
+              tool_default =
+                (match mode with
+                 | `Allow -> Allow
+                 | `Ask | `Cancel -> Ask
+                 | `Deny -> Deny)
+            }
+          in
+          let configuration = config ~profile root workspace prompt_file in
+          let model_calls = ref 0 in
+          let start sw =
+            Agent_server.Daemon.start
+              ~sw
+              ~env
+              ~config:configuration
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Agent_server.Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some
+                      (fun ~sw:_ ~inputs:_ ->
+                        incr model_calls;
+                        failwith "idle lifecycle must not call a provider")
+                }
+              ()
+            |> protocol_ok
+          in
+          let entry daemon id =
+            Agent_server.Session_registry.find (Agent_server.Daemon.registry daemon) id
+            |> Option.value_exn
+          in
+          let snapshot_value state =
+            match state.Agent_session.Session_state.moderator with
+            | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
+              let snapshot =
+                Session.Moderator_state.Identity_snapshot.t_of_sexp
+                  (Sexp.of_string encoded)
+              in
+              (match snapshot.current_state with
+               | Session.Snapshot.Int value -> value
+               | _ -> failwith "unexpected lifecycle state")
+            | _ -> failwith "missing lifecycle checkpoint"
+          in
+          let await actor predicate =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state actor |> protocol_ok in
+                match predicate state with
+                | true -> state
+                | false ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let finished phase state =
+            List.exists
+              state.Agent_session.Session_state.moderator_executions
+              ~f:(fun receipt ->
+                E.equal_phase receipt.context.phase phase
+                &&
+                match receipt.status with
+                | Completed _ | Failed _ | Interrupted _ -> true
+                | Running -> false)
+          in
+          let id, first_value, invocation_owned, permission_states =
+            Eio.Switch.run (fun sw ->
+              let daemon = start sw in
+              let client = connection daemon (principal ()) in
+              initialize client;
+              let created, creator_attachment = create_session client in
+              let actor = (entry daemon created.id).actor in
+              let stopped = A.state actor |> protocol_ok in
+              assert (List.is_empty stopped.invocations);
+              assert (List.is_empty stopped.moderator_executions);
+              let controller = connection daemon (principal ()) in
+              initialize controller;
+              let handle =
+                H.attach
+                  ~sw
+                  ~clock:(Eio.Stdenv.clock env)
+                  ~connection:controller
+                  ~session_id:created.id
+                  ~mode:Read_write
+                  ()
+                |> protocol_ok
+              in
+              H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+              let invocation_owned =
+                match mode with
+                | `Allow | `Deny -> true
+                | `Ask | `Cancel ->
+                  let waiting =
+                    await actor (fun state ->
+                      List.exists state.permissions ~f:(fun permission ->
+                        Agent_protocol.Permission.equal_state permission.state Pending))
+                  in
+                  let permission =
+                    List.find_exn waiting.permissions ~f:(fun permission ->
+                      Agent_protocol.Permission.equal_state permission.state Pending)
+                  in
+                  assert (Option.is_none waiting.active_operation);
+                  Agent_client.Connection.request
+                    client
+                    (Session_get { session_id = created.id; history = None })
+                  |> protocol_ok
+                  |> ignore;
+                  let owned =
+                    match permission.owner with
+                    | Operation _ -> false
+                    | Invocation id ->
+                      List.exists waiting.invocations ~f:(fun invocation ->
+                        Agent_protocol.Id.Invocation.equal invocation.context.id id
+                        && Option.is_some invocation.parent_event)
+                  in
+                  (match mode with
+                   | `Cancel -> H.stop handle ~mode:Cancel |> protocol_ok |> ignore
+                   | `Ask ->
+                     let first, second =
+                       Eio.Fiber.pair
+                         (fun () ->
+                            H.respond_permission
+                              handle
+                              ~permission_id:permission.id
+                              ~permission_generation:permission.generation
+                              ~choice:Approve_session
+                              ~reason:None
+                            |> Result.map ~f:ignore)
+                         (fun () ->
+                            Agent_client.Connection.request
+                              client
+                              (Permission_respond
+                                 { session_id = created.id
+                                 ; attachment_id = creator_attachment.id
+                                 ; permission_id = permission.id
+                                 ; permission_generation = permission.generation
+                                 ; choice = Approve_session
+                                 ; reason = None
+                                 ; idempotency_key =
+                                     Agent_protocol.Idempotency_key.of_string
+                                       "competing-approval"
+                                     |> protocol_ok
+                                 })
+                            |> Result.map ~f:ignore)
+                     in
+                     assert (List.count [ first; second ] ~f:Result.is_ok = 1);
+                     List.iter [ first; second ] ~f:(function
+                       | Ok () -> ()
+                       | Error error ->
+                         assert (
+                           Agent_protocol.Error.equal_code error.code Already_resolved))
+                   | `Allow | `Deny -> assert false);
+                  owned
+              in
+              let settled = await actor (finished Session_start) in
+              let value = snapshot_value settled in
+              let permission_states =
+                List.map settled.permissions ~f:(fun p -> p.state)
+              in
+              H.close handle;
+              Agent_client.Connection.close controller;
+              Agent_client.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              created.id, value, invocation_owned, permission_states)
+          in
+          let resumed_value, native_calls =
+            Eio.Switch.run (fun sw ->
+              let daemon = start sw in
+              let client = connection daemon (principal ()) in
+              initialize client;
+              Agent_client.Connection.request
+                client
+                (Session_get { session_id = id; history = None })
+              |> protocol_ok
+              |> ignore;
+              let actor = (entry daemon id).actor in
+              let restarted_handle =
+                match mode with
+                | `Allow | `Ask | `Deny -> None
+                | `Cancel ->
+                  let handle =
+                    H.attach
+                      ~sw
+                      ~clock:(Eio.Stdenv.clock env)
+                      ~connection:client
+                      ~session_id:id
+                      ~mode:Read_write
+                      ()
+                    |> protocol_ok
+                  in
+                  H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+                  Some handle
+              in
+              let settled =
+                match mode with
+                | `Allow | `Ask -> await actor (finished Session_resume)
+                | `Deny | `Cancel ->
+                  (* Failed lifecycle receipts must not replay their effects. *)
+                  ignore
+                    (Agent_server.Runtime_owner.drain_idle_moderator
+                       (entry daemon id).runtime
+                     : (bool, Agent_protocol.Error.t) result);
+                  A.state actor |> protocol_ok
+              in
+              let value = snapshot_value settled in
+              let calls = List.length settled.invocations in
+              Option.iter restarted_handle ~f:H.close;
+              Agent_client.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              value, calls)
+          in
+          print_s
+            [%sexp
+              { mode : [ `Allow | `Ask | `Deny | `Cancel ]
+              ; first_value : int
+              ; resumed_value : int
+              ; invocation_owned : bool
+              ; permission_states : Agent_protocol.Permission.state list
+              ; native_calls : int
+              ; model_calls = (!model_calls : int)
+              }])));
+  [%expect
+    {|
+    ((mode Allow) (first_value 10) (resumed_value 110) (invocation_owned true)
+     (permission_states ()) (native_calls 2) (model_calls 0))
+    ((mode Ask) (first_value 10) (resumed_value 110) (invocation_owned true)
+     (permission_states (Approved)) (native_calls 2) (model_calls 0))
+    ((mode Deny) (first_value 0) (resumed_value 0) (invocation_owned true)
+     (permission_states ()) (native_calls 1) (model_calls 0))
+    ((mode Cancel) (first_value 0) (resumed_value 0) (invocation_owned true)
+     (permission_states (Cancelled)) (native_calls 1) (model_calls 0))
+    |}]
+;;
+
+let%expect_test "qualified runtime initialization failure releases its preparation scope" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt_file = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = fail("initializer rejected")
+let on_event = fun ctx state event -> Task.pure(state + 1)
+</script>|};
+        let failures, registered =
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              Agent_server.Daemon.start
+                ~sw
+                ~env
+                ~config:(config root workspace prompt_file)
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { Agent_server.Daemon.default_options with
+                    qualify_chatml_extensions = true
+                  ; model_post_stream =
+                      Some
+                        (fun ~sw:_ ~inputs:_ ->
+                          failwith "failed initialization must not call a model")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let failures =
+              List.map [ "first"; "second" ] ~f:(fun key ->
+                match
+                  Agent_client.Connection.request
+                    client
+                    (Session_create (create_request ~key ()))
+                with
+                | Ok _ -> failwith "poisoned initializer was admitted"
+                | Error error ->
+                  String.is_substring error.message ~substring:"initializer rejected")
+            in
+            let registered =
+              List.length
+                (Agent_server.Session_registry.entries
+                   (Agent_server.Daemon.registry daemon))
+            in
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok;
+            failures, registered)
+        in
+        (* Reaching this point also joins both failed preparations' resource scopes. *)
+        print_s [%sexp { failures : bool list; registered : int }]));
+  [%expect {| ((failures (true true)) (registered 0)) |}]
+;;
+
+let%expect_test
+    "qualified timers deliver versioned events and native reads without a client turn"
+  =
+  let module A = Agent_session.Session_actor in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / workspace / "value.txt")
+          "timer value";
+        let prompt_file = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event = fun ctx state event -> match event with
+| `Session_start -> Task.bind(Schedule.after_ms(0, `String("wake")), fun id -> Task.pure(state))
+| `Internal_event(payload) ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("value.txt")}])), fun result ->
+    match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) ->
+      match state with
+      | 0 -> Task.bind(Schedule.after_ms(0, `String("finish")), fun id -> Task.pure(1))
+      | _ -> Task.bind(Runtime.end_session("timers complete"), fun ignored -> Task.pure(2)))
+| _ -> Task.pure(state)
+</script>|};
+        Eio.Switch.run (fun sw ->
+          let model_calls = ref 0 in
+          let daemon =
+            Agent_server.Daemon.start
+              ~sw
+              ~env
+              ~config:(config root workspace prompt_file)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Agent_server.Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some
+                      (fun ~sw:_ ~inputs:_ ->
+                        incr model_calls;
+                        failwith "unexpected model")
+                }
+              ()
+            |> protocol_ok
+          in
+          let client = connection daemon (principal ()) in
+          initialize client;
+          let session, _ = create_session ~start_immediately:true client in
+          let entry =
+            Agent_server.Session_registry.find
+              (Agent_server.Daemon.registry daemon)
+              session.id
+            |> Option.value_exn
+          in
+          let final =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state entry.actor |> protocol_ok in
+                match state.halted with
+                | true -> state
+                | false ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let delivered =
+            List.map final.schedules ~f:(fun schedule -> schedule.delivery_count)
+          in
+          let completed_events =
+            List.count final.moderator_executions ~f:(fun receipt ->
+              match receipt.context.phase, receipt.status with
+              | Internal_event, Completed _ -> true
+              | _ -> false)
+          in
+          let native_event_owned =
+            List.for_all final.invocations ~f:(fun invocation ->
+              Option.is_some invocation.parent_event
+              && Option.is_none invocation.context.parent_invocation)
+          in
+          let owner_available_during_delivery = ref false in
+          let delivery_cancelled =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              (* Halt publishes before the automatic stop cleanup has joined its
+                 leases. Finish that retirement before loading a stopped runtime
+                 deliberately for this checkpoint-gate cancellation fixture. *)
+              Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
+              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
+              let held, held_u = Eio.Promise.create () in
+              let release, release_u = Eio.Promise.create () in
+              let released, released_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                A.with_moderator_checkpoint entry.actor (fun () ->
+                  Eio.Promise.resolve held_u ();
+                  Eio.Promise.await release;
+                  Ok ())
+                |> protocol_ok;
+                Eio.Promise.resolve released_u ());
+              Eio.Promise.await held;
+              let started, started_u = Eio.Promise.create () in
+              (* Reach the held checkpoint gate with a structurally valid claimed
+                 delivery. A completed timer may fail validation before cancellation
+                 gets scheduled and does not exercise the gate wait. The actor still
+                 rejects this stale claim if it ever reaches commit. *)
+              let claimed =
+                { (List.hd_exn final.schedules) with
+                  status = Agent_protocol.Schedule.Delivering
+                ; delivery_count = 0
+                ; last_delivery_at = None
+                ; delivery_cancellation = None
+                }
+              in
+              let cancelled =
+                Eio.Fiber.first
+                  (fun () ->
+                     Eio.Promise.resolve started_u ();
+                     Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed
+                     |> protocol_ok;
+                     false)
+                  (fun () ->
+                     Eio.Promise.await started;
+                     Eio.Fiber.yield ();
+                     (* A delegated policy check can need this owner while it
+                        holds the checkpoint that delivery is waiting for. Keep
+                        this bounded so a lock-order regression still cleans up. *)
+                     owner_available_during_delivery
+                     := Result.is_ok
+                          (Eio.Time.with_timeout (Eio.Stdenv.clock env) 2. (fun () ->
+                             Agent_server.Runtime_owner.ensure_loaded entry.runtime
+                             |> protocol_ok;
+                             Ok ()));
+                     true)
+              in
+              Exn.protect
+                ~finally:(fun () ->
+                  Eio.Promise.resolve release_u ();
+                  Eio.Promise.await released)
+                ~f:(fun () ->
+                  (* Owner retirement cancels this lease independently of its
+                     scheduler caller. It must return an interruption, rather
+                     than let Cancelled escape and terminate the daemon switch. *)
+                  let delivery_started, delivery_started_u = Eio.Promise.create () in
+                  let delivery =
+                    Eio.Fiber.fork_promise ~sw (fun () ->
+                      Eio.Promise.resolve delivery_started_u ();
+                      Agent_server.Runtime_owner.deliver_schedule entry.runtime claimed)
+                  in
+                  Eio.Promise.await delivery_started;
+                  Eio.Fiber.yield ();
+                  Agent_server.Runtime_owner.unload_and_wait entry.runtime |> protocol_ok;
+                  match Eio.Promise.await_exn delivery with
+                  | Error { code = Interrupted; _ } -> ()
+                  | _ -> failwith "retired delivery did not report interruption");
+              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
+              let after = A.state entry.actor |> protocol_ok in
+              assert (Option.equal Jsonaf.exactly_equal final.moderator after.moderator);
+              cancelled)
+          in
+          Agent_client.Connection.close client;
+          Agent_server.Daemon.shutdown daemon |> protocol_ok;
+          print_s
+            [%sexp
+              { delivered : int list
+              ; completed_events : int
+              ; native_calls = (List.length final.invocations : int)
+              ; native_event_owned : bool
+              ; delivery_cancelled : bool
+              ; owner_available_during_delivery =
+                  (!owner_available_during_delivery : bool)
+              ; model_calls = (!model_calls : int)
+              ; halt_reason = (final.halt_reason : string option)
+              }])));
+  [%expect
+    {|
+    ((delivered (1 1)) (completed_events 2) (native_calls 2)
+     (native_event_owned true) (delivery_cancelled true)
+     (owner_available_during_delivery true) (model_calls 0)
+     (halt_reason ("timers complete")))
+    |}]
+;;
+
+let%expect_test "a timer interrupted before enqueue survives runtime retirement" =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_server.Daemon in
+  let module O = Agent_server.Runtime_owner in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt = Filename.concat root "timer.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt)
+          {|<script id="timer" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Session_start ->
+  let* timer = Schedule.after_ms(200, `String("deliver once")) in Task.pure(state)
+| `Internal_event(_) ->
+  let* () = Runtime.end_session("timer delivered") in Task.pure(state + 1)
+| _ -> Task.pure(state)
+</script>|};
+        Eio.Switch.run (fun sw ->
+          let daemon =
+            D.start
+              ~sw
+              ~env
+              ~config:(config root root prompt)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { D.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                }
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Connection.close client)
+                ~f:(fun () ->
+                  initialize client;
+                  let session, _ = create_session ~start_immediately:true client in
+                  let entry =
+                    Agent_server.Session_registry.find (D.registry daemon) session.id
+                    |> Option.value_exn
+                  in
+                  let state () = A.state entry.actor |> protocol_ok in
+                  let wait predicate =
+                    let rec loop () =
+                      let current = state () in
+                      match predicate current with
+                      | true -> current
+                      | false ->
+                        Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                        loop ()
+                    in
+                    loop ()
+                  in
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+                    ignore (wait (fun current -> not (List.is_empty current.schedules)));
+                    A.with_moderator_checkpoint entry.actor (fun () ->
+                      ignore
+                        (wait (fun current ->
+                           List.exists current.schedules ~f:(fun schedule ->
+                             match schedule.status with
+                             | Delivering -> true
+                             | _ -> false)));
+                      O.unload_and_wait entry.runtime |> protocol_ok;
+                      O.ensure_loaded entry.runtime)
+                    |> protocol_ok;
+                    let final = wait (fun current -> current.halted) in
+                    (match final.schedules with
+                     | [ { status = Delivered; delivery_count = 1; _ } ] -> ()
+                     | _ -> failwith "interrupted timer was lost or delivered twice");
+                    [%test_eq: int]
+                      1
+                      (List.count final.moderator_executions ~f:(fun receipt ->
+                         match receipt.context.phase, receipt.status with
+                         | Internal_event, Completed _ -> true
+                         | _ -> false));
+                    print_endline "interrupted claim retried; one committed timer event"))))));
+  [%expect {| interrupted claim retried; one committed timer event |}]
+;;
+
+let%expect_test "shutdown gives admitted timer delivery a bounded grace before retirement"
+  =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_server.Daemon in
+  List.iter [ false; true ] ~f:(fun exceed_grace ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      (* Scheduler polling and storage still use real I/O. Only persisted time
+         and the shutdown fiber's grace sleep are controlled by the test. This
+         keeps a slow machine from expiring grace while we release the gate. *)
+      let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
+      let mono_clock, pause_mono, _resume_mono, advance_mono =
+        controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+      in
+      pause_mono ();
+      let grace_sleep = Eio.Fiber.create_key () in
+      let module Clock = struct
+        type t = unit
+        type time = float
+
+        let now () = !logical_now
+
+        let sleep_until () deadline =
+          match Eio.Fiber.get grace_sleep with
+          | Some (registered, expire) ->
+            Eio.Promise.resolve registered deadline;
+            Eio.Promise.await expire
+          | None ->
+            Eio.Time.sleep
+              (Eio.Stdenv.clock env)
+              (Float.max 0. (deadline -. !logical_now))
+        ;;
+      end
+      in
+      let clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
+      let daemon_env =
+        object
+          method fs = env#fs
+          method cwd = env#cwd
+          method stdin = env#stdin
+          method stdout = env#stdout
+          method stderr = env#stderr
+          method net = env#net
+          method domain_mgr = env#domain_mgr
+          method process_mgr = env#process_mgr
+          method clock = clock
+          method mono_clock = mono_clock
+          method secure_random = env#secure_random
+          method debug = env#debug
+          method backend_id = env#backend_id
+        end
+      in
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let prompt = Filename.concat root "timer.chatmd" in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt)
+            {|<script id="timer" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event ctx state event = match event with
+| `Session_start -> let* timer = Schedule.after_ms(200, `Null) in Task.pure(state)
+| `Internal_event(_) -> let* () = Runtime.end_session("delivered") in Task.pure(state + 1)
+| _ -> Task.pure(state)
+</script>|};
+          let configuration = config root root prompt in
+          let configuration =
+            { configuration with
+              server = { configuration.server with shutdown_grace_ms = 100 }
+            }
+          in
+          Eio.Switch.run (fun sw ->
+            let start () =
+              D.start
+                ~sw
+                ~env:daemon_env
+                ~config:configuration
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { D.default_options with
+                    qualify_chatml_extensions = true
+                  ; model_post_stream =
+                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let daemon = start () in
+            let session_id =
+              Exn.protect
+                ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
+                ~f:(fun () ->
+                  let client = connection daemon (principal ()) in
+                  Exn.protect
+                    ~finally:(fun () -> Agent_client.Connection.close client)
+                    ~f:(fun () ->
+                      initialize client;
+                      let session, _ = create_session ~start_immediately:true client in
+                      let entry =
+                        Agent_server.Session_registry.find (D.registry daemon) session.id
+                        |> Option.value_exn
+                      in
+                      let rec wait predicate =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match predicate state with
+                        | true -> state
+                        | false ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait predicate
+                      in
+                      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                        ignore (wait (fun state -> not (List.is_empty state.schedules)));
+                        let registered, register = Eio.Promise.create () in
+                        let expire, expire_grace = Eio.Promise.create () in
+                        Exn.protect
+                          ~finally:(fun () ->
+                            match Eio.Promise.is_resolved expire with
+                            | true -> ()
+                            | false -> Eio.Promise.resolve expire_grace ())
+                          ~f:(fun () ->
+                            let shutdown =
+                              A.with_moderator_checkpoint entry.actor (fun () ->
+                                (* The timer cannot become due until the checkpoint
+                               is held, so even its initial admission is ordered. *)
+                                logical_now := !logical_now +. 1.;
+                                advance_mono 1.;
+                                ignore
+                                  (wait (fun state ->
+                                     List.exists state.schedules ~f:(fun timer ->
+                                       match timer.status with
+                                       | Delivering -> true
+                                       | _ -> false)));
+                                let shutdown =
+                                  Eio.Fiber.fork_promise ~sw (fun () ->
+                                    Eio.Fiber.with_binding
+                                      grace_sleep
+                                      (register, expire)
+                                      (fun () -> D.shutdown daemon |> protocol_ok))
+                                in
+                                (* Await actual timeout registration, not just the
+                               Draining flag, before deciding whether to expire. *)
+                                let grace_deadline = Eio.Promise.await registered in
+                                assert (
+                                  Float.(
+                                    abs (grace_deadline -. !logical_now -. 0.1) < 0.000001));
+                                (match exceed_grace with
+                                 | false ->
+                                   Agent_server.Runtime_owner.ensure_loaded entry.runtime
+                                   |> protocol_ok;
+                                   (match
+                                      (A.state entry.actor |> protocol_ok).schedules
+                                    with
+                                    | [ { status = Delivering; _ } ] -> ()
+                                    | _ ->
+                                      failwith
+                                        "shutdown cancelled delivery before its grace")
+                                 | true ->
+                                   (* The held gate prevents enqueue; grace expiry must
+                              cancel that delivery and restore its pending claim. *)
+                                   logical_now := grace_deadline;
+                                   advance_mono 0.1;
+                                   Eio.Promise.resolve expire_grace ();
+                                   ignore
+                                     (wait (fun state ->
+                                        List.exists state.schedules ~f:(fun timer ->
+                                          match timer.status with
+                                          | Scheduled -> true
+                                          | _ -> false))));
+                                Ok shutdown)
+                              |> protocol_ok
+                            in
+                            Eio.Promise.await_exn shutdown));
+                      session.id))
+            in
+            let recovered = start () in
+            Exn.protect
+              ~finally:(fun () -> D.shutdown recovered |> protocol_ok)
+              ~f:(fun () ->
+                let entry =
+                  Agent_server.Session_registry.load (D.registry recovered) session_id
+                  |> protocol_ok
+                in
+                let final =
+                  match
+                    Eio.Time.with_timeout (Eio.Stdenv.clock env) 5. (fun () ->
+                      let rec wait () =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match state.halted with
+                        | true -> state
+                        | false ->
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait ()
+                      in
+                      Ok (wait ()))
+                  with
+                  | Ok state -> state
+                  | Error `Timeout ->
+                    let state = A.state entry.actor |> protocol_ok in
+                    raise_s
+                      [%sexp
+                        "timer delivery did not finish after restart"
+                      , (exceed_grace : bool)
+                      , (state.schedules : Agent_protocol.Schedule.t list)
+                      , (state.moderator_executions
+                         : Agent_protocol.Moderator_execution.t list)]
+                in
+                [%test_eq: int]
+                  1
+                  (List.count final.moderator_executions ~f:(fun receipt ->
+                     match receipt.context.phase, receipt.status with
+                     | Internal_event, Completed _ -> true
+                     | _ -> false));
+                (match final.schedules with
+                 | [ { status = Delivered; delivery_count = 1; _ } ] -> ()
+                 | _ -> failwith "timer delivery was lost or duplicated");
+                print_s
+                  [%sexp
+                    (exceed_grace : bool), ("one committed event after restart" : string)])))));
+  [%expect
+    {|
+    (false "one committed event after restart")
+    (true "one committed event after restart")
+    |}]
+;;
+
+let%expect_test
+    "X02 review references deduplicate concurrent requests and survive daemon restart"
+  =
+  let module A = Agent_session.Session_actor in
+  let module H = Agent_client.Session_handle in
+  let module I = Agent_protocol.Invocation in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        List.iter
+          [ ( "agent.chatmd"
+            , [%blob "chatml_extensibility_fixtures/x02-review/agent.chatmd"] )
+          ; ( "review.chatml"
+            , [%blob "chatml_extensibility_fixtures/x02-review/review.chatml"] )
+          ; "input.json", [%blob "chatml_extensibility_fixtures/x02-review/input.json"]
+          ; "output.json", [%blob "chatml_extensibility_fixtures/x02-review/output.json"]
+          ]
+          ~f:(fun (name, source) ->
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / root / name)
+              source);
+        let configuration = config root workspace (Filename.concat root "agent.chatmd") in
+        let requests = ref 0 in
+        let call_events batch calls =
+          List.concat_mapi calls ~f:(fun index (name, revision) ->
+            let open Openai.Responses.Response_stream in
+            let id = sprintf "review-%d-%d" batch index in
+            [ Output_item_added
+                { item =
+                    Function_call
+                      { name
+                      ; arguments = ""
+                      ; call_id = id
+                      ; _type = "function_call"
+                      ; id = Some id
+                      ; status = None
+                      }
+                ; output_index = index
+                ; type_ = "response.output_item.added"
+                }
+            ; Function_call_arguments_done
+                { arguments = Jsonaf.to_string (`Object [ "revision", `String revision ])
+                ; item_id = id
+                ; output_index = index
+                ; type_ = "response.function_call_arguments.done"
+                }
+            ])
+          |> Stdlib.List.to_seq
+        in
+        let post_stream ~sw:_ ~inputs:_ =
+          incr requests;
+          match !requests with
+          | 1 -> call_events 1 [ "begin_review", "rev-a"; "begin_review", "rev-a" ]
+          | 2 ->
+            call_events
+              2
+              [ "begin_review", "rev-b"
+              ; "unhandled_review", "rev-x"
+              ; "double_resolve", "rev-x"
+              ]
+          | 3 | 5 -> Stdlib.Seq.empty
+          | 4 ->
+            call_events
+              4
+              [ "begin_review", "rev-a"
+              ; "begin_review", "rev-b"
+              ; "begin_review", "rev-c"
+              ]
+          | _ -> failwith "unexpected additional model turn"
+        in
+        let start sw =
+          Agent_server.Daemon.start
+            ~sw
+            ~env
+            ~config:configuration
+            ~tool_dir:root
+            ~home:root
+            ~process_start_identity:None
+            ~options:
+              { Agent_server.Daemon.default_options with
+                qualify_chatml_extensions = true
+              ; model_post_stream = Some post_stream
+              }
+            ()
+          |> protocol_ok
+        in
+        let run daemon sw client id expected_requests =
+          let handle =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client
+              ~session_id:id
+              ~mode:Read_write
+              ()
+            |> protocol_ok
+          in
+          let entry =
+            Agent_server.Session_registry.find (Agent_server.Daemon.registry daemon) id
+            |> Option.value_exn
+          in
+          let before_sequence =
+            Agent_session.Durable_event_log.latest_sequence entry.durable_events
+            |> Option.value ~default:0L
+          in
+          let submission =
+            H.send_message
+              handle
+              { kind = Plain_text
+              ; text = "review the requested revisions"
+              ; attachments = []
+              }
+            |> protocol_ok
+          in
+          let final =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state entry.actor |> protocol_ok in
+                match state.active_operation with
+                | None
+                  when !requests >= expected_requests
+                       && List.is_empty state.conversation.deferred_user_entries -> state
+                | _ ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let events =
+            match
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:before_sequence
+                ~through_sequence:Int64.max_value
+            with
+            | Available events -> events
+            | Snapshot_required -> failwith "test lost operation completion evidence"
+          in
+          let operation_id =
+            match submission.operation_id with
+            | Some id -> id
+            | None ->
+              (match
+                 List.filter_map events ~f:(fun event ->
+                   match
+                     Agent_protocol.Event.Durable.Payload.of_json
+                       ~kind:event.kind
+                       event.payload
+                     |> protocol_ok
+                   with
+                   | Operation_started { id; kind = Turn User_submit; _ } -> Some id
+                   | _ -> None)
+               with
+               | [ id ] -> id
+               | _ -> failwith "expected exactly one deferred user operation")
+          in
+          assert (
+            List.exists final.conversation.canonical_history ~f:(fun entry ->
+              Agent_protocol.History.Id.equal entry.id submission.history_id));
+          assert (
+            List.exists events ~f:(fun event ->
+              match
+                Agent_protocol.Event.Durable.Payload.of_json
+                  ~kind:event.kind
+                  event.payload
+                |> protocol_ok
+              with
+              | Operation_completed operation ->
+                Agent_protocol.Id.Operation.equal operation.id operation_id
+              | _ -> false));
+          List.iter final.invocations ~f:(fun invocation ->
+            assert (I.equal_origin invocation.context.origin Model);
+            let output_id = Option.value_exn invocation.output_entry_id in
+            assert (
+              List.exists final.conversation.canonical_history ~f:(fun entry ->
+                Agent_protocol.History.Id.equal entry.id output_id)));
+          H.close handle;
+          final
+        in
+        let output state call_id =
+          let invocation =
+            List.find_exn
+              state.Agent_session.Session_state.invocations
+              ~f:(fun invocation ->
+                Option.exists
+                  invocation.context.provider_call_id
+                  ~f:(String.equal call_id))
+          in
+          match invocation.status with
+          | Published (Complete (`String reference)) -> reference
+          | Published (Fail error) -> error.code
+          | _ -> failwith "review outcome was not published"
+        in
+        let reviews state =
+          match state.Agent_session.Session_state.moderator with
+          | Some (`Object [ ("identity_snapshot_sexp", `String value) ]) ->
+            let snapshot =
+              Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string value)
+            in
+            (match snapshot.current_state with
+             | Session.Snapshot.Array reviews -> List.length reviews
+             | _ -> failwith "review state is not an array")
+          | _ -> failwith "review state was not persisted"
+        in
+        let id, first =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw in
+            Exn.protect
+              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    let session, _ = create_session ~start_immediately:true client in
+                    let state = run daemon sw client session.id 3 in
+                    session.id, state)))
+        in
+        let changed_source =
+          String.substr_replace_all
+            [%blob "chatml_extensibility_fixtures/x02-review/review.chatml"]
+            ~pattern:"review-"
+            ~with_:"changed-"
+        in
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / root / "review.chatml")
+          changed_source;
+        let second =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw in
+            Exn.protect
+              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~f:(fun () ->
+                let client = connection daemon (principal ()) in
+                Exn.protect
+                  ~finally:(fun () -> Agent_client.Connection.close client)
+                  ~f:(fun () ->
+                    initialize client;
+                    run daemon sw client id 5)))
+        in
+        assert (
+          Agent_protocol.Id.Prompt_revision.equal
+            first.spec.prompt_revision_id
+            second.spec.prompt_revision_id);
+        print_s
+          [%sexp
+            { first =
+                (List.map
+                   [ "review-1-0"
+                   ; "review-1-1"
+                   ; "review-2-0"
+                   ; "review-2-1"
+                   ; "review-2-2"
+                   ]
+                   ~f:(output first)
+                 : string list)
+            ; after_restart =
+                (List.map [ "review-4-0"; "review-4-1"; "review-4-2" ] ~f:(output second)
+                 : string list)
+            ; review_counts = ([ reviews first; reviews second ] : int list)
+            ; provider_requests = (!requests : int)
+            }]));
+  [%expect
+    {|
+    ((first
+      (review-1 review-1 review-2 invocation.unhandled
+       invocation.duplicate_resolution))
+     (after_restart (review-1 review-2 review-3)) (review_counts (2 3))
+     (provider_requests 5))
+    |}]
+;;
+
 let server_health connection ~include_details =
   Agent_client.Connection.request
     connection
@@ -436,6 +1364,8 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
               ; completed_at = Some timestamp
               ; result = Some `Null
               ; delivery = Not_required
+              ; launch = None
+              ; progress = None
               }
           in
           Agent_session.Session_actor.add_job entry.actor job |> protocol_ok |> ignore;
@@ -473,7 +1403,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)));
   [%expect
     {|
-    ((expected_transaction 4) (checkpoint_transaction 4)
+    ((expected_transaction 5) (checkpoint_transaction 5)
      (checkpoint_is_latest true))
     |}]
 ;;
@@ -543,6 +1473,163 @@ let%expect_test "operator grant authorizes only the exact compiled manifest" =
       ~finally:(fun () ->
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)));
   [%expect {| ((mismatched_denied true) (persisted_grants 1)) |}]
+;;
+
+let%test_unit
+    "restart reconciles durable invocation outcomes once before lazy runtime restoration"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        let prompt_file = Filename.concat root "agent.chatmd" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          "<developer>Offline invocation recovery fixture.</developer>";
+        let configuration = config root workspace prompt_file in
+        Eio.Switch.run (fun sw ->
+          let first = start_daemon sw env configuration root in
+          let client = connection first (principal ()) in
+          initialize client;
+          let created, attachment = create_session ~key:"invocation-recovery" client in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry first)
+              created.id
+            |> protocol_ok
+          in
+          List.iter [ false; true ] ~f:(fun custom ->
+            let module I = Agent_protocol.Invocation in
+            let id =
+              Agent_session.History_id_source.allocate entry.history_ids |> protocol_ok
+            in
+            let call_id = if custom then "custom-interrupted" else "function-saved" in
+            let item =
+              if custom
+              then
+                Openai.Responses.Item.Custom_tool_call
+                  { name = "fixture"
+                  ; input = "null"
+                  ; call_id
+                  ; _type = "custom_tool_call"
+                  ; id = None
+                  }
+              else
+                Function_call
+                  { name = "fixture"
+                  ; arguments = "null"
+                  ; call_id
+                  ; _type = "function_call"
+                  ; id = None
+                  ; status = None
+                  }
+            in
+            Agent_session.Session_actor.append_history
+              entry.actor
+              ~attachment_id:attachment.id
+              [ Agent_session.History_codec.to_protocol
+                  (History_entry.create_with_id ~id item)
+              ]
+            |> protocol_ok
+            |> ignore;
+            let state = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+            let admitted =
+              I.create
+                { id = Agent_protocol.Id.Invocation.create ()
+                ; session_id = created.id
+                ; generation = created.generation
+                ; origin = Model
+                ; provider_call_id = Some call_id
+                ; call_entry_id = Some id
+                ; parent_invocation = None
+                ; parent_job = None
+                ; tool_name = "fixture"
+                ; implementation_revision = "retained-fixture"
+                ; capability_fingerprint = "retained-capability"
+                ; input = `Null
+                ; created_at = Agent_protocol.Timestamp.now ()
+                ; deadline = None
+                }
+              |> protocol_ok
+            in
+            let dispatched = I.dispatch admitted |> protocol_ok in
+            let changes =
+              Agent_session.Session_actor.Extension_change.
+                [ Invocation admitted; Invocation dispatched ]
+            in
+            let changes =
+              if custom
+              then changes
+              else
+                changes
+                @ [ Invocation
+                      (I.resolve
+                         dispatched
+                         ~session_id:created.id
+                         ~generation:created.generation
+                         (Complete (`String "already computed"))
+                       |> protocol_ok)
+                  ]
+            in
+            Agent_session.Session_actor.commit_extensions
+              entry.actor
+              ~generation:created.generation
+              ~expected_revision:state.counters.revision
+              changes
+            |> protocol_ok
+            |> ignore);
+          Agent_client.Connection.close client;
+          Agent_server.Daemon.shutdown first |> protocol_ok;
+          let second = start_daemon sw env configuration root in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry second)
+              created.id
+            |> protocol_ok
+          in
+          let recovered = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+          assert (List.length recovered.invocations = 2);
+          List.iter recovered.invocations ~f:(fun inv ->
+            assert (Option.is_some inv.output_entry_id);
+            Agent_session.Invocation_history.validate_publication
+              ~history:recovered.conversation.canonical_history
+              inv
+            |> protocol_ok;
+            match inv.context.provider_call_id, inv.status with
+            | Some "function-saved", Published (Complete (`String "already computed")) ->
+              ()
+            | Some "custom-interrupted", Published (Cancelled _) -> ()
+            | _ -> assert false);
+          let new_id =
+            Agent_session.History_id_source.allocate entry.history_ids |> protocol_ok
+          in
+          assert (
+            not
+              (List.exists recovered.conversation.canonical_history ~f:(fun e ->
+                 History_entry.Id.equal new_id e.id)));
+          Agent_server.Daemon.shutdown second |> protocol_ok;
+          let third = start_daemon sw env configuration root in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry third)
+              created.id
+            |> protocol_ok
+          in
+          let again = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+          assert (
+            Sexp.equal
+              ([%sexp_of: Agent_protocol.Invocation.t list] recovered.invocations)
+              ([%sexp_of: Agent_protocol.Invocation.t list] again.invocations));
+          assert (
+            List.length again.conversation.canonical_history
+            = List.length recovered.conversation.canonical_history);
+          Agent_server.Daemon.shutdown third |> protocol_ok)))
 ;;
 
 let%expect_test "durable stopped session resets, recovers, and starts after restart" =
@@ -965,6 +2052,247 @@ let%expect_test "owner reclaim token survives restart and rotates on reclaim" =
     |}]
 ;;
 
+let%expect_test "daemon idle polling applies retained termination without a queued event" =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  List.iter [ `Observation; `Event ] ~f:(fun source ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let workspace = Filename.concat root "workspace" in
+          let prompt_file = Filename.concat root "agent.chatmd" in
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+            {|<developer>Idle follow-up fixture.</developer>
+<script language="chatml" kind="moderator">
+type event = [ `Session_start | `Session_resume ]
+let initial_state = 0
+let on_event : context -> int -> event -> int task = fun ctx state event -> Task.pure(state)
+</script>|};
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              Agent_server.Daemon.start
+                ~sw
+                ~env
+                ~config:(config root workspace prompt_file)
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { Agent_server.Daemon.default_options with
+                    model_post_stream =
+                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model execution")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let created, _ =
+              create_session ~start_immediately:true ~key:"follow-up-poll" client
+            in
+            let entry =
+              Agent_server.Session_registry.find
+                (Agent_server.Daemon.registry daemon)
+                created.id
+              |> Option.value_exn
+            in
+            let state = A.state entry.actor |> protocol_ok in
+            (* Install a v1-shaped durable receipt fixture; the public runtime
+             still uses the legacy moderator compiler's source fingerprint. *)
+            let snapshot =
+              match state.moderator with
+              | Some (`Object fields) ->
+                (match
+                   List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal
+                 with
+                 | Some (`String encoded) ->
+                   Session.Moderator_state.Identity_snapshot.t_of_sexp
+                     (Sexp.of_string encoded)
+                 | _ -> assert false)
+              | _ -> assert false
+            in
+            let snapshot = { snapshot with script_source_hash = String.make 64 'a' } in
+            A.change_moderator
+              entry.actor
+              (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+            |> protocol_ok
+            |> ignore;
+            let state = A.state entry.actor |> protocol_ok in
+            assert (
+              not
+                (Agent_session.Runtime_builder.moderator_snapshot_has_queued_events
+                   state.moderator
+                 |> protocol_ok));
+            let observer =
+              Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            let parent =
+              I.create
+                { id = Agent_protocol.Id.Invocation.create ()
+                ; session_id = created.id
+                ; generation = created.generation
+                ; origin = Script
+                ; provider_call_id = None
+                ; call_entry_id = None
+                ; parent_invocation = None
+                ; parent_job = None
+                ; tool_name = "fixture"
+                ; implementation_revision = "fixture"
+                ; capability_fingerprint = "fixture"
+                ; input = `Null
+                ; created_at = Agent_protocol.Timestamp.now ()
+                ; deadline = None
+                }
+              |> protocol_ok
+            in
+            let parent_dispatched = I.dispatch parent |> protocol_ok in
+            let resolve invocation =
+              I.resolve
+                invocation
+                ~session_id:created.id
+                ~generation:created.generation
+                (Complete `Null)
+              |> protocol_ok
+            in
+            let child =
+              I.create
+                ~observer
+                { parent.context with
+                  id = Agent_protocol.Id.Invocation.create ()
+                ; origin = Moderator
+                ; parent_invocation = Some parent.context.id
+                }
+              |> protocol_ok
+            in
+            let dispatched = I.dispatch child |> protocol_ok in
+            let resolved = resolve dispatched in
+            let observing = I.claim_observation resolved |> protocol_ok in
+            let observed =
+              I.complete_observation
+                observing
+                ~follow_up:
+                  { request_turn = true
+                  ; request_compaction = true
+                  ; end_session = Some "finished"
+                  }
+              |> protocol_ok
+            in
+            (match source with
+             | `Observation ->
+               A.commit_extensions
+                 entry.actor
+                 ~generation:created.generation
+                 ~expected_revision:state.counters.revision
+                 (List.map
+                    [ parent
+                    ; parent_dispatched
+                    ; resolve parent_dispatched
+                    ; child
+                    ; dispatched
+                    ; resolved
+                    ; observing
+                    ; observed
+                    ]
+                    ~f:(fun invocation -> A.Extension_change.Invocation invocation))
+               |> protocol_ok
+               |> ignore
+             | `Event ->
+               (* Hold the owner lock while creating and consuming the fixture head,
+                so polling sees only the final empty queue with retained intent. *)
+               Agent_server.Runtime_owner.For_testing.with_loaded_runtime
+                 entry.runtime
+                 (fun () ->
+                    let open Result.Let_syntax in
+                    let queued =
+                      { snapshot with
+                        queued_internal_events =
+                          [ Session.Snapshot.Variant
+                              ("Internal_event", [ Variant ("Null", []) ])
+                          ]
+                      }
+                    in
+                    let%bind _ =
+                      A.change_moderator
+                        entry.actor
+                        (Some
+                           (Agent_session.Runtime_builder.encode_moderator_snapshot
+                              queued))
+                    in
+                    let%map _ =
+                      A.with_idle_queued_moderator_event
+                        entry.actor
+                        ~snapshot:queued
+                        (fun ~event:_ ~commit ->
+                           commit
+                             ~snapshot
+                             ~requests:
+                               { request_turn = true
+                               ; request_compaction = true
+                               ; end_session = Some "finished"
+                               })
+                    in
+                    ())
+               |> protocol_ok);
+            let stopped =
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                let rec wait () =
+                  let state = A.state entry.actor |> protocol_ok in
+                  match state.lifecycle.observed with
+                  | Stopped -> state
+                  | _ ->
+                    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                    wait ()
+                in
+                wait ())
+            in
+            let follow_up, event_intent =
+              match source with
+              | `Observation ->
+                let retained =
+                  List.find_exn stopped.invocations ~f:(fun invocation ->
+                    Agent_protocol.Id.Invocation.equal
+                      invocation.context.id
+                      child.context.id)
+                in
+                (Option.value_exn retained.observation).follow_up, None
+              | `Event ->
+                assert (List.is_empty stopped.invocations);
+                None, (List.hd_exn stopped.moderator_executions).intent
+            in
+            print_s
+              [%sexp
+                { source : [ `Observation | `Event ]
+                ; halted = (stopped.halted : bool)
+                ; active_operation = (Option.is_some stopped.active_operation : bool)
+                ; history_entries =
+                    (List.length stopped.conversation.canonical_history : int)
+                ; follow_up : I.follow_up_status option
+                ; event_intent : Agent_protocol.Moderator_execution.intent option
+                }];
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok))));
+  [%expect
+    {|
+    ((source Observation) (halted true) (active_operation false)
+     (history_entries 1)
+     (follow_up
+      ((Applied_follow_up
+        ((request_turn true) (request_compaction true) (end_session (finished))))))
+     (event_intent ()))
+    ((source Event) (halted true) (active_operation false) (history_entries 1)
+     (follow_up ()) (event_intent (Applied)))
+    |}]
+;;
+
 let%expect_test "running model jobs recover interrupted and redeliver without rerun" =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -1038,6 +2366,8 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
               ; completed_at = None
               ; result = None
               ; delivery = Pending
+              ; launch = None
+              ; progress = None
               }
           in
           Agent_session.Session_actor.add_job entry.actor job |> protocol_ok |> ignore;
@@ -1068,8 +2398,13 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
           let interrupted =
             match recovered.Agent_protocol.Job.status with
             | Interrupted _ -> true
-            | Queued | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled
-              -> false
+            | Queued
+            | Running
+            | Waiting_permission _
+            | Waiting_completion _
+            | Succeeded
+            | Failed _
+            | Cancelled -> false
           in
           Agent_client.Connection.close second_connection;
           Agent_server.Daemon.shutdown second_daemon |> protocol_ok;

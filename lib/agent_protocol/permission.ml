@@ -16,11 +16,16 @@ type choice =
   | Deny
 [@@deriving compare, equal, sexp]
 
+type owner =
+  | Operation of Id.Operation.t
+  | Invocation of Id.Invocation.t
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Permission.t
   ; session_id : Id.Session.t
   ; generation : int
-  ; operation_id : Id.Operation.t
+  ; owner : owner
   ; call_id : string
   ; tool_name : string
   ; runtime_identity : string option
@@ -42,6 +47,20 @@ and resolution =
   ; reason : string option
   }
 [@@deriving sexp]
+
+let t_of_sexp sexp =
+  let sexp =
+    match sexp with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.map fields ~f:(function
+           | Sexp.List [ Atom "operation_id"; id ] ->
+             Sexp.List [ Atom "owner"; List [ Atom "Operation"; id ] ]
+           | field -> field))
+    | _ -> sexp
+  in
+  t_of_sexp sexp
+;;
 
 let optional_field name value encode =
   Option.map value ~f:(fun value -> name, encode value)
@@ -130,7 +149,10 @@ let to_json t =
     [ Some ("id", Id.Permission.to_json t.id)
     ; Some ("session_id", Id.Session.to_json t.session_id)
     ; Some ("generation", `Number (Int.to_string t.generation))
-    ; Some ("operation_id", Id.Operation.to_json t.operation_id)
+    ; Some
+        (match t.owner with
+         | Operation id -> "operation_id", Id.Operation.to_json id
+         | Invocation id -> "invocation_id", Id.Invocation.to_json id)
     ; Some ("call_id", `String t.call_id)
     ; Some ("tool_name", `String t.tool_name)
     ; optional_field "runtime_identity" t.runtime_identity (fun value -> `String value)
@@ -161,10 +183,20 @@ let decode_identity fields =
       "generation"
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
-  let%map operation_id =
-    Json_codec.required_as fields "operation_id" Id.Operation.of_json
+  let%map owner =
+    match
+      ( List.Assoc.mem (Json_codec.to_alist fields) "operation_id" ~equal:String.equal
+      , List.Assoc.mem (Json_codec.to_alist fields) "invocation_id" ~equal:String.equal )
+    with
+    | true, false ->
+      Json_codec.required_as fields "operation_id" Id.Operation.of_json
+      |> Result.map ~f:(fun id -> Operation id)
+    | false, true ->
+      Json_codec.required_as fields "invocation_id" Id.Invocation.of_json
+      |> Result.map ~f:(fun id -> Invocation id)
+    | _ -> Error (Protocol_error.invalid_request "permission requires exactly one owner")
   in
-  id, session_id, generation, operation_id
+  id, session_id, generation, owner
 ;;
 
 let decode_invocation fields =
@@ -217,7 +249,7 @@ let validate t =
 let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
-  let%bind id, session_id, generation, operation_id = decode_identity fields in
+  let%bind id, session_id, generation, owner = decode_identity fields in
   let%bind call_id, tool_name, runtime_identity, invocation_display, rationale =
     decode_invocation fields
   in
@@ -228,7 +260,7 @@ let of_json json =
     { id
     ; session_id
     ; generation
-    ; operation_id
+    ; owner
     ; call_id
     ; tool_name
     ; runtime_identity

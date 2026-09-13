@@ -14,8 +14,29 @@ open! Core
     tool progress, but only the completed tool result enters root history. *)
 
 module Safe_point_input : sig
+  (** Inserted data and continuation requests are independent. Only genuine
+      deferred user input follows the user-driven continuation path; notification
+      wake requests must use the normal runtime policy and self-trigger budget. *)
+  type batch = private
+    { entries : History_entry.t list
+    ; user_input : bool
+    ; request_turn : bool
+    }
+
+  val empty : batch
+  val user_entries : History_entry.t list -> batch
+
+  (** The host supplies entries committed at this safe point and owns their
+      disclosure, provenance and deduplication. The driver does not commit them
+      again. True requests a continuation under policy; it is not acceptance of
+      a durable wake receipt. Empty entries can request a wake for data already
+      present in history. Idle scheduling and receipt disposition belong to the host. *)
+  val notification_entries : request_turn:bool -> History_entry.t list -> batch
+
+  val append : batch -> batch -> batch
+
   type t =
-    { consume_entries : unit -> History_entry.t list
+    { consume_entries : unit -> batch
     ; consume_compatibility_text : unit -> string option
     }
 end
@@ -25,15 +46,142 @@ type post_stream =
   -> inputs:Openai.Responses.Item.t list
   -> Openai.Responses.Response_stream.t Seq.t
 
+module Tool_dispatch : sig
+  (** Trusted driver adapter. Invoke only after revalidating the selected native
+      binding and authorizing its effects. Executes that binding with the driver's
+      progress/trace observer and legacy fork handler; it performs no admission. *)
+  type native_runner =
+    Ochat_function.t -> payload:string -> Openai.Responses.Tool_output.Output.t
+
+  type rejection =
+    | Invalid_input
+    | Pre_tool
+    | Pre_tool_failed
+    | Session_ended
+    (** The moderator has halted; do not start the requested implementation. *)
+
+  type request =
+    { kind : Tool_call.Kind.t
+    ; original_name : string
+    ; original_payload : string
+    ; name : string
+    ; payload : string
+    ; rejection : rejection option
+    ; call : History_entry.t
+    ; history : History_entry.t list
+    ; source : string option
+    ; parent_call_id : string option
+    }
+
+  type result =
+    { output : Openai.Responses.Tool_output.Output.t
+    ; commit_output : (History_entry.t -> unit) option
+    ; runtime_requests : Moderation.Runtime_request.t list
+    }
+
+  (** [run] dispatches after pre-tool moderation and canonical call commit.
+      Service callbacks are trusted host code.
+      With a service installed, failed pre-tool scripts produce [Pre_tool_failed]
+      with bounded diagnostics; cancellation still propagates. Without a service,
+      legacy pre-tool error propagation is unchanged.
+      Original/final arguments are execution inputs, not display-redacted text.
+      [Some] supplies a validated result; [None] selects normal native execution.
+      A routed implementation must validate its final target/schema and call
+      [authorize] before effects, including again after an owner-queue wait.
+      Requests with [rejection] may only record that failure; they must not run an
+      implementation or invoke [authorize]. Returning [None] preserves the
+      native synthetic rejection without execution. Fork requests retain their
+      separate [source] and [parent_call_id]; hosts must use the correct owner.
+      [commit_output] replaces generic history append and must persist the output
+      and receipt before returning. Failure skips publication and post hooks.
+      Pre-tool and implementation runtime requests are surfaced after publication.
+      End-session requests
+      suppress further moderator hooks and follow-up turns after pending outputs
+      are handled. Other requests participate in the normal turn-end decision. *)
+  type t =
+    { for_fork : (source:string -> parent_call_id:string -> t) option
+      (** Called inside the executing built-in fork to capture its actual owner.
+          The returned service owns child tool admission, not root provider
+          history. It must validate the branch identity and expiring parent
+          authority on each call. Recursive forks acquire their own parent scope. *)
+    ; commit_call : request -> bool
+      (** Runs before appending a canonical call or observing it. A root service
+          atomically saves the call and invocation intent. A fork service claims
+          its temporary child entry without appending root history; [run] admits
+          its child invocation before effects. Both return true. False uses the
+          ordinary history append. Failure aborts the turn. No policy or
+          implementation callback runs here. *)
+    ; prepare_call :
+        (request -> (Moderation.Tool_moderation.t option, string) Result.t) option
+      (** Optional host policy after the canonical history identity is allocated,
+          before the call is saved or observed. Input contains the child's already
+          moderated call. Rewrites update both canonical history and dispatch;
+          identity and original request evidence are retained. Rejected/invalid
+          calls skip this callback. The host must validate its delegation and final
+          selected capability; this callback grants no execution authority.
+          Requests using this policy cannot fall back to a legacy dispatcher. *)
+    ; validate_original :
+        kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
+      (** Pure validation of the original target and arguments before pre-tool
+          moderation. Unknown targets may pass to another host service. An error
+          skips pre moderation and reaches [run] as [Invalid_input], with the
+          original canonical call retained. Diagnostic text is not published. *)
+    ; run :
+        ?run_native:native_runner -> request -> authorize:(unit -> unit) -> result option
+    }
+
+  (** Compose host services with disjoint registered names. Every original-input
+      validator runs (unknown names must pass); the first service claiming a
+      final target owns execution/publication. Errors propagate, never fall
+      through. The host must reject conflicting registrations before composing. *)
+  val chain : t list -> t
+
+  (** Install one host preparation policy on the composed dispatch service.
+      Composing or replacing multiple such policies is rejected; the host must
+      explicitly coordinate ancestor decisions in its single callback. *)
+  val with_preparation
+    :  t
+    -> prepare:(request -> (Moderation.Tool_moderation.t option, string) Result.t)
+    -> t
+end
+
+(** A post-tool observer failed after the initial output was committed. Hosts
+    must record this separately; never re-execute the tool or replace its output. *)
+exception Post_tool_moderation_failed of History_entry.t * string
+
 (** Raised when an OpenAI stream emits no next event before its idle
     deadline. Each received event resets the deadline. *)
 exception Openai_stream_idle_timeout of float
+
+(** Host-owned event routing for identity-bearing streams. The host must claim
+    durable event ownership, install the prospective checkpoint atomically, and
+    define how returned runtime requests are consumed. Legacy raw-item APIs reject
+    these handlers rather than discarding identity or bypassing ownership. *)
+type moderator_event_handlers =
+  { before_model_call : unit -> (unit, string) result
+    (** Called once before provider dispatch, after turn preparation and budget
+        checks. A failed acknowledgement prevents the provider call. Transient
+        model forks have no moderator and never invoke this callback. *)
+  ; handle :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> event:Moderation.Event.t
+      -> (Moderation.Outcome.t option, string) result
+  ; drain :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> max_events:int
+      -> (Moderation.Outcome.t list, string) result
+  }
 
 type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
   ; session_meta : Jsonaf.t
   ; runtime_policy : Runtime_semantics.policy
+  ; event_handlers : moderator_event_handlers option
   }
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
@@ -71,8 +219,9 @@ val resume_ui_request
        turn-start boundary has decided the turn may proceed.}}
 
     [consume_entries] is used by the entry-native streaming loop after tool
-    outputs complete; those entries are canonical and are sent on the next
-    provider turn. [consume_compatibility_text] remains a request-only adapter
+    outputs complete; its batch separates canonical entries from user continuation
+    and notification wake requests. Quiet notification data does not itself start
+    another provider turn. [consume_compatibility_text] remains a request-only adapter
     for embedders using this raw helper.
 
     Without a moderator, [history] is forwarded unchanged unless
@@ -216,6 +365,7 @@ val run_completion_stream_in_memory_entries
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> ?authorize_tool:
        (kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit)
+  -> ?dispatch_tool:Tool_dispatch.t
   -> ?redact_tool_payload:(name:string -> string -> string)
   -> tools:Openai.Responses.Request.Tool.t list option
   -> ?tool_tbl:(string, Ochat_function.runner) Hashtbl.t
@@ -223,6 +373,12 @@ val run_completion_stream_in_memory_entries
   -> ?max_output_tokens:int
   -> ?reasoning:Openai.Responses.Request.Reasoning.t
   -> ?moderator:moderator
+  -> ?before_model_call:(unit -> unit)
+  -> ?prepare_model_input:
+       (history:History_entry.t list
+        -> effective:Moderation.Effective_entry.t list
+        -> History_entry.t list)
+  -> ?runtime_policy:Runtime_semantics.policy
   -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
   -> ?history_compaction:bool
   -> ?parallel_tool_calls:bool
@@ -242,7 +398,20 @@ val run_completion_stream_in_memory_entries
     adapts [allocator]. Each identity-bearing
     stream callback is emitted only after its ID has been reserved, and the
     same ID appears in the returned history. Tool-call and tool-output entries
-    remain distinct despite sharing a provider [call_id]. *)
+    remain distinct despite sharing a provider [call_id].
+
+    [before_model_call] runs before each root provider request, after moderator
+    admission and outside provider retries. Hosts use it to persist notification
+    wake acceptance; an exception prevents the request. Forks do not inherit it.
+    [prepare_model_input] follows that admission and receives identity-bearing
+    effective history after moderator projection. The trusted host returns only
+    newly committed reference entries; these are appended to both canonical
+    history and this request, without user-submission/item-appended moderation.
+    The hook runs once outside provider retries, never for forks or halted turns.
+    An exception prevents the request. Hosts own atomic persistence, provenance
+    and deduplication; returned IDs must already be durably reserved.
+    [runtime_policy] overrides the moderator/default continuation policy for the
+    root stream, including sessions without a moderator. *)
 
 (** [handle_item_appended_entries ...] notifies the moderator about the final
     already-committed entry in [history]. Hosts call it once for a newly

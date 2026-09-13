@@ -89,6 +89,7 @@ module Response : sig
     ; implementation : Implementation.t
     ; server_id : Id.Server.t
     ; enabled_features : string list
+    ; extensions : Extension_capabilities.t option [@sexp.option]
     ; principal : Principal.t
     ; limits : Limits.t
     ; event_retention : Event_retention.t
@@ -103,6 +104,7 @@ module Response : sig
     -> implementation:Implementation.t
     -> server_id:Id.Server.t
     -> enabled_features:string list
+    -> extensions:Extension_capabilities.t option
     -> principal:Principal.t
     -> limits:Limits.t
     -> event_retention:Event_retention.t

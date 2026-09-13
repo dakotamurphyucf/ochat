@@ -19,9 +19,24 @@ type t
 
 val default_permission_profile : Config.Permission_profile.t
 
+(** [daemon_options] supplies the shared runtime's trusted host configuration,
+    including provider adapters, policy and internal extension qualification.
+    Defaults match [Daemon.default_options]. The embedded host always derives
+    extension host metadata from [data_root], keeps process-bound liveness and
+    starts no network listener. A durable data root preserves data; it does not
+    keep jobs running after the embedding process exits. Startup initializes the
+    Unix cryptographic RNG before allocating IDs or a transient data root. *)
 val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> ?daemon_options:Daemon.options
+  -> ?authoring_package_files:string list
+       (** Absolute paths captured through the shared bounded loader before store
+         creation. Packages configure the same host as daemon configuration;
+         they do not enable extensions or widen selected tool authority. *)
+  -> ?authoring_budget:Chat_response.Authoring_validation.context_budget
+       (** Query defaults/ceiling and automatic insertion budget, shared with
+           daemon configuration and inherited by delegated sessions. *)
   -> options
   -> (t, Agent_protocol.Error.t) result
 

@@ -1,0 +1,59 @@
+let initial_state = 0
+let on_event ctx state event =
+  match event with
+  | `Session_start ->
+    let* () = Log.debug("begin") in
+    let* () = Task.catch(
+      (let* () = Turn.append_notice("discarded") in
+       let* result = Tool.call("probe", `Null) in
+       let* () = Log.error("probe already ran") in
+       Task.fail("recover")),
+      fun message -> Log.warn(message)) in
+    let* () = Log.info("commit") in
+    let* () = Turn.prepend_system("Use the selected tools within their permissions.") in
+    let* () = Turn.append_notice("Ready") in
+    Task.pure(state + 1)
+  | `Pre_tool_call(call) ->
+    let action =
+      if Tool_call.is_named(call, "reject") then Tool.reject("Declined by moderator")
+      else if Tool_call.is_named(call, "rewrite") then
+        Tool.rewrite_args(Json.set_field(call.args, "mode", `String("safe")))
+      else if Tool_call.is_named(call, "redirect") then Tool.redirect("echo", call.args)
+      else if Tool_call.is_named(call, "conflict") then
+        let* () = Tool.approve() in Tool.reject("second decision")
+      else Tool.approve()
+    in
+    let* () = action in
+    Task.pure(state + 1)
+  | `Turn_start ->
+    let target = match Context.last_assistant_item(ctx) with
+      | `None -> Option.none()
+      | `Some(item) -> Option.some(Item.id(item))
+    in
+    let* () = Turn.replace_or_append(target, Item.assistant_text("status", "Reviewed")) in
+    Task.pure(state + 1)
+  | `Internal_event(command) ->
+    (match Json.as_string(command) with
+     | `Some("edit") ->
+       (match Context.last_assistant_item(ctx) with
+        | `None -> Task.pure(state)
+        | `Some(item) ->
+          let target = Item.id(item) in
+          let* () = Turn.replace_item(target, Item.assistant_text("draft", "Draft")) in
+          let* () = Turn.replace_message(target, Item.assistant_text("final", "Final")) in
+          let* () = Turn.delete_item(target) in
+          let* () = (match Context.last_tool_result(ctx) with
+            | `None -> Task.pure(())
+            | `Some(result) -> Turn.delete_message(Item.id(result))) in
+          let* () = Turn.append_item(Item.assistant_text("summary", "Summary")) in
+          let* () = Turn.append_message(Item.notice("notice", "Review complete")) in
+          Task.pure(state + 1))
+     | `Some("fail") ->
+       let* () = Turn.append_notice("must not commit") in
+       Task.fail("whole handler failed")
+     | `Some("halt") ->
+       let* () = Turn.halt("Review finished") in
+       let* () = Log.info("after halt construction") in
+       Task.pure(state + 1)
+     | _ -> Task.pure(state))
+  | _ -> Task.pure(state)

@@ -1,0 +1,37 @@
+{
+  "version": 1,
+  "packages": [
+    {
+      "help": {
+        "version": 1,
+        "package": "e10-children",
+        "tasks": [
+          "child_agent"
+        ],
+        "topics": [
+          "custom.e10-children.guide"
+        ],
+        "required_helpers": [
+          "ochat_authoring_context",
+          "ochat_validate"
+        ]
+      },
+      "topics": [
+        {
+          "id": "custom.e10-children.guide",
+          "title": "E10 children composition guide",
+          "prerequisites": [
+            "runtime.delegation.stop-helper",
+            "chatmd.definitions",
+            "runtime.authority.tool-selection"
+          ],
+          "surfaces": [
+            "delegated_moderator_v1"
+          ],
+          "source_name": "e10-children.md",
+          "text": "# Persisted specialists: X05\n\nUse a persisted child for an agent with its own retained conversation, moderator state and session ID. For deterministic logic over current tools use a one-off script instead. The complete X05 bundle has native generated and authored coordinator prompts plus a private-data-separated daemon configuration. x05-create.json captures the generated root and its inherited read_file import; x05-helper-child.chatmd demonstrates a persisted lifecycle moderator that counts pre-tool events.\n\nPrepare child_agent and follow all continuations. Put model=\"gpt-6-astra\" and any reasoning choice in the child's single config declaration. Child instructions/model/reasoning can differ, but selected tools and shell/file authority cannot exceed delegated authority. Capture every import in sources and set tools to an explicit smaller set of original parent bindings. Generated declarations use type=\"inherited\"; they cannot invent new native/shell/MCP implementations. A root import escaping the captured bundle and an undelegated read_file declaration must fail. See runtime.delegation.generated, chatmd.definitions and runtime.authority.tool-selection.\n\nThe delegated moderator exports initial_state and on_event ctx state event returning a Task of state. It has no direct Model or Process surface. Validate as generated_chatmd with root_file, sources and tools; then submit the complete creation request to agent_create. Use a stable idempotency_key and start_immediately=true for an active child. Validation cannot authorize creation or ensure provider availability.\n\nRetain the returned session ID. agent_send uses its own stable request key and returns a submission receipt. Wait for that receipt with agent_wait, then read bounded output with agent_read and retain continuation cursors. Distinguish a committed output page from terminal completion. agent_status reports activity; agent_stop preserves data. Sending does not start a stopped child. Owned child shutdown can stop the child on daemon shutdown; authorized host start is separate from send. Reuse IDs and pinned source across restart instead of silently creating replacements. Read runtime.delegation.submissions, runtime.delegation.output and runtime.delegation.stop-helper.\n\nThe authored variant offers researcher with persistence=\"optional\" and reviewer with persistence=\"persistent\". The model chooses from the generated tool schema; retain its returned ID/receipt for later generic lifecycle operations. The authored definition controls policy, and named tools do not accept arbitrary replacement child source. Two retained instances own independent moderator counters. These examples are qualified with offline providers, including retained state and restart; a live run uses the configured provider.\n"
+        }
+      ]
+    }
+  ]
+}

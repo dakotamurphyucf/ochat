@@ -1,5 +1,10 @@
 open! Core
 
+type generated_lifetime =
+  | Owned
+  | Independent
+[@@deriving equal, sexp_of]
+
 type limits =
   { max_journal_payload : int
   ; max_segment_bytes : int64
@@ -15,13 +20,41 @@ type limits =
   ; event_replay_capacity : int
   ; max_attachments_per_session : int
   ; subscriber_queue_capacity : int
+  ; job_result_inline_bytes : int
+  ; job_result_max_bytes : int
+  ; job_result_recovery_max_count : int
+  ; job_result_recovery_max_bytes : int
+  ; delegation_recovery_max_count : int
+  ; delegation_recovery_max_bytes : int
+  ; delegation_artifact_max_entries : int
+  ; delegation_artifact_max_bytes : int
+  ; delegation_max_depth : int
+  ; managed_submission_max_count : int option
+  ; managed_stop_max_count : int option
+  ; managed_message_max_bytes : int option
+  ; managed_output_page_max_bytes : int
+  ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
+  ; subscriptions : Agent_session.Staged_subscriptions.limits
+  ; schedules : Agent_session.Staged_schedules.limits
+  ; notifications : Agent_session.Staged_notifications.limits
+  ; ingress : Agent_session.Staged_ingress.limits
   }
 
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
+  ; registry : Session_registry.t
+  ; authored_resources : Authored_resources.t
+  ; authored_services :
+      Agent_session.Runtime_builder.authored_resources
+      -> Agent_session.Native_tool_invocation.borrowed
+      -> ( Agent_session.Authored_agent_call.host * Agent_session.Managed_session_service.t
+           , Agent_protocol.Invocation.tool_error )
+           result
+  ; generated_creation_mutex : Eio.Mutex.t
   ; idempotency_store : Agent_store.Idempotency_store.t
+  ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
   ; workspaces : Agent_session.Workspace_catalog.t
   ; catalog_mutex : Eio.Mutex.t
@@ -34,6 +67,14 @@ type t =
   ; tool_dir : string
   ; home : string
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; qualify_chatml_extensions : bool
+  ; session_helpers : Agent_session.Session_management_channel.grant list
+  ; independent_lifetime_policy : string option
+  ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; generated_creation : Agent_session.Generated_session_request.service
+  ; managed_sessions : Agent_session.Managed_session_service.t
+  ; managed_output_cursors : Managed_output_cursor.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -52,53 +93,12 @@ module Legacy_provenance = struct
   [@@deriving sexp]
 end
 
-let create
-      ~sw
-      ~env
-      ~store
-      ~idempotency_store
-      ~prompts
-      ~workspaces
-      ~permission_profiles
-      ~manifest_grants
-      ~quota_manager
-      ~job_capacity
-      ~tool_dir
-      ~home
-      ~model_post_stream
-      ~durability
-      ~limits
-  =
-  let permission_profiles_by_id =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
-  in
-  let permission_profile_revisions =
-    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
-      Map.set
-        profiles
-        ~key:profile.Agent_session.Permission_policy.revision_digest
-        ~data:profile)
-  in
-  { sw
-  ; env
-  ; store
-  ; idempotency_store
-  ; prompts
-  ; workspaces
-  ; catalog_mutex = Eio.Mutex.create ()
-  ; permission_profiles = permission_profiles_by_id
-  ; permission_profile_revisions
-  ; manifest_grants
-  ; quota_manager
-  ; job_capacity
-  ; tool_dir
-  ; home
-  ; model_post_stream
-  ; durability
-  ; limits
-  }
-;;
+type runtime_source =
+  | Authored of Agent_session.Prompt_revision.t
+  | Generated_artifact of
+      { artifact : Agent_store.Prompt_artifact_store.Artifact.t
+      ; materialized_tree : Eio.Fs.dir_ty Eio.Path.t
+      }
 
 let install_catalogs t ~workspaces ~permission_profiles ~manifest_grants =
   Agent_session.Workspace_catalog.install t.workspaces ~replacement:workspaces;
@@ -138,6 +138,11 @@ let unavailable code message =
 ;;
 
 let resolve_prompt t = function
+  | Agent_protocol.Session.Prompt_ref.Generated _ ->
+    Error
+      (unavailable
+         Permission_denied
+         "generated sessions require scoped delegation admission")
   | Agent_protocol.Session.Prompt_ref.Local_path _ ->
     Error (unavailable Prompt_unavailable "daemon sessions require a catalog prompt")
   | Catalog prompt_id ->
@@ -219,6 +224,7 @@ let session_spec request definition revision instance profile =
   Agent_session.Session_state.Spec.
     { protocol = request.Agent_protocol.Session.Create_request.spec
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
+    ; delegation = None
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
     ; workspace_instance = instance
     ; permission_profile = profile.Agent_session.Permission_policy.id
@@ -361,13 +367,279 @@ let prompt_directory revision =
     (Agent_session.Prompt_revision.root_relative_path revision |> Filename.dirname)
 ;;
 
-let runtime_paths t handle revision state =
+let source_prompt_directory = function
+  | Authored revision -> prompt_directory revision
+  | Generated_artifact { artifact; materialized_tree } ->
+    Filename.concat
+      (Eio.Path.native_exn materialized_tree)
+      (Filename.dirname artifact.root_relative_path)
+;;
+
+let restore_state_source t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_state.validate state in
+  match state.spec.protocol.prompt, state.spec.delegation with
+  | Generated revision_id, Some reference ->
+    let%bind record =
+      Agent_store.Delegation_store.resolve
+        (Agent_store.Session_store.delegations t.store)
+        reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind artifact_store =
+      Agent_store.Prompt_artifact_store.create
+        ~env:t.env
+        ~root:
+          (Agent_store.Data_root.prompt_artifacts_path
+             (Agent_store.Session_store.data_root t.store))
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%map artifact =
+      match record.admission.authored_tool with
+      | Some _ ->
+        Agent_session.Authored_agent_source.load_artifact
+          ~artifact_store
+          ~reservation:record
+      | None ->
+        Agent_session.Generated_definition.load_artifact
+          ~artifact_store
+          ~revision_id
+          ~manifest_sha256:record.admission.manifest_sha256
+        |> Result.map_error ~f:(fun diagnostics ->
+          unavailable
+            Prompt_unavailable
+            (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+             |> String.concat ~sep:"\n"))
+    in
+    Generated_artifact
+      { artifact
+      ; materialized_tree =
+          Agent_store.Prompt_artifact_store.materialized_tree artifact_store revision_id
+      }
+  | _ ->
+    (match state.spec.prompt_definition_id with
+     | None ->
+       Error (unavailable Prompt_unavailable "session has no catalog prompt identity")
+     | Some definition_id ->
+       Agent_session.Prompt_catalog.restore_revision
+         t.prompts
+         ~definition_id
+         ~revision_id:state.spec.prompt_revision_id
+       |> Result.map ~f:(fun revision -> Authored revision)
+       |> Result.map_error ~f:(fun diagnostics ->
+         unavailable
+           Prompt_unavailable
+           (List.map diagnostics ~f:(fun value -> value.message)
+            |> String.concat ~sep:"\n")))
+;;
+
+let restore_state_profile t (state : Agent_session.Session_state.t) =
+  permission_profile_revision t state.spec.permission_profile_digest
+;;
+
+let parent_moderation_source t session_id =
+  match Session_registry.find t.registry session_id with
+  | Some parent ->
+    let open Result.Let_syntax in
+    let%bind state = Agent_session.Session_actor.state parent.actor in
+    (match state.moderator, state.lifecycle.desired with
+     | None, _ -> Ok None
+     | Some _, Running -> Runtime_owner.moderation_source parent.runtime
+     | Some _, Stopped ->
+       Error
+         (unavailable
+            Permission_denied
+            "delegation.owner_mediation_unavailable: stopped parent policy cannot be \
+             activated for a child"))
+  | None ->
+    Error
+      (unavailable
+         Permission_denied
+         "delegation.parent_missing: parent runtime is unavailable")
+;;
+
+let independent_authorization_digest t =
+  Option.bind t.independent_lifetime_policy ~f:(fun revision ->
+    match String.is_empty (String.strip revision) || String.length revision > 1024 with
+    | true -> None
+    | false ->
+      Some
+        (Chatmd_shell_spec.Source_ref.digest
+           ([%sexp ("ochat.independent-lifetime.v1" : string), (revision : string)]
+            |> Sexp.to_string_mach)))
+;;
+
+let authorize_independent t (record : Agent_store.Delegation_store.record) =
+  match record.admission.lifetime with
+  | Owned | Invocation_owned _ -> Ok ()
+  | Independent { authorization_sha256 } ->
+    (match t.qualify_chatml_extensions, independent_authorization_digest t with
+     | true, Some current when String.equal current authorization_sha256 -> Ok ()
+     | _ ->
+       Error
+         (unavailable
+            Permission_denied
+            "delegation.lifetime_denied: independent lifetime is not authorized by \
+             current host policy"))
+;;
+
+let requested_lifetime t = function
+  | Owned -> Ok Agent_store.Delegation_store.Admission.Owned
+  | Independent ->
+    (match t.qualify_chatml_extensions, independent_authorization_digest t with
+     | true, Some authorization_sha256 ->
+       Ok (Agent_store.Delegation_store.Admission.Independent { authorization_sha256 })
+     | _ ->
+       Error
+         (unavailable
+            Permission_denied
+            "delegation.lifetime_denied: independent lifetime requires explicit host \
+             authorization"))
+;;
+
+let parent_authority_fingerprint t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind moderator = parent_moderation_source t state.identity.session_id in
+  Agent_session.Delegation_authority.fingerprint ?moderator state
+;;
+
+let generated_parent ?(check_stop_epoch = true) t (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let missing_host () =
+    Error
+      (unavailable
+         Invalid_state
+         "delegation.runtime_unavailable: a qualified live parent runtime host is \
+          required")
+  in
+  match t.qualify_chatml_extensions, state.spec.delegation with
+  | true, Some reference ->
+    let%bind record =
+      Agent_store.Delegation_store.resolve
+        (Agent_store.Session_store.delegations t.store)
+        reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match record.stage with
+      | Linked -> Ok ()
+      | Reserved | Artifact_installed | Child_installed ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.not_linked: child management relationship is not committed")
+    in
+    (match Session_registry.find t.registry record.key.parent_session_id with
+     | None -> missing_host ()
+     | Some parent ->
+       let%bind current = Agent_session.Session_actor.state parent.actor in
+       let%bind () =
+         Agent_session.Delegation_authority.check_invocation_owner record current
+       in
+       let%bind fingerprint = parent_authority_fingerprint t current in
+       let%bind () = authorize_independent t record in
+       (match
+          ( current.lifecycle.desired
+          , current.lifecycle.observed
+          , current.halted
+          , current.failure
+          , record.revocation
+          , record.admission.lifetime )
+        with
+        | ( Running
+          , (Idle | Running_turn _ | Waiting_for_permission _)
+          , false
+          , None
+          , None
+          , (Owned | Invocation_owned _) )
+          when String.equal fingerprint record.admission.authority_sha256
+               && ((not check_stop_epoch)
+                   || Int64.equal
+                        current.stop_epoch
+                        (Option.value
+                           state.parent_stop_epoch
+                           ~default:
+                             (Option.value record.admission.parent_stop_epoch ~default:0L))
+                  ) -> Ok (parent, record)
+        | _, _, _, _, None, Independent _
+          when String.equal fingerprint record.admission.authority_sha256 ->
+          Ok (parent, record)
+        | _ ->
+          Error
+            (unavailable
+               Permission_denied
+               "delegation.parent_authority: parent authority or lifetime does not \
+                permit execution")))
+  | _ -> missing_host ()
+;;
+
+let check_source_for_execution t state = function
+  | Authored _ -> Ok ()
+  | Generated_artifact _ -> Result.map (generated_parent t state) ~f:ignore
+;;
+
+type parent_stop_recovery =
+  { reference : Agent_store.Delegation_store.Reference.t
+  ; epoch : int64
+  ; stop : bool
+  }
+
+let parent_stop_recovery t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  match state.spec.delegation with
+  | None -> Ok None
+  | Some reference ->
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    (match record.admission.lifetime with
+     | Independent _ -> Ok None
+     | Owned | Invocation_owned _ ->
+       let previous =
+         Option.value
+           state.parent_stop_epoch
+           ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+       in
+       let%bind parent =
+         match Session_registry.find t.registry record.key.parent_session_id with
+         | None -> Ok None
+         | Some entry ->
+           Agent_session.Session_actor.state entry.actor |> Result.map ~f:Option.some
+       in
+       let epoch =
+         Option.value_map parent ~default:previous ~f:(fun parent -> parent.stop_epoch)
+       in
+       let%bind () =
+         match Int64.(epoch < previous) with
+         | false -> Ok ()
+         | true ->
+           Error
+             (protocol_of_store
+                (Agent_store.Store_error.Corrupt
+                   "parent stop counter moved backwards during child recovery"))
+       in
+       let stop =
+         Option.is_some record.revocation
+         || Int64.(epoch > previous)
+         || Option.value_map parent ~default:true ~f:(fun parent ->
+           Agent_protocol.Session.equal_desired_state parent.lifecycle.desired Stopped
+           || parent.halted
+           || Option.is_some parent.failure
+           || Result.is_error
+                (Agent_session.Delegation_authority.check_invocation_owner record parent))
+       in
+       Ok (Some { reference; epoch; stop }))
+;;
+
+let runtime_paths t handle source state =
   Agent_session.Runtime_paths.create
     ~env:t.env
     ~tool_dir:t.tool_dir
     ~workspace:
       state.Agent_session.Session_state.spec.workspace_instance.canonical_root.native_path
-    ~prompt_dir:(prompt_directory revision)
+    ~prompt_dir:(source_prompt_directory source)
     ~session_dir:(Agent_store.Session_store.Handle.directory handle)
     ~cache_dir:(Agent_store.Session_store.Handle.cache_directory handle)
     ~home:t.home
@@ -439,6 +711,23 @@ let shell_broker_response (request : Shell_runtime.Approval_broker.ui_request) r
     Deny (Option.value resolution.reason ~default:"shell command approval was denied")
 ;;
 
+let shell_permission_owner (state : Agent_session.Session_state.t) =
+  match Agent_session.Native_tool_invocation.current_scope () with
+  | Active invocation
+    when Agent_protocol.Id.Session.equal
+           invocation.context.session_id
+           state.identity.session_id
+         && invocation.context.generation = state.identity.generation ->
+    Ok (Agent_protocol.Permission.Invocation invocation.context.id)
+  | Active _ | Expired ->
+    Error (unavailable Invalid_state "shell invocation scope is stale or foreign")
+  | Unbound ->
+    state.active_operation
+    |> Result.of_option
+         ~error:(unavailable Invalid_state "shell permission has no executing owner")
+    |> Result.map ~f:(fun operation -> Agent_protocol.Permission.Operation operation.id)
+;;
+
 let resolve_shell_permission t profile actor request ~review_on_timeout =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
@@ -452,17 +741,13 @@ let resolve_shell_permission t profile actor request ~review_on_timeout =
        | Deny -> Deny "no shell permission responder is available"
        | Approve_session | Approve_prefix | Durable_exact -> assert false)
   else (
-    let%bind operation =
-      state.active_operation
-      |> Result.of_option
-           ~error:(unavailable Invalid_state "shell permission has no active operation")
-    in
+    let%bind owner = shell_permission_owner state in
     let permission =
       Agent_protocol.Permission.
         { id = Agent_protocol.Id.Permission.create ()
         ; session_id = state.identity.session_id
         ; generation = state.identity.generation
-        ; operation_id = operation.id
+        ; owner
         ; call_id = request.request.context.request_id
         ; tool_name = "shell:" ^ request.runtime_id
         ; runtime_identity = Some request.request.identity.command_hash
@@ -595,7 +880,7 @@ let manifest_now_ns t () =
   |> Int63.to_int64
 ;;
 
-let operator_manifest_authorizer t revision state =
+let operator_manifest_authorizer t ~manifest_sha256 revision state =
   let artifact = Agent_session.Prompt_revision.artifact revision in
   fun request ->
     let open Shell_runtime.Manifest_authorizer in
@@ -603,7 +888,7 @@ let operator_manifest_authorizer t revision state =
       ( state.Agent_session.Session_state.spec.prompt_definition_id
       , state.spec.workspace_instance.definition_id
       , state.identity.creating_principal
-      , artifact.shell_manifest_sha256 )
+      , manifest_sha256 )
     with
     | ( Some prompt_definition_id
       , Some workspace_definition_id
@@ -627,7 +912,7 @@ let operator_manifest_authorizer t revision state =
     | _ -> Reject "shell manifest cannot be bound to a complete session identity"
 ;;
 
-let manifest_authorizer t profile revision state actor_ref shell_state =
+let manifest_authorizer ?manifest_sha256 t profile revision state actor_ref shell_state =
   let load () =
     match !actor_ref with
     | None -> Ok !shell_state.Session.Shell_state.manifest_grants
@@ -647,7 +932,13 @@ let manifest_authorizer t profile revision state actor_ref shell_state =
   in
   let fallback =
     match profile.Agent_session.Permission_policy.manifest_authorization with
-    | Require_grant -> operator_manifest_authorizer t revision state
+    | Require_grant ->
+      let manifest_sha256 =
+        match manifest_sha256 with
+        | Some hash -> Some hash
+        | None -> (Agent_session.Prompt_revision.artifact revision).shell_manifest_sha256
+      in
+      operator_manifest_authorizer t ~manifest_sha256 revision state
     | Deny_manifest -> Shell_runtime.Manifest_authorizer.deny
     | Assume_authorized -> Shell_runtime.Manifest_authorizer.assume_authorized
   in
@@ -667,17 +958,6 @@ let manifest_authorizer t profile revision state actor_ref shell_state =
 type pending_schedule_operation =
   | Add of Agent_protocol.Schedule.t
   | Cancel of Agent_protocol.Id.Schedule.t
-
-let due_after t delay_ms =
-  try
-    now t
-    |> Agent_protocol.Timestamp.to_time_ns
-    |> Fn.flip Time_ns.add (Time_ns.Span.of_ms (Float.of_int delay_ms))
-    |> Agent_protocol.Timestamp.of_time_ns
-    |> Result.return
-  with
-  | exn -> Error ("schedule due time overflow: " ^ Exn.to_string exn)
-;;
 
 let add_bound_schedule actor_ref pending schedule =
   match !actor_ref with
@@ -700,7 +980,10 @@ let schedule_services t state actor_ref pending =
     then Error "schedule delay must be nonnegative"
     else (
       let created_at = now t in
-      let%bind next_due_at = due_after t delay_ms in
+      let%bind next_due_at =
+        Agent_protocol.Timestamp.add_ms created_at delay_ms
+        |> Result.map_error ~f:(fun error -> error.message)
+      in
       let schedule =
         Agent_protocol.Schedule.
           { id = Agent_protocol.Id.Schedule.create ()
@@ -713,6 +996,8 @@ let schedule_services t state actor_ref pending =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; delivery_cancellation = None
+          ; ownership = None
           }
       in
       add_bound_schedule actor_ref pending schedule)
@@ -767,6 +1052,8 @@ let model_job t state ~recipe ~payload ~delivery =
     ; completed_at = None
     ; result = None
     ; delivery
+    ; launch = None
+    ; progress = None
     }
 ;;
 
@@ -799,9 +1086,9 @@ let shell_review_permission t actor_ref profile request =
       Agent_session.Session_actor.state actor
       |> Result.map_error ~f:(fun error -> error.message)
     in
-    let%bind operation =
-      current.active_operation
-      |> Result.of_option ~error:"shell permission has no active operation"
+    let%bind owner =
+      shell_permission_owner current
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
     in
     let invocation = shell_policy_invocation request in
     let permission =
@@ -809,7 +1096,7 @@ let shell_review_permission t actor_ref profile request =
         { id = Agent_protocol.Id.Permission.create ()
         ; session_id = current.identity.session_id
         ; generation = current.identity.generation
-        ; operation_id = operation.id
+        ; owner
         ; call_id = request.request.context.request_id
         ; tool_name = invocation.tool_name
         ; runtime_identity = Some invocation.identity_digest
@@ -874,6 +1161,624 @@ let shell_approval_provider t profile actor_ref =
   | Policy, _ -> policy_shell_provider t profile actor_ref
 ;;
 
+let extension_actor actor_ref =
+  Result.of_option
+    !actor_ref
+    ~error:(unavailable Invalid_state "extension runtime is not installed in a session")
+;;
+
+let authorize_extension_native t actor_ref profile native invocation binding =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module Policy = Agent_session.Permission_policy in
+  let open Result.Let_syntax in
+  let%bind actor = extension_actor actor_ref in
+  let%bind state = A.state actor in
+  let%bind () =
+    match Agent_session.Native_tool_invocation.current_scope () with
+    | Active current
+      when I.equal_context current.context invocation.I.context
+           && Agent_protocol.Id.Session.equal
+                current.context.session_id
+                state.identity.session_id
+           && current.context.generation = state.identity.generation
+           && String.equal
+                profile.Policy.revision_digest
+                state.spec.permission_profile_digest -> Ok ()
+    | Active _ | Expired | Unbound ->
+      Error
+        (unavailable
+           Permission_denied
+           "native invocation has no current scoped authority")
+  in
+  if
+    Set.mem
+      native.Chat_response.Agent_runtime.shell_tool_names
+      invocation.context.tool_name
+  then Ok ()
+  else (
+    let identity_digest =
+      String.concat
+        ~sep:"\000"
+        [ "ochat.native-permission.v2"
+        ; profile.Policy.revision_digest
+        ; invocation.context.tool_name
+        ; invocation.context.implementation_revision
+        ; Chat_response.Tool_capability.permission_fingerprint binding
+        ; Jsonaf.to_string invocation.context.input
+        ]
+      |> Chatmd_shell_spec.Source_ref.digest
+    in
+    let request : Policy.invocation =
+      { tool_name = invocation.context.tool_name
+      ; identity_digest
+      ; invocation_display = invocation.context.tool_name ^ "(<redacted>)"
+      ; effects = [ "tool_invocation" ]
+      }
+    in
+    let%bind granted =
+      A.invocation_granted actor ~tool_name:request.tool_name ~identity_digest
+    in
+    match granted with
+    | true -> Ok ()
+    | false ->
+      let decision =
+        Policy.decide
+          profile
+          ~responder_available:(shell_responder_available t state)
+          request
+      in
+      let permission choices =
+        Agent_protocol.Permission.
+          { id = Agent_protocol.Id.Permission.create ()
+          ; session_id = state.identity.session_id
+          ; generation = state.identity.generation
+          ; owner = Invocation invocation.context.id
+          ; call_id =
+              Option.value
+                invocation.context.provider_call_id
+                ~default:(Agent_protocol.Id.Invocation.to_string invocation.context.id)
+          ; tool_name = request.tool_name
+          ; runtime_identity = Some identity_digest
+          ; invocation_display = request.invocation_display
+          ; rationale = None
+          ; effects = request.effects
+          ; choices
+          ; created_at = now t
+          ; expires_at = shell_permission_expiry t profile
+          ; state = Pending
+          ; resolution = None
+          }
+      in
+      let accept (resolution : Agent_protocol.Permission.resolution) =
+        match resolution.choice with
+        | Deny ->
+          Error (unavailable Permission_denied "native tool invocation was denied")
+        | Approve_once | Approve_session | Approve_prefix | Durable_exact -> Ok ()
+      in
+      (match decision with
+       | Allow_now -> Ok ()
+       | Deny_now reason -> Error (unavailable Permission_denied reason)
+       | Request_permission ->
+         let permission =
+           permission
+             [ Approve_once; Approve_session; Approve_prefix; Durable_exact; Deny ]
+         in
+         let fallback =
+           match profile.fallback with
+           | Fallback_allow -> Agent_protocol.Permission.Approve_once
+           | Fallback_deny | Fallback_allow_if_policy | Fallback_reviewer _ -> Deny
+         in
+         let%bind resolution =
+           match profile.fallback with
+           | Fallback_reviewer _ ->
+             A.request_permission_with_review_fallback
+               actor
+               ~permission
+               ~timeout_seconds:(shell_permission_timeout profile)
+               ~fallback
+               ~review_on_timeout:(fun () ->
+                 review_permission t actor_ref profile request)
+           | Fallback_allow | Fallback_deny | Fallback_allow_if_policy ->
+             A.request_permission
+               actor
+               ~permission
+               ~timeout_seconds:(shell_permission_timeout profile)
+               ~fallback
+         in
+         accept resolution
+       | Request_review ->
+         let%bind resolution =
+           A.request_review
+             actor
+             ~permission:(permission [ Approve_once; Deny ])
+             ~review:(fun () -> review_permission t actor_ref profile request)
+         in
+         (match resolution.choice with
+          | Approve_once | Deny -> accept resolution
+          | Approve_session | Approve_prefix | Durable_exact ->
+            Error
+              (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
+;;
+
+let extension_jobs t actor_ref registry =
+  let module A = Agent_session.Session_actor in
+  let module Jobs = Agent_session.Script_job_service in
+  let host : Jobs.host =
+    { stage =
+        (fun owner request ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          let%bind job = A.prepare_background_job_launch actor ~owner request in
+          let%bind state = A.state actor in
+          let key =
+            Job_capacity.Key.create
+              ~principal_id:state.identity.creating_principal
+              ~prompt:
+                (Option.value_map
+                   state.spec.prompt_definition_id
+                   ~default:"<local>"
+                   ~f:Agent_protocol.Id.Prompt_definition.to_string)
+              ~workspace_conflict_domain:state.spec.workspace_instance.conflict_domain
+              ~session_id:job.session_id
+              ~kind:job.kind
+              ~nested_depth:(Option.value_exn job.launch).nested_depth
+          in
+          let%bind reservation = Job_capacity.reserve_job t.job_capacity key ~job in
+          let%bind reservation =
+            Result.of_option
+              reservation
+              ~error:(unavailable Resource_limit "background job capacity is exhausted")
+          in
+          let%map () =
+            A.stage_background_job
+              actor
+              ~job
+              ~capacity:
+                { publish = (fun () -> Job_capacity.publish reservation)
+                ; abort = (fun () -> Job_capacity.abort reservation)
+                }
+          in
+          job)
+    ; select =
+        (fun owner ids ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_background_jobs actor ~owner ~ids))
+    ; abort =
+        (fun owner id ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_background_job actor ~owner ~id)
+             : (unit, Agent_protocol.Error.t) result))
+    ; get =
+        (fun owner id ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          A.read_script_job actor ~owner ~id)
+    ; materialize =
+        (fun owner expected ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_job_result actor ~owner ~expected))
+    ; cancel =
+        (fun owner id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.cancel_script_job actor ~owner ~id))
+    }
+  in
+  Jobs.create
+    ~env:t.env
+    ~policy:Chat_response.One_off_request.default_policy
+    ~current_capabilities:(fun () -> registry)
+    ~host
+;;
+
+let extension_subscriptions t actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_subscription_service in
+  let host : Service.host =
+    { create =
+        (fun owner source ~kind ~lifetime_ms ~wake ~completion_schema ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_subscription
+              actor
+              ~owner
+              ~source
+              ~kind
+              ~lifetime_ms
+              ~wake
+              ~completion_schema))
+    ; stage =
+        (fun owner source ~previous ~next ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.stage_subscription_mutation actor ~owner ~source ~previous ~next))
+    ; get =
+        (fun owner source id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_subscription actor ~owner ~source ~id))
+    ; finish =
+        (fun owner source id ~expected_epoch completion ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.finish_script_subscription
+              actor
+              ~owner
+              ~source
+              ~id
+              ~expected_epoch
+              completion))
+    ; select =
+        (fun owner source receipts ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_subscription_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_subscription_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    ; get_job =
+        (fun owner id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_job actor ~owner ~id))
+    }
+  in
+  Service.create ~limits:t.limits.subscriptions ~host
+;;
+
+let extension_notifications actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_notification_service in
+  let host : Service.host =
+    { create =
+        (fun owner source ~correlation ~completion ~wake ~disclosure_pins ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_notification
+              ~disclosure_pins
+              actor
+              ~owner
+              ~source
+              ~correlation
+              ~completion
+              ~wake))
+    ; get =
+        (fun owner source id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_notification actor ~owner ~source ~id))
+    ; select =
+        (fun owner source receipts ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_notification_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_notification_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
+;;
+
+let extension_ingress actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_ingress_service in
+  let with_actor f = Result.bind (extension_actor actor_ref) ~f in
+  let host : Service.host =
+    { register =
+        (fun owner source ~subscription_id ~expected_epoch ~namespace ~schema ->
+          with_actor (fun actor ->
+            A.create_script_ingress
+              actor
+              ~owner
+              ~source
+              ~subscription_id
+              ~expected_epoch
+              ~namespace
+              ~schema))
+    ; get =
+        (fun owner source id ->
+          with_actor (fun actor -> A.read_script_ingress actor ~owner ~source ~id))
+    ; revoke =
+        (fun owner source id ~reason ->
+          with_actor (fun actor ->
+            A.revoke_script_ingress actor ~owner ~source ~id ~reason))
+    ; select =
+        (fun owner source receipts ->
+          with_actor (fun actor ->
+            A.select_ingress_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (with_actor (fun actor -> A.abort_ingress_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
+;;
+
+let extension_schedules actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_schedule_service in
+  let host : Service.host =
+    { create =
+        (fun owner source ~delay_ms ~payload ~misfire ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_schedule actor ~owner ~source ~delay_ms ~payload ~misfire))
+    ; stage =
+        (fun owner source ~previous ~next ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.stage_schedule_mutation actor ~owner ~source ~previous ~next))
+    ; get =
+        (fun owner source id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_schedule actor ~owner ~source ~id))
+    ; select =
+        (fun owner source receipts ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_schedule_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_schedule_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
+;;
+
+let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
+  let module A = Agent_session.Session_actor in
+  let shell_provider = shell_approval_provider t profile actor_ref in
+  let shell_store = shell_approval_store state actor_ref (ref state.shell) in
+  let shell_context () =
+    let open Result.Let_syntax in
+    let check () =
+      let%bind actor = extension_actor actor_ref in
+      let%bind current = A.state actor in
+      match Agent_session.Native_tool_invocation.current_scope () with
+      | Active invocation
+        when Agent_protocol.Id.Session.equal
+               current.identity.session_id
+               state.identity.session_id
+             && Agent_protocol.Id.Session.equal
+                  invocation.context.session_id
+                  current.identity.session_id
+             && Int.equal invocation.context.generation current.identity.generation
+             && String.equal
+                  profile.Agent_session.Permission_policy.revision_digest
+                  current.spec.permission_profile_digest -> Ok ()
+      | Active _ | Expired | Unbound ->
+        Error (unavailable Permission_denied "shell caller authority is stale or foreign")
+    in
+    let check () =
+      check () |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+    in
+    let%map () = check () in
+    Shell_runtime.Call_context.
+      { session_id = Agent_protocol.Id.Session.to_string state.identity.session_id
+      ; approval_provider = shell_provider
+      ; approval_store = shell_store
+      ; check
+      }
+  in
+  let notification_snapshot () =
+    let open Result.Let_syntax in
+    let%bind actor = extension_actor actor_ref in
+    let%bind current = A.state actor in
+    let%bind () =
+      match
+        Agent_protocol.Id.Session.equal
+          current.identity.session_id
+          state.identity.session_id
+        && Int.equal current.identity.generation state.identity.generation
+        && Agent_protocol.Id.Prompt_revision.equal
+             current.spec.prompt_revision_id
+             state.spec.prompt_revision_id
+        && Agent_protocol.Id.Workspace_instance.equal
+             current.spec.workspace_instance.id
+             state.spec.workspace_instance.id
+        && Agent_session.Workspace_instance.equal_canonical_identity
+             current.spec.workspace_instance.canonical_root
+             state.spec.workspace_instance.canonical_root
+        && Agent_session.Workspace_definition.equal_access
+             current.spec.workspace_instance.access
+             state.spec.workspace_instance.access
+        && String.equal
+             current.spec.permission_profile_digest
+             state.spec.permission_profile_digest
+      with
+      | true -> Ok ()
+      | false -> Error (unavailable Conflict "notification runtime pin changed")
+    in
+    Ok (actor, current)
+  in
+  Agent_session.Runtime_builder.
+    { runtime_policy =
+        (match state.automatic_turn_budget with
+         | Some budget -> budget.policy
+         | None -> t.chatml_runtime_policy)
+    ; script_tools =
+        (fun native ->
+          let registry =
+            Lazy.force native.Chat_response.Agent_runtime.capabilities
+            |> Result.map_error ~f:(fun error ->
+              error.Chat_response.Tool_capability.message)
+            |> Result.ok_or_failwith
+          in
+          Agent_session.Script_tool_calls.create
+            ~registry:(fun () -> registry)
+            ~moderator_names:String.Set.empty
+            ~now:(fun () -> now t)
+            ~is_halted:(fun () ->
+              match Result.bind (extension_actor actor_ref) ~f:A.state with
+              | Error _ -> true
+              | Ok state ->
+                state.halted
+                || Option.is_some state.failure
+                || Agent_protocol.Session.equal_desired_state
+                     state.lifecycle.desired
+                     Stopped
+                || Option.exists state.active_operation ~f:(fun operation ->
+                  match operation.state with
+                  | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+                  | Starting | Running | Completed -> false))
+            ~requires_active_moderator:(fun _ -> false)
+            ~authorize:(authorize_extension_native t actor_ref profile native)
+            ~prepare_output:(function
+              | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
+              | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
+            ~defer_observation:(fun _ -> Ok ())
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_generated_creation_service
+            tools
+            t.generated_creation
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_managed_session_service
+            tools
+            t.managed_sessions
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_shell_context tools shell_context
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_session_helpers tools t.session_helpers
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_job_service
+            tools
+            (extension_jobs t actor_ref registry)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_subscription_service
+            tools
+            (extension_subscriptions t actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_schedule_service
+            tools
+            (extension_schedules actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_notification_service
+            tools
+            (extension_notifications actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_ingress_service
+            tools
+            (extension_ingress actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_progress
+            tools
+            ~emit:(fun invocation progress ->
+              match extension_actor actor_ref with
+              | Error _ -> ()
+              | Ok actor ->
+                A.publish_job_progress actor ~invocation_id:invocation.context.id progress))
+    ; standalone_execution_limits =
+        Agent_session.Standalone_tool_dispatch.declared_execution_limits
+    ; standalone_completion =
+        (fun ~tools job ->
+          let open Result.Let_syntax in
+          let%bind actor, current = notification_snapshot () in
+          A.deliver_standalone_completion
+            actor
+            ~revision:current.counters.revision
+            ~job
+            ~current_capabilities:
+              (Agent_session.Script_tool_calls.current_capabilities tools)
+            ~policy:Chat_response.One_off_request.default_policy)
+    ; one_off_policy = Chat_response.One_off_request.default_policy
+    ; native_service_revision =
+        Agent_session.Session_management_channel.policy_fingerprint t.session_helpers
+    ; authoring_validation_host = t.authoring_validation_host
+    ; claim_lifecycle =
+        (fun ~event ~snapshot handle ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          A.with_current_moderator_event actor ~operation_id:None ~event ~snapshot handle)
+    ; lifecycle_started =
+        (fun observer ->
+          List.exists state.moderator_executions ~f:(fun receipt ->
+            receipt.context.generation = state.identity.generation
+            && Agent_protocol.Invocation.equal_observer receipt.context.source observer
+            && (match receipt.context.phase with
+                | Session_start | Session_resume -> true
+                | Turn_start
+                | Message_appended
+                | Pre_tool_call
+                | Post_tool_response
+                | Turn_end
+                | Internal_event -> false)
+            &&
+            match receipt.status with
+            | Completed _ -> true
+            | Running | Failed _ | Interrupted _ -> false))
+    ; notification_input =
+        (fun ~source ~tools ~operation_id () ->
+          let open Result.Let_syntax in
+          let%bind actor, current = notification_snapshot () in
+          let%bind plan =
+            Agent_session.Notification_delivery.prepare_for_runtime
+              ~state:current
+              ~source
+              ~current_capabilities:
+                (Agent_session.Script_tool_calls.current_capabilities tools)
+              ~policy:Chat_response.One_off_request.default_policy
+              ~max_count:t.limits.notifications.max_per_source
+          in
+          match
+            Eio.Cancel.protect (fun () ->
+              A.consume_notifications actor ~operation_id plan)
+          with
+          | Error { code = Conflict; _ } ->
+            Ok Chat_response.In_memory_stream.Safe_point_input.empty
+          | result -> result)
+    ; initial_notification_input =
+        (fun ~source ~tools ~operation_id () ->
+          let open Result.Let_syntax in
+          let%bind actor, current = notification_snapshot () in
+          let%bind plan =
+            Agent_session.Notification_delivery.prepare_idle_for_runtime
+              ~state:current
+              ~source
+              ~current_capabilities:
+                (Agent_session.Script_tool_calls.current_capabilities tools)
+              ~policy:Chat_response.One_off_request.default_policy
+              ~max_count:t.limits.notifications.max_per_source
+          in
+          match
+            Eio.Cancel.protect (fun () ->
+              A.consume_initial_notifications actor ~operation_id plan)
+          with
+          | Error { code = Conflict; _ } ->
+            Ok Chat_response.In_memory_stream.Safe_point_input.empty
+          | result -> result)
+    ; idle_notifications =
+        (fun ~source ~tools () ->
+          let open Result.Let_syntax in
+          let%bind actor, current = notification_snapshot () in
+          let%bind plan =
+            Agent_session.Notification_delivery.prepare_idle_for_runtime
+              ~state:current
+              ~source
+              ~current_capabilities:
+                (Agent_session.Script_tool_calls.current_capabilities tools)
+              ~policy:Chat_response.One_off_request.default_policy
+              ~max_count:t.limits.notifications.max_per_source
+          in
+          match
+            Eio.Cancel.protect (fun () -> A.deliver_idle_notifications actor plan)
+          with
+          | Error { code = Conflict; _ } -> Ok false
+          | result -> result)
+    ; history =
+        (fun () ->
+          let result =
+            let open Result.Let_syntax in
+            let%bind actor = extension_actor actor_ref in
+            let%bind state = A.state actor in
+            Agent_session.History_codec.all_of_protocol
+              state.conversation.canonical_history
+          in
+          Result.map_error result ~f:(fun error -> error.Agent_protocol.Error.message)
+          |> Result.ok_or_failwith)
+    }
+;;
+
 let add_bound_job actor_ref pending job =
   match !actor_ref with
   | Some actor ->
@@ -912,6 +1817,7 @@ let cancelled_call actor (job : Agent_protocol.Job.t) =
          actor
          ~job_id:job.id
          ~generation:job.generation
+         ~attempt:job.attempt
          ~reason:"synchronous model call was cancelled"
        : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
   Ok
@@ -951,6 +1857,7 @@ let job_services t state actor_ref pending =
       actor
       ~job_id:job.Agent_protocol.Job.id
       ~generation:job.generation
+      ~attempt:job.attempt
       outcome
     |> Result.map_error ~f:(fun error -> error.message)
     |> Result.bind ~f:(fun _ -> result)
@@ -972,6 +1879,7 @@ let job_services t state actor_ref pending =
              actor
              ~job_id:job.Agent_protocol.Job.id
              ~generation:job.generation
+             ~attempt:job.attempt
              ~reason:"synchronous model call was cancelled"
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
       raise exn
@@ -1020,18 +1928,611 @@ let flush_pending_jobs actor jobs =
 let install_moderator_if_changed actor moderator_snapshot =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
-  if Option.equal Poly.equal state.moderator moderator_snapshot
+  if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
   then Ok ()
   else
     Agent_session.Session_actor.change_moderator actor moderator_snapshot
     |> Result.map ~f:(fun _ -> ())
 ;;
 
+let prepare_authored_graph
+      t
+      ~sw
+      ~revision
+      ~paths
+      ~storage_paths
+      ~(state : Agent_session.Session_state.t)
+      ~profile
+      ~actor_ref
+      ~shell_state
+      ~native_service_revision
+      ~one_off_policy
+      ~authoring_validation_host
+  =
+  Authored_resources.prepare
+    t.authored_resources
+    ~sw
+    ~max_depth:t.limits.delegation_max_depth
+    ~revision
+    ~services:t.authored_services
+    ~build:(fun ~parent_revision ~tool_name ~native_registrations ->
+      Agent_session.Runtime_builder.prepare_authored_resources
+        ~native_registrations
+        ~parent_revision
+        ~tool_name
+        ~native_service_revision
+        ~env:t.env
+        ~sw
+        ~paths
+        ~storage_paths
+        ~session_id:state.identity.session_id
+        ~one_off_policy
+        ~authoring_validation_host
+        ~manifest_authorizer:(fun specialist ->
+          match
+            Chat_response.Agent_runtime.inspect_shell
+              ~env:t.env
+              ~platform:(Chat_response.Agent_runtime.platform ())
+              ~prompt_elements:(Agent_session.Prompt_revision.elements specialist)
+          with
+          | Error _ ->
+            fun _ ->
+              Shell_runtime.Manifest_authorizer.Reject
+                "captured specialist shell manifest cannot be verified"
+          | Ok inspection ->
+            manifest_authorizer
+              ~manifest_sha256:inspection.manifest.sha256
+              t
+              profile
+              revision
+              state
+              actor_ref
+              shell_state)
+        ~approval_provider:(shell_approval_provider t profile actor_ref)
+        ~approval_store:(shell_approval_store state actor_ref shell_state))
+;;
+
+let independent_resource_host t =
+  let module R = Independent_resources in
+  let module B = Agent_session.Runtime_builder in
+  let module G = Agent_session.Generated_definition in
+  let open Result.Let_syntax in
+  let entry id =
+    Session_registry.find t.registry id
+    |> Result.of_option
+         ~error:
+           (unavailable
+              Permission_denied
+              "delegation.parent_missing: independent ancestor is not loaded")
+  in
+  let artifacts () =
+    Agent_store.Prompt_artifact_store.create
+      ~env:t.env
+      ~root:
+        (Agent_store.Data_root.prompt_artifacts_path
+           (Agent_store.Session_store.data_root t.store))
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let diagnostics errors =
+    unavailable
+      Prompt_unavailable
+      (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+       |> String.concat ~sep:"\n")
+  in
+  { R.find =
+      (fun id ->
+        let%bind parent = entry id in
+        let%map state = Agent_session.Session_actor.state parent.actor in
+        { R.state; owner = parent.runtime })
+  ; resolve =
+      (fun reference ->
+        Agent_store.Delegation_store.resolve
+          (Agent_store.Session_store.delegations t.store)
+          reference
+        |> Result.map_error ~f:protocol_of_store)
+  ; authorize = authorize_independent t
+  ; build_root =
+      (fun ~sw ancestor ->
+        let state = ancestor.R.state in
+        let%bind parent = entry state.identity.session_id in
+        let%bind handle =
+          parent.store_handle
+          |> Result.of_option
+               ~error:
+                 (unavailable
+                    Invalid_state
+                    "independent resources need a durable ancestor store")
+        in
+        let%bind () =
+          Agent_session.Workspace_resolver.verify_available
+            ~env:t.env
+            state.spec.workspace_instance
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind source = restore_state_source t state in
+        match source with
+        | Generated_artifact _ ->
+          Error
+            (unavailable Permission_denied "independent ancestry has no authored root")
+        | Authored revision ->
+          let%bind paths = runtime_paths t handle source state in
+          let%bind profile = restore_state_profile t state in
+          let actor_ref = ref (Some parent.actor) in
+          let shell_state = ref state.shell in
+          let%bind prepared, native_registrations =
+            prepare_authored_graph
+              t
+              ~sw
+              ~revision
+              ~paths
+              ~storage_paths:paths
+              ~state
+              ~profile
+              ~actor_ref
+              ~shell_state
+              ~native_service_revision:
+                (Agent_session.Session_management_channel.policy_fingerprint
+                   t.session_helpers)
+              ~one_off_policy:Chat_response.One_off_request.default_policy
+              ~authoring_validation_host:t.authoring_validation_host
+          in
+          let%bind resources =
+            B.prepare_resources
+              ~native_registrations
+              ~native_service_revision:
+                (Agent_session.Session_management_channel.policy_fingerprint
+                   t.session_helpers)
+              ~env:t.env
+              ~sw
+              ~paths
+              ~storage_paths:paths
+              ~revision
+              ~session_id:state.identity.session_id
+              ~one_off_policy:Chat_response.One_off_request.default_policy
+              ~authoring_validation_host:t.authoring_validation_host
+              ~manifest_authorizer:
+                (manifest_authorizer t profile revision state actor_ref shell_state)
+              ~approval_provider:(shell_approval_provider t profile actor_ref)
+              ~approval_store:(shell_approval_store state actor_ref shell_state)
+          in
+          let%bind public =
+            Lazy.force resources.native.capabilities
+            |> Result.map_error ~f:(fun error ->
+              unavailable Permission_denied error.Chat_response.Tool_capability.message)
+          in
+          let%map () =
+            Authored_resources.install t.authored_resources ~sw ~public prepared
+          in
+          resources)
+  ; build_generated =
+      (fun ~sw:_ ~parent ancestor ->
+        let state = ancestor.R.state in
+        let%bind reference =
+          state.spec.delegation
+          |> Result.of_option
+               ~error:
+                 (unavailable
+                    Permission_denied
+                    "independent generated ancestor has no private reference")
+        in
+        let%bind record =
+          Agent_store.Delegation_store.resolve
+            (Agent_store.Session_store.delegations t.store)
+            reference
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind artifact_store = artifacts () in
+        let%bind capabilities =
+          Lazy.force parent.B.native.capabilities
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.Chat_response.Tool_capability.message)
+        in
+        match record.admission.authored_tool with
+        | Some origin ->
+          let%bind prepared =
+            Authored_resources.find
+              t.authored_resources
+              ~public:capabilities
+              ~name:origin.name
+          in
+          let%bind private_capabilities =
+            Authored_resources.resolve t.authored_resources record ~public:capabilities
+          in
+          let%bind _ =
+            Agent_session.Authored_agent_source.load_artifact
+              ~artifact_store
+              ~reservation:record
+          in
+          let%bind selected =
+            Chat_response.Background_request.rebind_capabilities
+              ~pins:record.admission.capability_pins
+              ~capabilities:private_capabilities
+          in
+          (match
+             String.equal
+               (Chat_response.Tool_capability.fingerprint selected)
+               (Chat_response.Tool_capability.fingerprint private_capabilities)
+           with
+           | true -> Ok prepared.resources
+           | false ->
+             Error
+               (unavailable
+                  Permission_denied
+                  "delegation.authored_resources_changed: private ancestor pins differ"))
+        | None ->
+          let%bind definition =
+            G.restore
+              ?limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.compilation_limits)
+              ?source_limits:
+                (Option.map
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.bundle_limits)
+              ?catalog:
+                (Option.bind
+                   t.authoring_validation_host
+                   ~f:Chat_response.Authoring_validation.delegated_catalog)
+              ~env:t.env
+              ~artifact_store
+              ~revision_id:state.spec.prompt_revision_id
+              ~manifest_sha256:record.admission.manifest_sha256
+              ~current_capabilities:(fun () -> capabilities)
+              ~pins:record.admission.capability_pins
+              ()
+            |> Result.map_error ~f:diagnostics
+          in
+          B.inherit_resources ~parent ~definition)
+  }
+;;
+
+let prepare_extension_runtime_scope t build =
+  let ready, ready_u = Eio.Promise.create () in
+  let stop, stop_u = Eio.Promise.create () in
+  let exited, exited_u = Eio.Promise.create () in
+  let stopping = Atomic.make false in
+  let delivered = ref false in
+  let signal_stop () =
+    if not (Atomic.exchange stopping true) then Eio.Promise.resolve stop_u ()
+  in
+  let stop_and_join () =
+    Eio.Cancel.protect (fun () ->
+      signal_stop ();
+      Eio.Promise.await exited)
+  in
+  let deliver result =
+    delivered := true;
+    Eio.Promise.resolve ready_u result
+  in
+  Eio.Fiber.fork ~sw:t.sw (fun () ->
+    Exn.protect
+      ~finally:(fun () -> Eio.Promise.resolve exited_u ())
+      ~f:(fun () ->
+        try
+          Eio.Cancel.sub (fun context ->
+            Eio.Switch.run (fun sw ->
+              Eio.Fiber.fork_daemon ~sw (fun () ->
+                Eio.Promise.await stop;
+                Eio.Cancel.cancel context Exit;
+                `Stop_daemon);
+              match build sw with
+              | Error error ->
+                deliver (Ok (Error error));
+                signal_stop ();
+                Eio.Promise.await stop
+              | Ok runtime ->
+                let close_started = Atomic.make false in
+                let close () =
+                  Eio.Cancel.protect (fun () ->
+                    if Atomic.exchange close_started true
+                    then Eio.Promise.await exited
+                    else
+                      Exn.protect
+                        ~f:runtime.Agent_session.Runtime_builder.close
+                        ~finally:stop_and_join)
+                in
+                deliver (Ok (Ok { runtime with close }));
+                Eio.Promise.await stop))
+        with
+        | exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          (match !delivered, Atomic.get stopping with
+           | false, _ -> deliver (Error (exn, backtrace))
+           | true, true -> ()
+           | true, false -> Exn.raise_with_original_backtrace exn backtrace)));
+  match Eio.Promise.await ready with
+  | Ok (Ok runtime) -> Ok runtime
+  | Ok (Error error) ->
+    stop_and_join ();
+    Error error
+  | Error (exn, backtrace) ->
+    stop_and_join ();
+    Exn.raise_with_original_backtrace exn backtrace
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    stop_and_join ();
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+(* Shared active-owner, nested dependency and ancestor-moderator admission.
+   Resource selection is supplied by the source
+   adapter; it never substitutes a parent's public registry for private tools. *)
+let delegated_tool_preparation
+      t
+      ~authority
+      ~actor_ref
+      ~reference
+      ~selected
+      ~(inherited_managed : Agent_session.Runtime_builder.inherited_managed option)
+      ~(lookup :
+         Agent_protocol.Id.Session.t
+         -> (Session_registry.entry, Agent_protocol.Error.t) result)
+      (request : Agent_session.Script_tool_calls.preparation)
+  =
+  let open Result.Let_syntax in
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let module C = Chat_response.Tool_capability in
+  let reject message = Error (unavailable Permission_denied message) in
+  let check () =
+    let%bind () = Agent_session.Delegation_authority.check_execution authority in
+    let%bind actor = extension_actor actor_ref in
+    let%bind child = Agent_session.Session_actor.state actor in
+    let%bind () =
+      match child.lifecycle.desired, child.halted, child.failure with
+      | Running, false, None
+        when P.Id.Session.equal request.session_id child.identity.session_id
+             && Int.equal request.generation child.identity.generation
+             && Option.equal D.Reference.equal child.spec.delegation (Some reference) ->
+        Ok ()
+      | _ -> reject "delegation.candidate_inactive: child owner is unavailable"
+    in
+    let%bind () =
+      match request.owner with
+      | Model_call (operation_id, call_id) ->
+        (match child.active_operation with
+         | Some operation when P.Id.Operation.equal operation.id operation_id ->
+           (match operation.state with
+            | Starting | Running ->
+              let input : Agent_session.Operation_worker.Input.t =
+                { session_id = child.identity.session_id
+                ; session_generation = child.identity.generation
+                ; operation
+                ; history = []
+                }
+              in
+              if
+                String.equal
+                  (History_entry.Id.namespace call_id)
+                  (P.Id.Session.to_string request.session_id)
+                && Int64.(
+                     of_int (History_entry.Id.sequence call_id)
+                     < child.conversation.reserved_history_through)
+                && P.Id.Invocation.equal
+                     request.invocation_id
+                     (Agent_session.Stream_invocation.id_for_call ~input ~call_id)
+              then Ok ()
+              else reject "delegation.candidate_identity: foreign model reservation"
+            | _ -> reject "delegation.candidate_inactive: model operation ended")
+         | _ -> reject "delegation.candidate_inactive: model owner changed")
+      | Native_call id ->
+        (match
+           List.find child.invocations ~f:(fun i -> P.Id.Invocation.equal i.context.id id)
+         with
+         | Some { status = Dispatching; context; _ }
+           when P.Id.Session.equal context.session_id request.session_id
+                && Int.equal context.generation request.generation -> Ok ()
+         | _ -> reject "delegation.candidate_inactive: native owner ended")
+      | Moderator_event id ->
+        (match
+           List.find child.moderator_executions ~f:(fun e ->
+             P.Id.Moderator_execution.equal e.context.id id)
+         with
+         | Some { status = Running; context; _ }
+           when P.Id.Session.equal context.session_id request.session_id
+                && Int.equal context.generation request.generation -> Ok ()
+         | _ -> reject "delegation.candidate_inactive: moderator owner ended")
+    in
+    let fits ceiling =
+      match
+        C.select
+          ceiling
+          ~names:(List.map (C.references request.selected) ~f:(fun r -> r.name))
+      with
+      | Ok selected ->
+        String.equal (C.fingerprint selected) (C.fingerprint request.selected)
+      | Error _ -> false
+    in
+    match fits selected with
+    | true -> Ok ()
+    | false ->
+      (match inherited_managed, request.owner with
+       | Some inherited, Native_call id ->
+         let module Managed = Chat_response.Managed_tool_registry in
+         let%bind () =
+           Managed.revalidate
+             (Managed.delegation_registry inherited.delegation)
+             ~current:(inherited.current ())
+           |> Result.map_error ~f:(fun error ->
+             unavailable Permission_denied error.C.message)
+         in
+         let%bind () =
+           match
+             fits
+               (Managed.capabilities (Managed.delegation_registry inherited.delegation))
+           with
+           | true -> Ok ()
+           | false ->
+             reject
+               "delegation.candidate_tools: call is outside inherited implementation \
+                dependencies"
+         in
+         let%bind invocation =
+           List.find child.invocations ~f:(fun invocation ->
+             P.Id.Invocation.equal invocation.context.id id)
+           |> Result.of_option
+                ~error:
+                  (unavailable
+                     Permission_denied
+                     "delegation.candidate_owner: handler owner ended")
+         in
+         let%bind dependencies =
+           match
+             Managed.delegated_invocation_dependencies inherited.delegation invocation
+           with
+           | Ok dependencies -> Ok dependencies
+           | Error _ ->
+             let module Native = Agent_session.Native_tool_invocation in
+             let%bind borrowed = Native.borrow () in
+             let%bind () =
+               match
+                 P.Invocation.equal_context
+                   (Native.borrowed_invocation borrowed).context
+                   invocation.context
+               with
+               | true -> Ok ()
+               | false ->
+                 reject
+                   "delegation.candidate_owner: native borrow belongs to another \
+                    invocation"
+             in
+             let%bind launch =
+               Agent_session.Job_launch.derive
+                 ~session_id:child.identity.session_id
+                 ~generation:child.identity.generation
+                 ~invocations:child.invocations
+                 ~events:child.moderator_executions
+                 ~jobs:child.jobs
+                 ~owner:(Invocation invocation.context.id)
+             in
+             let%bind () =
+               match launch.parent_job with
+               | None -> Ok ()
+               | Some (id, attempt) ->
+                 (match List.find child.jobs ~f:(fun job -> P.Id.Job.equal job.id id) with
+                  | Some
+                      { kind = Async_tool
+                      ; status = Running | Waiting_permission _
+                      ; launch = Some _
+                      ; generation
+                      ; attempt = current
+                      ; _
+                      }
+                    when Int.equal generation child.identity.generation
+                         && Int.equal current attempt -> Ok ()
+                  | _ ->
+                    reject
+                      "delegation.candidate_owner: private background work has no \
+                       current owned launch")
+             in
+             Native.borrowed_capabilities borrowed
+         in
+         (match fits dependencies with
+          | true -> Ok ()
+          | false -> reject "delegation.candidate_tools: handler dependencies changed")
+       | _ -> reject "delegation.candidate_tools: selected ceiling changed")
+  in
+  let%bind () = check () in
+  let rec evaluate visited depth (edge : D.Reference.t) call =
+    let%bind () =
+      if
+        depth >= t.limits.delegation_max_depth
+        || List.mem visited edge.child_session_id ~equal:P.Id.Session.equal
+      then reject "delegation.ancestry_limit: policy ancestry is cyclic or excessive"
+      else Ok ()
+    in
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) edge
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind parent = lookup record.key.parent_session_id in
+    let%bind source = parent_moderation_source t record.key.parent_session_id in
+    let%bind decision =
+      match source with
+      | None -> Ok P.Moderator_execution.Decision.Approve
+      | Some _ ->
+        Runtime_owner.prepare_delegated_tool
+          parent.runtime
+          ~delegation:
+            { child_session_id = request.session_id
+            ; child_generation = request.generation
+            ; child_invocation_id = request.invocation_id
+            ; admission_sha256 = reference.admission_sha256
+            }
+          ~event:(Pre_tool_call call)
+          ~authorize:check
+    in
+    let%bind () = check () in
+    match decision with
+    | Reject _ ->
+      Ok
+        (Some
+           (Chat_response.Moderation.Tool_moderation.Reject
+              "Parent policy rejected the call."))
+    | Approve | Rewrite_args _ | Redirect _ ->
+      let name, args =
+        match decision with
+        | Approve -> call.Chat_response.Moderation.Tool_call.name, call.args
+        | Rewrite_args args -> call.name, args
+        | Redirect (name, args) -> name, args
+        | Reject _ -> assert false
+      in
+      let%bind binding =
+        C.find request.selected ~name
+        |> Result.map_error ~f:(fun e -> unavailable Permission_denied e.C.message)
+      in
+      let kind =
+        if String.equal (C.descriptor binding).type_ "custom"
+        then Chat_response.Moderation.Tool_call.Custom
+        else Function
+      in
+      let%bind () =
+        match request.owner, request.call.kind, kind with
+        | Model_call _, Function, Custom | Model_call _, Custom, Function ->
+          reject "delegation.candidate_kind: model tool kind cannot change"
+        | _ -> Ok ()
+      in
+      let%bind schema =
+        Chatmd_shell_spec.Tool_schema.compile (C.reference binding).input_schema
+        |> Result.map_error ~f:(fun _ ->
+          unavailable Permission_denied "invalid delegated target schema")
+      in
+      let%bind () =
+        Chatmd_shell_spec.Tool_schema.validate schema args
+        |> Result.map_error ~f:(fun _ ->
+          unavailable Permission_denied "invalid delegated target arguments")
+      in
+      let payload_text =
+        match kind, args with
+        | Custom, `String text -> text
+        | _ -> Jsonaf.to_string args
+      in
+      let call = { call with name; args; kind; payload_text } in
+      let%bind parent_state = Agent_session.Session_actor.state parent.actor in
+      (match parent_state.spec.delegation with
+       | Some ancestor ->
+         evaluate (edge.child_session_id :: visited) (depth + 1) ancestor call
+       | None ->
+         if not (String.equal call.name request.call.name)
+         then
+           Ok
+             (Some
+                (Chat_response.Moderation.Tool_moderation.Redirect (call.name, call.args)))
+         else if Jsonaf.exactly_equal call.args request.call.args
+         then Ok None
+         else Ok (Some (Chat_response.Moderation.Tool_moderation.Rewrite_args call.args)))
+  in
+  let%bind result = evaluate [] 0 reference request.call in
+  let%map () = check () in
+  result
+;;
+
 let prepare_runtime_at_paths
       t
       paths
       storage_paths
-      revision
+      source
       profile
       (state : Agent_session.Session_state.t)
       ~next_history_sequence
@@ -1043,18 +2544,14 @@ let prepare_runtime_at_paths
   =
   let open Result.Let_syntax in
   let shell_state = ref state.Agent_session.Session_state.shell in
-  let manifest_authorizer =
-    manifest_authorizer t profile revision state actor_ref shell_state
-  in
   let approval_provider = shell_approval_provider t profile actor_ref in
   let approval_store = shell_approval_store state actor_ref shell_state in
-  let%map runtime =
-    Agent_session.Runtime_builder.build
-      ~sw:t.sw
+  let construct sw build manifest_authorizer =
+    build
+      ~sw
       ~env:t.env
       ~paths
       ~storage_paths
-      ~revision
       ~session_id:state.Agent_session.Session_state.identity.session_id
       ~history_namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
       ~next_history_sequence
@@ -1069,6 +2566,373 @@ let prepare_runtime_at_paths
       ~review_permission:(review_permission t actor_ref profile)
       ~schedule_services:(schedule_services t state actor_ref pending_schedule_operations)
       ~job_services:(job_services t state actor_ref pending_jobs)
+  in
+  let%map runtime =
+    match source with
+    | Authored revision ->
+      let construct_root sw =
+        match t.qualify_chatml_extensions with
+        | false ->
+          construct
+            sw
+            (Agent_session.Runtime_builder.build ~revision)
+            (manifest_authorizer t profile revision state actor_ref shell_state)
+        | true ->
+          let module B = Agent_session.Runtime_builder in
+          let services = extension_services t profile actor_ref ~state in
+          let%bind prepared, native_registrations =
+            prepare_authored_graph
+              t
+              ~sw
+              ~revision
+              ~paths
+              ~storage_paths
+              ~state
+              ~profile
+              ~actor_ref
+              ~shell_state
+              ~native_service_revision:services.native_service_revision
+              ~one_off_policy:services.one_off_policy
+              ~authoring_validation_host:services.authoring_validation_host
+          in
+          let%bind runtime =
+            construct
+              sw
+              (B.build_with_extensions ~native_registrations ~revision ~services)
+              (manifest_authorizer t profile revision state actor_ref shell_state)
+          in
+          let installed =
+            let%bind public =
+              Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+              |> Result.map_error ~f:(fun error ->
+                unavailable Permission_denied error.Chat_response.Tool_capability.message)
+            in
+            Authored_resources.install t.authored_resources ~sw ~public prepared
+          in
+          (match installed with
+           | Ok () -> Ok runtime
+           | Error error ->
+             runtime.close ();
+             Error error)
+      in
+      (match t.qualify_chatml_extensions with
+       | false -> construct_root t.sw
+       | true -> prepare_extension_runtime_scope t construct_root)
+    | Generated_artifact { artifact; _ } ->
+      let%bind parent, record = generated_parent t state in
+      let parent_stop_epoch =
+        Option.value
+          state.parent_stop_epoch
+          ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
+      in
+      let%bind artifact_store =
+        Agent_store.Prompt_artifact_store.create
+          ~env:t.env
+          ~root:
+            (Agent_store.Data_root.prompt_artifacts_path
+               (Agent_store.Session_store.data_root t.store))
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let reference = Agent_store.Delegation_store.reference record in
+      let capabilities (runtime : Agent_session.Runtime_builder.t) =
+        match runtime.native_runtime with
+        | None ->
+          Error
+            (unavailable
+               Invalid_state
+               "delegation.runtime_unavailable: parent does not expose qualified native \
+                resources")
+        | Some native ->
+          Lazy.force native.capabilities
+          |> Result.map_error ~f:(fun error ->
+            unavailable Permission_denied error.Chat_response.Tool_capability.message)
+      in
+      let on_revoked () =
+        match record.admission.lifetime with
+        | Independent _ | Invocation_owned _ ->
+          let%bind () =
+            match Session_registry.is_closing t.registry, !actor_ref with
+            | true, _ | _, None -> Ok ()
+            | false, Some actor ->
+              Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
+              |> Result.map ~f:ignore
+          in
+          (match Session_registry.find t.registry reference.child_session_id with
+           | None -> Ok ()
+           | Some child -> Runtime_owner.prepare_dependency_close child.runtime)
+        | Owned ->
+          (match Agent_session.Session_actor.state parent.actor, !actor_ref with
+           | Ok current, Some actor
+             when Agent_protocol.Session.equal_desired_state
+                    current.lifecycle.desired
+                    Stopped
+                  || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
+             Agent_session.Session_actor.stop_delegated_at_epoch
+               actor
+               ~reference
+               ~epoch:current.stop_epoch
+             |> Result.map ~f:ignore
+           | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
+           | Error error, _ -> Error error)
+      in
+      let build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities =
+        let%bind source, selected =
+          match record.admission.authored_tool with
+          | Some origin ->
+            let%bind prepared =
+              Authored_resources.find
+                t.authored_resources
+                ~public:current
+                ~name:origin.name
+            in
+            let%bind selected =
+              Authored_resources.resolve t.authored_resources record ~public:current
+            in
+            let%bind artifact =
+              Agent_session.Authored_agent_source.load_artifact
+                ~artifact_store
+                ~reservation:record
+            in
+            let%map revision =
+              Agent_session.Prompt_revision_builder.reparse
+                ~definition:(Agent_session.Prompt_revision.definition prepared.revision)
+                ~artifact
+                ~materialized_tree:
+                  (Agent_store.Prompt_artifact_store.materialized_tree
+                     artifact_store
+                     artifact.revision_id)
+              |> Result.map_error ~f:(fun errors ->
+                unavailable
+                  Prompt_unavailable
+                  (List.map errors ~f:(fun error ->
+                     error.Agent_session.Prompt_revision_builder.Diagnostic.message)
+                   |> String.concat ~sep:"\n"))
+            in
+            `Authored (prepared, revision), selected
+          | None ->
+            let%map definition =
+              Agent_session.Generated_definition.restore
+                ?limits:
+                  (Option.map
+                     t.authoring_validation_host
+                     ~f:Chat_response.Authoring_validation.compilation_limits)
+                ?source_limits:
+                  (Option.map
+                     t.authoring_validation_host
+                     ~f:Chat_response.Authoring_validation.bundle_limits)
+                ?catalog:
+                  (Option.bind
+                     t.authoring_validation_host
+                     ~f:Chat_response.Authoring_validation.delegated_catalog)
+                ~env:t.env
+                ~artifact_store
+                ~revision_id:artifact.revision_id
+                ~manifest_sha256:record.admission.manifest_sha256
+                ~current_capabilities:(fun () -> current)
+                ~pins:record.admission.capability_pins
+                ()
+              |> Result.map_error ~f:(fun diagnostics ->
+                unavailable
+                  Prompt_unavailable
+                  (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                   |> String.concat ~sep:"\n"))
+            in
+            ( `Generated definition
+            , Chat_response.Generated_admission.capabilities
+                (Agent_session.Generated_definition.admission definition) )
+        in
+        let lookup id =
+          Session_registry.find t.registry id
+          |> Result.of_option
+               ~error:
+                 (unavailable
+                    Permission_denied
+                    "delegation.parent_missing: ancestor is not loaded")
+        in
+        let authority =
+          Agent_session.Delegation_authority.create
+            ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
+            ~max_depth:t.limits.delegation_max_depth
+            ~moderation:(parent_moderation_source t)
+            ~authorize_independent:(authorize_independent t)
+            ~parent_stop_epoch
+            ~reference
+            ~capabilities:selected
+            ~host:
+              { state =
+                  (fun id ->
+                    Result.bind (lookup id) ~f:(fun entry ->
+                      Agent_session.Session_actor.state entry.actor))
+              ; resolve =
+                  (fun reference ->
+                    Agent_store.Delegation_store.resolve
+                      (Agent_store.Session_store.delegations t.store)
+                      reference
+                    |> Result.map_error ~f:protocol_of_store)
+              ; capabilities = ancestor_capabilities
+              }
+            ()
+        in
+        let services = extension_services t profile actor_ref ~state in
+        let%bind inherited_managed =
+          match source, managed with
+          | `Authored _, _ | `Generated _, None -> Ok None
+          | `Generated _, Some managed ->
+            Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+            |> Result.map ~f:(fun delegation ->
+              Some Agent_session.Runtime_builder.{ delegation; current = managed_current })
+            |> Result.map_error ~f:(fun error ->
+              unavailable Permission_denied error.Chat_response.Tool_capability.message)
+        in
+        let prepare =
+          delegated_tool_preparation
+            t
+            ~authority
+            ~actor_ref
+            ~reference
+            ~selected
+            ~inherited_managed
+            ~lookup
+        in
+        let services =
+          { services with
+            script_tools =
+              (fun native ->
+                Agent_session.Script_tool_calls.with_preparation
+                  (services.script_tools native)
+                  ~prepare)
+          }
+        in
+        let%bind build =
+          match source with
+          | `Generated definition ->
+            Ok
+              (Agent_session.Runtime_builder.build_generated
+                 ~services
+                 ~definition
+                 ~artifact_store
+                 ~parent_runtime:native
+                 ~inherited_managed
+                 ~authority)
+          | `Authored (prepared, revision) ->
+            let%map history =
+              Result.of_option
+                existing_history
+                ~error:
+                  (unavailable
+                     Invalid_state
+                     "authored child requires admitted stored history")
+            in
+            fun ~sw
+              ~env
+              ~paths
+              ~storage_paths
+              ~session_id
+              ~history_namespace
+              ~next_history_sequence
+              ~existing_history:_ ->
+              Agent_session.Runtime_builder.build_authored_child
+                ~services
+                ~revision
+                ~prepared
+                ~authority
+                ~history
+                ~sw
+                ~env
+                ~paths
+                ~storage_paths
+                ~session_id
+                ~history_namespace
+                ~next_history_sequence
+        in
+        let%map runtime =
+          construct sw build (fun _ ->
+            Shell_runtime.Manifest_authorizer.Reject
+              "generated definitions cannot authorize new shell manifests")
+        in
+        { runtime with ancestor_capabilities = Some ancestor_capabilities }
+      in
+      (match record.admission.lifetime with
+       | Owned | Invocation_owned _ ->
+         Delegated_runtime.prepare
+           ~sw:t.sw
+           ~parent:parent.runtime
+           ~on_revoked
+           ~build:(fun ~sw parent_runtime ->
+             let%bind current = capabilities parent_runtime in
+             let native = Option.value_exn parent_runtime.native_runtime in
+             let ancestor_capabilities id =
+               match Agent_protocol.Id.Session.equal id record.key.parent_session_id with
+               | true -> Ok current
+               | false ->
+                 (match parent_runtime.ancestor_capabilities with
+                  | Some lookup -> lookup id
+                  | None ->
+                    Error
+                      (unavailable
+                         Permission_denied
+                         "delegation.resources_unavailable: ancestor binding lookup is \
+                          missing"))
+             in
+             let managed =
+               Option.bind
+                 parent_runtime.moderator_script_tools
+                 ~f:Agent_session.Script_tool_calls.managed_registry
+             in
+             let managed_current () =
+               match parent_runtime.moderator_script_tools with
+               | Some tools -> Agent_session.Script_tool_calls.current_capabilities tools
+               | None -> current
+             in
+             build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities)
+       | Independent _ ->
+         let retained = ref None in
+         let with_resources f =
+           Independent_resources.with_chain
+             ~max_depth:t.limits.delegation_max_depth
+             ~host:(independent_resource_host t)
+             ~reference
+             ~f:(fun resources ->
+               let%bind parent =
+                 Independent_resources.find resources record.key.parent_session_id
+               in
+               Exn.protect
+                 ~finally:(fun () -> retained := None)
+                 ~f:(fun () ->
+                   retained := Some resources;
+                   f parent))
+         in
+         Delegated_runtime.prepare_resources
+           ~with_resources
+           ~sw:t.sw
+           ~on_revoked
+           ~build:(fun ~sw parent_resources ->
+             let native = parent_resources.Agent_session.Runtime_builder.native in
+             let resource_capabilities native =
+               Lazy.force native.Chat_response.Agent_runtime.capabilities
+               |> Result.map_error ~f:(fun error ->
+                 unavailable Permission_denied error.Chat_response.Tool_capability.message)
+             in
+             let%bind current = resource_capabilities native in
+             let ancestor_capabilities id =
+               let%bind resources =
+                 !retained
+                 |> Result.of_option
+                      ~error:
+                        (unavailable
+                           Permission_denied
+                           "delegation.resources_unavailable: independent scope closed")
+               in
+               let%bind resource = Independent_resources.find resources id in
+               resource_capabilities resource.native
+             in
+             build
+               ~sw
+               ~native
+               ~current
+               ~managed:parent_resources.managed
+               ~managed_current:(fun () -> current)
+               ~ancestor_capabilities))
   in
   runtime, shell_state
 ;;
@@ -1117,6 +2981,7 @@ let install_runtime_state state runtime shell =
       { state.conversation with
         canonical_history =
           Agent_session.History_codec.all_to_protocol
+            ~previous:state.conversation.canonical_history
             runtime.Agent_session.Runtime_builder.initial_history
       ; initial_prompt_entry_count = runtime.initial_prompt_entry_count
       ; next_history_sequence = Int64.of_int runtime.reserved_history_through
@@ -1130,14 +2995,19 @@ let install_runtime_state state runtime shell =
 let runnable_job job =
   match job.Agent_protocol.Job.status with
   | Queued -> true
-  | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    false
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> false
 ;;
 
 let deliverable_job job =
   match job.Agent_protocol.Job.delivery with
   | Pending -> true
-  | Not_required | Delivered _ -> false
+  | Not_required | Delivered _ | Discarded _ -> false
 ;;
 
 let active_schedule schedule =
@@ -1166,6 +3036,7 @@ let index_entry state =
     ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
     ; earliest_schedule_due
     ; owner_grace_deadline = owner_grace_deadline state
+    ; pending_initial_start = state.pending_initial_start
     ; archived = false
     }
 ;;
@@ -1285,27 +3156,29 @@ let release_stopped_capacity capacity events =
 ;;
 
 let unload_stopped_runtime t runtime_owner state events =
+  let stop_requested =
+    List.exists events ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
+      match
+        Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+      with
+      | Ok (Session_state_changed { desired_state = Stopped; _ }) -> true
+      | Ok _ | Error _ -> false)
+  in
   match
-    ( state.Agent_session.Session_state.lifecycle.observed
-    , List.exists events ~f:event_stops_session
-    , !runtime_owner )
+    state.Agent_session.Session_state.lifecycle.desired, stop_requested, !runtime_owner
   with
-  | Agent_protocol.Session.Stopped, true, Some runtime ->
+  | Stopped, true, Some runtime ->
+    (* Never enter another owner synchronously from the actor's commit callback.
+       A parent's foreground cleanup must not delay cancellation of descendants,
+       but its runtime must remain alive until that foreground operation ends. *)
+    let cleanup =
+      match state.lifecycle.observed with
+      | Stopped -> Runtime_owner.unload_and_wait
+      | _ -> Runtime_owner.prepare_dependency_stop
+    in
     Eio.Fiber.fork ~sw:t.sw (fun () ->
-      ignore (Runtime_owner.unload runtime : (unit, Agent_protocol.Error.t) result))
-  | ( ( Queued_for_slot
-      | Starting
-      | Recovering
-      | Idle
-      | Running_turn _
-      | Compacting _
-      | Waiting_for_permission _
-      | Stopping
-      | Failed _ )
-    , _
-    , _ )
-  | Stopped, false, _
-  | Stopped, true, None -> ()
+      ignore (cleanup runtime : (unit, Agent_protocol.Error.t) result))
+  | Running, _, _ | Stopped, false, _ | Stopped, true, None -> ()
 ;;
 
 let prune_snapshot t handle journal _installed =
@@ -1324,7 +3197,36 @@ let prune_snapshot t handle journal _installed =
   Agent_store.Journal.seal_checkpoint journal
 ;;
 
-let actor_services t handle journal persistence durable_events capacity runtime_owner =
+let actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal
+  =
+  let open Result.Let_syntax in
+  let%bind result_blobs =
+    Agent_store.Blob_store.with_max_upload_bytes
+      t.blob_store
+      ~max_upload_bytes:(Int64.of_int t.limits.job_result_max_bytes)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let principal =
+    Option.value_or_thunk creating_principal ~default:Agent_protocol.Id.Principal.create
+  in
+  let%map job_results =
+    Agent_store.Job_result_store.Publisher.create
+      ~env:t.env
+      ~blobs:result_blobs
+      ~sw:t.sw
+      ~session:handle
+      ~principal
+      ~inline_bytes:t.limits.job_result_inline_bytes
+      ~max_bytes:t.limits.job_result_max_bytes
+  in
   let last_snapshot_sequence = ref 0L in
   let last_snapshot_at = ref (Eio.Time.now (Eio.Stdenv.clock t.env)) in
   let snapshot_due state =
@@ -1358,6 +3260,12 @@ let actor_services t handle journal persistence durable_events capacity runtime_
   in
   Agent_session.Session_actor.
     { now = (fun () -> now t)
+    ; monotonic_now = (fun () -> Eio.Time.Mono.now (Eio.Stdenv.mono_clock t.env))
+    ; job_results = Some job_results
+    ; subscription_limits = t.limits.subscriptions
+    ; schedule_limits = t.limits.schedules
+    ; notification_limits = t.limits.notifications
+    ; ingress_limits = t.limits.ingress
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->
@@ -1384,25 +3292,6 @@ let history_source t actor session_id =
       Agent_session.Session_actor.reserve_history_block actor ~count)
 ;;
 
-let restore_state_revision t state =
-  match state.Agent_session.Session_state.spec.prompt_definition_id with
-  | None ->
-    Error (unavailable Prompt_unavailable "session has no catalog prompt identity")
-  | Some definition_id ->
-    Agent_session.Prompt_catalog.restore_revision
-      t.prompts
-      ~definition_id
-      ~revision_id:state.spec.prompt_revision_id
-    |> Result.map_error ~f:(fun diagnostics ->
-      unavailable
-        Prompt_unavailable
-        (List.map diagnostics ~f:(fun value -> value.message) |> String.concat ~sep:"\n"))
-;;
-
-let restore_state_profile t (state : Agent_session.Session_state.t) =
-  permission_profile_revision t state.spec.permission_profile_digest
-;;
-
 let prepared_schedules initial operations =
   List.fold operations ~init:initial ~f:(fun schedules -> function
     | Add schedule -> schedule :: schedules
@@ -1420,6 +3309,7 @@ let prepared_state state runtime shell schedules jobs ~fresh_history =
       { conversation with
         canonical_history =
           Agent_session.History_codec.all_to_protocol
+            ~previous:(if fresh_history then [] else conversation.canonical_history)
             runtime.Agent_session.Runtime_builder.initial_history
       ; initial_prompt_entry_count =
           (if fresh_history
@@ -1517,7 +3407,8 @@ let prepare_administration t entry state ~fresh_history =
       |> Result.of_option
            ~error:(unavailable Invalid_state "session has no administration store")
     in
-    let%bind revision = restore_state_revision t state in
+    let%bind revision = restore_state_source t state in
+    let%bind () = check_source_for_execution t state revision in
     let%bind profile = restore_state_profile t state in
     let%bind paths = runtime_paths t handle revision state in
     with_preparation_storage paths (fun storage_paths ->
@@ -1557,12 +3448,15 @@ let checkpoint_entry t handle journal persistence actor =
 let close_entry t handle journal persistence runtime writer actor capacity =
   Exn.protect
     ~f:(fun () ->
-      Runtime_owner.close runtime;
+      Runtime_owner.close_and_wait runtime;
       ignore
         (checkpoint_entry t handle journal persistence actor
          : (unit, Agent_protocol.Error.t) result))
     ~finally:(fun () ->
       Eio.Cancel.protect (fun () ->
+        Job_capacity.close_session
+          t.job_capacity
+          ~session_id:(Agent_store.Session_store.Handle.session_id handle);
         Agent_session.Session_actor.shutdown actor;
         Option.iter capacity ~f:Session_capacity.release;
         Agent_store.Commit_writer.close writer;
@@ -1571,24 +3465,31 @@ let close_entry t handle journal persistence runtime writer actor capacity =
            : (unit, Agent_store.Store_error.t) result)))
 ;;
 
-let close_unregistered_entry runtime writer actor capacity =
-  Runtime_owner.close runtime;
+let close_unregistered_entry t handle runtime writer actor capacity =
+  Runtime_owner.close_and_wait runtime;
+  Job_capacity.close_session
+    t.job_capacity
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
   Agent_session.Session_actor.shutdown actor;
   Option.iter capacity ~f:Session_capacity.release;
   Agent_store.Commit_writer.close writer
 ;;
 
-let close_unregistered_runtime runtime writer actor capacity =
+let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_session.Session_actor.shutdown actor;
   Option.iter capacity ~f:Session_capacity.release;
   runtime.Agent_session.Runtime_builder.close ();
+  Job_capacity.close_session
+    t.job_capacity
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
   Agent_store.Commit_writer.close writer
 ;;
 
 let build_runtime_for_actor t handle actor =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
-  let%bind revision = restore_state_revision t state in
+  let%bind revision = restore_state_source t state in
+  let%bind () = check_source_for_execution t state revision in
   let%bind profile = restore_state_profile t state in
   let%bind reservation =
     Agent_session.Session_actor.reserve_history_block
@@ -1620,7 +3521,99 @@ let build_runtime_for_actor t handle actor =
     ~pending_schedule_operations
     ~pending_jobs
   |> Result.bind ~f:(fun (runtime, _shell) ->
-    Result.map (runtime.start_moderator ()) ~f:(fun _ -> runtime))
+    let prepared = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        match !prepared with
+        | true -> ()
+        | false -> Eio.Cancel.protect runtime.close)
+      ~f:(fun () ->
+        match runtime.start_moderator () with
+        | Ok _ ->
+          prepared := true;
+          Ok runtime
+        | Error error -> Error error))
+;;
+
+let collect_results t handle journal persistence durable_events services runtime actor () =
+  match services.Agent_session.Session_actor.job_results with
+  | None -> Ok None
+  | Some publisher ->
+    Result_retention.collect
+      ~runtime
+      ~actor
+      ~publisher
+      ~handle
+      ~journal
+      ~persistence
+      ~durable_events
+      ~idempotency_store:t.idempotency_store
+      ~limits:t.limits.job_result_collection
+      ~max_frame_bytes:
+        (Int.max t.limits.max_journal_payload t.limits.snapshot_payload_limit)
+      ~max_events:t.limits.event_replay_capacity
+;;
+
+let retire_owned_children t actor ~closing =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let%bind parent = A.state actor in
+  match closing, parent.lifecycle.desired with
+  | false, Running -> Ok ()
+  | true, Running | _, Stopped ->
+    let ledger = Agent_store.Session_store.delegations t.store in
+    let%bind records =
+      D.with_records
+        ledger
+        ~max_records:t.limits.delegation_recovery_max_count
+        ~max_bytes:t.limits.delegation_recovery_max_bytes
+        ~f:(fun records -> Ok records)
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let children id =
+      List.filter records ~f:(fun record ->
+        P.Id.Session.equal record.D.key.parent_session_id id
+        &&
+        match record.admission.lifetime with
+        | Owned | Invocation_owned _ -> true
+        | Independent _ -> false)
+    in
+    (* Validate the complete dependency graph before entering other owners. A
+       malformed cycle must fail rather than join this owner's own retirement. *)
+    let rec validate trail id =
+      match List.mem trail id ~equal:P.Id.Session.equal with
+      | true -> Error (unavailable Permission_denied "owned stop ancestry is cyclic")
+      | false ->
+        List.fold_result (children id) ~init:() ~f:(fun () record ->
+          validate (id :: trail) record.admission.child_session_id)
+    in
+    let%bind () = validate [] parent.identity.session_id in
+    Eio.Fiber.List.map
+      (fun (record : D.record) ->
+         match Session_registry.find t.registry record.admission.child_session_id with
+         | None -> Ok ()
+         | Some child ->
+           (match parent.lifecycle.desired with
+            | Running ->
+              (try
+                 Runtime_owner.close_and_wait child.runtime;
+                 Ok ()
+               with
+               | Runtime_owner.Cleanup_failed error -> Error error)
+            | Stopped ->
+              Delegation_lifecycle.stop_owned
+                ~parent_stop_epoch:parent.stop_epoch
+                ~clock:(Eio.Stdenv.clock t.env)
+                ~delegations:ledger
+                ~reference:(D.reference record)
+                ~actor:child.actor
+                ~runtime:child.runtime
+                ()
+              |> Result.map ~f:ignore))
+      (children parent.identity.session_id)
+    |> Result.all_unit
 ;;
 
 let create_loaded_entry
@@ -1645,6 +3638,17 @@ let create_loaded_entry
       initial_events
   in
   let runtime_owner = ref None in
+  let%bind services =
+    actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal:state.identity.creating_principal
+  in
   let actor =
     Agent_session.Session_actor.create_with_owner_lease_duration
       ~schedule_permission_timeouts:false
@@ -1658,32 +3662,33 @@ let create_loaded_entry
       ~initial_state:state
       ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
       ~operation_worker:(Some runtime.Agent_session.Runtime_builder.worker)
-      ~services:
-        (actor_services
-           t
-           handle
-           journal
-           persistence
-           durable_events
-           capacity
-           runtime_owner)
+      ~services
   in
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
     let%bind () = flush_pending_schedules actor !pending_schedule_operations in
     let%bind () = flush_pending_jobs actor !pending_jobs in
+    let%bind () =
+      match runtime.automatic_turn_policy with
+      | None -> Ok ()
+      | Some policy ->
+        Agent_session.Session_actor.enable_automatic_turn_budget actor policy
+    in
     let%bind moderator_snapshot = runtime.start_moderator () in
     install_moderator_if_changed actor moderator_snapshot
   with
   | Error _ as failure ->
     actor_ref := None;
-    close_unregistered_runtime runtime writer actor capacity;
+    close_unregistered_runtime t handle runtime writer actor capacity;
     failure
   | Ok () ->
     let runtime =
-      Runtime_owner.create ~actor ~initial:(Some runtime) ~build:(fun () ->
-        build_runtime_for_actor t handle actor)
+      Runtime_owner.create_with_unload
+        ~before_unload:(retire_owned_children t actor)
+        ~actor
+        ~initial:(Some runtime)
+        ~build:(fun () -> build_runtime_for_actor t handle actor)
     in
     runtime_owner := Some runtime;
     (match history_source t actor state.identity.session_id with
@@ -1697,6 +3702,16 @@ let create_loaded_entry
            ; capacity
            ; store_handle = Some handle
            ; expire_permissions = expire_permissions t actor profile
+           ; collect_results =
+               collect_results
+                 t
+                 handle
+                 journal
+                 persistence
+                 durable_events
+                 services
+                 runtime
+                 actor
            ; close =
                (fun () ->
                  close_entry t handle journal persistence runtime writer actor capacity)
@@ -1709,7 +3724,7 @@ let create_loaded_entry
            | Error _ as failure ->
              actor_ref := None;
              runtime_owner := None;
-             close_unregistered_entry runtime writer actor capacity;
+             close_unregistered_entry t handle runtime writer actor capacity;
              failure)
         | Queued_for_slot
         | Starting
@@ -1722,7 +3737,7 @@ let create_loaded_entry
         | Failed _ -> Ok entry)
      | Error _ as failure ->
        actor_ref := None;
-       close_unregistered_entry runtime writer actor capacity;
+       close_unregistered_entry t handle runtime writer actor capacity;
        failure)
 ;;
 
@@ -1744,6 +3759,17 @@ let create_unloaded_entry
       initial_events
   in
   let runtime_owner = ref None in
+  let%bind services =
+    actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal:state.identity.creating_principal
+  in
   let actor =
     Agent_session.Session_actor.create_with_owner_lease_duration
       ~schedule_permission_timeouts:false
@@ -1757,25 +3783,20 @@ let create_unloaded_entry
       ~initial_state:state
       ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
       ~operation_worker:None
-      ~services:
-        (actor_services
-           t
-           handle
-           journal
-           persistence
-           durable_events
-           capacity
-           runtime_owner)
+      ~services
   in
   let runtime =
-    Runtime_owner.create ~actor ~initial:None ~build:(fun () ->
-      build_runtime_for_actor t handle actor)
+    Runtime_owner.create_with_unload
+      ~before_unload:(retire_owned_children t actor)
+      ~actor
+      ~initial:None
+      ~build:(fun () -> build_runtime_for_actor t handle actor)
   in
   runtime_owner := Some runtime;
   match history_source t actor state.identity.session_id with
   | Error _ as failure ->
     runtime_owner := None;
-    close_unregistered_entry runtime writer actor capacity;
+    close_unregistered_entry t handle runtime writer actor capacity;
     failure
   | Ok history_ids ->
     Ok
@@ -1787,6 +3808,16 @@ let create_unloaded_entry
         ; capacity
         ; store_handle = Some handle
         ; expire_permissions = expire_permissions t actor profile
+        ; collect_results =
+            collect_results
+              t
+              handle
+              journal
+              persistence
+              durable_events
+              services
+              runtime
+              actor
         ; close =
             (fun () ->
               close_entry t handle journal persistence runtime writer actor capacity)
@@ -2002,7 +4033,7 @@ let finish_creation t handle revision profile provisional ~command_audit =
     prepare_runtime
       t
       handle
-      revision
+      (Authored revision)
       profile
       provisional
       ~next_history_sequence:0
@@ -2274,7 +4305,7 @@ let open_recovery t handle initial =
   journal, recovery
 ;;
 
-let recovered_revision = restore_state_revision
+let recovered_revision = restore_state_source
 let recovered_profile = restore_state_profile
 
 let verify_recovered_workspace t state =
@@ -2284,8 +4315,7 @@ let verify_recovered_workspace t state =
   |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recovery_reservation t state =
-  let first = state.Agent_session.Session_state.conversation.next_history_sequence in
+let recovery_reservation t first =
   let count = t.limits.moderator_reservation_size in
   let maximum = Int64.of_int Int.max_value in
   if count < 0
@@ -2347,7 +4377,12 @@ let interrupted_reviewer_job now (job : Agent_protocol.Job.t) =
         }
     | Queued ->
       Some { job with status = Cancelled; completed_at = Some now; delivery = Pending }
-    | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ -> None)
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> None)
   else None
 ;;
 
@@ -2389,10 +4424,22 @@ let recovery_attachment_deltas state ~now =
     | _ -> Agent_session.Session_delta.Attachment_removed attachment.id)
 ;;
 
-let recovery_transition state ~now ~reserved_history_through ~observed =
+let recovery_transition
+      ~parent_stop
+      state
+      ~now
+      ~reserved_history_through
+      ~observed
+      ~(invocations : Agent_session.Invocation_recovery.t)
+  =
   let lifecycle =
     Agent_session.Session_state.Lifecycle.
-      { desired = state.Agent_session.Session_state.lifecycle.desired; observed }
+      { desired =
+          (if Option.exists parent_stop ~f:(fun parent -> parent.stop)
+           then Stopped
+           else state.Agent_session.Session_state.lifecycle.desired)
+      ; observed
+      }
   in
   let attachment_deltas = recovery_attachment_deltas state ~now in
   let owner_was_attached =
@@ -2434,11 +4481,21 @@ let recovery_transition state ~now ~reserved_history_through ~observed =
           ; Lifecycle_changed lifecycle
           ]
           @ operation_delta
+          @ invocations.deltas
           @ permission_deltas
           @ reviewer_job_deltas
-          @ attachment_deltas))
+          @ attachment_deltas
+          @
+          match parent_stop with
+          | None -> []
+          | Some { stop = true; _ } -> [ Initial_start_consumed ]
+          | Some { stop = false; epoch; _ } -> [ Parent_stop_epoch_changed epoch ]))
     ~payloads:
       (operation_payload
+       @ (if List.is_empty invocations.appended
+          then []
+          else
+            [ Agent_protocol.Event.Durable.Payload.History_appended invocations.appended ])
        @ permission_payloads
        @ reviewer_job_payloads
        @ Option.to_list
@@ -2464,10 +4521,24 @@ let create_recovery_writer t journal recovery session_id =
     |> Result.map_error ~f:protocol_of_store
 ;;
 
-let commit_recovery_boundary t persistence state reserved_history_through observed =
+let commit_recovery_boundary
+      ~parent_stop
+      t
+      persistence
+      state
+      reserved_history_through
+      observed
+      invocations
+  =
   let open Result.Let_syntax in
   let%bind transition =
-    recovery_transition state ~now:(now t) ~reserved_history_through ~observed
+    recovery_transition
+      ~parent_stop
+      state
+      ~now:(now t)
+      ~reserved_history_through
+      ~observed
+      ~invocations
   in
   let%map () =
     Agent_session.Session_persistence.commit
@@ -2596,12 +4667,36 @@ let recover_open_handle t handle =
   let%bind journal, recovery = open_recovery t handle initial in
   let%bind () = reconcile_command_audits t recovery in
   let state = recovery.Agent_store.Recovery.state in
+  let%bind parent_stop = parent_stop_recovery t state in
+  let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
   let%bind revision = recovered_revision t state in
+  let%bind () =
+    match state.lifecycle.desired with
+    | Stopped -> Ok ()
+    | Running when not stopping -> check_source_for_execution t state revision
+    | Running -> Ok ()
+  in
   let%bind profile = recovered_profile t state in
   let%bind () = verify_recovered_workspace t state in
-  let%bind first_sequence, reserved_history_through = recovery_reservation t state in
+  let%bind recovery_first = preparation_sequence t state in
+  let%bind invocations =
+    Agent_session.Invocation_recovery.plan
+      ~state
+      ~namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
+      ~first_sequence:recovery_first
+      ~reason:"daemon restarted before the invocation recorded an outcome"
+  in
+  let%bind first_sequence, reserved_history_through =
+    recovery_reservation t (Int64.of_int invocations.next_sequence)
+  in
   let%bind durable_events = recovered_events recovery in
-  let%bind observed, capacity = prepare_recovery_capacity t state in
+  let%bind observed, capacity =
+    prepare_recovery_capacity
+      t
+      (if stopping
+       then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+       else state)
+  in
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
   let persistence =
     Agent_session.Session_persistence.create
@@ -2616,7 +4711,14 @@ let recover_open_handle t handle =
       ~previous_transaction_hash:recovery.latest_transaction_hash
   in
   match
-    commit_recovery_boundary t persistence state reserved_history_through observed
+    commit_recovery_boundary
+      ~parent_stop
+      t
+      persistence
+      state
+      reserved_history_through
+      observed
+      invocations
   with
   | Error _ as failure ->
     Option.iter capacity ~f:Session_capacity.release;
@@ -2633,15 +4735,36 @@ let recover_open_handle t handle =
           Agent_store.Commit_writer.close writer;
           failure
         | Ok () ->
-          create_unloaded_entry
-            t
-            handle
-            journal
-            state
-            writer
-            persistence
-            durable_events
-            capacity)
+          let%bind entry =
+            create_unloaded_entry
+              t
+              handle
+              journal
+              state
+              writer
+              persistence
+              durable_events
+              capacity
+          in
+          (match parent_stop with
+           | Some { stop = true; reference; epoch } ->
+             (match
+                Agent_session.Session_actor.stop_delegated_at_epoch
+                  ~force:true
+                  entry.actor
+                  ~reference
+                  ~epoch
+              with
+              | Ok _ ->
+                (match Runtime_owner.unload_and_wait entry.runtime with
+                 | Ok () -> Ok entry
+                 | Error failure ->
+                   entry.close ();
+                   Error failure)
+              | Error failure ->
+                entry.close ();
+                Error failure)
+           | None | Some { stop = false; _ } -> Ok entry))
      | Queued_for_slot
      | Starting
      | Recovering
@@ -2745,23 +4868,2210 @@ let index_requires_load entry =
   || entry.deliverable_job_count > 0
   || Option.is_some entry.earliest_schedule_due
   || Option.is_some entry.owner_grace_deadline
+  || entry.pending_initial_start
 ;;
 
 let recover_sessions t =
-  let indexed =
+  let open Result.Let_syntax in
+  let all =
     Agent_store.Session_store.list_sessions t.store
     |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
+  in
+  let indexed =
+    all
     |> List.filter ~f:(fun entry ->
       Agent_store.Session_store.index_was_rebuilt t.store || index_requires_load entry)
   in
+  let%bind records =
+    Agent_store.Delegation_store.with_records
+      (Agent_store.Session_store.delegations t.store)
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records -> Ok records)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let entries =
+    String.Map.of_alist_exn
+      (List.map all ~f:(fun entry ->
+         ( Agent_protocol.Id.Session.to_string
+             entry.Agent_store.Session_index.Entry.session.id
+         , entry )))
+  in
+  let parents =
+    String.Map.of_alist_exn
+      (List.map records ~f:(fun record ->
+         ( Agent_protocol.Id.Session.to_string
+             record.Agent_store.Delegation_store.admission.child_session_id
+         , record.key.parent_session_id )))
+  in
+  let visiting = Hash_set.create (module String) in
+  let heights = Hashtbl.create (module String) in
+  let ordered = ref [] in
+  let rec visit depth id =
+    let key = Agent_protocol.Id.Session.to_string id in
+    if depth > t.limits.delegation_max_depth || Hash_set.mem visiting key
+    then
+      Error (corrupt "generated recovery ancestry is cyclic or exceeds its depth limit")
+    else (
+      match Hashtbl.find heights key with
+      | Some height ->
+        if height > t.limits.delegation_max_depth - depth
+        then Error (corrupt "generated recovery ancestry exceeds its depth limit")
+        else Ok height
+      | None ->
+        (match Map.find entries key with
+         | None -> Error (corrupt "generated recovery requires a missing parent session")
+         | Some entry ->
+           Hash_set.add visiting key;
+           let%bind height =
+             match entry.session.spec.prompt, entry.session.desired_state with
+             | Generated _, (Running | Stopped) ->
+               (match Map.find parents key with
+                | None ->
+                  Error
+                    (corrupt "generated recovery requires a private delegation record")
+                | Some parent ->
+                  (match Map.mem entries (Agent_protocol.Id.Session.to_string parent) with
+                   | true -> Result.map (visit (depth + 1) parent) ~f:(( + ) 1)
+                   | false -> Ok 0))
+             | _ -> Ok 0
+           in
+           Hash_set.remove visiting key;
+           Hashtbl.set heights ~key ~data:height;
+           ordered := entry :: !ordered;
+           Ok height))
+  in
+  let%bind () =
+    List.fold_result indexed ~init:() ~f:(fun () entry ->
+      Result.map (visit 0 entry.session.id) ~f:ignore)
+  in
+  let rollback recovered =
+    List.iter recovered ~f:(fun (id, entry) ->
+      ignore (Session_registry.remove t.registry id : Session_registry.entry option);
+      entry.Session_registry.close ())
+  in
   let rec loop recovered = function
-    | [] -> Ok (List.rev recovered)
+    | [] -> Ok (List.rev_map recovered ~f:snd)
     | index_entry :: rest ->
       (match recover_index_entry t index_entry with
-       | Ok entry -> loop (entry :: recovered) rest
+       | Ok entry ->
+         let id = index_entry.session.id in
+         (match Session_registry.add t.registry ~session_id:id entry with
+          | Ok () -> loop ((id, entry) :: recovered) rest
+          | Error _ as failure ->
+            entry.close ();
+            rollback recovered;
+            failure)
        | Error _ as failure ->
-         List.iter recovered ~f:(fun entry -> entry.Session_registry.close ());
+         rollback recovered;
          failure)
   in
-  loop [] indexed
+  loop [] (List.rev !ordered)
+;;
+
+let initialize_generated_layout t state ~staging_directory =
+  let module Store = Agent_store in
+  let open Result.Let_syntax in
+  let%bind journal =
+    Store.Journal.create
+      ~env:t.env
+      ~directory:(Filename.concat staging_directory "journal")
+      ~max_payload_length:t.limits.max_journal_payload
+      ~max_segment_bytes:t.limits.max_segment_bytes
+      ~max_segment_frames:t.limits.max_segment_frames
+  in
+  let%bind writer =
+    Store.Commit_writer.create
+      ~sw:t.sw
+      ~journal
+      ~session_id:state.Agent_session.Session_state.identity.session_id
+      ~next_transaction_sequence:1L
+      ~previous_transaction_hash:None
+      ~queue_capacity:t.limits.commit_queue_capacity
+  in
+  Exn.protect
+    ~finally:(fun () -> Store.Commit_writer.close writer)
+    ~f:(fun () ->
+      let persistence =
+        Agent_session.Session_persistence.create
+          ~archive:(fun _ _ -> Error (corrupt "creation cannot archive history"))
+          ~command_accepted:(fun _ _ -> ())
+          ~writer
+          ~durability:Flush
+          ~previous_transaction_hash:None
+      in
+      let%bind transition =
+        commit_creation t persistence state ~command_audit:None
+        |> Result.map_error ~f:(fun error -> Store.Store_error.Corrupt error.message)
+      in
+      let state = transition.Agent_session.Session_transition.state in
+      let%bind _ =
+        Agent_session.Session_persistence.install_snapshot_at
+          ~env:t.env
+          ~directory:(Filename.concat staging_directory "snapshot")
+          ~max_payload_length:t.limits.snapshot_payload_limit
+          ~transaction_hash:
+            (Agent_session.Session_persistence.transaction_hash persistence)
+          state
+      in
+      let%map () = Store.Durable_file.sync_directory ~env:t.env ~path:staging_directory in
+      metadata state)
+;;
+
+let with_generated_creation_lock t f =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:true t.generated_creation_mutex (fun () ->
+      try Ok (f ()) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let workspace_retained t (state : Agent_session.Session_state.t) =
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  D.with_records
+    (Agent_store.Session_store.delegations t.store)
+    ~max_records:t.limits.delegation_recovery_max_count
+    ~max_bytes:t.limits.delegation_recovery_max_bytes
+    ~f:(fun records ->
+      (* Initial metadata precedes linking; clearing the pending-start bit follows
+         runtime resource admission. Read index hints conservatively, without
+         entering another actor while workspace maintenance holds this owner. *)
+      let index = Agent_store.Session_store.session_index t.store in
+      Ok
+        (List.exists records ~f:(fun record ->
+           match record.D.stage, record.revocation, record.admission.lifetime with
+           | Linked, None, Independent _ ->
+             (match
+                Agent_store.Session_index.find index record.admission.child_session_id
+              with
+              | Some entry ->
+                (not entry.archived)
+                && (entry.pending_initial_start
+                    || P.Session.equal_desired_state entry.session.desired_state Running)
+                && Option.equal
+                     P.Id.Prompt_revision.equal
+                     entry.session.prompt_revision
+                     (Some record.admission.revision_id)
+                && Option.equal
+                     P.Id.Workspace_instance.equal
+                     entry.session.workspace_instance
+                     (Some state.spec.workspace_instance.id)
+              | None -> false)
+           | _ -> false)))
+  |> Result.map_error ~f:protocol_of_store
+;;
+
+let load_independent_ancestors t reference =
+  let open Result.Let_syntax in
+  (* Run outside the registry loader mutex: stopped ancestors may have been
+         evicted while this independent child was stopped. Load actors only;
+         resource construction remains deferred to the child scope. *)
+  let rec load_ancestors visited reference =
+    let module D = Agent_store.Delegation_store in
+    let%bind () =
+      match
+        List.length visited < t.limits.delegation_max_depth
+        && not
+             (List.mem
+                visited
+                reference.D.Reference.child_session_id
+                ~equal:Agent_protocol.Id.Session.equal)
+      with
+      | true -> Ok ()
+      | false ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.ancestry_limit: invalid start ancestry")
+    in
+    let%bind record =
+      D.resolve (Agent_store.Session_store.delegations t.store) reference
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match record.stage, record.revocation with
+      | Linked, None -> Ok ()
+      | _ ->
+        Error
+          (unavailable
+             Permission_denied
+             "delegation.not_linked: start ancestry is unlinked or revoked")
+    in
+    let%bind () = authorize_independent t record in
+    let%bind parent = Session_registry.load t.registry record.key.parent_session_id in
+    let%bind current = Agent_session.Session_actor.state parent.actor in
+    match current.spec.delegation with
+    | None -> Ok ()
+    | Some ancestor -> load_ancestors (reference.child_session_id :: visited) ancestor
+  in
+  let%bind admission =
+    Agent_store.Delegation_store.resolve
+      (Agent_store.Session_store.delegations t.store)
+      reference
+    |> Result.map_error ~f:protocol_of_store
+  in
+  match admission.admission.lifetime with
+  | Owned | Invocation_owned _ -> Ok ()
+  | Independent _ -> load_ancestors [] reference
+;;
+
+let prepare_session_start t entry =
+  with_generated_creation_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
+    match state.spec.delegation with
+    | None -> Ok ()
+    | Some reference ->
+      let%bind () = load_independent_ancestors t reference in
+      let%bind parent, record = generated_parent ~check_stop_epoch:false t state in
+      (match record.admission.lifetime with
+       | Independent _ ->
+         Independent_resources.check_parent
+           ~max_depth:t.limits.delegation_max_depth
+           ~host:(independent_resource_host t)
+           ~parent_id:record.key.parent_session_id
+       | Owned | Invocation_owned _ ->
+         let%bind current = Agent_session.Session_actor.state parent.actor in
+         (match
+            Option.equal Int64.equal state.parent_stop_epoch (Some current.stop_epoch)
+          with
+          | true -> Ok ()
+          | false ->
+            Delegation_lifecycle.stop_owned
+              ~parent_stop_epoch:current.stop_epoch
+              ~clock:(Eio.Stdenv.clock t.env)
+              ~delegations:(Agent_store.Session_store.delegations t.store)
+              ~reference
+              ~actor:entry.actor
+              ~runtime:entry.runtime
+              ()
+            |> Result.map ~f:ignore)))
+;;
+
+let resume_generated_initial_start t entry =
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let open Result.Let_syntax in
+  let%bind state = A.state entry.Session_registry.actor in
+  match state.pending_initial_start, state.spec.delegation with
+  | false, _ -> Ok ()
+  | true, None -> Error (corrupt "generated initial start has no delegation")
+  | true, Some reference ->
+    (* A temporarily queued or compacting ancestor must not turn a durable start
+       request into a permanent failure. Terminal loss of authority is different. *)
+    let rec ready depth ~require_execution reference =
+      let%bind () =
+        match depth < t.limits.delegation_max_depth with
+        | true -> Ok ()
+        | false ->
+          Error
+            (unavailable
+               Permission_denied
+               "initial start exceeds delegation ancestry limit")
+      in
+      let%bind record =
+        D.resolve (Agent_store.Session_store.delegations t.store) reference
+        |> Result.map_error ~f:protocol_of_store
+      in
+      match record.stage, record.revocation with
+      | _, Some _ ->
+        Error (unavailable Permission_denied "initial start delegation was revoked")
+      | (Reserved | Artifact_installed | Child_installed), None -> Ok false
+      | Linked, None ->
+        let%bind () = authorize_independent t record in
+        let require_execution =
+          match record.admission.lifetime with
+          | Owned | Invocation_owned _ -> require_execution
+          | Independent _ -> false
+        in
+        let%bind parent =
+          Session_registry.find t.registry record.key.parent_session_id
+          |> Result.of_option
+               ~error:
+                 (unavailable Permission_denied "initial start parent is unavailable")
+        in
+        let%bind current = A.state parent.actor in
+        let%bind () =
+          Agent_session.Delegation_authority.check_invocation_owner record current
+        in
+        let%bind () =
+          match
+            require_execution
+            && depth = 0
+            && not
+                 (Int64.equal
+                    current.stop_epoch
+                    (Option.value record.admission.parent_stop_epoch ~default:0L))
+          with
+          | false -> Ok ()
+          | true ->
+            Error
+              (unavailable
+                 Permission_denied
+                 "initial start parent stopped after admission")
+        in
+        let%bind fingerprint = parent_authority_fingerprint t current in
+        (match
+           ( require_execution
+           , ( current.lifecycle.desired
+             , current.halted
+             , current.failure
+             , String.equal fingerprint record.admission.authority_sha256 ) )
+         with
+         | false, (_, _, _, true) ->
+           (match current.spec.delegation with
+            | None -> Ok true
+            | Some ancestor -> ready (depth + 1) ~require_execution ancestor)
+         | true, (Running, false, None, true) ->
+           (match current.lifecycle.observed with
+            | Idle | Running_turn _ | Waiting_for_permission _ ->
+              (match current.spec.delegation with
+               | None -> Ok true
+               | Some ancestor -> ready (depth + 1) ~require_execution ancestor)
+            | Stopped
+            | Queued_for_slot
+            | Starting
+            | Recovering
+            | Compacting _
+            | Stopping
+            | Failed _ -> Ok false)
+         | _ ->
+           Error (unavailable Permission_denied "initial start parent authority ended"))
+    in
+    let attempt () =
+      let%bind () = load_independent_ancestors t reference in
+      let%bind is_ready = ready 0 ~require_execution:true reference in
+      match is_ready with
+      | false -> Ok ()
+      | true ->
+        let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+        let%bind still_ready = ready 0 ~require_execution:true reference in
+        (match still_ready with
+         | false -> Ok ()
+         | true ->
+           A.start_initial_delegated
+             ?expected_parent_stop_epoch:state.parent_stop_epoch
+             entry.actor
+             ~reference
+           |> Result.map ~f:ignore)
+    in
+    (match attempt () with
+     | Ok () -> Ok ()
+     | Error failure
+       when failure.retryable
+            ||
+            match failure.code with
+            | Persistence_error | Journal_corrupt | Interrupted | Server_shutting_down ->
+              true
+            | _ -> false -> Error failure
+     | Error failure ->
+       (* Authority may have become temporarily unavailable while runtime loading
+          yielded. Leave that intent pending instead of recording a terminal error. *)
+       (match ready 0 ~require_execution:true reference with
+        | Ok false -> Ok ()
+        | Ok true | Error _ ->
+          A.fail_initial_delegated entry.actor ~reference failure |> Result.map ~f:ignore))
+;;
+
+let resume_generated_initial_starts t =
+  with_generated_creation_lock t (fun () ->
+    Agent_store.Session_store.list_sessions t.store
+    |> List.filter ~f:(fun entry ->
+      entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
+    |> List.iter ~f:(fun indexed ->
+      let entry =
+        match Session_registry.find t.registry indexed.session.id with
+        | Some entry -> Ok (Some entry)
+        | None ->
+          let open Result.Let_syntax in
+          let module D = Agent_store.Delegation_store in
+          (* A lost link acknowledgement may close a new actor before registry
+             publication. Publish only a privately linked durable child here;
+             unlinked creation stages remain unavailable to the scheduler. *)
+          let%bind linked =
+            D.with_records
+              (Agent_store.Session_store.delegations t.store)
+              ~max_records:t.limits.delegation_recovery_max_count
+              ~max_bytes:t.limits.delegation_recovery_max_bytes
+              ~f:(fun records ->
+                Ok
+                  (List.exists records ~f:(fun record ->
+                     D.equal_stage record.D.stage Linked
+                     && Agent_protocol.Id.Session.equal
+                          record.admission.child_session_id
+                          indexed.session.id
+                     && Option.equal
+                          Agent_protocol.Id.Prompt_revision.equal
+                          indexed.session.prompt_revision
+                          (Some record.admission.revision_id))))
+            |> Result.map_error ~f:protocol_of_store
+          in
+          (match linked with
+           | false -> Ok None
+           | true ->
+             Session_registry.index t.registry indexed;
+             Session_registry.load t.registry indexed.session.id
+             |> Result.map ~f:Option.some)
+      in
+      match entry with
+      | Error _ | Ok None -> ()
+      | Ok (Some entry) ->
+        ignore
+          (resume_generated_initial_start t entry : (unit, Agent_protocol.Error.t) result)))
+;;
+
+(* Source-specific admission runs under the parent's runtime lease. Everything
+   after it uses the same durable reservation, child layout and publication path.
+   These callbacks are host-owned, never supplied by a model or protocol client. *)
+type child_creation_source =
+  { artifact : Agent_store.Prompt_artifact_store.Artifact.t
+  ; capability_pins : (string * string) list
+  ; authored_tool : Agent_store.Delegation_store.Admission.authored_tool option
+  ; request_sha256 : string
+  ; install :
+      artifacts:Agent_store.Prompt_artifact_store.t
+      -> record:Agent_store.Delegation_store.record
+      -> (Agent_store.Delegation_store.record, Agent_protocol.Error.t) result
+  ; initial_history :
+      session_id:Agent_protocol.Id.Session.t
+      -> (History_entry.t list * int, Agent_protocol.Error.t) result
+  }
+
+let create_delegated_session
+      ?(start_immediately = false)
+      ?(lifetime = Owned)
+      ?invocation_owner
+      t
+      ~parent_session_id
+      ~idempotency_key
+      ~display_name
+      ~prepare_source
+  =
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let module State = Agent_session.Session_state in
+  let module C = Chat_response.Tool_capability in
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let open Result.Let_syntax in
+  let run () =
+    let%bind admitted_lifetime = requested_lifetime t lifetime in
+    let%bind admitted_lifetime =
+      match admitted_lifetime, invocation_owner with
+      | lifetime, None -> Ok lifetime
+      | D.Admission.Owned, Some invocation_id ->
+        Ok (D.Admission.Invocation_owned { invocation_id })
+      | (Invocation_owned _ | Independent _), Some _ ->
+        Error
+          (unavailable
+             Invalid_request
+             "one-off ownership cannot be combined with independent lifetime")
+    in
+    let%bind parent =
+      match
+        t.qualify_chatml_extensions, Session_registry.find t.registry parent_session_id
+      with
+      | true, Some parent -> Ok parent
+      | _ ->
+        Error (unavailable Invalid_state "generated creation requires a qualified parent")
+    in
+    Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+      let%bind before = A.state parent.actor in
+      let%bind moderator = parent_moderation_source t parent_session_id in
+      let%bind authority_sha256 =
+        Agent_session.Delegation_authority.fingerprint ?moderator before
+      in
+      let check_parent current =
+        (* Publication calls this from the actor checkpoint. The runtime lease
+           retains the captured immutable policy source; never reacquire its owner
+           here, since the idle scheduler may hold it while waiting for this actor. *)
+        let%bind fingerprint =
+          Agent_session.Delegation_authority.fingerprint ?moderator current
+        in
+        let%bind () =
+          match invocation_owner with
+          | None -> Ok ()
+          | Some id ->
+            (match
+               List.find current.invocations ~f:(fun invocation ->
+                 P.Id.Invocation.equal invocation.P.Invocation.context.id id)
+             with
+             | Some { status = Dispatching; _ } -> Ok ()
+             | _ ->
+               Error
+                 (unavailable Permission_denied "one-off invoking tool call has ended"))
+        in
+        match current.State.lifecycle.desired, current.halted, current.failure with
+        | Running, false, None
+          when String.equal fingerprint authority_sha256
+               && Int64.equal current.stop_epoch before.stop_epoch -> Ok ()
+        | _ ->
+          Error
+            (unavailable Permission_denied "parent no longer permits generated creation")
+      in
+      let%bind () = check_parent before in
+      let%bind () =
+        match lifetime with
+        | Owned -> Ok ()
+        | Independent ->
+          Independent_resources.check_parent
+            ~max_depth:t.limits.delegation_max_depth
+            ~host:(independent_resource_host t)
+            ~parent_id:parent_session_id
+      in
+      let%bind principal_id =
+        Result.of_option
+          before.identity.creating_principal
+          ~error:
+            (unavailable Permission_denied "generated creation needs a durable principal")
+      in
+      let%bind native =
+        Result.of_option
+          runtime.Agent_session.Runtime_builder.native_runtime
+          ~error:(unavailable Invalid_state "parent native resources are unavailable")
+      in
+      let%bind capabilities =
+        Lazy.force native.capabilities
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.C.message)
+      in
+      let%bind source = prepare_source ~runtime ~capabilities in
+      let artifact = source.artifact in
+      let%bind protocol =
+        P.Session.Spec.create
+          ~execution_host:Daemon
+          ~prompt:(Generated artifact.revision_id)
+          ~workspace:before.spec.protocol.workspace
+          ~liveness:Detached
+          ~persistence:Durable
+          ~permission_profile:before.spec.permission_profile
+          ~start_immediately
+          ?display_name
+          ~labels:[]
+          ()
+      in
+      let key : D.Key.t =
+        { parent_session_id
+        ; parent_generation = before.identity.generation
+        ; principal_id
+        ; idempotency_key
+        }
+      in
+      let ledger = S.delegations t.store in
+      let candidate : D.Admission.t =
+        { child_session_id = P.Id.Session.create ()
+        ; revision_id = artifact.revision_id
+        ; transaction_id = P.Id.Transaction.create ()
+        ; manifest_sha256 = artifact.manifest_sha256
+        ; parent_revision_id = before.spec.prompt_revision_id
+        ; parent_stop_epoch = Some before.stop_epoch
+        ; authored_tool = source.authored_tool
+        ; authority_sha256
+        ; capability_pins = source.capability_pins
+        ; lifetime = admitted_lifetime
+        ; created_at = artifact.created_at
+        }
+      in
+      Eio.Cancel.protect (fun () ->
+        let%bind reservation =
+          D.reserve
+            ledger
+            ~key
+            ~request_sha256:source.request_sha256
+            ~admission:candidate
+            ~max_records:t.limits.delegation_recovery_max_count
+            ~max_bytes:t.limits.delegation_recovery_max_bytes
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind record =
+          match reservation with
+          | (New record | Replay record) when Option.is_none record.revocation ->
+            Ok record
+          | New _ | Replay _ ->
+            Error (unavailable Permission_denied "generated admission was revoked")
+          | Conflict _ ->
+            Error (unavailable Conflict "generated creation key has different inputs")
+        in
+        let%bind () =
+          match record.stage with
+          | Linked -> Ok ()
+          | Reserved | Artifact_installed | Child_installed ->
+            (match
+               Int64.equal
+                 before.stop_epoch
+                 (Option.value record.admission.parent_stop_epoch ~default:0L)
+             with
+             | true -> Ok ()
+             | false ->
+               let%bind _ =
+                 D.revoke ledger record Parent_stopped
+                 |> Result.map_error ~f:protocol_of_store
+               in
+               Error
+                 (unavailable
+                    Permission_denied
+                    "parent stopped since generated creation admission"))
+        in
+        let%bind () =
+          match
+            ( record.admission.lifetime
+            , String.equal record.admission.authority_sha256 authority_sha256 )
+          with
+          | (Owned | Invocation_owned _ | Independent _), true ->
+            authorize_independent t record
+          | _ ->
+            Error (unavailable Permission_denied "reserved parent authority has changed")
+        in
+        let%bind artifacts =
+          Agent_store.Prompt_artifact_store.create
+            ~env:t.env
+            ~root:(Agent_store.Data_root.prompt_artifacts_path (S.data_root t.store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let%bind record = source.install ~artifacts ~record in
+        let reference = D.reference record in
+        let child_id = record.admission.child_session_id in
+        let verify state =
+          match state.State.spec.delegation with
+          | Some actual when D.Reference.equal reference actual -> Ok ()
+          | _ -> Error (corrupt "generated child does not match its creation reservation")
+        in
+        let%bind entry, fresh =
+          match Session_registry.find t.registry child_id with
+          | Some entry ->
+            let%map () = A.state entry.actor |> Result.bind ~f:verify in
+            entry, false
+          | None ->
+            let actor_lock_nonce =
+              P.Id.Transaction.create () |> P.Id.Transaction.to_string
+            in
+            let%bind handle =
+              match S.open_session t.store ~sw:t.sw ~actor_lock_nonce child_id with
+              | Ok handle -> Ok handle
+              | Error (Missing _)
+                when D.equal_stage record.stage Child_installed
+                     || D.equal_stage record.stage Linked ->
+                Error
+                  (unavailable
+                     Session_not_found
+                     "retained generated child is no longer available")
+              | Error (Missing _) ->
+                let%bind history, next = source.initial_history ~session_id:child_id in
+                let initial =
+                  State.create
+                    ~identity:
+                      { session_id = child_id
+                      ; display_name
+                      ; creating_principal = Some principal_id
+                      ; created_at = record.admission.created_at
+                      ; updated_at = record.admission.created_at
+                      ; labels = []
+                      ; generation = 0
+                      }
+                    ~spec:
+                      { before.spec with
+                        protocol =
+                          { protocol with
+                            prompt = Generated record.admission.revision_id
+                          }
+                      ; prompt_definition_id = None
+                      ; prompt_revision_id = record.admission.revision_id
+                      ; delegation = Some reference
+                      ; quota_key = None
+                      }
+                    ~initial_history:
+                      (List.map history ~f:Agent_session.History_codec.to_protocol)
+                in
+                let initial =
+                  { initial with
+                    lifecycle = { desired = Stopped; observed = Stopped }
+                  ; pending_initial_start = start_immediately
+                  ; parent_stop_epoch =
+                      Some (Option.value record.admission.parent_stop_epoch ~default:0L)
+                  ; conversation =
+                      { initial.conversation with
+                        next_history_sequence = Int64.of_int next
+                      ; reserved_history_through = Int64.of_int next
+                      }
+                  }
+                in
+                let%bind () = State.validate initial in
+                S.create_session_initialized
+                  t.store
+                  ~sw:t.sw
+                  ~transaction_id:record.admission.transaction_id
+                  ~actor_lock_nonce
+                  ~initialize:(initialize_generated_layout t initial)
+                |> Result.map_error ~f:protocol_of_store
+              | Error error -> Error (protocol_of_store error)
+            in
+            (match
+               let%bind archived =
+                 S.is_archived t.store handle |> Result.map_error ~f:protocol_of_store
+               in
+               let%bind () =
+                 match archived with
+                 | false -> Ok ()
+                 | true ->
+                   Error
+                     (unavailable
+                        Session_not_found
+                        "retained generated child is archived")
+               in
+               let%bind initial = initial_recovery_state t handle in
+               let%bind () = verify initial in
+               let%map entry = recover_open_handle t handle in
+               entry, true
+             with
+             | Ok _ as success -> success
+             | Error _ as failure ->
+               close_recovery_handle t handle;
+               failure)
+        in
+        let publication () =
+          let%bind () =
+            Agent_store.Durable_file.sync_directory
+              ~env:t.env
+              ~path:(Agent_store.Data_root.sessions_path (S.data_root t.store))
+            |> Result.map_error ~f:protocol_of_store
+          in
+          let%bind record =
+            D.advance ledger record Child_installed
+            |> Result.map_error ~f:protocol_of_store
+          in
+          A.checkpoint parent.actor ~persist:(fun current ->
+            match check_parent current with
+            | Ok () ->
+              D.advance ledger record Linked
+              |> Result.map ~f:ignore
+              |> Result.map_error ~f:protocol_of_store
+            | Error error ->
+              let reason =
+                match current.lifecycle.desired with
+                | _ when not (Int64.equal current.stop_epoch before.stop_epoch) ->
+                  D.Parent_stopped
+                | Stopped -> D.Parent_stopped
+                | Running -> Authority_changed
+              in
+              let%bind _ =
+                D.revoke ledger record reason |> Result.map_error ~f:protocol_of_store
+              in
+              Error error)
+        in
+        let owned = ref fresh in
+        Exn.protect
+          ~finally:(fun () -> if !owned then entry.close ())
+          ~f:(fun () ->
+            let%bind () = publication () in
+            let%bind () =
+              match fresh with
+              | false -> Ok ()
+              | true -> Session_registry.add t.registry ~session_id:child_id entry
+            in
+            owned := false;
+            let%map () = resume_generated_initial_start t entry in
+            entry)))
+  in
+  with_generated_creation_lock t run
+;;
+
+let create_generated_session
+      ?(start_immediately = false)
+      ?(lifetime = Owned)
+      t
+      ~parent_session_id
+      ~idempotency_key
+      ~display_name
+      definition
+  =
+  let module G = Agent_session.Generated_definition in
+  let module C = Chat_response.Tool_capability in
+  let open Result.Let_syntax in
+  let prepare_source ~runtime:_ ~capabilities =
+    let%map () =
+      C.references
+        (Chat_response.Generated_admission.capabilities (G.admission definition))
+      |> List.fold_result ~init:() ~f:(fun () reference ->
+        C.resolve capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map ~f:ignore
+        |> Result.map_error ~f:(fun error ->
+          unavailable Permission_denied error.C.message))
+    in
+    let request_sha256 =
+      [%sexp
+        (if start_immediately
+         then "ochat.generated-create.running.v1"
+         else "ochat.generated-create.stopped.v1"
+         : string)
+      , (Chat_response.Generated_admission.source_fingerprint (G.admission definition)
+         : string)
+      , (G.capability_pins definition : (string * string) list)
+      , (display_name : string option)]
+      |> Sexp.to_string_mach
+      |> Chatmd_shell_spec.Source_ref.digest
+    in
+    let request_sha256 =
+      match lifetime with
+      | Owned -> request_sha256
+      | Independent ->
+        [%sexp
+          ("ochat.generated-create.independent.v1" : string), (request_sha256 : string)]
+        |> Sexp.to_string_mach
+        |> Chatmd_shell_spec.Source_ref.digest
+    in
+    { artifact = G.artifact definition
+    ; capability_pins = G.capability_pins definition
+    ; authored_tool = None
+    ; request_sha256
+    ; initial_history = G.initial_history definition
+    ; install =
+        (fun ~artifacts ~record ->
+          let diagnostics errors =
+            unavailable
+              Prompt_unavailable
+              (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+               |> String.concat ~sep:"\n")
+          in
+          let%bind rebound =
+            G.with_identity
+              definition
+              ~revision_id:record.Agent_store.Delegation_store.admission.revision_id
+              ~created_at:record.admission.created_at
+            |> Result.map_error ~f:diagnostics
+          in
+          G.install_reserved
+            ~delegations:(Agent_store.Session_store.delegations t.store)
+            ~reservation:record
+            ~artifact_store:artifacts
+            rebound
+          |> Result.map_error ~f:diagnostics)
+    }
+  in
+  create_delegated_session
+    ~start_immediately
+    ~lifetime
+    t
+    ~parent_session_id
+    ~idempotency_key
+    ~display_name
+    ~prepare_source
+;;
+
+let create_authored_session
+      ?invocation_owner
+      t
+      ~parent_session_id
+      ~idempotency_key
+      prepared
+  =
+  let module P = Agent_protocol in
+  let module B = Agent_session.Runtime_builder in
+  let module Source = Agent_session.Authored_agent_source in
+  let module C = Chat_response.Tool_capability in
+  let open Result.Let_syntax in
+  let prepare_source ~runtime:_ ~capabilities =
+    let source = prepared.B.source in
+    let name = (Source.identity source).tool_name in
+    let%bind current =
+      Authored_resources.find t.authored_resources ~public:capabilities ~name
+    in
+    let%bind private_capabilities =
+      Lazy.force current.resources.native.capabilities
+      |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
+    in
+    let%bind expected =
+      Lazy.force prepared.resources.native.capabilities
+      |> Result.map_error ~f:(fun error -> unavailable Permission_denied error.C.message)
+    in
+    let%bind () =
+      match
+        String.equal (Source.fingerprint source) (Source.fingerprint current.source)
+        && String.equal (C.fingerprint private_capabilities) (C.fingerprint expected)
+      with
+      | true -> Ok ()
+      | false ->
+        Error
+          (unavailable Permission_denied "authored source or private resources changed")
+    in
+    let elements = Agent_session.Prompt_revision.elements prepared.revision in
+    let%bind _ =
+      Chat_response.Initial_prompt_history.create ~session_id:parent_session_id elements
+    in
+    let%bind artifact =
+      Source.artifact
+        source
+        ~revision_id:(P.Id.Prompt_revision.create ())
+        ~created_at:(now t)
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let%map capability_pins =
+      Chat_response.Background_request.capability_pins private_capabilities
+    in
+    let request_sha256 =
+      [%sexp
+        ("ochat.authored-create.running.v1" : string)
+      , (Source.fingerprint source : string)
+      , (capability_pins : (string * string) list)]
+      |> Sexp.to_string_mach
+      |> Chatmd_shell_spec.Source_ref.digest
+    in
+    { artifact
+    ; capability_pins
+    ; authored_tool = Some { name; source_sha256 = Source.fingerprint source }
+    ; request_sha256
+    ; initial_history =
+        (fun ~session_id ->
+          Chat_response.Initial_prompt_history.create ~session_id elements)
+    ; install =
+        (fun ~artifacts ~record ->
+          Source.install_reserved
+            ~delegations:(Agent_store.Session_store.delegations t.store)
+            ~reservation:record
+            ~artifact_store:artifacts
+            ~capability_pins
+            source)
+    }
+  in
+  create_delegated_session
+    ~start_immediately:true
+    ~lifetime:Owned
+    ?invocation_owner
+    t
+    ~parent_session_id
+    ~idempotency_key
+    ~display_name:None
+    ~prepare_source
+;;
+
+let reconcile_generated_creations t =
+  let module P = Agent_protocol in
+  let module A = Agent_session.Session_actor in
+  let module State = Agent_session.Session_state in
+  let module Authority = Agent_session.Delegation_authority in
+  let module G = Agent_session.Generated_definition in
+  let module D = Agent_store.Delegation_store in
+  let module S = Agent_store.Session_store in
+  let module Artifacts = Agent_store.Prompt_artifact_store in
+  let open Result.Let_syntax in
+  let ledger = S.delegations t.store in
+  let%bind records =
+    D.with_records
+      ledger
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records -> Ok records)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let revoke record reason =
+    D.revoke ledger record reason
+    |> Result.map ~f:ignore
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let native_capabilities (runtime : Agent_session.Runtime_builder.t) =
+    match runtime.native_runtime with
+    | None ->
+      Error
+        (unavailable Invalid_state "generated recovery needs qualified parent resources")
+    | Some native ->
+      Lazy.force native.capabilities
+      |> Result.map_error ~f:(fun error ->
+        unavailable Permission_denied error.Chat_response.Tool_capability.message)
+  in
+  let loaded id =
+    Session_registry.find t.registry id
+    |> Result.of_option
+         ~error:(unavailable Permission_denied "delegation ancestor is unavailable")
+  in
+  let host ~parent_id ~(runtime : Agent_session.Runtime_builder.t) ~current
+    : Authority.host
+    =
+    { state = (fun id -> Result.bind (loaded id) ~f:(fun entry -> A.state entry.actor))
+    ; resolve =
+        (fun reference ->
+          D.resolve ledger reference |> Result.map_error ~f:protocol_of_store)
+    ; capabilities =
+        (fun id ->
+          match P.Id.Session.equal id parent_id, runtime.ancestor_capabilities with
+          | true, _ -> Ok current
+          | false, Some lookup -> lookup id
+          | false, None ->
+            Error
+              (unavailable
+                 Permission_denied
+                 "delegation.resources_unavailable: recovery ancestor bindings are not \
+                  retained"))
+    }
+  in
+  List.fold_result records ~init:() ~f:(fun () record ->
+    let%bind () =
+      D.discard_uninstalled_staging ledger record |> Result.map_error ~f:protocol_of_store
+    in
+    match record.D.stage, record.revocation with
+    | Linked, _ | _, Some _ -> Ok ()
+    | (Reserved | Artifact_installed | Child_installed), None ->
+      (match authorize_independent t record with
+       | Error _ -> revoke record Authority_changed
+       | Ok () ->
+         (match Session_registry.load t.registry record.key.parent_session_id with
+          | Error { code = Session_not_found; _ } -> revoke record Parent_deleted
+          | Error _ as failure -> failure
+          | Ok parent ->
+            let%bind before = A.state parent.actor in
+            if Result.is_error (Authority.check_invocation_owner record before)
+            then revoke record Admission_failed
+            else (
+              match
+                ( before.lifecycle.desired
+                , before.lifecycle.observed
+                , before.halted
+                , before.failure )
+              with
+              | _
+                when not
+                       (Int64.equal
+                          before.stop_epoch
+                          (Option.value record.admission.parent_stop_epoch ~default:0L))
+                -> revoke record Parent_stopped
+              | Stopped, _, _, _ -> revoke record Parent_stopped
+              | Running, _, true, _ | Running, _, _, Some _ ->
+                revoke record Authority_changed
+              | ( Running
+                , ( Stopped
+                  | Queued_for_slot
+                  | Starting
+                  | Recovering
+                  | Compacting _
+                  | Stopping
+                  | Failed _ )
+                , false
+                , None ) -> Ok ()
+              | Running, (Idle | Running_turn _ | Waiting_for_permission _), false, None
+                ->
+                let%bind moderator =
+                  parent_moderation_source t before.identity.session_id
+                in
+                let%bind fingerprint = Authority.fingerprint ?moderator before in
+                if not (String.equal fingerprint record.admission.authority_sha256)
+                then revoke record Authority_changed
+                else
+                  Runtime_owner.with_background_runtime parent.runtime (fun runtime ->
+                    let%bind current = native_capabilities runtime in
+                    let%bind artifacts =
+                      Artifacts.create
+                        ~env:t.env
+                        ~root:
+                          (Agent_store.Data_root.prompt_artifacts_path
+                             (S.data_root t.store))
+                      |> Result.map_error ~f:protocol_of_store
+                    in
+                    match
+                      ( Artifacts.exists artifacts record.admission.revision_id
+                      , record.stage )
+                    with
+                    | false, Reserved -> Ok ()
+                    | false, _ ->
+                      Error (corrupt "unfinished delegation lost its installed artifact")
+                    | true, _ ->
+                      let diagnostics errors =
+                        unavailable
+                          Prompt_unavailable
+                          (List.map errors ~f:Chatmd_shell_spec.Diagnostic.to_string
+                           |> String.concat ~sep:"\n")
+                      in
+                      let%bind _ =
+                        match record.admission.authored_tool with
+                        | Some _ ->
+                          Agent_session.Authored_agent_source.load_artifact
+                            ~artifact_store:artifacts
+                            ~reservation:record
+                        | None ->
+                          G.load_artifact
+                            ~artifact_store:artifacts
+                            ~revision_id:record.admission.revision_id
+                            ~manifest_sha256:record.admission.manifest_sha256
+                          |> Result.map_error ~f:diagnostics
+                      in
+                      let%bind record =
+                        D.advance ledger record Artifact_installed
+                        |> Result.map_error ~f:protocol_of_store
+                      in
+                      let%bind () =
+                        D.discard_uninstalled_staging ledger record
+                        |> Result.map_error ~f:protocol_of_store
+                      in
+                      (match
+                         match record.admission.authored_tool with
+                         | Some _ ->
+                           Authored_resources.resolve
+                             t.authored_resources
+                             record
+                             ~public:current
+                         | None ->
+                           Chat_response.Background_request.rebind_capabilities
+                             ~pins:record.admission.capability_pins
+                             ~capabilities:current
+                       with
+                       | Error _ -> revoke record Authority_changed
+                       | Ok selected ->
+                         let reference = D.reference record in
+                         let child_id = record.admission.child_session_id in
+                         let verify (state : State.t) =
+                           match state.spec.delegation, state.lifecycle.desired with
+                           | Some actual, Stopped when D.Reference.equal reference actual
+                             -> Ok ()
+                           | _ ->
+                             Error
+                               (corrupt
+                                  "unfinished generated child has an invalid identity or \
+                                   running state")
+                         in
+                         let%bind child =
+                           match Session_registry.find t.registry child_id with
+                           | Some entry -> Ok (Some (entry, false))
+                           | None ->
+                             (match
+                                S.open_session
+                                  t.store
+                                  ~sw:t.sw
+                                  ~actor_lock_nonce:
+                                    (P.Id.Transaction.create ()
+                                     |> P.Id.Transaction.to_string)
+                                  child_id
+                              with
+                              | Error (Missing _) -> Ok None
+                              | Error error -> Error (protocol_of_store error)
+                              | Ok handle ->
+                                let result =
+                                  let%bind archived =
+                                    S.is_archived t.store handle
+                                    |> Result.map_error ~f:protocol_of_store
+                                  in
+                                  match archived with
+                                  | true -> Ok None
+                                  | false ->
+                                    let%bind initial = initial_recovery_state t handle in
+                                    let%bind () = verify initial in
+                                    let%map entry = recover_open_handle t handle in
+                                    Some (entry, true)
+                                in
+                                (match result with
+                                 | Ok (Some _) -> result
+                                 | Ok None | Error _ ->
+                                   close_recovery_handle t handle;
+                                   result))
+                         in
+                         (match child with
+                          | None ->
+                            (match record.stage with
+                             | Child_installed -> revoke record Admission_failed
+                             | Reserved | Artifact_installed -> Ok ()
+                             | Linked -> assert false)
+                          | Some (child, fresh) ->
+                            let owned = ref fresh in
+                            Exn.protect
+                              ~finally:(fun () -> if !owned then child.close ())
+                              ~f:(fun () ->
+                                let%bind state = A.state child.actor in
+                                let%bind () = verify state in
+                                let%bind () =
+                                  match record.admission.authored_tool with
+                                  | Some _ ->
+                                    Agent_session.Authored_agent_source.load_artifact
+                                      ~artifact_store:artifacts
+                                      ~reservation:record
+                                    |> Result.map ~f:ignore
+                                  | None ->
+                                    G.restore
+                                      ?limits:
+                                        (Option.map
+                                           t.authoring_validation_host
+                                           ~f:
+                                             Chat_response.Authoring_validation
+                                             .compilation_limits)
+                                      ?source_limits:
+                                        (Option.map
+                                           t.authoring_validation_host
+                                           ~f:
+                                             Chat_response.Authoring_validation
+                                             .bundle_limits)
+                                      ?catalog:
+                                        (Option.bind
+                                           t.authoring_validation_host
+                                           ~f:
+                                             Chat_response.Authoring_validation
+                                             .delegated_catalog)
+                                      ~env:t.env
+                                      ~artifact_store:artifacts
+                                      ~revision_id:record.admission.revision_id
+                                      ~manifest_sha256:record.admission.manifest_sha256
+                                      ~current_capabilities:(fun () -> current)
+                                      ~pins:record.admission.capability_pins
+                                      ()
+                                    |> Result.map_error ~f:diagnostics
+                                    |> Result.map ~f:ignore
+                                in
+                                let authority =
+                                  Authority.create
+                                    ~authored_capabilities:
+                                      (Authored_resources.resolve t.authored_resources)
+                                    ~max_depth:t.limits.delegation_max_depth
+                                    ~moderation:(parent_moderation_source t)
+                                    ~authorize_independent:(authorize_independent t)
+                                    ~host:
+                                      (host
+                                         ~parent_id:record.key.parent_session_id
+                                         ~runtime
+                                         ~current)
+                                    ~reference
+                                    ~capabilities:selected
+                                    ()
+                                in
+                                let%bind profile =
+                                  permission_profile_revision
+                                    t
+                                    state.spec.permission_profile_digest
+                                in
+                                let%bind () =
+                                  Authority.check_preparation
+                                    authority
+                                    ~session_id:child_id
+                                    ~revision_id:state.spec.prompt_revision_id
+                                    ~manifest_sha256:record.admission.manifest_sha256
+                                    ~permission_profile:profile
+                                in
+                                let%bind () =
+                                  Agent_store.Durable_file.sync_directory
+                                    ~env:t.env
+                                    ~path:
+                                      (Agent_store.Data_root.sessions_path
+                                         (S.data_root t.store))
+                                  |> Result.map_error ~f:protocol_of_store
+                                in
+                                let%bind record =
+                                  D.advance ledger record Child_installed
+                                  |> Result.map_error ~f:protocol_of_store
+                                in
+                                let%bind () =
+                                  A.checkpoint parent.actor ~persist:(fun latest ->
+                                    let%bind latest_fingerprint =
+                                      Authority.fingerprint ?moderator latest
+                                    in
+                                    match
+                                      ( latest.lifecycle.desired
+                                      , latest.halted
+                                      , latest.failure )
+                                    with
+                                    | Running, false, None
+                                      when String.equal fingerprint latest_fingerprint
+                                           && Int64.equal
+                                                latest.stop_epoch
+                                                before.stop_epoch ->
+                                      D.advance ledger record Linked
+                                      |> Result.map ~f:ignore
+                                      |> Result.map_error ~f:protocol_of_store
+                                    | Stopped, _, _ -> revoke record Parent_stopped
+                                    | _
+                                      when not
+                                             (Int64.equal
+                                                latest.stop_epoch
+                                                before.stop_epoch) ->
+                                      revoke record Parent_stopped
+                                    | _ -> revoke record Authority_changed)
+                                in
+                                let%map () =
+                                  match fresh with
+                                  | false -> Ok ()
+                                  | true ->
+                                    Session_registry.add
+                                      t.registry
+                                      ~session_id:child_id
+                                      child
+                                in
+                                owned := false))))))))
+;;
+
+let managed_child t borrowed child_id =
+  let module N = Agent_session.Native_tool_invocation in
+  let module A = Agent_session.Session_actor in
+  let module D = Agent_store.Delegation_store in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let denied () = unavailable Permission_denied "managed child is unavailable" in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  let%bind parent =
+    Session_registry.find t.registry context.session_id
+    |> Result.of_option ~error:(denied ())
+  in
+  let parent_state () =
+    let%bind state = A.state parent.actor in
+    match state.spec.protocol.persistence, state.identity.creating_principal with
+    | Durable, Some principal when Int.equal state.identity.generation context.generation
+      -> Ok (state, principal)
+    | _ -> Error (denied ())
+  in
+  let%bind initial_parent, principal = parent_state () in
+  let ledger = Agent_store.Session_store.delegations t.store in
+  (* Prove relationship before loading any supplied ID. Drop the ledger lock
+     before actor/runtime access; even a foreign-ID probe cannot initialize a
+     session or recover its stored work. *)
+  let%bind record =
+    D.with_records
+      ledger
+      ~max_records:t.limits.delegation_recovery_max_count
+      ~max_bytes:t.limits.delegation_recovery_max_bytes
+      ~f:(fun records ->
+        Ok
+          (List.find records ~f:(fun record ->
+             P.Id.Session.equal record.D.admission.child_session_id child_id
+             && P.Id.Session.equal record.key.parent_session_id context.session_id
+             && Int.equal record.key.parent_generation context.generation
+             && P.Id.Principal.equal record.key.principal_id principal)))
+    |> Result.map_error ~f:protocol_of_store
+    |> Result.bind ~f:(Result.of_option ~error:(denied ()))
+  in
+  let reference = D.reference record in
+  let%bind () =
+    match record.admission.lifetime with
+    | Invocation_owned { invocation_id }
+      when not (P.Id.Invocation.equal invocation_id context.id) -> Error (denied ())
+    | Owned | Invocation_owned _ | Independent _ -> Ok ()
+  in
+  let validate_parent state =
+    let%bind current =
+      D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+    in
+    let%bind () =
+      match current.stage, current.revocation with
+      | Linked, None -> authorize_independent t current
+      | _ -> Error (denied ())
+    in
+    let%bind fingerprint = parent_authority_fingerprint t state in
+    match String.equal fingerprint current.admission.authority_sha256 with
+    | true -> Ok ()
+    | false -> Error (denied ())
+  in
+  let%bind () = validate_parent initial_parent in
+  let%bind child = Session_registry.load t.registry child_id in
+  let%bind child_state = A.state child.actor in
+  let%bind () =
+    match child_state.spec.delegation with
+    | Some actual
+      when D.Reference.equal actual reference
+           && P.Id.Prompt_revision.equal
+                child_state.spec.prompt_revision_id
+                reference.revision_id -> Ok ()
+    | _ -> Error (denied ())
+  in
+  let%bind final_parent, final_principal = parent_state () in
+  let%bind () =
+    match P.Id.Principal.equal principal final_principal with
+    | true -> validate_parent final_parent
+    | false -> Error (denied ())
+  in
+  let%bind _ = N.borrowed_capabilities borrowed in
+  (* Native/parent checks may yield. Refresh the private child's revocation after
+     those waits, before returning even bounded metadata. *)
+  let%bind current =
+    D.resolve ledger reference |> Result.map_error ~f:protocol_of_store
+  in
+  let%map () =
+    match current.stage, current.revocation with
+    | Linked, None -> authorize_independent t current
+    | _ -> Error (denied ())
+  in
+  child, child_state
+;;
+
+let managed_status t borrowed child_id =
+  managed_child t borrowed child_id
+  |> Result.map ~f:(fun (_, state) ->
+    Agent_session.Managed_session_service.status_json state)
+  |> Result.map_error ~f:(fun _ ->
+    Agent_protocol.Invocation.
+      { code = "agent.management.denied"
+      ; message = "The child session is unavailable to this caller."
+      ; retryable = false
+      ; details = `Null
+      })
+;;
+
+let managed_send t borrowed child_id ~key ~message =
+  let module P = Agent_protocol in
+  let module M = Agent_session.Managed_submission in
+  let module D = Agent_store.Delegation_store in
+  let module A = Agent_session.Session_actor in
+  let open Result.Let_syntax in
+  let protocol result =
+    Result.map_error result ~f:(fun error ->
+      P.Invocation.
+        { code = "agent.send." ^ P.Error.code_to_string error.P.Error.code
+        ; message =
+            "The message could not be admitted. Reuse its original key for any retry."
+        ; retryable = error.retryable
+        ; details = `Null
+        })
+  in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, initial = authorize () in
+  let%bind reference =
+    initial.spec.delegation
+    |> Result.of_option
+         ~error:(unavailable Permission_denied "missing child relationship")
+    |> protocol
+  in
+  let request_sha256 =
+    [%sexp ("ochat.managed-send.plain.v1" : string), (message : string)]
+    |> Sexp.to_string_mach
+    |> Chatmd_shell_spec.Source_ref.digest
+  in
+  let%bind receipt =
+    match
+      List.find initial.managed_submissions ~f:(fun receipt ->
+        D.Reference.equal receipt.M.reference reference
+        && P.Idempotency_key.equal receipt.key key)
+    with
+    | Some receipt ->
+      (match String.equal request_sha256 receipt.request_sha256 with
+       | true -> Ok receipt
+       | false -> Error (unavailable Conflict "managed send input changed") |> protocol)
+    | None ->
+      let%bind () =
+        match
+          String.is_empty (String.strip message), t.limits.managed_message_max_bytes
+        with
+        | true, _ -> Error (unavailable Invalid_request "message is empty") |> protocol
+        | false, Some maximum when maximum < 1 || String.length message > maximum ->
+          Error (unavailable Invalid_request "message exceeds host limit") |> protocol
+        | false, _ -> Ok ()
+      in
+      let%bind () =
+        match initial.lifecycle.desired with
+        | Running -> Ok ()
+        | Stopped -> Error (unavailable Invalid_state "child is stopped") |> protocol
+      in
+      let%bind id =
+        Agent_session.History_id_source.allocate child.history_ids |> protocol
+      in
+      let%bind entry =
+        Runtime_owner.parse_user_content
+          child.runtime
+          ~id
+          { kind = Plain_text; text = message; attachments = [] }
+        |> protocol
+      in
+      let%bind _, current = authorize () in
+      let%bind () =
+        match
+          Int.equal initial.identity.generation current.identity.generation
+          && Option.exists current.spec.delegation ~f:(D.Reference.equal reference)
+        with
+        | true -> Ok ()
+        | false ->
+          Error (unavailable Conflict "child generation changed during send") |> protocol
+      in
+      A.submit_managed_message
+        child.actor
+        ~reference
+        ~key
+        ~request_sha256
+        ~generation:current.identity.generation
+        ~max_receipts:t.limits.managed_submission_max_count
+        (Agent_session.History_codec.to_protocol entry)
+      |> protocol
+  in
+  let%map _ = authorize () in
+  M.to_json receipt
+;;
+
+let managed_read t borrowed child_id ~receipt_id ~cursor ~limit =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, state = authorize () in
+  let result =
+    let open Result.Let_syntax in
+    let%bind history_epoch =
+      Agent_session.Durable_event_log.history_epoch
+        child.durable_events
+        ~through_sequence:state.counters.event_sequence
+    in
+    Managed_output_page.read
+      t.managed_output_cursors
+      ~state
+      ~receipt_id
+      ~cursor
+      ~history_epoch
+      ~limit
+      ~max_bytes:t.limits.managed_output_page_max_bytes
+  in
+  let%bind _, current = authorize () in
+  let result =
+    match
+      Int.equal current.identity.generation state.identity.generation
+      && Int.equal
+           current.conversation.compaction_generation
+           state.conversation.compaction_generation
+    with
+    | true -> result
+    | false ->
+      Error
+        (P.Error.create
+           Snapshot_required
+           ~message:"The session changed while reading output; request a fresh snapshot."
+           ~retryable:false
+           ~data:(`Object [ "snapshot_required", `True ])
+           ())
+  in
+  Result.map_error result ~f:(fun error ->
+    P.Invocation.
+      { code = "agent.read." ^ P.Error.code_to_string error.P.Error.code
+      ; message = error.message
+      ; retryable = error.retryable
+      ; details = error.data
+      })
+;;
+
+let managed_wait t borrowed child_id ~target ~timeout_ms =
+  let module P = Agent_protocol in
+  let module M = Agent_session.Managed_submission in
+  let module S = Agent_session.Managed_session_service in
+  let open Result.Let_syntax in
+  let fail code message details =
+    P.Invocation.{ code; message; retryable = false; details }
+  in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      fail
+        "agent.management.denied"
+        "The child session is unavailable to this caller."
+        `Null)
+  in
+  let%bind child, initial = authorize () in
+  let%bind () =
+    match timeout_ms >= 0 && timeout_ms <= 30000 with
+    | true -> Ok ()
+    | false ->
+      Error
+        (fail
+           "agent.wait.invalid_request"
+           "timeout_ms must be between 0 and 30000."
+           `Null)
+  in
+  let clock = Eio.Stdenv.mono_clock t.env in
+  let started = Eio.Time.Mono.now clock in
+  let remaining () =
+    (Float.of_int timeout_ms /. 1000.)
+    -. ((Mtime.span started (Eio.Time.Mono.now clock) |> Mtime.Span.to_float_ns) /. 1e9)
+  in
+  let same_generation state =
+    match
+      Int.equal
+        initial.identity.generation
+        state.Agent_session.Session_state.identity.generation
+    with
+    | true -> Ok ()
+    | false ->
+      Error
+        (fail
+           "agent.wait.snapshot_required"
+           "The child generation changed while waiting; request a fresh snapshot."
+           (`Object [ "snapshot_required", `True ]))
+  in
+  let receipt state id =
+    List.find state.Agent_session.Session_state.managed_submissions ~f:(fun receipt ->
+      P.History.Id.equal receipt.M.history_id id)
+    |> Result.of_option
+         ~error:
+           (fail "agent.wait.not_found" "The submission receipt is unavailable." `Null)
+  in
+  let rec loop () =
+    (* Capture before the snapshot. A commit between the read and await resolves
+       this same promise, avoiding a lost wakeup without retaining actor locks. *)
+    let changed = Agent_session.Durable_event_log.changed child.durable_events in
+    let%bind _, state = authorize () in
+    let%bind () = same_generation state in
+    let%bind ready, selected_receipt, cursor =
+      match target with
+      | S.Receipt id ->
+        let%map receipt = receipt state id in
+        let ready =
+          match receipt.status with
+          | Terminal _ -> Some "receipt_terminal"
+          | Deferred | Ready | Assigned _ -> None
+        in
+        ready, M.to_json receipt, `Null
+      | S.Output { cursor; receipt_id } ->
+        let%map page =
+          managed_read t borrowed child_id ~receipt_id ~cursor:(Some cursor) ~limit:1
+          |> Result.map_error ~f:(fun error ->
+            match String.chop_prefix error.P.Invocation.code ~prefix:"agent.read." with
+            | None -> error
+            | Some code -> { error with code = "agent.wait." ^ code })
+        in
+        let available =
+          match Jsonaf.member_exn "items" page with
+          | `Array (_ :: _) -> Some "output_available"
+          | _ -> None
+        in
+        available, Jsonaf.member_exn "receipt" page, P.Page.Cursor.to_json cursor
+    in
+    let%bind _, current = authorize () in
+    let%bind () = same_generation current in
+    let left = remaining () in
+    match ready, Float.(left <= 0.) with
+    | Some _, _ | None, true ->
+      let reason = Option.value ready ~default:"timeout" in
+      Ok
+        (`Object
+            [ "version", `Number "1"
+            ; "session_id", P.Id.Session.to_json child_id
+            ; "reason", `String reason
+            ; "receipt", selected_receipt
+            ; "cursor", cursor
+            ; "status", S.status_json current
+            ])
+    | None, false ->
+      (* Child commits wake immediately. A bounded heartbeat revalidates parent
+         authority/revocation even when the child emits no events. Neither branch
+         runs on the actor; cancellation propagates and never stops the child. *)
+      Eio.Fiber.first
+        (fun () -> Eio.Promise.await changed)
+        (fun () -> Eio.Time.Mono.sleep clock (Float.min left 0.25));
+      loop ()
+  in
+  loop ()
+;;
+
+let managed_stop t borrowed child_id ~key ~mode =
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let authorize () =
+    managed_child t borrowed child_id
+    |> Result.map_error ~f:(fun _ ->
+      P.Invocation.
+        { code = "agent.management.denied"
+        ; message = "The child session is unavailable to this caller."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind child, initial = authorize () in
+  let%bind receipt =
+    match initial.spec.delegation with
+    | None ->
+      Error
+        P.Invocation.
+          { code = "agent.management.denied"
+          ; message = "The child session is unavailable to this caller."
+          ; retryable = false
+          ; details = `Null
+          }
+    | Some reference ->
+      Agent_session.Session_actor.stop_managed
+        child.actor
+        ~reference
+        ~key
+        ~mode
+        ~generation:initial.identity.generation
+        ~max_receipts:t.limits.managed_stop_max_count
+      |> Result.map_error ~f:(fun error ->
+        P.Invocation.
+          { code = "agent.stop." ^ P.Error.code_to_string error.P.Error.code
+          ; message =
+              "The stop request could not be admitted. Reuse its original key and mode \
+               for retries."
+          ; retryable = error.retryable
+          ; details = `Null
+          })
+  in
+  let%map _, current = authorize () in
+  let progress =
+    match
+      ( Int.equal receipt.generation current.identity.generation
+        && Int64.equal receipt.stop_epoch current.stop_epoch
+      , current.lifecycle.desired
+      , current.lifecycle.observed )
+    with
+    | true, Stopped, Stopped -> "stopped"
+    | true, Stopped, _ -> "stopping"
+    | _ -> "superseded"
+  in
+  `Object
+    [ "version", `Number "1"
+    ; "receipt", Agent_session.Managed_stop.to_json receipt
+    ; "progress", `String progress
+    ; "status", Agent_session.Managed_session_service.status_json current
+    ]
+;;
+
+let authored_protocol result =
+  let module P = Agent_protocol in
+  Result.map_error result ~f:(fun error ->
+    P.Invocation.
+      { code = "agent.authored." ^ P.Error.code_to_string error.P.Error.code
+      ; message = "The authored specialist is unavailable to this caller."
+      ; retryable = error.retryable
+      ; details = `Null
+      })
+;;
+
+let authored_one_off t prepared borrowed ~input =
+  let module N = Agent_session.Native_tool_invocation in
+  let module A = Agent_session.Session_actor in
+  let module P = Agent_protocol in
+  let module M = Agent_session.Managed_submission in
+  let open Result.Let_syntax in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind key =
+    Agent_session.Authored_agent_call.invocation_key borrowed "one_off_create"
+  in
+  (* This call owns execution, not the retained audit record. Cancellation or a
+     failed result must join its descendants and resources before the caller's
+     borrowed scope ends. Recovery independently checks the durable invocation
+     lifetime, so a crash cannot turn the child into a continuing agent. *)
+  Exn.protect
+    ~finally:(fun () ->
+      Eio.Cancel.protect (fun () ->
+        let module D = Agent_store.Delegation_store in
+        let ledger = Agent_store.Session_store.delegations t.store in
+        (* Install cleanup before creation. Its durable key also covers a child
+           published before cancellation interrupted the creation acknowledgement.
+           Partial, unpublished layouts have no running registry entry. Never
+           load or activate such a layout merely to clean up this invocation. *)
+        let result =
+          let%bind records =
+            D.with_records
+              ledger
+              ~max_records:t.limits.delegation_recovery_max_count
+              ~max_bytes:t.limits.delegation_recovery_max_bytes
+              ~f:(fun records ->
+                Ok
+                  (List.filter records ~f:(fun record ->
+                     P.Id.Session.equal record.D.key.parent_session_id context.session_id
+                     && Int.equal record.key.parent_generation context.generation
+                     && P.Idempotency_key.equal record.key.idempotency_key key
+                     &&
+                     match record.admission.lifetime with
+                     | Invocation_owned { invocation_id } ->
+                       P.Id.Invocation.equal invocation_id context.id
+                     | Owned | Independent _ -> false)))
+            |> Result.map_error ~f:protocol_of_store
+          in
+          List.fold_result records ~init:() ~f:(fun () record ->
+            match Session_registry.find t.registry record.admission.child_session_id with
+            | None -> Ok ()
+            | Some child ->
+              Delegation_lifecycle.stop_owned
+                ~clock:(Eio.Stdenv.clock t.env)
+                ~delegations:ledger
+                ~reference:(D.reference record)
+                ~actor:child.actor
+                ~runtime:child.runtime
+                ()
+              |> Result.map ~f:ignore)
+        in
+        match result with
+        | Ok () -> ()
+        | Error error ->
+          raise_s [%sexp "one-off child cleanup failed", (error : P.Error.t)]))
+    ~f:(fun () ->
+      let%bind child =
+        create_authored_session
+          ~invocation_owner:context.id
+          t
+          ~parent_session_id:context.session_id
+          ~idempotency_key:key
+          prepared
+        |> authored_protocol
+      in
+      let%bind initial = A.state child.actor |> authored_protocol in
+      let child_id = initial.identity.session_id in
+      let%bind key =
+        Agent_session.Authored_agent_call.invocation_key borrowed "one_off_send"
+      in
+      let%bind receipt = managed_send t borrowed child_id ~key ~message:input in
+      let%bind receipt_id =
+        let%bind fields = P.Json_codec.fields receipt |> authored_protocol in
+        P.Json_codec.required_as fields "receipt_id" P.History.Id.of_json
+        |> authored_protocol
+      in
+      let rec await () =
+        let%bind _ =
+          managed_wait t borrowed child_id ~target:(Receipt receipt_id) ~timeout_ms:30000
+        in
+        let%bind _, state = managed_child t borrowed child_id |> authored_protocol in
+        match
+          List.find state.managed_submissions ~f:(fun receipt ->
+            P.History.Id.equal receipt.M.history_id receipt_id)
+        with
+        | Some { status = Terminal _; _ } -> Ok state
+        | Some { status = Deferred | Ready | Assigned _; _ } -> await ()
+        | None ->
+          Error (unavailable Invalid_state "one-off submission receipt was lost")
+          |> authored_protocol
+      in
+      let%bind state = await () in
+      let%bind answer =
+        Managed_output_page.completed_answer ~state ~receipt_id |> authored_protocol
+      in
+      let%bind _, latest = managed_child t borrowed child_id |> authored_protocol in
+      let%bind current_answer =
+        Managed_output_page.completed_answer ~state:latest ~receipt_id
+        |> authored_protocol
+      in
+      match
+        Int.equal state.identity.generation latest.identity.generation
+        && Int.equal
+             state.conversation.compaction_generation
+             latest.conversation.compaction_generation
+        && String.equal answer current_answer
+      with
+      | true -> Ok (`String answer)
+      | false ->
+        Error (unavailable Conflict "one-off output changed before disclosure")
+        |> authored_protocol)
+;;
+
+let authored_call_services t prepared borrowed =
+  let module P = Agent_protocol in
+  let module N = Agent_session.Native_tool_invocation in
+  let module Source = Agent_session.Authored_agent_source in
+  let open Result.Let_syntax in
+  let protocol = authored_protocol in
+  let source = prepared.Agent_session.Runtime_builder.source in
+  let name = (Source.identity source).tool_name in
+  let check borrowed =
+    let%bind public = N.borrowed_capabilities borrowed |> protocol in
+    let%bind current =
+      Authored_resources.find t.authored_resources ~public ~name |> protocol
+    in
+    match
+      String.equal (Source.fingerprint current.source) (Source.fingerprint source)
+    with
+    | true -> Ok ()
+    | false ->
+      Error
+        P.Invocation.
+          { code = "agent.authored.source_changed"
+          ; message = "The authored specialist definition changed."
+          ; retryable = false
+          ; details = `Null
+          }
+  in
+  let%map () = check borrowed in
+  let host : Agent_session.Authored_agent_call.host =
+    { create =
+        (fun borrowed ~key ->
+          let%bind () = check borrowed in
+          let context = (N.borrowed_invocation borrowed).context in
+          let%bind child =
+            create_authored_session
+              t
+              ~parent_session_id:context.session_id
+              ~idempotency_key:key
+              prepared
+            |> protocol
+          in
+          let%bind () = check borrowed in
+          let%map state = Agent_session.Session_actor.state child.actor |> protocol in
+          state.identity.session_id)
+    ; validate =
+        (fun borrowed child_id ->
+          let%bind () = check borrowed in
+          let%bind _, state = managed_child t borrowed child_id |> protocol in
+          let%bind reference =
+            Result.of_option
+              state.spec.delegation
+              ~error:(unavailable Permission_denied "authored child has no admission")
+            |> protocol
+          in
+          let%bind record =
+            Agent_store.Delegation_store.resolve
+              (Agent_store.Session_store.delegations t.store)
+              reference
+            |> Result.map_error ~f:protocol_of_store
+            |> protocol
+          in
+          let%bind () =
+            match record.admission.lifetime with
+            | Invocation_owned _ ->
+              Error (unavailable Permission_denied "one-off sessions cannot be continued")
+              |> protocol
+            | Owned | Independent _ -> Ok ()
+          in
+          let%bind () =
+            match record.admission.authored_tool with
+            | Some origin
+              when String.equal origin.name name
+                   && String.equal origin.source_sha256 (Source.fingerprint source) ->
+              Ok ()
+            | _ ->
+              Error
+                (unavailable
+                   Permission_denied
+                   "child belongs to another authored declaration")
+              |> protocol
+          in
+          check borrowed)
+    ; one_off =
+        (fun borrowed ~input ->
+          let%bind () = check borrowed in
+          let%bind answer = authored_one_off t prepared borrowed ~input in
+          let%map () = check borrowed in
+          answer)
+    }
+  in
+  host, t.managed_sessions
+;;
+
+let create_from_native t borrowed (request : Agent_session.Generated_session_request.t) =
+  let module Q = Agent_session.Generated_session_request in
+  let module N = Agent_session.Native_tool_invocation in
+  let module C = Chat_response.Tool_capability in
+  let module G = Agent_session.Generated_definition in
+  let module P = Agent_protocol in
+  let open Result.Let_syntax in
+  let failure error =
+    P.Invocation.
+      { code = "agent.create." ^ P.Error.code_to_string error.P.Error.code
+      ; message = "The child session could not be admitted."
+      ; retryable = error.retryable
+      ; details = `Null
+      }
+  in
+  let protocol result = Result.map_error result ~f:failure in
+  let context = (N.borrowed_invocation borrowed).context in
+  let%bind ceiling = N.borrowed_capabilities borrowed |> protocol in
+  let%bind parent =
+    Session_registry.find t.registry context.session_id
+    |> Result.of_option
+         ~error:(failure (unavailable Permission_denied "invoking parent is unavailable"))
+  in
+  let%bind state = Agent_session.Session_actor.state parent.actor |> protocol in
+  let%bind () =
+    match state.spec.protocol.persistence with
+    | Transient ->
+      Error
+        P.Invocation.
+          { code = "capability_unavailable"
+          ; message =
+              "Persisted child creation requires a durable Ochat host. Use a daemon or \
+               durable embedded session."
+          ; retryable = false
+          ; details = `Null
+          }
+    | Durable -> Ok ()
+  in
+  let%bind () =
+    match Int.equal state.identity.generation context.generation with
+    | true -> Ok ()
+    | false ->
+      Error (failure (unavailable Permission_denied "invoking parent generation changed"))
+  in
+  let capability result =
+    Result.map_error result ~f:(fun error ->
+      P.Invocation.
+        { code = error.C.code
+        ; message = "Requested tools exceed the invoking capability scope."
+        ; retryable = false
+        ; details = `Null
+        })
+  in
+  let%bind selected = C.select ceiling ~names:request.tools |> capability in
+  let%bind definition =
+    G.prepare
+      ?limits:
+        (Option.map
+           t.authoring_validation_host
+           ~f:Chat_response.Authoring_validation.compilation_limits)
+      ~env:t.env
+      ~dir:
+        Eio.Path.(
+          Eio.Stdenv.fs t.env / state.spec.workspace_instance.canonical_root.native_path)
+      ?catalog:
+        (Option.bind
+           t.authoring_validation_host
+           ~f:Chat_response.Authoring_validation.delegated_catalog)
+      ~revision_id:(P.Id.Prompt_revision.create ())
+      ~created_at:(now t)
+      ~current_capabilities:(fun () -> selected)
+      ~references:(C.references selected)
+      request.bundle
+    |> Result.map_error ~f:(fun diagnostics ->
+      P.Invocation.
+        { code = "agent.create.invalid_definition"
+        ; message = "The generated ChatMD definition could not be prepared."
+        ; retryable = false
+        ; details =
+            `Object
+              [ ( "diagnostics"
+                , `Array
+                    (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.jsonaf_of_t) )
+              ]
+        })
+  in
+  let%bind current = N.borrowed_capabilities borrowed |> protocol in
+  let%bind () =
+    List.fold_result (C.references selected) ~init:() ~f:(fun () reference ->
+      C.resolve current ~id:reference.id ~fingerprint:reference.fingerprint
+      |> capability
+      |> Result.map ~f:ignore)
+  in
+  let lifetime =
+    match request.lifetime with
+    | Q.Owned -> Owned
+    | Independent -> Independent
+  in
+  let%bind child =
+    create_generated_session
+      t
+      ~lifetime
+      ~start_immediately:request.start_immediately
+      ~parent_session_id:context.session_id
+      ~idempotency_key:request.idempotency_key
+      ~display_name:request.display_name
+      definition
+    |> protocol
+  in
+  let%bind _ = N.borrowed_capabilities borrowed |> protocol in
+  let%map state = Agent_session.Session_actor.state child.actor |> protocol in
+  Q.
+    { session = Agent_session.Session_state.summary state
+    ; parent_session_id = context.session_id
+    ; tools =
+        List.map
+          (C.references
+             (Chat_response.Generated_admission.capabilities (G.admission definition)))
+          ~f:(fun reference -> reference.name)
+    }
+;;
+
+let create
+      ~sw
+      ~env
+      ~store
+      ~registry
+      ~idempotency_store
+      ~blob_store
+      ~prompts
+      ~workspaces
+      ~permission_profiles
+      ~manifest_grants
+      ~quota_manager
+      ~job_capacity
+      ~tool_dir
+      ~home
+      ~model_post_stream
+      ~qualify_chatml_extensions
+      ~session_helpers
+      ~independent_lifetime_policy
+      ~chatml_runtime_policy
+      ~authoring_validation_host
+      ~durability
+      ~limits
+  =
+  let authoring_validation_host =
+    match qualify_chatml_extensions with
+    | false -> authoring_validation_host
+    | true ->
+      Agent_session.Authoring_runtime.configure_host
+        ?host:authoring_validation_host
+        ~policy:Chat_response.One_off_request.default_policy
+        ()
+      |> Result.ok_or_failwith
+      |> Option.some
+  in
+  let profiles =
+    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
+      Map.set profiles ~key:profile.Agent_session.Permission_policy.id ~data:profile)
+  in
+  let revisions =
+    List.fold permission_profiles ~init:Map.Poly.empty ~f:(fun profiles profile ->
+      Map.set
+        profiles
+        ~key:profile.Agent_session.Permission_policy.revision_digest
+        ~data:profile)
+  in
+  let bundle_limits =
+    Option.value_map
+      authoring_validation_host
+      ~default:Chatmd_source_bundle.default_limits
+      ~f:Chat_response.Authoring_validation.bundle_limits
+  in
+  let rec t =
+    { sw
+    ; env
+    ; store
+    ; registry
+    ; authored_resources = Authored_resources.create ()
+    ; authored_services =
+        (fun prepared borrowed -> authored_call_services t prepared borrowed)
+    ; generated_creation_mutex = Eio.Mutex.create ()
+    ; idempotency_store
+    ; blob_store
+    ; prompts
+    ; workspaces
+    ; catalog_mutex = Eio.Mutex.create ()
+    ; permission_profiles = profiles
+    ; permission_profile_revisions = revisions
+    ; manifest_grants
+    ; quota_manager
+    ; job_capacity
+    ; tool_dir
+    ; home
+    ; model_post_stream
+    ; qualify_chatml_extensions
+    ; session_helpers
+    ; independent_lifetime_policy
+    ; chatml_runtime_policy
+    ; authoring_validation_host
+    ; durability
+    ; limits
+    ; generated_creation =
+        { limits = bundle_limits
+        ; create = (fun borrowed request -> create_from_native t borrowed request)
+        }
+    ; managed_output_cursors = Managed_output_cursor.create ()
+    ; managed_sessions =
+        { status = (fun borrowed child_id -> managed_status t borrowed child_id)
+        ; send =
+            (fun borrowed child_id ~key ~message ->
+              managed_send t borrowed child_id ~key ~message)
+        ; read =
+            (fun borrowed child_id ~receipt_id ~cursor ~limit ->
+              managed_read t borrowed child_id ~receipt_id ~cursor ~limit)
+        ; wait =
+            (fun borrowed child_id ~target ~timeout_ms ->
+              managed_wait t borrowed child_id ~target ~timeout_ms)
+        ; stop =
+            (fun borrowed child_id ~key ~mode ->
+              managed_stop t borrowed child_id ~key ~mode)
+        }
+    }
+  in
+  t
 ;;

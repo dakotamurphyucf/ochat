@@ -64,6 +64,7 @@ module Limits : sig
     { wall_time_seconds : float
     ; idle_time_seconds : float option
     ; max_stdin_bytes : int
+      (** Nonnegative; zero forbids input bytes while permitting empty stdin. *)
     ; max_stdout_bytes : int
     ; max_stderr_bytes : int
     ; max_total_bytes : int
@@ -472,6 +473,8 @@ module Audit : sig
   val context : event -> Context.t
 end
 
+module Request_channel : module type of Request_channel
+
 module Execution_plan : sig
   type t =
     { id : string
@@ -479,7 +482,7 @@ module Execution_plan : sig
     ; limits : Limits.t
     ; environment : string array
     ; cwd : string
-    ; resource_runner : Executable.t option
+    ; request_channel : bool
     }
 end
 
@@ -522,6 +525,12 @@ module Backend : sig
   val direct : t
   val macos_seatbelt : t
   val linux_bubblewrap : ?executable:string -> unit -> t
+
+  (** Conservative union of implicit readable paths for both request-channel
+      backends, including their device/process namespaces. Host helper policies
+      must account for these paths in addition to explicit capability roots.
+      These are not grants for an unsandboxed process. *)
+  val request_channel_implicit_read_roots : string list
 
   val external_
     :  name:string
@@ -637,7 +646,6 @@ module Executor : sig
     -> ?cwd:Eio.Fs.dir_ty Eio.Path.t
     -> ?process_env:string array
     -> ?limits:Limits.t
-    -> ?resource_runner:string
     -> ?secret_filter:Secret_filter.t
     -> ?audit:Audit.t
     -> ?audit_sequence:int Atomic.t
@@ -649,6 +657,37 @@ module Executor : sig
   (** [run config invocation] authorizes and executes [invocation]. Supplied
       input is bounded and included in approval identity before execution. *)
   val run : config -> invocation -> (result, error) Result.t
+
+  (** Bind the actual invoking session and its grant store without rebuilding
+      inherited executables, paths, environment, policy, reviewers, limits, audit
+      or sandbox configuration. [check] revalidates live host authority before
+      execution, after approval waits (before remembering grants), and before
+      prepared effects run. Nested scopes retain every ancestor check. This is
+      trusted host plumbing, not permission to delegate a configuration. A new
+      execution scope clears any request channel; its actual owner must explicitly
+      lend a new one rather than inheriting another invocation's handler. *)
+  val with_execution_scope
+    :  config
+    -> session_id:string
+    -> approval_store:Approval.store
+    -> check:(unit -> (unit, string) Result.t)
+    -> config
+
+  (** Trusted host opt-in for a private process request channel (FDs 3/4). Only
+      supported verified sandbox backends with networking/privilege changes denied
+      can receive it. [authorize] must validate the exact final executable,
+      environment and filesystem roots (including implicit platform roots),
+      excluding broader host credentials/control sockets. It runs after normal
+      authorization and again immediately before
+      spawn. Linked child setup closes inherited descriptors above 4 before
+      executing the sandbox backend and helper. The channel's own live check
+      must validate its admitting caller.
+      Existing channels cannot be replaced by nested configuration. *)
+  val with_request_channel
+    :  config
+    -> channel:Request_channel.t
+    -> authorize:(Context.t -> (unit, string) Result.t)
+    -> (config, string) Result.t
 
   (** [streaming_support config] rejects every after-interceptor and filters
       outside {!Sanitized_stream.support}, using the total-output byte budget.
