@@ -1,5 +1,6 @@
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import path from 'node:path';
 export const digest = (text) => createHash('sha256').update(text).digest('hex');
 export function gitFacts(root) {
   const git = (args) =>
@@ -14,6 +15,33 @@ export function gitFacts(root) {
   return {
     revision,
     shallow,
+    sourceDigestAt(sourceRevision, source) {
+      if (
+        !/^[a-f0-9]{40}$/.test(sourceRevision) ||
+        typeof source !== 'string' ||
+        !source ||
+        source.includes('\\') ||
+        source.includes('\0') ||
+        path.posix.isAbsolute(source) ||
+        path.posix.normalize(source) !== source ||
+        source === '..' ||
+        source.startsWith('../')
+      )
+        throw new Error('Invalid recorded source identity');
+      try {
+        return digest(
+          execFileSync('git', ['show', `${sourceRevision}:${source}`], {
+            cwd: root,
+            maxBuffer: 16 * 1024 * 1024,
+            stdio: ['ignore', 'pipe', 'pipe'],
+          }),
+        );
+      } catch {
+        throw new Error(
+          `Recorded runtime source is unavailable: ${sourceRevision}:${source}. Build with full Git history.`,
+        );
+      }
+    },
     source(source, text) {
       let committed;
       try {

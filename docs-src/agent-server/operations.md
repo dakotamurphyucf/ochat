@@ -127,6 +127,22 @@ redacted; encryption-at-rest is an operator responsibility.
 
 ## Inspection, migration, and legacy import
 
+The store-container schema and each session's state schema are separate. The
+current store container uses schema 1; the current session state uses schema 20.
+Normal session loading upgrades supported older state shapes and rejects fields
+that could not exist in the declared version. This does not migrate a workflow's
+application-specific moderator state.
+
+For an extensibility upgrade, stop the daemon and back up the complete store,
+configuration and external resources before starting the new binary. Keep the
+matching old binary and backup together for rollback. Inspect recovered sessions,
+interrupted work and pending approvals before resuming them; refresh process-bound
+output cursors after restart. Existing prompt revisions remain pinned. Use an
+explicit stopped-session prompt upgrade when changing a captured definition, and
+review its [workflow migration behavior](../guide/chatml-session-lifecycle.md#source-replacement-is-not-workflow-migration).
+Downgrading the binary against a newly written store is not a supported rollback;
+restore the matching backup instead of editing schema numbers.
+
 ```sh
 ochat-agent-server -inspect-store /absolute/private/store
 ochat-agent-server -migrate-store /absolute/private/store -dry-run
@@ -134,8 +150,8 @@ ochat-agent-server -migrate-store /absolute/private/store
 ```
 
 Inspection reads schema/session-directory information without acquiring daemon
-ownership. Migration planning/application takes the lock. Schema 1 is currently
-the only supported schema; applying unsupported older/newer formats fails without
+ownership. Migration planning/application takes the lock. Store-container schema 1 is currently
+the only supported container schema; applying unsupported older/newer formats fails without
 inventing a conversion. Neither operation is a complete artifact/journal integrity
 scan. A dry-run is not a repair tool. Preserve evidence on corruption and avoid
 manual journal edits.

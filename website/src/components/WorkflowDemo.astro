@@ -185,10 +185,25 @@ const steps = recording.steps;
           ? 'Captured with OpenAI gpt-4.1 on synthetic sample documentation. A new run can produce different results.'
           : 'Real Ochat tools and delegation with scripted model responses. This demonstrates execution, not model quality.'
       }
-    </p><details>
+    </p>
+    {
+      recording.runtimeChanged && (
+        <p>
+          Captured on {recording.recordedAt.slice(0, 10)} with an earlier Ochat
+          revision. This recording does not verify the current runtime.
+        </p>
+      )
+    }
+    <details>
       <summary>Recording details and reproduction</summary><p>
         {recording.scope}
       </p><p>{recording.transport}</p><p>
+        <a
+          href={`https://github.com/dakotamurphyucf/ochat/tree/${recording.sourceRevision}`}
+        >
+          Recorded Ochat revision {recording.sourceRevision.slice(0, 8)}
+        </a>
+      </p><p>
         Playback advances through captured steps; its timing is illustrative.
         Temporary directory paths are redacted. No credentials are included.
       </p><p>

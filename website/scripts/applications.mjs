@@ -52,13 +52,30 @@ export async function applicationReport({
     !Array.isArray(recording.requests)
   )
     throw new Error('Invalid showcase recording');
-  for (const [source, expected] of Object.entries(
-    recording.runtimeSources || {},
-  )) {
-    if (
-      digest(await fs.readFile(await containedFile(root, source))) !== expected
-    )
-      throw new Error(`Stale recording runtime: ${source}`);
+  if (
+    !/^[a-f0-9]{40}$/.test(recording.sourceRevision) ||
+    !Number.isFinite(Date.parse(recording.recordedAt)) ||
+    !recording.runtimeSources ||
+    !Object.keys(recording.runtimeSources).length
+  )
+    throw new Error(
+      'Recording requires its original runtime revision and sources',
+    );
+  let runtimeChanged = false;
+  for (const [source, expected] of Object.entries(recording.runtimeSources)) {
+    if (facts.sourceDigestAt(recording.sourceRevision, source) !== expected)
+      throw new Error(
+        `Recording runtime differs from its captured revision: ${source}`,
+      );
+    try {
+      if (
+        digest(await fs.readFile(await containedFile(root, source))) !== expected
+      )
+        runtimeChanged = true;
+    } catch (error) {
+      if (error.code !== 'ENOENT') throw error;
+      runtimeChanged = true;
+    }
   }
   const example = examples.find((e) => e.id === 'docs-review');
   if (!example)
@@ -147,6 +164,12 @@ export async function applicationReport({
         exampleTitle: example.title,
       };
     }),
-    recording: { ...recording, steps, source, sha256: digest(raw) },
+    recording: {
+      ...recording,
+      runtimeChanged,
+      steps,
+      source,
+      sha256: digest(raw),
+    },
   };
 }

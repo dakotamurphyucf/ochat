@@ -21,6 +21,9 @@ below is separate. Core is the standard library; new application I/O uses Eio.
 
 ## Maintaining the installed authoring reference
 
+Start with the [extensibility maintenance handoff](docs-src/development/chatml-extensibility-handoff.md)
+for execution forms, ownership, host boundaries, migration and qualification.
+
 The authoring corpus embeds selected `docs-src` guides and compiler-owned
 signatures, so a running agent can retrieve the installed version without this
 checkout or network access. `lib/authoring_sources/dune` also embeds hashes of
@@ -63,9 +66,9 @@ When changing an inventoried implementation or its documentation:
    before serving guidance. A stale mapping therefore needs an explicit review.
 
 Inventory tests prove completeness against the maintained feature lists, not
-against every possible runtime behavior. The corpus still reports foundation
-coverage and incomplete prepared packages until the full authoring qualification
-is complete. Offline example checks and the authoring evaluation harness do not
+against every possible runtime behavior. The installed corpus supplies qualified
+task packages; completeness is checked against the selected surface, prerequisites
+and maintained inventories. Offline example checks and the authoring evaluation harness do not
 establish model-quality results; optional provider evaluation is separate.
 
 
