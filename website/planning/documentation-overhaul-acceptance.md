@@ -192,6 +192,16 @@ warnings or hints; the three learning-path/browser-evidence tests also passed.
 The exact new PR revision must still pass the complete protected gate before
 merge, followed by main qualification, deployment and live reader verification.
 
+The [follow-up PR run](https://github.com/dakotamurphyucf/ochat/actions/runs/34768377984)
+passed all four browser shards and both website qualifications. It exposed an
+independent ordering assumption in the ordinary runtime-builder expect fixture:
+two concurrent calls shared a counter with completion observations, so a valid
+observation between calls changed a returned value from 12 to 13. The fixture now
+tracks invocation ordinals separately while still asserting the combined event
+count and all existing outcomes. Its complete runtime-mode matrix passed three
+consecutive focused runs. Production runtime behavior and expected output were
+not changed. The new revision still requires complete CI qualification.
+
 ## Acceptance scenario evidence
 
 These are reader outcomes from plan section 14, not counts of files written.

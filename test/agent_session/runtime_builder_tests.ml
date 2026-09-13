@@ -74,7 +74,9 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
           let source =
             {|<tool name="read_file"><read id="data" path="${workspace}/data"/></tool>
 <script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
-let initial_state = [0]
+(* Keep invocation results independent of when concurrent completion observations
+   arrive. The first cell still counts both kinds of event. *)
+let initial_state = [0, 0]
 let read = fun () -> Tool.call("read_file", `Object([{key = "root"; value = `String("data")}, {key = "file"; value = `String("value.txt")}]))
 let on_event = fun ctx state event -> match event with
 | `Session_start -> Task.bind(read(), fun result -> match result with
@@ -83,7 +85,8 @@ let on_event = fun ctx state event -> match event with
 | `Tool_invoked(p) -> Task.bind(read(), fun result -> match result with
     | `Error(code) -> Task.fail(code)
     | `Ok(value) -> let ignored = state[0] <- state[0] + 1 in
-      Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`String(to_string(state[0])))), fun ignored -> Task.pure(state)))
+      let ignored = state[1] <- state[1] + 1 in
+      Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`String(to_string(10 + state[1])))), fun ignored -> Task.pure(state)))
 | `Tool_observed(p) -> (match p.origin with
     | `Script -> let ignored = state[0] <- state[0] + 1 in Task.pure(state)
     | _ -> Task.pure(state))
@@ -679,7 +682,13 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                        (M.identity_snapshot manager |> Result.ok_or_failwith)
                          .current_state
                      with
-                     | Session.Snapshot.Array [ Int n ] -> n
+                     | Session.Snapshot.Array [ Int n; Int invoked ] ->
+                       [%test_eq: int]
+                         (match mode with
+                          | `Foreground | `Idle | `One_off_moderator -> 2
+                          | _ -> 0)
+                         invoked;
+                       n
                      | _ -> assert false)
                 in
                 let published =
