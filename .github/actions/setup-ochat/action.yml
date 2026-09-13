@@ -46,7 +46,7 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install --yes bubblewrap apparmor
+        sudo apt-get install --yes bubblewrap apparmor apparmor-profiles
         bash .github/scripts/check-linux-sandbox.sh
     - name: Reconcile locked dependencies
       shell: bash

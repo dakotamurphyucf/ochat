@@ -9,8 +9,9 @@ if [[ -r /sys/module/apparmor/parameters/enabled ]] &&
    [[ $(cat /sys/module/apparmor/parameters/enabled) == Y ]]; then
   profile=/etc/apparmor.d/bwrap-userns-restrict
   if [[ ! -f "$profile" ]]; then
-    echo "Ubuntu's packaged Bubblewrap AppArmor profile is missing: $profile" >&2
-    exit 1
+    # Noble distributes this opt-in profile in apparmor-profiles, not apparmor.
+    sudo install -m 0644 \
+      /usr/share/apparmor/extra-profiles/bwrap-userns-restrict "$profile"
   fi
   sudo apparmor_parser --replace "$profile"
 fi

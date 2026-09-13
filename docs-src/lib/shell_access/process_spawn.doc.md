@@ -31,8 +31,9 @@ namespace restrictions can reject setup even when `bwrap` is installed, for
 example with `loopback: Failed RTM_NEWADDR: Operation not permitted`. The host
 administrator must configure the distribution's Bubblewrap profile; Ochat does
 not change AppArmor or retry without confinement. The Ubuntu CI runner explicitly
-loads its packaged `/etc/apparmor.d/bwrap-userns-restrict` profile and checks
-namespace startup before framework tests. See Ubuntu's
+installs the opt-in `bwrap-userns-restrict` profile from `apparmor-profiles`, loads
+it under `/etc/apparmor.d/`, and checks namespace startup before framework tests.
+See Ubuntu's
 [Bubblewrap profile guidance](https://discourse.ubuntu.com/t/understanding-apparmor-user-namespace-restriction/58007).
 
 ## Private channels and process lifetime
