@@ -46,7 +46,8 @@ runs:
       shell: bash
       run: |
         sudo apt-get update
-        sudo apt-get install --yes bubblewrap
+        sudo apt-get install --yes bubblewrap apparmor
+        bash .github/scripts/check-linux-sandbox.sh
     - name: Reconcile locked dependencies
       shell: bash
       run: opam install . --deps-only --with-test --locked --yes
