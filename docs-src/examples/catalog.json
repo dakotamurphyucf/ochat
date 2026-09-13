@@ -2136,5 +2136,188 @@
         "test/chatml_composition/embedded_extension_tests.ml": "ef39846409e77f69cfebc907eee5a87f2df1b1f86c5d45c08777f483fdad4b89"
       }
     }
+  },
+  {
+    "id": "persistent-review-team",
+    "title": "Persistent review team",
+    "summary": "Keep distinct specialist conversations, refine their findings with follow-up evidence, and collect receipt-correlated progress with ChatML.",
+    "tutorial": "applications/persistent-review-team",
+    "host": "Private durable Unix daemon and connected TUI",
+    "capabilities": [
+      "Three authored specialists",
+      "Optional and fixed persistence",
+      "Retained follow-up",
+      "ChatML collection tool",
+      "Receipt and cursor correlation",
+      "Scoped file reads",
+      "Explicit failure and cleanup"
+    ],
+    "required": [
+      "Installed Ochat and configured gpt-6-astra provider; specialists request high reasoning.",
+      "Run the bundled private daemon from its extracted directory; transient local hosting is not sufficient.",
+      "Read-only sample workspace; recorded report evidence, no shell or editing tools."
+    ],
+    "kind": "complete",
+    "entry": "team.chatmd",
+    "files": [
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/team.chatmd",
+        "path": "team.chatmd",
+        "role": "entry"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/agents/correctness-reviewer.chatmd",
+        "path": "agents/correctness-reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/agents/documentation-reviewer.chatmd",
+        "path": "agents/documentation-reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/agents/integration-reviewer.chatmd",
+        "path": "agents/integration-reviewer.chatmd",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/scripts/coordinator.chatml",
+        "path": "scripts/coordinator.chatml",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/schemas/review-request.json",
+        "path": "schemas/review-request.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/schemas/review-findings.json",
+        "path": "schemas/review-findings.json",
+        "role": "companion"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/server.sexp",
+        "path": "server.sexp",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/sample-project/requirements.txt",
+        "path": "sample-project/requirements.txt",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/sample-project/follow-up.txt",
+        "path": "sample-project/follow-up.txt",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/applications/persistent-review-team/README.md",
+        "path": "README.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/setup.md",
+        "path": "sample-project/docs/setup.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/docs/reference.md",
+        "path": "sample-project/docs/reference.md",
+        "role": "data"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh",
+        "path": "sample-project/scripts/check-docs.sh",
+        "role": "build"
+      },
+      {
+        "source": "docs-src/examples/learning/lantern/sample-project/expected-report.json",
+        "path": "sample-project/expected-report.json",
+        "role": "data"
+      },
+      {
+        "source": "LICENSE.txt",
+        "path": "LICENSE.txt",
+        "role": "notice"
+      }
+    ],
+    "edges": [
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "agents/correctness-reviewer.chatmd",
+        "reference": "agents/correctness-reviewer.chatmd",
+        "kind": "agent"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "agents/documentation-reviewer.chatmd",
+        "reference": "agents/documentation-reviewer.chatmd",
+        "kind": "agent"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "agents/integration-reviewer.chatmd",
+        "reference": "agents/integration-reviewer.chatmd",
+        "kind": "agent"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "scripts/coordinator.chatml",
+        "reference": "scripts/coordinator.chatml",
+        "kind": "script"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "schemas/review-request.json",
+        "reference": "schemas/review-request.json",
+        "kind": "import"
+      },
+      {
+        "fromPath": "team.chatmd",
+        "toPath": "schemas/review-findings.json",
+        "reference": "schemas/review-findings.json",
+        "kind": "import"
+      }
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "cd06d4be337e7eefef73236b6e0cd5217b6f697c",
+      "testedAt": "2026-09-13",
+      "platform": "macOS / arm64; private durable host",
+      "toolchain": "Repository OCaml toolchain; website Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "Build the chatml_composition_test runner and execute documentation_review_team_tests.ml and documentation_agent_team_tests.ml partitions.",
+        "opam exec -- dune build -j 2 @agent-docs-check",
+        "Extract all sixteen archived files, compare canonical bytes, validate server.sexp and inspect team.chatmd from its extracted directory."
+      ],
+      "observed": "Exact sources run through the durable host with controlled model responses: three distinct authored reviewer sessions, real scoped evidence reads, a failed reviewer, receipt-filtered ChatML collection, consumed-cursor reading, optional default one-off mode, a new instance when the ID is omitted, retained history and a new receipt on same-ID follow-up, partial collection despite an invalid receipt query, and admitted child stops with no active operations and retained readable evidence. All sixteen archived files match; private configuration validates and the root inspects from the extracted working directory.",
+      "limitations": "Provider judgment and the reviewer failure are simulated. No live API, physical TUI, Linux, restart/recovery or unattended completion-notification run is claimed. The collector performs bounded observations; it does not wait for every reviewer. Stop admission is distinct from joining all cleanup. Sample reports and the follow-up proposal are recorded inputs, not newly executed checks.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "docs-src/applications/persistent-review-team.md": "b9a366d21fe6bf09b178e92984e09993222f33778213f1e859c44a345023febf",
+        "docs-src/examples/applications/persistent-review-team/README.md": "650d604eddb9a56330e78eff6890d7a6ff079db2a090cb38bd10afa62cc4e198",
+        "docs-src/examples/applications/persistent-review-team/agents/correctness-reviewer.chatmd": "1ae31a5e747ccaa89a8b2d4626c041752dc38ff699eda92e751a0e56c616f0ed",
+        "docs-src/examples/applications/persistent-review-team/agents/documentation-reviewer.chatmd": "09c7b2bbdc41fef60159384eee2650d289cc61a188c2162ec264f59fe642b2c5",
+        "docs-src/examples/applications/persistent-review-team/agents/integration-reviewer.chatmd": "db3834c8c82e0eeb747358d923bb5fd8c922de379ba94c5d79b9525aecb25161",
+        "docs-src/examples/applications/persistent-review-team/sample-project/follow-up.txt": "41285755b748e48425cf7f641728983917e8e5ac54658c30a9cd6c2da39360d7",
+        "docs-src/examples/applications/persistent-review-team/sample-project/requirements.txt": "12549ca8719f1481f65f906c59fa870d7df95a91e31d206a16cddf04ee57477f",
+        "docs-src/examples/applications/persistent-review-team/schemas/review-findings.json": "255b779a4ccaf15502ac9c5538519f58cbd3976e6eb8a2c0414bee5ec880aea5",
+        "docs-src/examples/applications/persistent-review-team/schemas/review-request.json": "a585e4c5286ceb57fdc73da8eef59424baf13fda697292e1b67a8bed3fa799db",
+        "docs-src/examples/applications/persistent-review-team/scripts/coordinator.chatml": "f42c6c60af8eac51231fe5ce44289ec157838368d3f2152edbe04aef5efd7242",
+        "docs-src/examples/applications/persistent-review-team/server.sexp": "7a09f5b9fee59d5e20ed0ede053d300a44d8d172aa61e4b70205566db4355338",
+        "docs-src/examples/applications/persistent-review-team/team.chatmd": "bb245e0607152e8079df6175f0736edcb5e6ab202be4ceaf1ef3b461cb1739f0",
+        "docs-src/examples/learning/lantern/sample-project/docs/reference.md": "93a321e07c456a3e02d24cb40d3fb89382996337e0f0caf5ecedcd709f93347b",
+        "docs-src/examples/learning/lantern/sample-project/docs/setup.md": "95212f95130aa1190d2542ac906913b2eba2275f052d71974778d8cccbc70eef",
+        "docs-src/examples/learning/lantern/sample-project/expected-report.json": "4f2150068d67c6cff71d90c970d2ee5a10a055256723c0df439bab2d548be236",
+        "docs-src/examples/learning/lantern/sample-project/scripts/check-docs.sh": "3ae64dd89b459c42007e87537b7549563373884a7a9b5a26387dafbe508458f5",
+        "lib/agent_session/authored_agent_call.ml": "3051888e7fe39e353858677938a36a374a702b8d5e0d775d2dd0817278278f33",
+        "lib/agent_session/runtime_builder.ml": "03fecc74dadb6599ef8eaaf8ffb0118080cebf895718bb613af58c51f5582381",
+        "test/chatml_composition/documentation_agent_team_tests.ml": "f200e06d8472e96289307e91b58ac6cfc087c93e2a477b465659fb2d879cef92",
+        "test/chatml_composition/documentation_review_team_tests.ml": "0385c46fe4b24877204e533018e73efbc7ed72a69020840f2a5d45392d0d136c",
+        "test/chatml_composition/documentation_shell_tests.ml": "bd098576fdf083e08216066bdcdfa0e15d22a2a635a94306bf4b848418a1dcab",
+        "test/chatml_composition/dune": "e1b33b3308fcb8dcfcebb406b3fc97de3cda20ec1facd48a733b4d8c0b835a26"
+      }
+    }
   }
 ]

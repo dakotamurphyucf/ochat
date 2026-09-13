@@ -22,6 +22,28 @@
     "benefit": "Combine different tools and runtimes in one reusable engineering assistant while keeping decisions, execution and evidence distinct."
   },
   {
+    "id": "persistent-review-team",
+    "title": "Keep specialists working on the same investigation",
+    "category": "Code",
+    "summary": "Keep distinct specialist conversations, refine their findings with follow-up evidence, and collect receipt-correlated progress with ChatML.",
+    "input": "Release requirements, tutorial source and follow-up evidence",
+    "output": "Separate specialist findings, unresolved disagreements and a correlated follow-up report",
+    "example": "persistent-review-team",
+    "level": "Complete application",
+    "steps": [
+      "Assign distinct retained reviews",
+      "Collect correlated progress and evidence",
+      "Refine the same conversations and finish"
+    ],
+    "preview": [
+      "Correctness \u2192 commands and result accuracy",
+      "Documentation \u2192 the reader journey",
+      "Integration \u2192 release evidence still needed"
+    ],
+    "tutorial": "tutorials/persistent-specialist",
+    "benefit": "Revisit the same specialist investigations while keeping identity, completion, evidence and disagreement visible."
+  },
+  {
     "id": "repository-onboarding",
     "title": "Understand an unfamiliar repository",
     "category": "Code",

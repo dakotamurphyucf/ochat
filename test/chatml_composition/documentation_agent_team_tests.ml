@@ -64,7 +64,7 @@ let answer ~id text =
 (* Exercise the exact public bundle and its read-only daemon configuration.
    Only model responses are simulated: file tools, admission, durable sessions,
    ownership and receipt/output publication all use the production paths. *)
-let with_team f =
+let with_team ?(sources = sources) ?reviewer_provider f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -89,7 +89,7 @@ let with_team f =
         let queued = ref None in
         let calls = ref 0 in
         let continuations = ref 0 in
-        let provider ~sw:_ ~inputs =
+        let default_provider ~sw:_ ~inputs =
           Int.incr calls;
           let id suffix = sprintf "lesson-%d-%s" !calls suffix in
           let transcript = `Array (List.map inputs ~f:Res.Item.jsonaf_of_t) in
@@ -136,6 +136,14 @@ let with_team f =
                      ( id label
                      , "read_file"
                      , `Object [ "root", `String "project"; "file", `String path ] )))
+        in
+        let provider ~sw ~inputs =
+          match reviewer_provider with
+          | None -> default_provider ~sw ~inputs
+          | Some review ->
+            (match review ~sw ~inputs with
+             | Some output -> output
+             | None -> default_provider ~sw ~inputs)
         in
         Eio.Switch.run (fun sw ->
           let daemon =

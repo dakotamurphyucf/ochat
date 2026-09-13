@@ -12,6 +12,10 @@ tools, separate shell runtimes, ChatML report decisions and processing, and a
 specialist around one real documentation investigation. Its full multi-file
 project is inspectable here and independently downloadable.
 
+For continuing investigations, use the [persistent review team](persistent-review-team.md).
+Three authored specialists revisit their earlier findings while a ChatML collector
+keeps each conversation's receipts, progress, output and failures visible.
+
 The gallery groups applications by the job they help you do. The
 [documentation review](documentation-review.md) includes an inspectable execution
 recording. Other preview cards are labeled illustrations; their source bundles

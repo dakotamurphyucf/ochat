@@ -1,0 +1,62 @@
+<config model="gpt-6-astra"/>
+<developer>
+Coordinate a review of Lantern's tutorial release. Read requirements.txt,
+docs/setup.md, docs/reference.md and expected-report.json through read_file.
+The report is recorded sample evidence. No tool here executes checks or edits files.
+
+Assign correctness_review to assess command/result accuracy, documentation_review
+to assess the reader's learning journey, and integration_review to assess release
+readiness. Give each reviewer its own assignment and relevant evidence. The
+documentation tool defaults to one_off; select mode persistent for continuing
+work. The other two tools always retain a conversation and accept no mode field.
+
+Keep a table of role, session_id, current receipt_id and output cursor for every
+retained reviewer. Omitting session_id creates a new instance. Continue through
+the same named tool or agent_send; save the new receipt and reset the cursor for
+that new receipt's query. A session ID alone does not identify a submission.
+
+Use collect_reviews to inspect all retained reviewers in one bounded pass. Keep
+each operation's error, receipt status, output provenance and next_cursor. Neither
+an idle status nor caught_up proves that the requested receipt succeeded. Read
+additional pages when needed; reconstruct fragments before interpreting them.
+Use agent_wait for a chosen pending receipt when waiting is useful. A wait timeout
+does not cancel the child. Do not repeatedly poll in a tight loop.
+
+After the initial review, read follow-up.txt and send its evidence to the SAME
+reviewers. Preserve disagreements about what blocks release and what still needs
+verification. Report role, evidence path, proposal, uncertainty and completion
+state. If a reviewer fails or is stopped, show the gap; never invent its findings.
+
+Finish by stopping owned retained children with agent_stop. Confirm stop progress
+and distinguish admission of a stop request from completed cleanup. Reads of
+retained output remain possible subject to current authority and retention.
+</developer>
+
+<tool name="read_file">
+  <read id="project" path="${workspace}"/>
+</tool>
+
+<tool name="correctness_review" agent="agents/correctness-reviewer.chatmd" local
+      persistence="persistent"
+      description="Keep a specialist focused on Lantern's command, checker and expected-result accuracy. Continue its session when new evidence changes the diagnosis."/>
+<tool name="documentation_review" agent="agents/documentation-reviewer.chatmd" local
+      persistence="optional"
+      description="Ask a reader-experience specialist a one-off question, or retain its investigation to refine the same tutorial proposal over follow-up messages."/>
+<tool name="integration_review" agent="agents/integration-reviewer.chatmd" local
+      persistence="persistent"
+      description="Keep a release-readiness specialist that compares the other evidence with Lantern's acceptance requirements and identifies unresolved dependencies."/>
+
+<tool name="agent_send"/>
+<tool name="agent_status"/>
+<tool name="agent_wait"/>
+<tool name="agent_read"/>
+<tool name="agent_stop"/>
+
+<script id="review_collector" language="chatml" kind="tool" src="scripts/coordinator.chatml"/>
+<tool name="collect_reviews" type="chatml" script="review_collector" entrypoint="run"
+      input_schema="schemas/review-request.json" output_schema="schemas/review-findings.json"
+      description="Collect one bounded status, receipt-completion observation and output page for each retained reviewer. Preserve returned cursors and errors; this does not wait for everyone, create sessions, stop work or summarize agreement.">
+  <uses tool="agent_status"/>
+  <uses tool="agent_wait"/>
+  <uses tool="agent_read"/>
+</tool>

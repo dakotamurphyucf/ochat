@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "reviewers": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 3,
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string", "enum": ["correctness", "documentation", "integration"] },
+          "session_id": { "type": "string" },
+          "receipt_id": { "type": "string" },
+          "cursor": { "type": ["string", "null"] }
+        },
+        "required": ["role", "session_id", "receipt_id", "cursor"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["reviewers"],
+  "additionalProperties": false
+}

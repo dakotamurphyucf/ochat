@@ -1903,7 +1903,7 @@
     "noindex": false,
     "status": "current",
     "verification": "not-checked",
-    "order": 11
+    "order": 12
   },
   {
     "id": "examples/agent-server/README",
@@ -4467,7 +4467,7 @@
     "description": "Turn a named project file into an explanation you can check against the source.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 2,
+    "order": 3,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4489,7 +4489,7 @@
     "description": "Let an explorer gather the context and a specialist identify what a new contributor needs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 3,
+    "order": 4,
     "navigation": false,
     "related": [
       "tutorials/specialist"
@@ -4511,7 +4511,7 @@
     "description": "Compare supplied source notes, preserve attribution, and separate evidence from open questions.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 4,
+    "order": 5,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4533,7 +4533,7 @@
     "description": "Read a supplied patch and acceptance criteria, then produce findings tied to the changed lines.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 5,
+    "order": 6,
     "navigation": false,
     "related": [
       "tutorials/file-tool"
@@ -4555,7 +4555,7 @@
     "description": "Run one request without the terminal UI and save the conversation as an inspectable artifact.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 6,
+    "order": 7,
     "navigation": false,
     "related": [
       "cli/chat-completion"
@@ -4577,7 +4577,7 @@
     "description": "Learn the host lifecycle with a real timer, then extend it with background research jobs.",
     "section": "Complete applications",
     "kind": "guide",
-    "order": 7,
+    "order": 8,
     "navigation": false,
     "related": [
       "background"
@@ -4843,6 +4843,44 @@
     "disposition": "repository-only",
     "title": "Guarded engineering bundle instructions",
     "reviewNote": "Complete bundle setup and usage instructions displayed/downloaded in the source reader; the public walkthrough is the application page.",
+    "provenance": "authored"
+  },
+  {
+    "id": "applications/persistent-review-team",
+    "source": "docs-src/applications/persistent-review-team.md",
+    "route": "/docs/applications/persistent-review-team/",
+    "title": "Keep a team of specialist reviewers",
+    "description": "Keep distinct specialist conversations, refine their findings with follow-up evidence, and collect receipt-correlated progress with ChatML.",
+    "section": "Complete applications",
+    "kind": "guide",
+    "order": 2,
+    "navigation": true,
+    "audience": [
+      "author",
+      "operator"
+    ],
+    "related": [
+      "tutorials/persistent-specialist",
+      "tutorials/generated-specialist",
+      "guide/chatml-authoring-children"
+    ],
+    "disposition": "publish",
+    "provenance": "authored",
+    "search": true,
+    "sitemap": true,
+    "noindex": false,
+    "status": "current",
+    "verification": "offline-checked",
+    "reviewNote": "Complete sixteen-file durable review team; exact authored sessions, ChatML receipt/cursor collection, partial failure and retained follow-up qualified with controlled provider responses. See catalog evidence for limits.",
+    "verifiedAt": "2026-09-13",
+    "verifiedCommit": "cd06d4be337e7eefef73236b6e0cd5217b6f697c"
+  },
+  {
+    "id": "examples/applications/persistent-review-team/README",
+    "source": "docs-src/examples/applications/persistent-review-team/README.md",
+    "disposition": "repository-only",
+    "title": "Persistent review team bundle instructions",
+    "reviewNote": "Included in complete source reader and download; application walkthrough is public.",
     "provenance": "authored"
   }
 ]

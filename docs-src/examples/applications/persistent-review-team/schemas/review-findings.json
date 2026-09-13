@@ -1,0 +1,23 @@
+{
+  "type": "object",
+  "properties": {
+    "reviews": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "role": { "type": "string" },
+          "session_id": { "type": "string" },
+          "receipt_id": { "type": "string" },
+          "status": { "type": "object" },
+          "completion": { "type": "object" },
+          "output": { "type": "object" }
+        },
+        "required": ["role", "session_id", "receipt_id", "status", "completion", "output"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["reviews"],
+  "additionalProperties": false
+}

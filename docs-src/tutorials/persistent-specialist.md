@@ -175,6 +175,10 @@ the daemon with Ctrl-C. Keep the extracted directory to retain its private store
 deleting it removes that local example's saved sessions. Native local transient
 mode cannot substitute for this durable setup.
 
+Build the [complete persistent review team](../applications/persistent-review-team.md)
+to coordinate several roles, collect their receipt-correlated output with ChatML,
+handle a failed reviewer and refine the same conversations with new evidence.
+
 Continue with [create a task-specific specialist](generated-specialist.md) to let
 the parent choose a new role and capture its definition while retaining the same
 session lifecycle and inherited authority rules.

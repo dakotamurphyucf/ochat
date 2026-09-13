@@ -355,3 +355,40 @@ all 33 benchmark queries in the top five, across 152 indexed pages and 2,512
 checked anchors. Long mobile code still benefits from the planned D05 reader
 improvements. These are local macOS and preview results, not a live provider,
 interactive TUI, Linux or deployed-site qualification.
+
+## D04 — Persistent review team
+
+The second complete application gives correctness, documentation and integration
+reviewers distinct authored conversations. Two declarations are fixed persistent;
+the documentation reviewer supports default one-off and explicit persistent use.
+The walkthrough covers new-instance creation, same-wrapper continuation, new
+follow-up receipts, output cursors, failure distinctions and explicit stopping.
+Its private daemon exposes only the sample workspace through file tools.
+
+A standalone ChatML collector performs bounded status, zero-time receipt wait and
+output-read operations for up to three reviewers. It retains per-operation errors
+and raw correlated evidence; it does not infer success from idle/caught-up status
+or synthesize consensus. The caller retains role/session/receipt/cursor state.
+The follow-up sample deliberately leaves the proposed correction unexecuted so
+reviewers must distinguish better wording from proof of a passing release.
+
+The complete durable integration passes with controlled provider responses:
+distinct sessions, actual scoped evidence reads, one failed reviewer, receipt
+filtering, consumed-cursor reads, optional one-off output, new instance on omitted
+ID, same-ID retained history with a new receipt, and healthy output preserved when
+another receipt query fails. Stop requests are admitted, desired state is stopped,
+no child operation remains active at observation, and retained evidence is readable.
+This does not claim the stop receipt itself joins all asynchronous cleanup.
+The existing authored/generated lesson integration also passes after sharing its
+host harness with the application test. Production runtime code is unchanged.
+
+All 16 files in the published archive match canonical sources. From clean
+extraction, the private server configuration validates and the root inspects.
+Canonical checks pass for 357 pages and 39 methods, website checks pass 83 cases,
+and the build checks 164 HTML pages and 827 files. Nine targeted Chromium cases
+pass, including the complete inline bundle without JavaScript and all served
+source/archive byte checks. Desktop/mobile review follows the specialist lesson
+into the application, opens agents/schemas/scripts and reads wrapped ChatML
+without document overflow. Search passes 33/33 queries across 153 indexed pages
+and 2,523 checked anchors. No live provider, physical TUI, Linux, restart/recovery
+or deployed-site qualification is claimed for this batch.

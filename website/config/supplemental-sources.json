@@ -425,6 +425,61 @@
       "source": "docs-src/examples/applications/guarded-engineering/README.md",
       "disposition": "example-download",
       "reason": "Complete guarded engineering application companion, inspected and downloaded from its source bundle."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/team.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/correctness-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/documentation-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/agents/integration-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/scripts/coordinator.chatml",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/schemas/review-request.json",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/schemas/review-findings.json",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/server.sexp",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/sample-project/requirements.txt",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/sample-project/follow-up.txt",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
+    },
+    {
+      "source": "docs-src/examples/applications/persistent-review-team/README.md",
+      "disposition": "example-download",
+      "reason": "Complete persistent review team companion for inline source and archive reading."
     }
   ],
   "directories": [
