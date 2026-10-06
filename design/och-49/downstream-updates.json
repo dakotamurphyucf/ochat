@@ -1,0 +1,287 @@
+{
+  "ticket": "OCH-49",
+  "status": "proposed_for_root_review_not_applied",
+  "create_new_issues": false,
+  "updates": [
+    {
+      "task_key": "M1-T02",
+      "identifier": "OCH-50",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Typed codecs currently discard unknown fields and distinct stream terminals need semantic projection.",
+      "proposed_scope": [
+        "Capture raw object before narrowing; ordered semantic roles/content, call exact bytes, opaque origin/account/endpoint compatibility and unknown extras remain locally recoverable.",
+        "Normalize item/part descriptors and typed delta kind; completed/refused/incomplete/provider-failed/transport-lost remain distinct. No new steering API.",
+        "Use field-specific missing/null/value codecs; unresolved output format absence differs from explicit Text. Repeat PPX checks against actual supported toolchain."
+      ],
+      "proposed_acceptance": [
+        "Independent decode-state and exact emitted-key cases for missing/null/value; extra-field retention proved independently of allow_extra_fields.",
+        "Duplicate/conflicting call finalizations cannot become executable twice; malformed/unknown semantics remain non-executable; raw replay retains exact input strings."
+      ],
+      "implementation_inputs": [
+        "OCH-49 interface and presence policy; existing Openai.Responses codecs"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T03a",
+      "identifier": "OCH-51",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Current-type-before-upgrade and bin wrappers must be removed from the complete durable boundary.",
+      "proposed_scope": [
+        "Register universal generic document kinds with per-kind positive target versions, bounded pure transformations and current-domain validation after conversion.",
+        "Define stable family envelope and complete outer wrapper replacement; retain independent Frame version/checksum and original persisted transaction-byte digest.",
+        "Reject duplicate keys; preserve absent/null/extensions; unsupported beta binary/sexp bytes and pointers remain untouched.",
+        "Restore returns a carrier of validated current value plus unknown-field paths/template; functional edits retain it, encoding merges it, and ownership conflicts fail explicitly instead of dropping extras."
+      ],
+      "proposed_acceptance": [
+        "Constructed rename/missing/default/null/extension/newer-kind cases; converter chains deterministic and bounded; wrong kind/target rejected before runtime construction.",
+        "Demonstrate schema evolution without frozen old runtime types/readers. Verify stored bytes/hash anchors before upgraded representation; no effects in conversion.",
+        "Edit/write preserves unknown nested fields; a newly owned conflicting field returns Extension_conflict until a pure kind converter explicitly resolves promotion."
+      ],
+      "implementation_inputs": [
+        "OCH-49 storage interfaces/ledger; existing Frame, Recovery and bounded JSON patterns"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T03b",
+      "identifier": "OCH-52",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "The history payload is embedded in many complete containers and independent readers.",
+      "proposed_scope": [
+        "Migrate outer Snapshot/Transaction records, Session_state, Session_delta and durable-event sexp strings, nested command-audit receipts, compaction archives, moderator identity_snapshot_sexp/effective history and standalone Session/session_store.",
+        "Replace typed-before-upgrade restore and old local V0\u2013V5 reader cascade on new-format paths; unsupported pre-contract beta data remains untouched.",
+        "Update ordinary/fallback/replay/retained_history/blob-reference readers together. Implement the complete embedded command-audit receipt codec here, reusing existing idempotency validators; do not wait for downstream M3-T06 side-store conversion or leave a sexp escape hatch."
+      ],
+      "proposed_acceptance": [
+        "Every ledger row has writer/ordinary reader/retention-recovery reader/test ownership; failed conversion or checkpoint installation never replaces original bytes/pointers.",
+        "Stored-version chain/fallback anchors verified from original payload; host IDs/high-water, provenance/call pairs and captured profile intent survive supported new-document resume."
+      ],
+      "implementation_inputs": [
+        "Working generic conversion infrastructure",
+        "Provider ingress integration",
+        "M3 side-record coordination only; no prerequisite on M3-T06 implementation"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T03c",
+      "identifier": "OCH-53",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Current role classification folds Developer into System and reconstructs provider items from client payload.",
+      "proposed_scope": [
+        "Use neutral semantic history/events and preserve Developer distinctly; canonical/raw private history and redacted display views remain separated.",
+        "Carry item/part descriptor plus semantic delta kind, source/attempt identity and existing durable sequence/version negotiation."
+      ],
+      "proposed_acceptance": [
+        "Replay and finalized live views agree without client OpenAI decoding; nested events isolate sources; redacted/unknown payload cannot become canonical executable input."
+      ],
+      "implementation_inputs": [
+        "Neutral history/event contract; working domain integration for final acceptance"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T04",
+      "identifier": "OCH-55",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Prepared inputs and temporary auth require explicit immutable ownership and safe failure semantics.",
+      "proposed_scope": [
+        "Capture nonsecret profile/account/model/settings with provenance, immutable effective history/tool schemas/assets; optional explicit unsupported/unknown settings fail before network.",
+        "Keep pure adapter preparation separate from existing final actor admission and Eio driver/auth lease; no secret serialization or mutable settings reads during dispatch.",
+        "SSE callback stream delivers typed item/part/terminal events under caller switch; cancellation/consumer failures propagate; no hidden retry/executor."
+      ],
+      "proposed_acceptance": [
+        "Concurrent profiles cannot leak credentials/settings; actual request fingerprint includes final guidance additions; Error Auth emits no events; only Ok returns exactly one matching terminal event.",
+        "Partial/uncertain delivery retains evidence and never automatically replays effects; private helper body logging stays prohibited."
+      ],
+      "implementation_inputs": [
+        "OCH-49 target/request/event/auth seams; real M2 resolver for live qualification"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T05",
+      "identifier": "OCH-56",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Existing nested/generated/helper paths retain OpenAI-specific defaults and executor signatures.",
+      "proposed_scope": [
+        "Thread the same target/adapter/auth context through all selected root/child/grandchild, ChatML Model, compactor, meta-prompting, typeahead, fork/private helper and headless routes.",
+        "Preserve existing native admission, operation/occurrence receipts and source isolation; no second dispatcher or workflow policy.",
+        "Explicitly disposition separate Completions and legacy local-session routes; embeddings remain a separate API family."
+      ],
+      "proposed_acceptance": [
+        "Synthetic non-OpenAI-shaped adapter reaches every supported route; omitted inheritance/explicit child override and restore remain independent.",
+        "CLI/script run completion is not provider response completion; pending jobs survive inference terminal transitions."
+      ],
+      "implementation_inputs": [
+        "Working neutral driver/history integration; CLI/CAP run identity contracts as coordination"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T07",
+      "identifier": "OCH-58",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "WS continuation/cache is optional acceleration, never authoritative conversation recovery.",
+      "proposed_scope": [
+        "Cache compatibility includes captured history/tools/options/assets, adapter/endpoint/profile/account and auth owner-generation; child independently active contexts own separate scopes.",
+        "Restart/full reconstruction succeeds without stored response IDs; store=false is explicit; uncertain delivery cannot switch transport and resend."
+      ],
+      "proposed_acceptance": [
+        "Edit/config/source/compaction/auth changes invalidate incompatible reuse; metadata-only catalog edits need not invalidate.",
+        "Fresh-channel SSE/WS canonical parity and resource cancellation release scopes without repeating observed effects."
+      ],
+      "implementation_inputs": [
+        "Working driver/routing/storage integration; real auth invalidation notification"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M1-T08",
+      "identifier": "OCH-59",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Usage semantics must support consumers without conflating attempts, turns and context capacity.",
+      "proposed_scope": [
+        "Expose attempt/source-scoped actual/estimated/unknown observations, nonsecret effective settings and bounded diagnostics.",
+        "Record inclusion relationships for cache/reasoning subsets; no double counting or pricing assumptions.",
+        "Usage observations have stable identity within attempt and nonnegative revision, representing authoritative replacement snapshots rather than additive deltas."
+      ],
+      "proposed_acceptance": [
+        "Missing/interrupted terminal counts remain unknown; duplicate identity/revision adds nothing, conflicting same-revision data rejects, older revisions are stale and newer snapshots replace counts; child scope retained; committed-turn and attempt accounting stay distinguishable."
+      ],
+      "implementation_inputs": [
+        "Neutral event/projection and working provider observation mapping"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M2-T01",
+      "identifier": "OCH-62",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Credential identity and captured session intent must be distinct from mutable profile defaults.",
+      "proposed_scope": [
+        "Supply stable nonsecret profile/account/endpoint compatibility references and host-scoped temporary auth leases; same captured identity resolves current material after restore.",
+        "Profile editing/default re-resolution is explicit; generation invalidation contains no tokens in fingerprints/history/projections."
+      ],
+      "proposed_acceptance": [
+        "Two profiles independent; captured omission/provenance survives restore; endpoint/account change does not silently reuse incompatible opaque replay or WS channel."
+      ],
+      "implementation_inputs": [
+        "Shared target/config/auth contract; host authorization"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M3-T06",
+      "identifier": "OCH-86",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Universal storage includes side records and independent retention/reference readers.",
+      "proposed_scope": [
+        "Implement ledger rows for metadata/index, independent idempotency and command-audit side stores, blob metadata/retention, job-result intent/artifact, delegation, prompt manifests and audit chain. Reuse the embedded receipt codec from M1-T03b rather than implementing it twice.",
+        "Reuse the complete embedded command-audit receipt codec delivered by M1-T03b when converting the independent idempotency side-store. Preserve authority/reference/hash checks without duplicate stores or a dependency back from M1-T03b.",
+        "Track CAP/CTX domain record cross-links as introduced; raw blob/source bytes and credential/lock state stay outside session JSON."
+      ],
+      "proposed_acceptance": [
+        "All enumerated writers/readers/recovery/retention consumers agree through generic conversion; unknown/null/unsupported failures leave bytes unchanged."
+      ],
+      "implementation_inputs": [
+        "Shared conversion infrastructure and history cross-reference contract; domain-specific CAP/CTX records when implemented"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    },
+    {
+      "task_key": "M3-R1",
+      "identifier": "OCH-69",
+      "operation": "append_scope_and_acceptance",
+      "rationale": "Durable local discovery must not treat unsupported beta files as empty sessions.",
+      "proposed_scope": [
+        "Specify new-document standalone/embedded admission and actionable Unsupported_beta_format handling, preserving old bytes and explicit host/process lifetime."
+      ],
+      "proposed_acceptance": [
+        "Research generates actual local discover/resume implementation tasks; no frozen old readers, destructive reset or implicit live migration; existing local files never silently replaced."
+      ],
+      "implementation_inputs": [
+        "Generic storage/profile contracts; existing durable embedded/store locks"
+      ],
+      "contract_artifacts": [
+        "design/och-49/README.md",
+        "design/och-49/provider_contracts.mli",
+        "design/och-49/storage_contracts.mli",
+        "design/och-49/storage.md",
+        "design/och-49/scenarios.md"
+      ],
+      "dependency_change": "No new whole-milestone edge proposed. Preserve normalized prerequisites; refine generated children at implementation start."
+    }
+  ]
+}
