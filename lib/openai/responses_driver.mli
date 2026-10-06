@@ -133,6 +133,7 @@ module Terminal : sig
     | Invalid_http
     | Invalid_content_type
     | Body_limit
+    | Framing_limit
     | Protocol
     | Connection
     | Timeout
@@ -160,7 +161,10 @@ type t
 (** Secure HTTP/1.1 client using system CA certificate and hostname verification.
     Per-attempt nested Eio switch owns the socket under the caller fiber's
     cancellation context. Limits bound request, headers,
-    total response bytes and individual SSE frames; deadline bounds I/O including
+    aggregate entity bytes, cumulative transfer-framing bytes and individual SSE
+    frames. HTTP status/header/chunk/trailer lines require CRLF; fields and chunk
+    extensions are validated. [max_framing_bytes] defaults to 1 MiB and includes
+    chunk sizes/extensions, separators and trailers. Deadline bounds I/O including
     DNS/TLS/auth. Host must initialize Mirage_crypto_rng before HTTPS use (as the
     repository binaries already do), once in the embedding host. No redirects, retries, transport fallback, logging or lazy stream.
     [create] performs CA setup, without fetching credentials or network access. *)
@@ -170,6 +174,7 @@ val create
   -> ?max_request_bytes:int
   -> ?max_header_bytes:int
   -> ?max_body_bytes:int
+  -> ?max_framing_bytes:int
   -> ?max_frame_bytes:int
   -> ?timeout_seconds:float
   -> unit

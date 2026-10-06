@@ -40,7 +40,10 @@ objects retain unknown fields, exact call strings, presence and opaque reasoning
 Opaque replay requires affirmative support; the host is responsible for matching
 capture origin before passing raw opaque history. Actual non-null caller or
 namespace metadata and `async=true` reject until their host mapping is selected.
-Null metadata is retained. Tool names are unique, and schemas grant no authority.
+Null metadata is retained only where the selected codec field is nullable;
+for example, `function_call.namespace` remains non-null while
+`function_call_output.namespace` permits null. Tool names are unique, and
+schemas grant no authority.
 
 The host resolves assets before capture. Images use validated base64 data URIs;
 files use base64 bytes or base64 data URIs. Remote URLs and provider-only file IDs
@@ -87,7 +90,12 @@ error (including deadline expiry during resolution) returns `Error` before any
 events. Unexpected resolver failures and cancellation propagate.
 
 Limits bound request bytes, aggregate response headers, aggregate entity bytes,
-individual SSE frames and transfer-framing lines/trailers. HTTP status other than
+individual SSE frames and cumulative transfer-framing bytes.
+`max_framing_bytes` defaults to 1 MiB and charges chunk sizes/extensions,
+chunk separators and trailers separately from entity bytes. HTTP lines require
+CRLF; field names/values, trailer fields and token/quoted chunk extensions are
+validated. Transfer-framing exhaustion reports `Framing_limit`. HTTP status other
+than
 200, unsupported content encoding/type, interim responses, duplicate/ambiguous
 lengths, invalid chunks and premature entity EOF produce typed failures. This
 selected one-request HTTP/1.1 client does not negotiate interim responses,
@@ -109,7 +117,9 @@ has been published it is `Response_started`. Failed attempts retain already
 published callback evidence. No state automatically retries, falls back to a
 transport, restarts an inference or replays an effect. A qualified retry decision
 belongs to the host. Callback exceptions, including exceptions with transport-like
-types, preserve their original exception/backtrace. Cancellation propagates
+types, preserve their original exception/backtrace. If attempt cleanup also
+fails, Eio retains both original exceptions in its aggregate error. Cancellation
+propagates
 through cleanup. Neither path manufactures a normal terminal.
 
 Failures carry bounded typed diagnostics without request, credential, response,
@@ -123,8 +133,10 @@ and fake clocks. It exercises exact full-history/tools transmission, first event
 before server completion, declared arbitrary models, settings precedence and
 fingerprints, concurrent profiles/credentials, null replay metadata, immutable
 assets, completed/refused/incomplete/failed outcomes, terminal-only finalizations,
-HTTP/framing/body limits, malformed streams, uncertain delivery without retry,
-consumer exceptions, cancellation and authentication deadlines. A real local TLS
+HTTP/framing/body limits, cumulative chunk metadata limits, strict CRLF and
+header/trailer/extension syntax, malformed streams, uncertain delivery without
+retry, consumer exceptions with concurrent cleanup failures, cancellation and
+authentication deadlines. A real local TLS
 server with an intentionally untrusted certificate verifies the secure adapter
 rejects it before receiving any decrypted application bytes. No live model calls,
 external inference endpoint or real credentials are used.

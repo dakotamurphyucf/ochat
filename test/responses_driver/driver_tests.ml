@@ -151,6 +151,7 @@ let driver
       ?max_request_bytes
       ?max_header_bytes
       ?max_body_bytes
+      ?max_framing_bytes
       ?max_frame_bytes
       ?timeout_seconds
       env
@@ -161,19 +162,18 @@ let driver
     ?max_request_bytes
     ?max_header_bytes
     ?max_body_bytes
+    ?max_framing_bytes
     ?max_frame_bytes
     ?timeout_seconds
     ()
   |> ok
 ;;
 
-let run d ~sw:_ = D.run d
-
-let run_print d ~sw prepared =
+let run_print d prepared =
   let terminals = ref 0 in
   let emitted = ref None in
   let result =
-    run d ~sw ~auth ~prepared ~on_event:(function
+    D.run d ~auth ~prepared ~on_event:(function
       | D.Event.Terminal outcome ->
         incr terminals;
         emitted := Some outcome;
@@ -343,7 +343,7 @@ let%expect_test
          Eio.Flow.copy_string created flow;
          Eio.Promise.await first_seen;
          Eio.Flow.copy_string (future ^ terminal ()) flow)
-      (fun sw endpoint ->
+      (fun _sw endpoint ->
          let caps =
            capabilities
              ~extra:
@@ -378,7 +378,7 @@ let%expect_test
          let events = ref [] in
          let terminal_value = ref None in
          let outcome =
-           run (driver env) ~sw ~auth ~prepared ~on_event:(fun event ->
+           D.run (driver env) ~auth ~prepared ~on_event:(fun event ->
              match event with
              | Update update ->
                events := W.Event.raw update.event :: !events;
@@ -428,13 +428,12 @@ updates:2 one-matching-terminal:true
 
 let%expect_test "auth failure emits no events and cannot reach HTTP" =
   Eio_main.run (fun env ->
-    Eio.Switch.run (fun sw ->
+    Eio.Switch.run (fun _sw ->
       let prepared = prepare (profile "http://127.0.0.1:1/v1/responses") in
       let events = ref 0 in
       let result =
-        run
+        D.run
           (driver env)
-          ~sw
           ~prepared
           ~auth:(fun ~sw:_ p ->
             printf
@@ -469,11 +468,10 @@ let%expect_test
         with_server
           env
           (fun flow _ -> write flow (terminal ~status ~output ~extras ()))
-          (fun sw endpoint ->
+          (fun _sw endpoint ->
              let result =
-               run
+               D.run
                  (driver env)
-                 ~sw
                  ~auth
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
@@ -510,8 +508,8 @@ let%expect_test "HTTP statuses and private malformed bodies remain redacted; no 
         (fun flow _ ->
            incr calls;
            write flow ~status "PRIVATE HELPER BODY INCLUDING KEY")
-        (fun sw endpoint ->
-           run_print (driver env) ~sw (prepare (profile endpoint));
+        (fun _sw endpoint ->
+           run_print (driver env) (prepare (profile endpoint));
            printf "calls:%d\n" !calls)));
   [%expect
     {|
@@ -547,12 +545,11 @@ let%expect_test
           (fun flow _ ->
              incr calls;
              write flow body)
-          (fun sw endpoint ->
+          (fun _sw endpoint ->
              let updates = ref 0 in
              let result =
-               run
+               D.run
                  (driver env)
-                 ~sw
                  ~auth
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
@@ -586,14 +583,13 @@ let%expect_test
       with_server
         env
         (fun flow _ -> write flow normal)
-        (fun sw endpoint ->
+        (fun _sw endpoint ->
            let terminals = ref 0 in
            let propagated =
              try
                ignore
-                 (run
+                 (D.run
                     (driver env)
-                    ~sw
                     ~auth
                     ~prepared:(prepare (profile endpoint))
                     ~on_event:(function
@@ -620,10 +616,10 @@ let%expect_test "concurrent prepared profiles isolate credentials, model and set
       (fun flow req ->
          requests := req :: !requests;
          write flow (terminal ()))
-      (fun sw endpoint ->
+      (fun _sw endpoint ->
          let caps = capabilities ~extra:[ Setting "temperature", Supported ] () in
          let auth ~sw:_ p = D.Auth.bearer ("test-key-" ^ D.Profile.id p) in
-         let run id temperature =
+         let execute id temperature =
            let p = profile ~caps ~id ~account:(Some ("account-" ^ id)) endpoint in
            let prepared =
              prepare
@@ -633,11 +629,11 @@ let%expect_test "concurrent prepared profiles isolate credentials, model and set
                  ]
                p
            in
-           run (driver env) ~sw ~auth ~prepared ~on_event:(fun _ -> ()) |> unwrap
+           D.run (driver env) ~auth ~prepared ~on_event:(fun _ -> ()) |> unwrap
          in
          Eio.Fiber.both
-           (fun () -> ignore (run "a" "0.1" : D.Terminal.t))
-           (fun () -> ignore (run "b" "0.8" : D.Terminal.t));
+           (fun () -> ignore (execute "a" "0.1" : D.Terminal.t))
+           (fun () -> ignore (execute "b" "0.8" : D.Terminal.t));
          let rows =
            List.map !requests ~f:(fun req ->
              let body = json req.body in
@@ -713,18 +709,18 @@ let%expect_test "header, entity and frame bounds hold independently" =
     with_server
       env
       (fun flow _ -> write flow normal)
-      (fun sw endpoint ->
-         run_print (driver ~max_header_bytes:128 env) ~sw (prepare (profile endpoint)));
+      (fun _sw endpoint ->
+         run_print (driver ~max_header_bytes:128 env) (prepare (profile endpoint)));
     with_server
       env
       (fun flow _ -> write flow normal)
-      (fun sw endpoint ->
-         run_print (driver ~max_body_bytes:100 env) ~sw (prepare (profile endpoint)));
+      (fun _sw endpoint ->
+         run_print (driver ~max_body_bytes:100 env) (prepare (profile endpoint)));
     with_server
       env
       (fun flow _ -> write flow (":" ^ String.make 200 'x' ^ "\n\n" ^ terminal ()))
-      (fun sw endpoint ->
-         run_print (driver ~max_frame_bytes:64 env) ~sw (prepare (profile endpoint)));
+      (fun _sw endpoint ->
+         run_print (driver ~max_frame_bytes:64 env) (prepare (profile endpoint)));
     with_server
       env
       (fun flow _ ->
@@ -732,12 +728,11 @@ let%expect_test "header, entity and frame bounds hold independently" =
            flow
            ~headers:(List.init 12 ~f:(fun _ -> "X-Extra", String.make 20 'x'))
            normal)
-      (fun sw endpoint ->
-         run_print (driver ~max_header_bytes:128 env) ~sw (prepare (profile endpoint)));
-    Eio.Switch.run (fun sw ->
+      (fun _sw endpoint ->
+         run_print (driver ~max_header_bytes:128 env) (prepare (profile endpoint)));
+    Eio.Switch.run (fun _sw ->
       run_print
         (driver ~max_request_bytes:16 env)
-        ~sw
         (prepare (profile "http://127.0.0.1:1/v1/responses"))));
   [%expect
     {|
@@ -795,7 +790,7 @@ let%expect_test
         with_server
           env
           (fun flow _ -> Eio.Flow.copy_string raw flow)
-          (fun sw endpoint -> run_print (driver env) ~sw (prepare (profile endpoint)))));
+          (fun _sw endpoint -> run_print (driver env) (prepare (profile endpoint)))));
   [%expect
     {|
 (Possibly_submitted Invalid_http)
@@ -842,10 +837,9 @@ let%expect_test "chunked streaming is incremental and aggregate body/trailer lim
         with_server
           env
           (fun flow _ -> Eio.Flow.copy_string (header ^ body) flow)
-          (fun sw endpoint ->
+          (fun _sw endpoint ->
              run_print
                (driver ~max_body_bytes ~max_header_bytes env)
-               ~sw
                (prepare (profile endpoint)))));
   [%expect
     {|
@@ -869,13 +863,12 @@ let%expect_test
     with_server
       env
       (fun flow _ -> write flow (terminal ~output ()))
-      (fun sw endpoint ->
+      (fun _sw endpoint ->
          let finalized = ref 0 in
          let terminals = ref 0 in
          ignore
-           (run
+           (D.run
               (driver env)
-              ~sw
               ~auth
               ~prepared:(prepare (profile endpoint))
               ~on_event:(function
@@ -893,7 +886,7 @@ let%expect_test "external cancellation propagates during auth and after first pu
   Eio_main.run (fun env ->
     List.iter [ false; true ] ~f:(fun streaming ->
       let started, signal_started = Eio.Promise.create () in
-      let attempt ~sw endpoint =
+      let attempt endpoint =
         let context, signal_context = Eio.Promise.create () in
         let events = ref 0 in
         let terminals = ref 0 in
@@ -904,13 +897,12 @@ let%expect_test "external cancellation propagates during auth and after first pu
                  Eio.Cancel.sub (fun cancel ->
                    Eio.Promise.resolve signal_context cancel;
                    ignore
-                     (run
+                     (D.run
                         (driver env)
-                        ~sw
                         ~prepared:(prepare (profile endpoint))
                         ~auth:(fun ~sw:_ _ ->
                           if streaming
-                          then auth ~sw ()
+                          then D.Auth.bearer "test-key-a"
                           else (
                             Eio.Promise.resolve signal_started ();
                             Eio.Fiber.await_cancel ()))
@@ -935,8 +927,8 @@ let%expect_test "external cancellation propagates during auth and after first pu
         with_server
           env
           (fun flow _ -> write flow normal)
-          (fun sw endpoint -> attempt ~sw endpoint)
-      else Eio.Switch.run (fun sw -> attempt ~sw "http://127.0.0.1:1/v1/responses")));
+          (fun _sw endpoint -> attempt endpoint)
+      else Eio.Switch.run (fun _sw -> attempt "http://127.0.0.1:1/v1/responses")));
   [%expect
     {|
 cancelled:true events:0 terminals:0
@@ -946,7 +938,7 @@ cancelled:true events:1 terminals:0
 
 let%expect_test "fake-clock authentication deadline fails before any event" =
   Eio_mock.Backend.run_full (fun mock_env ->
-    Eio.Switch.run (fun sw ->
+    Eio.Switch.run (fun _sw ->
       let events = ref 0 in
       let d =
         D.create
@@ -957,9 +949,8 @@ let%expect_test "fake-clock authentication deadline fails before any event" =
         |> ok
       in
       let result =
-        run
+        D.run
           d
-          ~sw
           ~prepared:(prepare (profile "http://127.0.0.1:1/v1/responses"))
           ~auth:(fun ~sw:_ _ -> Eio.Fiber.await_cancel ())
           ~on_event:(fun _ -> incr events)
@@ -1015,7 +1006,7 @@ let%expect_test
       let prepared =
         prepare (profile (sprintf "https://localhost:%d/v1/responses" port))
       in
-      run_print (driver env) ~sw prepared;
+      run_print (driver env) prepared;
       Eio.Promise.await server_done;
       printf "credential-http-received:%b\n" !http_received));
   [%expect
@@ -1227,4 +1218,130 @@ tools-rejected:true
 hosted-tool-rejected:true
 provider-file-id-rejected:true
 |}]
+;;
+
+let%expect_test "transfer framing has an aggregate budget independent of entity bytes" =
+  Eio_main.run (fun env ->
+    let header =
+      "HTTP/1.1 200 OK\r\n\
+       Content-Type: text/event-stream\r\n\
+       Transfer-Encoding: chunked\r\n\
+       \r\n"
+    in
+    let body =
+      chunk created
+      ^ String.concat
+          (List.map
+             (String.to_list (terminal ()))
+             ~f:(fun c ->
+               "1;pad=" ^ String.make 40 'x' ^ "\r\n" ^ String.of_char c ^ "\r\n"))
+      ^ "0\r\n\r\n"
+    in
+    with_server
+      env
+      (fun flow _ -> Eio.Flow.copy_string (header ^ body) flow)
+      (fun _sw endpoint ->
+         run_print
+           (driver ~max_body_bytes:512 ~max_header_bytes:128 ~max_framing_bytes:512 env)
+           (prepare (profile endpoint)));
+    printf
+      "zero-framing-budget-rejected:%b\n"
+      (Result.is_error
+         (D.create
+            ~net:(Eio.Stdenv.net env)
+            ~clock:(Eio.Stdenv.clock env)
+            ~max_framing_bytes:0
+            ())));
+  [%expect
+    {|
+    (Response_started Framing_limit)
+    terminals:1 matching:true
+    zero-framing-budget-rejected:true
+    |}]
+;;
+
+let%expect_test
+    "HTTP lines, fields, trailers and chunk extensions validate before publication"
+  =
+  Eio_main.run (fun env ->
+    let header =
+      "HTTP/1.1 200 OK\r\n\
+       Content-Type: text/event-stream\r\n\
+       Transfer-Encoding: chunked\r\n\
+       \r\n"
+    in
+    let with_extension extension data =
+      sprintf "%x%s\r\n%s\r\n" (String.length data) extension data
+    in
+    List.iter
+      [ ( "valid token and escaped quoted extensions"
+        , header
+          ^ with_extension ";flag; name = \"a\\\"b\";x=token" created
+          ^ chunk (terminal ())
+          ^ "0\r\n\r\n" )
+      ; ( "LF status line"
+        , "HTTP/1.1 200 OK\nContent-Type: text/event-stream\r\n\r\n" ^ terminal () )
+      ; ( "NUL header value"
+        , "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Extra: x\000y\r\n\r\n"
+          ^ terminal () )
+      ; ( "DEL header value"
+        , "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nX-Extra: x\127y\r\n\r\n"
+          ^ terminal () )
+      ; "NUL extension", header ^ with_extension ";\000bad" created
+      ; "empty extension name", header ^ with_extension ";=value" created
+      ; "unterminated quoted extension", header ^ with_extension ";x=\"value" created
+      ; "quoted extension control", header ^ with_extension ";x=\"a\000b\"" created
+      ; ( "LF chunk separator"
+        , header
+          ^ sprintf "%x\r\n%s\n" (String.length created) created
+          ^ chunk (terminal ()) )
+      ; "malformed trailer", header ^ chunk created ^ "0\r\nNOT A HEADER\r\n\r\n"
+      ; "NUL trailer", header ^ chunk created ^ "0\r\nX-Extra: a\000b\r\n\r\n"
+      ; "framing trailer", header ^ chunk created ^ "0\r\nContent-Length: 0\r\n\r\n"
+      ]
+      ~f:(fun (name, raw) ->
+        printf "%s\n" name;
+        with_server
+          env
+          (fun flow _ -> Eio.Flow.copy_string raw flow)
+          (fun _sw endpoint -> run_print (driver env) (prepare (profile endpoint)))));
+  [%expect
+    {|
+    valid token and escaped quoted extensions
+    Completed
+    terminals:1 matching:true
+    LF status line
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    NUL header value
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    DEL header value
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    NUL extension
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    empty extension name
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    unterminated quoted extension
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    quoted extension control
+    (Possibly_submitted Invalid_http)
+    terminals:1 matching:true
+    LF chunk separator
+    (Response_started Invalid_http)
+    terminals:1 matching:true
+    malformed trailer
+    (Response_started Invalid_http)
+    terminals:1 matching:true
+    NUL trailer
+    (Response_started Invalid_http)
+    terminals:1 matching:true
+    framing trailer
+    (Response_started Invalid_http)
+    terminals:1 matching:true
+    |}]
 ;;
