@@ -45,3 +45,36 @@ let%expect_test "callback and cleanup failures retain their original exceptions"
     callback:true cleanup:true errors:2 terminals:0
   |}]
 ;;
+
+let%expect_test "resolver timeout exceptions are distinct from the driver's deadline" =
+  Eio_main.run (fun env ->
+    List.iter [ false; true ] ~f:(fun in_child ->
+      let events = ref 0 in
+      let auth ~sw _profile =
+        if in_child
+        then (
+          Eio.Fiber.fork ~sw (fun () -> raise Eio.Time.Timeout);
+          Eio.Fiber.await_cancel ())
+        else raise Eio.Time.Timeout
+      in
+      let propagated =
+        try
+          ignore
+            (D.run
+               (Fixture.driver env)
+               ~auth
+               ~prepared:
+                 (Fixture.prepare (Fixture.profile "http://127.0.0.1:1/v1/responses"))
+               ~on_event:(fun _ -> incr events)
+             : (D.Terminal.t, D.Auth.error) Result.t);
+          false
+        with
+        | Eio.Time.Timeout -> true
+      in
+      printf "child:%b propagated:%b events:%d\n" in_child propagated !events));
+  [%expect
+    {|
+    child:false propagated:true events:0
+    child:true propagated:true events:0
+  |}]
+;;

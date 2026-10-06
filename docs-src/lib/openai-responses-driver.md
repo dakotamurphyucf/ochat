@@ -118,7 +118,9 @@ published callback evidence. No state automatically retries, falls back to a
 transport, restarts an inference or replays an effect. A qualified retry decision
 belongs to the host. Callback exceptions, including exceptions with transport-like
 types, preserve their original exception/backtrace. If attempt cleanup also
-fails, Eio retains both original exceptions in its aggregate error. Cancellation
+fails, Eio retains both original exceptions in its aggregate error. Unexpected
+authentication-resolver exceptions also propagate, including `Eio.Time.Timeout`;
+only expiry of the driver-owned deadline becomes a typed timeout outcome. Cancellation
 propagates
 through cleanup. Neither path manufactures a normal terminal.
 

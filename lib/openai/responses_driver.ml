@@ -724,7 +724,7 @@ end
 
 type t =
   { connect : sw:Eio.Switch.t -> Uri.t -> Eio.Flow.two_way_ty Eio.Resource.t
-  ; with_timeout : 'a. (unit -> 'a) -> 'a
+  ; with_timeout : 'a. (unit -> 'a) -> ('a, [ `Timeout ]) Result.t
   ; max_request_bytes : int
   ; max_header_bytes : int
   ; max_body_bytes : int
@@ -790,7 +790,10 @@ let create
     in
     Ok
       { connect
-      ; with_timeout = (fun f -> Eio.Time.with_timeout_exn clock timeout_seconds f)
+        (* A result distinguishes this deadline from a resolver/callback that
+         independently raises [Eio.Time.Timeout]. *)
+      ; with_timeout =
+          (fun f -> Eio.Time.with_timeout clock timeout_seconds (fun () -> Ok (f ())))
       ; max_request_bytes
       ; max_header_bytes
       ; max_body_bytes
@@ -939,15 +942,6 @@ let run t ~auth ~prepared ~on_event =
   let authenticated = ref false in
   let submitted = ref false in
   let published = ref false in
-  let consumer_failed = ref false in
-  let publish event =
-    try on_event event with
-    | Eio.Cancel.Cancelled _ as ex -> raise ex
-    | ex ->
-      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-      consumer_failed := true;
-      Stdlib.Printexc.raise_with_backtrace ex backtrace
-  in
   let failed reason =
     Terminal.Failed
       { delivery =
@@ -961,20 +955,19 @@ let run t ~auth ~prepared ~on_event =
   in
   let result =
     try
-      t.with_timeout (fun () ->
-        Eio.Switch.run (fun sw ->
-          match auth ~sw (Prepared.profile prepared) with
-          | Error error -> Error error
-          | Ok lease ->
-            authenticated := true;
-            Ok (dispatch t ~sw ~lease ~prepared ~on_event:publish ~published ~submitted)))
+      match
+        t.with_timeout (fun () ->
+          Eio.Switch.run (fun sw ->
+            match auth ~sw (Prepared.profile prepared) with
+            | Error error -> Error error
+            | Ok lease ->
+              authenticated := true;
+              Ok (dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted)))
+      with
+      | Ok result -> result
+      | Error `Timeout ->
+        if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
     with
-    | ex when !consumer_failed ->
-      (* Preserve callback failures, including aggregates containing cleanup
-         failures, before interpreting transport-like exception constructors. *)
-      Stdlib.Printexc.raise_with_backtrace ex (Stdlib.Printexc.get_raw_backtrace ())
-    | Eio.Time.Timeout ->
-      if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
     | Transport_failure reason -> Ok (failed reason)
   in
   match result with
