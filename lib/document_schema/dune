@@ -1,0 +1,5 @@
+(library
+ (name document_schema)
+ (public_name ochat.document_schema)
+ (libraries core jsonaf)
+ (preprocess (pps ppx_jane)))
