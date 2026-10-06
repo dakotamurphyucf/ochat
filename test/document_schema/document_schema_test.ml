@@ -892,3 +892,40 @@ let%expect_test "numeric wire lexemes have exact syntax and exact byte-bound adm
     (Invalid_field (path ()) (reason "invalid JSON number"))
     |}]
 ;;
+
+let%expect_test "array identity ownership cannot change underneath retained extensions" =
+  let codec identity_field =
+    identity_codec
+      (Shape.object_
+         [ ( "items"
+           , Shape.array (shape [ "id"; "other_id"; "value" ]) ~identity_field |> ok )
+         ]
+       |> ok)
+  in
+  let doc =
+    document
+      {|{"format":"ochat.document","schema_version":1,"kind":"example","payload":{"items":[{"id":"a","other_id":"b","value":1,"future":17}]}}|}
+  in
+  List.iter
+    [ None, Some "id"; Some "id", None; Some "id", Some "other_id" ]
+    ~f:(fun (previous_identity, next_identity) ->
+      let carrier = Domain_codec.decode (codec previous_identity) doc |> ok in
+      print_error (Domain_codec.encode (codec next_identity) carrier));
+  let no_unknown =
+    Document.create
+      ~limits
+      ~kind:"example"
+      ~version:1
+      ~payload:(json {|{"items":[{"id":"a","other_id":"b","value":1}]}|})
+    |> ok
+  in
+  let carrier = Domain_codec.decode (codec None) no_unknown |> ok in
+  print_document (Domain_codec.encode (codec (Some "id")) carrier);
+  [%expect
+    {|
+    (Extension_conflict (payload items))
+    (Extension_conflict (payload items))
+    (Extension_conflict (payload items))
+    {"format":"ochat.document","schema_version":1,"kind":"example","payload":{"items":[{"id":"a","other_id":"b","value":1}]}}
+    |}]
+;;

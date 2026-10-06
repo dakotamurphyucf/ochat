@@ -98,7 +98,10 @@ current decoding.
 Array shapes can declare an owned, unique, nonempty string identity field. Host
 IDs then attach unknown fields to the correct entries through reorder and edits;
 array order follows the replacement domain. Removing an entry with unknown data
-fails with `Extension_conflict`. Without identity, an array with unknown data can
+fails with `Extension_conflict`. A carrier also retains its original identity
+policy: changing between keyed/unkeyed arrays or changing the identity field
+while unknown data exists fails with `Extension_conflict`. Without identity, an
+array with unknown data can
 be emitted only when its known projection is semantically unchanged: object key
 order may normalize, but array order, numeric lexemes and absence/null may not.
 The conservative check prevents unknown data from attaching to a different

@@ -618,6 +618,7 @@ type retained =
   | Object of (string * retained_field) list
   | Array of
       { original_known : Json.t
+      ; identity_field : string option
       ; entries : (string option * retained) list
       }
 
@@ -738,7 +739,7 @@ module Domain_codec = struct
             , index + 1 ))
       in
       let known = `Array (List.rev known) in
-      known, Array { original_known = known; entries = List.rev entries }
+      known, Array { original_known = known; identity_field; entries = List.rev entries }
     | Object _, (`Null | `String _ | `Number _ | `True | `False | `Array _)
     | Array _, (`Null | `String _ | `Number _ | `True | `False | `Object _) ->
       invalid path "value does not match codec shape"
@@ -750,7 +751,7 @@ module Domain_codec = struct
       List.exists fields ~f:(function
         | _, Unknown _ -> true
         | _, Known tree -> has_unknown tree)
-    | Array { original_known = _; entries } ->
+    | Array { original_known = _; identity_field = _; entries } ->
       List.exists entries ~f:(fun (_, tree) -> has_unknown tree)
   ;;
 
@@ -769,6 +770,12 @@ module Domain_codec = struct
     | _, Shape.Nullable _, `Null ->
       if has_unknown retained then Error (Error.Extension_conflict path) else Ok known
     | _, Shape.Nullable shape, _ -> merge shape retained known path
+    | ( Array { original_known = _; identity_field = previous_identity; entries = _ }
+      , Shape.Array { element = _; identity_field }
+      , _ )
+      when has_unknown retained
+           && not (Option.equal String.equal previous_identity identity_field) ->
+      Error (Error.Extension_conflict path)
     | Object previous, Shape.Object owned, `Object fields ->
       (* Both lists originate in duplicate-checked JSON trees. Indexing keeps
          large named-field objects bounded by O(n log n), including templates. *)
@@ -812,7 +819,7 @@ module Domain_codec = struct
             (original
              @ List.filter fields ~f:(fun (name, _) ->
                not (Map.mem previous_by_name name))))
-    | ( Array { original_known; entries }
+    | ( Array { original_known; identity_field = _; entries }
       , Shape.Array { element; identity_field = None }
       , `Array values ) ->
       if has_unknown retained && not (Json.equal original_known known)
@@ -826,7 +833,7 @@ module Domain_codec = struct
          | List.Or_unequal_lengths.Unequal_lengths ->
            Error (Error.Extension_conflict path)
          | Ok results -> Result.map (Result.all results) ~f:(fun values -> `Array values))
-    | ( Array { original_known = _; entries }
+    | ( Array { original_known = _; identity_field = _; entries }
       , Shape.Array { element; identity_field = Some key }
       , `Array values ) ->
       let%bind identities =

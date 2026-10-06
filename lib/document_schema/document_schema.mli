@@ -212,6 +212,7 @@ module Domain_codec : sig
   val decode : 'a t -> Document.t -> ('a Extension_carrier.t, Error.t) Result.t
 
   (** Retains unknown fields at original paths; ownership changes, deleted
-      containers or ambiguous array changes return [Extension_conflict]. *)
+      containers, changed array identity policies with unknown data, or ambiguous
+      array changes return [Extension_conflict]. *)
   val encode : 'a t -> 'a Extension_carrier.t -> (Document.t, Error.t) Result.t
 end
