@@ -159,10 +159,32 @@ module Json = struct
         bytes_seen := !bytes_seen + count;
         Ok ())
     in
+    (* Match Jsonaf's compact string serializer without allocating escaped text.
+       Check before every addition so even rejected authored values stay bounded. *)
+    let charge_string text =
+      let available = limits.Limits.max_bytes - !bytes_seen in
+      let encoded_bytes = ref 2 in
+      let index = ref 0 in
+      let exceeds_limit = ref (available < 2) in
+      while !index < String.length text && not !exceeds_limit do
+        let width =
+          match text.[!index] with
+          | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
+          | '\000' .. '\031' -> 6
+          | _ -> 1
+        in
+        if width > available - !encoded_bytes
+        then exceeds_limit := true
+        else encoded_bytes := !encoded_bytes + width;
+        incr index
+      done;
+      if !exceeds_limit
+      then Error (Error.Limit_exceeded "bytes")
+      else charge_bytes !encoded_bytes
+    in
     let open Result.Let_syntax in
     let rec walk t depth rev_path =
       incr nodes_seen;
-      let%bind () = charge_bytes 1 in
       if depth > limits.Limits.max_depth
       then Error (Error.Limit_exceeded "depth")
       else if !nodes_seen > limits.max_nodes
@@ -170,9 +192,11 @@ module Json = struct
       else (
         match t with
         | `Object fields ->
+          let%bind () = charge_bytes 2 in
           List.fold_result fields ~init:String.Set.empty ~f:(fun seen (key, value) ->
             incr fields_seen;
-            let%bind () = charge_bytes (String.length key) in
+            let%bind () = charge_bytes (if Set.is_empty seen then 1 else 2) in
+            let%bind () = charge_string key in
             let%bind () =
               if String.Utf8.is_valid key
               then Ok ()
@@ -187,26 +211,26 @@ module Json = struct
               Set.add seen key))
           |> Result.map ~f:(fun _ -> ())
         | `Array values ->
+          let%bind () = charge_bytes 2 in
           List.fold_result values ~init:0 ~f:(fun index value ->
+            let%bind () = if index = 0 then Ok () else charge_bytes 1 in
             let%map () = walk value (depth + 1) (Int.to_string index :: rev_path) in
             index + 1)
           |> Result.map ~f:(fun _ -> ())
         | `Number number ->
-          let%bind () = charge_bytes (Int.max 0 (String.length number - 1)) in
+          let%bind () = charge_bytes (String.length number) in
           if valid_number number
           then Ok ()
           else invalid (List.rev rev_path) "invalid JSON number"
         | `String text ->
-          let%bind () = charge_bytes (String.length text) in
+          let%bind () = charge_string text in
           if String.Utf8.is_valid text
           then Ok ()
           else invalid (List.rev rev_path) "invalid UTF-8 string"
-        | `True | `False | `Null -> Ok ())
+        | `True | `Null -> charge_bytes 4
+        | `False -> charge_bytes 5)
     in
-    let%bind () = walk t 1 [] in
-    if String.length (Jsonaf.to_string t) > limits.max_bytes
-    then Error (Error.Limit_exceeded "bytes")
-    else Ok ()
+    walk t 1 []
   ;;
 
   let rec equal left right =

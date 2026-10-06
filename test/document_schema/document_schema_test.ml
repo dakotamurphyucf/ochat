@@ -893,6 +893,77 @@ let%expect_test "numeric wire lexemes have exact syntax and exact byte-bound adm
     |}]
 ;;
 
+let%expect_test "encoded byte bounds include exact escaping and structural punctuation" =
+  let limits_for max_bytes =
+    Limits.create ~max_bytes ~max_depth:10 ~max_fields:100 ~max_nodes:100 |> ok
+  in
+  List.iter
+    [ "empty string", `String "", 2
+    ; "empty object", `Object [], 2
+    ; "empty array", `Array [], 2
+    ; "null", `Null, 4
+    ; "true", `True, 4
+    ; "false", `False, 5
+    ; "number", `Number "-1.25e+2", 8
+    ; "short escapes and slash", `String "\"\\\b\012\n\r\t/", 17
+    ; "unicode control escapes", `String "\000\001\031", 20
+    ; "UTF-8", `String "é😀", 8
+    ; "escaped key", `Object [ "\000\"", `Null ], 17
+    ; "object separators", `Object [ "a", `Null; "b", `False ], 20
+    ; "array separators", `Array [ `True; `False; `Null ], 17
+    ]
+    ~f:(fun (name, json, bytes) ->
+      let encoded = Jsonaf.to_string json in
+      require [%here] (Int.equal bytes (String.length encoded));
+      require [%here] (Result.is_ok (Json.validate ~limits:(limits_for bytes) json));
+      require [%here] (Result.is_ok (Json.decode ~limits:(limits_for bytes) encoded));
+      require
+        [%here]
+        (Result.equal
+           Unit.equal
+           Error.equal
+           (Json.validate ~limits:(limits_for (bytes - 1)) json)
+           (Error (Error.Limit_exceeded "bytes")));
+      print_endline name);
+  [%expect
+    {|
+    empty string
+    empty object
+    empty array
+    null
+    true
+    false
+    number
+    short escapes and slash
+    unicode control escapes
+    UTF-8
+    escaped key
+    object separators
+    array separators
+    |}]
+;;
+
+let%expect_test "over-limit escaped strings and keys reject without encoded allocation" =
+  let max_bytes = 1024 * 1024 in
+  let limits = Limits.create ~max_bytes ~max_depth:2 ~max_fields:2 ~max_nodes:2 |> ok in
+  let text = String.make (max_bytes - 1) '\000' in
+  List.iter
+    [ `String text; `Object [ text, `Null ] ]
+    ~f:(fun json ->
+      let before = Gc.allocated_bytes () in
+      let result = Json.validate ~limits json in
+      let allocated_bytes = Gc.allocated_bytes () -. before in
+      (* A megabyte margin tolerates small validation bookkeeping while catching
+       materialization of the six-megabyte escaped representation. *)
+      require [%here] Float.(allocated_bytes < of_int max_bytes);
+      print_error result);
+  [%expect
+    {|
+    (Limit_exceeded bytes)
+    (Limit_exceeded bytes)
+    |}]
+;;
+
 let%expect_test "array identity ownership cannot change underneath retained extensions" =
   let codec identity_field =
     identity_codec

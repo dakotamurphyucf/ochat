@@ -62,6 +62,10 @@ module Json : sig
     | Value of t
 
   val decode : limits:Limits.t -> string -> (t, Error.t) Result.t
+
+  (** Counts the exact compact JSON byte size, including escaping, without
+      materializing encoded output. Rejects before a byte-limit addition would
+      exceed the bound, including for in-memory strings and object keys. *)
   val validate : limits:Limits.t -> t -> (unit, Error.t) Result.t
 
   (** Lookup on a validated tree preserves absence separately from explicit null. *)

@@ -117,7 +117,8 @@ conflict fallback. The generic encoder always fails closed on accidental loss.
 
 Limits are validated positive values, with maximum depth 256. Input receives a
 lexical depth guard before Jsonaf parsing. In-memory values receive a bounded
-traversal and aggregate byte guard before full serialization; invalid UTF-8 keys
+traversal that counts exact compact JSON bytes, including string/key escaping,
+without allocating encoded output; invalid UTF-8 keys
 and strings and malformed numeric lexemes reject. Validation and conversion
 boundaries use immutable JSON trees; the carrier retains the converted document
 and unknown tree for its lifetime. Callers should release carriers with their
