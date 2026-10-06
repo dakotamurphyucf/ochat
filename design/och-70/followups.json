@@ -1,0 +1,250 @@
+[
+  {
+    "key": "OCH70-F1",
+    "title": "Align ChatML module and record operations across checking and evaluation",
+    "kind": "implementation",
+    "suggested_severity": "high correctness",
+    "evidence_cases": [
+      "module extension",
+      "module pattern",
+      "record annotated module"
+    ],
+    "source_paths": [
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_eval.ml",
+      "lib/chatml/chatml_lang.ml",
+      "lib/chatml/chatml_resolver.ml",
+      "test/och70_chatml_audit/audit_tests.ml",
+      "test/chatml_runtime_test.ml"
+    ],
+    "acceptance_gates": [
+      {
+        "key": "M4-T02",
+        "id": "OCH-100",
+        "scope": "typed module/value contract"
+      },
+      {
+        "key": "M4-T06",
+        "id": "OCH-127",
+        "scope": "semantic module queries"
+      },
+      {
+        "key": "M5-T02",
+        "id": "OCH-133",
+        "scope": "module/record-aware intelligence"
+      }
+    ],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      }
+    ],
+    "body": "Module values currently typecheck as records while their runtime representation supports only part of that interface. OCH-70 reproduces accepted record extension on M failing with “Record extension base is not a record”, and an accepted exhaustive record pattern on M failing to match. Literal-record operations and module field access succeed.\n\nDraft and implement a coherent module/value contract across checking, unification, resolution and evaluation. Decide whether static types distinguish module-only operations or whether selected record operations deliberately support modules; preserve module environment ownership and immutable record semantics. Do not accidentally adopt general recursive modules or treat a module's mutable export environment as an ordinary persistent record.\n\nStart in lib/chatml/chatml_typechecker.ml (module export Record at line2436), lib/chatml/chatml_eval.ml (field access/extension), lib/chatml/chatml_lang.ml (pattern representations), and existing module/runtime tests.\n\nAcceptance: affected programs are correctly rejected before execution or execute according to the agreed contract; aliases, annotations, higher-order arguments, nested/exported modules, open, record consumers and exported mutable values remain coherent. Retain paired positive cases. Replace current-defect observations in test/och70_chatml_audit/audit_tests.ml with desired behavior and add meaningful regressions. Keep eager self-reference initialization as separate F5 work. Consume findings in OCH-73 without blocking independent design; retain this blocker on relevant module and semantic-service acceptance. No sandbox-escape claim is implied."
+  },
+  {
+    "key": "OCH70-F2",
+    "title": "Preserve exact record-pattern coverage through joins and lambda row widening",
+    "kind": "implementation",
+    "suggested_severity": "high correctness",
+    "evidence_cases": [
+      "join exact pattern",
+      "join open pattern",
+      "lambda exact pattern wider record",
+      "lambda exact pattern exact record"
+    ],
+    "source_paths": [
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_lang.ml",
+      "test/och70_chatml_audit/audit_tests.ml",
+      "test/chatml_typechecker_test.ml"
+    ],
+    "acceptance_gates": [
+      {
+        "key": "M4-T01",
+        "id": "OCH-98",
+        "scope": "record inference/coverage correctness"
+      },
+      {
+        "key": "M4-T06",
+        "id": "OCH-127",
+        "scope": "row/coverage semantic queries"
+      },
+      {
+        "key": "M5-T02",
+        "id": "OCH-133",
+        "scope": "coverage diagnostics"
+      }
+    ],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      }
+    ],
+    "body": "Record width abstraction currently makes exact patterns appear exhaustive even when runtime values retain additional fields. OCH-70 confirms failure after both a branch join with {x;y}/{x} and a lambda's closed row reopening. The exact {x=n} match is admitted but fails on the wider record; the explicit open {x=n; _} match and exact-width argument succeed.\n\nSpecify and implement the distinction between known accessible fields and physical exactness through record inference, joins, lambda parameters, annotations and coverage checking. Preserve useful common-field joins and row-polymorphic helpers. Choose sufficient width/exactness tracking or a coherent exact-pattern admission rule; do not simply disable all row polymorphism.\n\nStart in lib/chatml/chatml_typechecker.ml at join_record_rows (2109), reopen_lambda_row (2006) and pattern_totally_covers_type (1658), and runtime exact-size matching in lib/chatml/chatml_lang.ml (389).\n\nAcceptance: both confirmed paths reject unsafe exhaustive patterns or execute consistently under the chosen language contract. Cover both branch directions, if/match joins, nested payload records, annotated/higher-order helpers and mutable containers. Missing-field access must remain rejected and open patterns must remain usable. Convert the audit's defect observations into desired regressions with positive pairs. This gates relevant type/coverage implementation and semantic-service acceptance, not OCH-73 discovery. No host authority change belongs here."
+  },
+  {
+    "key": "OCH70-F3",
+    "title": "Retain variant constructor payload arity including unary unit",
+    "kind": "implementation",
+    "suggested_severity": "high correctness",
+    "evidence_cases": [
+      "nullary variant positive",
+      "unit payload nullary pattern",
+      "unit payload wildcard pattern",
+      "unit payload unit pattern"
+    ],
+    "source_paths": [
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_lang.ml",
+      "lib/chatml/chatml_builtin_spec.ml",
+      "lib/chatml/chatml_extension_surface.ml",
+      "test/och70_chatml_audit/audit_tests.ml"
+    ],
+    "acceptance_gates": [
+      {
+        "key": "M4-T01",
+        "id": "OCH-98",
+        "scope": "variant typing/coverage correctness"
+      },
+      {
+        "key": "M4-T06",
+        "id": "OCH-127",
+        "scope": "constructor signature/coverage queries"
+      },
+      {
+        "key": "M5-T02",
+        "id": "OCH-133",
+        "scope": "variant coverage diagnostics"
+      }
+    ],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      }
+    ],
+    "body": "Static inference encodes both nullary constructor A and unary constructor A(()) as Unit, although runtime variants retain distinct payload-list lengths. OCH-70 confirms an accepted nullary match against A(()) fails at runtime, while valid unary binding/unit patterns are rejected as missing nullary A. True nullary and boolean-payload positive cases work.\n\nDraft and implement a constructor payload representation that retains arity across expression/pattern inference, type declarations, builtin conversion, unification, recursive aliases, display, coverage and required entrypoint signatures. Make zero payloads, one unit payload and multiple payloads unambiguous. Inventory actual persisted value/type surfaces before selecting compatibility requirements; do not assume all compiler types are durable.\n\nStart in lib/chatml/chatml_typechecker.ml: expression/pattern payload construction (2308/1978), payload_component_types (1645), and runtime variant pattern matching in lib/chatml/chatml_lang.ml (363).\n\nAcceptance: the confirmed false acceptance and false rejections are corrected, with meaningful zero/one-unit/multiple-argument positive and negative cases, recursive constructors, builtin/Option signatures and compiler entrypoint validation. Preserve parsing/runtime agreement and useful diagnostics. Replace audit current-defect outputs with chosen desired behavior. Attach applicable variant/type and semantic-services acceptance; OCH-73 can consume the finding before fixes finish. This is language representation work, not a provider JSON or authorization feature."
+  },
+  {
+    "key": "OCH70-F4",
+    "title": "Make direct and abstracted ChatML equality follow one type policy",
+    "kind": "implementation",
+    "suggested_severity": "medium contract consistency",
+    "evidence_cases": [
+      "direct array equality",
+      "abstracted array equality",
+      "abstracted function equality",
+      "abstracted record equality"
+    ],
+    "source_paths": [
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_lang.ml",
+      "test/och70_chatml_audit/audit_tests.ml",
+      "test/chatml_typechecker_test.ml"
+    ],
+    "acceptance_gates": [
+      {
+        "key": "M4-T01",
+        "id": "OCH-98",
+        "scope": "selected equality/type contract"
+      },
+      {
+        "key": "M4-T06",
+        "id": "OCH-127",
+        "scope": "equality-qualified type queries"
+      }
+    ],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      },
+      {
+        "key": "M4-R2",
+        "id": "OCH-74"
+      }
+    ],
+    "body": "Direct array/function equality is rejected, but let eq x y = x == y accepts those same values because unknown-type equality checks retain no deferred obligation. OCH-70 reproduces physical-identity true for abstracted array and function calls; ordinary record equality succeeds. The observed inconsistency does not demonstrate memory unsafety or a sandbox escape.\n\nChoose and implement a coherent language equality policy. If current prohibited types remain prohibited, preserve equality obligations through unification, monomorphic late binding, generalization/instantiation and higher-order/module export use. Evaluate open-row tails and fields hidden by width abstraction. An alternate policy must change direct and abstracted admission together and document its behavior.\n\nStart in lib/chatml/chatml_typechecker.ml (ensure_equality_type at1007; generalization/instantiation at315/279), runtime equal_value in lib/chatml/chatml_lang.ml (330), and the audit reproducer.\n\nAcceptance: direct and abstracted forms consistently reject or execute under the agreed rule, with generic aliases, nested records/variants, refs/arrays/tasks/functions and late constraints tested meaningfully. Preserve supported ordinary equality and stable diagnostics. Replace current-defect observations with desired tests; do not enshrine bypassed restrictions as permanent behavior. OCH-73/OCH-74 consume design inputs without waiting for the fix, while selected equality and semantic type-query acceptance retain the applicable blocker."
+  },
+  {
+    "key": "OCH70-F5",
+    "title": "Define and enforce ChatML module self-reference initialization availability",
+    "kind": "implementation",
+    "suggested_severity": "medium initialization correctness",
+    "evidence_cases": [
+      "module eager self reference",
+      "module delayed self reference",
+      "module lexical closure",
+      "module export rebind"
+    ],
+    "source_paths": [
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_eval.ml",
+      "test/och70_chatml_audit/audit_tests.ml",
+      "test/chatml_runtime_test.ml"
+    ],
+    "acceptance_gates": [
+      {
+        "key": "M4-T02",
+        "id": "OCH-100",
+        "scope": "module initialization order/availability"
+      },
+      {
+        "key": "M4-T06",
+        "id": "OCH-127",
+        "scope": "initialization-aware module analysis"
+      }
+    ],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      },
+      {
+        "key": "M4-R3",
+        "id": "OCH-75"
+      }
+    ],
+    "body": "The checker admits eager M.x during M construction, but the evaluator publishes exports only after all module statements finish. OCH-70 confirms module M = struct let x = 1 let y = M.x end passes checking then reports a missing field. A deferred function reading M.x after initialization succeeds; ordinary local x use and lexical closure capture work.\n\nChoose an explicit initialization contract and enforce it consistently: a static restriction on unavailable self-reference, or incremental export publication with carefully defined order, forward references, rebinding and failure behavior. Avoid introducing generic recursive-module semantics accidentally. Keep this distinct from the module/record representation mismatch; record support alone will not fix availability.\n\nStart in lib/chatml/chatml_typechecker.ml (module placeholder/export unification around2409) and lib/chatml/chatml_eval.ml (eval_module_value at393), using the new paired reproductions and existing module tests.\n\nAcceptance: eager/deferred reads of earlier, later and missing exports have coherent static/runtime outcomes; nested modules, duplicate names/rebindings and initializer failure are covered. Existing lexical use, explicit exports, open and deferred closure captures remain correct. Replace the audit's current-defect observation with the chosen desired behavior. OCH-73/OCH-75 receive findings as concurrent design inputs; relevant module initialization and semantic-analysis acceptance carry the unresolved blocker. No host resource or provider-policy changes belong to this task."
+  },
+  {
+    "key": "OCH70-V1",
+    "title": "Expand bounded ChatML correctness and builtin contract verification",
+    "kind": "verification implementation",
+    "suggested_severity": "bounded coverage follow-up",
+    "evidence_cases": [
+      "coverage matrix remaining limits",
+      "duplicate parameters",
+      "unknown type diagnostic location"
+    ],
+    "source_paths": [
+      "design/och-70/coverage.md",
+      "lib/chatml/chatml_typechecker.ml",
+      "lib/chatml/chatml_builtin_spec.ml",
+      "lib/chatml/chatml_host_runtime.ml",
+      "test/chatml_typechecker_test.ml",
+      "test/chatml_runtime_test.ml",
+      "test/chatml_type_traversal_test.ml",
+      "test/chatml_diagnostic_budget_test.ml",
+      "test/och70_chatml_audit/audit_tests.ml"
+    ],
+    "acceptance_gates": [],
+    "coordination_only": [
+      {
+        "key": "M4-R1",
+        "id": "OCH-73"
+      },
+      {
+        "key": "M4-R2",
+        "id": "OCH-74"
+      },
+      {
+        "key": "M5-R1",
+        "id": "OCH-129"
+      }
+    ],
+    "body": "OCH-70 provides reproducible defects, broad source coverage and seven passing baseline suites, but not complete soundness or independent validation of every builtin/host scheme. Convert explicit high-value gaps into bounded automated verification rather than claiming happy-path examples prove correctness.\n\nPrioritize reference-model/negative mutation and lexical-scope cases, recursive-binder and row constraints, and representative builtin/host argument/result/error behavior. Use independent oracles where justified, deterministic seeds and saved minimal counterexamples. Inspect existing coverage before adding tests. Define a bounded signature coverage inventory that distinguishes pure builtins, task descriptions, admitted host adapters and deliberate dynamic JSON conversion. Concurrent compile isolation and diagnostic span anchoring should have scoped cases and useful limits; benchmark/fuzz time and workload bounds must be explicit.\n\nStart from design/och-70/coverage.md, compiler/type/builtin sources and existing type/runtime/traversal/diagnostic tests. Coordinate desired regressions with F1–F5; discovery can proceed while fixes are unresolved.\n\nAcceptance: implement meaningful missing tests or record justified existing coverage for the selected inventory; publish exact isolated-toolchain commands, achieved coverage and remaining limits. Resolve or separately own duplicate parameter policy and annotation/entrypoint diagnostic precision instead of asserting a soundness defect without evidence. Any newly confirmed blocker becomes a concrete owned fix with affected-consumer relations. Do not gate every independent design on an open-ended fuzz campaign or expand into live-provider/security/release qualification."
+  }
+]

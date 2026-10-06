@@ -1,0 +1,8 @@
+(library
+ (name och70_chatml_audit)
+ (modules audit_tests)
+ (libraries
+  core eio eio_main chatml chatml_typechecker chatml_resolver
+  chatml_builtin_modules chatml_compilation chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
