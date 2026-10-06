@@ -51,6 +51,11 @@
     {!Openai.Responses.Response_stream.Output_text_delta} values to a buffer.
 *)
 
+(** Lossless request/output/SSE boundary for new provider integrations. Unlike
+    the historical runtime projections below, captures retain unknown fields,
+    opaque reasoning and omission/null distinctions. *)
+module Codec = Responses_codec
+
 module Input_message : sig
   type role =
     | User

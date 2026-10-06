@@ -3,6 +3,7 @@ open Eio
 open Io.Net
 module Jsonaf = Jsonaf_ext
 open Jsonaf.Export
+module Codec = Responses_codec
 
 (** [api_key] is the API key for the OpenAI API. *)
 let api_key = Sys.getenv "OPENAI_API_KEY" |> Option.value ~default:""

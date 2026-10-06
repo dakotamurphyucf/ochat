@@ -3921,6 +3921,14 @@
     "provenance": "authored"
   },
   {
+    "id": "lib/openai-responses-codecs",
+    "source": "docs-src/lib/openai-responses-codecs.md",
+    "disposition": "repository-only",
+    "title": "Responses wire codecs",
+    "reviewNote": "Current codec API and provider-driver integration reference. Runtime adoption is a separate milestone task; keep this developer boundary reference alongside the existing OpenAI module documentation rather than presenting it as an already active application feature.",
+    "provenance": "authored"
+  },
+  {
     "id": "lib/openai/completions.doc",
     "source": "docs-src/lib/openai/completions.doc.md",
     "disposition": "repository-only",

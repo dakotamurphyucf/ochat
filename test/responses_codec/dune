@@ -1,0 +1,5 @@
+(library
+ (name responses_codec_tests)
+ (libraries core jsonaf ochat.openai)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_jsonaf_conv ppx_expect)))
