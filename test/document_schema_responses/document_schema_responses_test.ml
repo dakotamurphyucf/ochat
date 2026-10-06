@@ -133,7 +133,7 @@ let%expect_test "wire capture survives storage conversion, host edit and reframi
      print_s [%sexp (call_id : string), (arguments : string)]
    | _ -> failwith "function capture changed");
   [%expect
-    {| 
+    {|
     (after true true true true)
     absent
     {"entry_id":"host-entry-7","nullable":null}
