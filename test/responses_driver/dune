@@ -1,0 +1,5 @@
+(library
+ (name responses_driver_tests)
+ (libraries core expect_test_helpers_core jsonaf ochat.openai eio eio_main eio.mock tls-eio mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

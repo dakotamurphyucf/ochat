@@ -9,10 +9,16 @@
   responses_request
   responses_sse
   responses_codec
+  responses_driver
+  responses_json
   grader)
+ (private_modules responses_json)
  (libraries
   io
   jsonaf_ext
+  ca-certs
+  digestif
+  base64
   tls-eio
   core
   eio

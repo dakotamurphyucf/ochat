@@ -192,11 +192,7 @@ let validate_json json =
       | `String s -> count (String.length s)
       | `Number s ->
         let%bind.Or_error () = count (String.length s) in
-        (match Or_error.try_with (fun () -> Jsonaf.of_string s) with
-         | Ok (`Number parsed) when String.equal parsed s -> Ok ()
-         | Ok (`Number _)
-         | Ok (`String _ | `Null | `True | `False | `Object _ | `Array _)
-         | Error _ -> fail path "invalid JSON number")
+        if Responses_json.valid_number s then Ok () else fail path "invalid JSON number"
       | `Array values ->
         List.fold_result values ~init:() ~f:(fun () value -> walk (depth + 1) path value)
       | `Object fields ->
