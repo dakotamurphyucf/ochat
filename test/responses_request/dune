@@ -1,0 +1,7 @@
+(library
+ (name responses_request_test)
+ (modules responses_request_test)
+ (libraries core jsonaf openai expect_test_helpers_core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

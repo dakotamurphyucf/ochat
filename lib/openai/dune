@@ -1,7 +1,15 @@
 (library
  (name openai)
  (public_name ochat.openai)
- (modules completions embeddings responses grader)
+ (modules
+  completions
+  embeddings
+  responses
+  responses_wire
+  responses_request
+  responses_sse
+  responses_codec
+  grader)
  (libraries
   io
   jsonaf_ext
