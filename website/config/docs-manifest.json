@@ -3921,6 +3921,14 @@
     "provenance": "authored"
   },
   {
+    "id": "lib/openai-responses-driver",
+    "source": "docs-src/lib/openai-responses-driver.md",
+    "disposition": "repository-only",
+    "title": "Explicit Responses preparation and HTTP/SSE driver",
+    "reviewNote": "Current additive provider driver, immutable preparation, credential isolation and secure bounded transport contracts with offline loopback evidence. Runtime entry-point migration belongs to OCH-56; this reference does not claim all application paths have adopted it.",
+    "provenance": "authored"
+  },
+  {
     "id": "lib/openai-responses-codecs",
     "source": "docs-src/lib/openai-responses-codecs.md",
     "disposition": "repository-only",
