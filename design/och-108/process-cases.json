@@ -1,0 +1,177 @@
+{
+  "baseline_sha": "58e9d2c5567d596fbe52ba1041e37d12dbde102b",
+  "scope": "existing executables; isolated child homes/config/cwd; no provider requests",
+  "cases": [
+    {
+      "name": "main_help",
+      "binary": "main.exe",
+      "args": [
+        "-help"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 1181,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "main_version",
+      "binary": "main.exe",
+      "args": [
+        "-version"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 16,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "main_missing_command",
+      "binary": "main.exe",
+      "args": [],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 1221
+    },
+    {
+      "name": "main_unknown_command",
+      "binary": "main.exe",
+      "args": [
+        "unknown-command"
+      ],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 1216
+    },
+    {
+      "name": "main_completion_missing_prompt",
+      "binary": "main.exe",
+      "args": [
+        "chat-completion",
+        "-prompt-file"
+      ],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 133
+    },
+    {
+      "name": "tui_help_missing_config",
+      "binary": "chat_tui.exe",
+      "args": [
+        "--help"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 9882,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "tui_version_missing_config",
+      "binary": "chat_tui.exe",
+      "args": [
+        "--version"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 16,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "server_help",
+      "binary": "ochat_agent_server.exe",
+      "args": [
+        "-help"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 805,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "server_version",
+      "binary": "ochat_agent_server.exe",
+      "args": [
+        "-version"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 16,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "stdio_help",
+      "binary": "ochat_agent_stdio.exe",
+      "args": [
+        "-help"
+      ],
+      "exit_code": 0,
+      "created_paths": [],
+      "stdout_bytes": 1280,
+      "stderr_bytes": 0
+    },
+    {
+      "name": "stdio_invalid_modes",
+      "binary": "ochat_agent_stdio.exe",
+      "args": [
+        "--local",
+        "--connect",
+        "unix:///missing"
+      ],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 45
+    },
+    {
+      "name": "stdio_missing_prompt",
+      "binary": "ochat_agent_stdio.exe",
+      "args": [
+        "--local"
+      ],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 31
+    },
+    {
+      "name": "helper_malformed_json",
+      "binary": "ochat_agent_helper.exe",
+      "args": [],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 47
+    },
+    {
+      "name": "helper_no_channel",
+      "binary": "ochat_agent_helper.exe",
+      "args": [],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 61
+    },
+    {
+      "name": "helper_options",
+      "binary": "ochat_agent_helper.exe",
+      "args": [
+        "-help"
+      ],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 82
+    },
+    {
+      "name": "helper_empty_stdin",
+      "binary": "ochat_agent_helper.exe",
+      "args": [],
+      "exit_code": 1,
+      "created_paths": [],
+      "stdout_bytes": 0,
+      "stderr_bytes": 47
+    }
+  ]
+}

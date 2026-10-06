@@ -1,0 +1,146 @@
+{
+  "ticket": "OCH-108",
+  "baseline_sha": "58e9d2c5567d596fbe52ba1041e37d12dbde102b",
+  "purpose": "Root applies reviewed issue refinements and transfers generated blockers before research closure; these proposals do not implement features.",
+  "refinements": [
+    {
+      "issue": "OCH-110",
+      "title": "Extract typed effect-safe runtime entrypoints and unified CLI dispatch",
+      "outcome": "One thin installed ochat entrypoint selects validated command plans before runtime initialization, and reusable handlers return typed outcomes.",
+      "scope": "Extract daemon, TUI and session stdio entrypoints into existing runtime/service libraries; map the selected command hierarchy and beta utility disposition. No new executor, GUI dependency or required deprecated MCP host.",
+      "acceptance": [
+        "Help/version and parser errors work with absent or unreadable defaults before credential resolution, source capture, store/listener/terminal setup; inspect source-local and transitive module/native startup effects, including provider environment capture and daemon RNG. Filesystem-only probes do not establish the whole guarantee.",
+        "Pure validated plans distinguish local/connect, host configuration and execution settings; preserve absent/null/value and host-owned credential identity. No flat TUI argv configuration is injected into other commands.",
+        "Handlers receive explicit Eio capabilities and do not call exit; the executable maps each outcome once. No GUI initialization/dependency for CLI/service/help.",
+        "Internal helper selection precedes unrelated command initialization while preserving inherited-channel authentication; OCH-111 qualifies the actual confined artifact.",
+        "Current utility workflows remain usable during explicit beta mappings; deprecated MCP host has a separate disposition, not a newly required product server."
+      ],
+      "source_paths": [
+        "bin/main.ml",
+        "bin/chat_tui.ml",
+        "bin/ochat_agent_server.ml",
+        "bin/ochat_agent_stdio.ml",
+        "bin/dune",
+        "lib/agent_server/embedded.mli",
+        "lib/openai/responses.ml",
+        "lib/openai/embeddings.ml"
+      ]
+    },
+    {
+      "issue": "OCH-111",
+      "title": "Qualify internal agent-helper dispatch in the actual unified installed artifact",
+      "outcome": "The final ochat internal agent-helper artifact preserves current scoped authority and confined execution.",
+      "scope": "Change exact helper argv/digest registration and dispatch without expanding roots, environment, network or credentials.",
+      "acceptance": [
+        "Execute the final installed artifact under the current compiled grant with exact canonical path, digest and argv; do not substitute only the legacy small helper for this acceptance.",
+        "Preserve fd 3/4 FIFO checks, bounded framing and request/response counts, scope expiry, revocation before disclosure, cancellation/reaping, descriptor/environment isolation and resource ceilings.",
+        "No config/help/host/terminal chatter or socket/token/credential fallback. Request data cannot select a privileged mode or supply authority.",
+        "Investigate transitive linked initialization under confinement; never broaden permissions merely to make the larger artifact start.",
+        "If the unified artifact cannot satisfy confinement, retain only a qualified private helper temporarily and mark this migration incomplete with a concrete remaining blocker."
+      ],
+      "source_paths": [
+        "bin/ochat_agent_helper.ml",
+        "bin/dune",
+        "lib/agent_server/session_helper_policy.ml",
+        "lib/agent_session/session_management_channel.ml",
+        "lib/shell_access/request_channel.ml",
+        "lib/shell_access/process_spawn.ml",
+        "test/request_channel_integration_test.ml"
+      ]
+    },
+    {
+      "issue": "OCH-112",
+      "title": "Implement bounded single-turn and ChatML-owned workflow headless observers",
+      "outcome": "Headless runs report host-committed state and explicit uncertainty without inventing a CLI continuation loop.",
+      "scope": "Use shared run receipts and the existing session/client actor; CAP-R4 owns authored continue/wait/finish composition.",
+      "acceptance": [
+        "Single-turn admits one root user operation including its tool/provider followups; later authored workflow turns are not silently absorbed. Exactly one message/file/stdin source is required only when submitting user input.",
+        "Workflow requires a qualified ChatMD orchestrator. Explicit no-input orchestration start validates startup policy and supports existing/fresh scheduled sessions without synthesizing empty user messages; CLI idleness never triggers an automatic continue prompt.",
+        "JSON/JSONL output is bounded and versioned with stdout purity, stable sequence/run/session identities and one terminal/client outcome. Provider SSE is not the public command schema.",
+        "EOF, output failure and signals apply ownership-specific detach/cancel/cleanup; receipt loss is uncertain until reconciliation, not failure or automatic resubmission.",
+        "Finish waits for settled or authorized relinquished owned work, commits a terminal receipt and leaves session liveness independent; unrelated jobs do not block completion. Permissions and limits remain host-enforced."
+      ],
+      "source_paths": [
+        "lib/agent_client/session_handle.mli",
+        "lib/agent_protocol/session.mli",
+        "lib/agent_protocol/operation.mli",
+        "lib/agent_session/observation_follow_up.mli",
+        "lib/chatml/chatml_host_runtime.mli",
+        "bin/ochat_agent_stdio.ml",
+        "test/agent_server_e2e/scenarios/stdio_scenario.ml"
+      ]
+    },
+    {
+      "issue": "OCH-117",
+      "title": "Complete installed executable inventory and explicit beta CLI cutover",
+      "outcome": "The installed product surface has one ochat command with documented migrations and no accidental duplicate public runtime parser.",
+      "scope": "Inventory installed/developer-only/retired executables and resource packaging. Cut over only qualified workflows and confined helper artifact.",
+      "acceptance": [
+        "Map chat-tui, ochat-agent-server and ochat-agent-stdio flags/workflows into unified commands with actionable errors and examples; qualify equivalent process/output ownership first.",
+        "Test the installed artifact and manifest, not only build-tree executables; CLI/help/service commands do not load GUI runtime or require desktop completion.",
+        "Retire the public helper only after OCH-111 artifact qualification. A temporary private helper is an explicit incomplete migration, not a widened grant.",
+        "Keep useful utility commands deliberately. Deprecated MCP prompt host disposition is reviewed separately from maintained MCP tools and is not newly required.",
+        "No frozen legacy storage reader is implied by executable migration; universal document conversion requirements remain owned by their existing tasks."
+      ],
+      "source_paths": [
+        "bin/dune",
+        "ochat.opam",
+        "dune-project",
+        "bin/main.ml",
+        "bin/mcp_server.ml"
+      ]
+    }
+  ],
+  "generated_tasks": [
+    {
+      "proposal_key": "M3-RUN-01",
+      "title": "Commit and expose shared host-owned run lifecycle and terminal receipts",
+      "milestone": "M3",
+      "body": "Add a narrow shared runtime-host run record spanning one or more existing operations, with distinct run/session/generation/operation/request identities and authoritative terminal receipts. Reuse the session actor, durable invocation/operation receipts, local persistence and current event/client projections. This is the host state and admission seam; CAP-R4 retains reusable ChatML lifecycle policy and action composition. Do not build a second executor or scheduler.\n\nAdmission validates captured definition, expected session generation, current authority, liveness/ownership and explicit single-turn versus workflow scope. Support either submitted user input or an authorized no-input authored orchestration start. Commit admission identity before effects; same-scope retry returns the original receipt, conflicting idempotency reuse rejects. Track owned work and intent relationships. Continue/wait use existing scheduling and receipts; wait records its authorized wake condition. Finish commits completed/failed/cancelled/limited/interrupted state only after owned work settles or is explicitly relinquished under authority. Run completion must not stop its session or wait for unrelated jobs.\n\nExpose authorization-checked read/subscription and terminal result references. Commit terminal state before notification; identical terminal retries are no-ops and conflicting terminal transitions reject. Loss of a connection or receipt is a client uncertainty, not an inferred host terminal state. Restore/reconnect rebuilds committed local state and event sequence before further effects, with no silent model/tool replay. Transient process lifetime and durable-host guarantees remain explicit.\n\nAcceptance uses actor-level meaningful tests for terminal commit/retry conflicts, same-request admission, receipt-loss reconciliation, reconnect/restart, scope expiry/cancellation, owned versus unrelated work and successful finish with a live session. Add universal-document codecs with absent/null/value behavior and no provider tokens/remote hosted state. Coordinate exact storage and lifecycle interfaces with OCH-51/OCH-52 and OCH-88; unblock OCH-112 with this concrete host contract rather than whole milestone gates.",
+      "proposed_prerequisites": [
+        {
+          "issue": "OCH-69",
+          "reason": "Reuse shared session actor/service contract; refine only the missing run projection."
+        },
+        {
+          "issue": "OCH-88",
+          "reason": "Lifecycle continue/wait/finish policy and host action integration; no duplicate policy owner."
+        },
+        {
+          "issue": "OCH-51",
+          "reason": "Use shared local document persistence/codec contract where required by implementation."
+        },
+        {
+          "issue": "OCH-52",
+          "reason": "Use accepted universal-document absent/null/value conversions where required by implementation."
+        }
+      ],
+      "source_paths": [
+        "lib/agent_protocol/session.mli",
+        "lib/agent_protocol/operation.mli",
+        "lib/agent_protocol/event.mli",
+        "lib/agent_protocol/invocation.mli",
+        "lib/agent_session/operation_worker.mli",
+        "lib/agent_session/moderator_event.mli",
+        "lib/agent_session/observation_follow_up.mli",
+        "lib/agent_server/daemon.ml",
+        "lib/agent_client/session_handle.mli",
+        "lib/chatml/chatml_host_runtime.mli",
+        "test/agent_server_e2e"
+      ]
+    }
+  ],
+  "proposed_dependency_changes": [
+    {
+      "blocked_issue": "OCH-112",
+      "blocks_on_proposal": "M3-RUN-01",
+      "reason": "Headless observers require authoritative run admission/terminal receipts and uncertainty/reconnect semantics."
+    }
+  ],
+  "ownership_constraints": [
+    "OCH-88/CAP-R4 owns ChatMD-native tools, builtin docs and reusable ChatML lifecycle composition.",
+    "Reuse existing jobs/timers/schedules and session actor; generated run record is not a second executor.",
+    "No GUI or desktop milestone dependency for ordinary CLI/runtime delivery; explicit desktop gates remain unchanged.",
+    "Root owns final ticket/dependency mutations; proposed prerequisites are narrow contract joins, not broad milestone start bans."
+  ]
+}
