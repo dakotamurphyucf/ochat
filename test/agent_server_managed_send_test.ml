@@ -8,6 +8,26 @@ module H = Agent_client.Session_handle
 module M = Agent_session.Managed_submission
 module Res = Openai.Responses
 
+type fixture_client =
+  { connection : Agent_client.Connection.t
+  ; invocation_handles : (P.Id.Session.t, H.t) Hashtbl.t
+  }
+
+let close_fixture_client client =
+  Eio.Cancel.protect (fun () ->
+    Exn.protect
+      ~finally:(fun () -> Agent_client.Connection.close client.connection)
+      ~f:(fun () ->
+        let handles = Hashtbl.data client.invocation_handles in
+        Hashtbl.clear client.invocation_handles;
+        let rec close = function
+          | [] -> ()
+          | handle :: rest ->
+            Exn.protect ~finally:(fun () -> close rest) ~f:(fun () -> H.close handle)
+        in
+        close handles))
+;;
+
 let field json name = Jsonaf.member_exn name json
 let text json name = field json name |> Jsonaf.string_exn
 
@@ -219,16 +239,19 @@ let%expect_test
                      deadlines and cancellation assertions remain unchanged below. *)
                   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 300. (fun () ->
                     let client =
-                      Agent_server_wire_fixture.connect_stdio
-                        ~sw
-                        ~env
-                        ~daemon
-                        ~socket_path:(Filename.concat root "managed.sock")
+                      { connection =
+                          Agent_server_wire_fixture.connect_stdio
+                            ~sw
+                            ~env
+                            ~daemon
+                            ~socket_path:(Filename.concat root "managed.sock")
+                      ; invocation_handles = Hashtbl.create (module P.Id.Session)
+                      }
                     in
                     Exn.protect
-                      ~finally:(fun () -> Agent_client.Connection.close client)
+                      ~finally:(fun () -> close_fixture_client client)
                       ~f:(fun () ->
-                        initialize client;
+                        initialize client.connection;
                         f sw daemon client))
                 with
                 | Eio.Time.Timeout -> failwith ("managed send timeout: " ^ !phase)))
@@ -237,7 +260,7 @@ let%expect_test
           H.attach
             ~sw
             ~clock:(Eio.Stdenv.clock env)
-            ~connection:client
+            ~connection:client.connection
             ~session_id:id
             ~mode:Read_write
             ~subscribe:false
@@ -247,26 +270,30 @@ let%expect_test
         let invoke sw daemon client caller name args =
           phase := name;
           let before = state daemon caller in
-          let handle = attach sw client caller in
-          Exn.protect
-            ~finally:(fun () -> H.close handle)
-            ~f:(fun () ->
-              queued := Some (name, args);
-              H.send_message
-                handle
-                { kind = Plain_text; text = "Run tool."; attachments = [] }
-              |> protocol_ok
-              |> ignore;
-              await (fun () -> Option.is_none (state daemon caller).active_operation);
-              let current = state daemon caller in
-              let invocation =
-                List.find_exn current.invocations ~f:(fun invocation ->
-                  P.Invocation.equal_origin invocation.context.origin Model
-                  && not
-                       (List.exists before.invocations ~f:(fun previous ->
-                          P.Id.Invocation.equal previous.context.id invocation.context.id)))
-              in
-              invocation.status)
+          (* One invocation writer belongs to this actual connection/session.
+             Repeated pagination should not add a fresh attachment lifecycle and
+             snapshot for every tool call. Explicit cancellation/output/child
+             attachments below remain independently owned. *)
+          let handle =
+            Hashtbl.find_or_add client.invocation_handles caller ~default:(fun () ->
+              attach sw client caller)
+          in
+          queued := Some (name, args);
+          H.send_message
+            handle
+            { kind = Plain_text; text = "Run tool."; attachments = [] }
+          |> protocol_ok
+          |> ignore;
+          await (fun () -> Option.is_none (state daemon caller).active_operation);
+          let current = state daemon caller in
+          let invocation =
+            List.find_exn current.invocations ~f:(fun invocation ->
+              P.Invocation.equal_origin invocation.context.origin Model
+              && not
+                   (List.exists before.invocations ~f:(fun previous ->
+                      P.Id.Invocation.equal previous.context.id invocation.context.id)))
+          in
+          invocation.status
         in
         let complete = function
           | P.Invocation.Published (Complete value) -> value
@@ -328,7 +355,7 @@ let%expect_test
         in
         let parent_id, child_id, receipt_id, output_cursor, stop_receipt =
           with_daemon (fun sw daemon client ->
-            let parent, _ = create_session ~start_immediately:true client in
+            let parent, _ = create_session ~start_immediately:true client.connection in
             let child =
               invoke
                 sw
@@ -451,7 +478,7 @@ let%expect_test
               H.attach
                 ~sw
                 ~clock:(Eio.Stdenv.clock env)
-                ~connection:client
+                ~connection:client.connection
                 ~session_id:child_id
                 ~mode:Read_only
                 ~subscribe:false
@@ -835,83 +862,6 @@ let%expect_test
                 , stop_receipt )))
         in
         with_daemon ~page_bytes:65536 (fun sw daemon client ->
-          let before = state daemon child_id in
-          let stopped_replay =
-            invoke
-              sw
-              daemon
-              client
-              parent_id
-              "agent_stop"
-              (stop_request child_id "native-stop" "graceful")
-            |> complete
-          in
-          assert (Jsonaf.exactly_equal stop_receipt (field stopped_replay "receipt"));
-          [%test_eq: string] "stopped" (text stopped_replay "progress");
-          let retained =
-            invoke
-              sw
-              daemon
-              client
-              parent_id
-              "agent_wait"
-              (wait_request child_id receipt_id None 0)
-            |> complete
-          in
-          [%test_eq: string] "receipt_terminal" (text retained "reason");
-          (match
-             invoke
-               sw
-               daemon
-               client
-               parent_id
-               "agent_wait"
-               (wait_request child_id receipt_id (Some output_cursor) 0)
-           with
-           | Published (Fail error) ->
-             [%test_eq: string] "agent.wait.cursor_expired" error.code;
-             assert (Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
-           | _ -> failwith "wait accepted a previous-process cursor");
-          (match
-             invoke
-               sw
-               daemon
-               client
-               parent_id
-               "agent_read"
-               (read_request child_id receipt_id (Some output_cursor))
-           with
-           | Published (Fail error) ->
-             [%test_eq: string] "agent.read.cursor_expired" error.code;
-             assert (Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
-           | _ -> failwith "old process output cursor did not expire");
-          let fresh =
-            invoke
-              sw
-              daemon
-              client
-              parent_id
-              "run_chatml"
-              (script ~tool:"agent_read" (read_request child_id receipt_id None))
-            |> complete
-          in
-          assert (Jsonaf.exactly_equal (field fresh "snapshot") `True);
-          [%test_eq: int] 1 (field fresh "items" |> Jsonaf.list_exn |> List.length);
-          let replay =
-            invoke
-              sw
-              daemon
-              client
-              parent_id
-              "run_chatml"
-              (script (message child_id "first" "Retain this exact message."))
-            |> complete
-          in
-          [%test_eq: string] receipt_id (text replay "receipt_id");
-          [%test_eq: string] "completed" (text replay "status");
-          let after = state daemon child_id in
-          assert_same_state before after ~context:"restart receipt and read replay";
-          [%test_eq: int] 2 (List.length before.managed_submissions);
           let read_all cursor =
             invoke
               sw
@@ -924,10 +874,108 @@ let%expect_test
                    @ Option.to_list (Option.map cursor ~f:(fun value -> "cursor", value))
                   ))
           in
-          let all = read_all None |> complete in
-          assert (Jsonaf.exactly_equal (field all "caught_up") `True);
-          [%test_eq: int] 1 (field all "items" |> Jsonaf.list_exn |> List.length);
-          let tail = field all "next_cursor" in
+          (* These restart reads compare one stopped-child lifetime. Keep a reader
+             attached until the last page so maintenance cannot evict/recover the
+             child between requests and add a separate recovery transaction. *)
+          let replay_reader =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client.connection
+              ~session_id:child_id
+              ~mode:Read_only
+              ~subscribe:false
+              ()
+            |> protocol_ok
+          in
+          let tail =
+            Exn.protect
+              ~finally:(fun () -> H.close replay_reader)
+              ~f:(fun () ->
+                let before = state daemon child_id in
+                let stopped_replay =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent_id
+                    "agent_stop"
+                    (stop_request child_id "native-stop" "graceful")
+                  |> complete
+                in
+                assert (Jsonaf.exactly_equal stop_receipt (field stopped_replay "receipt"));
+                [%test_eq: string] "stopped" (text stopped_replay "progress");
+                let retained =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent_id
+                    "agent_wait"
+                    (wait_request child_id receipt_id None 0)
+                  |> complete
+                in
+                [%test_eq: string] "receipt_terminal" (text retained "reason");
+                (match
+                   invoke
+                     sw
+                     daemon
+                     client
+                     parent_id
+                     "agent_wait"
+                     (wait_request child_id receipt_id (Some output_cursor) 0)
+                 with
+                 | Published (Fail error) ->
+                   [%test_eq: string] "agent.wait.cursor_expired" error.code;
+                   assert (
+                     Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
+                 | _ -> failwith "wait accepted a previous-process cursor");
+                (match
+                   invoke
+                     sw
+                     daemon
+                     client
+                     parent_id
+                     "agent_read"
+                     (read_request child_id receipt_id (Some output_cursor))
+                 with
+                 | Published (Fail error) ->
+                   [%test_eq: string] "agent.read.cursor_expired" error.code;
+                   assert (
+                     Jsonaf.exactly_equal (field error.details "snapshot_required") `True)
+                 | _ -> failwith "old process output cursor did not expire");
+                let fresh =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent_id
+                    "run_chatml"
+                    (script ~tool:"agent_read" (read_request child_id receipt_id None))
+                  |> complete
+                in
+                assert (Jsonaf.exactly_equal (field fresh "snapshot") `True);
+                [%test_eq: int] 1 (field fresh "items" |> Jsonaf.list_exn |> List.length);
+                let replay =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent_id
+                    "run_chatml"
+                    (script (message child_id "first" "Retain this exact message."))
+                  |> complete
+                in
+                [%test_eq: string] receipt_id (text replay "receipt_id");
+                [%test_eq: string] "completed" (text replay "status");
+                let after = state daemon child_id in
+                assert_same_state before after ~context:"restart receipt and read replay";
+                [%test_eq: int] 2 (List.length before.managed_submissions);
+                let all = read_all None |> complete in
+                assert (Jsonaf.exactly_equal (field all "caught_up") `True);
+                [%test_eq: int] 1 (field all "items" |> Jsonaf.list_exn |> List.length);
+                field all "next_cursor")
+          in
           let handle = attach sw client child_id in
           H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
           await (fun () -> observed_idle (state daemon child_id).lifecycle.observed);
