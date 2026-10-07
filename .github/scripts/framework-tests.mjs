@@ -8,6 +8,9 @@ const commands = {
   e2e: ["build", "--force", "-j", "2", "@agent-e2e-pr"],
 };
 if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
+// The complete normal suite takes about 31 minutes with two workers. Bound the
+// aggregate run separately from individual test and runtime execution deadlines.
+const timeoutMs = (tier === "normal" ? 35 : 25) * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
 const start = Date.now();
 const report = {
@@ -16,13 +19,14 @@ const report = {
     encoding: "utf8",
   }).trim(),
   command: ["dune", ...commands[tier]],
+  timeoutSeconds: timeoutMs / 1000,
   startedAt: new Date(start).toISOString(),
   result: "fail",
 };
 const log = fs.openSync(`.ci-evidence/${tier}.log`, "w");
 const result = spawnSync("dune", commands[tier], {
   stdio: ["ignore", log, log],
-  timeout: 25 * 60 * 1000,
+  timeout: timeoutMs,
 });
 fs.closeSync(log);
 Object.assign(report, {
