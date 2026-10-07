@@ -736,7 +736,11 @@ module Configuration = struct
   let value_to_json = function
     | Tokens value -> decimal value
     | Boolean value -> if value then `True else `False
-    | Temperature value | Probability value -> `Number (Float.to_string value)
+    | Temperature value | Probability value ->
+      (* [Float.to_string] emits [1.] for integral values; JSON requires a digit
+         after a decimal point. These values are already finite and validated. *)
+      let number = Float.to_string value in
+      `Number (if String.is_suffix number ~suffix:"." then number ^ "0" else number)
     | Reasoning_effort value ->
       string
         (match value with

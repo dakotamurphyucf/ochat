@@ -494,3 +494,23 @@ let%expect_test "diagnostic rings are bounded by both entries and encoded bytes"
   [%expect
     {| entry and byte overflow reject; static typed diagnostic roundtrip stays bounded |}]
 ;;
+
+let%expect_test "integral floating settings encode valid JSON through safe configuration" =
+  List.iter
+    [ "temperature", "0"
+    ; "temperature", "1.0"
+    ; "temperature", "2"
+    ; "top_p", "0"
+    ; "top_p", "1.0"
+    ]
+    ~f:(fun (name, value) ->
+      let config = configuration [ setting name (Value (`Number value)) ] in
+      let encoded = O.Configuration.to_json config in
+      assert (Result.is_ok (D.Json.validate ~limits:O.Admission.observation encoded));
+      assert (
+        O.Configuration.equal
+          config
+          (O.Configuration.of_json encoded ~limits:O.Admission.observation |> ok)));
+  print_endline "zero, one and endpoint temperatures/probabilities remain valid JSON";
+  [%expect {| zero, one and endpoint temperatures/probabilities remain valid JSON |}]
+;;
