@@ -27,8 +27,9 @@ interruption independently of rendering callbacks. It never receives raw provide
 text. A returned completion callback failure propagates without a second callback;
 when execution already raised, interruption reporting preserves that original
 exception and backtrace even if the reporting callback also fails. Persisted
-accounting integration consumes these ports separately; the initial application
-composition supplies explicit untracked observers.
+accounting integration consumes these ports separately. Daemon-managed resource
+graphs use the [retained observation ledger](inference-observations.md); standalone
+host compositions may supply explicit untracked observers.
 
 The adapter emits validated evidence, not durable conversation commits.
 `Candidate_ready` identifies an output occurrence and its exact canonical

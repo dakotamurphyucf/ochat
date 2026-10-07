@@ -1973,3 +1973,101 @@ let%expect_test "certified equal heads retain distinct unknown carriers" =
   print_endline "certified counter equality cannot substitute a different unknown carrier";
   [%expect {| certified counter equality cannot substitute a different unknown carrier |}]
 ;;
+
+let%expect_test
+    "immutable recovery read preserves incomplete tails and validates retained fallbacks"
+  =
+  with_directory (fun env root ->
+    let journal_directory = Filename.concat root "journal" in
+    let snapshot_directory = Filename.concat root "snapshot" in
+    let journal =
+      S.Journal.create
+        ~env
+        ~directory:journal_directory
+        ~max_payload_length:16384
+        ~max_segment_bytes:1048576L
+        ~max_segment_frames:100
+      |> ok
+    in
+    let first = S.Transaction.decode original_transaction |> ok in
+    S.Snapshot.install
+      ~env
+      ~directory:snapshot_directory
+      ~max_payload_length:16384
+      (snapshot_document 0L None "initial")
+    |> ok
+    |> ignore;
+    S.Journal.append journal ~durability:Flush ~flags:0 ~payload:original_transaction
+    |> ok
+    |> ignore;
+    S.Snapshot.install
+      ~env
+      ~directory:snapshot_directory
+      ~max_payload_length:16384
+      (snapshot_document 1L (Some (S.Transaction.hash first)) "head")
+    |> ok
+    |> ignore;
+    let segment =
+      S.Journal_segment.open_existing
+        ~env
+        ~directory:journal_directory
+        ~id:(S.Journal.current_segment journal)
+      |> ok
+    in
+    let partial =
+      S.Frame.encode ~max_payload_length:16384 ~flags:0 "physical-tail"
+      |> frame_ok
+      |> Fn.flip String.drop_suffix 3
+    in
+    S.Journal_segment.append ~env ~durability:Flush segment ~frame:partial |> ok |> ignore;
+    let files =
+      [ Filename.concat journal_directory "CURRENT"
+      ; Filename.concat snapshot_directory "CURRENT"
+      ; S.Journal_segment.path segment
+      ]
+    in
+    let bytes () =
+      List.map files ~f:(fun path -> Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / path))
+    in
+    let original = bytes () in
+    let scan = S.Journal.scan journal |> ok in
+    assert (Option.is_some scan.crash_tail);
+    let restored = ref 0
+    and applied = ref 0
+    and transactions = ref 0 in
+    let read reject_older =
+      S.Recovery.read
+        ~env
+        ~journal
+        ~snapshot_directory
+        ~max_snapshot_payload_length:16384
+        ~session_id
+        ~initial:"none"
+        ~restore_snapshot:(fun snapshot ->
+          Int.incr restored;
+          Ok (text snapshot.S.Snapshot.payload))
+        ~apply:(fun previous transaction ->
+          Int.incr applied;
+          if reject_older && String.equal previous "initial"
+          then Error (S.Store_error.Corrupt "older fallback rejected")
+          else Ok (text transaction.S.Transaction.delta))
+        ~validate_transaction:(fun _ ->
+          Int.incr transactions;
+          Ok ())
+        ~validate:(fun _ -> Ok ())
+    in
+    let result = read false |> ok in
+    assert (String.equal result.state "head");
+    assert (not result.repaired_crash_tail);
+    [%test_eq: int] 2 !restored;
+    [%test_eq: int] 1 !applied;
+    [%test_eq: int] 1 !transactions;
+    assert (List.equal String.equal original (bytes ()));
+    assert (Result.is_error (read true));
+    assert (List.equal String.equal original (bytes ()));
+    assert (Option.is_some (S.Journal.scan journal |> ok).crash_tail));
+  print_endline
+    "selected head read; every fallback checked; journal and both CURRENT files unchanged";
+  [%expect
+    {| selected head read; every fallback checked; journal and both CURRENT files unchanged |}]
+;;

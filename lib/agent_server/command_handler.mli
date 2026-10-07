@@ -34,6 +34,7 @@ val create
        (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
   -> prepare_administration:
        (Session_registry.entry
+        -> previous:Agent_session.Session_state.t
         -> Agent_session.Session_state.t
         -> fresh_history:bool
         -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
@@ -42,6 +43,7 @@ val create
 val handle
   :  t
   -> context:Connection_context.t
+  -> inference_budget:Inference_query_budget.t
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 

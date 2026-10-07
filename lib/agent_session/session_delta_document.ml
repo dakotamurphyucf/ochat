@@ -165,6 +165,15 @@ let atom_to_jsonaf ~limits ~state_document delta =
                  | _ -> "model_job_target_restored") )
           ; "value", Model_job_target.to_json binding
           ])
+  | Inference_ledger_changed value ->
+    let%map document =
+      Inference_ledger.to_document value
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    `Object
+      [ "kind", `String "inference_ledger_changed"; "value", D.Document.json document ]
   | Job_changed value ->
     let%bind () =
       match value.P.Job.status with
@@ -426,6 +435,20 @@ let atom_of_jsonaf ~limits json =
     else if String.equal kind "model_job_recipe_target_captured"
     then Delta.Model_job_recipe_target_captured binding
     else Delta.Model_job_target_restored binding
+  | "inference_ledger_changed" ->
+    let%bind json = X.required fields "value" X.raw in
+    let%bind document =
+      D.Document.inspect ~limits json
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+    in
+    let%map ledger =
+      Inference_ledger.of_document document ~limits:Inference_ledger.Limits.default
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    Delta.Inference_ledger_changed ledger
   | "job_changed" ->
     Result.map (X.required fields "value" P.Job.of_json) ~f:(fun value ->
       Delta.Job_changed value)
@@ -596,6 +619,8 @@ let shape =
                , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
              ; ( "model_job_target_restored"
                , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
+             ; ( "inference_ledger_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "value", D.Shape.value ] )
              ; ( "job_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Session_record_shapes.job ]
                )
@@ -738,13 +763,45 @@ let upgrade document ~limits =
                    else value ))))
       | _ -> F.invalid "payload" "must be an object")
   in
+  let%bind ledger_step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:2 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%bind changes =
+        List.map changes ~f:(fun change ->
+          let%bind kind = F.required change "kind" F.string in
+          if not (String.equal kind "created")
+          then Ok change
+          else (
+            let%bind raw = F.required change "state" Result.return in
+            let%bind state = D.Document.inspect ~limits raw in
+            let%bind state = Session_state_document.upgrade state ~limits in
+            match change with
+            | `Object fields ->
+              Ok
+                (`Object
+                    (List.map fields ~f:(fun (name, value) ->
+                       ( name
+                       , if String.equal name "state"
+                         then D.Document.json state
+                         else value ))))
+            | _ -> F.invalid "change" "must be an object"))
+        |> Result.all
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 name, if String.equal name "changes" then `Array changes else value)))
+      | _ -> F.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.delta", 2 ]
-      ~max_steps:1
+      ~targets:[ "session.delta", 3 ]
+      ~max_steps:2
       ~max_operations:100_000
-      ~steps:[ step ]
+      ~steps:[ step; ledger_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -753,7 +810,7 @@ let codec ~limits =
   D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
-    ~version:2
+    ~version:3
     ~shape
     ~supported_semantics:[]
     ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
@@ -783,7 +840,7 @@ let create value ~limits ~state_document =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:2
+      ~version:3
       ~payload:(`Object [ "changes", `Array changes ])
   in
   (* Decode authored output too: one set of validators governs both paths. *)

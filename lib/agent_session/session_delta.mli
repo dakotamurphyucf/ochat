@@ -34,6 +34,7 @@ type t =
   | Model_job_target_captured of Model_job_target.t
   | Model_job_recipe_target_captured of Model_job_target.t
   | Model_job_target_restored of Model_job_target.t
+  | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t

@@ -513,7 +513,26 @@ let initialization_shape =
   |> Result.ok_or_failwith
 ;;
 
+let ledger_error error =
+  P.Error.invalid_request (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+;;
+
+let ledger_of_jsonaf ~limits json =
+  let open Result.Let_syntax in
+  let%bind document =
+    D.Document.inspect ~limits json
+    |> Result.map_error ~f:(fun error ->
+      P.Error.invalid_request (Sexp.to_string_hum (D.Error.sexp_of_t error)))
+  in
+  Inference_ledger.of_document document ~limits:Inference_ledger.Limits.default
+  |> Result.map_error ~f:ledger_error
+;;
+
 let state_to_jsonaf (t : S.t) =
+  let open Result.Let_syntax in
+  let%map ledger =
+    Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
+  in
   `Object
     [ "identity", identity_to_jsonaf t.identity
     ; "spec", spec_to_jsonaf t.spec
@@ -529,6 +548,7 @@ let state_to_jsonaf (t : S.t) =
     ; "permissions", (X.list_json P.Permission.to_json) t.permissions
     ; "grants", (X.list_json P.Grant.to_json) t.grants
     ; "jobs", (X.list_json P.Job.to_json) t.jobs
+    ; "inference_ledger", D.Document.json ledger
     ; "model_job_targets", X.list_json Model_job_target.to_json t.model_job_targets
     ; "schedules", (X.list_json P.Schedule.Storage.to_json) t.schedules
     ; "invocations", (X.list_json P.Invocation.Storage.to_json) t.invocations
@@ -575,6 +595,9 @@ let state_of_jsonaf ~limits json =
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
   let%bind jobs = X.required fields "jobs" (X.list P.Job.of_json) in
+  let%bind inference_ledger =
+    X.required fields "inference_ledger" (ledger_of_jsonaf ~limits)
+  in
   let%bind model_job_targets =
     X.required
       fields
@@ -630,6 +653,7 @@ let state_of_jsonaf ~limits json =
     ; permissions
     ; grants
     ; jobs
+    ; inference_ledger
     ; model_job_targets
     ; schedules
     ; invocations
@@ -667,6 +691,7 @@ let state_shape =
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
+    ; "inference_ledger", D.Shape.value
     ; ( "model_job_targets"
       , X.array_shape_exn ~identity_field:"job_id" Model_job_target.shape )
     ; "schedules", X.array_shape_exn ~identity_field:"id" Shapes.schedule
@@ -775,13 +800,62 @@ let upgrade document ~limits =
         Error
           (D.Error.Invalid_field { path = []; reason = "state payload must be an object" }))
   in
+  let%bind ledger_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:2 ~f:(fun payload ->
+      let%bind identity =
+        Agent_store.Document_fields.required payload "identity" Result.return
+      in
+      let%bind identity = identity_of_jsonaf identity |> X.document_result in
+      let%bind ledger =
+        match D.Json.field payload ~name:"inference_ledger" with
+        | Absent ->
+          let%bind ledger =
+            Inference_ledger.create
+              ~session_id:identity.session_id
+              ~generation:identity.generation
+              ~before_tracking_unknown:true
+              ~limits:Inference_ledger.Limits.default
+            |> Result.map_error ~f:ledger_error
+            |> X.document_result
+          in
+          Inference_ledger.to_document ledger
+          |> Result.map_error ~f:ledger_error
+          |> X.document_result
+        | Null | Value _ ->
+          let%bind raw =
+            Agent_store.Document_fields.required payload "inference_ledger" Result.return
+          in
+          let%bind document = D.Document.inspect ~limits raw in
+          let%bind ledger =
+            Inference_ledger.of_document document ~limits:Inference_ledger.Limits.default
+            |> Result.map_error ~f:ledger_error
+            |> X.document_result
+          in
+          let%map () =
+            Inference_ledger.validate
+              ledger
+              ~limits:Inference_ledger.Limits.default
+              ~session_id:identity.session_id
+              ~generation:identity.generation
+            |> Result.map_error ~f:ledger_error
+            |> X.document_result
+          in
+          document
+      in
+      match payload with
+      | `Object fields ->
+        if List.Assoc.mem fields "inference_ledger" ~equal:String.equal
+        then Ok payload
+        else Ok (`Object (fields @ [ "inference_ledger", D.Document.json ledger ]))
+      | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 2 ]
-      ~max_steps:1
+      ~targets:[ "session.state", 3 ]
+      ~max_steps:2
       ~max_operations:100_000
-      ~steps:[ step ]
+      ~steps:[ step; ledger_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -791,12 +865,12 @@ let codec ~limits =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:2
+      ~version:3
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
       ~decode:(fun json -> X.document_result (state_of_jsonaf ~limits json))
-      ~encode:(fun state -> Ok (state_to_jsonaf state))
+      ~encode:(fun state -> X.document_result (state_to_jsonaf state))
   with
   | Ok codec -> codec
   | Error error -> raise_s [%sexp "invalid session state codec", (error : D.Error.t)]
@@ -807,8 +881,39 @@ let decode ~limits document =
   D.Domain_codec.decode (codec ~limits) document
 ;;
 
-let encode t ~limits = D.Domain_codec.encode (codec ~limits) t
+let validate_ledger_carrier (t : t) ~limits =
+  let open Result.Let_syntax in
+  match D.Extension_carrier.template t with
+  | None -> Ok ()
+  | Some original ->
+    let%bind () = D.Document.validate original ~limits in
+    let%bind raw =
+      Agent_store.Document_fields.required
+        (D.Document.payload original)
+        "inference_ledger"
+        Result.return
+    in
+    let%bind previous = ledger_of_jsonaf ~limits raw |> X.document_result in
+    Inference_ledger.validate_update previous ~incoming:(value t).inference_ledger
+    |> Result.map_error ~f:ledger_error
+    |> X.document_result
+;;
+
+let encode t ~limits =
+  let%bind.Result () = validate_ledger_carrier t ~limits in
+  D.Domain_codec.encode (codec ~limits) t
+;;
 
 let adopt previous ~limits incoming =
+  let open Result.Let_syntax in
+  let%bind () = validate_ledger_carrier previous ~limits in
+  let%bind () = validate_ledger_carrier incoming ~limits in
+  let%bind () =
+    Inference_ledger.validate_update
+      (value previous).inference_ledger
+      ~incoming:(value incoming).inference_ledger
+    |> Result.map_error ~f:ledger_error
+    |> X.document_result
+  in
   D.Domain_codec.adopt (codec ~limits) ~previous ~incoming
 ;;

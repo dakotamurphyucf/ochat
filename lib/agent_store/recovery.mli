@@ -58,6 +58,25 @@ val load
   -> validate:('state -> (unit, Store_error.t) result)
   -> ('state t, Store_error.t) result
 
+(** Same complete stored/domain/fallback/archive validation as [load], returning
+    the selected recovered state without repairing an incomplete journal tail.
+    No recovery metadata, state, snapshot or journal mutation occurs. Temporary
+    store locking remains the caller's responsibility. [repaired_crash_tail] is
+    false even when an incomplete tail was observed. Callback restrictions match
+    [load]. *)
+val read
+  :  env:Eio_unix.Stdenv.base
+  -> journal:Journal.t
+  -> snapshot_directory:string
+  -> max_snapshot_payload_length:int
+  -> session_id:Agent_protocol.Id.Session.t
+  -> initial:'state
+  -> restore_snapshot:(Snapshot.t -> ('state, Store_error.t) result)
+  -> apply:('state -> Transaction.t -> ('state, Store_error.t) result)
+  -> validate_transaction:(Transaction.t -> (unit, Store_error.t) result)
+  -> validate:('state -> (unit, Store_error.t) result)
+  -> ('state t, Store_error.t) result
+
 (** Complete restoration/retention preflight under the same existing owner;
     performs the same checks and fallback replays as [load] without repair or
     writes. Domain callbacks have the same effect restrictions as [load]. Run

@@ -72,6 +72,90 @@ val set_compaction_inference
   -> Compaction_inference.t option
   -> (unit, Agent_protocol.Error.t) Result.t
 
+module Inference_owner : sig
+  (** One actual constructed graph, with no model/tool authority. The process-local
+      token survives worker detachment and authorized resource borrowing. *)
+  type t
+end
+
+(** Open before graph constructors. Fresh graph source, issuing actor and current
+    generation are captured; it cannot be reconstructed from durable state. *)
+val open_inference_owner
+  :  t
+  -> source:Transcript.Source_id.t
+  -> (Inference_owner.t, Agent_protocol.Error.t) Result.t
+
+(** Serialized original-ledger admission and durable ACK precede handle return.
+    Optional associations require actual per-execution evidence; no inference from
+    the actor's current operation. Untracked admission also ACKs its ordinal. *)
+val admit_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> relation:Transcript.Scope.relation
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> invocation_id:Agent_protocol.Id.Invocation.t option
+  -> configuration:Inference.Observation.Configuration.t
+  -> (Inference_ledger.Handle.t, Agent_protocol.Error.t) Result.t
+
+val acknowledge_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference_runtime.Attempt.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Exact retained-handle observations may arrive after inference ends. Missing
+    retired/untracked rows stay absent. Context estimate remains separate from
+    usage and must carry the designated context identity/preparation. *)
+val observe_inference
+  :  t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference.Observation.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Late revisions may use an EXACT retained admitted handle under this still
+    live graph owner. Missing/future/unallocated scope rejects; no handle is
+    constructed from incoming identifiers or lifetime tombstone index. *)
+val observe_owned_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> Inference.Observation.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val complete_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference_client.Completion.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Called once after allocation's joined lifetime. Routing is removed even if
+    interruption ACK fails; the bounded durable row remains recovery authority.
+    Uses the actual live Attempt.delivery when acknowledged. Without that owned
+    instance, Prepared is definitely not submitted and Running conservatively
+    possibly submitted. No provider terminal is manufactured. *)
+val release_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+val seal_inference_owner
+  :  t
+  -> owner:Inference_owner.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Only after the actual graph excludes new calls and joins. Reconciles bounded
+    retained residual rows; success removes the owner. Actor/writer must be live. *)
+val finish_inference_owner
+  :  t
+  -> owner:Inference_owner.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Exclusive activation/recovery only, never read/query. Reconciles outstanding
+    Prepared/Running using honest conservative delivery before fresh constructors. *)
+val reconcile_inference_recovery : t -> (unit, Agent_protocol.Error.t) Result.t
+
 module Initialization_scope : sig
   (** Process-local capability issued only to a trusted Pending constructor.
       Bound to one actor, stable source/complete Selection and generation; it is
@@ -567,6 +651,27 @@ val commit_administration
   -> command_audit:Document_schema.Document.t option
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
+  -> kind:Session_state.Compaction_archive.kind
+  -> Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Trusted owner-fenced administration. Validate the original writer/CAS basis
+    BEFORE resource retirement. The reconciled commit accepts only ledger,
+    counters and updated timestamp changes caused by that retirement; complete
+    opaque configuration and all other fields must still match [expected].
+    The original candidate is validated before overlaying the actual ledger,
+    preserving retained records/ordinals across the candidate generation. *)
+val validate_administration_basis
+  :  t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val commit_reconciled_administration
+  :  t
+  -> command_audit:Document_schema.Document.t option
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected:Session_state.t
   -> kind:Session_state.Compaction_archive.kind
   -> Session_state.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result

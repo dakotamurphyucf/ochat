@@ -112,6 +112,16 @@ module Spec : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+(** Optional status-visible aggregate. This local sexp codec preserves presence;
+    value decoding uses the same bounded validated safe summary JSON codec. It is
+    not a generic deserializer for provider/private Presence payloads. *)
+module Inference_summary : sig
+  type t = Inference_query.Summary.t History_entry.Payload.Presence.t
+
+  val sexp_of_t : t -> Core.Sexp.t
+  val t_of_sexp : Core.Sexp.t -> t
+end
+
 type t =
   { id : Id.Session.t
   ; creator : Id.Principal.t option
@@ -126,6 +136,8 @@ type t =
   ; active_operation : Operation.t option
   ; revision : int64
   ; latest_event_sequence : int64
+  ; inference_summary : Inference_summary.t
+        [@sexp.default History_entry.Payload.Presence.Absent]
   }
 [@@deriving sexp]
 

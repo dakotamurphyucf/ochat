@@ -121,7 +121,8 @@ let inference_policy env =
     ; runtime_inference_ports =
         (fun _ ->
           Ok
-            { identity = Inference_host.identity host
+            { new_preparation_id = (Inference_host.identity host).new_preparation_id
+            ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
             ; on_attempt = ignore
             ; on_observation = ignore
             ; on_completion = ignore

@@ -53,7 +53,9 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ ( [ "inference_runtime/"
+    [ ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
+      , "../lib/inference-observations.md" )
+    ; ( [ "inference_runtime/"
         ; "inference_client/"
         ; "inference_host/"
         ; "openai/inference_"

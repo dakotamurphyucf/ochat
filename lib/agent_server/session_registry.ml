@@ -22,6 +22,10 @@ type t =
   ; sessions : (Agent_protocol.Id.Session.t, entry) Map.Poly.t Atomic.t
   ; mutable indexed :
       (Agent_protocol.Id.Session.t, Agent_store.Session_index.Entry.t) Map.Poly.t
+  ; mutable reader :
+      (Agent_store.Session_index.Entry.t
+       -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
+        option
   ; mutable loader :
       (Agent_store.Session_index.Entry.t -> (entry, Agent_protocol.Error.t) result) option
   }
@@ -37,6 +41,7 @@ let create () =
   ; closing = Atomic.make false
   ; sessions = Atomic.make Map.Poly.empty
   ; indexed = Map.Poly.empty
+  ; reader = None
   ; loader = None
   }
 ;;
@@ -46,6 +51,11 @@ let install_loader t loader =
     match Atomic.get t.closing with
     | true -> ()
     | false -> t.loader <- Some loader)
+;;
+
+let install_reader t reader =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if not (Atomic.get t.closing) then t.reader <- Some reader)
 ;;
 
 let index t entry =
@@ -115,6 +125,50 @@ let load t session_id =
              (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
            t.indexed <- Map.remove t.indexed session_id;
            entry)))
+;;
+
+let read_state t ~authorize session_id =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    let open Result.Let_syntax in
+    let check state =
+      let summary = Agent_session.Session_state.summary state in
+      if not (Agent_protocol.Id.Session.equal summary.id session_id)
+      then
+        Error
+          (Agent_protocol.Error.create
+             Persistence_error
+             ~message:"read session identity does not match the index"
+             ~retryable:false
+             ())
+      else (
+        let%map () = authorize summary in
+        state)
+    in
+    match Atomic.get t.closing, find t session_id with
+    | true, _ -> Error (shutting_down ())
+    | false, Some entry ->
+      let%bind state = Agent_session.Session_actor.state entry.actor in
+      check state
+    | false, None ->
+      (match Map.find t.indexed session_id, t.reader with
+       | None, _ ->
+         Error
+           (Agent_protocol.Error.create
+              Session_not_found
+              ~message:"session does not exist"
+              ~retryable:false
+              ())
+       | Some _, None ->
+         Error
+           (Agent_protocol.Error.create
+              Server_shutting_down
+              ~message:"session reader is unavailable"
+              ~retryable:true
+              ())
+       | Some indexed, Some reader ->
+         let%bind () = authorize indexed.Agent_store.Session_index.Entry.session in
+         let%bind state = reader indexed in
+         check state))
 ;;
 
 let entries t = Eio.Mutex.use_ro t.mutex (fun () -> Map.data (Atomic.get t.sessions))
@@ -216,6 +270,7 @@ let shutdown t =
         Atomic.set t.closing true;
         t.indexed <- Map.Poly.empty;
         t.loader <- None;
+        t.reader <- None;
         entries)
     in
     (* Dependency cleanup can still need another actor's durable stop acknowledgement.

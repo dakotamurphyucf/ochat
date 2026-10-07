@@ -27,6 +27,7 @@ type t =
   | Model_job_target_captured of Model_job_target.t
   | Model_job_recipe_target_captured of Model_job_target.t
   | Model_job_target_restored of Model_job_target.t
+  | Inference_ledger_changed of (Inference_ledger.t[@sexp.opaque])
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -115,9 +116,20 @@ let inference_error error =
     (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
 ;;
 
-let rec apply ?(limits = native_limits) state = function
+let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
-  | Created created -> Session_state.upgrade_schema created
+  | Created created ->
+    let open Result.Let_syntax in
+    let%bind created = Session_state.upgrade_schema created in
+    let%map () =
+      Inference_ledger.validate_update
+        state.inference_ledger
+        ~incoming:created.inference_ledger
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    created
   | Managed_stop_admitted receipt ->
     let open Result.Let_syntax in
     let%bind () = Managed_stop.validate receipt in
@@ -462,6 +474,25 @@ let rec apply ?(limits = native_limits) state = function
        Error
          (Agent_protocol.Error.invalid_request
             "restored model job target generation changed"))
+  | Inference_ledger_changed inference_ledger ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Inference_ledger.validate_update state.inference_ledger ~incoming:inference_ledger
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    let%map () =
+      Inference_ledger.validate
+        inference_ledger
+        ~limits:Inference_ledger.Limits.default
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request
+          (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+    in
+    { state with inference_ledger }
   | Job_changed job ->
     let open Result.Let_syntax in
     let previous =
@@ -1006,17 +1037,23 @@ let rec apply ?(limits = native_limits) state = function
            ~message:"session generation did not advance"
            ~retryable:false
            ())
-    else
-      Ok
-        { state with
-          identity = { state.identity with generation }
-        ; pending_initial_start = false
-        ; conversation =
-            { state.conversation with
-              authoring_reference_index = None
-            ; authoring_publication = None
-            }
-        }
+    else (
+      let%map.Result inference_ledger =
+        Inference_ledger.with_generation state.inference_ledger ~generation
+        |> Result.map_error ~f:(fun error ->
+          Agent_protocol.Error.invalid_request
+            (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error)))
+      in
+      { state with
+        inference_ledger
+      ; identity = { state.identity with generation }
+      ; pending_initial_start = false
+      ; conversation =
+          { state.conversation with
+            authoring_reference_index = None
+          ; authoring_publication = None
+          }
+      })
 ;;
 
 let capture_new_model_jobs ?(limits = native_limits) state delta =

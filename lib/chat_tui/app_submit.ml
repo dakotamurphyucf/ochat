@@ -319,7 +319,7 @@ let context_for_tests runtime started_turns =
   in
   let inference_identity : Chat_response.Neutral_turn.Identity.t =
     { new_preparation_id = (fun () -> failwith "submit fixture dispatched")
-    ; new_attempt = (fun _ ~relation:_ -> failwith "submit fixture started attempt")
+    ; with_attempt = (fun _ ~relation:_ ~f:_ -> failwith "submit fixture started attempt")
     }
   in
   let shared : App_context.Resources.t =

@@ -39,6 +39,11 @@ module Limits : sig
     -> max_retained_bytes:int
     -> document_limits:Document_schema.Limits.t
     -> (t, Error.t) Result.t
+
+  (** Durable session profile: 256 attempts, 256 host turns, 4 MiB complete encoded
+      ledger; structural admission depth 256, one million fields, two million nodes.
+      State/actor/migration share this exact profile. *)
+  val default : t
 end
 
 module Handle : sig
@@ -50,8 +55,9 @@ module Handle : sig
       the admitted ordinal, so retired scope cannot be allocated again. Fixed
       accounting/context IDs belong to this exact scope. A handle is returned to
       inference only AFTER actor persistence acknowledgement, tracked or not. *)
-  val session_id : t -> Agent_protocol.Id.Session.t
+  val equal : t -> t -> bool
 
+  val session_id : t -> Agent_protocol.Id.Session.t
   val generation : t -> int
   val ordinal : t -> int64
   val scope : t -> Transcript.Scope.t
@@ -178,6 +184,33 @@ val finish_turn
   -> Agent_protocol.Operation.t
   -> (t, Error.t) Result.t
 
+(** Exact retained lookup; never admits a missing historical host occurrence. *)
+val find_turn_handle
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> generation:int
+  -> Turn_handle.t option
+
+val session_id : t -> Agent_protocol.Id.Session.t
+val generation : t -> int
+
+(** Canonical session qualification for an actual host graph source; allocates no
+    scope, ordinal or attempt. Admission uses this same validated operation. *)
+val qualify_source
+  :  t
+  -> Transcript.Source_id.t
+  -> (Transcript.Source_id.t, Error.t) Result.t
+
+(** Admit the ORIGINAL carrier under the supplied profile and exact identity.
+    Abstract ledgers constructed under looser quotas cannot bypass State's profile.
+    No normalization/reset or new ownership is published by validation. *)
+val validate
+  :  t
+  -> limits:Limits.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> generation:int
+  -> (unit, Error.t) Result.t
+
 val find : t -> ordinal:int64 -> Row.t option
 val rows : t -> Row.t list
 
@@ -204,3 +237,14 @@ val revision : t -> int64
 val to_document : t -> (Document_schema.Document.t, Error.t) Result.t
 
 val of_document : Document_schema.Document.t -> limits:Limits.t -> (t, Error.t) Result.t
+
+(** Admit an exact complete replacement after a prior durable ledger exists.
+    Both originals use [Limits.default]; session identity is unchanged and
+    generation, admission/revision/coverage counters never decrease. Retained
+    actual identities/configuration and authoritative observations cannot rewind;
+    active rows cannot disappear, ended rows cannot reopen, and retired ordinals
+    cannot resurrect. Existing child adoption rules reject protected retirement,
+    conflicting unknown members, or an incoming carrier that omits previous
+    unknowns. Accepted incoming is unchanged; no silent repair or authority is
+    granted. New initial ledgers have no prior update boundary. *)
+val validate_update : t -> incoming:t -> (unit, Error.t) Result.t

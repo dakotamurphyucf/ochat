@@ -841,9 +841,17 @@ module Response = struct
     let create ~summary ~max_bytes =
       let* limits = bounds max_bytes in
       let* base_bytes =
-        measure
+        D.Json.validate_and_measure
           ~limits
           (to_json { summary; attempts = { items = []; next_cursor = None } })
+        |> Result.map_error ~f:(function
+          | D.Error.Limit_exceeded "bytes" ->
+            Protocol_error.create
+              Resource_limit
+              ~message:"inference summary cannot fit response allowance"
+              ~retryable:false
+              ()
+          | _ -> Protocol_error.invalid_request "invalid bounded inference read JSON")
       in
       Ok
         { summary
@@ -866,7 +874,11 @@ module Response = struct
           match next_cursor with
           | None -> Ok 0
           | Some cursor ->
-            let* limits = bounds t.max_bytes in
+            (* Cursor validity is independent of the remaining page allowance.
+               Measure escaping under the protocol ceiling; the fit check below
+               classifies a valid cursor that cannot fit as a capacity failure. *)
+            let* _ = Page.Cursor.of_json (Page.Cursor.to_json cursor) in
+            let* limits = bounds (16 * 1024 * 1024) in
             let* bytes = measure ~limits (Page.Cursor.to_json cursor) in
             Ok (String.length ",\"next_cursor\":" + bytes)
         in
@@ -883,7 +895,13 @@ module Response = struct
         if not fits
         then
           if count = 0
-          then invalid "first inference row cannot fit response allowance"
+          then
+            Error
+              (Protocol_error.create
+                 Resource_limit
+                 ~message:"first inference row cannot fit response allowance"
+                 ~retryable:false
+                 ())
           else Ok None
         else
           Ok

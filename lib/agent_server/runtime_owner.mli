@@ -190,6 +190,15 @@ val reinitialize_administration
   -> before_initialize:(unit -> unit)
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Original admission is checked under this owner fence before old resources
+    are joined. [commit] reconciles only tracking ACK drift against that original
+    basis. No initialization occurs; failures and cancellation propagate. *)
+val retire_administration
+  :  t
+  -> validate:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> commit:(unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 val parse_user_content
   :  t
   -> id:History_entry.Id.t

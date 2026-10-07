@@ -264,8 +264,8 @@ let create ~namespace ~default_model ~post_stream =
   let next () = Atomic.fetch_and_add sequence 1 |> Int.to_string in
   let identity : Chat_response.Neutral_turn.Identity.t =
     { new_preparation_id = (fun () -> namespace ^ "/preparation/" ^ next ())
-    ; new_attempt =
-        (fun _ ~relation ->
+    ; with_attempt =
+        (fun _ ~relation ~f ->
           let id = next () in
           let scope =
             Transcript.Scope.create
@@ -274,7 +274,10 @@ let create ~namespace ~default_model ~post_stream =
               ~relation
             |> ok
           in
-          scope, O.Observation_id.of_string (namespace ^ "/usage/" ^ id) |> ok)
+          let accounting_id =
+            O.Observation_id.of_string (namespace ^ "/usage/" ^ id) |> ok
+          in
+          f ~scope ~accounting_id)
     }
   in
   let bind target =

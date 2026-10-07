@@ -5,11 +5,18 @@ module C = Inference_client
 let identity =
   C.Identity.
     { new_preparation_id = (fun () -> "client-preparation")
-    ; new_attempt = (fun _ ~relation:_ -> scope, accounting_id)
+    ; with_attempt = (fun _ ~relation:_ ~f -> f ~scope ~accounting_id)
     }
 ;;
 
-let run context ~on_attempt ~on_completion ~on_observation ~on_event =
+let run
+      ?(identity = identity)
+      context
+      ~on_attempt
+      ~on_completion
+      ~on_observation
+      ~on_event
+  =
   Eio_main.run (fun _ ->
     Eio.Switch.run (fun sw ->
       C.run
@@ -151,4 +158,59 @@ let%expect_test "terminal acknowledgement failure is not reclassified or deliver
   in
   printf "raised=%b completion_count=%d\n" raised !count;
   [%expect {| raised=true completion_count=1 |}]
+;;
+
+let%expect_test
+    "attempt bracket contains scope admission and strict callbacks on every exit"
+  =
+  let allocations = ref 0 in
+  let releases = ref 0 in
+  let identity =
+    C.Identity.
+      { new_preparation_id = (fun () -> "bracket-preparation")
+      ; with_attempt =
+          (fun _ ~relation:_ ~f ->
+            incr allocations;
+            Exn.protect
+              ~finally:(fun () -> incr releases)
+              ~f:(fun () -> f ~scope ~accounting_id))
+      }
+  in
+  let dispatched = ref false in
+  let selected =
+    context
+      (fun ~sw:_ ~scope ~accounting_id ~note_delivery:_ ~on_event:_ ~on_observation:_ ->
+         dispatched := true;
+         receipt ~scope ~accounting_id ())
+  in
+  let original =
+    try
+      run
+        ~identity
+        selected
+        ~on_attempt:(fun _ -> raise Original_observer_failed)
+        ~on_completion:ignore
+        ~on_observation:ignore
+        ~on_event:ignore
+      |> ignore;
+      false
+    with
+    | Original_observer_failed -> true
+  in
+  assert (original && (not !dispatched) && !allocations = 1 && !releases = 1);
+  run
+    ~identity
+    selected
+    ~on_attempt:ignore
+    ~on_completion:ignore
+    ~on_observation:ignore
+    ~on_event:ignore
+  |> ok
+  |> ignore;
+  assert (!dispatched && !allocations = 2 && !releases = 2);
+  print_endline
+    "one f per admitted allocation; callback exception and normal return release exactly \
+     once";
+  [%expect
+    {| one f per admitted allocation; callback exception and normal return release exactly once |}]
 ;;

@@ -125,7 +125,8 @@ let daemon_options host =
           (* Actual fresh identities are mandatory independently of rendering.
              These explicit observers do not claim durable usage accounting. *)
           Ok
-            { identity = Inference_host.identity host
+            { new_preparation_id = (Inference_host.identity host).new_preparation_id
+            ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
             ; on_attempt = (fun _ -> ())
             ; on_observation = (fun _ -> ())
             ; on_completion = (fun _ -> ())

@@ -312,6 +312,7 @@ let session_summary () : Session.t =
   ; active_operation = None
   ; revision = 4L
   ; latest_event_sequence = 9L
+  ; inference_summary = History_entry.Payload.Presence.Absent
   }
 ;;
 

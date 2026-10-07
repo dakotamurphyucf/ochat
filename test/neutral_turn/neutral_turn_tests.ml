@@ -31,8 +31,8 @@ let identity () =
   let next = ref 0 in
   C.Neutral_turn.Identity.
     { new_preparation_id = (fun () -> "preparation-" ^ Int.to_string (!next + 1))
-    ; new_attempt =
-        (fun _ ~relation ->
+    ; with_attempt =
+        (fun _ ~relation ~f ->
           Int.incr next;
           let attempt = Int.to_string !next in
           let scope =
@@ -42,7 +42,8 @@ let identity () =
               ~relation
             |> ok
           in
-          scope, O.Observation_id.of_string ("usage-" ^ attempt) |> ok)
+          let accounting_id = O.Observation_id.of_string ("usage-" ^ attempt) |> ok in
+          f ~scope ~accounting_id)
     }
 ;;
 

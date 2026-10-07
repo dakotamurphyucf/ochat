@@ -597,6 +597,52 @@ let history_window =
 
 let extension_status = f [ "version"; "kind"; "id"; "generation"; "state" ]
 
+let inference_summary =
+  let sum = tag "kind" [ "tokens", f [ "kind"; "tokens" ]; "overflow", f [ "kind" ] ] in
+  let metric =
+    o
+      [ "actual", sum
+      ; "actual_attempts", v
+      ; "estimated", sum
+      ; "estimated_attempts", v
+      ; "mixed_estimators", v
+      ; ( "unknown"
+        , f
+            [ "not_reported"
+            ; "explicit_null"
+            ; "interrupted"
+            ; "not_submitted"
+            ; "before_tracking"
+            ] )
+      ]
+  in
+  o
+    [ "retained_attempts", v
+    ; "turns", f [ "pending"; "completed"; "failed"; "cancelled"; "interrupted" ]
+    ; ( "components"
+      , o
+          (List.map
+             [ "input"
+             ; "output"
+             ; "reported_total"
+             ; "cached_input"
+             ; "cache_write_input"
+             ; "reasoning_output"
+             ]
+             ~f:(fun name -> name, metric)) )
+    ; ( "coverage"
+      , f
+          [ "before_tracking_unknown"
+          ; "retired_attempts"
+          ; "untracked_attempts"
+          ; "retired_turns"
+          ; "untracked_turns"
+          ; "tracking_limit"
+          ] )
+    ; "accounting_revision", v
+    ]
+;;
+
 let session_summary_fields =
   [ "id", v
   ; "creator", v
@@ -610,6 +656,7 @@ let session_summary_fields =
   ; "workspace_instance", v
   ; "active_operation", n operation
   ; "revision", v
+  ; "inference_summary", n inference_summary
   ; "latest_event_sequence", v
   ]
 ;;

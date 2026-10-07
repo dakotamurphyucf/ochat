@@ -34,6 +34,7 @@ type t =
       Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result
   ; prepare_administration :
       Session_registry.entry
+      -> previous:Agent_session.Session_state.t
       -> Agent_session.Session_state.t
       -> fresh_history:bool
       -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
@@ -338,6 +339,8 @@ let idempotency = function
   | Blob_read _
   | Session_list _
   | Session_get _
+  | Session_inference_summary _
+  | Session_inference_observations _
   | Session_export _
   | Permission_list _
   | Grant_list _
@@ -821,6 +824,93 @@ let handle_session_get t context request =
       snapshot
   in
   Agent_protocol.Method_result.Session_get snapshot
+;;
+
+let read_inference_state t context session_id =
+  let principal = Connection_context.principal context in
+  Session_registry.read_state t.registry session_id ~authorize:(fun summary ->
+    if session_visible_to principal summary
+    then Ok ()
+    else Error (error Permission_denied "session is not visible to this principal"))
+;;
+
+let handle_inference_summary
+      t
+      context
+      (request : Agent_protocol.Inference_query.Summary_request.t)
+  =
+  let open Result.Let_syntax in
+  let%map state = read_inference_state t context request.session_id in
+  Agent_protocol.Method_result.Session_inference_summary
+    (Agent_session.Inference_ledger.summary state.inference_ledger)
+;;
+
+let handle_inference_observations
+      t
+      context
+      budget
+      (request : Agent_protocol.Inference_query.Request.t)
+  =
+  let module Q = Agent_protocol.Inference_query in
+  let module L = Agent_session.Inference_ledger in
+  let open Result.Let_syntax in
+  let%bind _ =
+    Q.Request.create
+      ~session_id:request.session_id
+      ~page:request.page
+      ~include_configuration:request.include_configuration
+      ~include_diagnostics:request.include_diagnostics
+  in
+  let%bind () =
+    if request.page.limit > (t.server_info ()).limits.max_page_size
+    then Error (error Invalid_request "inference page exceeds the advertised page limit")
+    else Ok ()
+  in
+  let%bind state = read_inference_state t context request.session_id in
+  let ledger = state.inference_ledger in
+  let%bind binding =
+    Pagination.Inference.binding
+      ~principal:(Connection_context.principal context)
+      ~request
+      ~generation:state.identity.generation
+      ~accounting_revision:(L.revision ledger)
+  in
+  let%bind after = Pagination.Inference.after t.pagination binding request.page.cursor in
+  let ordinal row = L.Handle.ordinal (L.Row.handle row) in
+  let rows =
+    L.rows ledger
+    |> List.filter ~f:(fun row -> Int64.(ordinal row > after))
+    |> List.sort ~compare:(fun a b -> Int64.compare (ordinal a) (ordinal b))
+  in
+  let%bind builder =
+    Q.Response.Builder.create
+      ~summary:(L.summary ledger)
+      ~max_bytes:(Inference_query_budget.max_result_bytes budget)
+  in
+  let rec append builder remaining rows =
+    match remaining, rows with
+    | 0, _ | _, [] -> Q.Response.Builder.finish builder
+    | _, row :: rest ->
+      let%bind next_cursor =
+        match rest with
+        | [] -> Ok None
+        | _ :: _ ->
+          Pagination.Inference.cursor t.pagination binding ~after_ordinal:(ordinal row)
+          |> Result.map ~f:Option.some
+      in
+      let row =
+        L.row_view
+          row
+          ~include_configuration:request.include_configuration
+          ~include_diagnostics:request.include_diagnostics
+      in
+      let%bind added = Q.Response.Builder.add builder row ~next_cursor in
+      (match added with
+       | None -> Q.Response.Builder.finish builder
+       | Some builder -> append builder (remaining - 1) rest)
+  in
+  let%map response = append builder request.page.limit rows in
+  Agent_protocol.Method_result.Session_inference_observations response
 ;;
 
 let handle_session_attach t context command_audit request =
@@ -1439,58 +1529,63 @@ let handle_session_reset t context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
-       let%bind state = Agent_session.Session_actor.state entry.actor in
-       let%bind () = validate_stopped_revision state request.expected_revision in
-       let%bind () = Runtime_owner.unload entry.runtime in
+       let%bind expected = Agent_session.Session_actor.state entry.actor in
+       let%bind () = validate_stopped_revision expected request.expected_revision in
+       let%bind retained = t.workspace_retained expected in
+       let%bind () =
+         if retained
+         then
+           Error (error Conflict "session resources are retained by an independent child")
+         else Ok ()
+       in
+       let%bind workspace_instance =
+         replacement_workspace t entry expected request.keep_workspace
+       in
+       let options =
+         Agent_session.Administration.
+           { keep_history = request.keep_history
+           ; keep_tasks = request.keep_tasks
+           ; keep_grants = request.keep_grants
+           ; keep_labels = request.keep_labels
+           ; workspace_instance
+           }
+       in
+       let%bind candidate = Agent_session.Administration.reset expected options in
+       let%bind () =
+         Agent_session.Session_state.validate_administration_candidate
+           candidate
+           ~previous:expected
+       in
        Eio.Cancel.protect (fun () ->
-         Runtime_owner.with_administration entry.runtime (fun () ->
-           let%bind state = Agent_session.Session_actor.state entry.actor in
-           let%bind () = validate_stopped_revision state request.expected_revision in
-           let%bind retained = t.workspace_retained state in
-           let%bind () =
-             match retained with
-             | false -> Ok ()
-             | true ->
-               Error
-                 (error Conflict "session resources are retained by an independent child")
-           in
-           let%bind workspace_instance =
-             replacement_workspace t entry state request.keep_workspace
-           in
-           let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
-           let options =
-             Agent_session.Session_actor.
-               { keep_history = request.keep_history
-               ; keep_tasks = request.keep_tasks
-               ; keep_grants = request.keep_grants
-               ; keep_labels = request.keep_labels
-               ; workspace_instance
-               }
-           in
-           let%bind _ =
-             actor_command
-               command_audit
-               ~plain:(fun () ->
-                 Agent_session.Session_actor.reset
-                   entry.actor
-                   ~attachment_id:request.attachment_id
-                   ~expected_revision:request.expected_revision
-                   options)
-               ~audited:(fun command_audit ->
-                 Agent_session.Session_actor.reset_with_command_audit
-                   entry.actor
-                   ~command_audit
-                   ~attachment_id:request.attachment_id
-                   ~expected_revision:request.expected_revision
-                   options)
-           in
-           let%bind () =
-             Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
-               update_workspace_capacity entry instance)
-           in
-           let%map state = Agent_session.Session_actor.state entry.actor in
-           Agent_protocol.Method_result.Session_reset
-             (session_mutation (Agent_session.Session_state.summary state)))))
+         Runtime_owner.retire_administration
+           entry.runtime
+           ~validate:(fun () ->
+             let%bind () =
+               Agent_session.Session_actor.validate_administration_basis
+                 entry.actor
+                 ~attachment_id:request.attachment_id
+                 ~expected
+             in
+             if request.keep_cache then Ok () else reset_cache t entry)
+           ~commit:(fun () ->
+             let%bind _ =
+               Agent_session.Session_actor.commit_reconciled_administration
+                 entry.actor
+                 ~command_audit
+                 ~attachment_id:request.attachment_id
+                 ~expected
+                 ~kind:Reset
+                 candidate
+             in
+             let%bind () =
+               Option.value_map
+                 workspace_instance
+                 ~default:(Ok ())
+                 ~f:(update_workspace_capacity entry)
+             in
+             let%map state = Agent_session.Session_actor.state entry.actor in
+             Agent_protocol.Method_result.Session_reset
+               (session_mutation (Agent_session.Session_state.summary state)))))
 ;;
 
 let current_prompt_revision t state =
@@ -1532,25 +1627,30 @@ let commit_prepared
       entry
       command_audit
       ~attachment_id
+      ~expected
       ~expected_revision
       ~kind
       ~fresh_history
       candidate
   =
   let open Result.Let_syntax in
-  let%bind candidate = t.prepare_administration entry candidate ~fresh_history in
+  let%bind candidate =
+    t.prepare_administration entry ~previous:expected candidate ~fresh_history
+  in
   Runtime_owner.reinitialize_administration
     entry.Session_registry.runtime
     ~validate:(fun () ->
-      let%bind state = Agent_session.Session_actor.state entry.actor in
-      let%bind () = validate_stopped_revision state expected_revision in
-      Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id)
+      let%bind () = validate_stopped_revision expected expected_revision in
+      Agent_session.Session_actor.validate_administration_basis
+        entry.actor
+        ~attachment_id
+        ~expected)
     ~commit:(fun () ->
-      Agent_session.Session_actor.commit_administration
+      Agent_session.Session_actor.commit_reconciled_administration
         entry.actor
         ~command_audit
         ~attachment_id
-        ~expected_revision
+        ~expected
         ~kind
         candidate
       |> Result.map ~f:ignore)
@@ -1584,6 +1684,7 @@ let handle_session_rebuild t context command_audit request =
            entry
            command_audit
            ~attachment_id:request.attachment_id
+           ~expected:state
            ~expected_revision:request.expected_revision
            ~kind:Rebuild
            ~fresh_history:true
@@ -1620,6 +1721,7 @@ let handle_session_upgrade_prompt t context command_audit request =
            entry
            command_audit
            ~attachment_id:request.attachment_id
+           ~expected:state
            ~expected_revision:request.expected_revision
            ~kind:Upgrade
            ~fresh_history:false
@@ -2004,7 +2106,7 @@ let authorize_mutation t context command =
     with_writer t context ~session_id ~attachment_id (fun _ -> Ok ())
 ;;
 
-let dispatch_authorized t ~context ~command_audit = function
+let dispatch_authorized t ~context ~command_audit ~inference_budget = function
   | Agent_protocol.Command.Protocol_initialize request ->
     Result.map
       (t.initialize ~principal:(Connection_context.principal context) request)
@@ -2031,6 +2133,9 @@ let dispatch_authorized t ~context ~command_audit = function
   | Session_create request -> handle_session_create t context command_audit request
   | Session_list request -> handle_session_list t context request
   | Session_get request -> handle_session_get t context request
+  | Session_inference_summary request -> handle_inference_summary t context request
+  | Session_inference_observations request ->
+    handle_inference_observations t context inference_budget request
   | Session_attach request -> handle_session_attach t context command_audit request
   | Session_detach request -> handle_session_detach t context command_audit request
   | Session_renew_owner request ->
@@ -2065,10 +2170,12 @@ let dispatch_authorized t ~context ~command_audit = function
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
-let handle_authorized t ~context ~command_audit command =
+let handle_authorized t ~context ~command_audit ~inference_budget command =
   let open Result.Let_syntax in
   let%bind () = authorize_mutation t context command in
-  let%bind result = dispatch_authorized t ~context ~command_audit command in
+  let%bind result =
+    dispatch_authorized t ~context ~command_audit ~inference_budget command
+  in
   Pagination.lists t.pagination (Connection_context.principal context) command result
 ;;
 
@@ -2086,6 +2193,8 @@ let command_session_id = function
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
   | Session_get request -> Some request.Agent_protocol.Session.Get_request.session_id
+  | Session_inference_summary request -> Some request.session_id
+  | Session_inference_observations request -> Some request.session_id
   | Session_attach request -> Some request.session_id
   | Session_detach request -> Some request.session_id
   | Session_renew_owner request -> Some request.session_id
@@ -2141,15 +2250,15 @@ let audit_outcome
   |> Result.map_error ~f:persistence_error
 ;;
 
-let execute t context command =
+let execute t context ~inference_budget command =
   match idempotency command with
-  | None -> handle_authorized t ~context ~command_audit:None command
+  | None -> handle_authorized t ~context ~command_audit:None ~inference_budget command
   | Some identity ->
     handle_idempotent t context command identity (fun command_audit ->
-      handle_authorized t ~context ~command_audit command)
+      handle_authorized t ~context ~command_audit ~inference_budget command)
 ;;
 
-let handle t ~context command =
+let handle t ~context ~inference_budget command =
   let open Result.Let_syntax in
   let%bind () = Authorization.authorize (Connection_context.principal context) command in
   if
@@ -2160,8 +2269,17 @@ let handle t ~context command =
   else (
     let outcome =
       Result.bind
-        (execute t context command)
+        (execute t context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
+    in
+    let outcome =
+      match command with
+      | Agent_protocol.Command.Session_inference_summary _
+      | Session_inference_observations _ ->
+        Result.bind outcome ~f:(fun result ->
+          Inference_query_budget.validate_result inference_budget result
+          |> Result.map ~f:(fun () -> result))
+      | _ -> outcome
     in
     match audit_outcome t context command outcome with
     | Ok _ -> outcome

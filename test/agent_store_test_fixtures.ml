@@ -100,6 +100,7 @@ let session_summary revision =
     ; active_operation = None
     ; revision
     ; latest_event_sequence = revision
+    ; inference_summary = History_entry.Payload.Presence.Absent
     }
 ;;
 

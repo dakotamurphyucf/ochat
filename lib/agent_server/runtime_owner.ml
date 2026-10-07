@@ -512,6 +512,20 @@ let with_administration t f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let retire_administration t ~validate ~commit =
+  with_owner_lock t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if t.closed
+      then Error (closed_error ())
+      else if Option.is_some t.unloading || not (List.is_empty t.background_leases)
+      then Error (background_busy ())
+      else validate ()
+    in
+    let%bind () = unload_locked t in
+    commit ())
+;;
+
 let reinitialize_administration t ~validate ~commit ~before_initialize =
   with_owner_lock t ~protect:false (fun () ->
     let open Result.Let_syntax in

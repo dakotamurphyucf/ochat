@@ -14,7 +14,11 @@ type host =
   { find : P.Id.Session.t -> (ancestor, P.Error.t) result
   ; resolve : D.Reference.t -> (D.record, P.Error.t) result
   ; authorize : D.record -> (unit, P.Error.t) result
-  ; build_root : sw:Eio.Switch.t -> ancestor -> (B.resources, P.Error.t) result
+  ; build_root :
+      sw:Eio.Switch.t
+      -> register_tracking:(Graph_tracking.t -> unit)
+      -> ancestor
+      -> (B.resources, P.Error.t) result
   ; build_generated :
       sw:Eio.Switch.t -> parent:B.resources -> ancestor -> (B.resources, P.Error.t) result
   }
@@ -134,6 +138,63 @@ let find t id =
             ())
 ;;
 
+type cleanup_failure =
+  | Protocol of P.Error.t
+  | Raised of exn * Stdlib.Printexc.raw_backtrace
+
+let cleanup_all graphs f =
+  List.fold graphs ~init:(Ok ()) ~f:(fun first graph ->
+    let current =
+      try Result.map_error (f graph) ~f:(fun error -> Protocol error) with
+      | exn -> Error (Raised (exn, Stdlib.Printexc.get_raw_backtrace ()))
+    in
+    match first with
+    | Ok () -> current
+    | Error _ -> first)
+;;
+
+let with_tracking_scope f =
+  let graphs = ref [] in
+  let observed = ref None in
+  let cleanup f = Eio.Cancel.protect (fun () -> cleanup_all !graphs f) in
+  let retain_primary result cleanup =
+    match result, cleanup with
+    | Error _, _ | Ok _, Ok () -> result
+    | Ok _, Error (Protocol error) -> Error error
+    | Ok _, Error (Raised (exn, backtrace)) ->
+      Exn.raise_with_original_backtrace exn backtrace
+  in
+  let run () =
+    Eio.Switch.run (fun sw ->
+      match f sw (fun graph -> graphs := graph :: !graphs) with
+      | result ->
+        observed := Some (Ok result);
+        (match retain_primary result (cleanup Graph_tracking.seal) with
+         | result ->
+           observed := Some (Ok result);
+           result
+         | exception exn ->
+           let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+           observed := Some (Error (exn, backtrace));
+           Exn.raise_with_original_backtrace exn backtrace)
+      | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        observed := Some (Error (exn, backtrace));
+        ignore (cleanup Graph_tracking.seal : (unit, cleanup_failure) Result.t);
+        Exn.raise_with_original_backtrace exn backtrace)
+  in
+  match run () with
+  | result -> retain_primary result (cleanup Graph_tracking.finish)
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    ignore (cleanup Graph_tracking.finish : (unit, cleanup_failure) Result.t);
+    (match !observed with
+     | Some (Ok (Error _ as failure)) -> failure
+     | Some (Error (original, original_backtrace)) ->
+       Exn.raise_with_original_backtrace original original_backtrace
+     | None | Some (Ok (Ok _)) -> Exn.raise_with_original_backtrace exn backtrace)
+;;
+
 let with_chain ~max_depth ~host ~reference ~f =
   let open Result.Let_syntax in
   let%bind record = validate_record host reference in
@@ -149,12 +210,12 @@ let with_chain ~max_depth ~host ~reference ~f =
   let%bind () = validate_edge record (List.last_exn ancestors).state in
   let rec borrow = function
     | [] ->
-      Eio.Switch.run (fun sw ->
+      with_tracking_scope (fun sw register_tracking ->
         let%bind resources =
           List.fold_result ancestors ~init:[] ~f:(fun resources ancestor ->
             let%map prepared =
               match List.last resources with
-              | None -> host.build_root ~sw ancestor
+              | None -> host.build_root ~sw ~register_tracking ancestor
               | Some (_, parent) -> host.build_generated ~sw ~parent ancestor
             in
             resources @ [ ancestor.state.identity.session_id, prepared ])

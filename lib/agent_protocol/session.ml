@@ -439,6 +439,29 @@ module Spec = struct
   ;;
 end
 
+module Inference_summary = struct
+  type t = Inference_query.Summary.t History_entry.Payload.Presence.t
+
+  let sexp_of_t = function
+    | History_entry.Payload.Presence.Absent -> Sexp.Atom "Absent"
+    | Null -> Sexp.Atom "Null"
+    | Value summary ->
+      Sexp.List
+        [ Sexp.Atom "Value"; Jsonaf.sexp_of_t (Inference_query.Summary.to_json summary) ]
+  ;;
+
+  let t_of_sexp sexp =
+    match sexp with
+    | Sexp.Atom "Absent" -> History_entry.Payload.Presence.Absent
+    | Sexp.Atom "Null" -> History_entry.Payload.Presence.Null
+    | Sexp.List [ Sexp.Atom "Value"; json ] ->
+      (match Inference_query.Summary.of_json (Jsonaf.t_of_sexp json) with
+       | Ok summary -> History_entry.Payload.Presence.Value summary
+       | Error _ -> Sexplib.Conv.of_sexp_error "invalid bounded inference summary" sexp)
+    | _ -> Sexplib.Conv.of_sexp_error "expected Absent, Null or Value summary" sexp
+  ;;
+end
+
 type t =
   { id : Id.Session.t
   ; creator : Id.Principal.t option
@@ -453,6 +476,8 @@ type t =
   ; active_operation : Operation.t option
   ; revision : int64
   ; latest_event_sequence : int64
+  ; inference_summary : Inference_summary.t
+        [@sexp.default History_entry.Payload.Presence.Absent]
   }
 [@@deriving sexp]
 
@@ -476,6 +501,13 @@ let to_json t =
     ; Some ("latest_event_sequence", int64_to_json t.latest_event_sequence)
     ]
     |> List.filter_opt
+  in
+  let fields =
+    match t.inference_summary with
+    | History_entry.Payload.Presence.Absent -> fields
+    | Null -> fields @ [ "inference_summary", `Null ]
+    | Value summary ->
+      fields @ [ "inference_summary", Inference_query.Summary.to_json summary ]
   in
   `Object fields
 ;;
@@ -535,6 +567,14 @@ let of_json json =
   let%bind latest_event_sequence =
     Json_codec.required_as fields "latest_event_sequence" nonnegative_int64
   in
+  let%bind inference_summary =
+    match Json_codec.optional fields "inference_summary" with
+    | None -> Ok History_entry.Payload.Presence.Absent
+    | Some `Null -> Ok History_entry.Payload.Presence.Null
+    | Some json ->
+      Result.map (Inference_query.Summary.of_json json) ~f:(fun summary ->
+        History_entry.Payload.Presence.Value summary)
+  in
   if Timestamp.compare updated_at created_at < 0
   then Error (Protocol_error.invalid_request "session update precedes creation")
   else
@@ -552,6 +592,7 @@ let of_json json =
       ; active_operation
       ; revision
       ; latest_event_sequence
+      ; inference_summary
       }
 ;;
 

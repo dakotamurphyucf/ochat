@@ -135,9 +135,9 @@ end
 module Attempt : sig
   type t
 
-  (** Usage/Context/state are visible to a principal who can see the session.
-      Detailed Configuration/account alias/diagnostics are disclosed only after
-      Diagnostics AND session visibility. The encoder never exposes hidden full
+  (** Usage/Context/state rows require transcript scope AND session visibility.
+      Detailed Configuration/account alias/diagnostics additionally require
+      Diagnostics. The encoder never exposes hidden full
       Attempt_record JSON as a shortcut. Ordinal orders actual durable admission;
       Operation/Invocation are real host associations or absent. *)
   val create
@@ -198,8 +198,11 @@ end
 module Response : sig
   type t [@@deriving sexp]
 
-  (** Fully measured result <=min(16 MiB, configured connection response ceiling),
-      including result/envelope headroom and cursor. Byte admission happens before
+  (** Fully measured result within the inference-query per-RPC envelope policy
+      (default16 MiB), using the allowance left after measuring the actual RPC ID
+      and envelope wrapper, and including the actual signed cursor. HTTP batch
+      aggregate and unrelated response limits are unchanged; input limits do not
+      supply this response policy. Byte admission happens before
       next-row append/serialized allocation; a valid row that cannot fit returns
       a structured error, never a non-advancing cursor loop. *)
   val create

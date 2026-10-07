@@ -136,6 +136,7 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; inference_ledger : (Inference_ledger.t[@sexp.opaque])
   ; model_job_targets : Model_job_target.t list
     (** Exactly one private ID/generation binding per retained Model_call job.
         Source is captured at admission, root recipe target after prompt fetch;
@@ -172,6 +173,10 @@ val current_schema_version : int
     inconsistent legacy fields fail closed. *)
 val upgrade_schema : t -> (t, Agent_protocol.Error.t) result
 
+(** Fresh state with known-empty tracking coverage. The identity must have a
+    valid session ID and nonnegative generation.
+    @raise Failure if that native identity precondition is violated. Decoders
+    admit untrusted identities through typed errors instead. *)
 val create
   :  identity:Identity.t
   -> spec:Spec.t
@@ -179,6 +184,16 @@ val create
   -> t
 
 val validate : t -> (unit, Agent_protocol.Error.t) result
+
+(** Planning-only validation before retiring the actual resource graph. The
+    candidate retains the byte-exact previous ledger, admitted under its previous
+    generation; all other native checks use the actual candidate identity. This
+    grants no durable admission. The actor must overlay its CURRENT reconciled
+    ledger and run ordinary [validate] before publishing a new generation. *)
+val validate_administration_candidate
+  :  t
+  -> previous:t
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Decode the bounded receipt index under this session/generation. Absence is an
     empty index; it does not scan archives or infer that topic prose is present. *)

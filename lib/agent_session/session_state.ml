@@ -113,6 +113,7 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; inference_ledger : (Inference_ledger.t[@sexp.opaque])
   ; model_job_targets : Model_job_target.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
@@ -132,11 +133,13 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 21
+let current_schema_version = 22
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if t.schema_version = 21
+  then Ok { t with schema_version = current_schema_version }
   else if t.schema_version = 20
   then Ok { t with schema_version = current_schema_version }
   else if Option.is_some t.conversation.authoring_publication
@@ -336,7 +339,24 @@ let upgrade_schema t =
          ())
 ;;
 
+let ledger_error error =
+  Agent_protocol.Error.invalid_request
+    (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+;;
+
+let fresh_inference_ledger_exn (identity : Identity.t) =
+  Inference_ledger.create
+    ~session_id:identity.session_id
+    ~generation:identity.generation
+    ~before_tracking_unknown:false
+    ~limits:Inference_ledger.Limits.default
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
 let create ~identity ~spec ~initial_history =
+  let inference_ledger = fresh_inference_ledger_exn identity in
   let desired =
     if spec.Spec.protocol.start_immediately
     then Agent_protocol.Session.Running
@@ -368,6 +388,7 @@ let create ~identity ~spec ~initial_history =
   ; permissions = []
   ; grants = []
   ; jobs = []
+  ; inference_ledger
   ; model_job_targets = []
   ; schedules = []
   ; invocations = []
@@ -490,7 +511,7 @@ let validate_model_job_targets t =
     | Compaction -> Ok ())
 ;;
 
-let validate t =
+let validate_domain t =
   let open Result.Let_syntax in
   let%bind () = validate_delegation t in
   let%bind () = validate_model_job_targets t in
@@ -871,6 +892,40 @@ let validate t =
   else Ok ()
 ;;
 
+let validate t =
+  let open Result.Let_syntax in
+  let%bind () = validate_domain t in
+  Inference_ledger.validate
+    t.inference_ledger
+    ~limits:Inference_ledger.Limits.default
+    ~session_id:t.identity.session_id
+    ~generation:t.identity.generation
+  |> Result.map_error ~f:ledger_error
+;;
+
+let validate_administration_candidate t ~previous =
+  let open Result.Let_syntax in
+  let%bind () = validate previous in
+  let%bind () = validate_domain t in
+  let%bind before =
+    Inference_ledger.to_document previous.inference_ledger
+    |> Result.map_error ~f:ledger_error
+  in
+  let%bind after =
+    Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
+  in
+  if
+    Agent_protocol.Id.Session.equal t.identity.session_id previous.identity.session_id
+    && String.equal
+         (Jsonaf.to_string (Document_schema.Document.json before))
+         (Jsonaf.to_string (Document_schema.Document.json after))
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.invalid_request
+         "administration must retain the original inference ledger")
+;;
+
 let summary t =
   Agent_protocol.Session.
     { id = t.identity.session_id
@@ -885,6 +940,7 @@ let summary t =
     ; workspace_instance = Some t.spec.workspace_instance.id
     ; active_operation = t.active_operation
     ; revision = t.counters.revision
+    ; inference_summary = Value (Inference_ledger.summary t.inference_ledger)
     ; latest_event_sequence = t.counters.event_sequence
     }
 ;;

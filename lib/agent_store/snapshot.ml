@@ -58,7 +58,7 @@ module Stored = struct
       else F.invalid "transaction_hash" "noninitial snapshot requires a digest"
     in
     let%bind state = F.required payload "state" (F.document ~limits) in
-    let%bind () = F.expect_versions state ~kind:"session.state" ~versions:[ 1; 2 ] in
+    let%bind () = F.expect_versions state ~kind:"session.state" ~versions:[ 1; 2; 3 ] in
     let state = D.Document.payload state in
     let%bind identity = F.required state "identity" Result.return in
     let%bind counters = F.required state "counters" Result.return in

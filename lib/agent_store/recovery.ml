@@ -635,6 +635,36 @@ module Retention_preflight = struct
   ;;
 end
 
+let read
+      ~env
+      ~journal
+      ~snapshot_directory
+      ~max_snapshot_payload_length
+      ~session_id
+      ~initial
+      ~restore_snapshot
+      ~apply
+      ~validate_transaction
+      ~validate
+  =
+  let open Result.Let_syntax in
+  let%map (recovered, _scan), _ =
+    prepare
+      ~env
+      ~journal
+      ~snapshot_directory
+      ~max_snapshot_payload_length
+      ~session_id
+      ~initial
+      ~restore_snapshot
+      ~apply
+      ~validate_transaction
+      ~validate
+      ~replay_mode:Sequential
+  in
+  recovered
+;;
+
 let load
       ~env
       ~journal

@@ -137,8 +137,8 @@ let execution ~target ~answer ~on_observation =
   let identity =
     Inference_client.Identity.
       { new_preparation_id = (fun () -> "prepare-" ^ Int.to_string (!attempts + 1))
-      ; new_attempt =
-          (fun _ ~relation ->
+      ; with_attempt =
+          (fun _ ~relation ~f ->
             Int.incr attempts;
             let scope =
               Transcript.Scope.create
@@ -147,7 +147,8 @@ let execution ~target ~answer ~on_observation =
                 ~relation
               |> ok
             in
-            scope, O.Observation_id.of_string "usage" |> ok)
+            let accounting_id = O.Observation_id.of_string "usage" |> ok in
+            f ~scope ~accounting_id)
       }
   in
   let execution =

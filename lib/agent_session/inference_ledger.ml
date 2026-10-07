@@ -64,6 +64,24 @@ module Limits = struct
     then invalid "limits" "required positive bounds"
     else Ok { max_attempts; max_turns; max_retained_bytes; document_limits }
   ;;
+
+  let default =
+    let document_limits =
+      D.Limits.create
+        ~max_bytes:(4 * 1024 * 1024)
+        ~max_depth:256
+        ~max_fields:1_000_000
+        ~max_nodes:2_000_000
+      |> document
+      |> invariant
+    in
+    create
+      ~max_attempts:256
+      ~max_turns:256
+      ~max_retained_bytes:(4 * 1024 * 1024)
+      ~document_limits
+    |> invariant
+  ;;
 end
 
 type tracking =
@@ -886,6 +904,30 @@ let of_document doc ~limits =
   Ok t
 ;;
 
+let session_id t = (value t).session_id
+let generation t = (value t).generation
+
+let qualify_source t source =
+  Result.map_error
+    (Transcript.Source_id.of_string
+       (P.Id.Session.to_string (session_id t)
+        ^ ":"
+        ^ Transcript.Source_id.to_string source))
+    ~f:(fun _ ->
+      Error.Invalid_field
+        { field = "source"; reason = "session-qualified source is invalid" })
+;;
+
+let validate t ~limits ~session_id:expected_session_id ~generation:expected_generation =
+  let* doc = encode t in
+  let* admitted = of_document doc ~limits in
+  if
+    P.Id.Session.equal (session_id admitted) expected_session_id
+    && Int.equal (generation admitted) expected_generation
+  then Ok ()
+  else invalid "identity" "ledger differs from its session or generation"
+;;
+
 let with_generation t ~generation =
   let v = value t in
   if generation < v.generation
@@ -1011,16 +1053,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
          ~f:(fun _ -> ()))
   in
   let* ordinal = increment v.last_ordinal in
-  let* source =
-    Result.map_error
-      (Transcript.Source_id.of_string
-         (P.Id.Session.to_string v.session_id
-          ^ ":"
-          ^ Transcript.Source_id.to_string source))
-      ~f:(fun _ ->
-        Error.Invalid_field
-          { field = "source"; reason = "session-qualified source is invalid" })
-  in
+  let* source = qualify_source t source in
   let* attempt =
     Result.map_error
       (Transcript.Attempt_id.of_string ("ordinal:" ^ Int64.to_string ordinal))
@@ -1144,34 +1177,42 @@ let same_state (a : O.Attempt_record.state) (b : O.Attempt_record.state) =
   | (Prepared | Running | Terminal _ | Interrupted _), _ -> false
 ;;
 
+let validate_state_transition previous state =
+  if same_state previous state
+  then Ok ()
+  else if ended previous
+  then Error Error.Invalid_transition
+  else (
+    match previous, state with
+    | O.Attempt_record.Running, Prepared -> Error Error.Invalid_transition
+    | Prepared, (Prepared | Running | Terminal _ | Interrupted _)
+    | Running, (Running | Terminal _ | Interrupted _) -> Ok ()
+    | (Terminal _ | Interrupted _), _ -> Error Error.Invalid_transition)
+;;
+
 let set_state t handle state =
   let* row = check_handle t handle in
   match row with
   | None -> Ok t
   | Some row ->
     let previous = O.Attempt_record.state row.record in
+    let* () = validate_state_transition previous state in
     if same_state previous state
     then Ok t
-    else if ended previous
-    then Error Error.Invalid_transition
-    else (
-      match previous, state with
-      | O.Attempt_record.Running, Prepared -> Error Error.Invalid_transition
-      | (Prepared | Running), (Prepared | Running | Terminal _ | Interrupted _) ->
-        let* record =
-          record_with
-            row
-            ~state
-            ~observations:(O.Attempt_record.observations row.record)
-            ~omitted_diagnostics:(O.Attempt_record.omitted_diagnostics row.record)
-        in
-        let v = value t in
-        publish
-          t
-          { v with
-            rows = Map.set v.rows ~key:handle.Handle.ordinal ~data:{ row with record }
-          }
-      | (Terminal _ | Interrupted _), _ -> Error Error.Invalid_transition)
+    else
+      let* record =
+        record_with
+          row
+          ~state
+          ~observations:(O.Attempt_record.observations row.record)
+          ~omitted_diagnostics:(O.Attempt_record.omitted_diagnostics row.record)
+      in
+      let v = value t in
+      publish
+        t
+        { v with
+          rows = Map.set v.rows ~key:handle.Handle.ordinal ~data:{ row with record }
+        }
 ;;
 
 let observe t handle incoming =
@@ -1369,6 +1410,14 @@ let admit_turn t (operation : P.Operation.t) =
                 Ok (next, { handle with tracking }, tracking))
          in
          plan t false))
+;;
+
+let find_turn_handle t ~operation_id ~generation =
+  List.find_map (Map.data (value t).turns) ~f:(fun turn ->
+    Option.some_if
+      (P.Id.Operation.equal turn.operation.id operation_id
+       && Int.equal turn.operation.generation generation)
+      turn.handle)
 ;;
 
 let finish_turn t (handle : Turn_handle.t) (operation : P.Operation.t) =
@@ -1602,4 +1651,166 @@ let summary t =
        ~coverage:v.coverage
        ~accounting_revision:v.revision)
   |> invariant
+;;
+
+let validate_update previous ~incoming =
+  let before = value previous in
+  let after = value incoming in
+  let* () =
+    validate
+      previous
+      ~limits:Limits.default
+      ~session_id:before.session_id
+      ~generation:before.generation
+  in
+  let* () =
+    validate
+      incoming
+      ~limits:Limits.default
+      ~session_id:before.session_id
+      ~generation:after.generation
+  in
+  let nondecreasing a b = Int64.(b >= a) in
+  let* () =
+    if
+      after.generation >= before.generation
+      && nondecreasing before.last_ordinal after.last_ordinal
+      && nondecreasing before.last_turn_ordinal after.last_turn_ordinal
+      && nondecreasing before.revision after.revision
+      && ((not before.coverage.before_tracking_unknown)
+          || after.coverage.before_tracking_unknown)
+      && nondecreasing before.coverage.retired_attempts after.coverage.retired_attempts
+      && nondecreasing
+           before.coverage.untracked_attempts
+           after.coverage.untracked_attempts
+      && nondecreasing before.coverage.retired_turns after.coverage.retired_turns
+      && nondecreasing before.coverage.untracked_turns after.coverage.untracked_turns
+    then Ok ()
+    else Error Error.Invalid_transition
+  in
+  let* () =
+    if
+      Int64.equal before.revision after.revision
+      && not (D.Json.equal (value_to_json before) (value_to_json after))
+    then Error Error.Invalid_transition
+    else Ok ()
+  in
+  let* () =
+    let missing_rows =
+      Map.count before.rows ~f:(fun row ->
+        not (Map.mem after.rows row.Row.handle.ordinal))
+    in
+    let missing_turns =
+      Map.count before.turns ~f:(fun turn ->
+        not (Map.mem after.turns turn.handle.ordinal))
+    in
+    if
+      Int64.(
+        after.coverage.retired_attempts - before.coverage.retired_attempts
+        >= of_int missing_rows)
+      && Int64.(
+           after.coverage.retired_turns - before.coverage.retired_turns
+           >= of_int missing_turns)
+    then Ok ()
+    else invalid "coverage" "retired tracked identities require retired coverage"
+  in
+  let* () =
+    List.fold_result (Map.to_alist before.rows) ~init:() ~f:(fun () (ordinal, old) ->
+      match Map.find after.rows ordinal with
+      | None ->
+        if ended (O.Attempt_record.state old.record)
+        then Ok ()
+        else Error Error.Invalid_transition
+      | Some next ->
+        if
+          (not (Handle.equal old.handle next.handle))
+          || (not
+                (O.Configuration.equal
+                   (O.Attempt_record.configuration old.record)
+                   (O.Attempt_record.configuration next.record)))
+          || not
+               (nondecreasing
+                  (O.Attempt_record.omitted_diagnostics old.record)
+                  (O.Attempt_record.omitted_diagnostics next.record))
+        then Error Error.Conflicting_handle
+        else
+          let* () =
+            validate_state_transition
+              (O.Attempt_record.state old.record)
+              (O.Attempt_record.state next.record)
+          in
+          let* latest =
+            observation
+              (O.Latest.create ~max_observations:64 ~max_retained_bytes:(64 * 1024))
+          in
+          let* latest =
+            List.fold_result
+              (O.Attempt_record.observations old.record)
+              ~init:latest
+              ~f:(fun latest value ->
+                observation (O.Latest.observe latest value) |> Result.map ~f:fst)
+          in
+          let* latest =
+            List.fold_result
+              (O.Attempt_record.observations next.record)
+              ~init:latest
+              ~f:(fun latest value ->
+                observation (O.Latest.observe latest value) |> Result.map ~f:fst)
+          in
+          let supplied = O.Attempt_record.observations next.record in
+          if
+            List.length supplied = List.length (O.Latest.observations latest)
+            && List.for_all supplied ~f:(fun value ->
+              Option.exists (O.Latest.find latest (O.key value)) ~f:(O.equal value))
+          then Ok ()
+          else Error Error.Invalid_transition)
+  in
+  let* () =
+    List.fold_result (Map.to_alist before.turns) ~init:() ~f:(fun () (ordinal, old) ->
+      match Map.find after.turns ordinal with
+      | None ->
+        if turn_ended old.operation.state then Ok () else Error Error.Invalid_transition
+      | Some next ->
+        if
+          (not (P.Id.Session.equal old.handle.session_id next.handle.session_id))
+          || (not (P.Id.Operation.equal old.handle.operation_id next.handle.operation_id))
+          || (not (Int.equal old.handle.generation next.handle.generation))
+          || (not (Int64.equal old.handle.ordinal next.handle.ordinal))
+          || (not (equal_tracking old.handle.tracking next.handle.tracking))
+          || (not (P.Operation.equal_kind old.operation.kind next.operation.kind))
+          || not (P.Timestamp.equal old.operation.started_at next.operation.started_at)
+        then Error Error.Conflicting_handle
+        else if
+          turn_ended old.operation.state
+          && not
+               (D.Json.equal
+                  (P.Operation.to_json old.operation)
+                  (P.Operation.to_json next.operation))
+        then Error Error.Invalid_transition
+        else Ok ())
+  in
+  let* () =
+    if
+      List.exists (Map.keys after.rows) ~f:(fun ordinal ->
+        Int64.(ordinal <= before.last_ordinal) && not (Map.mem before.rows ordinal))
+      || List.exists (Map.keys after.turns) ~f:(fun ordinal ->
+        Int64.(ordinal <= before.last_turn_ordinal) && not (Map.mem before.turns ordinal))
+    then Error Error.Invalid_transition
+    else Ok ()
+  in
+  let* adopted =
+    document
+      (D.Domain_codec.adopt
+         (codec Limits.default)
+         ~previous:previous.carrier
+         ~incoming:incoming.carrier)
+  in
+  let* adopted = document (D.Domain_codec.encode (codec Limits.default) adopted) in
+  let* supplied = encode incoming in
+  if
+    String.equal
+      (Jsonaf.to_string (D.Document.json adopted))
+      (Jsonaf.to_string (D.Document.json supplied))
+  then Ok ()
+  else invalid "carrier" "update omits protected previous fields"
 ;;

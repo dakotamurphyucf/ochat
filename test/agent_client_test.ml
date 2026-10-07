@@ -55,6 +55,7 @@ let session =
     ; active_operation = None
     ; revision = 0L
     ; latest_event_sequence = 0L
+    ; inference_summary = History_entry.Payload.Presence.Absent
     }
 ;;
 

@@ -5,6 +5,8 @@ let required_scope = function
   | Protocol_ping _
   | Server_info
   | Server_health _ -> None
+  | Session_inference_summary _ -> None
+  | Session_inference_observations _ -> Some Agent_protocol.Scope.View_session_transcript
   | Prompt_list _ | Prompt_get _ -> Some Agent_protocol.Scope.List_prompts
   | Workspace_list _ | Workspace_get _ -> Some List_workspaces
   | Blob_read _ -> Some View_session_transcript
@@ -91,5 +93,14 @@ let authorize principal command =
   | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
     authorize_attachment_mode principal mode
   | Session_attach request -> authorize_attachment_mode principal request.requested_mode
+  | Session_inference_observations request
+    when (request.include_configuration || request.include_diagnostics)
+         && not (Agent_protocol.Principal.has_scope principal Diagnostics) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"detailed inference observations require diagnostics scope"
+         ~retryable:false
+         ())
   | _ -> Ok ()
 ;;

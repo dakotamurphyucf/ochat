@@ -15,6 +15,7 @@
   catalog_builder
   runtime_owner
   delegated_runtime
+  graph_tracking
   independent_resources
   authored_resources
   result_retention
@@ -24,6 +25,7 @@
   authorization
   principal_projection
   pagination
+  inference_query_budget
   managed_output_cursor
   managed_output_page
   catalog_projection

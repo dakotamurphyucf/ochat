@@ -192,3 +192,151 @@ let history t principal request snapshot =
           }
         else { snapshot with canonical_history = window; effective_history = None })
 ;;
+
+module Inference = struct
+  module P = Agent_protocol
+
+  type binding =
+    { authority : string
+    ; query : string
+    ; generation : int
+    ; revision : int64
+    }
+
+  let hash json =
+    Jsonaf.to_string json |> Digestif.SHA256.digest_string |> Digestif.SHA256.to_hex
+  ;;
+
+  let binding
+        ~principal
+        ~(request : P.Inference_query.Request.t)
+        ~generation
+        ~accounting_revision
+    =
+    let open Result.Let_syntax in
+    let%bind _ =
+      P.Inference_query.Request.create
+        ~session_id:request.session_id
+        ~page:request.page
+        ~include_configuration:request.include_configuration
+        ~include_diagnostics:request.include_diagnostics
+    in
+    if generation < 0 || Int64.(accounting_revision < zero)
+    then Error (P.Error.invalid_request "inference cursor counters must be nonnegative")
+    else
+      Ok
+        { authority =
+            hash
+              (`Array
+                  [ P.Id.Principal.to_json principal.P.Principal.id
+                  ; P.Scope.set_to_json principal.scopes
+                  ])
+        ; query =
+            hash
+              (`Array
+                  [ P.Id.Session.to_json request.session_id
+                  ; `Number (Int.to_string request.page.limit)
+                  ; (if request.include_configuration then `True else `False)
+                  ; (if request.include_diagnostics then `True else `False)
+                  ; `String "admission_ordinal_ascending.v1"
+                  ])
+        ; generation
+        ; revision = accounting_revision
+        }
+  ;;
+
+  let expired () =
+    P.Error.create
+      Cursor_expired
+      ~message:"inference cursor is invalid or expired"
+      ~retryable:false
+      ()
+  ;;
+
+  let changed () =
+    P.Error.create
+      Conflict
+      ~message:"inference accounting changed; restart pagination"
+      ~retryable:false
+      ~data:(`Object [ "restart_required", `True ])
+      ()
+  ;;
+
+  let same_signature a b =
+    if String.length a <> String.length b
+    then false
+    else (
+      let difference = ref 0 in
+      for i = 0 to String.length a - 1 do
+        difference := !difference lor (Char.to_int a.[i] lxor Char.to_int b.[i])
+      done;
+      Int.equal !difference 0)
+  ;;
+
+  let claims binding after_ordinal =
+    String.concat
+      ~sep:":"
+      [ "inference.v1"
+      ; binding.authority
+      ; binding.query
+      ; Int.to_string binding.generation
+      ; Int64.to_string binding.revision
+      ; Int64.to_string after_ordinal
+      ]
+  ;;
+
+  let cursor t binding ~after_ordinal =
+    if Int64.(after_ordinal < zero)
+    then Error (P.Error.invalid_request "inference cursor ordinal must be nonnegative")
+    else (
+      let text = claims binding after_ordinal in
+      (* Fixed-size digests and bounded decimal counters fit well below 2048.
+         Check before Base64 allocates the externally retained cursor. *)
+      if String.length text + 65 > 1536
+      then Error (expired ())
+      else P.Page.Cursor.of_string (Base64.encode_exn (text ^ ":" ^ sign t text)))
+  ;;
+
+  let after t binding = function
+    | None -> Ok Int64.zero
+    | Some cursor ->
+      let encoded = P.Page.Cursor.to_string cursor in
+      if String.length encoded > 2048
+      then Error (expired ())
+      else (
+        match Base64.decode encoded with
+        | Error _ -> Error (expired ())
+        | Ok raw ->
+          (match String.split raw ~on:':' with
+           | [ version; authority; query; generation; revision; ordinal; signature ] ->
+             let text =
+               String.concat
+                 ~sep:":"
+                 [ version; authority; query; generation; revision; ordinal ]
+             in
+             if not (same_signature signature (sign t text))
+             then Error (expired ())
+             else if
+               not
+                 (String.equal version "inference.v1"
+                  && String.equal authority binding.authority
+                  && String.equal query binding.query)
+             then Error (expired ())
+             else (
+               match
+                 ( Int.of_string_opt generation
+                 , Int64.of_string_opt revision
+                 , Int64.of_string_opt ordinal )
+               with
+               | Some generation, Some revision, Some ordinal
+                 when generation >= 0 && Int64.(revision >= zero && ordinal >= zero) ->
+                 if
+                   not
+                     (Int.equal generation binding.generation
+                      && Int64.equal revision binding.revision)
+                 then Error (changed ())
+                 else Ok ordinal
+               | _ -> Error (expired ()))
+           | _ -> Error (expired ())))
+  ;;
+end

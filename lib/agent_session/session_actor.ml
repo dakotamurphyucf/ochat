@@ -1,5 +1,27 @@
 open! Core
 
+module Inference_owner = struct
+  type phase =
+    | Open
+    | Sealed
+    | Finished
+
+  type registration =
+    { handle : Inference_ledger.Handle.t
+    ; configuration : Inference.Observation.Configuration.t
+    ; mutable attempt : Inference_runtime.Attempt.t option
+    }
+
+  type t =
+    { issuing_actor : unit ref
+    ; source : Transcript.Source_id.t
+    ; generation : int
+    ; mutable qualified_source : Transcript.Source_id.t option
+    ; mutable phase : phase
+    ; mutable registrations : registration Int64.Map.t
+    }
+end
+
 module Initialization_scope = struct
   type t =
     { owner : unit ref
@@ -134,6 +156,28 @@ type invocation_execution =
   }
 
 type _ request =
+  | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
+  | Admit_inference :
+      Inference_owner.t
+      * Transcript.Scope.relation
+      * Agent_protocol.Id.Operation.t option
+      * Agent_protocol.Id.Invocation.t option
+      * Inference.Observation.Configuration.t
+      -> Inference_ledger.Handle.t request
+  | Acknowledge_inference :
+      Inference_owner.t * Inference_ledger.Handle.t * Inference_runtime.Attempt.t
+      -> unit request
+  | Observe_inference :
+      Inference_ledger.Handle.t * Inference.Observation.t
+      -> unit request
+  | Observe_owned_inference : Inference_owner.t * Inference.Observation.t -> unit request
+  | Complete_inference :
+      Inference_owner.t * Inference_ledger.Handle.t * Inference_client.Completion.t
+      -> unit request
+  | Release_inference : Inference_owner.t * Inference_ledger.Handle.t -> unit request
+  | Seal_inference_owner : Inference_owner.t -> unit request
+  | Finish_inference_owner : Inference_owner.t -> unit request
+  | Reconcile_inference_recovery : unit request
   | Claim_delegated_event :
       Agent_protocol.Id.Moderator_execution.t
       * Agent_protocol.Moderator_execution.delegation
@@ -377,6 +421,15 @@ type _ request =
   | Commit_administration :
       Agent_protocol.Id.Attachment.t
       * int64
+      * Session_state.Compaction_archive.kind
+      * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Validate_administration_basis :
+      Agent_protocol.Id.Attachment.t * Session_state.t
+      -> unit request
+  | Commit_reconciled_administration :
+      Agent_protocol.Id.Attachment.t
+      * Session_state.t
       * Session_state.Compaction_archive.kind
       * Session_state.t
       -> Agent_protocol.Session.t request
@@ -694,6 +747,8 @@ type t =
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
+  ; inference_owner_identity : unit ref
+  ; mutable inference_owners : Inference_owner.t list
   ; initialization_owner : unit ref
   ; mutable initialization_scope : Initialization_scope.t option
   ; mutable job_scopes : job_scope list
@@ -884,6 +939,281 @@ let transition t ~delta ~payloads =
   in
   let%map () = install t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
+;;
+
+let inference_error _ = error Invalid_state "inference tracking admission failed"
+
+let commit_inference_ledger t ledger =
+  if
+    Int64.equal
+      (Inference_ledger.revision ledger)
+      (Inference_ledger.revision t.state.inference_ledger)
+  then Ok ()
+  else
+    transition
+      t
+      ~delta:(Session_delta.Inference_ledger_changed ledger)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary { t.state with inference_ledger = ledger })
+        ]
+    |> Result.map ~f:ignore
+;;
+
+let validate_inference_owner t (owner : Inference_owner.t) =
+  if not (phys_equal t.inference_owner_identity owner.issuing_actor)
+  then Error (error Conflict "inference owner belongs to another actor")
+  else if not (List.mem t.inference_owners owner ~equal:phys_equal)
+  then Error (error Conflict "inference graph owner is no longer active")
+  else Ok ()
+;;
+
+let open_inference_owner t source =
+  if
+    List.exists t.inference_owners ~f:(fun owner ->
+      Transcript.Source_id.equal owner.source source)
+  then Error (error Conflict "inference graph source is already owned")
+  else
+    let open Result.Let_syntax in
+    let%bind qualified_source =
+      Inference_ledger.qualify_source t.state.inference_ledger source
+      |> Result.map_error ~f:inference_error
+    in
+    let owner =
+      Inference_owner.
+        { issuing_actor = t.inference_owner_identity
+        ; source
+        ; generation = t.state.identity.generation
+        ; qualified_source = Some qualified_source
+        ; phase = Open
+        ; registrations = Int64.Map.empty
+        }
+    in
+    t.inference_owners <- owner :: t.inference_owners;
+    Ok owner
+;;
+
+let inference_registration t owner handle =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  match
+    Map.find owner.Inference_owner.registrations (Inference_ledger.Handle.ordinal handle)
+  with
+  | Some registration when Inference_ledger.Handle.equal registration.handle handle ->
+    Ok registration
+  | Some _ | None -> Error (error Conflict "inference handle is not owned by this graph")
+;;
+
+let admit_inference t owner relation operation_id invocation_id configuration =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let%bind () =
+    if
+      Int.equal owner.generation t.state.identity.generation
+      &&
+      match owner.phase with
+      | Open -> true
+      | Sealed | Finished -> false
+    then Ok ()
+    else Error (error Conflict "inference graph excludes new attempts")
+  in
+  let%bind ledger, handle, _tracking =
+    Inference_ledger.admit
+      t.state.inference_ledger
+      ~source:owner.source
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+    |> Result.map_error ~f:inference_error
+  in
+  let%bind () = commit_inference_ledger t ledger in
+  owner.qualified_source
+  <- Some (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source;
+  owner.registrations
+  <- Map.set
+       owner.registrations
+       ~key:(Inference_ledger.Handle.ordinal handle)
+       ~data:{ handle; configuration; attempt = None };
+  Ok handle
+;;
+
+let validate_inference_attempt registration attempt =
+  if
+    Transcript.Scope.equal
+      (Inference_ledger.Handle.scope registration.Inference_owner.handle)
+      (Inference_runtime.Attempt.scope attempt)
+    && Inference.Observation.Observation_id.equal
+         (Inference_ledger.Handle.accounting_id registration.handle)
+         (Inference_runtime.Attempt.accounting_id attempt)
+    && Inference.Observation.Configuration.equal
+         registration.configuration
+         (Inference_runtime.Attempt.configuration attempt)
+  then Ok ()
+  else Error (error Conflict "inference attempt differs from its admitted identity")
+;;
+
+let acknowledge_inference t owner handle attempt =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  let%bind () = validate_inference_attempt registration attempt in
+  registration.attempt <- Some attempt;
+  let%bind ledger =
+    Inference_ledger.set_state t.state.inference_ledger handle Running
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let observe_inference t handle incoming =
+  let open Result.Let_syntax in
+  let%bind ledger, _disposition =
+    Inference_ledger.observe t.state.inference_ledger handle incoming
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let observe_owned_inference t owner incoming =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let scope = Inference.Observation.scope incoming in
+  let owner_matches =
+    match owner.phase, owner.qualified_source with
+    | (Open | Sealed), Some source ->
+      Transcript.Source_id.equal source (Transcript.Scope.key scope).source
+    | Finished, _ | _, None -> false
+  in
+  let%bind () =
+    if owner_matches
+    then Ok ()
+    else Error (error Conflict "observation does not belong to a live inference graph")
+  in
+  match
+    List.find (Inference_ledger.rows t.state.inference_ledger) ~f:(fun row ->
+      let handle = Inference_ledger.Row.handle row in
+      Int.equal owner.generation (Inference_ledger.Handle.generation handle)
+      && Transcript.Scope.equal scope (Inference_ledger.Handle.scope handle))
+  with
+  | None -> Error (error Conflict "observation has no retained admitted scope")
+  | Some row -> observe_inference t (Inference_ledger.Row.handle row) incoming
+;;
+
+let complete_inference t owner handle completion =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  let%bind () =
+    validate_inference_attempt
+      registration
+      (Inference_client.Completion.attempt completion)
+  in
+  let state =
+    match Inference_client.Completion.outcome completion with
+    | Returned terminal -> Inference.Observation.Attempt_record.Terminal terminal
+    | Interrupted { reason; delivery } -> Interrupted { reason; delivery }
+  in
+  let%bind ledger =
+    Inference_ledger.set_state t.state.inference_ledger handle state
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let interrupt_inference_row ledger handle ~delivery =
+  let interrupt fallback =
+    Inference_ledger.set_state
+      ledger
+      handle
+      (Interrupted
+         { reason = Host_interrupted; delivery = Option.value delivery ~default:fallback })
+    |> Result.map_error ~f:inference_error
+  in
+  match
+    Inference_ledger.find ledger ~ordinal:(Inference_ledger.Handle.ordinal handle)
+  with
+  | None -> Ok ledger
+  | Some row ->
+    (match
+       Inference.Observation.Attempt_record.state (Inference_ledger.Row.record row)
+     with
+     | Terminal _ | Interrupted _ -> Ok ledger
+     | Prepared -> interrupt Inference.Event.Terminal.Definitely_not_submitted
+     | Running -> interrupt Inference.Event.Terminal.Possibly_submitted)
+;;
+
+let release_inference t owner handle =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  Exn.protect
+    ~f:(fun () ->
+      let%bind ledger =
+        interrupt_inference_row
+          t.state.inference_ledger
+          handle
+          ~delivery:
+            (Option.map registration.attempt ~f:Inference_runtime.Attempt.delivery)
+      in
+      commit_inference_ledger t ledger)
+    ~finally:(fun () ->
+      owner.registrations
+      <- Map.remove owner.registrations (Inference_ledger.Handle.ordinal handle))
+;;
+
+let seal_inference_owner t owner =
+  let open Result.Let_syntax in
+  let%map () = validate_inference_owner t owner in
+  owner.Inference_owner.phase <- Sealed
+;;
+
+let finish_inference_owner t owner =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let%bind () =
+    match owner.Inference_owner.phase with
+    | Open -> Error (error Conflict "inference graph must exclude calls before joining")
+    | Sealed -> Ok ()
+    | Finished -> Error (error Conflict "inference graph already finished")
+  in
+  let rows = Inference_ledger.rows t.state.inference_ledger in
+  let%bind ledger =
+    List.fold_result rows ~init:t.state.inference_ledger ~f:(fun ledger row ->
+      let handle = Inference_ledger.Row.handle row in
+      match owner.qualified_source with
+      | Some source
+        when Transcript.Source_id.equal
+               source
+               (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source ->
+        interrupt_inference_row
+          ledger
+          handle
+          ~delivery:
+            (Map.find owner.registrations (Inference_ledger.Handle.ordinal handle)
+             |> Option.bind ~f:(fun registration -> registration.attempt)
+             |> Option.map ~f:Inference_runtime.Attempt.delivery)
+      | Some _ | None -> Ok ledger)
+  in
+  let%map () = commit_inference_ledger t ledger in
+  owner.phase <- Finished;
+  owner.registrations <- Int64.Map.empty;
+  t.inference_owners
+  <- List.filter t.inference_owners ~f:(fun current -> not (phys_equal current owner))
+;;
+
+let reconcile_inference_recovery t =
+  let open Result.Let_syntax in
+  let%bind () =
+    if List.is_empty t.inference_owners
+    then Ok ()
+    else Error (error Conflict "live inference graphs must join before recovery")
+  in
+  let%bind ledger =
+    List.fold_result
+      (Inference_ledger.rows t.state.inference_ledger)
+      ~init:t.state.inference_ledger
+      ~f:(fun ledger row ->
+        interrupt_inference_row ledger (Inference_ledger.Row.handle row) ~delivery:None)
+  in
+  commit_inference_ledger t ledger
 ;;
 
 let abort_staged_work t ~owner =
@@ -2023,6 +2353,66 @@ let commit_administration t attachment_id expected_revision kind candidate =
     ~payloads:(Administration.payloads ~previous:t.state state)
 ;;
 
+let administration_basis (expected : Session_state.t) (state : Session_state.t) =
+  { state with
+    identity = { state.identity with updated_at = expected.identity.updated_at }
+  ; counters = expected.counters
+  ; inference_ledger = expected.inference_ledger
+  }
+;;
+
+let same_administration_basis ~reconciled expected current =
+  let open Result.Let_syntax in
+  let document_error _ = error Invalid_state "administration basis admission failed" in
+  let%bind limits =
+    Persistence_codec.limits ~max_bytes:(64 * 1024 * 1024)
+    |> Result.map_error ~f:document_error
+  in
+  let admit state =
+    Session_state_document.encode (Session_state_document.authored state) ~limits
+    |> Result.map_error ~f:document_error
+  in
+  let%bind expected_document = admit expected in
+  let%map current_document =
+    admit (if reconciled then administration_basis expected current else current)
+  in
+  String.equal
+    (Jsonaf.to_string (Document_schema.Document.json expected_document))
+    (Jsonaf.to_string (Document_schema.Document.json current_document))
+;;
+
+let validate_administration_basis t attachment_id expected =
+  let open Result.Let_syntax in
+  let%bind () =
+    validate_administrative_state t attachment_id expected.Session_state.counters.revision
+  in
+  let%bind unchanged = same_administration_basis ~reconciled:false expected t.state in
+  if unchanged
+  then Ok ()
+  else Error (error Conflict "administration basis changed before resource retirement")
+;;
+
+let commit_reconciled_administration t attachment_id expected kind candidate =
+  let open Result.Let_syntax in
+  let%bind () =
+    Session_state.validate_administration_candidate candidate ~previous:expected
+  in
+  let%bind unchanged = same_administration_basis ~reconciled:true expected t.state in
+  let%bind () =
+    if unchanged
+    then Ok ()
+    else Error (error Conflict "administration basis changed during resource retirement")
+  in
+  let%bind inference_ledger =
+    Inference_ledger.with_generation
+      t.state.inference_ledger
+      ~generation:candidate.Session_state.identity.generation
+    |> Result.map_error ~f:inference_error
+  in
+  let candidate = { candidate with inference_ledger; counters = t.state.counters } in
+  commit_administration t attachment_id t.state.counters.revision kind candidate
+;;
+
 (* Initialization may durably admit jobs and tracking before its final local
    runtime state is available. Those records are never replaced by an earlier
    constructor snapshot. History reservations alone may also advance. *)
@@ -2030,6 +2420,7 @@ let initialization_basis (basis : Session_state.t) (state : Session_state.t) =
   { state with
     identity = { state.identity with updated_at = basis.identity.updated_at }
   ; counters = basis.counters
+  ; inference_ledger = basis.inference_ledger
   ; jobs = basis.jobs
   ; model_job_targets = basis.model_job_targets
   ; schedules = basis.schedules
@@ -9793,6 +10184,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     upgrade_prompt_internal t attachment_id expected_revision target_revision
   | Commit_administration (attachment_id, expected_revision, kind, state) ->
     commit_administration t attachment_id expected_revision kind state
+  | Validate_administration_basis (attachment_id, expected) ->
+    validate_administration_basis t attachment_id expected
+  | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
+    commit_reconciled_administration t attachment_id expected kind candidate
   | Begin_initialization expected -> begin_initialization t expected
   | End_initialization scope -> end_initialization t scope
   | Complete_initialization (scope, candidate) ->
@@ -10020,6 +10415,19 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
      | None, None, [], [], None, None, None, false, true, ([], []) ->
        Result.map (inspect t.state) ~f:Option.some
      | _ -> Ok None)
+  | Open_inference_owner source -> open_inference_owner t source
+  | Admit_inference (owner, relation, operation_id, invocation_id, configuration) ->
+    admit_inference t owner relation operation_id invocation_id configuration
+  | Acknowledge_inference (owner, handle, attempt) ->
+    acknowledge_inference t owner handle attempt
+  | Observe_inference (handle, incoming) -> observe_inference t handle incoming
+  | Observe_owned_inference (owner, incoming) -> observe_owned_inference t owner incoming
+  | Complete_inference (owner, handle, completion) ->
+    complete_inference t owner handle completion
+  | Release_inference (owner, handle) -> release_inference t owner handle
+  | Seal_inference_owner owner -> seal_inference_owner t owner
+  | Finish_inference_owner owner -> finish_inference_owner t owner
+  | Reconcile_inference_recovery -> reconcile_inference_recovery t
   | Shutdown ->
     t.initialization_scope <- None;
     abort_all_staged_work t;
@@ -10130,6 +10538,8 @@ let create_with_owner_lease_duration
     ; queued_event_borrow = None
     ; foreground_moderator = None
     ; invocation_executions = []
+    ; inference_owner_identity = ref ()
+    ; inference_owners = []
     ; initialization_owner = ref ()
     ; initialization_scope = None
     ; job_scopes = []
@@ -10223,6 +10633,48 @@ let commit_administration t ~command_audit ~attachment_id ~expected_revision ~ki
     (Commit_administration (attachment_id, expected_revision, kind, state))
 ;;
 
+let validate_administration_basis t ~attachment_id ~expected =
+  call t (Validate_administration_basis (attachment_id, expected))
+;;
+
+let commit_reconciled_administration
+      t
+      ~command_audit
+      ~attachment_id
+      ~expected
+      ~kind
+      candidate
+  =
+  call
+    t
+    ?command_audit
+    (Commit_reconciled_administration (attachment_id, expected, kind, candidate))
+;;
+
+let open_inference_owner t ~source = call t (Open_inference_owner source)
+
+let admit_inference t ~owner ~relation ~operation_id ~invocation_id ~configuration =
+  call t (Admit_inference (owner, relation, operation_id, invocation_id, configuration))
+;;
+
+let acknowledge_inference t ~owner ~handle attempt =
+  call t (Acknowledge_inference (owner, handle, attempt))
+;;
+
+let observe_inference t ~handle incoming = call t (Observe_inference (handle, incoming))
+
+let observe_owned_inference t ~owner incoming =
+  call t (Observe_owned_inference (owner, incoming))
+;;
+
+let complete_inference t ~owner ~handle completion =
+  call t (Complete_inference (owner, handle, completion))
+;;
+
+let release_inference t ~owner ~handle = call t (Release_inference (owner, handle))
+let seal_inference_owner t ~owner = call t (Seal_inference_owner owner)
+let finish_inference_owner t ~owner = call t (Finish_inference_owner owner)
+let reconcile_inference_recovery t = call t Reconcile_inference_recovery
 let begin_initialization t ~expected = call t (Begin_initialization expected)
 let end_initialization t ~scope = call t ~priority:Priority (End_initialization scope)
 

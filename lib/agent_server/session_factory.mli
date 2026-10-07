@@ -40,12 +40,7 @@ type limits =
 (** Host-owned, acknowledged inference tracking for this actual actor.
     Identity allocation and attempt callbacks preserve durable ownership; they
     are never invented from a presentation callback or ambient backend. *)
-type runtime_inference_ports =
-  { identity : Chat_response.Neutral_turn.Identity.t
-  ; on_attempt : Inference_runtime.Attempt.t -> unit
-  ; on_observation : Inference.Observation.t -> unit
-  ; on_completion : Inference_client.Completion.t -> unit
-  }
+type runtime_inference_ports = Graph_tracking.Upstream.t
 
 (** Composition-root selection policy. Capture and migration are distinct host
     decisions: reading targetless storage never invokes normal source capture.
@@ -157,6 +152,7 @@ val create_session
 val prepare_administration
   :  t
   -> Session_registry.entry
+  -> previous:Agent_session.Session_state.t
   -> Agent_session.Session_state.t
   -> fresh_history:bool
   -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
@@ -246,6 +242,15 @@ val complete_index_recovery
   :  t
   -> Session_registry.entry list
   -> (unit, Agent_protocol.Error.t) result
+
+(** Restore immutable durable state without activating source/runtime/target,
+    acquiring a writer, changing recovery metadata, or repairing a torn tail.
+    Original retained frames, fallbacks and bounded archives are validated under
+    the same admission policy. The temporary session lock is always released. *)
+val read_session
+  :  t
+  -> Agent_store.Session_index.Entry.t
+  -> (Agent_session.Session_state.t, Agent_protocol.Error.t) Result.t
 
 (** Reconstructs one indexed session on demand. The caller must serialize
     loads for a session ID and register the returned entry exactly once. *)

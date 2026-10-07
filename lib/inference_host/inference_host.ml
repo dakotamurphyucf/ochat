@@ -57,8 +57,8 @@ let make_identity namespace =
   Ok
     Chat_response.Neutral_turn.Identity.
       { new_preparation_id = (fun () -> id "preparation" (next_exn preparations))
-      ; new_attempt =
-          (fun _prepared ~relation ->
+      ; with_attempt =
+          (fun _prepared ~relation ~f ->
             let n = next_exn attempts in
             let attempt =
               Transcript.Attempt_id.of_string (Int.to_string n) |> invariant_exn
@@ -70,7 +70,7 @@ let make_identity namespace =
               Inference.Observation.Observation_id.of_string (id "usage" n)
               |> invariant_exn
             in
-            scope, accounting_id)
+            f ~scope ~accounting_id)
       }
 ;;
 

@@ -28,10 +28,15 @@ end
 module Identity = struct
   type t =
     { new_preparation_id : unit -> string
-    ; new_attempt :
+    ; with_attempt :
+        'a.
         R.Prepared.t
         -> relation:Transcript.Scope.relation
-        -> Transcript.Scope.t * Inference.Observation.Observation_id.t
+        -> f:
+             (scope:Transcript.Scope.t
+              -> accounting_id:Inference.Observation.Observation_id.t
+              -> 'a)
+        -> 'a
     }
 end
 
@@ -54,53 +59,57 @@ let run
     |> Result.map_error ~f:(fun error -> Error.Preparation error)
   in
   before_dispatch prepared;
-  let scope, accounting_id = identity.new_attempt prepared ~relation in
-  let%bind expected_scope =
-    Transcript.Scope.create ~source:scope.key.source ~attempt:scope.key.attempt ~relation
-    |> Result.map_error ~f:(fun _ ->
-      Error.Preparation R.Preparation_error.Invalid_preparation)
-  in
-  let%bind () =
-    if Transcript.Scope.equal scope expected_scope
-    then Ok ()
-    else Error (Error.Preparation R.Preparation_error.Invalid_preparation)
-  in
-  let%bind attempt =
-    R.Prepared.start prepared ~scope ~accounting_id
-    |> Result.map_error ~f:(fun error -> Error.Preparation error)
-  in
-  let result =
-    try
-      on_attempt attempt;
-      `Result
-        (R.Attempt.run attempt ~sw ~on_event ~on_observation
-         |> Result.map_error ~f:(fun error -> Error.Attempt error))
-    with
-    | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
-  in
-  let interrupted reason =
-    { Completion.attempt
-    ; outcome = Interrupted { reason; delivery = R.Attempt.delivery attempt }
-    }
-  in
-  match result with
-  | `Result (Ok receipt) ->
-    (* Outside the exception boundary: a failed terminal acknowledgement cannot
-       produce a second, contradictory interruption callback. *)
-    on_completion { Completion.attempt; outcome = Returned (R.Receipt.terminal receipt) };
-    Ok receipt
-  | `Result (Error error) ->
-    on_completion (interrupted Host_interrupted);
-    Error error
-  | `Raised (exn, backtrace) ->
-    let reason =
-      match exn with
-      | Eio.Cancel.Cancelled _ -> Inference.Observation.Attempt_record.Cancelled
-      | _ -> Host_interrupted
+  identity.with_attempt prepared ~relation ~f:(fun ~scope ~accounting_id ->
+    let%bind expected_scope =
+      Transcript.Scope.create
+        ~source:scope.key.source
+        ~attempt:scope.key.attempt
+        ~relation
+      |> Result.map_error ~f:(fun _ ->
+        Error.Preparation R.Preparation_error.Invalid_preparation)
     in
-    (try Eio.Cancel.protect (fun () -> on_completion (interrupted reason)) with
-     | _ -> ());
-    Exn.raise_with_original_backtrace exn backtrace
+    let%bind () =
+      if Transcript.Scope.equal scope expected_scope
+      then Ok ()
+      else Error (Error.Preparation R.Preparation_error.Invalid_preparation)
+    in
+    let%bind attempt =
+      R.Prepared.start prepared ~scope ~accounting_id
+      |> Result.map_error ~f:(fun error -> Error.Preparation error)
+    in
+    let result =
+      try
+        on_attempt attempt;
+        `Result
+          (R.Attempt.run attempt ~sw ~on_event ~on_observation
+           |> Result.map_error ~f:(fun error -> Error.Attempt error))
+      with
+      | exn -> `Raised (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    let interrupted reason =
+      { Completion.attempt
+      ; outcome = Interrupted { reason; delivery = R.Attempt.delivery attempt }
+      }
+    in
+    match result with
+    | `Result (Ok receipt) ->
+      (* Outside the exception boundary: a failed terminal acknowledgement cannot
+       produce a second, contradictory interruption callback. *)
+      on_completion
+        { Completion.attempt; outcome = Returned (R.Receipt.terminal receipt) };
+      Ok receipt
+    | `Result (Error error) ->
+      on_completion (interrupted Host_interrupted);
+      Error error
+    | `Raised (exn, backtrace) ->
+      let reason =
+        match exn with
+        | Eio.Cancel.Cancelled _ -> Inference.Observation.Attempt_record.Cancelled
+        | _ -> Host_interrupted
+      in
+      (try Eio.Cancel.protect (fun () -> on_completion (interrupted reason)) with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 module Text = struct

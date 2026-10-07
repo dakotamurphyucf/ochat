@@ -29,13 +29,25 @@ module Identity : sig
   (** Trusted host allocation ports. Preparation identity is an opaque label,
       never a private-input hash. Actual attempt allocation runs independently of
       UI callbacks; durable hosts acknowledge tracking before returning. Parent
-      relation is actual known ownership, not inferred nesting. *)
+      relation is actual known ownership, not inferred nesting.
+
+      with_attempt admits one actual allocation and calls f exactly once after
+      successful admission. Its scope includes validation, Prepared.start and all
+      joined dispatch callbacks. Every exit releases local routing; an allocation
+      or on_admitted failure before f cleans its registration and separately
+      reconciles any acknowledged Prepared row. Cleanup preserves a primary
+      exception/backtrace; cleanup failure after normal return propagates. *)
   type t =
     { new_preparation_id : unit -> string
-    ; new_attempt :
+    ; with_attempt :
+        'a.
         Inference_runtime.Prepared.t
         -> relation:Transcript.Scope.relation
-        -> Transcript.Scope.t * Inference.Observation.Observation_id.t
+        -> f:
+             (scope:Transcript.Scope.t
+              -> accounting_id:Inference.Observation.Observation_id.t
+              -> 'a)
+        -> 'a
     }
 end
 

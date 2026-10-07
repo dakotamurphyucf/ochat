@@ -38,7 +38,7 @@ let fixture_ctx ~env ~dir ~tool_dir ~cache =
   in
   let inference_identity : Chat_response.Neutral_turn.Identity.t =
     { new_preparation_id = (fun () -> failwith "fixture prepared")
-    ; new_attempt = (fun _ ~relation:_ -> failwith "fixture started attempt")
+    ; with_attempt = (fun _ ~relation:_ ~f:_ -> failwith "fixture started attempt")
     }
   in
   Ctx.create

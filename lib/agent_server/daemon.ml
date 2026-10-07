@@ -78,6 +78,7 @@ let default_options =
       ; "workspaces.configured"
       ]
       @ Agent_protocol.Extension_capabilities.known_features
+      @ Agent_protocol.Inference_query.Features.all
   ; protocol_limits =
       { max_request_bytes = 16 * 1024 * 1024
       ; max_event_bytes = 16 * 1024 * 1024
@@ -880,6 +881,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   in
   Session_registry.index_all registry indexed_sessions;
   Session_registry.install_loader registry (Session_factory.recover_session factory);
+  Session_registry.install_reader registry (Session_factory.read_session factory);
   let%bind _ = Session_factory.recover_sessions factory in
   let%bind () = Session_factory.reconcile_generated_creations factory in
   let pinned_revisions =
