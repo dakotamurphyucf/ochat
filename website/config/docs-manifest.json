@@ -4960,5 +4960,13 @@
     "title": "Neutral durable history",
     "reviewNote": "Accepted contributor architecture for canonical neutral history and durable document ownership. Provider runtime adoption remains a separate follow-up.",
     "provenance": "authored"
+  },
+  {
+    "id": "neutral-transcript-protocol",
+    "source": "docs-src/neutral-transcript-protocol.md",
+    "disposition": "repository-only",
+    "title": "Neutral transcript projections",
+    "reviewNote": "Accepted contributor architecture for public transcript disclosure, neutral live projections and protocol ownership. User-facing protocol references remain published separately.",
+    "provenance": "authored"
   }
 ]
