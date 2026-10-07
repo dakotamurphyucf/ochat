@@ -67,11 +67,17 @@ constructors. Revalidation under the same complete profile reuses that proof;
 a different profile checks the complete encoded record. Raw decoding and
 ledger carrier adoption still run their existing admission checks.
 
+The ledger serializer validates the original native value before encoding it,
+including host identities and retained tracking state. It uses the shared
+validated-codec contract to avoid decoding its own known projection again.
+Original-template checks, JSON bounds, unknown-field merging and final document
+admission remain in place. Raw documents still pass through the full decoder.
+
 A local synthetic benchmark used 128 retained attempt rows, a 352,463-byte
 ledger and 64 KiB of preserved future data. For an unrelated state edit followed
 by the owner's complete encode-and-decode sequence, the median of three batches
-of three calls reduced CPU time from 211 ms to 43 ms. Cumulative allocations per
-call fell from 1.38 GB to 276 MB (decimal bytes). These include transient objects
+of three calls reduced CPU time from 211 ms to 36 ms. Cumulative allocations per
+call fell from 1.38 GB to 229 MB (decimal bytes). These include transient objects
 and do not describe resident memory or a heap bound. The final typed session
 decode remains included; provider, transport, disk writes and runtime scheduling
 are excluded, so this is not an end-to-end latency claim.

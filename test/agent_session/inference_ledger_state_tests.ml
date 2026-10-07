@@ -986,3 +986,273 @@ let%test_unit
           assert (
             String.equal (ledger_bytes ledger) (ledger_bytes initial.inference_ledger)))))
 ;;
+
+let%test_unit "validated ledger serializer rejects forged native host identities" =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let original = ledger_bytes before.inference_ledger in
+    let invalid_session = P.Id.Session.t_of_sexp (Sexp.Atom "invalid-session") in
+    assert (
+      Result.is_error
+        (L.create
+           ~session_id:invalid_session
+           ~generation:0
+           ~before_tracking_unknown:false
+           ~limits:L.Limits.default));
+    let target =
+      match Inference.Selection.view before.spec.inference_target with
+      | Captured target -> target
+      | Unresolved -> assert false
+    in
+    let configuration =
+      O.Configuration.of_target
+        target
+        ~preparation_id:"native-identity-check"
+        ~transport:Http_sse
+        ~capabilities:[]
+        ~limits:O.Admission.observation
+      |> observation_ok
+    in
+    let invalid_operation = P.Id.Operation.t_of_sexp (Sexp.Atom "invalid-operation") in
+    let invalid_invocation = P.Id.Invocation.t_of_sexp (Sexp.Atom "invalid-invocation") in
+    List.iter
+      [ Some invalid_operation, None; None, Some invalid_invocation ]
+      ~f:(fun (operation_id, invocation_id) ->
+        assert (
+          Result.is_error
+            (L.admit
+               before.inference_ledger
+               ~source:
+                 (Transcript.Source_id.of_string "native-identity-check"
+                  |> Result.ok_or_failwith)
+               ~relation:Root
+               ~operation_id
+               ~invocation_id
+               ~configuration));
+        assert (String.equal original (ledger_bytes before.inference_ledger)));
+    let invalid_turn =
+      P.Operation.
+        { id = invalid_operation
+        ; generation = before.identity.generation
+        ; kind = Turn User_submit
+        ; state = Starting
+        ; started_at = timestamp
+        ; updated_at = timestamp
+        }
+    in
+    assert (Result.is_error (L.admit_turn before.inference_ledger invalid_turn)))
+;;
+
+let%test_unit
+    "validated ledger serialization is faithful across complete native lifecycles"
+  =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let raw =
+      ledger_json before.inference_ledger
+      |> fun raw ->
+      add
+        raw
+        "future_serializer"
+        (`Object [ "literal", `Number "1e+00"; "text", `String "λ📚" ])
+    in
+    let ledger =
+      D.Document.inspect ~limits:document_limits raw
+      |> document_ok
+      |> fun document -> L.of_document document ~limits:L.Limits.default |> ledger_ok
+    in
+    let roundtrip ledger =
+      let document = L.to_document ledger |> ledger_ok in
+      let restored = L.of_document document ~limits:L.Limits.default |> ledger_ok in
+      assert (String.equal (D.Document.to_string document) (ledger_bytes restored));
+      assert (
+        List.equal
+          L.Handle.equal
+          (List.map (L.rows ledger) ~f:L.Row.handle)
+          (List.map (L.rows restored) ~f:L.Row.handle));
+      assert (
+        List.equal
+          (fun original restored ->
+             String.equal
+               (Jsonaf.to_string (O.Attempt_record.to_json (L.Row.record original)))
+               (Jsonaf.to_string (O.Attempt_record.to_json (L.Row.record restored))))
+          (L.rows ledger)
+          (L.rows restored));
+      assert (
+        String.equal
+          (Jsonaf.to_string (P.Inference_query.Summary.to_json (L.summary ledger)))
+          (Jsonaf.to_string (P.Inference_query.Summary.to_json (L.summary restored))));
+      assert (String.is_substring (ledger_bytes restored) ~substring:"\"literal\":1e+00");
+      let state = { before with inference_ledger = ledger } in
+      let full = SD.encode (SD.authored state) ~limits:document_limits |> document_ok in
+      let current = SD.decode ~limits:document_limits full |> document_ok |> SD.value in
+      assert (String.equal (ledger_bytes ledger) (ledger_bytes current.inference_ledger));
+      ledger
+    in
+    let target =
+      match Inference.Selection.view before.spec.inference_target with
+      | Captured target -> target
+      | Unresolved -> assert false
+    in
+    let configuration =
+      O.Configuration.of_target
+        target
+        ~preparation_id:"native-serializer-lifecycle"
+        ~transport:Http_sse
+        ~capabilities:[]
+        ~limits:O.Admission.observation
+      |> observation_ok
+    in
+    let source =
+      Transcript.Source_id.of_string "native-serializer-lifecycle"
+      |> Result.ok_or_failwith
+    in
+    let outcomes
+      : (Inference.Event.Terminal.delivery * Inference.Event.Terminal.outcome) list
+      =
+      [ Response_started, Completed
+      ; Response_started, Refused
+      ; Response_started, Incomplete Output_limit
+      ; Response_started, Failed (Provider Rate_limited)
+      ; Possibly_submitted, Failed (Transport Timeout)
+      ; Definitely_not_submitted, Failed (Authentication Missing)
+      ]
+    in
+    let ledger =
+      List.foldi
+        outcomes
+        ~init:(roundtrip ledger)
+        ~f:(fun index ledger (delivery, outcome) ->
+          let operation_id =
+            if index = 0 then None else Some (P.Id.Operation.create ())
+          in
+          let invocation_id =
+            if index = 0 then None else Some (P.Id.Invocation.create ())
+          in
+          let relation =
+            if index = 0
+            then Transcript.Scope.Root
+            else (
+              let parent =
+                List.hd_exn (L.rows ledger) |> L.Row.handle |> L.Handle.scope
+              in
+              let call_entry_id =
+                History_entry.Id.create ~namespace:"actual-host" ~sequence:index
+                |> Result.ok_or_failwith
+              in
+              Transcript.Scope.Nested
+                { scope = Transcript.Scope.key parent
+                ; call_entry_id = Some call_entry_id
+                ; call_alias = Some "actual-call"
+                })
+          in
+          let ledger, handle, _ =
+            L.admit ledger ~source ~relation ~operation_id ~invocation_id ~configuration
+            |> ledger_ok
+          in
+          let ledger = roundtrip ledger in
+          assert (
+            Option.equal P.Id.Operation.equal operation_id (L.Handle.operation_id handle));
+          assert (
+            Option.equal
+              P.Id.Invocation.equal
+              invocation_id
+              (L.Handle.invocation_id handle));
+          let ledger = L.set_state ledger handle Running |> ledger_ok |> roundtrip in
+          let actual = O.Count.create (Actual 0L) |> observation_ok in
+          let unknown = O.Count.create (Unknown Not_reported) |> observation_ok in
+          let usage =
+            O.Usage.create
+              ~counts:
+                { input = actual
+                ; output = unknown
+                ; reported_total = unknown
+                ; cached_input = unknown
+                ; cache_write_input = unknown
+                ; reasoning_output = unknown
+                }
+              ~inclusions:[]
+            |> observation_ok
+          in
+          let observed =
+            O.create
+              ~scope:(L.Handle.scope handle)
+              ~id:(L.Handle.accounting_id handle)
+              ~revision:0L
+              ~payload:(Usage usage)
+              ~limits:O.Admission.observation
+            |> observation_ok
+          in
+          let ledger, _ = L.observe ledger handle observed |> ledger_ok in
+          let ledger = roundtrip ledger in
+          let terminal =
+            Inference.Event.Terminal.create
+              ~scope:(L.Handle.scope handle)
+              ~delivery
+              ~outcome
+            |> Result.ok_or_failwith
+          in
+          L.set_state ledger handle (Terminal terminal) |> ledger_ok |> roundtrip)
+    in
+    let ledger, handle, _ =
+      L.admit
+        ledger
+        ~source
+        ~relation:Root
+        ~operation_id:None
+        ~invocation_id:None
+        ~configuration
+      |> ledger_ok
+    in
+    let ledger =
+      L.set_state
+        ledger
+        handle
+        (Interrupted { reason = Cancelled; delivery = Definitely_not_submitted })
+      |> ledger_ok
+      |> roundtrip
+    in
+    let ledger =
+      List.fold
+        [ P.Operation.Completed
+        ; Cancelled
+        ; Failed
+            (P.Error.create
+               Invalid_state
+               ~message:"actual host failure"
+               ~retryable:false
+               ())
+        ; Interrupted { reason = "actual host interruption"; retryable = false }
+        ]
+        ~init:ledger
+        ~f:(fun ledger terminal_state ->
+          let operation =
+            P.Operation.
+              { id = P.Id.Operation.create ()
+              ; generation = before.identity.generation
+              ; kind = Turn Administrative
+              ; state = Starting
+              ; started_at = timestamp
+              ; updated_at = timestamp
+              }
+          in
+          let ledger, handle, _ = L.admit_turn ledger operation |> ledger_ok in
+          let ledger = roundtrip ledger in
+          L.finish_turn ledger handle { operation with state = terminal_state }
+          |> ledger_ok
+          |> roundtrip)
+    in
+    let advanced =
+      L.with_generation ledger ~generation:(before.identity.generation + 1) |> ledger_ok
+    in
+    (* Full state identity must advance alongside the ledger; the native ledger roundtrip remains exact. *)
+    let document = L.to_document advanced |> ledger_ok in
+    let restored = L.of_document document ~limits:L.Limits.default |> ledger_ok in
+    assert (String.equal (D.Document.to_string document) (ledger_bytes restored));
+    assert (
+      List.equal
+        L.Handle.equal
+        (List.map (L.rows ledger) ~f:L.Row.handle)
+        (List.map (L.rows advanced) ~f:L.Row.handle));
+    assert (Int64.equal (L.revision advanced) (Int64.succ (L.revision ledger))))
+;;

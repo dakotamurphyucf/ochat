@@ -512,6 +512,11 @@ let record_consistent (h : Handle.t) record =
 ;;
 
 let validate_value ~limits v =
+  let* () =
+    protocol
+      "session_id"
+      (Result.map (P.Id.Session.of_json (P.Id.Session.to_json v.session_id)) ~f:ignore)
+  in
   if
     v.generation < 0
     || Int64.(v.last_ordinal < zero || v.last_turn_ordinal < zero || v.revision < zero)
@@ -584,6 +589,22 @@ let validate_value ~limits v =
              || not (equal_tracking h.tracking Tracked)
            then Error Error.Conflicting_handle
            else
+             let* () =
+               Option.value_map h.operation_id ~default:(Ok ()) ~f:(fun id ->
+                 protocol
+                   "operation_id"
+                   (Result.map
+                      (P.Id.Operation.of_json (P.Id.Operation.to_json id))
+                      ~f:ignore))
+             in
+             let* () =
+               Option.value_map h.invocation_id ~default:(Ok ()) ~f:(fun id ->
+                 protocol
+                   "invocation_id"
+                   (Result.map
+                      (P.Id.Invocation.of_json (P.Id.Invocation.to_json id))
+                      ~f:ignore))
+             in
              let* () = record_consistent h row.record in
              observation
                (O.Attempt_record.validate row.record ~limits:O.Admission.attempt)))
@@ -603,7 +624,8 @@ let validate_value ~limits v =
            || (not (Int64.equal ordinal h.ordinal))
            || Int64.(ordinal <= zero || ordinal > v.last_turn_ordinal)
            || (not (P.Id.Operation.equal h.operation_id turn.operation.id))
-           || not (Int.equal h.generation turn.operation.generation)
+           || (not (Int.equal h.generation turn.operation.generation))
+           || not (equal_tracking h.tracking Tracked)
          then Error Error.Conflicting_handle
          else (
            match turn.operation.kind with
@@ -743,12 +765,13 @@ let value_of_json ~limits json =
 
 let codec limits =
   match
-    D.Domain_codec.create
+    D.Domain_codec.create_validated
       ~limits:limits.Limits.document_limits
       ~kind:"session.inference_ledger"
       ~version:1
       ~shape:Shape.ledger
       ~supported_semantics:[]
+      ~validate:(fun value -> decode_error "payload" (validate_value ~limits value))
       ~decode:(value_of_json ~limits)
       ~encode:(fun v -> Ok (value_to_json v))
   with
