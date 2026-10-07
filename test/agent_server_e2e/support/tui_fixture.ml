@@ -146,6 +146,8 @@ let frame_events contents =
         Agent_store.Frame.decode ~max_payload_length:(16 * 1024 * 1024) ~contents ~offset
       with
       | Ok (Incomplete_tail _) -> List.rev acc |> List.concat
+      | Ok (Complete { frame; next_offset }) when Agent_store.Frame.flags frame <> 0 ->
+        loop next_offset acc
       | Ok (Complete { frame; next_offset }) ->
         let transaction =
           Agent_store.Frame.payload frame |> Agent_store.Transaction.decode
@@ -183,14 +185,21 @@ let assert_user entries text =
   match users with
   | [ actual ] ->
     let expected =
-      Agent_session.History_codec.user_text ~id:actual.id text
+      Openai.Responses.Item.Input_message
+        { role = User
+        ; content = [ Text { text; _type = "input_text" } ]
+        ; _type = "message"
+        }
+      |> Openai.Responses_history.create_with_id_exn ~id:actual.id
       |> Agent_session.History_codec.to_protocol
     in
-    require
-      (Sexp.equal
-         ([%sexp_of: Agent_protocol.History.entry] actual)
-         ([%sexp_of: Agent_protocol.History.entry] expected))
-      "TUI submitted different content"
+    if not (Agent_protocol.History.equal_entry actual expected)
+    then
+      raise_s
+        [%sexp
+          "TUI submitted different content"
+        , (actual : Agent_protocol.History.entry)
+        , (expected : Agent_protocol.History.entry)]
   | _ ->
     raise_s
       [%sexp

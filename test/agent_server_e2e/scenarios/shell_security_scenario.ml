@@ -698,14 +698,14 @@ let split_payload secret =
         [ "arguments", `Array [ `String secret; `String (Base64.encode_exn secret) ] ])
 ;;
 
-let live_tool_item name index =
+let live_tool_item ?(arguments = "") ?(status = "in_progress") name index =
   Res.Response_stream.Item.Function_call
     { name
-    ; arguments = ""
+    ; arguments
     ; call_id = sprintf "live-call-%d" index
     ; _type = "function_call"
     ; id = Some (sprintf "live-item-%d" index)
-    ; status = Some "in_progress"
+    ; status = Some status
     }
 ;;
 
@@ -732,6 +732,11 @@ let live_tool_stream name payload index =
         ; item_id = sprintf "live-item-%d" index
         ; output_index = 0
         ; type_ = "response.function_call_arguments.done"
+        }
+    ; Res.Response_stream.Output_item_done
+        { item = live_tool_item ~arguments:payload ~status:"completed" name index
+        ; output_index = 0
+        ; type_ = "response.output_item.done"
         }
     ]
 ;;

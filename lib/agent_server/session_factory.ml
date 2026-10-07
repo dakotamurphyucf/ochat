@@ -4114,6 +4114,70 @@ let retire_owned_children t actor ~closing =
     |> Result.all_unit
 ;;
 
+let install_compaction_inference t actor owner =
+  let module A = Agent_session.Session_actor in
+  let port : A.Compaction_inference.t =
+    { with_execution =
+        (fun ~operation ~selection f ->
+          let open Result.Let_syntax in
+          let%bind target =
+            match Inference.Selection.view selection with
+            | Captured target -> Ok target
+            | Unresolved ->
+              Error
+                (unavailable
+                   Migration_required
+                   "compaction requires an explicitly approved persisted inference target")
+          in
+          Runtime_owner.with_auxiliary_execution_lifetime owner (fun installed ->
+            let%bind state = A.state actor in
+            let%bind () =
+              match state.active_operation with
+              | Some current
+                when Agent_protocol.Id.Operation.equal current.id operation.id
+                     && Int.equal current.generation operation.generation
+                     && Agent_protocol.Operation.equal_kind current.kind Compaction
+                     && Document_schema.Json.equal
+                          (Inference.Selection.to_json state.spec.inference_target)
+                          (Inference.Selection.to_json selection) -> Ok ()
+              | Some _ | None ->
+                Error (unavailable Conflict "compaction inference admission changed")
+            in
+            let%bind inference =
+              match installed with
+              | Some inference -> Ok inference
+              | None ->
+                let%bind context =
+                  t.inference_policy.resolve_inference_context target
+                  |> Result.map_error ~f:(fun error ->
+                    unavailable
+                      Configuration_invalid
+                      (Sexp.to_string_hum
+                         (Inference_runtime.Preparation_error.sexp_of_t error)))
+                in
+                let%map ports = runtime_inference_ports t (ref (Some actor)) in
+                Inference_client.Execution.create
+                  ~context
+                  ~identity:ports.identity
+                  ~relation:Root
+                  ~before_dispatch:(fun _ -> ())
+                  ~on_attempt:ports.on_attempt
+                  ~on_completion:ports.on_completion
+                  ~on_observation:ports.on_observation
+            in
+            if
+              Inference.Request.Target.equal
+                (Inference_runtime.Context.target
+                   (Inference_client.Execution.context inference))
+                target
+            then f inference
+            else
+              Error (unavailable Conflict "selected compaction inference target changed")))
+    }
+  in
+  A.set_compaction_inference actor (Some port)
+;;
+
 let create_loaded_entry
       t
       handle
@@ -4202,54 +4266,65 @@ let create_loaded_entry
         ~build:(fun () -> build_runtime_for_actor t handle actor)
     in
     runtime_owner := Some runtime;
-    (match history_source t actor state.identity.session_id with
-     | Ok history_ids ->
-       let entry =
-         Session_registry.
-           { actor
-           ; history_ids
-           ; runtime
-           ; durable_events
-           ; capacity
-           ; store_handle = Some handle
-           ; expire_permissions = expire_permissions t actor profile
-           ; collect_results =
-               collect_results
-                 t
-                 handle
-                 journal
-                 persistence
-                 durable_events
-                 services
-                 runtime
-                 actor
-           ; close =
-               (fun () ->
-                 close_entry t handle journal persistence runtime writer actor capacity)
-           }
-       in
-       (match state.lifecycle.observed with
-        | Agent_protocol.Session.Stopped ->
-          (match Runtime_owner.unload runtime with
-           | Ok () -> Ok entry
-           | Error _ as failure ->
-             actor_ref := None;
-             runtime_owner := None;
-             close_unregistered_entry t handle runtime writer actor capacity;
-             failure)
-        | Queued_for_slot
-        | Starting
-        | Recovering
-        | Idle
-        | Running_turn _
-        | Compacting _
-        | Waiting_for_permission _
-        | Stopping
-        | Failed _ -> Ok entry)
+    let finish () =
+      let%bind () = install_compaction_inference t actor runtime in
+      let%bind history_ids = history_source t actor state.identity.session_id in
+      let entry =
+        Session_registry.
+          { actor
+          ; history_ids
+          ; runtime
+          ; durable_events
+          ; capacity
+          ; store_handle = Some handle
+          ; expire_permissions = expire_permissions t actor profile
+          ; collect_results =
+              collect_results
+                t
+                handle
+                journal
+                persistence
+                durable_events
+                services
+                runtime
+                actor
+          ; close =
+              (fun () ->
+                close_entry t handle journal persistence runtime writer actor capacity)
+          }
+      in
+      match state.lifecycle.observed with
+      | Agent_protocol.Session.Stopped ->
+        let%map () = Runtime_owner.unload runtime in
+        entry
+      | Queued_for_slot
+      | Starting
+      | Recovering
+      | Idle
+      | Running_turn _
+      | Compacting _
+      | Waiting_for_permission _
+      | Stopping
+      | Failed _ -> Ok entry
+    in
+    let close_failed () =
+      actor_ref := None;
+      runtime_owner := None;
+      try
+        Eio.Cancel.protect (fun () ->
+          close_unregistered_entry t handle runtime writer actor capacity)
+      with
+      | _ -> ()
+    in
+    (match finish () with
+     | Ok _ as result -> result
      | Error _ as failure ->
-       actor_ref := None;
-       close_unregistered_entry t handle runtime writer actor capacity;
-       failure)
+       close_failed ();
+       failure
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       close_failed ();
+       Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let create_unloaded_entry
@@ -4326,6 +4401,7 @@ let create_unloaded_entry
     in
     runtime_owner := Some runtime;
     (cleanup := fun () -> close_unregistered_entry t handle runtime writer actor capacity);
+    let%bind () = install_compaction_inference t actor runtime in
     match history_source t actor state.identity.session_id with
     | Error _ as failure ->
       runtime_owner := None;

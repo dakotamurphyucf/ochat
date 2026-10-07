@@ -1,5 +1,6 @@
 open Core
 module Config_fixture = Support.Config_fixture
+module Daemon_host = Support.Daemon_host
 module Daemon_process = Support.Daemon_process
 module Port_reservation = Support.Port_reservation
 module Process_manager = Support.Process_manager
@@ -585,6 +586,8 @@ let direct_embedded_observation env environment fixture =
   Eio.Switch.run (fun sw ->
     let embedded =
       Agent_server.Embedded.start
+        ~daemon_options:
+          (Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
         ~sw
         ~env
         (embedded_options environment fixture data_root)

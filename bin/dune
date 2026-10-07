@@ -1,7 +1,7 @@
 (library
  (name inference_composition)
  (modules inference_composition)
- (libraries core eio ochat.openai ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.chat_response ochat.agent_protocol ochat.transcript ochat.agent_server)
+ (libraries core eio uri ochat.openai ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.chat_response ochat.agent_protocol ochat.transcript ochat.agent_server)
  (preprocess (pps ppx_jane)))
 
 (executable

@@ -34,6 +34,17 @@ type services =
   ; ingress_limits : Staged_ingress.limits
   }
 
+module Compaction_inference = struct
+  type t =
+    { with_execution :
+        'a.
+        operation:Agent_protocol.Operation.t
+        -> selection:Inference.Selection.t
+        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> ('a, Agent_protocol.Error.t) Result.t
+    }
+end
+
 type submission =
   { session : Agent_protocol.Session.t
   ; history_id : Agent_protocol.History.Id.t
@@ -342,6 +353,7 @@ type _ request =
   | Set_runtime_worker :
       Operation_worker.t option * Inference_client.Execution.t option
       -> unit request
+  | Set_compaction_inference : Compaction_inference.t option -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
   | Set_automatic_turn_pauses :
       Chat_response.Runtime_semantics.pause_condition list
@@ -667,6 +679,7 @@ type t =
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
   ; mutable operation_worker : Operation_worker.t option
+  ; mutable compaction_inference : Compaction_inference.t option
   ; mutable inference_execution : Inference_client.Execution.t option
   ; compaction_env : Eio_unix.Stdenv.base option
   ; owner_lease_duration_ms : int
@@ -5432,44 +5445,53 @@ let compaction_terminal t operation_id outcome =
 ;;
 
 let compaction_failure exn =
-  Agent_protocol.Error.create
-    Internal_error
-    ~message:("history compaction failed: " ^ Exn.to_string exn)
-    ~retryable:true
-    ()
+  let message =
+    match exn with
+    | Context_compaction.Summarizer.Failed No_text ->
+      "history compaction failed: summarizer returned no text"
+    | _ -> "history compaction failed: " ^ Exn.to_string exn
+  in
+  Agent_protocol.Error.create Internal_error ~message ~retryable:true ()
 ;;
 
 exception Compaction_cancel_requested
 
-let compute_compaction t allocator history =
-  match t.inference_execution with
-  | None ->
-    Compaction_failed
-      (error Configuration_invalid "compaction requires selected runtime inference")
-  | Some inference ->
-    (match
-       Context_compaction.Compactor.compact_entries
-         ~inference
-         ~allocator
-         ~env:t.compaction_env
-         ~history
-     with
-     | Error exn -> Compaction_failed (compaction_failure exn)
-     | Ok history ->
-       (match History_entry.validate ~allocator history with
-        | Ok () -> Compacted history
-        | Error message ->
-          Compaction_failed (error Conflict ("invalid compacted history: " ^ message))))
+let compute_compaction t operation selection port installed allocator history =
+  let compute inference =
+    match
+      Context_compaction.Compactor.compact_entries
+        ~inference
+        ~allocator
+        ~env:t.compaction_env
+        ~history
+    with
+    | Error exn -> Error (compaction_failure exn)
+    | Ok history ->
+      (match History_entry.validate ~allocator history with
+       | Ok () -> Ok history
+       | Error message -> Error (error Conflict ("invalid compacted history: " ^ message)))
+  in
+  let result =
+    match port, installed with
+    | Some port, _ ->
+      port.Compaction_inference.with_execution ~operation ~selection compute
+    | None, Some inference -> compute inference
+    | None, None ->
+      Error (error Configuration_invalid "compaction requires selected runtime inference")
+  in
+  match result with
+  | Ok history -> Compacted history
+  | Error failure -> Compaction_failed failure
 ;;
 
-let run_compaction t operation allocator history =
+let run_compaction t operation selection port installed allocator history =
   let operation_id = operation.Agent_protocol.Operation.id in
   try
     Eio.Switch.run (fun operation_switch ->
       let cancel () = Eio.Switch.fail operation_switch Compaction_cancel_requested in
       match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
       | Error failure -> Compaction_failed failure
-      | Ok () -> compute_compaction t allocator history)
+      | Ok () -> compute_compaction t operation selection port installed allocator history)
   with
   | Compaction_cancel_requested -> Compaction_cancelled "operation cancelled"
   | Eio.Cancel.Cancelled reason -> Compaction_cancelled (Exn.to_string reason)
@@ -5478,8 +5500,11 @@ let run_compaction t operation allocator history =
 
 let launch_compaction t operation allocator history =
   let operation_id = operation.Agent_protocol.Operation.id in
+  let selection = t.state.spec.inference_target in
+  let port = t.compaction_inference in
+  let installed = t.inference_execution in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
-    let outcome = run_compaction t operation allocator history in
+    let outcome = run_compaction t operation selection port installed allocator history in
     ignore
       (call t ~priority:Priority (Compaction_terminal (operation_id, outcome))
        : (unit, Agent_protocol.Error.t) result))
@@ -9714,6 +9739,9 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
+  | Set_compaction_inference port ->
+    t.compaction_inference <- port;
+    Ok ()
   | Enable_automatic_turn_budget policy ->
     (match
        t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
@@ -10088,6 +10116,7 @@ let create_with_owner_lease_duration
     ; subscribers = ref Map.Poly.empty
     ; permission_waiters = ref Map.Poly.empty
     ; operation_worker
+    ; compaction_inference = None
     ; inference_execution = None
     ; compaction_env
     ; owner_lease_duration_ms
@@ -10171,6 +10200,10 @@ let set_operation_worker t worker =
 
 let set_runtime_worker t ~worker ~inference =
   call t ~priority:Priority (Set_runtime_worker (worker, inference))
+;;
+
+let set_compaction_inference t port =
+  call t ~priority:Priority (Set_compaction_inference port)
 ;;
 
 let change_moderator t moderator = call t (Change_moderator moderator)

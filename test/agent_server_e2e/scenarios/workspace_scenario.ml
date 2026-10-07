@@ -1,5 +1,6 @@
 open Core
 module Config_fixture = Support.Config_fixture
+module Daemon_host = Support.Daemon_host
 module Daemon_process = Support.Daemon_process
 module Port_reservation = Support.Port_reservation
 module Temporary_environment = Support.Temporary_environment
@@ -371,7 +372,15 @@ let test_local_workspace env environment =
         ; event_capacity = 1_024
         }
     in
-    let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+    let embedded =
+      Agent_server.Embedded.start
+        ~daemon_options:
+          (Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+        ~sw
+        ~env
+        options
+      |> protocol_ok
+    in
     Exn.protect
       ~f:(fun () ->
         let schedule =

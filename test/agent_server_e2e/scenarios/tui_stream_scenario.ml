@@ -131,13 +131,28 @@ let await_row env client applier model role text =
   assert_row model role text
 ;;
 
-let call model =
-  List.find (Model.active_agent_calls model) ~f:(fun call ->
-    String.equal (Model.agent_call_id call) "tui-fork")
+let call client model =
+  let live = Projection.live (Client.projection client) in
+  let activities =
+    Agent_client.Live_projection.activities live
+    @ Option.value_map
+        (Agent_client.Live_projection.terminal_view live)
+        ~default:[]
+        ~f:(fun view -> view.activities)
+  in
+  List.find_map activities ~f:(fun (summary : Agent_protocol.Activity.Tool.summary) ->
+    if String.equal summary.key.call_alias "tui-fork" && Option.is_none summary.key.parent
+    then (
+      let call_id =
+        Agent_protocol.Activity.Key.sexp_of_t summary.key |> Sexp.to_string_mach
+      in
+      List.find (Model.active_agent_calls model) ~f:(fun call ->
+        String.equal (Model.agent_call_id call) call_id))
+    else None)
 ;;
 
-let progress model =
-  Option.value_map (call model) ~default:[] ~f:(fun call ->
+let progress client model =
+  Option.value_map (call client model) ~default:[] ~f:(fun call ->
     Model.agent_call_progress_entries call |> List.map ~f:Model.progress_entry_text)
 ;;
 
@@ -194,7 +209,7 @@ let nested_progress env provider client applier model =
     ; Provider.reasoning_delta "nested-reason" "nested-think"
     ];
   apply_until env client applier model (fun () ->
-    List.mem (progress model) "nested-think" ~equal:String.equal);
+    List.mem (progress client model) "nested-think" ~equal:String.equal);
   Provider.emit
     nested
     [ Provider.done_ (Provider.reasoning "nested-reason" "nested-think")
@@ -202,15 +217,15 @@ let nested_progress env provider client applier model =
     ; Provider.text_delta "nested-message" "nested-a"
     ];
   apply_until env client applier model (fun () ->
-    List.mem (progress model) "nested-a" ~equal:String.equal);
+    List.mem (progress client model) "nested-a" ~equal:String.equal);
   F.require
-    (Poly.equal (progress model) [ "nested-think"; "nested-a" ])
+    (Poly.equal (progress client model) [ "nested-think"; "nested-a" ])
     "nested progress duplicated or reordered";
   nested
 ;;
 
 let durable_during_progress env client applier model =
-  let before = progress model in
+  let before = progress client model in
   let sent = Client.send_text client "stream-deferred" |> F.ok in
   F.require
     (Agent_protocol.Method_result.Send_message.equal_disposition
@@ -221,19 +236,21 @@ let durable_during_progress env client applier model =
     List.exists (snapshot client).deferred_entries ~f:(fun entry ->
       Agent_protocol.History.Id.compare entry.id sent.history_id = 0));
   T.apply applier model (Client.projection client);
-  F.require (Poly.equal before (progress model)) "durable revision replayed tool progress";
+  F.require
+    (Poly.equal before (progress client model))
+    "durable revision replayed tool progress";
   sent
 ;;
 
 let finish_nested env provider client applier model nested =
   Provider.emit nested [ Provider.text_delta "nested-message" "-b" ];
   apply_until env client applier model (fun () ->
-    List.mem (progress model) "nested-a-b" ~equal:String.equal);
+    List.mem (progress client model) "nested-a-b" ~equal:String.equal);
   Provider.emit nested [ Provider.done_ (Provider.message "nested-message" "nested-a-b") ];
   Provider.finish nested;
   let final = Provider.await_request provider env 2 in
   apply_until env client applier model (fun () ->
-    Option.exists (call model) ~f:(fun call ->
+    Option.exists (call client model) ~f:(fun call ->
       Poly.equal (Model.agent_call_outcome call) (Some Returned)));
   F.require
     (String.is_substring (Jsonaf.to_string (Provider.body final)) ~substring:"nested-a-b")
@@ -283,8 +300,7 @@ let finish_text env client applier model final =
   id
 ;;
 
-let assert_canonical model entries deferred =
-  F.assert_public_rows model entries;
+let assert_canonical entries deferred =
   let headers = List.map entries ~f:Agent_protocol.Public.History.header in
   F.require
     (List.equal
@@ -319,7 +335,12 @@ let finish_root env provider client observer applier model final reason_id defer
   in
   F.require (Option.is_none authoritative.failure) "streaming session failed";
   let entries = authoritative.canonical_history.entries in
-  assert_canonical model entries deferred;
+  assert_canonical entries deferred;
+  let visible =
+    Option.value_map authoritative.effective_history ~default:entries ~f:(fun window ->
+      window.entries)
+  in
+  F.assert_public_rows model visible;
   List.iter
     [ "reasoning", "root-think", reason_id; "assistant", "root-a-b", id ]
     ~f:(fun (role, text, id) ->
@@ -418,12 +439,12 @@ let assert_terminal_agent client model =
   F.require
     (List.is_empty (snapshot client).deferred_entries)
     "adopted queue was not cleared";
-  let call = Option.value_exn (call model) in
+  let call = Option.value_exn (call client model) in
   F.require
     (Poly.equal (Model.agent_call_outcome call) (Some Returned))
     "terminal Agent-page state lost";
   F.require
-    (Poly.equal (progress model) [ "nested-think"; "nested-a-b" ])
+    (Poly.equal (progress client model) [ "nested-think"; "nested-a-b" ])
     "terminal progress duplicated";
   ignore
     (Chat_tui.Renderer_page_agent.render ~size:(90, 25) ~model : Notty.I.t * (int * int));
@@ -548,13 +569,33 @@ let cancel_nested env provider client applier model =
     ; Provider.text_delta "cancel-child" "cancel-partial"
     ];
   apply_until env client applier model (fun () ->
-    List.mem (progress model) "cancel-partial" ~equal:String.equal);
+    List.mem (progress client model) "cancel-partial" ~equal:String.equal);
+  let operation_id = (Option.value_exn (snapshot client).session.active_operation).id in
   ignore (Client.cancel_active_operation client |> F.ok : Agent_protocol.Session.t);
   await_idle env client applier model;
+  let terminal =
+    Option.value_exn (Projection.terminal_operation (Client.projection client))
+  in
   F.require
-    (Option.exists (call model) ~f:(fun call ->
-       Poly.equal (Model.agent_call_outcome call) (Some Cancelled)))
-    "cancelled Agent-page call remained running";
+    (Agent_protocol.Id.Operation.equal operation_id terminal.id)
+    "cancellation terminal belongs to another operation";
+  F.require
+    (match terminal.state with
+     | Cancelled -> true
+     | Starting | Running | Cancelling | Completed | Failed _ | Interrupted _ -> false)
+    "operation did not publish a cancellation terminal";
+  let cancelled_call = Option.value_exn (call client model) in
+  F.require
+    ((not (Model.agent_call_is_running cancelled_call))
+     && Option.is_none (Model.agent_call_outcome cancelled_call)
+     && Option.is_none (Model.agent_call_output cancelled_call))
+    "cancelled operation left a running or fabricated tool outcome";
+  F.require
+    (List.exists (Model.agent_call_render_blocks cancelled_call) ~f:(fun block ->
+       match Model.agent_render_block_view block with
+       | Outcome_unavailable -> true
+       | Invocation _ | Truncation | Waiting | Progress _ | Status _ -> false))
+    "cancelled tool lacks its unavailable outcome row";
   Provider.emit
     child
     [ Provider.done_ (Provider.message "cancel-child" "late-child-result") ];

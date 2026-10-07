@@ -328,3 +328,81 @@ let%expect_test
     failure=true archives=0 original_preserved=true idle=true
     |}]
 ;;
+
+let%expect_test
+    "stopped compaction uses captured auxiliary inference without runtime load"
+  =
+  let module A = Agent_session.Session_actor in
+  let module Owner = Agent_server.Runtime_owner in
+  let execution = Inference_ports.compaction_execution () in
+  let selection =
+    Inference.Selection.captured
+      (Inference_runtime.Context.target (Inference_client.Execution.context execution))
+      ~limits:document_limits
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Job_fixtures.with_actor
+    ~prepare_state:(fun state ->
+      { state with spec = { state.spec with inference_target = selection } })
+    (fun _env _sw actor writer _ ->
+       let entry =
+         Agent_session.History_codec.user_text ~id:history_id "remember stopped history"
+         |> Agent_session.History_codec.to_protocol
+       in
+       A.append_history actor ~attachment_id:writer.id [ entry ] |> protocol_ok |> ignore;
+       A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
+       let builds = ref 0
+       and uses = ref 0 in
+       let owner =
+         Owner.create ~actor ~initial:None ~build:(fun () ->
+           incr builds;
+           failwith "auxiliary compaction must not initialize runtime")
+       in
+       Exn.protect
+         ~finally:(fun () -> Owner.close_and_wait owner)
+         ~f:(fun () ->
+           let port : A.Compaction_inference.t =
+             { with_execution =
+                 (fun ~operation ~selection:admitted f ->
+                   [%test_eq: Agent_protocol.Operation.kind] Compaction operation.kind;
+                   assert (
+                     Document_schema.Json.equal
+                       (Inference.Selection.to_json admitted)
+                       (Inference.Selection.to_json selection));
+                   Owner.with_auxiliary_execution_lifetime owner (fun installed ->
+                     assert (Option.is_none installed);
+                     incr uses;
+                     f execution))
+             }
+           in
+           A.set_compaction_inference actor (Some port) |> protocol_ok;
+           let before = A.state actor |> protocol_ok in
+           A.compact
+             actor
+             ~attachment_id:writer.id
+             ~expected_revision:(Some before.counters.revision)
+           |> protocol_ok
+           |> ignore;
+           let rec completed () =
+             let state = A.state actor |> protocol_ok in
+             match state.active_operation with
+             | Some _ ->
+               Eio.Fiber.yield ();
+               completed ()
+             | None -> state
+           in
+           let after = completed () in
+           [%test_eq: int] 1 after.conversation.compaction_generation;
+           [%test_eq: int] 1 !uses;
+           [%test_eq: int] 0 !builds;
+           (match after.lifecycle.observed with
+            | Stopped -> ()
+            | _ -> failwith "stopped compaction changed runtime lifecycle");
+           assert (not (Owner.is_loaded owner));
+           print_endline
+             "captured selected summary; stopped lifecycle; no initializer or worker load"));
+  [%expect
+    {| captured selected summary; stopped lifecycle; no initializer or worker load |}]
+;;

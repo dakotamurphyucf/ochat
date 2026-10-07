@@ -1,0 +1,5 @@
+(library
+ (name inference_composition_tests)
+ (libraries core inference_composition)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

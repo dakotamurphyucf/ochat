@@ -334,7 +334,7 @@ let automatic_suggestions ~sw env provider manual =
       | Some request ->
         let body = Provider.body request in
         if
-          Poly.equal (Jsonaf.member "stream" body) (Some `False)
+          Poly.equal (Jsonaf.member "stream" body) (Some `True)
           && Poly.equal (Jsonaf.member "model" body) (Some (`String "gpt-5.6-luna"))
         then delayed_suggestion ~sw env manual index;
         loop (index + 1)

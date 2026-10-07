@@ -126,11 +126,24 @@ The standalone TUI captures its session cache key and existing model-list retent
 heuristic once with a new target, persists them before initialization, and preserves
 resumed captured settings. This heuristic is host policy, not a support catalog.
 
+Explicit session compaction also works while the runtime is unloaded. Its host
+port captures the admitted operation and complete persisted selection, then runs
+outside the actor mailbox after worker readiness. A cancellable ownership lease
+retains an existing selected execution or resolves the exact captured target for
+a short-lived auxiliary execution. It does not load the agent runtime, rerun
+initializers, or select an alternative provider. Stop and administration join the
+lease before releasing resources; primary errors survive cleanup failures.
+
 Typeahead stays opt-in and requires an explicitly supplied execution. Its standalone
 host derives a response-limited adapter without changing the captured target,
 profile, credentials or identity allocator. Raw response/frame bounds can only
 tighten; the existing deadline and insertion bound remain separate controls.
-An attached client without an explicit typeahead execution reports unavailable.
+Typeahead is opt-in private editor inference. The CLI supplies a bounded selected
+execution for embedded sessions and explicitly selects a client-local host from
+its configured `API_URL`, credentials and suggestion model for attached sessions.
+The remote conversation remains daemon-owned; private suggestions do not infer or
+forward the daemon's target or credentials. Library callers without an explicit
+typeahead execution report unavailable. Off mode creates no auxiliary execution.
 
 The old `Chat_completion.run_agent` and `run_completion` executors are retired and
 reject before filesystem, network or tool effects. Their old DTO conversion
@@ -165,7 +178,7 @@ compose it with the existing host's tool, history and lifecycle owners.
 | Generated/authored children and descendants | `Runtime_builder` receives the child's independently captured selection; `Driver.run_agent` applies only explicit nested prompt overrides. |
 | ChatML `Model.call` / `Model.spawn` | `Model_executor` derives the recipe's effective target and acknowledges capture before model-capable initialization; retries use the persisted job binding. |
 | Forks | `In_memory_stream` isolates child history and carries the actual invocation parent. The built-in returns its last assistant entry's text; `Fork.execute_entries` retains its all-new-assistant-text contract. |
-| Compaction and relevance | The runtime owner installs the selected `Execution` alongside its worker; canonical compaction preserves retained entry IDs and payloads. |
+| Compaction and relevance | A host-owned auxiliary lease reuses a loaded selected `Execution` or resolves the captured target without loading the runtime; canonical compaction preserves retained entry IDs and payloads. |
 | Meta prompting and refinement | `Meta_prompting.Context` and `Inference_support` require explicit selected execution for every online model step. |
 | Typeahead | An explicit response-limited execution preserves the captured profile, credentials and identity allocator. |
 | Shell model review | `Agent_runtime.model_completion` uses selected no-tool execution and reports the actual effective model. |
@@ -178,7 +191,19 @@ existing fork-depth bound. Provider-shaped `post`/`post_stream` injection and th
 old agent DTO-result executor reject explicitly before execution. Pure DTO
 conversion and descriptor helpers do not dispatch inference.
 
+The current `Runtime_builder.parse_user_content` authoring bridge still converts
+plain-text and ChatMD inputs through the existing Responses DTO converter, then
+immediately creates a canonical Reconstructed payload. That local provenance is
+preserved in storage; it does not select a backend or dispatch a model request.
+Host producers that construct canonical content directly, such as new compaction
+reminders, use Authored payloads.
+
 The initial standard host has no remote image resolver. Local or already inline
 image bytes are supported; an unresolved remote URL rejects before authentication
 or network dispatch, including when it entered through reconstructed history.
 A host can supply immutable assets explicitly through the selected request port.
+
+The command entry points capture `API_URL` and `OPENAI_API_KEY` once at host
+construction. `API_URL` retains the existing host/base-URL convention: a bare
+host uses HTTPS, and `/v1/responses` is appended to the base path. Invalid
+configured endpoints fail validation; they do not fall back to the public API.

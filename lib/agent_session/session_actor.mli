@@ -47,6 +47,31 @@ type reset_options = Administration.reset_options =
 
 type t
 
+module Compaction_inference : sig
+  (** Trusted process-local selected auxiliary lifetime. Operation and complete
+      selection are captured by durable compaction admission. The callback runs
+      after Worker_ready, outside the actor mailbox; it must not initialize a
+      runtime or reselect a provider. Its bracket joins inference work before
+      releasing tracking/resources, preserves primary errors/cancellation, and
+      propagates cleanup failure after otherwise successful work. *)
+  type t =
+    { with_execution :
+        'a.
+        operation:Agent_protocol.Operation.t
+        -> selection:Inference.Selection.t
+        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> ('a, Agent_protocol.Error.t) Result.t
+    }
+end
+
+(** Install an explicitly owned host auxiliary port. None retains direct actor
+    fixture support for an explicitly installed selected runtime, otherwise
+    compaction reports configuration unavailable. No ambient provider exists. *)
+val set_compaction_inference
+  :  t
+  -> Compaction_inference.t option
+  -> (unit, Agent_protocol.Error.t) Result.t
+
 module Initialization_scope : sig
   (** Process-local capability issued only to a trusted Pending constructor.
       Bound to one actor, stable source/complete Selection and generation; it is

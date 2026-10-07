@@ -470,10 +470,7 @@ let run_in_env
     Inference_composition.create ~env ~default_model:"gpt-4.5-preview"
   in
   let typeahead_host =
-    Inference_host.with_response_limit inference_host ~max_body_bytes:(256 * 1024)
-    |> Result.map_error ~f:(fun error ->
-      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
-    |> Result.ok_or_failwith
+    Inference_composition.bounded_host inference_host ~max_body_bytes:(256 * 1024)
   in
   Chat_tui.App.run_chat
     ~inference_host
@@ -1754,6 +1751,22 @@ module Daemon_connection = struct
   ;;
 end
 
+let private_typeahead_execution (config : Chat_tui.Type_ahead_config.t) ~env ~host =
+  match config.mode with
+  | Off -> None
+  | Manual | Auto ->
+    let host =
+      match host with
+      | Some host -> host
+      | None -> Inference_composition.create ~env ~default_model:config.model
+    in
+    Some
+      (Inference_composition.bounded_execution
+         host
+         ~max_body_bytes:(256 * 1024)
+         Chat_response.Config.default)
+;;
+
 module Daemon_interactive = struct
   let protocol_error = Daemon_connection.protocol_error
 
@@ -1819,7 +1832,11 @@ module Daemon_interactive = struct
          in
          let open Or_error.Let_syntax in
          let%map client = select_client ~sw ~env ~connection ~reconnect ~mode target in
+         let typeahead_inference =
+           private_typeahead_execution typeahead_config ~env ~host:None
+         in
          Chat_tui.App.run_agent_session
+           ?typeahead_inference
            ~typeahead_config
            ~env
            ~client
@@ -2095,10 +2112,11 @@ module Embedded_interactive = struct
     let authoring_package_files =
       List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
     in
+    let inference_host =
+      Inference_composition.create ~env ~default_model:"gpt-4.5-preview"
+    in
     Agent_server.Embedded.start
-      ~daemon_options:
-        (Inference_composition.daemon_options
-           (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
+      ~daemon_options:(Inference_composition.daemon_options inference_host)
       ~sw
       ~env
       ~authoring_package_files
@@ -2122,7 +2140,14 @@ module Embedded_interactive = struct
                   ()
                 |> Result.map_error ~f:protocol_error
                 |> Or_error.map ~f:(fun client ->
+                  let typeahead_inference =
+                    private_typeahead_execution
+                      typeahead_config
+                      ~env
+                      ~host:(Some inference_host)
+                  in
                   Chat_tui.App.run_agent_session
+                    ?typeahead_inference
                     ~typeahead_config
                     ~env
                     ~client

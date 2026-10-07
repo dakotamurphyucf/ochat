@@ -54,7 +54,9 @@ let request provider env index =
   F.require
     (Poly.equal (Jsonaf.member "tools" body) (Some (`Array [])))
     "suggestion declared tools";
-  F.require (Poly.equal (Jsonaf.member "stream" body) (Some `False)) "suggestion streamed";
+  F.require
+    (Poly.equal (Jsonaf.member "stream" body) (Some `True))
+    "suggestion did not use the selected SSE adapter";
   request
 ;;
 
@@ -347,7 +349,7 @@ let configuration env =
             (Process.equal_exit (cli ~sw env temporary arguments).exit (Exited 0))
             "typeahead config precedence/no-config failed");
       List.iter
-        [ [ "--typeahead"; "manual" ]
+        [ [ "--typeahead"; "unsupported" ]
         ; [ "--typeahead-history-messages"; "4" ]
         ; [ "--typeahead-debounce-ms"; "0" ]
         ; [ "--typeahead-max-output-tokens"; "513" ]

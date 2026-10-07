@@ -20,36 +20,49 @@ let create () =
 let apply t event = Transcript.Draft.apply t event |> Result.map ~f:fst
 
 let rows_of_draft t =
-  let items = Transcript.Draft.items t |> List.map ~f:Conversation.draft_row in
+  let root scope =
+    match scope.Transcript.Scope.relation with
+    | Root -> true
+    | Nested _ -> false
+  in
+  let items =
+    Transcript.Draft.items t
+    |> List.filter ~f:(fun item -> root item.descriptor.scope)
+    |> List.map ~f:Conversation.draft_row
+  in
   let unknowns =
     Transcript.Draft.unknown_events t
-    |> List.mapi ~f:(fun index value ->
-      let key =
-        Transcript.Scope.key value.scope
-        |> Transcript.Scope.Key.sexp_of_t
-        |> Sexp.to_string_mach
-      in
-      let local_id = Printf.sprintf "%d:%s:%d" (String.length key) key index in
-      let id =
-        Projected_message.Id.local ~namespace:"unknown-live-observation" ~local_id
-        |> Result.ok_or_failwith
-      in
-      Projected_message.
-        { id
-        ; entry_id = None
-        ; message =
-            ( "unknown"
-            , Util.sanitize
-                ~strip:false
-                (Printf.sprintf
-                   "[Unknown live event: %s]\n%s"
-                   value.provider_kind
-                   (Jsonaf.to_string value.raw)) )
-        ; provenance = Streaming
-        ; source = Draft { key = local_id }
-        ; editing_text = None
-        ; revision = 0
-        })
+    |> List.filter_mapi ~f:(fun index value ->
+      if not (root value.scope)
+      then None
+      else (
+        let key =
+          Transcript.Scope.key value.scope
+          |> Transcript.Scope.Key.sexp_of_t
+          |> Sexp.to_string_mach
+        in
+        let local_id = Printf.sprintf "%d:%s:%d" (String.length key) key index in
+        let id =
+          Projected_message.Id.local ~namespace:"unknown-live-observation" ~local_id
+          |> Result.ok_or_failwith
+        in
+        Some
+          Projected_message.
+            { id
+            ; entry_id = None
+            ; message =
+                ( "unknown"
+                , Util.sanitize
+                    ~strip:false
+                    (Printf.sprintf
+                       "[Unknown live event: %s]\n%s"
+                       value.provider_kind
+                       (Jsonaf.to_string value.raw)) )
+            ; provenance = Streaming
+            ; source = Draft { key = local_id }
+            ; editing_text = None
+            ; revision = 0
+            }))
   in
   items @ unknowns
 ;;

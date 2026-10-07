@@ -7,6 +7,17 @@ let require result =
   |> Result.ok_or_failwith
 ;;
 
+let responses_endpoint ~api_url =
+  let base =
+    Option.value api_url ~default:"https://api.openai.com"
+    |> String.chop_suffix_if_exists ~suffix:"/"
+  in
+  let base =
+    if Option.is_some (Uri.scheme (Uri.of_string base)) then base else "https://" ^ base
+  in
+  base ^ "/v1/responses"
+;;
+
 let create ~env ~default_model =
   (* The standard endpoint host policy permits fields implemented by this
      adapter. This is neither a model catalog nor a live support probe: a model
@@ -44,7 +55,7 @@ let create ~env ~default_model =
     D.Profile.create
       ~id:"first-party-openai-responses"
       ~account:None
-      ~endpoint:"https://api.openai.com/v1/responses"
+      ~endpoint:(responses_endpoint ~api_url:(Sys.getenv "API_URL"))
       ~capabilities
       ~defaults:[]
     |> Or_error.ok_exn
@@ -86,6 +97,14 @@ let execution host config =
     ~on_attempt:(fun _ -> ())
     ~on_observation:(fun _ -> ())
     ~on_completion:(fun _ -> ())
+;;
+
+let bounded_host host ~max_body_bytes =
+  Inference_host.with_response_limit host ~max_body_bytes |> require
+;;
+
+let bounded_execution host ~max_body_bytes config =
+  execution (bounded_host host ~max_body_bytes) config
 ;;
 
 let daemon_options host =

@@ -120,9 +120,9 @@ let assert_request request =
   in
   require
     (match List.Assoc.find fields "stream" ~equal:String.equal with
-     | Some `False -> true
+     | Some `True -> true
      | _ -> false)
-    "compactor did not request nonstreaming JSON";
+    "compactor did not use the selected SSE adapter";
   let inputs =
     List.Assoc.find_exn fields "input" ~equal:String.equal |> Jsonaf.to_string
   in
@@ -274,9 +274,16 @@ let assert_terminal operation_id expected events =
     (match expected, operation.state with
      | Operation_completed, Completed | Operation_cancelled, Cancelled -> ()
      | Operation_failed, Failed error ->
-       require
-         (String.is_substring error.message ~substring:"Missing_summary")
-         "summary failed for an unexpected reason"
+       if
+         not
+           (Agent_protocol.Error.equal_code error.code Internal_error
+            && String.equal
+                 error.message
+                 "history compaction failed: summarizer returned no text")
+       then
+         raise_s
+           [%sexp
+             "summary failed for an unexpected reason", (error : Agent_protocol.Error.t)]
      | _ -> fail "terminal event and operation state disagree");
     require
       (Agent_protocol.Operation.equal_kind operation.kind Compaction)
@@ -331,14 +338,20 @@ let reminder_text summary =
 ;;
 
 let expected_reminder id marker =
-  let item =
-    Openai.Responses.Item.Input_message
-      { role = User
-      ; content = [ Text { text = reminder_text marker; _type = "input_text" } ]
-      ; _type = "message"
-      }
+  let module P = History_entry.Payload in
+  let semantic =
+    P.Semantic.create
+      (Message
+         { form = Input
+         ; role = User
+         ; content =
+             [ Text { text = reminder_text marker; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:P.Metadata.empty
+    |> Result.ok_or_failwith
   in
-  Openai.Responses_history.create_with_id_exn ~id item
+  History_entry.create_with_id ~id (P.authored semantic)
   |> fun native ->
   Agent_protocol.Public.History.full native ~provenance:Canonical |> F.protocol_ok
 ;;

@@ -1,121 +1,66 @@
-# `Chat_tui.Stream` — translate OpenAI stream events into UI patches
+# `Chat_tui.Stream` — project neutral live drafts
 
-`Chat_tui.Stream` is the protocol “adapter” between the OpenAI Responses
-stream (`Openai.Responses.Response_stream.t`) and the TUI’s internal update
-language (`Types.patch`).
+`Chat_tui.Stream` admits `Transcript.Stream.t` events into a bounded draft and
+projects parent Chat rows. Provider decoding belongs to the selected inference
+adapter. Draft rows are presentation state; they do not append canonical history.
 
-The module inspects incremental streaming events (text deltas, tool call
-arguments, reasoning summaries, …) and returns declarative patch lists that
-are later applied to `Model.t` by the app event loop.
+## Draft admission
 
-## Table of contents
+`create ()` creates an empty draft with limits of 256 scopes, 4,096 items,
+16,384 parts, 256 unknown events and 64 MiB of retained data, together with the
+shared transcript document limits. `apply` returns an updated draft or an
+admission error. Callers retain the previous value when admission fails.
 
-1. [High-level workflow](#workflow)
-2. [Public API](#api)
-3. [Pipeline notes (batching, coalescing, sanitisation)](#pipeline)
-4. [Tool metadata tracking](#tool-metadata)
-5. [Examples](#examples)
+`rows` projects the module's draft; `rows_of_draft` projects an existing
+`Transcript.Draft.t`, such as a validated client projection. The module does not
+apply these rows to `Model.t` or own a render loop.
 
-## High-level workflow <a id="workflow"></a>
+## Root and nested presentation
 
-```text
-OpenAI HTTP stream
-  └─► Response_stream.t events
-        └─► Chat_tui.Stream.handle_event(s)
-              └─► Types.patch list
-                    └─► Model.apply_patches
-```
+Parent Chat rows include only actual Root scopes. Known items use
+`Conversation.draft_row`; unknown Root events retain a sanitized evidence row.
+Their local identities include the actual scope and original unknown-event
+index, so filtering nested events does not renumber Root evidence.
 
-In the TUI, these functions are typically called from
-[`Chat_tui.App_stream_apply`](app_stream_apply.doc.md), not from user code.
+Nested items and unknown events remain in the underlying draft. Owned tool and
+agent activity presents readable nested progress separately; opaque nested
+evidence is not converted into raw Agent-page text. Updating an activity channel
+preserves its first-seen position.
 
-## Public API <a id="api"></a>
+A provider terminal is not a host history commit. `remove_committed` retires only
+Root items carrying the actual committed `History_entry.Id.t`; it neither removes
+nested occurrences with a similar identifier nor publishes their contents into
+the parent conversation. The postcommit owner remains responsible for canonical
+history and its stable row identities.
 
-### `handle_event`
+See [stream application](app_stream_apply.doc.md) and
+[agent event application](agent_event_apply.doc.md) for the corresponding TUI
+integration boundaries.
 
-`handle_event ~model ev` converts a single `Response_stream.t` event into a
-list of patches.
+## Public contract
 
-The function covers the event variants needed by the TUI, including:
+[Interface](../../../lib/chat_tui/stream.mli) ·
+[implementation](../../../lib/chat_tui/stream.ml)
 
-- `Output_text_delta` (assistant text)
-- `Output_item_added` (new output message, reasoning block, tool call)
-- `Reasoning_summary_text_delta`
-- tool-call argument deltas and “done” markers
-
-Unknown event variants are ignored and yield `[]`.
-
-### `handle_events`
-
-`handle_events ~model evs` is a convenience wrapper:
+The following excerpt is the current callable contract.
 
 ```ocaml
-let patches = Chat_tui.Stream.handle_events ~model evs in
-ignore (Model.apply_patches model patches)
+(** Bounded neutral standalone drafts. No provider decoding and no canonical
+    append: only the actual postcommit callback owns writable history. *)
+type t
+
+val create : unit -> t
+val apply : t -> Transcript.Stream.t -> (t, string) result
+
+(** Parent Chat rows include only actual Root scopes, including unknown evidence.
+    Nested scopes remain in the underlying Draft; owned Agent activity presents
+    their readable progress. This does not claim opaque nested evidence is
+    rendered as activity text. *)
+val rows : t -> Projected_message.t list
+
+val rows_of_draft : Transcript.Draft.t -> Projected_message.t list
+
+(** Retire only the actual committed root host occurrence; nested drafts remain
+    presentation-only and cannot enter the parent canonical list. *)
+val remove_committed : t -> History_entry.Id.t -> t
 ```
-
-### Tool output helpers
-
-The OpenAI Responses API can represent tool output either as a dedicated
-`Function_call_output.t` record, or as a history item (`Item.Function_call_output`
-or `Item.Custom_tool_call_output`).
-
-`Chat_tui.Stream` supports both:
-
-- `handle_fn_out ~model out` for `Function_call_output.t`
-- `handle_tool_out ~model item` for output items
-
-## Pipeline notes <a id="pipeline"></a>
-
-The stream handling pipeline is split across modules:
-
-- `Chat_tui.Stream` produces patches, but does not apply them.
-- `Chat_tui.App_stream_apply` applies patches and requests redraws.
-- `Chat_tui.App_streaming` batches very frequent stream events into
-  `Stream_batch` for efficiency.
-- `Chat_tui.Renderer` performs sanitisation and wrapping during rendering.
-
-This separation keeps the streaming-to-patch mapping concentrated in one
-place while allowing the app to tune performance (batching/coalescing)
-independently.
-
-## Tool metadata tracking <a id="tool-metadata"></a>
-
-For some tools, the TUI benefits from knowing *what* the tool was doing:
-
-- `read_file` / `read_directory` — record the referenced path
-- `apply_patch` — record that the output corresponds to a patch application
-
-Because OpenAI can interleave tool call arguments and tool outputs (especially
-when tool calls run in parallel), `Chat_tui.Stream` updates tool metadata both:
-
-- when the tool call is announced (`Output_item_added`), and
-- when the final arguments are received (“arguments_done” / “input_done”)
-
-If a tool output arrived *before* metadata was available, the module updates
-the already-rendered metadata and invalidates the relevant render cache entry
-so highlighting can be applied promptly.
-
-## Examples <a id="examples"></a>
-
-Processing a single stream event:
-
-```ocaml
-let patches = Chat_tui.Stream.handle_event ~model ev in
-ignore (Model.apply_patches model patches)
-```
-
-Processing a batch:
-
-```ocaml
-let patches = Chat_tui.Stream.handle_events ~model evs in
-ignore (Model.apply_patches model patches)
-```
-
-Handling a tool output item:
-
-```ocaml
-let patches = Chat_tui.Stream.handle_tool_out ~model item in
-ignore (Model.apply_patches model patches)
-```
-

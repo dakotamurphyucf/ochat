@@ -100,8 +100,8 @@ let respond t ~env ~action ~index =
   let request = P.request_at t.provider index |> Option.value_exn in
   let streaming = Poly.equal (Jsonaf.member "stream" (P.body request)) (Some `True) in
   if
-    (not (String.equal action "background"))
-    && Bool.equal streaming (List.mem [ "summary"; "suggest" ] action ~equal:String.equal)
+    (not (List.mem [ "background"; "summary"; "suggest" ] action ~equal:String.equal))
+    && not streaming
   then failwith "action does not match streaming/JSON request";
   let phase =
     match Hashtbl.find t.phases index with

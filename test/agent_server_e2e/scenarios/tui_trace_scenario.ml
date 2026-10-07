@@ -21,9 +21,12 @@ let embedded_options fixture : Agent_server.Embedded.options =
   }
 ;;
 
-let with_embedded_provider env fixture f =
+let with_embedded_options ~daemon_options env fixture f =
   Eio.Switch.run (fun sw ->
-    let host = Agent_server.Embedded.start ~sw ~env (embedded_options fixture) |> F.ok in
+    let host =
+      Agent_server.Embedded.start ~sw ~env ~daemon_options (embedded_options fixture)
+      |> F.ok
+    in
     Exn.protect
       ~f:(fun () ->
         let connection = Agent_server.Embedded.connect host in
@@ -43,8 +46,22 @@ let with_embedded_provider env fixture f =
       ~finally:(fun () -> Agent_server.Embedded.close host))
 ;;
 
+let with_embedded_provider env fixture f =
+  let host = Inference_composition.create ~env ~default_model:"gpt-4.1" in
+  with_embedded_options
+    ~daemon_options:(Inference_composition.daemon_options host)
+    env
+    fixture
+    f
+;;
+
 let with_embedded env fixture f =
-  with_embedded_provider (F.offline_environment env) fixture f
+  with_embedded_options
+    ~daemon_options:
+      (Support.Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+    (F.offline_environment env)
+    fixture
+    f
 ;;
 
 let connected ~sw env fixture http =

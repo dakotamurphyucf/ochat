@@ -1155,7 +1155,7 @@ let append_history_entry
     st)
 ;;
 
-let scoped_tool_observer (c : ctx) =
+let scoped_tool_observer (c : ctx) ~scope =
   match c.on_transcript_event, c.on_scoped_tool_execution with
   | None, None -> None
   | (None | Some _), (None | Some _) ->
@@ -1166,8 +1166,7 @@ let scoped_tool_observer (c : ctx) =
           Option.iter c.on_transcript_event ~f:(fun observe -> observe event)
         | Trace { call_id; _ } when Set.mem c.scoped_trace_bridges call_id -> ()
         | Started _ | Progress _ | Finished _ | Trace _ ->
-          Option.iter c.on_scoped_tool_execution ~f:(fun observe ->
-            observe ~scope:(Option.value_exn c.transcript_scope) event))
+          Option.iter c.on_scoped_tool_execution ~f:(fun observe -> observe ~scope event))
 ;;
 
 let append_history_item
@@ -1439,6 +1438,7 @@ let make_run_fork_admitted
     ; on_tool_out = (fun _ -> ())
     ; on_event =
         (fun event -> notify_each [ ctx.on_event; Agent_trace.on_event trace ] event)
+    ; on_transcript_event = Some (Agent_trace.on_transcript_event trace)
     ; on_tool_execution = Some (Agent_trace.on_tool_execution trace)
     }
   in
@@ -1983,16 +1983,17 @@ let accept_inference_candidate
                        ~arguments)
                | Custom -> None
              in
+             (* Bind delayed tool execution to the admitted candidate, rather
+                than the mutable current stream scope. *)
              let inference_parent =
-               Option.map c.transcript_scope ~f:(fun scope ->
-                 Transcript.Scope.
-                   { scope = Transcript.Scope.key scope
-                   ; call_entry_id = Some id
-                   ; call_alias = Some call_id
-                   })
+               Transcript.Scope.
+                 { scope = Transcript.Scope.key item.scope
+                 ; call_entry_id = Some id
+                 ; call_alias = Some call_id
+                 }
              in
              Tool_call.run_tool
-               ?inference_parent
+               ~inference_parent
                ~kind
                ~name:moderated.name
                ~payload
@@ -2000,7 +2001,7 @@ let accept_inference_candidate
                ~call_id
                ~tool_tbl:c.tool_tbl
                ?on_tool_execution:c.on_tool_execution
-               ?on_execution_event:(scoped_tool_observer c)
+               ?on_execution_event:(scoped_tool_observer c ~scope:item.scope)
                ~on_fork
                ())
       in

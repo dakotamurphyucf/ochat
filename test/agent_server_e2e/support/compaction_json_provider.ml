@@ -53,19 +53,29 @@ let empty_response : Res.Response.t =
   }
 ;;
 
-let response outcome =
+let response ~stream outcome =
   let output =
     match outcome with
     | Summary text -> [ output text ]
     | Missing_summary | Raw_json _ -> []
   in
   let response = { empty_response with output } in
-  let headers = Piaf.Headers.of_list [ "content-type", "application/json" ] in
   let body =
     match outcome with
     | Raw_json body -> body
     | Summary _ | Missing_summary -> Res.Response.jsonaf_of_t response |> Jsonaf.to_string
   in
+  let content_type, body =
+    if stream
+    then
+      ( "text/event-stream"
+      , "event: response.completed\n\
+         data: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":"
+        ^ body
+        ^ "}\n\n" )
+    else "application/json", body
+  in
+  let headers = Piaf.Headers.of_list [ "content-type", content_type ] in
   Piaf.Response.of_string ~headers ~body `OK
 ;;
 
@@ -79,7 +89,12 @@ let handle_request t incoming =
   let gate, release = Eio.Promise.create () in
   let returned, notify_returned = Eio.Promise.create () in
   t.requests <- t.requests @ [ { body; release; returned; released = false } ];
-  let response = Eio.Promise.await gate |> response in
+  let stream =
+    match Jsonaf.member "stream" body with
+    | Some `True -> true
+    | _ -> false
+  in
+  let response = Eio.Promise.await gate |> response ~stream in
   Eio.Promise.resolve notify_returned ();
   response
 ;;

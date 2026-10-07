@@ -399,6 +399,15 @@ let same_descriptor left right =
   Jsonaf.exactly_equal (Tool.to_json (Started left)) (Tool.to_json (Started right))
 ;;
 
+let rec upsert_channel (channels : Tool.channel_text list) (channel : Tool.channel_text) =
+  match channels with
+  | [] -> [ channel ]
+  | previous :: rest ->
+    if P.Activity.Progress.equal_channel previous.channel channel.channel
+    then channel :: rest
+    else previous :: upsert_channel rest channel
+;;
+
 let apply_tool t operation event ~budget =
   let open Result.Let_syntax in
   let key = Tool.key event in
@@ -476,12 +485,8 @@ let apply_tool t operation event ~budget =
          let empty_channel : Tool.channel_text =
            { channel = progress.channel; text = ""; complete }
          in
-         let other_channels =
-           List.filter channels ~f:(fun channel ->
-             not (P.Activity.Progress.equal_channel channel.channel progress.channel))
-         in
          let%bind empty_summary =
-           make descriptor (empty_channel :: other_channels) Running
+           make descriptor (upsert_channel channels empty_channel) Running
          in
          let%bind base_charge = measure_retained t (Tool.summary_to_json empty_summary) in
          (* Exact escaped-text growth is admitted before concatenation. *)
@@ -505,11 +510,7 @@ let apply_tool t operation event ~budget =
          let channel : Tool.channel_text =
            { channel = progress.channel; text; complete }
          in
-         let channels =
-           channel
-           :: List.filter channels ~f:(fun previous ->
-             not (P.Activity.Progress.equal_channel previous.channel progress.channel))
-         in
+         let channels = upsert_channel channels channel in
          make descriptor channels Running)
   in
   let%bind bytes = measure_retained t (Tool.summary_to_json summary) in

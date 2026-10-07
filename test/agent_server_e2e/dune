@@ -113,6 +113,7 @@
  (modules :standard)
  (libraries
   agent_server_test_support
+  inference_composition
   base64
   core
   core_unix.command_unix

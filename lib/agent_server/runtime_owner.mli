@@ -94,6 +94,17 @@ val with_background_runtime
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
+    runtime is retained and its selected execution supplied; otherwise f receives
+    None and must use explicit host selection. Stop/administration excludes and
+    joins this lease. No initializer/manager/tool setup occurs. Run selection,
+    inference and joined cleanup inside f, outside actor/owner callbacks. Primary
+    errors/exceptions remain authoritative if cleanup also fails. *)
+val with_auxiliary_execution_lifetime
+  :  t
+  -> (Inference_client.Execution.t option -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
+
 (** Retain native/compiled resources for an independently owned descendant.
     Admission uses the same current loaded-runtime check as a background borrow.
     Ordinary [unload_and_wait] detaches the parent's worker and permits a fresh runtime to

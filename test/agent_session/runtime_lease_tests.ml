@@ -817,3 +817,56 @@ let%expect_test "administration initialization fences committed stopped cleanup"
     (true "one committed selection; cleanup joined")
     |}]
 ;;
+
+exception Lease_primary
+exception Lease_cleanup
+
+let%expect_test "lease cleanup preserves primary failures and reports standalone cleanup" =
+  List.iter [ `Typed; `Raised; `Success ] ~f:(fun outcome ->
+    with_actor (fun _env _sw actor _writer _ ->
+      let closes = ref 0 in
+      let owner =
+        Owner.create
+          ~actor
+          ~initial:
+            (Some
+               (runtime
+                  ~close:(fun () ->
+                    incr closes;
+                    raise Lease_cleanup)
+                  ()))
+          ~build:(fun () -> failwith "unexpected lease reload")
+      in
+      let primary = Agent_protocol.Error.invalid_request "primary lease failure" in
+      let observed =
+        try
+          match
+            Owner.with_delegation_resources owner (fun _ ->
+              Owner.unload_and_wait owner |> protocol_ok;
+              match outcome with
+              | `Typed -> Error primary
+              | `Raised -> raise Lease_primary
+              | `Success -> Ok ())
+          with
+          | Error error ->
+            [%test_eq: Sexp.t]
+              (Agent_protocol.Error.sexp_of_t error)
+              (Agent_protocol.Error.sexp_of_t primary);
+            `Typed
+          | Ok () -> failwith "cleanup failure was lost"
+        with
+        | Lease_primary -> `Raised
+        | Lease_cleanup -> `Success
+      in
+      assert (
+        match outcome, observed with
+        | `Typed, `Typed | `Raised, `Raised | `Success, `Success -> true
+        | _ -> false);
+      [%test_eq: int] 1 !closes;
+      assert (not (Owner.is_loaded owner));
+      Owner.close_and_wait owner));
+  print_endline
+    "typed error and exception retained; cleanup raised only after success; closed once";
+  [%expect
+    {| typed error and exception retained; cleanup raised only after success; closed once |}]
+;;

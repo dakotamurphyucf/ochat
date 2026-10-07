@@ -240,14 +240,14 @@ let%expect_test "source attempts and nested drafts do not alias canonical occurr
       (List.dedup_and_sort
          (List.map rows ~f:(fun row -> row.Row.id))
          ~compare:Row.Id.compare)
-    = 3);
+    = 2);
   assert (List.for_all rows ~f:(fun row -> Option.is_none (Row.deletion_target row)));
   let retired = Chat_tui.Stream.remove_committed drafts (id 1) |> Chat_tui.Stream.rows in
   printf
     "distinct=%d retained-after-root-commit=%d\n"
     (List.length rows)
     (List.length retired);
-  [%expect {| distinct=3 retained-after-root-commit=2 |}]
+  [%expect {| distinct=2 retained-after-root-commit=1 |}]
 ;;
 
 let%expect_test
@@ -471,4 +471,61 @@ let%test_unit "nested-first activity uses the actual parent scope even for the s
       String.equal key (Activity.Key.sexp_of_t child_key |> Sexp.to_string_mach)
       && List.exists progress ~f:(fun (_, text) -> String.equal text "child only")));
   assert (List.is_empty (Model.history_items model))
+;;
+
+let%expect_test
+    "parent chat projects only root known and unknown drafts with stable identities"
+  =
+  let root = scope "parent-chat" "root" Root in
+  let child =
+    scope
+      "child-chat"
+      "child"
+      (Nested { scope = root.key; call_entry_id = None; call_alias = Some "fork" })
+  in
+  let limits =
+    Transcript.Draft.Limits.create
+      ~max_scopes:4
+      ~max_items:4
+      ~max_parts:4
+      ~max_unknown_events:4
+      ~max_retained_bytes:65536
+      ~document_limits:Transcript.Admission.default
+    |> ok
+  in
+  let apply drafts view = Transcript.Draft.apply drafts (event view) |> ok |> fst in
+  let drafts =
+    Transcript.Draft.create ~limits
+    |> fun drafts ->
+    apply drafts (Item_announced (item root "root" None (Some Reasoning)))
+    |> fun drafts ->
+    apply drafts (Item_announced (item child "child" None (Some Reasoning)))
+    |> fun drafts ->
+    apply
+      drafts
+      (Unknown_event { scope = child; provider_kind = "child-future"; raw = `Object [] })
+    |> fun drafts ->
+    apply
+      drafts
+      (Unknown_event { scope = root; provider_kind = "root-future"; raw = `Object [] })
+  in
+  [%test_eq: int] 2 (List.length (Transcript.Draft.items drafts));
+  [%test_eq: int] 2 (List.length (Transcript.Draft.unknown_events drafts));
+  let rows = Chat_tui.Stream.rows_of_draft drafts in
+  [%test_eq: int] 2 (List.length rows);
+  let root_unknown = List.last_exn rows in
+  assert (String.is_substring (snd root_unknown.message) ~substring:"root-future");
+  assert (
+    not
+      (List.exists rows ~f:(fun row ->
+         String.is_substring (snd row.Row.message) ~substring:"child-future")));
+  let drafts =
+    apply
+      drafts
+      (Unknown_event { scope = child; provider_kind = "later-child"; raw = `Object [] })
+  in
+  let after = Chat_tui.Stream.rows_of_draft drafts |> List.last_exn in
+  assert (Row.Id.equal root_unknown.id after.id);
+  print_endline "nested items/evidence retained separately; root unknown identity stable";
+  [%expect {| nested items/evidence retained separately; root unknown identity stable |}]
 ;;

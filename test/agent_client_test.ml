@@ -1153,3 +1153,64 @@ let%expect_test "gap admission at the public tool byte boundary is atomic" =
   [%expect
     {| oversized gap returns Snapshot_required; original prefix and sequence survive |}]
 ;;
+
+let%expect_test "alternating activity updates preserve first-seen channel positions" =
+  let key =
+    P.Activity.Key.create ~scope:root_scope.key ~call_alias:"stable-channels" ~parent:None
+    |> protocol_ok
+  in
+  let descriptor =
+    P.Activity.Tool.descriptor
+      key
+      ~call_entry_id:None
+      ~name:"fork"
+      ~kind:Function
+      ~input:"{}"
+      ~classification:(Some Subagent)
+    |> protocol_ok
+  in
+  let activity sequence payload =
+    P.Event.Recoverable.create
+      ~session_id
+      ~operation_id
+      ~operation_sequence:sequence
+      ~anchor_sequence:1L
+      ~timestamp
+      ~invocation_id:None
+      ~parent_invocation_id:None
+      (Tool_activity payload)
+    |> protocol_ok
+  in
+  let update t sequence channel update =
+    apply_live t (activity sequence (Progress { key; progress = { channel; update } }))
+  in
+  let t = apply_live (active_projection ()) (activity 1L (Started descriptor)) in
+  let first = update t 2L Reasoning (Append "think") in
+  let t = update first 3L Assistant (Append "answer") in
+  let t = update t 4L Reasoning (Append " more") in
+  let t = update t 5L Assistant (Replace "answer final") in
+  let summary t =
+    Agent_client.Live_projection.activities (Agent_client.Projection.live t)
+    |> List.hd_exn
+  in
+  let values t =
+    (summary t).channels
+    |> List.map ~f:(fun channel -> channel.channel, channel.text, channel.complete)
+  in
+  [%test_eq: (P.Activity.Progress.channel * string * bool) list]
+    [ Reasoning, "think", true ]
+    (values first);
+  [%test_eq: (P.Activity.Progress.channel * string * bool) list]
+    [ Reasoning, "think more", true; Assistant, "answer final", true ]
+    (values t);
+  let duplicate = update t 5L Assistant (Replace "answer final") in
+  assert (
+    Document_schema.Json.equal
+      (P.Activity.Tool.summary_to_json (summary t))
+      (P.Activity.Tool.summary_to_json (summary duplicate)));
+  print_endline
+    "first-seen order survives append/replace; exact text, completeness and duplicate \
+     preserved";
+  [%expect
+    {| first-seen order survives append/replace; exact text, completeness and duplicate preserved |}]
+;;

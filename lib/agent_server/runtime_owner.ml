@@ -206,29 +206,47 @@ let with_lease t ~survives_stop ~admit f =
       Atomic.set active false;
       failure
     | Ok runtime ->
-      Exn.protect
-        ~finally:(fun () ->
-          (* Mutex protection starts only after acquiring it. Lease cleanup must
-             also survive cancellation while waiting for another owner callback. *)
-          Eio.Cancel.protect (fun () ->
-            Atomic.set active false;
-            Exn.protect
-              ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
-              ~f:(fun () ->
-                with_owner_lock t ~protect:true (fun () ->
-                  t.background_leases
-                  <- List.filter t.background_leases ~f:(fun current ->
-                       not (phys_equal current lease));
-                  Option.iter lease.resources ~f:(release_retired_resources_locked t);
-                  match t.closed, t.background_leases, t.before_unload, t.unloading with
-                  | true, [], None, None -> retire_runtime_locked t
-                  | _ -> Ok ())
-                |> raise_cleanup)))
-        ~f:(fun () ->
+      let cleanup () =
+        (* Cleanup must survive cancellation while waiting for another owner. *)
+        Eio.Cancel.protect (fun () ->
+          Atomic.set active false;
+          Exn.protect
+            ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
+            ~f:(fun () ->
+              with_owner_lock t ~protect:true (fun () ->
+                t.background_leases
+                <- List.filter t.background_leases ~f:(fun current ->
+                     not (phys_equal current lease));
+                Option.iter lease.resources ~f:(release_retired_resources_locked t);
+                match t.closed, t.background_leases, t.before_unload, t.unloading with
+                | true, [], None, None -> retire_runtime_locked t
+                | _ -> Ok ())
+              |> raise_cleanup))
+      in
+      let result =
+        try
           Eio.Fiber.check ();
           let result = f runtime in
-          Eio.Fiber.check ();
-          result))
+          (match result with
+           | Error _ -> ()
+           | Ok _ -> Eio.Fiber.check ());
+          Ok result
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      let cleaned =
+        try
+          cleanup ();
+          Ok ()
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      (match result, cleaned with
+       | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+       | Ok (Error _ as failure), _ -> failure
+       | Ok result, Ok () -> result
+       | Ok (Ok _), Error (exn, backtrace) ->
+         Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
 let with_runtime_lease t ~retain_resources f =
@@ -245,6 +263,21 @@ let with_runtime_lease t ~retain_resources f =
 
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
+
+let with_auxiliary_execution_lifetime t f =
+  with_lease
+    t
+    ~survives_stop:false
+    ~admit:(fun () ->
+      match t.closed, t.unloading with
+      | true, _ -> Error (closed_error ())
+      | false, Some _ -> Error (background_busy ())
+      | false, None ->
+        Ok
+          ( Option.map t.runtime ~f:Agent_session.Runtime_builder.inference_execution
+          , t.runtime ))
+    f
+;;
 
 let with_resource_lifetime t f =
   with_lease
