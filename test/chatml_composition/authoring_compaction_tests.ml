@@ -105,65 +105,10 @@ let summary_events () =
     ]
 ;;
 
-let with_compaction_execution entry f =
-  (* Foreground authoring and auxiliary summarization are independently selected
-     synthetic executions. Compaction must not consume the foreground transcript. *)
-  Agent_server.Runtime_owner.with_background_runtime
-    entry.Agent_server.Session_registry.runtime
-    (fun runtime ->
-       let requests = ref 0 in
-       let post_stream ~sw:_ ~inputs:_ =
-         incr requests;
-         summary_events ()
-       in
-       let fixture =
-         Inference_fixture.create
-           ~namespace:(P.Id.Transaction.create () |> P.Id.Transaction.to_string)
-           ~default_model:"fixture-model"
-           ~post_stream
-       in
-       let original = Agent_session.Runtime_builder.inference_execution runtime in
-       let target =
-         Inference_runtime.Context.target (Inference_client.Execution.context original)
-       in
-       let context =
-         Inference_fixture.resolve fixture target
-         |> Result.map_error ~f:(fun error ->
-           Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
-         |> Result.ok_or_failwith
-       in
-       let auxiliary =
-         Inference_client.Execution.create
-           ~context
-           ~identity:(Inference_fixture.identity fixture)
-           ~relation:Root
-           ~before_dispatch:ignore
-           ~on_attempt:ignore
-           ~on_completion:ignore
-           ~on_observation:ignore
-       in
-       A.set_runtime_worker
-         entry.actor
-         ~worker:(Some runtime.worker)
-         ~inference:(Some auxiliary)
-       |> protocol_ok;
-       Exn.protect
-         ~finally:(fun () ->
-           Eio.Cancel.protect (fun () ->
-             A.set_runtime_worker
-               entry.actor
-               ~worker:(Some runtime.worker)
-               ~inference:(Some original)
-             |> protocol_ok))
-         ~f:(fun () ->
-           f ();
-           assert (!requests = 1));
-       Ok ())
-  |> protocol_ok
-;;
-
 let exercise with_session =
   let stage = ref Initial_prepare in
+  let compacting = ref false in
+  let summary_requests = ref 0 in
   let request_number = ref 0 in
   let initial_count = ref Int.max_value
   and final_count = ref Int.max_value in
@@ -202,6 +147,22 @@ let exercise with_session =
         , Q.request ~task:"background_workflow" ~max_tokens:1500 "prepare" )
       ]
     ~request_counts:(fun () -> !initial_count, !final_count)
+    ~auxiliary_response:(fun inputs ->
+      if not !compacting
+      then None
+      else (
+        assert (equal_stage !stage Await_compaction);
+        let encoded =
+          `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t)
+          |> Jsonaf.to_string
+        in
+        assert (
+          String.is_substring
+            encoded
+            ~substring:"your task is to compact it to save on context space");
+        assert (String.is_substring encoded ~substring:"<conversation>");
+        incr summary_requests;
+        Some (summary_events ())))
     ~inspect_request:(fun number actual ->
       assert (number < 200);
       request_number := number;
@@ -325,11 +286,18 @@ let exercise with_session =
          |> protocol_ok
          |> Chat_response.Authoring_reference_index.receipts;
       assert (not (List.is_empty !first_receipts));
-      with_compaction_execution entry (fun () ->
-        H.compact handle ~expected_revision:(Some before.counters.revision)
-        |> protocol_ok
-        |> ignore;
-        wait_idle env entry);
+      (* The real Factory compaction port uses the selected synthetic policy.
+         Only this admitted compaction scope selects the summary response; no
+         Actor worker override or foreground transcript suppression is needed. *)
+      compacting := true;
+      Exn.protect
+        ~finally:(fun () -> compacting := false)
+        ~f:(fun () ->
+          H.compact handle ~expected_revision:(Some before.counters.revision)
+          |> protocol_ok
+          |> ignore;
+          wait_idle env entry);
+      [%test_eq: int] 1 !summary_requests;
       assert (!request_number = !initial_count);
       let compacted = A.state entry.actor |> protocol_ok in
       assert (
@@ -396,6 +364,7 @@ let with_root
       ~sources
       ~calls
       ~request_counts
+      ~auxiliary_response
       ~inspect_request
       ~followup_calls
       ~after_turn
@@ -407,6 +376,7 @@ let with_root
     ~calls
     ~request_counts
     ~inspect_request
+    ~auxiliary_response
     ~followup_calls
     ~after_turn
     ~settle

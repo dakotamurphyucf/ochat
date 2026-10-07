@@ -78,6 +78,7 @@ let with_daemon
       ?after_turn_with_daemon
       ?(connect = fun ~sw:_ ~env:_ ~root:_ daemon -> connection daemon (principal ()))
       ?(inspect_request = fun _ _ -> ())
+      ?(auxiliary_response = fun _ -> None)
       ?(followup_calls = fun _ -> [])
       ?(expected_requests = 2)
       ?(initial_requests = 2)
@@ -140,15 +141,19 @@ let with_daemon
         let provider_failure = ref None in
         let post_stream ~sw:_ ~inputs =
           match
-            let () =
+            (* An explicitly selected auxiliary response does not consume the
+               independently asserted foreground transcript. Both still use the
+               actual fixture policy and Factory-owned inference ports. *)
+            match auxiliary_response inputs with
+            | Some events -> events
+            | None ->
               incr requests;
-              inspect_request !requests inputs
-            in
-            match !requests with
-            | 1 -> call_events calls
-            | request when request <= snd (request_counts ()) ->
-              call_events (followup_calls request)
-            | _ -> failwith "tool execution requested an unexpected model turn"
+              inspect_request !requests inputs;
+              (match !requests with
+               | 1 -> call_events calls
+               | request when request <= snd (request_counts ()) ->
+                 call_events (followup_calls request)
+               | _ -> failwith "tool execution requested an unexpected model turn")
           with
           | events -> events
           | exception error ->

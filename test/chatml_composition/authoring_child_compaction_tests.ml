@@ -11,6 +11,7 @@ let with_child
       ~sources
       ~calls
       ~request_counts
+      ~auxiliary_response
       ~inspect_request
       ~followup_calls
       ~after_turn
@@ -36,6 +37,7 @@ let with_child
     ~validation_host:host
     ~sources
     ~calls:[]
+    ~auxiliary_response
     ~request_counts:(fun () ->
       let count = snd (request_counts ()) in
       1, if count = Int.max_value then count else count + 1)
