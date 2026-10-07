@@ -58,6 +58,8 @@ actor state and authorization, not merely passing JSON validation.
 | `session.create` | `Session.Create_request` | `session.create` plus requested attachment scopes | Session, mutation acknowledgement and optional attachment/replay. |
 | `session.list` | `Session.List_request` | `session.transcript.read` | Paged visible sessions with filters. |
 | `session.get` | `Session.Get_request` | `session.transcript.read` | Scoped snapshot; optional history window. |
+| `session.inference_summary` | `Inference_query.Summary_request` | Authentication plus session visibility | Safe retained totals, coverage and host turns; not lifetime totals or pricing. |
+| `session.inference_observations` | `Inference_query.Request` | `session.transcript.read`; configuration and diagnostics also require `diagnostics.read` | Ordered, paginated retained attempts, with scoped disclosure. |
 | `session.attach` | `Session.Attach_request` | `session.transcript.read` plus requested mode | Attachment, replay decision, sequence and optional reclaim token. |
 | `session.detach` | `Session.Detach_request` | `session.transcript.read` | Detach supplied attachment; idempotent mutation acknowledgement. |
 | `session.renew_owner` | `Session.Renew_owner_request` | `session.transcript.read` plus valid owner lease | Renew matching generation; owner lease and mutation result. |
@@ -91,6 +93,11 @@ Ingress has separate authority: it needs its dedicated scope and matching
 registration, without an attachment or transcript permission. Read scopes are
 not stripped by read-only mode. Additional session,
 blob, owner-lease and revision checks still apply beyond this minimum-scope table.
+
+Inference queries read persisted observations without activating a session. Cursors
+bind the authenticated principal, scopes and accounting revision; changes require
+a fresh query. See [inference observations](../lib/inference-observations.md) for
+retention, response limits, disclosure and the OCaml client contract.
 
 ## Requests and results
 

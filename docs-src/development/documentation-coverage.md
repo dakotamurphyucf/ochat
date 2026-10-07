@@ -139,6 +139,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_client/catalog.mli` | [contract](../../lib/agent_client/catalog.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/connection.mli` | [contract](../../lib/agent_client/connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/in_memory.mli` | [contract](../../lib/agent_client/in_memory.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_client/inference_views.mli` | [contract](../../lib/agent_client/inference_views.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_client/ingress.mli` | [contract](../../lib/agent_client/ingress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/live_projection.mli` | [contract](../../lib/agent_client/live_projection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/projection.mli` | [contract](../../lib/agent_client/projection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -165,6 +166,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/history.mli` | [contract](../../lib/agent_protocol/history.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/id.mli` | [contract](../../lib/agent_protocol/id.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/idempotency_key.mli` | [contract](../../lib/agent_protocol/idempotency_key.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/inference_query.mli` | [contract](../../lib/agent_protocol/inference_query.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/ingress.mli` | [contract](../../lib/agent_protocol/ingress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/initialize.mli` | [contract](../../lib/agent_protocol/initialize.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/invocation.mli` | [contract](../../lib/agent_protocol/invocation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -218,7 +220,9 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/delegation_lifecycle.mli` | [contract](../../lib/agent_server/delegation_lifecycle.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_server/dispatcher.mli` | [contract](../../lib/agent_server/dispatcher.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/embedded.mli` | [contract](../../lib/agent_server/embedded.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/graph_tracking.mli` | [contract](../../lib/agent_server/graph_tracking.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_server/independent_resources.mli` | [contract](../../lib/agent_server/independent_resources.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_server/inference_query_budget.mli` | [contract](../../lib/agent_server/inference_query_budget.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_server/job_capacity.mli` | [contract](../../lib/agent_server/job_capacity.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/job_scheduler.mli` | [contract](../../lib/agent_server/job_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_server/maintenance.mli` | [contract](../../lib/agent_server/maintenance.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -267,6 +271,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/generated_session_tool.mli` | [contract](../../lib/agent_session/generated_session_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/history_codec.mli` | [contract](../../lib/agent_session/history_codec.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/history_id_source.mli` | [contract](../../lib/agent_session/history_id_source.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/inference_ledger.mli` | [contract](../../lib/agent_session/inference_ledger.mli) | [integration](../lib/inference-observations.md) | Public interface + current host guide. |
 | `lib/agent_session/ingress_submission.mli` | [contract](../../lib/agent_session/ingress_submission.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/invocation_history.mli` | [contract](../../lib/agent_session/invocation_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/invocation_recovery.mli` | [contract](../../lib/agent_session/invocation_recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -917,6 +922,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/github.doc.md) | `docs-src/lib/github.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/gpt_function.doc.md) | `docs-src/lib/gpt_function.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/indexer.doc.md) | `docs-src/lib/indexer.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/inference-observations.md) | `docs-src/lib/inference-observations.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/jsonaf_ext.doc.md) | `docs-src/lib/jsonaf_ext.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/log.doc.md) | `docs-src/lib/log.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/lru_cache.doc.md) | `docs-src/lib/lru_cache.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

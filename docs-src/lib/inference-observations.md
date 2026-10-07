@@ -98,3 +98,35 @@ accounting requires restarting pagination rather than mixing revisions. Each
 query response is bounded by its explicit response policy, including its actual
 RPC ID, envelope and cursor. This is not a new aggregate HTTP batch limit. A first
 row that cannot fit returns a typed error instead of a non-advancing cursor.
+
+## OCaml client contract
+
+After connection initialization has selected the inference-read features, call
+`Agent_client.Inference_views.summary connection session_id` for totals and
+coverage. Build an `Agent_protocol.Inference_query.Request.t` for paginated rows;
+request configuration and diagnostics only when the caller needs them and has
+permission. The helpers return typed protocol errors, including unsupported
+features and cursors that must be restarted.
+
+[Interface](../../lib/agent_client/inference_views.mli) ·
+[implementation](../../lib/agent_client/inference_views.ml)
+
+The following excerpt is the current callable contract.
+
+```ocaml
+(** Retained-window inference reads over an initialized connection. Optional
+    support is checked against its actual successful initialization. Feature
+    selection is not authority: the server still checks session visibility and
+    Diagnostics before exposing detailed safe configuration/diagnostic fields.
+    No lifetime total, provider DTO or private request body is reconstructed. *)
+
+val summary
+  :  Connection.t
+  -> Agent_protocol.Id.Session.t
+  -> (Agent_protocol.Inference_query.Summary.t, Agent_protocol.Error.t) result
+
+val observations
+  :  Connection.t
+  -> Agent_protocol.Inference_query.Request.t
+  -> (Agent_protocol.Inference_query.Response.t, Agent_protocol.Error.t) result
+```
