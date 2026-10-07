@@ -13,6 +13,8 @@ type t =
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
   | Session_get of Session.Get_request.t
+  | Session_inference_summary of Inference_query.Summary_request.t
+  | Session_inference_observations of Inference_query.Request.t
   | Session_attach of Session.Attach_request.t
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t

@@ -17,5 +17,10 @@ val request_without_history
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
 
+(** The last validated successful initialize response on this transport. Failed
+    initialization and unrelated responses do not establish support; closed
+    connections expose None. Capability selection does not grant authority. *)
+val initialization : t -> Agent_protocol.Initialize.Response.t option
+
 val next_notification : t -> Agent_protocol.Envelope.t option
 val close : t -> unit

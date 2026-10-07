@@ -41,7 +41,7 @@ let initialize connection ~implementation_name ~implementation_version =
       ~implementation
       ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features:Agent_protocol.Inference_query.Features.all
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()

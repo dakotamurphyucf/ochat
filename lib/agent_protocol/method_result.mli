@@ -113,6 +113,8 @@ type t =
   | Session_create of Create.t
   | Session_list of Session.t Page.t
   | Session_get of Snapshot.t
+  | Session_inference_summary of Inference_query.Summary.t
+  | Session_inference_observations of Inference_query.Response.t
   | Session_attach of Attach.t
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t

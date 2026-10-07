@@ -10,6 +10,7 @@
   admin
   in_memory
   ingress
+  inference_views
   blob_download
   session_handle
   reconnect)

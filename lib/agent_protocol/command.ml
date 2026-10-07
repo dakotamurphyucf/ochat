@@ -13,6 +13,8 @@ type t =
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
   | Session_get of Session.Get_request.t
+  | Session_inference_summary of Inference_query.Summary_request.t
+  | Session_inference_observations of Inference_query.Request.t
   | Session_attach of Session.Attach_request.t
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
@@ -55,6 +57,8 @@ let method_name = function
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
   | Session_get _ -> "session.get"
+  | Session_inference_summary _ -> "session.inference_summary"
+  | Session_inference_observations _ -> "session.inference_observations"
   | Session_attach _ -> "session.attach"
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
@@ -97,6 +101,8 @@ let params = function
   | Session_create request -> Session.Create_request.to_json request
   | Session_list request -> Session.List_request.to_json request
   | Session_get request -> Session.Get_request.to_json request
+  | Session_inference_summary request -> Inference_query.Summary_request.to_json request
+  | Session_inference_observations request -> Inference_query.Request.to_json request
   | Session_attach request -> Session.Attach_request.to_json request
   | Session_detach request -> Session.Detach_request.to_json request
   | Session_renew_owner request -> Session.Renew_owner_request.to_json request
@@ -156,6 +162,10 @@ let decoders =
   ; "session.create", map Session.Create_request.of_json (fun x -> Session_create x)
   ; "session.list", map Session.List_request.of_json (fun x -> Session_list x)
   ; "session.get", map Session.Get_request.of_json (fun x -> Session_get x)
+  ; ( "session.inference_summary"
+    , map Inference_query.Summary_request.of_json (fun x -> Session_inference_summary x) )
+  ; ( "session.inference_observations"
+    , map Inference_query.Request.of_json (fun x -> Session_inference_observations x) )
   ; "session.attach", map Session.Attach_request.of_json (fun x -> Session_attach x)
   ; "session.detach", map Session.Detach_request.of_json (fun x -> Session_detach x)
   ; ( "session.renew_owner"

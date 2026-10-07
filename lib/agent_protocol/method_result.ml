@@ -315,6 +315,8 @@ type t =
   | Session_create of Create.t
   | Session_list of Session.t Page.t
   | Session_get of Snapshot.t
+  | Session_inference_summary of Inference_query.Summary.t
+  | Session_inference_observations of Inference_query.Response.t
   | Session_attach of Attach.t
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
@@ -357,6 +359,8 @@ let method_name = function
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
   | Session_get _ -> "session.get"
+  | Session_inference_summary _ -> "session.inference_summary"
+  | Session_inference_observations _ -> "session.inference_observations"
   | Session_attach _ -> "session.attach"
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
@@ -399,6 +403,8 @@ let to_json = function
   | Session_create value -> Create.to_json value
   | Session_list value -> Page.to_json Session.to_json value
   | Session_get value -> Snapshot.to_json value
+  | Session_inference_summary value -> Inference_query.Summary.to_json value
+  | Session_inference_observations value -> Inference_query.Response.to_json value
   | Session_attach value -> Attach.to_json value
   | Session_detach value -> Mutation_result.to_json value
   | Session_renew_owner (lease, mutation) ->
@@ -457,6 +463,12 @@ let decoders =
   ; "session.create", map Create.of_json (fun x -> Session_create x)
   ; "session.list", map (Page.of_json Session.of_json) (fun x -> Session_list x)
   ; "session.get", map Snapshot.of_json (fun x -> Session_get x)
+  ; ( "session.inference_summary"
+    , map Inference_query.Summary.of_json (fun x -> Session_inference_summary x) )
+  ; ( "session.inference_observations"
+    , map
+        (fun json -> Inference_query.Response.of_json json ~max_bytes:(16 * 1024 * 1024))
+        (fun x -> Session_inference_observations x) )
   ; "session.attach", map Attach.of_json (fun x -> Session_attach x)
   ; "session.detach", map Mutation_result.of_json (fun x -> Session_detach x)
   ; "session.renew_owner", renew_owner_of_json

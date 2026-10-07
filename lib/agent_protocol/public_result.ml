@@ -21,6 +21,8 @@ module Non_history = struct
     | Workspace_get _
     | Blob_read _
     | Session_list _
+    | Session_inference_summary _
+    | Session_inference_observations _
     | Session_detach _
     | Session_renew_owner _
     | Session_start _

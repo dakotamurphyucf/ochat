@@ -117,7 +117,8 @@
   retained_history
   quota_key
   quota_manager
-  start_queue)
+  start_queue
+  inference_ledger)
  (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif
