@@ -138,6 +138,12 @@ module Payload : sig
     type t =
       | Text of string
       | Content of Content.t list
+    [@@deriving sexp_of]
+
+    val to_json : t -> Jsonaf.t
+
+    (** Validates the complete JSON tree before decoding neutral output. *)
+    val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, string) Result.t
   end
 
   module Call_relation : sig

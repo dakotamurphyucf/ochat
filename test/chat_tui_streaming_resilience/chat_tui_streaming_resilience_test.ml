@@ -157,6 +157,51 @@ let%expect_test "OpenAI idle deadline resets after each streamed event" =
   [%expect {| ((1 2) true) |}]
 ;;
 
+let apply_text ?(announce = false) runtime throttler ~viewport_height ~entry_id text =
+  let ok = Result.ok_or_failwith in
+  let scope =
+    Transcript.Scope.create
+      ~source:(Transcript.Source_id.of_string "resilience" |> ok)
+      ~attempt:
+        (Transcript.Attempt_id.of_string (History_entry.Id.to_string entry_id) |> ok)
+      ~relation:Root
+    |> ok
+  in
+  let item =
+    Transcript.Item.create
+      ~scope
+      ~id:(Transcript.Item_id.of_string "provider-message" |> ok)
+      ~entry_id:(Some entry_id)
+      ~header:(Some (Message Assistant))
+      ~call_name:None
+    |> ok
+  in
+  let part =
+    Transcript.Part.create
+      ~item
+      ~id:(Transcript.Part_id.of_string "text" |> ok)
+      ~index:None
+      ~kind:Text
+    |> ok
+  in
+  let views =
+    (if announce
+     then [ Transcript.Stream.Item_announced item; Part_announced part ]
+     else [])
+    @ [ Changed { target = Content part; change = Append text } ]
+  in
+  List.iter views ~f:(fun view ->
+    let event =
+      Transcript.Stream.create view ~limits:Transcript.Admission.default |> ok
+    in
+    Chat_tui.App_stream_apply.apply_transcript_event
+      runtime
+      throttler
+      ~viewport_height
+      event
+    |> ok)
+;;
+
 let%expect_test "sourced deltas update the live model and schedule redraw" =
   let model = make_model ~messages:[] ~auto_follow:true in
   let runtime = Chat_tui.App_runtime.create ~model () in
@@ -167,20 +212,13 @@ let%expect_test "sourced deltas update the live model and schedule redraw" =
   let entry_id =
     History_entry.Id.create ~namespace:"realtime" ~sequence:0 |> Result.ok_or_failwith
   in
-  let event =
-    Res.Response_stream.Output_text_delta
-      { content_index = 0
-      ; delta = "visible before completion"
-      ; item_id = "provider-message"
-      ; output_index = 0
-      ; type_ = "response.output_text.delta"
-      }
-  in
-  Chat_tui.App_stream_apply.apply_sourced_stream_event
+  apply_text
+    ~announce:true
     runtime
     throttler
     ~viewport_height:20
-    (Chat_response.Sourced_response_event.outer ~entry_id event);
+    ~entry_id
+    "visible before completion";
   Chat_tui.Redraw_throttle.tick throttler;
   print_s
     [%sexp (Chat_tui.Model.messages model : (string * string) list), (!enqueued : int)];
@@ -248,6 +286,7 @@ let%expect_test "stream finalization preserves a manually scrolled row anchor" =
     ; source =
         Streaming
           { entry_id = b_id; provider_item_id = Some "provider-b"; call_id = None }
+    ; editing_text = None
     ; revision = 0
     }
   in
@@ -452,26 +491,31 @@ let%expect_test "offscreen sourced delta updates the model without scheduling re
   let entry_id =
     History_entry.Id.create ~namespace:"offscreen" ~sequence:0 |> Result.ok_or_failwith
   in
-  let id = History_entry.Id.to_string entry_id in
   let runtime = Chat_tui.App_runtime.create ~model () in
   let enqueued = ref 0 in
   let throttler =
     Chat_tui.Redraw_throttle.create ~fps:60. ~enqueue_redraw:(fun () -> incr enqueued)
   in
-  let event delta =
-    Res.Response_stream.Output_text_delta
-      { content_index = 0
-      ; delta
-      ; item_id = id
-      ; output_index = 0
-      ; type_ = "response.output_text.delta"
-      }
+  let old_id =
+    History_entry.Id.create ~namespace:"old" ~sequence:0 |> Result.ok_or_failwith
   in
-  Chat_tui.App_stream_apply.apply_sourced_stream_event
-    runtime
-    throttler
-    ~viewport_height:5
-    (Chat_response.Sourced_response_event.outer ~entry_id (event "streaming"));
+  let module Payload = History_entry.Payload in
+  let old_payload =
+    Payload.Semantic.create
+      (Message
+         { form = Output
+         ; role = Assistant
+         ; content = [ Text { text = "old"; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:Payload.Metadata.empty
+    |> Result.ok_or_failwith
+    |> Payload.authored
+  in
+  Chat_tui.Model.set_history_items
+    model
+    [ History_entry.create_with_id ~id:old_id old_payload ];
+  apply_text ~announce:true runtime throttler ~viewport_height:5 ~entry_id "streaming";
   Chat_tui.Redraw_throttle.tick throttler;
   enqueued := 0;
   Chat_tui.Model.set_auto_follow model false;
@@ -482,11 +526,7 @@ let%expect_test "offscreen sourced delta updates the model without scheduling re
   Geometry.rebuild geometry ~length:2 ~height_at_index:(Array.get [| 5; 5 |]);
   Notty_scroll_box.set_content (Chat_tui.Model.scroll_box model) (Notty.I.void 40 10);
   Notty_scroll_box.scroll_to (Chat_tui.Model.scroll_box model) 0;
-  Chat_tui.App_stream_apply.apply_sourced_stream_event
-    runtime
-    throttler
-    ~viewport_height:5
-    (Chat_response.Sourced_response_event.outer ~entry_id (event " new"));
+  apply_text runtime throttler ~viewport_height:5 ~entry_id " new";
   Chat_tui.Redraw_throttle.tick throttler;
   print_s
     [%sexp (Chat_tui.Model.messages model : (string * string) list), (!enqueued : int)];

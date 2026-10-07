@@ -55,7 +55,13 @@ let with_client ~sw env fixture f =
     ~finally:(fun () -> Http_driver.shutdown client)
 ;;
 
-let request client command = (Http_driver.request client command |> protocol_ok).result
+let request_public client command =
+  (Http_driver.request client command |> protocol_ok).result
+;;
+
+let request client command =
+  Http_driver.request_without_history client command |> protocol_ok
+;;
 
 let session_spec () =
   Agent_protocol.Session.Spec.create
@@ -75,7 +81,7 @@ let session_spec () =
 
 let create_session client =
   match
-    request
+    request_public
       client
       (Session_create
          { spec = session_spec ()
@@ -89,8 +95,8 @@ let create_session client =
 ;;
 
 let get client session_id =
-  match request client (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public client (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned wrong result"
 ;;
 
@@ -99,7 +105,7 @@ let await_notifications env child client session ~provider_prefix ~calls ~count 
     String.split_lines (Process_manager.stdout child).contents
     |> List.count ~f:(String.is_prefix ~prefix:provider_prefix)
   in
-  let settled (snapshot : Agent_protocol.Snapshot.t) =
+  let settled (snapshot : Agent_protocol.Public.Snapshot.Fields.t) =
     let deliveries =
       List.filter snapshot.extension_status ~f:(fun status ->
         Agent_protocol.Extension_status.equal_kind status.kind Delivery)
@@ -115,7 +121,7 @@ let await_notifications env child client session ~provider_prefix ~calls ~count 
        session
        "notification recovery settlement"
        (fun snapshot -> settled snapshot && observed_calls () >= calls)
-     : Agent_protocol.Snapshot.t);
+     : Agent_protocol.Public.Snapshot.Fields.t);
   for _ = 1 to 10 do
     Eio.Time.sleep (Eio.Stdenv.clock env) 0.03;
     require (observed_calls () = calls) "saved wake was lost or repeated after restart"
@@ -156,8 +162,8 @@ let assert_summary
 ;;
 
 let normalized_snapshot
-      (expected : Agent_protocol.Snapshot.t)
-      (actual : Agent_protocol.Snapshot.t)
+      (expected : Agent_protocol.Public.Snapshot.Fields.t)
+      (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
   let normalized =
     { actual with
@@ -170,8 +176,8 @@ let normalized_snapshot
 ;;
 
 let assert_snapshot
-      (expected : Agent_protocol.Snapshot.t)
-      (actual : Agent_protocol.Snapshot.t)
+      (expected : Agent_protocol.Public.Snapshot.Fields.t)
+      (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
   require expected.canonical_history.reached_start "expected history is truncated";
   require
@@ -180,7 +186,7 @@ let assert_snapshot
   assert_summary expected.session actual.session;
   require_equal
     "complete projected history/state"
-    [%sexp_of: Agent_protocol.Snapshot.t]
+    [%sexp_of: Agent_protocol.Public.Snapshot.Fields.t]
     expected
     (normalized_snapshot expected actual);
   require Int64.(actual.revision > expected.revision) "recovery revision did not advance";

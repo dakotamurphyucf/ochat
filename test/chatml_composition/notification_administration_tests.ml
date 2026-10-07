@@ -27,8 +27,9 @@ let export_snapshot handle revision =
   Buffer.contents bytes
   |> Jsonaf.of_string
   |> Jsonaf.member_exn "snapshot"
-  |> P.Snapshot.of_json
+  |> P.Public.Snapshot.of_json
   |> protocol_ok
+  |> P.Public.Snapshot.fields
 ;;
 
 let%expect_test

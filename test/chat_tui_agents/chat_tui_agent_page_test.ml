@@ -14,9 +14,7 @@ let make_model ?(history_items = []) () =
   in
   Model.create
     ~history_items
-    ~messages:
-      (Chat_tui.Conversation.of_history
-         (Openai.Responses_history.items_exn history_items))
+    ~messages:(Chat_tui.Conversation.of_history history_items)
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -376,7 +374,7 @@ let%expect_test "nested calls keep custom stdout and final output with their too
   in
   let output =
     match output with
-    | Some (Openai.Responses.Tool_output.Output.Text text) -> text
+    | Some (History_entry.Payload.Output.Text text) -> text
     | Some (Content _) | None -> ""
   in
   print_s

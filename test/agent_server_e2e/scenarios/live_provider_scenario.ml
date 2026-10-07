@@ -114,11 +114,8 @@ let tool_journey env fixture client session =
   let state = idle env client session in
   let events = F.events client session "live:tool-events" in
   List.iter events ~f:(fun event ->
-    match
-      Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
-      |> F.protocol_ok
-    with
-    | Operation_failed { state = Failed error; _ } ->
+    match Support.Public_view.shared_payload_opt event with
+    | Some (Operation_failed { state = Failed error; _ }) ->
       failwith ("live operation failed: " ^ error.message)
     | _ -> ());
   F.require
@@ -130,7 +127,7 @@ let tool_journey env fixture client session =
     "live tool marker was duplicated or incorrect";
   F.require
     (List.exists state.canonical_history.entries ~f:(fun item ->
-       Agent_protocol.History.equal_kind item.kind Tool_output))
+       Support.Public_view.has_header item (Result Function)))
     "live tool output missing from canonical history"
 ;;
 
@@ -151,9 +148,9 @@ let compact env client session =
     (not
        (String.equal
           (Jsonaf.to_string
-             (Agent_protocol.History.Window.to_json before.canonical_history))
+             (Agent_protocol.Public.History.Window.to_json before.canonical_history))
           (Jsonaf.to_string
-             (Agent_protocol.History.Window.to_json after.canonical_history))))
+             (Agent_protocol.Public.History.Window.to_json after.canonical_history))))
     "live compaction did not replace canonical history"
 ;;
 
@@ -180,7 +177,7 @@ let cancel env client session proxy =
           ; idempotency_key = F.key "live:cancel-operation"
           })
      : Agent_protocol.Method_result.t);
-  ignore (idle env client session : Agent_protocol.Snapshot.t)
+  ignore (idle env client session : Agent_protocol.Public.Snapshot.Fields.t)
 ;;
 
 let start_daemon sw env fixture port =

@@ -68,6 +68,10 @@ module Json : sig
       exceed the bound, including for in-memory strings and object keys. *)
   val validate : limits:Limits.t -> t -> (unit, Error.t) Result.t
 
+  (** The same validation and error ordering as [validate], returning its exact
+      compact encoded-byte count without materializing encoded output. *)
+  val validate_and_measure : limits:Limits.t -> t -> (int, Error.t) Result.t
+
   (** Lookup on a validated tree preserves absence separately from explicit null. *)
   val field : t -> name:string -> presence
 

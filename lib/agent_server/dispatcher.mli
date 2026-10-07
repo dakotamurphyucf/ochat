@@ -8,7 +8,7 @@ val dispatch_command
   :  t
   -> context:Connection_context.t
   -> Agent_protocol.Command.t
-  -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+  -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 
 (** Request envelopes always produce one response. Notification-safe calls
     produce no response; all other input is rejected. *)

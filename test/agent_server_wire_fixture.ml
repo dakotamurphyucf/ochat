@@ -188,7 +188,7 @@ let connect_stdio ~sw ~env ~daemon ~socket_path =
     |> fun line ->
     Eio.Flow.copy_string (line ^ "\n") client_output;
     Eio.Promise.await response
-    |> Result.bind ~f:(Agent_protocol.Method_result.of_json ~method_)
+    |> Result.bind ~f:(Agent_protocol.Public.Result.of_json ~method_)
   in
   Agent_client.Transport.create
     ~request

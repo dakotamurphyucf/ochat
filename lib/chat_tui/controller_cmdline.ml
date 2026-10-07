@@ -109,32 +109,30 @@ let execute_command model line : reaction =
     Model.set_active_page model Model.Page_id.Shell_security;
     Shell_management_refresh_requested (Model.begin_shell_management_load model)
   | "delete" | "d" ->
-    (match Model.selected_projected_row model with
-     | Some { source = Canonical { entry_id }; _ } -> Delete_history entry_id
-     | _ ->
-       add_rejection_notice model "Select a canonical history entry to delete.";
+    (match
+       Option.bind
+         (Model.selected_projected_row model)
+         ~f:Projected_message.deletion_target
+     with
+     | Some entry_id -> Delete_history entry_id
+     | None ->
+       add_rejection_notice model "Select a canonical history occurrence to delete.";
        Redraw)
   | "edit" | "e" ->
-    (match Model.selected_projected_row model with
-     | None ->
-       add_rejection_notice model "No projected row is selected.";
+    (* This existing command copies into a fresh user draft. It never updates
+       captured history and must not reuse transformed display text. *)
+    (match
+       Option.bind (Model.selected_projected_row model) ~f:Projected_message.editing_text
+     with
+     | Some text ->
+       Model.set_input_line model text;
+       Model.set_cursor_pos model (String.length text);
+       Model.set_mode model Model.Insert;
+       Model.set_draft_mode model Model.Plain;
        Redraw
-     | Some row ->
-       (match row.Projected_message.source with
-        | Canonical _ ->
-          let _, txt = row.message in
-          Model.set_input_line model txt;
-          Model.set_cursor_pos model (String.length txt);
-          Model.set_mode model Model.Insert;
-          Model.set_draft_mode model Model.Plain;
-          Redraw
-        | Moderator_inserted _
-        | Moderator_replacement _
-        | Streaming _
-        | Pending_approval _
-        | Placeholder _ ->
-          add_rejection_notice model "Cannot edit a noncanonical projected row.";
-          Redraw))
+     | None ->
+       add_rejection_notice model "This row has no complete editable text.";
+       Redraw)
   | "noh" | "nohlsearch" ->
     Model.clear_last_search model;
     Redraw

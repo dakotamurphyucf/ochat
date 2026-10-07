@@ -12,7 +12,9 @@ let flip contents offset =
 
 let assert_restart env fixture expected =
   F.with_daemon env fixture (fun client ->
-    F.assert_snapshot expected (F.get client expected.Agent_protocol.Snapshot.session.id))
+    F.assert_snapshot
+      expected
+      (F.get client expected.Agent_protocol.Public.Snapshot.Fields.session.id))
 ;;
 
 let assert_session_corrupt env fixture session_id =

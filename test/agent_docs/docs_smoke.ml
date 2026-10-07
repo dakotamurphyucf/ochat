@@ -159,14 +159,14 @@ let snapshot connection session_id =
       (Session_get { session_id; history = None })
     |> protocol_exn
   with
-  | Session_get value -> value
+  | Session_get value -> Agent_protocol.Public.Snapshot.fields value
   | _ -> failwith "expected snapshot"
 ;;
 
 let verify_timer connection session_id =
   let page = Agent_protocol.Page.Request.create ~limit:10 () |> protocol_exn in
   match
-    Agent_client.Connection.request
+    Agent_client.Connection.request_without_history
       connection
       (Schedule_list { session_id; page; status = None })
     |> protocol_exn

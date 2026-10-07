@@ -1,313 +1,347 @@
-open Core
+open! Core
+module P = Agent_protocol
+module Public = P.Public
+
+type synchronization =
+  | Current
+  | Snapshot_required of P.Error.t
 
 type t =
-  { snapshot : Agent_protocol.Snapshot.t
-  ; live_events : Agent_protocol.Event.Recoverable.t list
-  ; operation_sequences : (Agent_protocol.Id.Operation.t, int64) Map.Poly.t
-  ; terminal_operation : Agent_protocol.Operation.t option
+  { snapshot : Public.Snapshot.t
+  ; live : Live_projection.t
+  ; terminal_operation : P.Operation.t option
+  ; synchronization : synchronization
   }
 
-let install_snapshot snapshot =
-  { snapshot
-  ; live_events = []
-  ; operation_sequences = Map.Poly.empty
-  ; terminal_operation = None
-  }
+let install_snapshot ?live_limits snapshot =
+  let live = Live_projection.empty ?limits:live_limits () in
+  let fields = Public.Snapshot.fields snapshot in
+  let admitted =
+    match fields.session.active_operation with
+    | None -> Ok live
+    | Some operation ->
+      Live_projection.seed_activity
+        live
+        ~operation_id:operation.id
+        fields.active_tool_calls
+  in
+  let live, synchronization =
+    match admitted with
+    | Ok live -> live, Current
+    | Error failure -> live, Snapshot_required failure
+  in
+  { snapshot; live; terminal_operation = None; synchronization }
 ;;
 
 let snapshot t = t.snapshot
-let live_events t = t.live_events
+let live t = t.live
 let terminal_operation t = t.terminal_operation
-let error code message = Agent_protocol.Error.create code ~message ~retryable:true ()
-let expected_sequence t = Int64.(t.snapshot.latest_event_sequence + 1L)
+let synchronization t = t.synchronization
+let error code message = P.Error.create code ~message ~retryable:true ()
+
+let mark_stale t failure =
+  { t with
+    live = Live_projection.clear t.live
+  ; synchronization = Snapshot_required failure
+  }
+;;
 
 let validate_event t event =
-  if
-    Agent_protocol.Id.Session.compare
-      event.Agent_protocol.Event.Durable.session_id
-      t.snapshot.session.id
-    <> 0
-  then Error (error Invalid_state "event belongs to another session")
-  else if not Int64.(event.sequence = expected_sequence t)
-  then Error (error Snapshot_required "durable event sequence is not contiguous")
-  else if Int64.(event.revision < t.snapshot.revision)
-  then Error (error Invalid_state "durable event revision regressed")
-  else Ok ()
+  let fields = Public.Snapshot.fields t.snapshot in
+  match t.synchronization with
+  | Snapshot_required failure -> Error failure
+  | Current ->
+    if not (P.Id.Session.equal event.Public.Durable.session_id fields.session.id)
+    then Error (error Invalid_state "event belongs to another session")
+    else if Int64.equal fields.latest_event_sequence Int64.max_value
+    then Error (error Snapshot_required "durable event sequence is exhausted")
+    else if not Int64.(event.sequence = fields.latest_event_sequence + 1L)
+    then Error (error Snapshot_required "durable event sequence is not contiguous")
+    else if Int64.(event.revision < fields.revision)
+    then Error (error Invalid_state "durable event revision regressed")
+    else Ok ()
 ;;
 
 let replace_by compare_id id value values ~id_of =
   value :: List.filter values ~f:(fun candidate -> compare_id (id_of candidate) id <> 0)
 ;;
 
-let update_session
-      (_snapshot : Agent_protocol.Snapshot.t)
-      (event : Agent_protocol.Event.Durable.t)
-      (session : Agent_protocol.Session.t)
-  =
-  { session with
-    revision = event.Agent_protocol.Event.Durable.revision
-  ; latest_event_sequence = event.sequence
-  ; updated_at = event.timestamp
-  }
-;;
-
-let apply_payload
-      (snapshot : Agent_protocol.Snapshot.t)
-      (event : Agent_protocol.Event.Durable.t)
-  = function
-  | Agent_protocol.Event.Durable.Payload.Session_created session | Session_updated session
-    -> { snapshot with session }
+let shared_payload (fields : Public.Snapshot.Fields.t) = function
+  | P.Event.Durable.Payload.Session_created session | Session_updated session ->
+    Ok { fields with session }
   | Session_state_changed change ->
-    let session =
-      { snapshot.session with
-        desired_state = change.desired_state
-      ; observed_state = change.observed_state
+    Ok
+      { fields with
+        session =
+          { fields.session with
+            desired_state = change.desired_state
+          ; observed_state = change.observed_state
+          }
       }
-    in
-    { snapshot with session }
-  | Attachment_owner_changed _ -> snapshot
-  | History_message_deferred entry ->
-    { snapshot with deferred_entries = snapshot.deferred_entries @ [ entry ] }
-  | History_appended entries ->
-    { snapshot with
-      canonical_history =
-        { snapshot.canonical_history with
-          entries = snapshot.canonical_history.entries @ entries
-        }
-    ; deferred_entries =
-        List.filter snapshot.deferred_entries ~f:(fun deferred ->
-          not
-            (List.exists entries ~f:(fun entry ->
-               History_entry.Id.equal deferred.id entry.id)))
-    }
-  | History_replaced canonical_history -> { snapshot with canonical_history }
-  | Moderator_overlay_changed _ | Moderator_notification _ -> snapshot
+  | Attachment_owner_changed _ | Moderator_notification _ -> Ok fields
   | Permission_requested permission | Permission_resolved permission ->
-    { snapshot with
-      permissions =
-        replace_by
-          Agent_protocol.Id.Permission.compare
-          permission.id
-          permission
-          snapshot.permissions
-          ~id_of:(fun value -> value.Agent_protocol.Permission.id)
-    }
+    Ok
+      { fields with
+        permissions =
+          replace_by
+            P.Id.Permission.compare
+            permission.id
+            permission
+            fields.permissions
+            ~id_of:(fun permission -> permission.P.Permission.id)
+      }
   | Grant_created grant | Grant_revoked grant ->
-    { snapshot with
-      grants =
-        replace_by
-          Agent_protocol.Id.Grant.compare
-          grant.id
-          grant
-          snapshot.grants
-          ~id_of:(fun value -> value.Agent_protocol.Grant.id)
-    }
+    Ok
+      { fields with
+        grants =
+          replace_by P.Id.Grant.compare grant.id grant fields.grants ~id_of:(fun grant ->
+            grant.P.Grant.id)
+      }
   | Operation_started operation ->
-    { snapshot with
-      session = { snapshot.session with active_operation = Some operation }
-    }
+    Ok { fields with session = { fields.session with active_operation = Some operation } }
   | Operation_completed _
   | Operation_failed _
   | Operation_cancelled _
   | Operation_interrupted _ ->
-    { snapshot with
-      session = { snapshot.session with active_operation = None }
-    ; active_tool_calls = []
-    ; active_agent_calls = []
-    }
+    Ok
+      { fields with
+        session = { fields.session with active_operation = None }
+      ; active_tool_calls = []
+      ; active_agent_calls = []
+      }
   | Job_state_changed job ->
-    { snapshot with
-      jobs =
-        replace_by
-          Agent_protocol.Id.Job.compare
-          job.id
-          job
-          snapshot.jobs
-          ~id_of:(fun value -> value.Agent_protocol.Job.id)
-    }
+    Ok
+      { fields with
+        jobs =
+          replace_by P.Id.Job.compare job.id job fields.jobs ~id_of:(fun job ->
+            job.P.Job.id)
+      }
   | Schedule_created schedule
   | Schedule_state_changed schedule
   | Schedule_cancelled schedule ->
-    { snapshot with
-      schedules =
-        replace_by
-          Agent_protocol.Id.Schedule.compare
-          schedule.id
-          schedule
-          snapshot.schedules
-          ~id_of:(fun value -> value.Agent_protocol.Schedule.id)
-    }
+    Ok
+      { fields with
+        schedules =
+          replace_by
+            P.Id.Schedule.compare
+            schedule.id
+            schedule
+            fields.schedules
+            ~id_of:(fun schedule -> schedule.P.Schedule.id)
+      }
   | Prompt_upgraded upgrade ->
-    { snapshot with
-      session = { snapshot.session with prompt_revision = Some upgrade.current_revision }
-    }
-  | Workspace_state_changed _ -> snapshot
-  | Session_error failure -> { snapshot with failure = Some failure }
+    Ok
+      { fields with
+        session = { fields.session with prompt_revision = Some upgrade.current_revision }
+      }
+  | Workspace_state_changed _ -> Ok fields
+  | Session_error failure -> Ok { fields with failure = Some failure }
+  | History_message_deferred _
+  | History_appended _
+  | History_replaced _
+  | Moderator_overlay_changed _ ->
+    Error (error Invalid_state "history payload crossed the shared event boundary")
 ;;
 
-let advance snapshot event =
-  let session = update_session snapshot event snapshot.session in
-  { snapshot with
-    session
-  ; revision = event.Agent_protocol.Event.Durable.revision
+let payload (fields : Public.Snapshot.Fields.t) = function
+  | Public.Durable.History_message_deferred entry ->
+    Ok { fields with deferred_entries = fields.deferred_entries @ [ entry ] }
+  | History_appended entries ->
+    Ok
+      { fields with
+        canonical_history =
+          { fields.canonical_history with
+            entries = fields.canonical_history.entries @ entries
+          }
+      ; deferred_entries =
+          List.filter fields.deferred_entries ~f:(fun deferred ->
+            not
+              (List.exists entries ~f:(fun entry ->
+                 History_entry.Id.equal deferred.id entry.id)))
+      }
+  | History_replaced canonical_history -> Ok { fields with canonical_history }
+  | Moderator_overlay_changed overlay ->
+    Ok
+      { fields with
+        effective_history = overlay.effective_history
+      ; halted = overlay.halted
+      ; halt_reason = overlay.halt_reason
+      }
+  | Shared shared -> shared_payload fields (Public.Durable.Shared_payload.value shared)
+;;
+
+let observed_terminal previous = function
+  | Some (Public.Durable.Shared shared) ->
+    (match Public.Durable.Shared_payload.value shared with
+     | P.Event.Durable.Payload.Operation_completed operation
+     | Operation_failed operation
+     | Operation_cancelled operation
+     | Operation_interrupted operation -> Some operation
+     | Operation_started _ -> None
+     | Session_created _
+     | Session_updated _
+     | Session_state_changed _
+     | Attachment_owner_changed _
+     | History_message_deferred _
+     | History_appended _
+     | History_replaced _
+     | Moderator_overlay_changed _
+     | Moderator_notification _
+     | Permission_requested _
+     | Permission_resolved _
+     | Grant_created _
+     | Grant_revoked _
+     | Job_state_changed _
+     | Schedule_created _
+     | Schedule_state_changed _
+     | Schedule_cancelled _
+     | Prompt_upgraded _
+     | Workspace_state_changed _
+     | Session_error _ -> previous)
+  | Some
+      ( History_message_deferred _
+      | History_appended _
+      | History_replaced _
+      | Moderator_overlay_changed _ )
+  | None -> previous
+;;
+
+let advance (fields : Public.Snapshot.Fields.t) (event : Public.Durable.t) =
+  { fields with
+    session =
+      { fields.session with
+        revision = event.Public.Durable.revision
+      ; latest_event_sequence = event.sequence
+      ; updated_at = event.timestamp
+      }
+  ; revision = event.revision
   ; latest_event_sequence = event.sequence
   }
 ;;
 
-let terminal_operation_id = function
-  | Agent_protocol.Event.Durable.Payload.Operation_completed operation
-  | Operation_failed operation
-  | Operation_cancelled operation
-  | Operation_interrupted operation -> Some operation.Agent_protocol.Operation.id
-  | Session_created _
-  | Session_updated _
-  | Session_state_changed _
-  | Attachment_owner_changed _
-  | History_message_deferred _
-  | History_appended _
-  | History_replaced _
-  | Moderator_overlay_changed _
-  | Moderator_notification _
-  | Permission_requested _
-  | Permission_resolved _
-  | Grant_created _
-  | Grant_revoked _
-  | Operation_started _
-  | Job_state_changed _
-  | Schedule_created _
-  | Schedule_state_changed _
-  | Schedule_cancelled _
-  | Prompt_upgraded _
-  | Workspace_state_changed _
-  | Session_error _ -> None
-;;
-
-let discard_terminal_live_events t payload =
-  match terminal_operation_id payload with
-  | None -> t.live_events, t.operation_sequences
-  | Some operation_id ->
-    ( List.filter t.live_events ~f:(fun event ->
-        Agent_protocol.Id.Operation.compare event.operation_id operation_id <> 0)
-    , Map.remove t.operation_sequences operation_id )
-;;
-
-let apply_moderator_projection (snapshot : Agent_protocol.Snapshot.t) = function
-  | Some (Agent_protocol.Event.Durable.Payload.Moderator_overlay_changed json) ->
-    let open Result.Let_syntax in
-    let%bind fields = Agent_protocol.Json_codec.fields json in
-    let%bind effective_history =
-      Agent_protocol.Json_codec.optional_as
-        fields
-        "effective_history"
-        Agent_protocol.History.Window.of_json
-    in
-    let%bind halted =
-      Agent_protocol.Json_codec.required_as fields "halted" Agent_protocol.Json_codec.bool
-    in
-    let%map halt_reason =
-      Agent_protocol.Json_codec.optional_as
-        fields
-        "halt_reason"
-        Agent_protocol.Json_codec.string
-    in
-    { snapshot with effective_history; halted; halt_reason }
-  | _ -> Ok snapshot
-;;
-
-let updated_terminal_operation t = function
-  | Some
-      ( Agent_protocol.Event.Durable.Payload.Operation_completed operation
-      | Operation_failed operation
-      | Operation_cancelled operation
-      | Operation_interrupted operation ) -> Some operation
-  | Some (Operation_started _) -> None
-  | _ -> t.terminal_operation
+let activity_fields (fields : Public.Snapshot.Fields.t) live =
+  let running =
+    (match fields.session.active_operation with
+     | None -> []
+     | Some active ->
+       Live_projection.operations live
+       |> List.concat_map ~f:(fun operation ->
+         if P.Id.Operation.equal active.id operation.operation_id
+         then operation.activities
+         else []))
+    |> List.filter ~f:(fun summary ->
+      match summary.P.Activity.Tool.state with
+      | Running -> true
+      | Finished _ -> false)
+  in
+  let agents =
+    List.filter running ~f:(fun summary ->
+      Option.exists summary.P.Activity.Tool.descriptor ~f:(fun descriptor ->
+        Option.is_some descriptor.classification))
+  in
+  { fields with active_tool_calls = running; active_agent_calls = agents }
 ;;
 
 let apply_event t event =
   let open Result.Let_syntax in
   let%bind () = validate_event t event in
-  let%bind replacement =
-    if Agent_protocol.Event.Durable.equal_visibility event.visibility Hidden
-    then Ok None
-    else Agent_protocol.Event.Durable.replacement_snapshot event
-  in
-  let t = Option.value_map replacement ~default:t ~f:install_snapshot in
-  let%bind snapshot, payload =
-    match event.visibility with
-    | Hidden -> Ok (t.snapshot, None)
-    | Full | Redacted ->
-      Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
-      |> Result.map ~f:(fun payload ->
-        apply_payload t.snapshot event payload, Some payload)
-  in
-  let%bind snapshot = apply_moderator_projection snapshot payload in
-  let%bind statuses =
-    if Agent_protocol.Event.Durable.equal_visibility event.visibility Hidden
-    then Ok None
-    else Agent_protocol.Event.Durable.extension_status event
-  in
-  let snapshot =
-    Option.value_map statuses ~default:snapshot ~f:(fun extension_status ->
-      { snapshot with extension_status })
-  in
-  let live_events, operation_sequences =
+  let previous = Public.Snapshot.fields t.snapshot in
+  let fields =
     Option.value_map
-      payload
-      ~default:(t.live_events, t.operation_sequences)
-      ~f:(discard_terminal_live_events t)
+      event.Public.Durable.replacement_snapshot
+      ~default:previous
+      ~f:Public.Snapshot.fields
   in
-  Ok
-    { snapshot = advance snapshot event
-    ; live_events
-    ; operation_sequences
-    ; terminal_operation = updated_terminal_operation t payload
-    }
+  let%bind fields, observed_payload =
+    match event.body with
+    | Hidden ->
+      let fields =
+        match event.kind with
+        | Operation_completed
+        | Operation_failed
+        | Operation_cancelled
+        | Operation_interrupted ->
+          { fields with
+            session = { fields.session with active_operation = None }
+          ; active_tool_calls = []
+          ; active_agent_calls = []
+          }
+        | Session_created
+        | Session_state_changed
+        | Session_updated
+        | Attachment_owner_changed
+        | History_message_deferred
+        | History_appended
+        | History_replaced
+        | Moderator_overlay_changed
+        | Moderator_notification
+        | Permission_requested
+        | Permission_resolved
+        | Grant_created
+        | Grant_revoked
+        | Operation_started
+        | Job_state_changed
+        | Schedule_created
+        | Schedule_state_changed
+        | Schedule_cancelled
+        | Prompt_upgraded
+        | Workspace_state_changed
+        | Session_error -> fields
+      in
+      Ok (fields, None)
+    | Full value | Filtered value ->
+      Result.map (payload fields value) ~f:(fun fields -> fields, Some value)
+  in
+  let fields =
+    Option.value_map event.extension_status ~default:fields ~f:(fun extension_status ->
+      { fields with extension_status })
+    |> fun fields -> advance fields event
+  in
+  let%bind live =
+    match event.replacement_snapshot with
+    | None -> Ok t.live
+    | Some snapshot ->
+      let replacement = Public.Snapshot.fields snapshot in
+      Live_projection.replace_snapshot
+        t.live
+        ~active_operation:replacement.session.active_operation
+        replacement.active_tool_calls
+  in
+  let%bind live =
+    Live_projection.advance_durable
+      live
+      event
+      ~previous_operation:previous.session.active_operation
+      ~active_operation:fields.session.active_operation
+      ~canonical_history:fields.canonical_history.entries
+  in
+  let%map snapshot = Public.Snapshot.create (activity_fields fields live) in
+  { snapshot
+  ; live
+  ; terminal_operation = observed_terminal t.terminal_operation observed_payload
+  ; synchronization = Current
+  }
 ;;
 
-let apply_live_event t (event : Agent_protocol.Event.Recoverable.t) =
-  let session_matches =
-    Agent_protocol.Id.Session.compare event.session_id t.snapshot.session.id = 0
+let apply_live_event t event =
+  let open Result.Let_syntax in
+  let fields = Public.Snapshot.fields t.snapshot in
+  let%bind () =
+    match t.synchronization with
+    | Snapshot_required failure -> Error failure
+    | Current ->
+      if P.Id.Session.equal event.P.Event.Recoverable.session_id fields.session.id
+      then Ok ()
+      else Error (error Invalid_state "live event belongs to another session")
   in
-  let previous =
-    Map.find t.operation_sequences event.operation_id |> Option.value ~default:0L
+  let%bind live =
+    Live_projection.apply
+      t.live
+      ~durable_sequence:fields.latest_event_sequence
+      ~active_operation:fields.session.active_operation
+      ~canonical_history:fields.canonical_history.entries
+      event
   in
-  if not session_matches
-  then Error (error Invalid_state "live event belongs to another session")
-  else if Int64.(event.operation_sequence <= previous)
-  then Error (error Invalid_state "live operation sequence did not advance")
-  else (
-    let snapshot =
-      if Agent_protocol.Event.Recoverable.equal_kind event.kind Tool_finished
-      then (
-        let call_id payload =
-          match payload with
-          | `Object fields -> List.Assoc.find fields "call_id" ~equal:String.equal
-          | _ -> None
-        in
-        let keep json =
-          match Agent_protocol.Event.Recoverable.of_json json with
-          | Error _ -> false
-          | Ok started ->
-            not
-              (Agent_protocol.Id.Operation.compare started.operation_id event.operation_id
-               = 0
-               && Poly.equal (call_id started.payload) (call_id event.payload))
-        in
-        { t.snapshot with
-          active_tool_calls = List.filter t.snapshot.active_tool_calls ~f:keep
-        ; active_agent_calls = List.filter t.snapshot.active_agent_calls ~f:keep
-        })
-      else t.snapshot
-    in
-    Ok
-      { t with
-        snapshot
-      ; live_events = t.live_events @ [ event ]
-      ; operation_sequences =
-          Map.set
-            t.operation_sequences
-            ~key:event.operation_id
-            ~data:event.operation_sequence
-      })
+  let%map snapshot = Public.Snapshot.create (activity_fields fields live) in
+  { t with snapshot; live }
 ;;

@@ -1,0 +1,5 @@
+(library
+ (name public_transcript_tests)
+ (libraries core expect_test_helpers_core ochat.agent_protocol ochat.agent_server ochat.transcript ochat.history_entry)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

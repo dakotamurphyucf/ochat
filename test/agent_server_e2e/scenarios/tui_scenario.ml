@@ -132,10 +132,14 @@ let connected_message env connection session_id child =
   submit child text;
   let snapshot =
     F.await env (fun () ->
-      let snapshot = Agent_client.Admin.get_session connection session_id |> F.ok in
+      let snapshot =
+        Agent_client.Admin.get_session connection session_id
+        |> F.ok
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       if snapshot.halted then Some snapshot else None)
   in
-  F.assert_user snapshot.canonical_history.entries text;
+  F.assert_public_user snapshot.canonical_history.entries text;
   Pty.await_text child ~clock:(Eio.Stdenv.clock env) text
 ;;
 
@@ -153,8 +157,12 @@ let connected http env temporary =
       "TUI-created session was not running";
     connected_message env connection session.id child;
     quit env child;
-    let after = Agent_client.Admin.get_session connection session.id |> F.ok in
-    F.assert_user after.canonical_history.entries "pty-daemon-user-message";
+    let after =
+      Agent_client.Admin.get_session connection session.id
+      |> F.ok
+      |> Agent_protocol.Public.Snapshot.fields
+    in
+    F.assert_public_user after.canonical_history.entries "pty-daemon-user-message";
     F.require
       (Agent_protocol.Session.equal_liveness after.session.spec.liveness Detached)
       "connected TUI changed detached liveness")

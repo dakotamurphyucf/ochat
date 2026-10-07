@@ -40,7 +40,7 @@ let principal t = t.principal
 let initialized t = Eio.Mutex.use_ro t.mutex (fun () -> t.initialized)
 let protocol_version t = Eio.Mutex.use_ro t.mutex (fun () -> t.protocol_version)
 
-let mark_initialized ?(version = Agent_protocol.Version.initial) t =
+let mark_initialized ?(version = Agent_protocol.Version.current) t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     t.protocol_version <- Some version;
     t.initialized <- true)

@@ -6,6 +6,7 @@
   embeddings
   responses
   responses_history
+  responses_live
   responses_wire
   responses_request
   responses_sse
@@ -16,6 +17,7 @@
  (private_modules responses_json)
  (libraries
   ochat.history_entry
+  ochat.transcript
   io
   jsonaf_ext
   ca-certs

@@ -689,28 +689,39 @@ let%expect_test
       let release, release_u = Eio.Promise.create () in
       let worker =
         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+          let source =
+            Transcript.Source_id.of_string "test-source" |> Result.ok_or_failwith
+          in
+          let attempt =
+            Transcript.Attempt_id.of_string "test-attempt" |> Result.ok_or_failwith
+          in
+          let key call_alias =
+            Agent_protocol.Activity.Key.create
+              ~scope:{ source; attempt }
+              ~call_alias
+              ~parent:None
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            |> Result.ok_or_failwith
+          in
           List.iter [ "tool-a"; "agent-b" ] ~f:(fun call_id ->
-            capabilities.publish_live
-              ~kind:Tool_started
-              ~payload:
-                (`Object
-                    [ "call_id", `String call_id
-                    ; "name", `String "child"
-                    ; "kind", `String "function"
-                    ; "payload", `String "{}"
-                    ; "agent_page_kind", `String "subagent"
-                    ]));
+            let descriptor =
+              Agent_protocol.Activity.Tool.descriptor
+                (key call_id)
+                ~call_entry_id:None
+                ~name:"child"
+                ~kind:Function
+                ~input:"{}"
+                ~classification:(Some Subagent)
+              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+              |> Result.ok_or_failwith
+            in
+            capabilities.publish_live (Tool_activity (Started descriptor)));
           Eio.Promise.resolve ready_u ();
           Eio.Promise.await release;
           List.iter [ "tool-a"; "agent-b" ] ~f:(fun call_id ->
             capabilities.publish_live
-              ~kind:Tool_finished
-              ~payload:
-                (`Object
-                    [ "call_id", `String call_id
-                    ; "outcome", `String "returned"
-                    ; "output", `Null
-                    ]));
+              (Tool_activity
+                 (Finished { key = key call_id; outcome = Returned; output = None })));
           Completed
             { final_history = input.history
             ; runtime_requests = []

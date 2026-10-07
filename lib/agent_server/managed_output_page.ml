@@ -123,22 +123,25 @@ let completed_answer ~state ~receipt_id =
       | true -> Error (P.Error.invalid_request "one-off answer was redacted")
       | false ->
         let%bind entry = Agent_session.History_codec.of_protocol entry in
-        (match Openai.Responses_history.item_exn entry with
-         | Openai.Responses.Item.Output_message message ->
-           Ok
-             (List.map message.content ~f:(fun part -> part.text)
-              |> String.concat ~sep:" ")
-         | Input_message { role = Assistant; content; _ } ->
+        (match
+           History_entry.Payload.semantic (History_entry.payload entry)
+           |> History_entry.Payload.Semantic.view
+         with
+         | Message { form; role = Assistant; content; _ } ->
            let%map parts =
              List.map content ~f:(function
-               | Text { text; _ } -> Ok text
-               | _ ->
+               | History_entry.Payload.Content.Text { text; _ } -> Ok text
+               | Refusal text
+                 when History_entry.Payload.Semantic.equal_message_form form Output ->
+                 Ok text
+               | Refusal _ | Image _ | Unknown _ ->
                  Error
                    (P.Error.invalid_request "one-off answer contains non-text content"))
              |> Result.all
            in
            String.concat ~sep:" " parts
-         | _ ->
+         | Message { role = System | Developer | User | Tool; _ }
+         | Call _ | Result _ | Reasoning _ | Unknown _ ->
            Error (P.Error.invalid_request "one-off output is not an assistant response")))
     |> Result.all
   in

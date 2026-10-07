@@ -60,6 +60,8 @@ let output = function
              }))
 ;;
 
+let output_to_neutral = output
+
 let semantic_of_item ?(call_relation = P.Call_relation.Unresolved) item =
   let raw = Item.jsonaf_of_t item in
   let view =

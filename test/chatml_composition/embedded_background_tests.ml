@@ -93,7 +93,7 @@ let%expect_test
                            { session_id = Embedded.session_id embedded; history = None })
                       |> protocol_ok
                     with
-                    | Session_get value -> value
+                    | Session_get value -> P.Public.Snapshot.fields value
                     | _ -> failwith "unexpected observer response"
                   in
                   let running = snapshot () in
@@ -123,7 +123,7 @@ let%expect_test
                   [%test_eq: int]
                     1
                     (List.count completed.canonical_history.entries ~f:(fun entry ->
-                       match entry.P.History.provenance with
+                       match entry.P.Public.History.provenance with
                        | Runtime_notification _ -> true
                        | _ -> false));
                   wait (fun () -> not (process_alive ()));

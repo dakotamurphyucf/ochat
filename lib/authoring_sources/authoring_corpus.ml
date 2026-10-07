@@ -2956,7 +2956,7 @@ let runtime_foundation ~sources =
         "Output pages, fragments and cursor recovery"
         [ "runtime.delegation.submissions" ]
         [ ( "## Read output and recover cursors"
-          , "9fe135857a2020bbafbe080538233609db986ca86f683b09bc1d8a04cba6c3d1" )
+          , "2f85f7dc54b7b1deb4ec680f5254b6b86fe581bf5d3462008e56382f7d290873" )
         ]
     ; make_child
         "runtime.delegation.stop-helper"

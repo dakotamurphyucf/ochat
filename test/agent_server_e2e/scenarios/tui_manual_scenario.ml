@@ -148,7 +148,9 @@ let status env observer =
   let sessions = Agent_client.Admin.list_sessions observer |> F.ok in
   List.iter sessions ~f:(fun session ->
     let snapshot =
-      Agent_client.Admin.get_session observer session.Agent_protocol.Session.id |> F.ok
+      Agent_client.Admin.get_session observer session.Agent_protocol.Session.id
+      |> F.ok
+      |> Agent_protocol.Public.Snapshot.fields
     in
     say
       env

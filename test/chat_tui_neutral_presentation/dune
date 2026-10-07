@@ -1,0 +1,5 @@
+(library
+ (name chat_tui_neutral_presentation_test)
+ (libraries core expect_test_helpers_core ochat.history_entry ochat.transcript ochat.document_schema ochat.agent_protocol ochat.agent_session chat_tui)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

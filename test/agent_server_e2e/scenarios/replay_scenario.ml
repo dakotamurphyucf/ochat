@@ -142,13 +142,17 @@ let catalog client =
       { page = page_request (); kind = None; access = None; available = Some true }
   in
   let prompt =
-    match (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result with
+    match
+      (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result
+      |> Support.Public_view.non_history
+    with
     | Prompt_list page -> List.hd_exn page.items
     | _ -> fail "prompt.list returned the wrong result"
   in
   let workspace =
     match
       (Http_driver.request client (Workspace_list workspaces) |> protocol_ok).result
+      |> Support.Public_view.non_history
     with
     | Workspace_list page -> List.hd_exn page.items
     | _ -> fail "workspace.list returned the wrong result"
@@ -208,7 +212,7 @@ let lifecycle_command session start key =
 
 let change_lifecycle client session start key =
   let result = Http_driver.request client (lifecycle_command session start key) in
-  match (result |> protocol_ok).result with
+  match (result |> protocol_ok).result |> Support.Public_view.non_history with
   | Session_start mutation | Session_stop mutation ->
     { session with summary = mutation.session }
   | _ -> fail "lifecycle command returned the wrong result"
@@ -228,7 +232,7 @@ let durable_event env stream =
     |> result_ok
   in
   let json = Jsonaf.of_string frame.data in
-  Agent_protocol.Event.Durable.of_json json |> protocol_ok
+  Agent_protocol.Public.Durable.of_json json |> protocol_ok
 ;;
 
 let rec collect_through env stream previous through events =
@@ -271,8 +275,8 @@ let connect_typed ?(notification_capacity = 128) ~sw env fixture =
 
 let snapshots_equal left right =
   String.equal
-    (Agent_protocol.Snapshot.to_json left |> Jsonaf.to_string)
-    (Agent_protocol.Snapshot.to_json right |> Jsonaf.to_string)
+    (Support.Public_view.snapshot_to_json left |> Jsonaf.to_string)
+    (Support.Public_view.snapshot_to_json right |> Jsonaf.to_string)
 ;;
 
 let send_message client session text key =
@@ -286,6 +290,7 @@ let send_message client session text key =
   in
   match
     (Http_driver.request client (Session_send_message request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Session_send_message sent -> sent
   | _ -> fail "session.send_message returned the wrong result"
@@ -317,13 +322,9 @@ let require_submitted_content
   require
     (match actual with
      | [ entry ] ->
-       let payload =
-         History_entry.Payload.of_json entry.payload |> Result.ok_or_failwith
-       in
-       Agent_protocol.History.equal_role entry.role User
-       && Agent_protocol.History.equal_kind entry.kind Message
+       let payload = Support.Public_view.full_payload entry in
+       Support.Public_view.has_header entry (Message User)
        && Agent_protocol.History.equal_provenance entry.provenance Canonical
-       && (not entry.redacted)
        &&
          (match
             History_entry.Payload.semantic payload |> History_entry.Payload.Semantic.view
@@ -367,8 +368,8 @@ let require_projection_matches writer session projected =
     raise_s
       [%sexp
         "client projection differs from authoritative snapshot"
-      , (projected : Agent_protocol.Snapshot.t)
-      , (authoritative : Agent_protocol.Snapshot.t)]
+      , (projected : Agent_protocol.Public.Snapshot.Fields.t)
+      , (authoritative : Agent_protocol.Public.Snapshot.Fields.t)]
 ;;
 
 let pressure_payload index =
@@ -412,7 +413,11 @@ type backpressure_observation =
   }
 
 let rec await_projection env projection target attempts =
-  let snapshot = projection () |> Agent_client.Projection.snapshot in
+  let snapshot =
+    projection ()
+    |> Agent_client.Projection.snapshot
+    |> Agent_protocol.Public.Snapshot.fields
+  in
   if Int64.(snapshot.latest_event_sequence >= target)
   then snapshot
   else if attempts = 0
@@ -434,7 +439,9 @@ let attach_healthy ~sw env fixture writer session =
       ~mode:Read_only
       ~subscribe:true
       ~after_sequence:previous.latest_event_sequence
-      ~previous_projection:(Agent_client.Projection.install_snapshot previous)
+      ~previous_projection:
+        (Agent_client.Projection.install_snapshot
+           (Agent_protocol.Public.Snapshot.create previous |> protocol_ok))
       ()
     |> protocol_ok
   in
@@ -538,7 +545,7 @@ let rec take_events env stream count events =
 ;;
 
 let sequences events =
-  List.map events ~f:(fun (event : Agent_protocol.Event.Durable.t) -> event.sequence)
+  List.map events ~f:(fun (event : Agent_protocol.Public.Durable.t) -> event.sequence)
 ;;
 
 let test_no_duplicates env environment =
@@ -610,8 +617,10 @@ let attach_from_snapshot ~sw env connection session_id snapshot ~subscribe =
     ~session_id
     ~mode:Read_only
     ~subscribe
-    ~after_sequence:snapshot.Agent_protocol.Snapshot.latest_event_sequence
-    ~previous_projection:(Agent_client.Projection.install_snapshot snapshot)
+    ~after_sequence:snapshot.Agent_protocol.Public.Snapshot.Fields.latest_event_sequence
+    ~previous_projection:
+      (Agent_client.Projection.install_snapshot
+         (Agent_protocol.Public.Snapshot.create snapshot |> protocol_ok))
     ()
   |> protocol_ok
 ;;
@@ -621,7 +630,9 @@ let require_snapshot_replaced writer session handle =
     Http_driver.get_snapshot writer session.summary.id |> result_ok
   in
   let replaced =
-    Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+    Agent_client.Session_handle.projection handle
+    |> Agent_client.Projection.snapshot
+    |> Agent_protocol.Public.Snapshot.fields
   in
   require
     (snapshots_equal replaced authoritative)
@@ -680,7 +691,7 @@ let reconnect_once env writer current client session iteration =
        (fun () -> Agent_client.Reconnect.projection client)
        session.summary.latest_event_sequence
        300
-     : Agent_protocol.Snapshot.t);
+     : Agent_protocol.Public.Snapshot.Fields.t);
   require (reconnect_status_connected client) "reconnect client did not recover";
   let session =
     generate_events ~prefix:(sprintf "reconnected:%d" iteration) writer session 1

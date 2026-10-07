@@ -338,8 +338,8 @@ let parse_cursor = Request_contract.event_cursor
 let sse_durable event =
   sprintf
     "id: %Ld\nevent: session.event\ndata: %s\n\n"
-    event.Agent_protocol.Event.Durable.sequence
-    (Agent_protocol.Event.Durable.to_json event |> Jsonaf.to_string)
+    event.Agent_protocol.Public.Durable.sequence
+    (Agent_protocol.Public.Durable.to_json event |> Jsonaf.to_string)
 ;;
 
 let sse_recoverable event =
@@ -382,32 +382,42 @@ let close_session_sse entry (attachment : Agent_protocol.Session.Attachment.t) s
 
 let next_session_sse t principal entry attachment subscriber state heartbeat_interval =
   let sse_durable event =
-    sse_durable (Agent_server.Principal_projection.durable principal event)
+    match Agent_server.Principal_projection.durable principal event with
+    | Ok event -> sse_durable event
+    | Error _ ->
+      close_session_sse entry attachment state;
+      sse_snapshot_required
+        (protocol_error
+           Snapshot_required
+           "session event stream requires a fresh snapshot")
   in
-  state.last_pull <- now t;
-  match state.connected, state.replay with
-  | false, _ ->
-    state.connected <- true;
-    Some sse_connected
-  | true, event :: replay ->
-    state.replay <- replay;
-    Some (sse_durable event)
-  | true, [] ->
-    (match subscriber_item t subscriber ~heartbeat_interval with
-     | `Keep_alive -> Some ": keep-alive\n\n"
-     | `Item None ->
-       close_session_sse entry attachment state;
-       None
-     | `Item (Some (Ok (Durable event))) -> Some (sse_durable event)
-     | `Item (Some (Ok (Recoverable event))) ->
-       Some
-         (Option.value_map
-            (Agent_server.Principal_projection.recoverable principal event)
-            ~default:": filtered\n\n"
-            ~f:sse_recoverable)
-     | `Item (Some (Error error)) ->
-       close_session_sse entry attachment state;
-       Some (sse_snapshot_required error))
+  if state.closed
+  then None
+  else (
+    state.last_pull <- now t;
+    match state.connected, state.replay with
+    | false, _ ->
+      state.connected <- true;
+      Some sse_connected
+    | true, event :: replay ->
+      state.replay <- replay;
+      Some (sse_durable event)
+    | true, [] ->
+      (match subscriber_item t subscriber ~heartbeat_interval with
+       | `Keep_alive -> Some ": keep-alive\n\n"
+       | `Item None ->
+         close_session_sse entry attachment state;
+         None
+       | `Item (Some (Ok (Durable event))) -> Some (sse_durable event)
+       | `Item (Some (Ok (Recoverable event))) ->
+         Some
+           (Option.value_map
+              (Agent_server.Principal_projection.recoverable principal event)
+              ~default:": filtered\n\n"
+              ~f:sse_recoverable)
+       | `Item (Some (Error error)) ->
+         close_session_sse entry attachment state;
+         Some (sse_snapshot_required error)))
 ;;
 
 let watch_session_sse t entry attachment state stream heartbeat_interval =
@@ -478,10 +488,8 @@ let handle_session_events t request principal encoded_session_id =
 ;;
 
 let snapshot_etag snapshot =
-  sprintf
-    "\"%Ld-%Ld\""
-    snapshot.Agent_protocol.Snapshot.revision
-    snapshot.latest_event_sequence
+  let fields = Agent_protocol.Public.Snapshot.fields snapshot in
+  sprintf "\"%Ld-%Ld\"" fields.revision fields.latest_event_sequence
 ;;
 
 let handle_snapshot t request principal encoded_session_id =
@@ -489,7 +497,7 @@ let handle_snapshot t request principal encoded_session_id =
   match
     let%bind session_id = session_id encoded_session_id in
     let%bind entry, _ = authorized_entry t principal session_id in
-    let%map snapshot = Agent_session.Session_actor.snapshot entry.actor in
+    let%bind snapshot = Agent_session.Session_actor.snapshot entry.actor in
     Agent_server.Principal_projection.snapshot principal snapshot
   with
   | Error error -> error_response error
@@ -501,7 +509,8 @@ let handle_snapshot t request principal encoded_session_id =
       ^ (snapshot_etag snapshot |> String.filter ~f:(fun ch -> not (Char.equal ch '"')))
       ^ ":"
       ^ Digestif.SHA256.(
-          digest_string (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string)
+          digest_string
+            (Agent_protocol.Public.Snapshot.to_json snapshot |> Jsonaf.to_string)
           |> to_hex)
       ^ "\""
     in
@@ -514,7 +523,7 @@ let handle_snapshot t request principal encoded_session_id =
         ~headers:(P.Headers.of_list [ "content-type", "application/json"; "etag", etag ])
         ~body:
           (P.Body.of_string
-             (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string))
+             (Agent_protocol.Public.Snapshot.to_json snapshot |> Jsonaf.to_string))
         `OK
 ;;
 

@@ -27,3 +27,5 @@ type t =
       { call_id : string
       ; trace : Ochat_function.Trace.t
       }
+
+let neutral_output = Openai.Responses_history.output_to_neutral

@@ -763,7 +763,7 @@
 (library
  (name agent_protocol_test)
  (modules agent_protocol_test agent_invocation_test agent_extension_test)
- (libraries core expect_test_helpers_core ochat.agent_protocol)
+ (libraries core expect_test_helpers_core ochat.agent_protocol ochat.transcript)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -804,7 +804,7 @@
 (library
  (name agent_client_test)
  (modules agent_client_test)
- (libraries core eio_main ochat.agent_protocol ochat.agent_client)
+ (libraries core eio_main ochat.agent_protocol ochat.agent_client ochat.transcript ochat.document_schema mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -816,6 +816,15 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_transport_http_projection_test)
+ (modules agent_transport_http_projection_test)
+ (libraries agent_server_test_support core eio eio_main eio.unix uri piaf
+  mirage-crypto-rng.unix ochat.agent_server ochat.agent_client
+  ochat.agent_protocol ochat.agent_transport_http)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_transport_client_test)

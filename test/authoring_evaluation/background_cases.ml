@@ -88,7 +88,7 @@ let binding_validation ~env candidate =
   | _ -> Invalid (Semantics, "expected source, binding, input_schema and output_schema")
 ;;
 
-let notifications (snapshot : P.Snapshot.t) =
+let notifications (snapshot : P.Public.Snapshot.Fields.t) =
   List.filter snapshot.canonical_history.entries ~f:(fun entry ->
     match entry.provenance with
     | Runtime_notification _ -> true
@@ -130,7 +130,9 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
     let initial_id = ref None in
     let pid = ref None in
     let after_ack ~workspace embedded initial =
-      H.require (List.length initial.P.Snapshot.jobs = 1) "expected exactly one probe job";
+      H.require
+        (List.length initial.P.Public.Snapshot.Fields.jobs = 1)
+        "expected exactly one probe job";
       let job_id =
         match H.outcome initial "begin" with
         | Pending (Job id, `Object fields) ->
@@ -177,14 +179,14 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
                 ; idempotency_key =
                     P.Idempotency_key.of_string "evaluation:cancel" |> H.get
                 })
-           : P.Method_result.t)
+           : P.Public.Result.t)
     in
     let settled snapshot =
       H.require
-        (List.length snapshot.P.Snapshot.jobs <= 1)
+        (List.length snapshot.P.Public.Snapshot.Fields.jobs <= 1)
         "unexpected additional probe job";
       H.require
-        (List.for_all snapshot.P.Snapshot.extension_status ~f:(fun status ->
+        (List.for_all snapshot.P.Public.Snapshot.Fields.extension_status ~f:(fun status ->
            match status.kind, status.state with
            | Moderator_execution, ("failed" | "failed.retired") -> false
            | _ -> true))
@@ -202,7 +204,7 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
            | `No_such_process -> true
            | `Ok -> false)
       in
-      List.length snapshot.P.Snapshot.jobs = 1
+      List.length snapshot.P.Public.Snapshot.Fields.jobs = 1
       && List.for_all snapshot.jobs ~f:(fun job ->
         match job.delivery with
         | Delivered _ -> true
@@ -236,12 +238,12 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
     let notification = List.hd_exn (notifications snapshot) in
     let data =
       match
-        Agent_session.History_codec.of_protocol notification
-        |> H.get
-        |> Openai.Responses_history.item_exn
+        P.Public.History.full_payload notification
+        |> Option.value_exn
+        |> History_entry.Payload.semantic
+        |> History_entry.Payload.Semantic.view
       with
-      | Openai.Responses.Item.Input_message
-          { role = User; content = Text { text; _ } :: _; _ } ->
+      | Message { form = Input; role = User; content = Text { text; _ } :: _; _ } ->
         String.lsplit2_exn text ~on:'\n' |> snd |> Jsonaf.of_string
       | _ -> failwith "notification did not use supported user-message framing"
     in

@@ -236,12 +236,20 @@ type ctx =
   ; on_event : Openai.Responses.Response_stream.t -> unit
   ; on_sourced_event : Sourced_response_event.t -> unit
   ; on_history_event : History_stream_event.t -> unit
+  ; on_transcript_event : (Transcript.Stream.t -> unit) option
+  ; on_scoped_tool_execution :
+      (scope:Transcript.Scope.t -> Tool_execution_event.t -> unit) option
   ; on_history_item_appended : History_entry.t -> unit
   ; on_history_tool_out : History_entry.t -> unit
   ; allocator : History_entry.Allocator.t
   ; id_source : History_entry.Id_source.t
   ; registry : History_stream_event.Registry.t
   ; mutable scope : int
+  ; transcript_source : Transcript.Source_id.t
+  ; transcript_relation : Transcript.Scope.relation
+  ; mutable transcript_scope : Transcript.Scope.t option
+  ; mutable transcript_live : Openai.Responses_live.t option
+  ; mutable scoped_trace_bridges : String.Set.t
   ; source : string option
   ; parent_call_id : string option
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
@@ -265,6 +273,9 @@ type args =
   ; on_event : Openai.Responses.Response_stream.t -> unit
   ; on_sourced_event : Sourced_response_event.t -> unit
   ; on_history_event : History_stream_event.t -> unit
+  ; on_transcript_event : (Transcript.Stream.t -> unit) option
+  ; on_scoped_tool_execution :
+      (scope:Transcript.Scope.t -> Tool_execution_event.t -> unit) option
   ; on_history_item_appended : History_entry.t -> unit
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
   ; on_tool_out : Openai.Responses.Item.t -> unit
@@ -992,6 +1003,59 @@ let emit_tool_output
 let add_entry st entry = { st with new_entries_rev = entry :: st.new_entries_rev }
 let history_with_new_entries ~hist st = List.append hist (List.rev st.new_entries_rev)
 
+let report_transcript (c : ctx) update =
+  match c.on_transcript_event, c.transcript_live with
+  | Some observer, Some live ->
+    let live, observations = update live |> Result.ok_or_failwith in
+    c.transcript_live <- Some live;
+    List.iter observations ~f:observer
+  | None, _ -> ()
+  | Some _, None -> failwith "transcript observation outside an actual source attempt"
+;;
+
+let finish_transcript (c : ctx) completion =
+  report_transcript c (fun live -> Openai.Responses_live.finish live ~completion);
+  c.transcript_live <- None;
+  c.transcript_scope <- None
+;;
+
+let begin_transcript (c : ctx) =
+  Option.iter c.transcript_live ~f:(fun _ -> finish_transcript c Failed);
+  match c.on_transcript_event, c.on_scoped_tool_execution with
+  | None, None -> ()
+  | (None | Some _), (None | Some _) ->
+    let attempt =
+      Transcript.Attempt_id.of_string ("attempt:" ^ Int.to_string c.scope)
+      |> Result.ok_or_failwith
+    in
+    let scope =
+      Transcript.Scope.create
+        ~source:c.transcript_source
+        ~attempt
+        ~relation:c.transcript_relation
+      |> Result.ok_or_failwith
+    in
+    let live = Openai.Responses_live.create ~scope ~limits:Transcript.Admission.default in
+    c.transcript_scope <- Some scope;
+    c.transcript_live <- Option.map c.on_transcript_event ~f:(fun _ -> live);
+    Option.iter c.transcript_live ~f:(fun _ ->
+      report_transcript c Openai.Responses_live.start)
+;;
+
+let report_finalized_entry (c : ctx) entry =
+  report_transcript c (fun live -> Openai.Responses_live.finalized live entry)
+;;
+
+let scoped_tool_observer (c : ctx) =
+  Option.map c.on_scoped_tool_execution ~f:(fun observer ->
+    let scope = Option.value_exn c.transcript_scope in
+    fun event ->
+      match event with
+      | Tool_execution_event.Trace { call_id; _ }
+        when Set.mem c.scoped_trace_bridges call_id -> ()
+      | Started _ | Progress _ | Finished _ | Trace _ -> observer ~scope event)
+;;
+
 let append_history_item
       (c : ctx)
       ?commit_entry
@@ -1029,6 +1093,7 @@ let append_history_item
     let entry = Openai.Responses_history.create_with_id_exn ~call_relation ~id item in
     let entry = Option.value_map prepare_entry ~default:entry ~f:(fun f -> f entry) in
     (Option.value commit_entry ~default:c.on_history_item_appended) entry;
+    report_finalized_entry c entry;
     let st = add_entry st entry in
     handle_item_appended_entries
       ~moderator
@@ -1139,6 +1204,11 @@ let report_event (c : ctx) event =
     History_stream_event.observe c.registry ~scope:c.scope ~source:c.source event
   in
   Option.iter history_event ~f:c.on_history_event;
+  report_transcript c (fun live ->
+    Openai.Responses_live.observe_legacy
+      live
+      ~entry_id:(Option.map history_event ~f:(fun event -> event.entry_id))
+      event);
   notify_each [ c.on_event ] event;
   notify_each
     [ c.on_sourced_event ]
@@ -1235,11 +1305,36 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
       ~emit:(Ochat_function.Invocation.emit invocation)
       ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
   in
+  let transcript_relation =
+    match ctx.transcript_scope with
+    | None -> Transcript.Scope.Root
+    | Some scope ->
+      let call_entry_id =
+        List.find_map (List.rev history_so_far) ~f:(fun entry ->
+          let semantic = History_entry.Payload.semantic (History_entry.payload entry) in
+          match
+            ( History_entry.Payload.Semantic.view semantic
+            , (History_entry.Payload.Semantic.metadata semantic).call_id )
+          with
+          | Call _, Value alias when String.equal alias call_id ->
+            Some (History_entry.id entry)
+          | _ -> None)
+      in
+      Transcript.Scope.Nested
+        { scope = Transcript.Scope.key scope; call_entry_id; call_alias = Some call_id }
+  in
   let child_ctx =
     { ctx with
       allocator = child_allocator
     ; id_source = History_entry.Id_source.of_allocator child_allocator
     ; registry = child_registry
+    ; transcript_source =
+        Transcript.Source_id.of_string (Fork.Invocation_id.to_string invocation_id)
+        |> Result.ok_or_failwith
+    ; transcript_relation
+    ; transcript_scope = None
+    ; transcript_live = None
+    ; scoped_trace_bridges = Set.empty (module String)
     ; source = Some (Fork.Invocation_id.to_string invocation_id)
     ; parent_call_id = Some call_id
     ; dispatch_tool =
@@ -1266,12 +1361,18 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
     }
   in
   let res =
-    turn child_ctx
-    @@ Fork.history_entries
-         ~allocator:child_allocator
-         ~history:history_so_far
-         ~arguments
-         ~call_id
+    Exn.protect
+      ~f:(fun () ->
+        if Option.is_some ctx.on_scoped_tool_execution
+        then ctx.scoped_trace_bridges <- Set.add ctx.scoped_trace_bridges call_id;
+        turn child_ctx
+        @@ Fork.history_entries
+             ~allocator:child_allocator
+             ~history:history_so_far
+             ~arguments
+             ~call_id)
+      ~finally:(fun () ->
+        ctx.scoped_trace_bridges <- Set.remove ctx.scoped_trace_bridges call_id)
   in
   let txt =
     [ Openai.Responses_history.item_exn (List.last_exn res) ]
@@ -1658,6 +1759,7 @@ let schedule_function_done
              ~call_id
              ~tool_tbl:c.tool_tbl
              ?on_tool_execution:c.on_tool_execution
+             ?on_execution_event:(scoped_tool_observer c)
              ~on_fork:
                (Some
                   (fun ~invocation ~call_id ~arguments ->
@@ -1780,6 +1882,7 @@ let schedule_custom_done
              ~tool_tbl:c.tool_tbl
              ~on_fork:None
              ?on_tool_execution:c.on_tool_execution
+             ?on_execution_event:(scoped_tool_observer c)
              ())
     in
     let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
@@ -1964,6 +2067,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
       (match completed.commit_output with
        | Some commit -> commit candidate_entry
        | None -> c.on_history_item_appended candidate_entry);
+      report_finalized_entry c candidate_entry;
       ignore
         (emit_tool_output
            ~on_fn_out:c.on_fn_out
@@ -2071,11 +2175,12 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
        | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
       let inputs = inputs @ Openai.Responses_history.items_exn additions in
       log_request c ~inputs;
-      c.scope <- History_stream_event.Registry.create_scope c.registry;
       let events =
         retry_stream_start
           ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock c.env))
           (fun () ->
+             c.scope <- History_stream_event.Registry.create_scope c.registry;
+             begin_transcript c;
              post_stream c ~sw ~inputs
              |> with_stream_idle_timeout
                   ~clock:(Eio.Stdenv.clock c.env)
@@ -2083,6 +2188,11 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       in
       let st = fold_stream ~turn:turn_for_fork c ~hist ~sem events in
       let new_entries_rev, tool_requests = await_calls c ~hist st in
+      let completion =
+        Option.bind c.transcript_live ~f:Openai.Responses_live.completion
+        |> Option.value ~default:Transcript.Stream.Incomplete
+      in
+      finish_transcript c completion;
       let hist = List.append hist (List.rev new_entries_rev) in
       if Option.is_some (Runtime_semantics.should_end_session tool_requests)
       then hist
@@ -2172,12 +2282,22 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_event = a.on_event
     ; on_sourced_event = a.on_sourced_event
     ; on_history_event = a.on_history_event
+    ; on_transcript_event = a.on_transcript_event
+    ; on_scoped_tool_execution = a.on_scoped_tool_execution
     ; on_history_item_appended = a.on_history_item_appended
     ; on_history_tool_out = a.on_history_tool_out
     ; allocator = a.allocator
     ; id_source = a.id_source
     ; registry = History_stream_event.Registry.create_with_source ~id_source:a.id_source
     ; scope = 0
+    ; transcript_source =
+        Transcript.Source_id.of_string
+          (Fork.Invocation_id.create () |> Fork.Invocation_id.to_string)
+        |> Result.ok_or_failwith
+    ; transcript_relation = Transcript.Scope.Root
+    ; transcript_scope = None
+    ; transcript_live = None
+    ; scoped_trace_bridges = Set.empty (module String)
     ; source = a.source
     ; parent_call_id = a.parent_call_id
     ; on_fn_out = a.on_fn_out
@@ -2209,6 +2329,8 @@ let run_completion_stream_in_memory_entries
       ?(on_event = fun _ -> ())
       ?(on_sourced_event = fun _ -> ())
       ?(on_history_event = fun _ -> ())
+      ?on_transcript_event
+      ?on_scoped_tool_execution
       ?(on_history_item_appended = fun _ -> ())
       ?(on_fn_out = fun _ -> ())
       ?(on_tool_out = fun _ -> ())
@@ -2250,6 +2372,8 @@ let run_completion_stream_in_memory_entries
     ; on_event
     ; on_sourced_event
     ; on_history_event
+    ; on_transcript_event
+    ; on_scoped_tool_execution
     ; on_history_item_appended
     ; on_fn_out
     ; on_tool_out

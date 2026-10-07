@@ -194,8 +194,7 @@ module Capabilities : sig
         -> (Agent_protocol.Permission.resolution, Agent_protocol.Error.t) result
     ; responder_available : unit -> bool
     ; invocation_granted : tool_name:string -> identity_digest:string -> bool
-    ; publish_live :
-        kind:Agent_protocol.Event.Recoverable.kind -> payload:Jsonaf.t -> unit
+    ; publish_live : Agent_protocol.Event.Recoverable.payload -> unit
     }
 end
 

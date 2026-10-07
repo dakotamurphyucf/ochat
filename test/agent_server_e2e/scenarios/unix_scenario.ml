@@ -157,7 +157,9 @@ let start_session connection session attachment key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match Agent_client.Connection.request connection (Session_start request) with
+  match
+    Agent_client.Connection.request_without_history connection (Session_start request)
+  with
   | Ok (Session_start result) -> result.session
   | Ok _ -> fail "session.start returned the wrong result variant"
   | Error error ->
@@ -167,7 +169,7 @@ let start_session connection session attachment key =
 let durable_event envelope =
   match envelope with
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    Agent_protocol.Event.Durable.of_json params |> protocol_ok
+    Agent_protocol.Public.Durable.of_json params |> protocol_ok
   | envelope ->
     raise_s [%sexp "unexpected notification", (envelope : Agent_protocol.Envelope.t)]
 ;;
@@ -268,7 +270,7 @@ let test_create_attach_subscribe env environment =
       in
       let writer_attachment =
         Option.value_exn created.attachment
-        |> fun (value : Agent_protocol.Method_result.Attach.t) -> value.attachment
+        |> fun (value : Agent_protocol.Public.Result.Attach.t) -> value.attachment
       in
       with_connection env fixture (fun reader ->
         ignore (initialize reader : Agent_protocol.Initialize.Response.t);
@@ -307,7 +309,7 @@ let test_create_attach_subscribe env environment =
 ;;
 
 let first_replay_event attached =
-  match attached.Agent_protocol.Method_result.Attach.replay with
+  match attached.Agent_protocol.Public.Result.Attach.replay with
   | Events (event :: _) -> event
   | Events [] -> fail "attach replay was empty"
   | Current -> fail "attach replay unexpectedly returned current"
@@ -346,7 +348,7 @@ let request_line id method_ params =
 ;;
 
 let initialize_line =
-  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"unix-e2e-raw","version":"dev"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
+  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"unix-e2e-raw","version":"dev"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
 ;;
 
 let require_success_response = function

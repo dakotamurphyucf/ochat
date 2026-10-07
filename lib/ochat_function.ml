@@ -51,28 +51,43 @@ module Trace = struct
 end
 
 module Invocation = struct
+  type delivery =
+    | Protected
+    | Propagate
+
   type observers =
     { progress : Progress.t -> unit
     ; trace : Trace.t -> unit
+    ; delivery : delivery
     }
 
   type t = observers option
 
   let silent = None
-  let create progress = Some { progress; trace = ignore }
-  let create_with_trace ~progress ~trace = Some { progress; trace }
+  let create progress = Some { progress; trace = ignore; delivery = Protected }
+  let create_with_trace ~progress ~trace = Some { progress; trace; delivery = Protected }
+
+  let create_strict_with_trace ~progress ~trace =
+    Some { progress; trace; delivery = Propagate }
+  ;;
 
   let emit t progress =
     match t with
     | None -> ()
     | Some observers ->
-      Exn.handle_uncaught ~exit:false (fun () -> observers.progress progress)
+      (match observers.delivery with
+       | Protected ->
+         Exn.handle_uncaught ~exit:false (fun () -> observers.progress progress)
+       | Propagate -> observers.progress progress)
   ;;
 
   let emit_trace t trace =
     match t with
     | None -> ()
-    | Some observers -> Exn.handle_uncaught ~exit:false (fun () -> observers.trace trace)
+    | Some observers ->
+      (match observers.delivery with
+       | Protected -> Exn.handle_uncaught ~exit:false (fun () -> observers.trace trace)
+       | Propagate -> observers.trace trace)
   ;;
 
   let is_observed = Option.is_some

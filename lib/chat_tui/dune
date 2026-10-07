@@ -91,7 +91,7 @@
   attachments
   export
   ui_helpers)
- (libraries
+ (libraries ochat.history_chatmd ochat.transcript ochat.document_schema
   core
   uuseg
   jsonaf

@@ -10,10 +10,10 @@ module Projection = Chat_tui.Agent_projection
 module Process = Support.Process_manager
 
 let endpoint port = sprintf "http://127.0.0.1:%d" port
-let snapshot client = Projection.snapshot (Client.projection client)
+let snapshot client = Projection.fields (Client.projection client)
 
 let protocol_json entries =
-  `Array (List.map entries ~f:Agent_protocol.History.entry_to_json) |> Jsonaf.to_string
+  `Array (List.map entries ~f:Agent_protocol.Public.History.to_json) |> Jsonaf.to_string
 ;;
 
 let fixture env temporary =
@@ -104,10 +104,9 @@ let apply_until env client applier model predicate =
       [%sexp
         "TUI trace checkpoint timed out"
       , (Model.messages model : (string * string) list)
-      , (List.map
-           (Projection.live_events (Client.projection client))
-           ~f:(fun event -> event.operation_sequence, event.kind)
-         : (int64 * Agent_protocol.Event.Recoverable.kind) list)]
+      , (Agent_client.Live_projection.retained_bytes
+           (Projection.live (Client.projection client))
+         : int)]
 ;;
 
 let row model role text =
@@ -151,7 +150,9 @@ let approve env client =
     with
     | Eio.Time.Timeout ->
       raise_s
-        [%sexp "permission never arrived", (snapshot client : Agent_protocol.Snapshot.t)]
+        [%sexp
+          "permission never arrived"
+        , (snapshot client : Agent_protocol.Public.Snapshot.Fields.t)]
   in
   F.require
     (String.equal permission.tool_name "fork")
@@ -243,17 +244,16 @@ let finish_nested env provider client applier model nested =
 let assert_pair entries =
   let index, call =
     List.findi entries ~f:(fun _ entry ->
-      Agent_protocol.History.equal_kind entry.Agent_protocol.History.kind Tool_call)
+      Support.Public_view.has_header entry (Call Function))
     |> Option.value_exn
   in
   let output = List.nth_exn entries (index + 1) in
   F.require
-    (Agent_protocol.History.equal_kind output.kind Tool_output)
+    (Support.Public_view.has_header output (Result Function))
     "tool pair is not adjacent";
   List.iter [ call; output ] ~f:(fun entry ->
     let metadata =
-      History_entry.Payload.of_json entry.Agent_protocol.History.payload
-      |> Result.ok_or_failwith
+      Support.Public_view.full_payload entry
       |> History_entry.Payload.semantic
       |> History_entry.Payload.Semantic.metadata
     in
@@ -284,20 +284,20 @@ let finish_text env client applier model final =
 ;;
 
 let assert_canonical model entries deferred =
-  F.require
-    (String.equal
-       (protocol_json entries)
-       (protocol_json
-          (List.map
-             (Model.history_items model)
-             ~f:Agent_session.History_codec.to_protocol)))
-    "final TUI history differs from server";
-  let kinds = List.map entries ~f:(fun entry -> entry.Agent_protocol.History.kind) in
+  F.assert_public_rows model entries;
+  let headers = List.map entries ~f:Agent_protocol.Public.History.header in
   F.require
     (List.equal
-       Agent_protocol.History.equal_kind
-       kinds
-       [ Message; Message; Reasoning; Tool_call; Tool_output; Message; Message ])
+       (Option.equal Transcript.Header.equal)
+       headers
+       [ Some (Message Developer)
+       ; Some (Message User)
+       ; Some Reasoning
+       ; Some (Call Function)
+       ; Some (Result Function)
+       ; Some (Message User)
+       ; Some (Message Assistant)
+       ])
     "child history leaked into the root or root entries were lost";
   F.require
     (List.count entries ~f:(fun entry ->
@@ -313,7 +313,9 @@ let assert_canonical model entries deferred =
 let finish_root env provider client observer applier model final reason_id deferred =
   let id = finish_text env client applier model final in
   let authoritative =
-    Agent_client.Admin.get_session observer (snapshot client).session.id |> F.ok
+    Agent_client.Admin.get_session observer (snapshot client).session.id
+    |> F.ok
+    |> Agent_protocol.Public.Snapshot.fields
   in
   F.require (Option.is_none authoritative.failure) "streaming session failed";
   let entries = authoritative.canonical_history.entries in
@@ -369,7 +371,9 @@ let overlay_script =
 
 let authoritative env client observer =
   let value =
-    Agent_client.Admin.get_session observer (snapshot client).session.id |> F.ok
+    Agent_client.Admin.get_session observer (snapshot client).session.id
+    |> F.ok
+    |> Agent_protocol.Public.Snapshot.fields
   in
   F.await env (fun () ->
     if Int64.((snapshot client).latest_event_sequence >= value.latest_event_sequence)
@@ -396,10 +400,10 @@ let assert_overlay env client observer applier model =
   let server = authoritative env client observer in
   T.apply applier model (Client.projection client);
   assert_overlay_rows model;
-  F.assert_user
+  F.assert_public_user
     (List.filter server.canonical_history.entries ~f:(fun entry ->
        String.is_substring
-         (Jsonaf.to_string entry.Agent_protocol.History.payload)
+         (Support.Public_view.history_text entry |> String.concat ~sep:"\n")
          ~substring:"stream-root"))
     "stream-root";
   let effective = Option.value_exn server.effective_history in
@@ -463,14 +467,13 @@ let assert_draft model =
 let assert_history env client observer applier model =
   let server = authoritative env client observer in
   T.apply applier model (Client.projection client);
-  F.require
-    (String.equal
-       (protocol_json server.canonical_history.entries)
-       (protocol_json
-          (List.map
-             (Model.history_items model)
-             ~f:Agent_session.History_codec.to_protocol)))
-    "TUI canonical history differs from authoritative snapshot";
+  let visible =
+    Option.value_map
+      server.effective_history
+      ~default:server.canonical_history.entries
+      ~f:(fun window -> window.Agent_protocol.Public.History.Window.entries)
+  in
+  F.assert_public_rows model visible;
   assert_draft model;
   server
 ;;
@@ -605,8 +608,8 @@ let continue_after_cancel env provider client applier model =
 ;;
 
 let assert_cancelled_history
-      (before : Agent_protocol.Snapshot.t)
-      (after : Agent_protocol.Snapshot.t)
+      (before : Agent_protocol.Public.Snapshot.Fields.t)
+      (after : Agent_protocol.Public.Snapshot.Fields.t)
   =
   let encoded = protocol_json after.canonical_history.entries in
   F.require
@@ -642,7 +645,7 @@ let record_connection connection replies =
     ~request:(fun command ->
       let result = Agent_client.Connection.request connection command in
       (match result with
-       | Ok (Agent_protocol.Method_result.Session_attach response) ->
+       | Ok (Agent_protocol.Public.Result.Session_attach response) ->
          replies := response.replay :: !replies
        | _ -> ());
       result)
@@ -674,14 +677,16 @@ let reconnect_terminal env provider original observer =
   Provider.finish followup;
   F.await env (fun () ->
     let server =
-      Agent_client.Admin.get_session observer (snapshot original).session.id |> F.ok
+      Agent_client.Admin.get_session observer (snapshot original).session.id
+      |> F.ok
+      |> Agent_protocol.Public.Snapshot.fields
     in
     if Option.is_none server.session.active_operation then Some server else None)
 ;;
 
 let verify_replay replies expired =
   match !replies with
-  | Agent_protocol.Method_result.Attach.Events events :: _ when not expired ->
+  | Agent_protocol.Public.Result.Attach.Events events :: _ when not expired ->
     F.require (not (List.is_empty events)) "reconnect replay contained no events"
   | Snapshot _ :: _ when expired -> ()
   | values ->
@@ -689,7 +694,7 @@ let verify_replay replies expired =
       [%sexp
         "wrong reconnect replay branch"
       , (expired : bool)
-      , (values : Agent_protocol.Method_result.Attach.replay list)]
+      , (values : Agent_protocol.Public.Result.Attach.replay list)]
 ;;
 
 let begin_reconnect env provider client applier model =

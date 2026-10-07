@@ -1,4 +1,4 @@
-# Ochat agent protocol 1.1
+# Ochat agent protocol 2.0
 
 Use the same method/envelope contract over [Unix](transports/unix.md),
 [stdio](transports/stdio.md), or [HTTP](transports/http.md). Transport framing and
@@ -9,18 +9,18 @@ The [ChatML extension foundations](extensibility-foundations.md) describe additi
 status and host-capability metadata, storage guarantees and the current execution
 feature availability.
 
-Protocol 1.1 adds `ingress.submit` and its dedicated permission scope. Servers also
-negotiate 1.0 for existing clients; those initialization responses omit the new
-scope, preserving the older closed permission vocabulary. Ingress submission
-requires negotiation of at least 1.1. A supported protocol method does not enable
-ChatML features on a host where their qualified runtime service is unavailable.
+Protocol 2.0 introduces [neutral transcript projections](../neutral-transcript-protocol.md)
+and typed live activity. Version-1 clients must upgrade; this server does not
+negotiate their former response shape. The existing `ingress.submit` method and
+its dedicated permission scope remain available. Protocol support does not enable
+ChatML features on a host where their runtime service is unavailable.
 
 ## Initialize and correlate
 
 Send this complete request before other work:
 
 ```json
-{"jsonrpc":"2.0","id":"initialize","method":"protocol.initialize","params":{"implementation":{"name":"tutorial","version":"1"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":1},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}
+{"jsonrpc":"2.0","id":"initialize","method":"protocol.initialize","params":{"implementation":{"name":"tutorial","version":"1"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}
 ```
 
 The response identifies the negotiated protocol, server/features/limits. Reject an
@@ -195,9 +195,10 @@ Durable families include session creation/state/update/error; owner changes;
 deferred/appended/replaced history; moderator overlays/notices; requested/resolved
 permissions; created/revoked grants; started/completed/failed/cancelled/interrupted
 operations; job transitions; schedule creation/transitions/cancellation; prompt
-upgrade; workspace state. Recoverable families include provider/sourced/history-
-correlated streams, tool start/progress/trace/finish, agent classification/progress,
-activity and compaction progress. Exact payload shapes are in `Event`.
+upgrade; workspace state. Recoverable payloads contain typed `Transcript.Stream`
+observations or `Activity.Tool` start/progress/finish observations with actual
+source/attempt identity and optional parent attribution. Public durable payloads
+are defined by `Public.Durable`; `Event.Recoverable` defines the live envelope.
 
 Client synchronization:
 
@@ -206,7 +207,7 @@ Client synchronization:
 3. Track stable history and operation IDs; preserve local drafts separately.
 4. Redacted/hidden durable events still advance sequence. Do not infer missing
    protected data by treating hidden payloads as deserialization failures.
-5. Protocol 1.0/1.1 does not expose replay of recoverable deltas. They are live-only
+5. Protocol 2.0 does not expose replay of recoverable deltas. They are live-only
    notifications; their operation sequence is not an accepted reconnect cursor.
    Recover through durable replay or a replacement snapshot, then resume live
    notifications. Finalized canonical state remains authoritative.
@@ -215,16 +216,23 @@ Client synchronization:
 7. On reconnect, re-establish identity/connection/attachment as required, then
    replay after the last durable position or request replacement.
 
-Transcript-only principals receive finalized text/redacted tool placeholders.
-Recoverable streams and tool/permission summaries require `security.read`, grants
-require `grant.manage`, jobs/schedules require `session.message.send`. Export and
-snapshot caching use the same principal projection; no unscoped cache reuse.
+Transcript-only principals receive whitelisted messages and reasoning, with
+explicitly redacted tool/unknown bodies. Full history and recoverable live content
+require both transcript and security scopes. Permission summaries require
+`security.read`, grants require `grant.manage`, and jobs/schedules require
+`session.message.send`. Export and snapshot caching use the same principal
+projection; no unscoped cache reuse.
 
-History entry `role` is a coarse protocol classification: both system and
-developer input messages have outer `role: "system"`. The exact role remains
-in `payload.role` (`"developer"` for developer instructions). Model reconstruction
-uses the payload, not the coarse classification; this does not convert developer
-instructions into system messages. ChatML `Item.role` also reports the exact role.
+Public history rows carry stable IDs and provenance with `Full`, `Visible`, or
+`Redacted` bodies. Developer remains distinct from System in both canonical
+semantics and visible message views. Readable or redacted views cannot become
+canonical input. The older coarse role fields belong only to private persistence
+codecs; clients use `Public.History`.
+
+A subscription that cannot deliver an admitted durable event emits
+`session.stream_error` with its session and attachment IDs. Clients mark that
+attachment stale and recover through a fresh snapshot; this notification does
+not consume a durable sequence.
 
 ## Pagination and history windows
 

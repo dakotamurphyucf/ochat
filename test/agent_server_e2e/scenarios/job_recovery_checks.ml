@@ -55,12 +55,12 @@ let on_event : context -> state -> event -> state task = fun ctx state event ->
 ;;
 
 let find snapshot id =
-  List.find_exn snapshot.Agent_protocol.Snapshot.jobs ~f:(fun job ->
+  List.find_exn snapshot.Agent_protocol.Public.Snapshot.Fields.jobs ~f:(fun job ->
     Agent_protocol.Id.Job.compare job.id id = 0)
 ;;
 
 let queued_once snapshot =
-  List.exists snapshot.Agent_protocol.Snapshot.jobs ~f:(fun job ->
+  List.exists snapshot.Agent_protocol.Public.Snapshot.Fields.jobs ~f:(fun job ->
     match job.status with
     | Queued -> job.attempt = 1
     | _ -> false)

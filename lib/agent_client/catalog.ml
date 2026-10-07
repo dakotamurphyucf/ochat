@@ -13,7 +13,7 @@ let prompts connection =
   let request =
     Agent_protocol.Prompt.List_request.{ page; enabled = None; available = None }
   in
-  match Connection.request connection (Prompt_list request) with
+  match Connection.request_without_history connection (Prompt_list request) with
   | Ok (Prompt_list result) -> Ok result.items
   | Ok _ -> Error (invalid "unexpected prompt.list result")
   | Error _ as failure -> failure
@@ -26,7 +26,7 @@ let workspaces connection =
     Agent_protocol.Workspace.List_request.
       { page; kind = None; access = None; available = None }
   in
-  match Connection.request connection (Workspace_list request) with
+  match Connection.request_without_history connection (Workspace_list request) with
   | Ok (Workspace_list result) -> Ok result.items
   | Ok _ -> Error (invalid "unexpected workspace.list result")
   | Error _ as failure -> failure

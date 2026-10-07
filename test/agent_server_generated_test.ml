@@ -291,6 +291,7 @@ let%expect_test
                       in
                       match mode, result with
                       | `Valid, Ok (Session_get snapshot) ->
+                        let snapshot = P.Public.Snapshot.fields snapshot in
                         assert (
                           List.exists snapshot.canonical_history.entries ~f:(fun entry ->
                             P.History.Id.equal entry.id retained.id));
@@ -706,12 +707,13 @@ let on_event ctx state event = Task.pure(state)
                     |> protocol_ok
                   with
                   | Session_get snapshot ->
+                    let snapshot = P.Public.Snapshot.fields snapshot in
                     assert (
                       P.Session.equal_desired_state snapshot.session.desired_state Stopped);
                     assert (
                       List.exists snapshot.canonical_history.entries ~f:(fun entry ->
                         String.is_substring
-                          (Jsonaf.to_string entry.P.History.payload)
+                          (Jsonaf.to_string (P.Public.History.to_json entry))
                           ~substring:"inherited-parent-file"));
                     [%test_eq: int] 3 !requests;
                     print_endline

@@ -26,3 +26,5 @@ val await : Eio_unix.Stdenv.base -> (unit -> 'a option) -> 'a
 val local_events : Temporary_environment.t -> Agent_protocol.Event.Durable.t list
 
 val assert_user : Agent_protocol.History.entry list -> string -> unit
+val assert_public_user : Agent_protocol.Public.History.t list -> string -> unit
+val assert_public_rows : Chat_tui.Model.t -> Agent_protocol.Public.History.t list -> unit

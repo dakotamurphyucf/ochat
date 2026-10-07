@@ -10,7 +10,7 @@ let request connection command = Agent_client.Connection.request connection comm
 
 let get connection session_id =
   match request connection (Session_get { session_id; history = None }) |> ok with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "expected snapshot"
 ;;
 
@@ -58,7 +58,7 @@ let probe env host reader =
           ; idempotency_key = key "stop"
           })
      |> ok
-     : Agent_protocol.Method_result.t);
+     : Agent_protocol.Public.Result.t);
   let attachment = attach reader session_id in
   let before = get writer session_id in
   let started =

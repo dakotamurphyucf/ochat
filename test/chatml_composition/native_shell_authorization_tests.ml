@@ -96,7 +96,10 @@ let%expect_test
               Background_shell_tests.wait env (fun () ->
                 List.count
                   (Surface.snapshot host).canonical_history.entries
-                  ~f:(fun entry -> P.History.equal_kind entry.kind Tool_output)
+                  ~f:(fun entry ->
+                    Option.exists (P.Public.History.header entry) ~f:(function
+                      | Transcript.Header.Result _ -> true
+                      | _ -> false))
                 = 2);
               Surface.request
                 host
@@ -122,7 +125,7 @@ let%expect_test
                    [%sexp
                      "native shell did not finish"
                    , (!requests : int)
-                   , (snapshot : P.Snapshot.t)]);
+                   , (snapshot : P.Public.Snapshot.Fields.t)]);
               let snapshot = Surface.snapshot host in
               List.iter [ "allowed"; "review" ] ~f:(fun id ->
                 match Surface.initial_outcome snapshot id with

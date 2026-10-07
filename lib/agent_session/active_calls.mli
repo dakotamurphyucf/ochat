@@ -1,6 +1,7 @@
 (** Ephemeral active-call summaries, owned and synchronized by the session actor.
-    Retain at most 1024 start envelopes, with invocation payload fields bounded
-    to 4096 bytes. Preserve call identities exactly.
+    Retain at most 1024 typed start summaries, each admitted under 4096
+    encoded JSON bytes. Oversized summaries are omitted entirely; no fabricated
+    truncation text or identities. Reconnect progress prefixes are unavailable.
     Agent calls are the classified subset. Terminal events remove summaries;
     no executable continuation or completed-call history is retained. *)
 type t

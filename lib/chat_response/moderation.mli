@@ -51,6 +51,11 @@ module Item : sig
   val to_value : t -> Lang.value
   val of_response_item : id:string -> Res.Item.t -> t
   val to_response_item : t -> (Res.Item.t, string) result
+
+  (** Legacy authored script/companion ingress, distinct from canonical neutral
+      Identity_snapshot payloads. Keeps DTO decoding inside the producer adapter. *)
+  val to_payload : t -> (History_entry.Payload.t, string) result
+
   val text_input_message : id:string -> role:Res.Input_message.role -> text:string -> t
 end
 

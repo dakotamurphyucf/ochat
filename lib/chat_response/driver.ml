@@ -1126,6 +1126,7 @@ let run_completion_stream
       ?prompt_file
       ?(on_event : Openai.Responses.Response_stream.t -> unit = fun _ -> ())
       ?(on_history_event : History_stream_event.t -> unit = fun _ -> ())
+      ?on_transcript_event
       ?(on_sourced_event : Sourced_response_event.t -> unit = fun _ -> ())
       ?(on_history_tool_out : History_entry.t -> unit = fun _ -> ())
       ?post_stream
@@ -1325,6 +1326,7 @@ let run_completion_stream
           log_event ev;
           on_event ev)
         ~on_history_event
+        ?on_transcript_event
         ~on_sourced_event
         ~on_history_tool_out
         ~tools:(Some tools)
@@ -1358,16 +1360,50 @@ let run_completion_stream
       |> Result.ok_or_failwith
     in
     let registry = History_stream_event.Registry.create ~allocator in
+    let transcript_source =
+      Transcript.Source_id.of_string
+        (Fork.Invocation_id.create () |> Fork.Invocation_id.to_string)
+      |> Result.ok_or_failwith
+    in
     let inputs = create_history_entries ~allocator inputs in
     (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
     let rec turn inputs =
-      let scope = History_stream_event.Registry.create_scope registry in
+      let scope = ref 0 in
+      let transcript_live = ref None in
+      let update_transcript update =
+        Option.iter on_transcript_event ~f:(fun observer ->
+          let current = Option.value_exn !transcript_live in
+          let current, observations = update current |> Result.ok_or_failwith in
+          transcript_live := Some current;
+          List.iter observations ~f:observer)
+      in
+      let begin_attempt () =
+        Option.iter !transcript_live ~f:(fun _ ->
+          update_transcript (fun live ->
+            Openai.Responses_live.finish live ~completion:Failed));
+        scope := History_stream_event.Registry.create_scope registry;
+        Option.iter on_transcript_event ~f:(fun _ ->
+          let attempt =
+            Transcript.Attempt_id.of_string ("attempt:" ^ Int.to_string !scope)
+            |> Result.ok_or_failwith
+          in
+          let neutral_scope =
+            Transcript.Scope.create ~source:transcript_source ~attempt ~relation:Root
+            |> Result.ok_or_failwith
+          in
+          transcript_live
+          := Some
+               (Openai.Responses_live.create
+                  ~scope:neutral_scope
+                  ~limits:Transcript.Admission.default);
+          update_transcript Openai.Responses_live.start)
+      in
       (* ────────────────── 2.  streaming callback state ─────────────────── *)
       (* existing tables … *)
       let new_items : History_entry.t list ref = ref [] in
       let add_item item =
         let id =
-          History_stream_event.Registry.find_item registry ~source:None item ~scope
+          History_stream_event.Registry.find_item registry ~source:None item ~scope:!scope
           |> Option.value_or_thunk ~default:(fun () ->
             History_entry.Allocator.allocate allocator |> Result.ok_or_failwith)
         in
@@ -1381,7 +1417,9 @@ let run_completion_stream
           not
             (List.exists !new_items ~f:(fun existing ->
                History_entry.Id.equal (History_entry.id existing) (History_entry.id entry)))
-        then new_items := entry :: !new_items;
+        then (
+          new_items := entry :: !new_items;
+          update_transcript (fun live -> Openai.Responses_live.finalized live entry));
         entry
       in
       let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
@@ -1484,7 +1522,7 @@ let run_completion_stream
               ~call_id
               ~id:(Some item_id)
           in
-          ignore (add_item fn_call_item : History_entry.t);
+          let call_entry = add_item fn_call_item in
           (* 3.  Spawn the actual tool invocation in its own fiber           *)
           let history_entries_so_far =
             if history_compaction
@@ -1523,6 +1561,26 @@ let run_completion_stream
                           ~tool_tbl
                           ~on_event
                           ~on_sourced_event
+                          ?transcript_observer:
+                            (Option.map on_transcript_event ~f:(fun observe ->
+                               let parent_scope =
+                                 Transcript.Scope.create
+                                   ~source:transcript_source
+                                   ~attempt:
+                                     (Transcript.Attempt_id.of_string
+                                        ("attempt:" ^ Int.to_string !scope)
+                                      |> Result.ok_or_failwith)
+                                   ~relation:Root
+                                 |> Result.ok_or_failwith
+                               in
+                               Fork.
+                                 { parent =
+                                     { scope = Transcript.Scope.key parent_scope
+                                     ; call_entry_id = Some (History_entry.id call_entry)
+                                     ; call_alias = Some call_id
+                                     }
+                                 ; observe
+                                 }))
                           ~on_fn_out:(fun _ -> ())
                           ?temperature
                           ?max_output_tokens:max_tokens
@@ -1635,8 +1693,15 @@ let run_completion_stream
           run_again := true
       in
       let callback (ev : Res.Response_stream.t) =
-        History_stream_event.observe registry ~scope ~source:None ev
-        |> Option.iter ~f:on_history_event;
+        let observed =
+          History_stream_event.observe registry ~scope:!scope ~source:None ev
+        in
+        Option.iter observed ~f:on_history_event;
+        update_transcript (fun live ->
+          Openai.Responses_live.observe_legacy
+            live
+            ~entry_id:(Option.map observed ~f:(fun event -> event.entry_id))
+            ev);
         (* For debugging purposes we still log every event. *)
         log_event ev;
         (* Internal book-keeping for writing the streamed response back into the
@@ -1741,6 +1806,7 @@ let run_completion_stream
         In_memory_stream.For_testing.retry_stream_start
           ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock env))
           (fun () ->
+             begin_attempt ();
              match post_stream with
              | Some post -> post ~sw ~inputs:hist
              | None ->
@@ -1827,10 +1893,20 @@ let run_completion_stream
           Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
         in
         ignore
-          (History_stream_event.Registry.tool_output registry ~scope ~source:None ~call_id
+          (History_stream_event.Registry.tool_output
+             registry
+             ~scope:!scope
+             ~source:None
+             ~call_id
            : History_entry.Id.t);
         let entry = add_item out_item in
         on_history_tool_out entry);
+      let completion =
+        Option.bind !transcript_live ~f:Openai.Responses_live.completion
+        |> Option.value ~default:Transcript.Stream.Incomplete
+      in
+      update_transcript (fun live -> Openai.Responses_live.finish live ~completion);
+      transcript_live := None;
       (* make sure any dangling assistant block is closed *)
       Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
       (* 4 • If no function call just happened, append empty user message.   *)

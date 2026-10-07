@@ -200,7 +200,7 @@ let with_background_daemon
                   initialize client;
                   List.iter completed_state.jobs ~f:(fun job ->
                     match
-                      Agent_client.Connection.request
+                      Agent_client.Connection.request_without_history
                         client
                         (Job_get { session_id = job.session_id; job_id = job.id })
                       |> protocol_ok
@@ -248,7 +248,7 @@ let submit ?created_at entry payload =
 let rec await env client (job : J.t) =
   let current =
     match
-      Agent_client.Connection.request
+      Agent_client.Connection.request_without_history
         client
         (Job_get { session_id = job.session_id; job_id = job.id })
       |> protocol_ok

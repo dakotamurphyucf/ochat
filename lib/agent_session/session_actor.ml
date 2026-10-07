@@ -5630,16 +5630,18 @@ let worker_failure exn =
     ()
 ;;
 
-let publish_worker_live t buffer ~kind ~payload =
+let publish_worker_live t buffer payload =
   let event =
     Live_event_buffer.publish
       buffer
       ~anchor_sequence:(Atomic.get t.event_sequence)
       ~timestamp:(t.services.now ())
-      ~kind
       ~payload
   in
-  broadcast_recoverable t event
+  match event with
+  | Ok event -> broadcast_recoverable t event
+  | Error error ->
+    raise_s [%message "invalid worker transcript event" (error : Agent_protocol.Error.t)]
 ;;
 
 let request_review_internal t ~permission ~review =

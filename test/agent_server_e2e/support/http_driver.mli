@@ -11,7 +11,7 @@ type response =
   }
 
 type rpc_response =
-  { result : Agent_protocol.Method_result.t
+  { result : Agent_protocol.Public.Result.t
   ; response : response
   }
 
@@ -60,6 +60,12 @@ val request
   -> Agent_protocol.Command.t
   -> (rpc_response, Agent_protocol.Error.t) result
 
+(** Checked metadata/mutation response whitelist; get/create/attach stay public. *)
+val request_without_history
+  :  t
+  -> Agent_protocol.Command.t
+  -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+
 val initialize
   :  t
   -> (Agent_protocol.Initialize.Response.t * response, Agent_protocol.Error.t) result
@@ -81,6 +87,6 @@ val open_session_events
 val get_snapshot
   :  t
   -> Agent_protocol.Id.Session.t
-  -> (Agent_protocol.Snapshot.t * response, string) result
+  -> (Agent_protocol.Public.Snapshot.Fields.t * response, string) result
 
 val shutdown : t -> unit

@@ -3,7 +3,7 @@ module F = Crash_recovery_fixture
 module Provider = Support.Compaction_json_provider
 module Http = Support.Http_driver
 module Config = Support.Config_fixture
-module Durable = Agent_protocol.Event.Durable
+module Durable = Agent_protocol.Public.Durable
 
 let fail message =
   raise_s [%sexp "compaction integrity assertion failed", (message : string)]
@@ -52,27 +52,27 @@ let with_daemon env fixture port ~cwd f =
 ;;
 
 let assert_history
-      (expected : Agent_protocol.Snapshot.t)
-      (actual : Agent_protocol.Snapshot.t)
+      (expected : Agent_protocol.Public.Snapshot.Fields.t)
+      (actual : Agent_protocol.Public.Snapshot.Fields.t)
   =
   equal
     "canonical IDs/payload/order"
-    [%sexp_of: Agent_protocol.History.Window.t]
+    [%sexp_of: Agent_protocol.Public.History.Window.t]
     expected.canonical_history
     actual.canonical_history;
   equal
     "effective IDs/payload/order"
-    [%sexp_of: Agent_protocol.History.Window.t option]
+    [%sexp_of: Agent_protocol.Public.History.Window.t option]
     expected.effective_history
     actual.effective_history;
   equal
     "deferred history"
-    [%sexp_of: Agent_protocol.History.entry list]
+    [%sexp_of: Agent_protocol.Public.History.t list]
     expected.deferred_entries
     actual.deferred_entries
 ;;
 
-let assert_seed (snapshot : Agent_protocol.Snapshot.t) =
+let assert_seed (snapshot : Agent_protocol.Public.Snapshot.Fields.t) =
   let window = snapshot.canonical_history in
   require
     (window.reached_start && window.reached_end && window.structurally_complete)
@@ -80,13 +80,13 @@ let assert_seed (snapshot : Agent_protocol.Snapshot.t) =
   require (List.length window.entries = 5) "seed must contain all five prompt items"
 ;;
 
-let attachment (created : Agent_protocol.Method_result.Create.t) =
+let attachment (created : Agent_protocol.Public.Result.Create.t) =
   (Option.value_exn created.attachment).attachment.id
 ;;
 
 let compact created revision key =
   Agent_protocol.Command.Session_compact
-    { session_id = created.Agent_protocol.Method_result.Create.session.id
+    { session_id = created.Agent_protocol.Public.Result.Create.session.id
     ; attachment_id = attachment created
     ; expected_revision = Some revision
     ; idempotency_key = F.key key
@@ -144,7 +144,7 @@ let assert_conflict client command =
 
 let rebuild created revision key =
   Agent_protocol.Command.Session_rebuild
-    { session_id = created.Agent_protocol.Method_result.Create.session.id
+    { session_id = created.Agent_protocol.Public.Result.Create.session.id
     ; attachment_id = attachment created
     ; expected_revision = revision
     ; prompt_choice = Pinned
@@ -154,7 +154,7 @@ let rebuild created revision key =
 
 let reset created revision key =
   Agent_protocol.Command.Session_reset
-    { session_id = created.Agent_protocol.Method_result.Create.session.id
+    { session_id = created.Agent_protocol.Public.Result.Create.session.id
     ; attachment_id = attachment created
     ; expected_revision = revision
     ; keep_history = false
@@ -167,8 +167,8 @@ let reset created revision key =
     }
 ;;
 
-let assert_precommit client created (before : Agent_protocol.Snapshot.t) =
-  let blocked = F.get client created.Agent_protocol.Method_result.Create.session.id in
+let assert_precommit client created (before : Agent_protocol.Public.Snapshot.Fields.t) =
+  let blocked = F.get client created.Agent_protocol.Public.Result.Create.session.id in
   assert_history before blocked;
   require
     Int64.(blocked.revision > before.revision)
@@ -181,7 +181,7 @@ let assert_precommit client created (before : Agent_protocol.Snapshot.t) =
   let current = F.get client created.session.id in
   equal
     "rejected mutations changed snapshot"
-    [%sexp_of: Agent_protocol.Snapshot.t]
+    [%sexp_of: Agent_protocol.Public.Snapshot.Fields.t]
     blocked
     current
 ;;
@@ -220,8 +220,8 @@ let with_events
       ~sw
       env
       client
-      (before : Agent_protocol.Snapshot.t)
-      (after : Agent_protocol.Snapshot.t)
+      (before : Agent_protocol.Public.Snapshot.Fields.t)
+      (after : Agent_protocol.Public.Snapshot.Fields.t)
       f
   =
   let stream, _response =
@@ -242,16 +242,19 @@ let with_events
 let events ~sw env client before after = with_events ~sw env client before after Fn.id
 
 let payload event =
-  Durable.Payload.of_json ~kind:event.Durable.kind event.payload |> F.protocol_ok
+  match event.Durable.body with
+  | Full value | Filtered value -> value
+  | Hidden -> fail "hidden payload cannot satisfy full compaction assertion"
 ;;
 
 let terminal_events events =
   List.filter_map events ~f:(fun event ->
-    match payload event with
-    | Operation_completed op
-    | Operation_cancelled op
-    | Operation_failed op
-    | Operation_interrupted op -> Some (event, op)
+    match Support.Public_view.shared_payload_opt event with
+    | Some
+        ( Operation_completed op
+        | Operation_cancelled op
+        | Operation_failed op
+        | Operation_interrupted op ) -> Some (event, op)
     | _ -> None)
 ;;
 
@@ -263,7 +266,11 @@ let assert_terminal operation_id expected events =
       [%sexp_of: Agent_protocol.Id.Operation.t]
       operation_id
       operation.id;
-    equal "terminal event kind" [%sexp_of: Durable.kind] expected event.kind;
+    equal
+      "terminal event kind"
+      [%sexp_of: Agent_protocol.Event.Durable.kind]
+      expected
+      event.kind;
     (match expected, operation.state with
      | Operation_completed, Completed | Operation_cancelled, Cancelled -> ()
      | Operation_failed, Failed error ->
@@ -291,7 +298,7 @@ let assert_no_replacement events =
     "unsuccessful compaction mutated history"
 ;;
 
-let assert_atomic_event (after : Agent_protocol.Snapshot.t) terminal events =
+let assert_atomic_event (after : Agent_protocol.Public.Snapshot.Fields.t) terminal events =
   match history_events events with
   | [ event ] ->
     require
@@ -304,7 +311,7 @@ let assert_atomic_event (after : Agent_protocol.Snapshot.t) terminal events =
      | History_replaced window ->
        equal
          "replacement event/full snapshot"
-         [%sexp_of: Agent_protocol.History.Window.t]
+         [%sexp_of: Agent_protocol.Public.History.Window.t]
          after.canonical_history
          window
      | _ -> fail "history changed incrementally")
@@ -332,30 +339,39 @@ let expected_reminder id marker =
       }
   in
   Openai.Responses_history.create_with_id_exn ~id item
-  |> Agent_session.History_codec.to_canonical
+  |> fun native ->
+  Agent_protocol.Public.History.full native ~provenance:Canonical |> F.protocol_ok
 ;;
 
-let assert_reminder before (reminder : Agent_protocol.History.entry) marker =
+let assert_reminder before (reminder : Agent_protocol.Public.History.t) marker =
   require
     (not
        (List.exists
-          before.Agent_protocol.Snapshot.canonical_history.entries
+          before.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
           ~f:(fun entry -> Agent_protocol.History.Id.compare entry.id reminder.id = 0)))
     "reminder reused an old ID";
   equal
     "new reminder full payload"
-    [%sexp_of: Agent_protocol.History.entry]
+    [%sexp_of: Agent_protocol.Public.History.t]
     (expected_reminder reminder.id marker)
     reminder
 ;;
 
-let assert_replacement before (after : Agent_protocol.Snapshot.t) marker terminal events =
+let assert_replacement
+      before
+      (after : Agent_protocol.Public.Snapshot.Fields.t)
+      marker
+      terminal
+      events
+  =
   assert_atomic_event after terminal events;
-  let retained = List.take before.Agent_protocol.Snapshot.canonical_history.entries 3 in
+  let retained =
+    List.take before.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries 3
+  in
   let actual, new_entries = List.split_n after.canonical_history.entries 3 in
   equal
     "retained prompt/reminder IDs and payloads"
-    [%sexp_of: Agent_protocol.History.entry list]
+    [%sexp_of: Agent_protocol.Public.History.t list]
     retained
     actual;
   match new_entries with
@@ -407,7 +423,7 @@ let cancel client created operation_id =
     F.request
       client
       (Session_cancel_operation
-         { session_id = created.Agent_protocol.Method_result.Create.session.id
+         { session_id = created.Agent_protocol.Public.Result.Create.session.id
          ; attachment_id = attachment created
          ; operation_id
          ; idempotency_key = F.key "compaction:cancel"
@@ -418,10 +434,10 @@ let cancel client created operation_id =
 ;;
 
 let assert_stable client expected =
-  let actual = F.get client expected.Agent_protocol.Snapshot.session.id in
+  let actual = F.get client expected.Agent_protocol.Public.Snapshot.Fields.session.id in
   equal
     "provider release changed terminal snapshot"
-    [%sexp_of: Agent_protocol.Snapshot.t]
+    [%sexp_of: Agent_protocol.Public.Snapshot.Fields.t]
     expected
     actual
 ;;
@@ -461,7 +477,9 @@ let run_case env environment name test =
       with_daemon env fixture port ~cwd (fun sw client -> test ~sw env client provider)
     in
     with_daemon env fixture port ~cwd (fun _sw client ->
-      let actual = F.get client expected.Agent_protocol.Snapshot.session.id in
+      let actual =
+        F.get client expected.Agent_protocol.Public.Snapshot.Fields.session.id
+      in
       assert_history expected actual;
       require
         (Agent_protocol.Id.Session.compare expected.session.id actual.session.id = 0)

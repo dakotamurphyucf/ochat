@@ -74,7 +74,8 @@ let%expect_test "public ChatML reviewer retains decisions and defers later repor
                  P.Permission.equal_state permission.state Pending);
             !requests = 3 && Option.is_some !pending)
         with
-        | Eio.Time.Timeout -> raise_s [%sexp (Host.snapshot host : P.Snapshot.t)]);
+        | Eio.Time.Timeout ->
+          raise_s [%sexp (Host.snapshot host : P.Public.Snapshot.Fields.t)]);
        let snapshot = Host.snapshot host in
        denied snapshot "selective";
        (match Host.initial_outcome snapshot "first-full" with

@@ -17,14 +17,10 @@ let json_outcome outcome =
 let await_watch ?timeout env host id =
   let delivered () =
     List.find_map (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-      match entry.P.History.provenance with
+      match entry.P.Public.History.provenance with
       | Runtime_notification _ ->
-        (match
-           Agent_session.History_codec.of_protocol entry
-           |> protocol_ok
-           |> Openai.Responses_history.item_exn
-         with
-         | Res.Item.Input_message { content = [ Text { text; _ } ]; _ } ->
+        (match Host.full_semantic entry |> History_entry.Payload.Semantic.view with
+         | Message { form = Input; content = [ Text { text; _ } ]; _ } ->
            let _, body = String.lsplit2_exn text ~on:'\n' in
            let data = Jsonaf.of_string body in
            if
@@ -264,7 +260,7 @@ let%expect_test
          [%test_eq: int] 4 (Lab.field report "reviews" |> Jsonaf.list_exn |> List.length);
          let notifications =
            List.count (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in
@@ -390,7 +386,7 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
            assert (Jsonaf.bool_exn (Lab.field closed_again "closed"));
            let notifications =
              List.count (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-               match entry.P.History.provenance with
+               match entry.P.Public.History.provenance with
                | Runtime_notification _ -> true
                | _ -> false)
            in

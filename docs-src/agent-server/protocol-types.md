@@ -5,6 +5,143 @@ The [protocol guide](protocol.md) explains operation semantics and authorization
 Each section includes the complete typed contract and a link to its JSON codec;
 wire tags/defaults are defined by that codec, not OCaml constructor spelling.
 
+## activity
+
+[JSON codec](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
+
+```ocaml
+(** Neutral transient tool activity. A call alias is scoped to an actual source
+    and attempt; it never substitutes for a host history or invocation ID. *)
+module Key : sig
+  type parent =
+    { scope : Transcript.Scope.Key.t
+    ; call_alias : string
+    }
+  [@@deriving compare, equal, hash, sexp_of]
+
+  type t = private
+    { scope : Transcript.Scope.Key.t
+    ; call_alias : string
+    ; parent : parent option
+    }
+  [@@deriving compare, equal, hash, sexp_of]
+
+  val create
+    :  scope:Transcript.Scope.Key.t
+    -> call_alias:string
+    -> parent:parent option
+    -> (t, Error.t) result
+end
+
+module Progress : sig
+  type channel =
+    | Assistant
+    | Reasoning
+    | Stdout
+    | Stderr
+    | Activity
+  [@@deriving compare, equal, sexp_of]
+
+  type update =
+    | Append of string
+    | Replace of string
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { channel : channel
+    ; update : update
+    }
+  [@@deriving equal, sexp_of]
+end
+
+module Tool : sig
+  type classification =
+    | Subagent
+    | Shell_script
+  [@@deriving equal, sexp_of]
+
+  type outcome =
+    | Returned
+    | Raised
+    | Cancelled
+  [@@deriving equal, sexp_of]
+
+  type descriptor = private
+    { key : Key.t
+    ; call_entry_id : History_entry.Id.t option
+    ; name : string
+    ; kind : History_entry.Payload.Call_kind.t
+    ; input : string
+    ; classification : classification option
+    }
+  [@@deriving sexp_of]
+
+  val descriptor
+    :  Key.t
+    -> call_entry_id:History_entry.Id.t option
+    -> name:string
+    -> kind:History_entry.Payload.Call_kind.t
+    -> input:string
+    -> classification:classification option
+    -> (descriptor, Error.t) result
+
+  type event =
+    | Started of descriptor
+    | Progress of
+        { key : Key.t
+        ; progress : Progress.t
+        }
+    | Finished of
+        { key : Key.t
+        ; outcome : outcome
+        ; output : History_entry.Payload.Output.t option
+        }
+  [@@deriving sexp_of]
+
+  (** Nested activity records the actual parent scope and call alias. Only existing
+      actual parent attribution is supplied; no guessed parent or host ID. *)
+  val key : event -> Key.t
+
+  val to_json : event -> Jsonaf.t
+  val of_json : Jsonaf.t -> (event, Error.t) result
+
+  type channel_text =
+    { channel : Progress.channel
+    ; text : string
+    ; complete : bool
+    }
+  [@@deriving sexp_of]
+
+  type state =
+    | Running
+    | Finished of
+        { outcome : outcome
+        ; output : History_entry.Payload.Output.t option
+        }
+  [@@deriving sexp_of]
+
+  type summary = private
+    { key : Key.t
+    ; descriptor : descriptor option
+    ; channels : channel_text list
+    ; state : state
+    }
+  [@@deriving sexp_of]
+
+  (** Missing descriptors and incomplete channel prefixes remain explicit after
+      a live gap. The client ordering owner performs bounded accumulation. *)
+  val summary
+    :  Key.t
+    -> descriptor:descriptor option
+    -> channels:channel_text list
+    -> state:state
+    -> (summary, Error.t) result
+
+  val summary_to_json : summary -> Jsonaf.t
+  val summary_of_json : Jsonaf.t -> (summary, Error.t) result
+end
+```
+
 ## audit
 
 [JSON codec](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
@@ -774,38 +911,41 @@ module Durable : sig
 end
 
 module Recoverable : sig
-  type kind =
-    | Provider_stream
-    | Sourced_stream
-    | History_correlated_stream
-    | Tool_started
-    | Tool_progress
-    | Tool_trace
-    | Tool_finished
-    | Agent_call_classified
-    | Agent_call_progress
-    | Activity
-    | Compaction_progress
-  [@@deriving compare, equal, sexp]
+  type payload =
+    | Transcript of Transcript.Stream.t
+    | Tool_activity of Activity.Tool.event
+  [@@deriving sexp_of]
 
-  type t =
+  type t = private
     { session_id : Id.Session.t
     ; operation_id : Id.Operation.t
     ; operation_sequence : int64
     ; anchor_sequence : int64
     ; timestamp : Timestamp.t
-    ; kind : kind
-    ; payload : Jsonaf.t
+    ; invocation_id : Id.Invocation.t option
+    ; parent_invocation_id : Id.Invocation.t option
+    ; payload : payload
+    ; original_json : Jsonaf.t option
+      (** Immutable admitted received envelope, retaining unknown fields for exact
+          duplicate detection. Native events have [None]. *)
     }
-  [@@deriving sexp]
+  [@@deriving sexp_of]
 
-  (** [to_json t] encodes the parameters of a [session.live_event] notification. *)
+  (** Positive operation sequence, nonnegative durable anchor; complete encoded
+      envelope is bounded to 16 MiB. Invocation IDs are actual host IDs only. *)
+  val create
+    :  session_id:Id.Session.t
+    -> operation_id:Id.Operation.t
+    -> operation_sequence:int64
+    -> anchor_sequence:int64
+    -> timestamp:Timestamp.t
+    -> invocation_id:Id.Invocation.t option
+    -> parent_invocation_id:Id.Invocation.t option
+    -> payload
+    -> (t, Error.t) result
+
   val to_json : t -> Jsonaf.t
-
-  (** [of_json json] decodes a recoverable live event. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
-
-  (** [to_notification t] wraps the live event in a JSON-RPC notification. *)
   val to_notification : t -> Envelope.t
 end
 ```
@@ -1053,6 +1193,9 @@ type provenance =
   | Runtime_notification of delivery_id
   | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
+
+val provenance_to_json : provenance -> Jsonaf.t
+val provenance_of_json : Jsonaf.t -> (provenance, Error.t) result
 
 type entry =
   { id : Id.t
@@ -2608,6 +2751,19 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## projection_codec
+
+[JSON codec](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
+
+```ocaml
+(** Shared admission boundary for protocol 2 transcript envelopes. *)
+val limits : Document_schema.Limits.t
+
+val validate : Jsonaf.t -> (unit, Error.t) result
+val string_result : ('a, string) result -> ('a, Error.t) result
+val optional : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+```
+
 ## prompt
 
 [JSON codec](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
@@ -2734,6 +2890,307 @@ val to_json : t -> Jsonaf.t
 
 (** [of_json json] decodes a protocol error and rejects duplicate required fields. *)
 val of_json : Jsonaf.t -> (t, t) result
+```
+
+## public
+
+[JSON codec](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
+
+```ocaml
+(** Explicit public read boundary. Private snapshot/history/event/result types
+    also serve durable storage and must not be changed to redact a client view. *)
+module History = Public_history
+
+module Snapshot = Public_snapshot
+module Durable = Public_durable_event
+module Result = Public_result
+```
+
+## public_durable_event
+
+[JSON codec](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
+
+```ocaml
+(** Typed public durable events. Hidden entries preserve sequence slots without
+    exposing content. Internal events and their persistence codecs stay intact. *)
+module Shared_payload : sig
+  type t [@@deriving sexp_of]
+
+  (** Exhaustive admission of the shared, non-history payload alternatives.
+      Rejects all history variants and the untyped internal moderator overlay.
+      Native children pass the same domain codec admission as received payloads.
+      Optional replacement/status fields are projected separately. *)
+  val of_internal : Event.Durable.Payload.t -> (t, Error.t) result
+
+  val value : t -> Event.Durable.Payload.t
+end
+
+type overlay =
+  { effective_history : Public_history.Window.t option
+  ; halted : bool
+  ; halt_reason : string option
+  }
+[@@deriving sexp_of]
+
+type payload =
+  | History_message_deferred of Public_history.t
+  | History_appended of Public_history.t list
+  | History_replaced of Public_history.Window.t
+  | Moderator_overlay_changed of overlay
+  | Shared of Shared_payload.t
+[@@deriving sexp_of]
+
+type body =
+  | Full of payload
+  | Filtered of payload
+  | Hidden
+[@@deriving sexp_of]
+
+type t = private
+  { session_id : Id.Session.t
+  ; sequence : int64
+  ; revision : int64
+  ; timestamp : Timestamp.t
+  ; kind : Event.Durable.kind
+  ; body : body
+  ; extension_status : Extension_status.t list option
+  ; replacement_snapshot : Public_snapshot.t option
+  }
+[@@deriving sexp_of]
+
+(** Copies only the event envelope. Checks kind, counters, payload session
+    ownership and replacement anchors. Extension summaries are unique, validated
+    and cannot name a future generation of their session update. Hidden events
+    must contain neither status nor snapshot extras. *)
+val of_internal_envelope
+  :  Event.Durable.t
+  -> body:body
+  -> extension_status:Extension_status.t list option
+  -> replacement_snapshot:Public_snapshot.t option
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val to_notification : t -> Envelope.t
+```
+
+## public_history
+
+[JSON codec](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
+
+```ocaml
+(** Read-only history projections. Public views never authorize canonical input
+    or a history edit. Full payloads retain their immutable neutral evidence;
+    visible and redacted bodies cannot be converted back into canonical entries. *)
+
+module Visible : sig
+  type part =
+    | Text of string
+    | Refusal of string
+    | Image of
+        { uri : string
+        ; detail : string History_entry.Payload.Presence.t
+        }
+    | Redacted_part of { kind : string }
+  [@@deriving equal, sexp_of]
+
+  type t = private
+    | Message of
+        { form : History_entry.Payload.Semantic.message_form
+        ; role : History_entry.Payload.Role.t
+        ; content : part list
+        ; phase : string History_entry.Payload.Presence.t
+        }
+    | Reasoning of { readable_summary : string list }
+  [@@deriving equal, sexp_of]
+
+  (** Whitelist known readable fields. Arbitrary raw content, annotations,
+      logprobs and provider metadata are never copied. Unknown message parts keep
+      only their position and structural kind. Other semantic families return
+      [None], requiring explicit redaction. *)
+  val of_semantic : History_entry.Payload.Semantic.t -> t option
+
+  val header : t -> Transcript.Header.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Redaction : sig
+  type t = private { disclosed_header : Transcript.Header.t option }
+  [@@deriving equal, sexp_of]
+
+  (** A structural header may be disclosed independently of content. *)
+  val create : disclosed_header:Transcript.Header.t option -> t
+end
+
+type body =
+  | Full of History_entry.Payload.t
+  | Visible of Visible.t
+  | Redacted of Redaction.t
+[@@deriving sexp_of]
+
+type t = private
+  { id : History.Id.t
+  ; provenance : History.provenance
+  ; body : body
+  }
+[@@deriving sexp_of]
+
+val full : History_entry.t -> provenance:History.provenance -> (t, Error.t) result
+
+val visible
+  :  History.Id.t
+  -> provenance:History.provenance
+  -> Visible.t
+  -> (t, Error.t) result
+
+val redacted
+  :  History.Id.t
+  -> provenance:History.provenance
+  -> Redaction.t
+  -> (t, Error.t) result
+
+val header : t -> Transcript.Header.t option
+val full_payload : t -> History_entry.Payload.t option
+
+(** Exact full-payload JSON comparison retains field order and numeric spelling. *)
+val equal : t -> t -> bool
+
+(** Reject repeated host IDs within a public history sequence. *)
+val validate_unique_ids : t list -> (unit, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+module Window : sig
+  type entry = t
+
+  type t =
+    { entries : entry list
+    ; previous_cursor : Page.Cursor.t option
+    ; next_cursor : Page.Cursor.t option
+    ; reached_start : bool
+    ; reached_end : bool
+    ; structurally_complete : bool
+    }
+  [@@deriving sexp_of]
+
+  (** Checks complete envelope bounds and unique host identities. *)
+  val validate : t -> (unit, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## public_result
+
+[JSON codec](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
+
+```ocaml
+(** Public success values. Only get/create/attach replace private inline history
+    containers. The internal Method_result codec remains the durable receipt
+    codec; projecting a result never changes a cached internal success. *)
+module Non_history : sig
+  type t [@@deriving sexp_of]
+
+  (** Exhaustive method whitelist excluding get/create/attach. This excludes
+      inline snapshot/history containers, not authority or disclosure: an export
+      result can still reference an artifact containing history. *)
+  val of_internal : Method_result.t -> (t, Error.t) result
+
+  val value : t -> Method_result.t
+end
+
+module Attach : sig
+  type replay =
+    | Current
+    | Events of Public_durable_event.t list
+    | Snapshot of Public_snapshot.t
+  [@@deriving sexp_of]
+
+  type t =
+    { attachment : Session.Attachment.t
+    ; replay : replay
+    ; latest_event_sequence : int64
+    ; reclaim_token : string option
+    }
+  [@@deriving sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Create : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; attachment : Attach.t option
+    }
+  [@@deriving sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t =
+  | Session_get of Public_snapshot.t
+  | Session_attach of Attach.t
+  | Session_create of Create.t
+  | Non_history of Non_history.t
+[@@deriving sexp_of]
+
+val method_name : t -> string
+val to_json : t -> Jsonaf.t
+val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
+
+(** Checks complete response bounds and the same container and child invariants
+    as wire admission. Validation retains the original result unchanged. *)
+val validate : t -> (unit, Error.t) result
+```
+
+## public_snapshot
+
+[JSON codec](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
+
+```ocaml
+(** Validated client read state, separate from the persisted internal snapshot.
+    These fields and their codecs do not change session storage version 1. *)
+module Fields : sig
+  type t =
+    { session : Session.t
+    ; canonical_history : Public_history.Window.t
+    ; archived_revisions : int64 list
+    ; effective_history : Public_history.Window.t option
+    ; deferred_entries : Public_history.t list
+    ; permissions : Permission.t list
+    ; grants : Grant.t list
+    ; jobs : Job.t list
+    ; extension_status : Extension_status.t list
+    ; schedules : Schedule.t list
+    ; active_tool_calls : Activity.Tool.summary list
+      (** All currently running foreground tool calls, unique by activity key. *)
+    ; active_agent_calls : Activity.Tool.summary list
+      (** Exact classified subset of [active_tool_calls], including shell scripts.
+          Nonempty activity requires the snapshot's active foreground operation. *)
+    ; halted : bool
+    ; halt_reason : string option
+    ; failure : Error.t option
+    ; revision : int64
+    ; latest_event_sequence : int64
+    }
+  [@@deriving sexp_of]
+end
+
+type t [@@deriving sexp_of]
+
+(** Checks positions against the session summary, ownership and counter bounds,
+    and extension generations. Fields remain immutable after admission. *)
+val create : Fields.t -> (t, Error.t) result
+
+val fields : t -> Fields.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## schedule
@@ -3434,6 +3891,28 @@ val materialize
   -> (Completion.t, Error.t) result
 ```
 
+## stream_error
+
+[JSON codec](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
+
+```ocaml
+(** Attachment-scoped terminal notification for a failed event subscription.
+    This has no durable sequence and cannot substitute for a missing event.
+    The server supplies a sanitized error; the client must obtain a fresh
+    snapshot before treating the session projection as current again. *)
+type t = private
+  { session_id : Id.Session.t
+  ; attachment_id : Id.Attachment.t
+  ; error : Error.t
+  }
+[@@deriving sexp_of]
+
+val create : session_id:Id.Session.t -> attachment_id:Id.Attachment.t -> Error.t -> t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val to_notification : t -> Envelope.t
+```
+
 ## subscription
 
 [JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
@@ -3558,8 +4037,8 @@ type t =
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
 
-(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
-    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+(** [current] is protocol [2.0], with neutral public transcript projections.
+    This release rejects version-1 connections explicitly; storage is separate. *)
 val current : t
 
 (** Minimum negotiated version for ingress submission and its scope vocabulary. *)

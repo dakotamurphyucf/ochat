@@ -664,7 +664,7 @@ module Agent_mode = struct
   ;;
 
   let sync_activity model projection =
-    let session = (Agent_projection.snapshot projection).session in
+    let session = (Agent_projection.fields projection).session in
     let activity =
       match session.active_operation with
       | Some { Agent_protocol.Operation.kind = Compaction; _ } -> Some Model.Compacting
@@ -777,7 +777,7 @@ module Agent_mode = struct
       true
     | None ->
       (match
-         (Agent_projection.snapshot (Agent_session_client.projection t.client)).session
+         (Agent_projection.fields (Agent_session_client.projection t.client)).session
            .active_operation
        with
        | None -> false
@@ -802,7 +802,7 @@ module Agent_mode = struct
              ~f:
                (Agent_security_projection.audit_page
                   ~session_id:
-                    (Agent_projection.snapshot (Agent_session_client.projection t.client))
+                    (Agent_projection.fields (Agent_session_client.projection t.client))
                       .session
                       .id)
       in
@@ -967,11 +967,7 @@ module Agent_mode = struct
 
   let initial_model client =
     let projection = Agent_session_client.projection client in
-    let model =
-      Setup.init_model
-        ~session:None
-        ~history_items:(Agent_projection.canonical_history projection)
-    in
+    let model = Setup.init_model ~session:None ~history_items:[] in
     Model.set_connection_status model (Some (Connection_status.connected ()));
     model, projection
   ;;
@@ -994,7 +990,7 @@ module Agent_mode = struct
        | Agent_protocol.Session.Read_only -> None
        | _ ->
          let snapshot =
-           Agent_projection.snapshot (Agent_session_client.projection client)
+           Agent_projection.fields (Agent_session_client.projection client)
          in
          let grants = List.map snapshot.grants ~f:Agent_protocol.Grant.sexp_of_t in
          Some

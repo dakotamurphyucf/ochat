@@ -9,8 +9,8 @@ type t =
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
 
-(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
-    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+(** [current] is protocol [2.0], with neutral public transcript projections.
+    This release rejects version-1 connections explicitly; storage is separate. *)
 val current : t
 
 (** Minimum negotiated version for ingress submission and its scope vocabulary. *)

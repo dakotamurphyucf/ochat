@@ -1,142 +1,74 @@
 open! Core
-module Item = Openai.Responses.Item
+module Payload = History_entry.Payload
+module Public = Agent_protocol.Public.History
 
-let history_id entry =
-  Printf.sprintf
-    " ochat-history-id=%S"
-    (History_entry.id entry |> History_entry.Id.to_string)
+let render_payload = History_chatmd.render_payload
+let history_id = History_chatmd.history_id
+let role = History_chatmd.role
+let raw = History_chatmd.raw
+
+let annotation = function
+  | Agent_protocol.History.Runtime_notification id ->
+    Printf.sprintf
+      "<!-- ochat-runtime-notification delivery_id=%S -->\n"
+      (Agent_protocol.Id.Delivery.to_string id)
+  | Runtime_authoring guidance ->
+    Printf.sprintf
+      "<!-- ochat-runtime-authoring %s -->\n"
+      (Agent_protocol.Authoring_guidance.to_json guidance |> Jsonaf.to_string)
+  | Canonical | Moderator_inserted | Moderator_replaced _ -> ""
 ;;
 
-let output_string = function
-  | Openai.Responses.Tool_output.Output.Text text -> text
-  | Content content ->
-    List.map content ~f:(function
-      | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-      | Input_image { image_url; _ } -> Printf.sprintf "<img src=%S />" image_url)
-    |> String.concat ~sep:"\n"
-;;
-
-let input_message entry (message : Openai.Responses.Input_message.t) =
-  let role = Openai.Responses.Input_message.role_to_string message.role in
-  let content =
-    List.map message.content ~f:(function
-      | Openai.Responses.Input_message.Text { text; _ } ->
-        Printf.sprintf "RAW|\n%s\n|RAW" text
-      | Image { image_url; _ } -> Printf.sprintf "<img src=%S />" image_url)
-    |> String.concat
-  in
-  Printf.sprintf "<msg role=%S%s>\n%s\n</msg>\n" role (history_id entry) content
-;;
-
-let output_message entry (message : Openai.Responses.Output_message.t) =
-  let content =
-    List.map message.content ~f:(fun item -> item.text) |> String.concat ~sep:" "
-  in
-  Printf.sprintf
-    "<assistant id=%S status=%S%s>\nRAW|\n%s\n|RAW\n</assistant>\n"
-    message.id
-    message.status
-    (history_id entry)
-    content
-;;
-
-let function_call entry (call : Openai.Responses.Function_call.t) =
-  Printf.sprintf
-    "<tool_call function_name=%S tool_call_id=%S%s%s>\nRAW|\n%s\n|RAW\n</tool_call>\n"
-    call.name
-    call.call_id
-    (Option.value_map call.id ~default:"" ~f:(Printf.sprintf " id=%S"))
-    (history_id entry)
-    call.arguments
-;;
-
-let custom_tool_call entry (call : Openai.Responses.Custom_tool_call.t) =
-  Printf.sprintf
-    "<tool_call type=\"custom_tool_call\" function_name=%S tool_call_id=%S%s%s>\n\
-     RAW|\n\
-     %s\n\
-     |RAW\n\
-     </tool_call>\n"
-    call.name
-    call.call_id
-    (Option.value_map call.id ~default:"" ~f:(Printf.sprintf " id=%S"))
-    (history_id entry)
-    call.input
-;;
-
-let function_output entry (output : Openai.Responses.Function_call_output.t) =
-  Printf.sprintf
-    "<tool_response tool_call_id=%S%s>\nRAW|\n%s\n|RAW\n</tool_response>\n"
-    output.call_id
-    (history_id entry)
-    (output_string output.output)
-;;
-
-let custom_tool_output entry (output : Openai.Responses.Custom_tool_call_output.t) =
-  Printf.sprintf
-    "<tool_response type=\"custom_tool_call\" tool_call_id=%S%s>\n\
-     RAW|\n\
-     %s\n\
-     |RAW\n\
-     </tool_response>\n"
-    output.call_id
-    (history_id entry)
-    (output_string output.output)
-;;
-
-let reasoning entry (reasoning : Openai.Responses.Reasoning.t) =
-  let summaries =
-    List.map reasoning.summary ~f:(fun summary ->
-      Printf.sprintf
-        "<summary type=%S>RAW|\n%s\n|RAW</summary>"
-        summary._type
-        summary.text)
-    |> String.concat
-  in
-  Printf.sprintf
-    "<reasoning id=%S%s%s>%s</reasoning>\n"
-    reasoning.id
-    (Option.value_map reasoning.status ~default:"" ~f:(Printf.sprintf " status=%S"))
-    (history_id entry)
-    summaries
-;;
-
-let search_call entry kind id =
-  Printf.sprintf "<msg role=\"assistant\" id=%S%s>%s</msg>\n" id (history_id entry) kind
-;;
-
-let render_entry entry =
-  match Openai.Responses_history.item_exn entry with
-  | Item.Input_message message -> input_message entry message
-  | Output_message message -> output_message entry message
-  | Function_call call -> function_call entry call
-  | Custom_tool_call call -> custom_tool_call entry call
-  | Function_call_output output -> function_output entry output
-  | Custom_tool_call_output output -> custom_tool_output entry output
-  | Reasoning value -> reasoning entry value
-  | Web_search_call call -> search_call entry "web_search" call.id
-  | File_search_call call -> search_call entry "file_search" call.id
-;;
-
-let render entries = List.map entries ~f:render_entry |> String.concat
+let render = History_chatmd.render
 
 let render_protocol entries =
   List.map entries ~f:(fun entry ->
     let open Result.Let_syntax in
     let%map history = History_codec.of_protocol entry in
-    let annotation =
-      match entry.Agent_protocol.History.provenance with
-      | Runtime_notification id ->
-        Printf.sprintf
-          "<!-- ochat-runtime-notification delivery_id=%S -->\n"
-          (Agent_protocol.Id.Delivery.to_string id)
-      | Runtime_authoring guidance ->
-        Printf.sprintf
-          "<!-- ochat-runtime-authoring %s -->\n"
-          (Agent_protocol.Authoring_guidance.to_json guidance |> Jsonaf.to_string)
-      | Canonical | Moderator_inserted | Moderator_replaced _ -> ""
-    in
-    annotation ^ render_entry history)
+    annotation entry.Agent_protocol.History.provenance
+    ^ render_payload (History_entry.id history) (History_entry.payload history))
   |> Result.all
   |> Result.map ~f:String.concat
 ;;
+
+let header_label = function
+  | Transcript.Header.Message value -> role value
+  | Call _ -> "tool call"
+  | Result _ -> "tool result"
+  | Reasoning -> "reasoning"
+  | Unknown kind -> "unknown " ^ kind
+;;
+
+let render_public_entry (entry : Public.t) =
+  match entry.body with
+  | Full payload -> annotation entry.provenance ^ render_payload entry.id payload
+  | Visible visible ->
+    let body =
+      match visible with
+      | Public.Visible.Message { content; _ } ->
+        List.map content ~f:(function
+          | Public.Visible.Text text | Refusal text -> text
+          | Image { uri; _ } -> Printf.sprintf "[Image: %s]" uri
+          | Redacted_part { kind } -> Printf.sprintf "[Redacted content: %s]" kind)
+        |> String.concat ~sep:"\n"
+      | Reasoning { readable_summary } -> String.concat ~sep:"\n" readable_summary
+    in
+    (* Disclosure markup is deliberately not canonical ChatMD message syntax. *)
+    Printf.sprintf
+      "<ochat-public-view disclosure=\"visible\" role=%S%s>\n%s\n</ochat-public-view>\n"
+      (Public.Visible.header visible |> header_label)
+      (history_id entry.id)
+      (raw body)
+  | Redacted redaction ->
+    let role =
+      Option.value_map redaction.disclosed_header ~default:"unavailable" ~f:header_label
+    in
+    Printf.sprintf
+      "<ochat-public-view disclosure=\"redacted\" role=%S%s>\n\
+       [Content redacted]\n\
+       </ochat-public-view>\n"
+      role
+      (history_id entry.id)
+;;
+
+let render_public entries = List.map entries ~f:render_public_entry |> String.concat

@@ -297,7 +297,11 @@ let qualify_authored_shell ~snapshot_replacement =
       in
       let before_denials = state child in
       let reader_projection = H.projection reader in
-      let snapshot = reader_projection |> Agent_client.Projection.snapshot in
+      let snapshot =
+        reader_projection
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       assert (P.Id.Session.equal snapshot.session.id child_id);
       assert (
         List.exists snapshot.permissions ~f:(fun observed ->
@@ -384,6 +388,7 @@ let qualify_authored_shell ~snapshot_replacement =
                (match snapshot_replacement, response.replay with
                 | false, Events events -> assert (not (List.is_empty events))
                 | true, Snapshot replacement ->
+                  let replacement = P.Public.Snapshot.fields replacement in
                   assert (
                     Int64.(
                       replacement.latest_event_sequence > snapshot.latest_event_sequence));
@@ -392,7 +397,7 @@ let qualify_authored_shell ~snapshot_replacement =
                   raise_s
                     [%sexp
                       "unexpected HTTP replay mode"
-                    , (response.replay : P.Method_result.Attach.replay)]);
+                    , (response.replay : P.Public.Result.Attach.replay)]);
                replay_seen := true
              | Session_attach _, _ ->
                failwith "HTTP reconnect did not return event replay"
@@ -418,16 +423,25 @@ let qualify_authored_shell ~snapshot_replacement =
         |> protocol_ok
       in
       assert !replay_seen;
-      let replayed = H.projection resumed_reader |> Agent_client.Projection.snapshot in
+      let replayed =
+        H.projection resumed_reader
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       assert (Int64.(replayed.latest_event_sequence > snapshot.latest_event_sequence));
       let resolved =
         List.find_exn replayed.permissions ~f:(fun observed ->
           P.Id.Permission.equal observed.P.Permission.id permission.id)
       in
       assert (not (P.Permission.equal_state resolved.state Pending));
+      let committed =
+        List.map (state child).conversation.canonical_history ~f:(fun entry ->
+          let canonical = Agent_session.History_codec.of_canonical entry |> protocol_ok in
+          P.Public.History.full canonical ~provenance:entry.provenance |> protocol_ok)
+      in
       [%test_eq: Sexp.t]
-        ([%sexp_of: P.History.entry list] (state child).conversation.canonical_history)
-        ([%sexp_of: P.History.entry list] replayed.canonical_history.entries);
+        ([%sexp_of: P.Public.History.t list] committed)
+        ([%sexp_of: P.Public.History.t list] replayed.canonical_history.entries);
       H.close resumed_reader;
       Agent_client.Connection.close resumed_client;
       send handle;

@@ -443,19 +443,10 @@ module Durable = struct
 end
 
 module Recoverable = struct
-  type kind =
-    | Provider_stream
-    | Sourced_stream
-    | History_correlated_stream
-    | Tool_started
-    | Tool_progress
-    | Tool_trace
-    | Tool_finished
-    | Agent_call_classified
-    | Agent_call_progress
-    | Activity
-    | Compaction_progress
-  [@@deriving compare, equal, sexp]
+  type payload =
+    | Transcript of Transcript.Stream.t
+    | Tool_activity of Activity.Tool.event
+  [@@deriving sexp_of]
 
   type t =
     { session_id : Id.Session.t
@@ -463,77 +454,116 @@ module Recoverable = struct
     ; operation_sequence : int64
     ; anchor_sequence : int64
     ; timestamp : Timestamp.t
-    ; kind : kind
-    ; payload : Jsonaf.t
+    ; invocation_id : Id.Invocation.t option
+    ; parent_invocation_id : Id.Invocation.t option
+    ; payload : payload
+    ; original_json : Jsonaf.t option
     }
-  [@@deriving sexp]
+  [@@deriving sexp_of]
 
-  let kind_values =
-    [ "provider.stream", Provider_stream
-    ; "sourced.stream", Sourced_stream
-    ; "history.correlated_stream", History_correlated_stream
-    ; "tool.started", Tool_started
-    ; "tool.progress", Tool_progress
-    ; "tool.trace", Tool_trace
-    ; "tool.finished", Tool_finished
-    ; "agent.call_classified", Agent_call_classified
-    ; "agent.call_progress", Agent_call_progress
-    ; "activity", Activity
-    ; "compaction.progress", Compaction_progress
-    ]
+  let encode_known t =
+    let kind, payload =
+      match t.payload with
+      | Transcript stream -> "transcript", Transcript.Stream.to_json stream
+      | Tool_activity event -> "tool.activity", Activity.Tool.to_json event
+    in
+    `Object
+      ([ "session_id", Id.Session.to_json t.session_id
+       ; "operation_id", Id.Operation.to_json t.operation_id
+       ; "operation_sequence", int64_to_json t.operation_sequence
+       ; "anchor_sequence", int64_to_json t.anchor_sequence
+       ; "timestamp", Timestamp.to_json t.timestamp
+       ; "kind", `String kind
+       ; "payload", payload
+       ]
+       @ Projection_codec.optional "invocation_id" t.invocation_id Id.Invocation.to_json
+       @ Projection_codec.optional
+           "parent_invocation_id"
+           t.parent_invocation_id
+           Id.Invocation.to_json)
   ;;
-
-  let kind_to_string kind =
-    List.Assoc.find_exn
-      (List.map kind_values ~f:(fun (name, kind) -> kind, name))
-      kind
-      ~equal:equal_kind
-  ;;
-
-  let kind_of_json = Json_codec.enum ~name:"recoverable event kind" kind_values
 
   let to_json t =
-    `Object
-      [ "session_id", Id.Session.to_json t.session_id
-      ; "operation_id", Id.Operation.to_json t.operation_id
-      ; "operation_sequence", int64_to_json t.operation_sequence
-      ; "anchor_sequence", int64_to_json t.anchor_sequence
-      ; "timestamp", Timestamp.to_json t.timestamp
-      ; "kind", `String (kind_to_string t.kind)
-      ; "payload", t.payload
-      ]
+    Option.value_or_thunk t.original_json ~default:(fun () -> encode_known t)
   ;;
 
-  let decode_ordering fields =
+  let create
+        ~session_id
+        ~operation_id
+        ~operation_sequence
+        ~anchor_sequence
+        ~timestamp
+        ~invocation_id
+        ~parent_invocation_id
+        payload
+    =
     let open Result.Let_syntax in
-    let%bind operation_sequence =
-      Json_codec.required_as fields "operation_sequence" nonnegative_int64
-    in
-    let%map anchor_sequence =
-      Json_codec.required_as fields "anchor_sequence" nonnegative_int64
-    in
-    operation_sequence, anchor_sequence
+    if Int64.(operation_sequence <= zero || anchor_sequence < zero)
+    then Error (Protocol_error.invalid_request "invalid live event positions")
+    else if Option.is_some parent_invocation_id && Option.is_none invocation_id
+    then Error (Protocol_error.invalid_request "parent invocation requires an invocation")
+    else (
+      let t =
+        { session_id
+        ; operation_id
+        ; operation_sequence
+        ; anchor_sequence
+        ; timestamp
+        ; invocation_id
+        ; parent_invocation_id
+        ; payload
+        ; original_json = None
+        }
+      in
+      let%map () = Projection_codec.validate (to_json t) in
+      t)
   ;;
 
   let of_json json =
     let open Result.Let_syntax in
+    let%bind () = Projection_codec.validate json in
     let%bind fields = Json_codec.fields json in
     let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
     let%bind operation_id =
       Json_codec.required_as fields "operation_id" Id.Operation.of_json
     in
-    let%bind operation_sequence, anchor_sequence = decode_ordering fields in
+    let%bind operation_sequence =
+      Json_codec.required_as fields "operation_sequence" nonnegative_int64
+    in
+    let%bind anchor_sequence =
+      Json_codec.required_as fields "anchor_sequence" nonnegative_int64
+    in
     let%bind timestamp = Json_codec.required_as fields "timestamp" Timestamp.of_json in
-    let%bind kind = Json_codec.required_as fields "kind" kind_of_json in
-    let%map payload = Json_codec.required fields "payload" in
-    { session_id
-    ; operation_id
-    ; operation_sequence
-    ; anchor_sequence
-    ; timestamp
-    ; kind
-    ; payload
-    }
+    let%bind invocation_id =
+      Json_codec.optional_as fields "invocation_id" Id.Invocation.of_json
+    in
+    let%bind parent_invocation_id =
+      Json_codec.optional_as fields "parent_invocation_id" Id.Invocation.of_json
+    in
+    let%bind kind = Json_codec.required_as fields "kind" Json_codec.string in
+    let%bind payload = Json_codec.required fields "payload" in
+    let%bind payload =
+      match kind with
+      | "transcript" ->
+        Transcript.Stream.of_json payload ~limits:Projection_codec.limits
+        |> Projection_codec.string_result
+        |> Result.map ~f:(fun stream -> Transcript stream)
+      | "tool.activity" ->
+        Activity.Tool.of_json payload |> Result.map ~f:(fun event -> Tool_activity event)
+      | _ -> Error (Protocol_error.invalid_request "unknown neutral live event kind")
+    in
+    let%map t =
+      create
+        ~session_id
+        ~operation_id
+        ~operation_sequence
+        ~anchor_sequence
+        ~timestamp
+        ~invocation_id
+        ~parent_invocation_id
+        payload
+    in
+    { t with original_json = Some json }
   ;;
 
   let to_notification t =

@@ -6,12 +6,12 @@
 val snapshot
   :  Agent_protocol.Principal.t
   -> Agent_protocol.Snapshot.t
-  -> Agent_protocol.Snapshot.t
+  -> (Agent_protocol.Public.Snapshot.t, Agent_protocol.Error.t) result
 
 val durable
   :  Agent_protocol.Principal.t
   -> Agent_protocol.Event.Durable.t
-  -> Agent_protocol.Event.Durable.t
+  -> (Agent_protocol.Public.Durable.t, Agent_protocol.Error.t) result
 
 val recoverable
   :  Agent_protocol.Principal.t
@@ -21,7 +21,7 @@ val recoverable
 val result
   :  Agent_protocol.Principal.t
   -> Agent_protocol.Method_result.t
-  -> Agent_protocol.Method_result.t
+  -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 
 val export_use : Agent_protocol.Principal.t -> string
 

@@ -161,9 +161,11 @@ let test env environment =
        | _ -> F.fail "queued job delivered a different completion");
       F.require_equal
         "live and saved history"
-        [%sexp_of: P.History.entry list]
+        [%sexp_of: P.Public.History.t list]
         snapshot.canonical_history.entries
-        recovered.conversation.canonical_history;
+        (List.map
+           recovered.conversation.canonical_history
+           ~f:Support.Public_view.history_of_internal);
       let retained =
         job, invocation, delivery, recovered.conversation.canonical_history
       in

@@ -15,27 +15,30 @@ let sources =
 ;;
 
 let registration_from_output snapshot =
-  List.find_map snapshot.P.Snapshot.canonical_history.entries ~f:(fun entry ->
-    match
-      Agent_session.History_codec.of_protocol entry
-      |> protocol_ok
-      |> Openai.Responses_history.item_exn
-    with
-    | Openai.Responses.Item.Function_call_output
-        { call_id = "watch-call"; output = Text text; _ } ->
-      (match Jsonaf.of_string text |> P.Invocation.outcome_of_json |> protocol_ok with
-       | Pending (Subscription _, acknowledgement) ->
-         let fields = P.Json_codec.fields acknowledgement |> protocol_ok in
-         let id =
-           P.Json_codec.required_as fields "registration_id" P.Id.Capability.of_json
-           |> protocol_ok
-         in
-         let namespace =
-           P.Json_codec.required_as fields "namespace" P.Json_codec.string |> protocol_ok
-         in
-         Some (id, namespace)
-       | _ -> failwith "watch did not acknowledge its subscription")
-    | _ -> None)
+  let module Payload = History_entry.Payload in
+  List.find_map
+    snapshot.P.Public.Snapshot.Fields.canonical_history.entries
+    ~f:(fun entry ->
+      let payload = P.Public.History.full_payload entry |> Option.value_exn in
+      let semantic = Payload.semantic payload in
+      match
+        Payload.Semantic.view semantic, (Payload.Semantic.metadata semantic).call_id
+      with
+      | Result { kind = Function; output = Text text; _ }, Value "watch-call" ->
+        (match Jsonaf.of_string text |> P.Invocation.outcome_of_json |> protocol_ok with
+         | Pending (Subscription _, acknowledgement) ->
+           let fields = P.Json_codec.fields acknowledgement |> protocol_ok in
+           let id =
+             P.Json_codec.required_as fields "registration_id" P.Id.Capability.of_json
+             |> protocol_ok
+           in
+           let namespace =
+             P.Json_codec.required_as fields "namespace" P.Json_codec.string
+             |> protocol_ok
+           in
+           Some (id, namespace)
+         | _ -> failwith "watch did not acknowledge its subscription")
+      | _ -> None)
   |> Option.value_exn
 ;;
 
@@ -46,7 +49,7 @@ let initialize_request () =
   in
   P.Initialize.Request.create
     ~implementation
-    ~protocol_min:P.Version.ingress_minimum
+    ~protocol_min:P.Version.current
     ~protocol_max:P.Version.current
     ~features:[]
     ~event_encodings:[ Json ]
@@ -144,7 +147,11 @@ let%expect_test
     ~inspect_request:(fun request _ -> if request = 3 then model_received := true)
     ~calls:[ "watch-call", "watch", `Null ]
     ~after_turn:(fun env handle entry ->
-      let snapshot = H.projection handle |> Agent_client.Projection.snapshot in
+      let snapshot =
+        H.projection handle
+        |> Agent_client.Projection.snapshot
+        |> P.Public.Snapshot.fields
+      in
       let registration_id, namespace = registration_from_output snapshot in
       let producer = Option.value_exn snapshot.session.creator in
       let request : P.Ingress.Submit_request.t =
@@ -269,10 +276,12 @@ let%expect_test
        (match
           Agent_session.History_codec.of_protocol (List.hd_exn notifications)
           |> protocol_ok
-          |> Openai.Responses_history.item_exn
+          |> History_entry.payload
+          |> History_entry.Payload.semantic
+          |> History_entry.Payload.Semantic.view
         with
-        | Input_message { role = User; _ } -> ()
-        | _ -> failwith "notification used an unsupported provider role");
+        | Message { form = Input; role = User; _ } -> ()
+        | _ -> failwith "notification used an unsupported message role");
        [%test_eq: int]
          1
          (List.count state.moderator_executions ~f:(fun execution ->

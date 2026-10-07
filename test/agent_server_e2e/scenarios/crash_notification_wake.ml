@@ -162,7 +162,7 @@ let run env environment boundary =
            ~provider_prefix:"notification-provider "
            ~calls:expected_calls
            ~count:2
-         : P.Snapshot.t);
+         : P.Public.Snapshot.Fields.t);
       F.kill env child;
       let recovered = state env fixture session in
       F.require

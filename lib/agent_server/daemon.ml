@@ -376,7 +376,7 @@ let initialize
     Agent_protocol.Version.negotiate
       ~client_min:request.Agent_protocol.Initialize.Request.protocol_min
       ~client_max:request.protocol_max
-      ~supported:[ Agent_protocol.Version.initial; Agent_protocol.Version.current ]
+      ~supported:[ Agent_protocol.Version.current ]
   in
   if Poly.equal !status_ref Draining || Poly.equal !status_ref Stopped
   then

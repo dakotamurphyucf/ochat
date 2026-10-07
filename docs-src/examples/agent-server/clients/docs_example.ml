@@ -132,8 +132,8 @@ let setup env root model =
 let initialize () =
   Agent_protocol.Initialize.Request.
     { implementation = { name = "ochat-docs"; version = "1" }
-    ; protocol_min = Agent_protocol.Version.initial
-    ; protocol_max = Agent_protocol.Version.initial
+    ; protocol_min = Agent_protocol.Version.current
+    ; protocol_max = Agent_protocol.Version.current
     ; features = []
     ; event_encodings = [ Json ]
     ; max_inbound_event_bytes = 16 * 1024 * 1024

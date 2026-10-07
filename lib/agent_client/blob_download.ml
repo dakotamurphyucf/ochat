@@ -21,7 +21,7 @@ let request connection ~session_id ~attachment_id ~blob_id ~offset =
     Agent_protocol.Blob.Read_request.
       { session_id; attachment_id; blob_id; offset; max_bytes = max_chunk_bytes }
   in
-  match Connection.request connection (Blob_read request) with
+  match Connection.request_without_history connection (Blob_read request) with
   | Ok (Blob_read chunk) -> Ok chunk
   | Ok _ -> Error (invalid "unexpected blob.read result")
   | Error _ as failure -> failure

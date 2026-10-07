@@ -206,18 +206,11 @@ let%expect_test
        let history = (Host.snapshot host).canonical_history.entries in
        let ack, _ =
          List.findi_exn history ~f:(fun _ entry ->
-           match
-             Agent_session.History_codec.of_protocol entry
-             |> protocol_ok
-             |> Openai.Responses_history.item_exn
-           with
-           | Openai.Responses.Item.Function_call_output { call_id = "original"; _ } ->
-             true
-           | _ -> false)
+           Option.exists (Host.function_output_call_id entry) ~f:(String.equal "original"))
        in
        let notification, _ =
          List.findi_exn history ~f:(fun _ entry ->
-           match entry.P.History.provenance with
+           match entry.P.Public.History.provenance with
            | Runtime_notification _ -> true
            | _ -> false)
        in

@@ -153,6 +153,7 @@ let await env ~name ~guard ~is_done =
 let assert_maintenance client =
   match
     (Http.request client (Server_health { include_details = true }) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Server_health health ->
     let maintenance =

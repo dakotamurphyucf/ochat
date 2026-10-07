@@ -148,7 +148,7 @@ module Json = struct
     integer && fraction && exponent && Int.equal !index length
   ;;
 
-  let validate ~limits t =
+  let validate_and_measure ~limits t =
     let fields_seen = ref 0 in
     let nodes_seen = ref 0 in
     let bytes_seen = ref 0 in
@@ -238,8 +238,11 @@ module Json = struct
         | `True | `Null -> charge_bytes 4
         | `False -> charge_bytes 5)
     in
-    walk t 1 []
+    let%map () = walk t 1 [] in
+    !bytes_seen
   ;;
+
+  let validate ~limits t = validate_and_measure ~limits t |> Result.map ~f:ignore
 
   let rec equal left right =
     match left, right with

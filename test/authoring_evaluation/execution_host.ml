@@ -136,13 +136,17 @@ let snapshot embedded =
   match
     request embedded (Session_get { session_id = session_id embedded; history = None })
   with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "evaluation host received another protocol response"
 ;;
 
+let snapshot_to_json fields =
+  P.Public.Snapshot.create fields |> get |> P.Public.Snapshot.to_json
+;;
+
 type background =
-  { after_ack : workspace:string -> session -> P.Snapshot.t -> unit
-  ; settled : P.Snapshot.t -> bool
+  { after_ack : workspace:string -> session -> P.Public.Snapshot.Fields.t -> unit
+  ; settled : P.Public.Snapshot.Fields.t -> bool
   ; final_requests : int
   }
 
@@ -211,7 +215,7 @@ let with_session
                     snapshot session)
                 with
                 | value ->
-                  P.Snapshot.to_json value
+                  snapshot_to_json value
                   |> Jsonaf.to_string
                   |> Execution_audit.text
                        audit
@@ -389,7 +393,7 @@ let run
                    }
                ; idempotency_key = P.Idempotency_key.of_string "evaluation:execute" |> get
                })
-          : P.Method_result.t);
+          : P.Public.Result.t);
        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
          let rec wait expected_requests ready =
            let current = snapshot embedded in
@@ -425,22 +429,23 @@ let run
            let final = wait scenario.final_requests scenario.settled in
            require
              (Jsonaf.exactly_equal
-                (P.Snapshot.to_json settled |> Jsonaf.member_exn "canonical_history")
-                (P.Snapshot.to_json final |> Jsonaf.member_exn "canonical_history"))
+                (snapshot_to_json settled |> Jsonaf.member_exn "canonical_history")
+                (snapshot_to_json final |> Jsonaf.member_exn "canonical_history"))
              "completion replay changed published history";
            final))
 ;;
 
-let outcome (snapshot : P.Snapshot.t) call_id =
+let outcome (snapshot : P.Public.Snapshot.Fields.t) call_id =
   List.find_map_exn snapshot.canonical_history.entries ~f:(fun entry ->
-    match
-      Agent_session.History_codec.of_protocol entry
-      |> get
-      |> Openai.Responses_history.item_exn
-    with
-    | Openai.Responses.Item.Function_call_output
-        { call_id = actual; output = Text text; _ }
-      when String.equal actual call_id ->
-      Some (P.Invocation.outcome_of_json (Jsonaf.of_string text) |> get)
-    | _ -> None)
+    match P.Public.History.full_payload entry with
+    | None -> None
+    | Some payload ->
+      let semantic = History_entry.Payload.semantic payload in
+      (match
+         ( History_entry.Payload.Semantic.view semantic
+         , (History_entry.Payload.Semantic.metadata semantic).call_id )
+       with
+       | Result { output = Text text; _ }, Value actual when String.equal actual call_id
+         -> Some (P.Invocation.outcome_of_json (Jsonaf.of_string text) |> get)
+       | _ -> None))
 ;;

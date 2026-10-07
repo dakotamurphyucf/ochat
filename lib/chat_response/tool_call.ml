@@ -43,6 +43,7 @@ let run_tool
       ~on_fork
       ?runner
       ?on_tool_execution
+      ?on_execution_event
       ()
   =
   let driver_fork =
@@ -72,5 +73,13 @@ let run_tool
     | Kind.Function -> `Function
     | Kind.Custom -> `Custom
   in
-  Tool_executor.run ~kind ~call_id ~name ~payload ~runner ?on_tool_execution ()
+  Tool_executor.run
+    ~kind
+    ~call_id
+    ~name
+    ~payload
+    ~runner
+    ?on_tool_execution
+    ?on_execution_event
+    ()
 ;;

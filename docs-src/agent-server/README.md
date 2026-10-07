@@ -50,6 +50,7 @@ prompt-serving host is a different feature.
 | Run a durable daemon | [Unix daemon tutorial](tutorials/unix-daemon.md), [configuration](configuration.md) |
 | Configure the host environment | [Environment variables](environment.md) |
 | Integrate a client | [Protocol](protocol.md), [Unix](transports/unix.md), [stdio](transports/stdio.md), [HTTP/SSE](transports/http.md) |
+| Understand transcript and storage contracts | [Neutral transcript projections](../neutral-transcript-protocol.md), [neutral history persistence](../neutral-history-persistence.md) |
 | Manage agents and workspaces | [Sessions and workspaces](sessions-and-workspaces.md) |
 | Configure authority and automation | [Permissions](permissions-and-security.md), [shell host integration](../guide/chatmd-shell-host-integration.md) |
 | Run background scripts | [ChatML orchestration](chatml-orchestration.md), [tutorial](tutorials/background-agent.md) |

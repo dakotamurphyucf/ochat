@@ -1857,11 +1857,12 @@ module Daemon_admin = struct
       List.iter sessions ~f:(fun session -> write env (session_line session ^ "\n"))
   ;;
 
-  let write_info env format (snapshot : Agent_protocol.Snapshot.t) =
-    let session = snapshot.session in
+  let write_info env format (snapshot : Agent_protocol.Public.Snapshot.t) =
+    let fields = Agent_protocol.Public.Snapshot.fields snapshot in
+    let session = fields.session in
     match format with
     | Handlers.Output_format.Json ->
-      write env (Jsonaf.to_string (Agent_protocol.Snapshot.to_json snapshot) ^ "\n")
+      write env (Jsonaf.to_string (Agent_protocol.Public.Snapshot.to_json snapshot) ^ "\n")
     | Tsv -> write env (session_line session ^ "\n")
     | Human ->
       write
@@ -1873,8 +1874,8 @@ module Daemon_admin = struct
            (state_text
               Agent_protocol.Session.sexp_of_observed_state
               session.observed_state)
-           snapshot.revision
-           snapshot.latest_event_sequence)
+           fields.revision
+           fields.latest_event_sequence)
   ;;
 
   let session_id value =
@@ -1915,7 +1916,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.reset
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~keep_history
         ~keep_tasks:false
         ~keep_cache:false
@@ -1930,7 +1931,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.rebuild
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~prompt_choice:Pinned
       |> Result.map_error ~f:protocol_error
       |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
@@ -1954,7 +1955,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.delete
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~policy
         ~confirmation:id
       |> Result.map_error ~f:protocol_error

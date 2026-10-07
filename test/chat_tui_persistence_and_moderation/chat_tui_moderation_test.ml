@@ -30,8 +30,7 @@ let entries_of_history history =
 let model_of_entries history =
   Chat_tui.Model.create
     ~history_items:history
-    ~messages:
-      (Chat_tui.Conversation.of_history (Openai.Responses_history.items_exn history))
+    ~messages:(Chat_tui.Conversation.of_history history)
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))

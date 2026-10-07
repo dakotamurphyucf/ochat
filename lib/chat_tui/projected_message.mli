@@ -9,6 +9,7 @@ module Id : sig
 end
 
 type provenance =
+  | Public of Agent_protocol.History.provenance
   | Canonical
   | Moderator_inserted of { change_id : int }
   | Moderator_replacement of
@@ -18,6 +19,12 @@ type provenance =
   | Streaming
   | Pending_approval
   | Placeholder
+[@@deriving equal, sexp]
+
+type disclosure =
+  | Full
+  | Visible
+  | Redacted
 [@@deriving equal, sexp]
 
 type source =
@@ -35,6 +42,12 @@ type source =
       ; provider_item_id : string option
       ; call_id : string option
       }
+  | Public_history of
+      { entry_id : History_entry.Id.t
+      ; provenance : Agent_protocol.History.provenance
+      ; disclosure : disclosure
+      }
+  | Draft of { key : string }
   | Pending_approval of { local_id : string }
   | Placeholder of
       { local_id : string
@@ -48,6 +61,7 @@ type t =
   ; message : Types.message
   ; provenance : provenance
   ; source : source
+  ; editing_text : string option
   ; revision : int
   }
 
@@ -59,4 +73,17 @@ val render_equal : t -> t -> bool
     increments it when the same ID has changed. *)
 val reconcile : previous:t option -> t -> t
 
-val canonical_row : entry_id:History_entry.Id.t -> Types.message -> t
+(** A row alone grants no edit authority. Exact known text must be supplied by
+    the neutral canonical renderer, never inferred from display text. *)
+val canonical_row
+  :  ?editing_text:string
+  -> entry_id:History_entry.Id.t
+  -> Types.message
+  -> t
+
+(** Canonical host occurrence only; server authorization still applies. *)
+val deletion_target : t -> History_entry.Id.t option
+
+(** Existing :edit copies exact complete known text into a fresh user draft.
+    Public Visible/Redacted, transformed/opaque and transient rows refuse. *)
+val editing_text : t -> string option

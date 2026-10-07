@@ -37,15 +37,59 @@ let required_scope = function
   | Schedule_cancel _ -> Some Send_messages
 ;;
 
-let authorize principal command =
-  match required_scope command with
-  | None -> Ok ()
-  | Some scope when Agent_protocol.Principal.has_scope principal scope -> Ok ()
-  | Some scope ->
+let authorize_attachment_mode principal mode =
+  if not (Agent_protocol.Principal.has_scope principal View_session_transcript)
+  then
     Error
       (Agent_protocol.Error.create
          Permission_denied
-         ~message:("missing scope " ^ Agent_protocol.Scope.to_string scope)
+         ~message:"attachment requires transcript scope"
          ~retryable:false
          ())
+  else (
+    match mode with
+    | Agent_protocol.Session.Read_only -> Ok ()
+    | Read_write ->
+      if Agent_protocol.Principal.has_scope principal Send_messages
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Permission_denied
+             ~message:"read/write attachment requires send_messages"
+             ~retryable:false
+             ())
+    | Owner_read_write ->
+      if
+        Agent_protocol.Principal.has_scope principal Send_messages
+        && Agent_protocol.Principal.has_scope principal Own_sessions
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Permission_denied
+             ~message:"owner attachment requires send_messages and own_sessions"
+             ~retryable:false
+             ()))
+;;
+
+let authorize principal command =
+  let open Result.Let_syntax in
+  let%bind () =
+    match required_scope command with
+    | None -> Ok ()
+    | Some scope when Agent_protocol.Principal.has_scope principal scope -> Ok ()
+    | Some scope ->
+      Error
+        (Agent_protocol.Error.create
+           Permission_denied
+           ~message:("missing scope " ^ Agent_protocol.Scope.to_string scope)
+           ~retryable:false
+           ())
+  in
+  match command with
+  | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
+    authorize_attachment_mode principal mode
+  | Session_attach request -> authorize_attachment_mode principal request.requested_mode
+  | _ -> Ok ()
 ;;

@@ -7,7 +7,7 @@ let job_delivered = function
 ;;
 
 let reset_session connection session attachment =
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Session_reset
        { session_id = session.Agent_protocol.Session.id
@@ -39,7 +39,7 @@ let manifest_grant_count daemon session_id =
 
 let grants connection session_id state =
   let page = Agent_protocol.Page.Request.create ~limit:100 () |> protocol_ok in
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Grant_list { page; session_id = Some session_id; principal_id = None; state })
   |> protocol_ok
@@ -285,7 +285,7 @@ let on_event = fun ctx state event -> match event with
                               ~reason:None
                             |> Result.map ~f:ignore)
                          (fun () ->
-                            Agent_client.Connection.request
+                            Agent_client.Connection.request_without_history
                               client
                               (Permission_respond
                                  { session_id = created.id
@@ -1275,7 +1275,7 @@ let%expect_test
 ;;
 
 let server_health connection ~include_details =
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Server_health Agent_protocol.Health.Request.{ include_details })
   |> protocol_ok
@@ -1309,7 +1309,11 @@ let%expect_test "public health is redacted and administrative health reports ser
           initialize public_connection;
           initialize admin_connection;
           let info_public =
-            match Agent_client.Connection.request public_connection Server_info with
+            match
+              Agent_client.Connection.request_without_history
+                public_connection
+                Server_info
+            with
             | Ok (Agent_protocol.Method_result.Server_info _) -> true
             | Ok _ | Error _ -> false
           in
@@ -1684,7 +1688,8 @@ let%expect_test "durable stopped session resets, recovers, and starts after rest
               (Session_get { session_id = reset.id; history = None })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_get snapshot -> snapshot.session
+            | Agent_protocol.Public.Result.Session_get snapshot ->
+              (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected recovered session response"
           in
           let grants_after_restart = manifest_grant_count second_daemon recovered.id in
@@ -1790,7 +1795,8 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
               (Session_get { session_id = created.id; history = None })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_get snapshot -> snapshot.session
+            | Agent_protocol.Public.Result.Session_get snapshot ->
+              (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected lazy session response"
           in
           let present_after_get =
@@ -1986,7 +1992,7 @@ let%expect_test "owner reclaim token survives restart and rotates on reclaim" =
                  })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_create
+            | Agent_protocol.Public.Result.Session_create
                 { session; attachment = Some attachment; _ } ->
               session, attachment.attachment, Option.value_exn attachment.reclaim_token
             | _ -> failwith "unexpected owner create response"
@@ -2400,7 +2406,8 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
                 (Session_get { session_id = created.id; history = None })
               |> protocol_ok
               |> function
-              | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+              | Agent_protocol.Public.Result.Session_get snapshot ->
+                Agent_protocol.Public.Snapshot.fields snapshot
               | _ -> failwith "unexpected recovered job response"
             in
             match snapshot.halted, snapshot.jobs with

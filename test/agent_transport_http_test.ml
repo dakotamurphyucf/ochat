@@ -355,7 +355,7 @@ let%expect_test "HTTP request contract validates headers, bearer syntax, body, a
     request
       ~headers:
         [ "content-type", "application/json; charset=utf-8"
-        ; "ochat-protocol-version", "1.0"
+        ; "ochat-protocol-version", "2.0"
         ; "authorization", "Bearer secret-token"
         ]
       ~body:"{}"

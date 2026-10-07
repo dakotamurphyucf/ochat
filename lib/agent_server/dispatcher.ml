@@ -17,7 +17,7 @@ let request t context (request : Agent_protocol.Envelope.request) =
     let response =
       match dispatch_command t ~context command with
       | Ok result ->
-        Agent_protocol.Method_result.to_json result
+        Agent_protocol.Public.Result.to_json result
         |> Agent_protocol.Envelope.success ~id:request.id
       | Error error -> Agent_protocol.Envelope.failure ~id:request.id error
     in

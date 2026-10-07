@@ -52,13 +52,11 @@ let install_status shared status =
 ;;
 
 let install_projection shared projection =
-  match Agent_projection.of_client_projection projection with
-  | Error failure -> install_failure shared failure
-  | Ok projection ->
-    Eio.Mutex.use_rw ~protect:true shared.mutex (fun () ->
-      shared.projection <- Some projection;
-      shared.status <- Connection_status.connected ());
-    publish shared (Projection projection)
+  let projection = Agent_projection.of_client_projection projection in
+  Eio.Mutex.use_rw ~protect:true shared.mutex (fun () ->
+    shared.projection <- Some projection;
+    shared.status <- Connection_status.connected ());
+  publish shared (Projection projection)
 ;;
 
 let attach ~sw ~clock ~connection ?(reconnect = None) ~session_id ~mode () =
@@ -83,12 +81,12 @@ let attach ~sw ~clock ~connection ?(reconnect = None) ~session_id ~mode () =
       ~on_error:(install_failure shared)
       ()
   in
-  let%map projection =
+  let projection =
     Agent_projection.of_client_projection (Agent_client.Reconnect.projection handle)
   in
   shared.projection <- Some projection;
   publish shared (Projection projection);
-  { handle; shared }
+  Ok { handle; shared }
 ;;
 
 let create_spec connection options =
@@ -139,12 +137,12 @@ let create ~sw ~clock ~connection ?(reconnect = None) options =
       ~on_error:(install_failure shared)
       ()
   in
-  let%map projection =
+  let projection =
     Agent_projection.of_client_projection (Agent_client.Reconnect.projection handle)
   in
   shared.projection <- Some projection;
   publish shared (Projection projection);
-  { handle; shared }
+  Ok { handle; shared }
 ;;
 
 let projection t =
@@ -163,12 +161,12 @@ let send_text t text =
 ;;
 
 let compact t =
-  let snapshot = Agent_projection.snapshot (projection t) in
+  let snapshot = Agent_projection.fields (projection t) in
   Agent_client.Reconnect.compact t.handle ~expected_revision:(Some snapshot.revision)
 ;;
 
 let delete_history t history_id =
-  let snapshot = Agent_projection.snapshot (projection t) in
+  let snapshot = Agent_projection.fields (projection t) in
   Agent_client.Reconnect.delete_history
     t.handle
     ~expected_revision:snapshot.revision
@@ -176,7 +174,7 @@ let delete_history t history_id =
 ;;
 
 let cancel_active_operation t =
-  let session = (Agent_projection.snapshot (projection t)).session in
+  let session = (Agent_projection.fields (projection t)).session in
   match session.active_operation with
   | None ->
     Error

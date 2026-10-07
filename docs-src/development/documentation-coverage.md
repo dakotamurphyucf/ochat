@@ -140,10 +140,12 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_client/connection.mli` | [contract](../../lib/agent_client/connection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/in_memory.mli` | [contract](../../lib/agent_client/in_memory.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/ingress.mli` | [contract](../../lib/agent_client/ingress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_client/live_projection.mli` | [contract](../../lib/agent_client/live_projection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/projection.mli` | [contract](../../lib/agent_client/projection.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/reconnect.mli` | [contract](../../lib/agent_client/reconnect.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/session_handle.mli` | [contract](../../lib/agent_client/session_handle.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_client/transport.mli` | [contract](../../lib/agent_client/transport.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/activity.mli` | [contract](../../lib/agent_protocol/activity.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/audit.mli` | [contract](../../lib/agent_protocol/audit.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_guidance.mli` | [contract](../../lib/agent_protocol/authoring_guidance.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/authoring_reference.mli` | [contract](../../lib/agent_protocol/authoring_reference.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -179,13 +181,20 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/permission.mli` | [contract](../../lib/agent_protocol/permission.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/ping.mli` | [contract](../../lib/agent_protocol/ping.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/principal.mli` | [contract](../../lib/agent_protocol/principal.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/projection_codec.mli` | [contract](../../lib/agent_protocol/projection_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/prompt.mli` | [contract](../../lib/agent_protocol/prompt.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/protocol_error.mli` | [contract](../../lib/agent_protocol/protocol_error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/public.mli` | [contract](../../lib/agent_protocol/public.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/public_durable_event.mli` | [contract](../../lib/agent_protocol/public_durable_event.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/public_history.mli` | [contract](../../lib/agent_protocol/public_history.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/public_result.mli` | [contract](../../lib/agent_protocol/public_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/public_snapshot.mli` | [contract](../../lib/agent_protocol/public_snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/schedule.mli` | [contract](../../lib/agent_protocol/schedule.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/scope.mli` | [contract](../../lib/agent_protocol/scope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session.mli` | [contract](../../lib/agent_protocol/session.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/snapshot.mli` | [contract](../../lib/agent_protocol/snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/stored_completion.mli` | [contract](../../lib/agent_protocol/stored_completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/stream_error.mli` | [contract](../../lib/agent_protocol/stream_error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/subscription.mli` | [contract](../../lib/agent_protocol/subscription.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/timestamp.mli` | [contract](../../lib/agent_protocol/timestamp.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/version.mli` | [contract](../../lib/agent_protocol/version.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -568,12 +577,14 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatml/chatml_runtime.mli` | [contract](../../lib/chatml/chatml_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_surface_inventory.mli` | [contract](../../lib/chatml/chatml_surface_inventory.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_value_codec.mli` | [contract](../../lib/chatml/chatml_value_codec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/history_chatmd/history_chatmd.mli` | [contract](../../lib/history_chatmd/history_chatmd.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/openai/responses.mli` | [contract](../../lib/openai/responses.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_codec.mli` | [contract](../../lib/openai/responses_codec.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_driver.mli` | [contract](../../lib/openai/responses_driver.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_history.mli` | [contract](../../lib/openai/responses_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/openai/responses_json.mli` | [contract](../../lib/openai/responses_json.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/openai/responses_live.mli` | [contract](../../lib/openai/responses_live.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_request.mli` | [contract](../../lib/openai/responses_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_sse.mli` | [contract](../../lib/openai/responses_sse.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_wire.mli` | [contract](../../lib/openai/responses_wire.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -620,6 +631,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/shell_runtime/result.mli` | [contract](../../lib/shell_runtime/result.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/runtime.mli` | [contract](../../lib/shell_runtime/runtime.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_runtime/trusted_source.mli` | [contract](../../lib/shell_runtime/trusted_source.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/transcript/transcript.mli` | [contract](../../lib/transcript/transcript.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 
 ## Document inventory
 
@@ -968,6 +980,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../meta_prompting/recursive_mp.doc.md) | `docs-src/meta_prompting/recursive_mp.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../meta_prompting/templates.doc.md) | `docs-src/meta_prompting/templates.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../neutral-history-persistence.md) | `docs-src/neutral-history-persistence.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../neutral-transcript-protocol.md) | `docs-src/neutral-transcript-protocol.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../notty_examples_research.md) | `docs-src/notty_examples_research.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../notty_examples_research.md.report.md) | `docs-src/notty_examples_research.md.report.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../openai_responses_tool_output.md) | `docs-src/openai_responses_tool_output.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

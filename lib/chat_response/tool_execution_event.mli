@@ -36,3 +36,9 @@ type t =
     tool output. [Started.payload] is the exact function arguments or custom
     tool input passed to the runner. [Finished.output] and [Trace] are
     non-authoritative display projections. *)
+
+(** Explicit producer presentation seam. Runtime trace keeps its existing DTO;
+    public/TUI models retain this neutral value after ingress. *)
+val neutral_output
+  :  Openai.Responses.Tool_output.Output.t
+  -> History_entry.Payload.Output.t

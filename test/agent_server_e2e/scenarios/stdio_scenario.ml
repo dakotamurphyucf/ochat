@@ -151,7 +151,7 @@ let initialize client = Stdio_client.initialize client |> protocol_ok |> fst
 
 let ping client =
   let response = typed_request client (Protocol_ping { payload = None }) in
-  match response.result with
+  match response.result |> Support.Public_view.non_history with
   | Protocol_ping ping -> ping
   | _ -> fail "protocol.ping returned the wrong result variant"
 ;;
@@ -169,7 +169,10 @@ let list_sessions client =
       ; labels = []
       }
   in
-  match (typed_request client (Session_list request)).result with
+  match
+    (typed_request client (Session_list request)).result
+    |> Support.Public_view.non_history
+  with
   | Session_list page -> page.items
   | _ -> fail "session.list returned the wrong result variant"
 ;;
@@ -184,12 +187,18 @@ let catalog client =
       { page = page_request (); kind = None; access = None; available = Some true }
   in
   let prompts =
-    match (typed_request client (Prompt_list prompt_request)).result with
+    match
+      (typed_request client (Prompt_list prompt_request)).result
+      |> Support.Public_view.non_history
+    with
     | Prompt_list page -> page.items
     | _ -> fail "prompt.list returned the wrong result variant"
   in
   let workspaces =
-    match (typed_request client (Workspace_list workspace_request)).result with
+    match
+      (typed_request client (Workspace_list workspace_request)).result
+      |> Support.Public_view.non_history
+    with
     | Workspace_list page -> page.items
     | _ -> fail "workspace.list returned the wrong result variant"
   in
@@ -238,14 +247,14 @@ let start_session client session attachment key =
       }
   in
   let response = typed_request client (Session_start request) in
-  match response.result with
+  match response.result |> Support.Public_view.non_history with
   | Session_start mutation -> mutation.session, response.notifications
   | _ -> fail "session.start returned the wrong result variant"
 ;;
 
 let durable_event session_id = function
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    (match Agent_protocol.Event.Durable.of_json params with
+    (match Agent_protocol.Public.Durable.of_json params with
      | Ok event when Agent_protocol.Id.Session.compare event.session_id session_id = 0 ->
        Some event
      | Ok _ -> None
@@ -472,7 +481,7 @@ let test_gateway_events transport env environment =
            in
            let attachment =
              Option.value_exn created.attachment
-             |> fun (attached : Agent_protocol.Method_result.Attach.t) ->
+             |> fun (attached : Agent_protocol.Public.Result.Attach.t) ->
              attached.attachment
            in
            let started, start_notifications =
@@ -558,7 +567,7 @@ let test_gateway_eof_detaches_only env environment =
              let created, _ = create_session client "eof-create" in
              let attachment =
                Option.value_exn created.attachment
-               |> fun (attached : Agent_protocol.Method_result.Attach.t) ->
+               |> fun (attached : Agent_protocol.Public.Result.Attach.t) ->
                attached.attachment
              in
              ignore (start_session client created.session attachment "eof-start");
@@ -579,7 +588,9 @@ let test_gateway_eof_detaches_only env environment =
         let deadline = Eio.Time.now (Eio.Stdenv.clock env) +. 2. in
         ignore (await_detached_cleanup env connection session_id deadline);
         let snapshot =
-          Agent_client.Admin.get_session connection session_id |> protocol_ok
+          Agent_client.Admin.get_session connection session_id
+          |> protocol_ok
+          |> Agent_protocol.Public.Snapshot.fields
         in
         require
           (Agent_protocol.Session.equal_desired_state

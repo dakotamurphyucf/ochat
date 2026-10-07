@@ -545,7 +545,8 @@ let%expect_test
                       (Session_get { session_id = id; history = None })
                     |> protocol_ok
                     |> function
-                    | P.Method_result.Session_get snapshot -> snapshot
+                    | P.Public.Result.Session_get snapshot ->
+                      P.Public.Snapshot.fields snapshot
                     | _ -> failwith "unexpected snapshot"
                   in
                   match snapshot.session.active_operation with
@@ -559,12 +560,14 @@ let%expect_test
                   P.Session.equal_persistence snapshot.session.spec.persistence Transient);
                 let outputs =
                   List.filter snapshot.canonical_history.entries ~f:(fun entry ->
-                    P.History.equal_kind entry.kind Tool_output)
+                    Option.exists
+                      (P.Public.History.header entry)
+                      ~f:(Transcript.Header.equal (Result Function)))
                 in
                 (match outputs with
                  | [ entry ] ->
                    let payload =
-                     History_entry.Payload.of_json entry.payload |> Result.ok_or_failwith
+                     P.Public.History.full_payload entry |> Option.value_exn
                    in
                    let output =
                      match

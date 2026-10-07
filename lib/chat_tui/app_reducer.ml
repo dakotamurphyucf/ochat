@@ -74,103 +74,80 @@ module Placeholders = struct
 end
 
 module Cancellation_repair = struct
-  module Item = Openai.Responses.Item
-  module Output = Openai.Responses.Tool_output.Output
+  module P = History_entry.Payload
 
-  let truncate s ~max_len =
-    if String.length s <= max_len then s else String.prefix s max_len ^ "…"
+  let alias semantic =
+    match (P.Semantic.metadata semantic).call_id with
+    | Value value -> Some value
+    | Absent | Null -> None
   ;;
 
-  let synthetic_output ~error = function
-    | Item.Function_call call ->
-      let args = Util.sanitize ~strip:true call.arguments |> truncate ~max_len:200 in
-      Some
-        (Item.Function_call_output
-           { output =
-               Output.Text
-                 (Printf.sprintf
-                    "Tool call did not complete (call_id=%s, name=%s, arguments=%s).\n\n\
-                     %s"
-                    call.call_id
-                    call.name
-                    args
-                    error)
-           ; call_id = call.call_id
-           ; _type = "function_call_output"
-           ; id = None
-           ; status = None
-           })
-    | Item.Custom_tool_call call ->
-      let input = Util.sanitize ~strip:true call.input |> truncate ~max_len:200 in
-      Some
-        (Item.Custom_tool_call_output
-           { output =
-               Output.Text
-                 (Printf.sprintf
-                    "Tool call did not complete (call_id=%s, name=%s, input=%s).\n\n%s"
-                    call.call_id
-                    call.name
-                    input
-                    error)
-           ; call_id = call.call_id
-           ; _type = "custom_tool_call_output"
-           ; id = None
-           })
-    | _ -> None
+  let truncate text =
+    if String.length text <= 200 then text else String.prefix text 200 ^ "…"
   ;;
 
   let repair ~allocator ~error entries =
-    let seen_outputs = Hash_set.create (module String) in
-    let rec loop entries acc ~dropping_trailing_reasoning =
-      match entries with
+    let seen_hosts = Hash_set.create (module History_entry.Id) in
+    let unresolved_aliases = Hash_set.create (module String) in
+    let rec loop remaining acc ~dropping_trailing_reasoning =
+      match remaining with
       | [] -> Ok acc
       | entry :: rest ->
-        let item = Openai.Responses_history.item_exn entry in
-        if dropping_trailing_reasoning
-        then (
-          match item with
-          | Item.Reasoning _ -> loop rest acc ~dropping_trailing_reasoning:true
-          | _ -> loop entries acc ~dropping_trailing_reasoning:false)
-        else (
-          let continue acc = loop rest acc ~dropping_trailing_reasoning:false in
-          match item with
-          | Item.Function_call_output output ->
-            if Hash_set.mem seen_outputs output.call_id
-            then continue acc
-            else (
-              Hash_set.add seen_outputs output.call_id;
-              continue (entry :: acc))
-          | Item.Custom_tool_call_output output ->
-            if Hash_set.mem seen_outputs output.call_id
-            then continue acc
-            else (
-              Hash_set.add seen_outputs output.call_id;
-              continue (entry :: acc))
-          | Item.Function_call call ->
-            if Hash_set.mem seen_outputs call.call_id
-            then continue (entry :: acc)
-            else (
-              Hash_set.add seen_outputs call.call_id;
-              let open Result.Let_syntax in
-              let%bind output =
-                synthetic_output ~error item
-                |> Option.value_exn
-                |> Openai.Responses_history.create ~allocator
-              in
-              continue (entry :: output :: acc))
-          | Item.Custom_tool_call call ->
-            if Hash_set.mem seen_outputs call.call_id
-            then continue (entry :: acc)
-            else (
-              Hash_set.add seen_outputs call.call_id;
-              let open Result.Let_syntax in
-              let%bind output =
-                synthetic_output ~error item
-                |> Option.value_exn
-                |> Openai.Responses_history.create ~allocator
-              in
-              continue (entry :: output :: acc))
-          | _ -> continue (entry :: acc))
+        let semantic = P.semantic (History_entry.payload entry) in
+        let view = P.Semantic.view semantic in
+        (match view, dropping_trailing_reasoning with
+         | Reasoning _, true -> loop rest acc ~dropping_trailing_reasoning:true
+         | (Message _ | Call _ | Result _ | Reasoning _ | Unknown _), _ ->
+           let continue acc = loop rest acc ~dropping_trailing_reasoning:false in
+           (match view with
+            | Result { relation = Bound call_id; _ } ->
+              if Hash_set.mem seen_hosts call_id
+              then continue acc
+              else (
+                Hash_set.add seen_hosts call_id;
+                continue (entry :: acc))
+            | Result { relation = Unresolved; _ } ->
+              (* Legacy unresolved results remain original occurrences. Their
+               genuine alias can satisfy compatibility calls, never a host ID. *)
+              Option.iter (alias semantic) ~f:(Hash_set.add unresolved_aliases);
+              continue (entry :: acc)
+            | Call { name; kind; input_bytes; _ } ->
+              let call_id = History_entry.id entry in
+              if
+                Hash_set.mem seen_hosts call_id
+                || Option.exists (alias semantic) ~f:(Hash_set.mem unresolved_aliases)
+              then continue (entry :: acc)
+              else (
+                Hash_set.add seen_hosts call_id;
+                let label =
+                  match kind with
+                  | P.Call_kind.Function -> "arguments"
+                  | Custom -> "input"
+                in
+                let call_alias = Option.value (alias semantic) ~default:"unavailable" in
+                let text =
+                  Printf.sprintf
+                    "Tool call did not complete (call_id=%s, name=%s, %s=%s).\n\n%s"
+                    call_alias
+                    name
+                    label
+                    (Util.sanitize ~strip:true input_bytes |> truncate)
+                    error
+                in
+                let open Result.Let_syntax in
+                let metadata =
+                  { P.Metadata.empty with
+                    call_id = (P.Semantic.metadata semantic).call_id
+                  }
+                in
+                let%bind result =
+                  P.Semantic.create
+                    (Result { relation = Bound call_id; kind; output = Text text })
+                    ~metadata
+                in
+                let%bind output = History_entry.create ~allocator (P.authored result) in
+                continue (entry :: output :: acc))
+            | Message _ | Reasoning _ | Unknown _ -> continue (entry :: acc)))
     in
     loop (List.rev entries) [] ~dropping_trailing_reasoning:true
   ;;
@@ -1281,6 +1258,7 @@ let run ?(typeahead_config = Type_ahead_config.default) (ctx : Context.t) =
     | `Streaming_started (op_id, sw) ->
       (match runtime.Runtime.op with
        | Some (Runtime.Starting_streaming { id }) when Int.equal id op_id ->
+         runtime.Runtime.transcript_drafts <- Stream.create ();
          runtime.Runtime.op <- Some (Runtime.Streaming { sw; id });
          if runtime.Runtime.cancel_streaming_on_start
          then (
@@ -1288,58 +1266,43 @@ let run ?(typeahead_config = Type_ahead_config.default) (ctx : Context.t) =
            Switch.fail sw cancelled);
          true
        | _ -> true)
-    | `Stream (op_id, ev) ->
+    | `Transcript (op_id, event) ->
       (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_stream_event
-           runtime
-           throttler
-           ~viewport_height:(chat_viewport_height ())
-           ev;
+       | Some (Runtime.Streaming { id; _ }) when Int.equal id op_id ->
+         (match
+            Stream_apply.apply_transcript_event
+              runtime
+              throttler
+              ~viewport_height:(chat_viewport_height ())
+              event
+          with
+          | Ok () -> ()
+          | Error message ->
+            Runtime.add_system_notice runtime ("Live transcript unavailable: " ^ message));
          true
-       | _ -> true)
-    | `Stream_batch (op_id, items) ->
+       | Some _ | None -> true)
+    | `Transcript_batch (op_id, events) ->
       (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_stream_batch
-           runtime
-           throttler
-           ~viewport_height:(chat_viewport_height ())
-           items;
+       | Some (Runtime.Streaming { id; _ }) when Int.equal id op_id ->
+         List.iter events ~f:(fun event ->
+           match
+             Stream_apply.apply_transcript_event
+               runtime
+               throttler
+               ~viewport_height:(chat_viewport_height ())
+               event
+           with
+           | Ok () -> ()
+           | Error message ->
+             Runtime.add_system_notice runtime ("Live transcript unavailable: " ^ message));
          true
-       | _ -> true)
-    | `Sourced_stream (op_id, event) ->
+       | Some _ | None -> true)
+    | `History_committed (op_id, entry) ->
       (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_sourced_stream_event
-           runtime
-           throttler
-           ~viewport_height:(chat_viewport_height ())
-           event;
+       | Some (Runtime.Streaming { id; _ }) when Int.equal id op_id ->
+         Stream_apply.apply_history_committed runtime throttler entry;
          true
-       | _ -> true)
-    | `Sourced_stream_batch (op_id, events) ->
-      (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_sourced_stream_batch
-           runtime
-           throttler
-           ~viewport_height:(chat_viewport_height ())
-           events;
-         true
-       | _ -> true)
-    | `History_stream (op_id, event) ->
-      (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_history_stream_event runtime event;
-         true
-       | _ -> true)
-    | `History_stream_batch (op_id, events) ->
-      (match runtime.Runtime.op with
-       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
-         Stream_apply.apply_history_stream_batch runtime events;
-         true
-       | _ -> true)
+       | Some _ | None -> true)
     | `Tool_execution (op_id, event) ->
       (match runtime.Runtime.op with
        | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
@@ -1370,6 +1333,9 @@ let run ?(typeahead_config = Type_ahead_config.default) (ctx : Context.t) =
              Model.agent_call_progress model ~call_id progress
            | Trace { call_id; trace } -> Model.agent_call_trace model ~call_id trace
            | Finished { call_id; outcome; output } ->
+             let output =
+               Option.map output ~f:Chat_response.Tool_execution_event.neutral_output
+             in
              let retained = Model.agent_call_finished model ~call_id ~outcome ~output in
              let chat_changed = Model.mark_tool_call_finished model ~call_id ~outcome in
              let has_running_tool =

@@ -59,11 +59,11 @@ private curl credential config. Do not use verbose/header tracing with secrets:
 ```sh
 curl --fail-with-body --silent --show-error --config "$OCHAT_DEMO/admin.curl" \
   -D "$OCHAT_DEMO/initialize.headers" \
-  -H 'Content-Type: application/json' -H 'ochat-protocol-version: 1.0' \
+  -H 'Content-Type: application/json' -H 'ochat-protocol-version: 2.0' \
   --data-binary "@$OCHAT_DEMO/initialize.json" http://127.0.0.1:8787/v1/rpc
 OCHAT_CONNECTION=$(awk 'tolower($1)=="ochat-connection-id:" {gsub("\r", "", $2); print $2}' "$OCHAT_DEMO/initialize.headers")
 curl --fail-with-body --silent --show-error --config "$OCHAT_DEMO/admin.curl" \
-  -H 'Content-Type: application/json' -H 'ochat-protocol-version: 1.0' \
+  -H 'Content-Type: application/json' -H 'ochat-protocol-version: 2.0' \
   -H "ochat-connection-id: $OCHAT_CONNECTION" \
   --data '{"jsonrpc":"2.0","id":"sessions","method":"session.list","params":{"limit":20}}' \
   http://127.0.0.1:8787/v1/rpc
@@ -103,7 +103,7 @@ For an implementation independent of Ochat's client library:
 
 1. Load the raw token from its private file without logging it.
 2. POST the fixture's initialization envelope to `/v1/rpc` with bearer auth,
-   JSON content type, and `ochat-protocol-version: 1.0`.
+   JSON content type, and `ochat-protocol-version: 2.0`.
 3. Capture `ochat-connection-id` from the response headers. Supply it on subsequent
    RPCs, `/v1/events`, and `DELETE /v1/connection`.
 4. Open `/v1/events` for notifications or use the per-session snapshot/event

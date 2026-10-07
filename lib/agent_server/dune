@@ -48,6 +48,8 @@
   eio
   eio.unix
   mirage-crypto-rng.unix
+  ochat.transcript
+  ochat.history_entry
   ochat.agent_protocol
   ochat.agent_client
   ochat.agent_store

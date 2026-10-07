@@ -336,6 +336,19 @@ val handle_tool_result
            overlay to compute the effective request history. The Phase 2 budget
            contract for self-triggered turn limits and internal-event drain
            limits is documented in [docs-src/chatml-budget-policy.md].
+    @param on_transcript_event Neutral transient read observations scoped to each
+           actual execution/attempt. Finalized carries the exact entry only after
+           its owning commit succeeds. Nested source entries never append parent
+           canonical history. Observer exceptions and cancellation propagate;
+           durable committed history remains authoritative for repair.
+    @param on_scoped_tool_execution Strict transient tool delivery stamped with
+           the actual execution/attempt captured when its runner starts. Direct
+           child callbacks retain their child scope; duplicate built-in fork
+           bridge traces are suppressed only on this channel. Other native-agent
+           Trace observations retain the parent scope and do not claim a child
+           source or attempt. Errors and cancellation propagate. On cancellation
+           no strict Finished callback runs: the authoritative operation terminal
+           fences live activity without claiming a tool output/outcome.
     @param on_runtime_request Optional callback invoked for surfaced moderator
            runtime requests such as compaction or end-session notifications.
 
@@ -358,6 +371,9 @@ val run_completion_stream_in_memory_entries
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
   -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_history_event:(History_stream_event.t -> unit)
+  -> ?on_transcript_event:(Transcript.Stream.t -> unit)
+  -> ?on_scoped_tool_execution:
+       (scope:Transcript.Scope.t -> Tool_execution_event.t -> unit)
   -> ?on_history_item_appended:(History_entry.t -> unit)
   -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?on_tool_out:(Openai.Responses.Item.t -> unit)

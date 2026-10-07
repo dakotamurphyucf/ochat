@@ -13,7 +13,14 @@ let string_ok = function
   | Error message -> failwith message
 ;;
 
-let request client command = (Http_driver.request client command |> protocol_ok).result
+let request_public client command =
+  (Http_driver.request client command |> protocol_ok).result
+;;
+
+let request client command =
+  Http_driver.request_without_history client command |> protocol_ok
+;;
+
 let digest data = Digestif.SHA256.(digest_string data |> to_hex)
 let key text = Agent_protocol.Idempotency_key.of_string text |> protocol_ok
 
@@ -139,7 +146,7 @@ let spec client =
 
 let create client name =
   match
-    request
+    request_public
       client
       (Session_create
          { spec = spec client
@@ -262,8 +269,8 @@ let exercise_actions client session attachment =
     | Ok _ -> failwith "out-of-range blob read succeeded"
   in
   ignore
-    (request client (Session_get { session_id = session.id; history = None })
-     : Agent_protocol.Method_result.t);
+    (request_public client (Session_get { session_id = session.id; history = None })
+     : Agent_protocol.Public.Result.t);
   failure
 ;;
 

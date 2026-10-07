@@ -144,7 +144,8 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
       in
       let snapshot =
         match response with
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected response"
       in
       let attachment = Agent_server.Embedded.attachment embedded in
@@ -194,7 +195,9 @@ let%expect_test "closing an embedded client releases its backpressured publisher
                 |> protocol_ok
             }
         in
-        Agent_client.Connection.request connection stop |> protocol_ok |> ignore;
+        Agent_client.Connection.request_without_history connection stop
+        |> protocol_ok
+        |> ignore;
         (* A rendezvous proves the forwarder is active. The remaining stop events
            have no reader and no buffer space. Close must release that publisher. *)
         assert (Option.is_some (Agent_client.Connection.next_notification connection));
@@ -231,7 +234,8 @@ let%expect_test "session creation returns the requested attachment after session
              { session_id = Agent_server.Embedded.session_id embedded; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let idempotency_key =
@@ -248,14 +252,15 @@ let%expect_test "session creation returns the requested attachment after session
              })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_create result -> result
+        | Agent_protocol.Public.Result.Session_create result -> result
         | _ -> failwith "unexpected creation response"
       in
       let attachment = Option.value_exn created.attachment in
       let first_event_present =
         match attachment.replay with
-        | Agent_protocol.Method_result.Attach.Snapshot snapshot ->
-          Int64.(snapshot.latest_event_sequence >= 2L)
+        | Agent_protocol.Public.Result.Attach.Snapshot snapshot ->
+          Int64.(
+            (Agent_protocol.Public.Snapshot.fields snapshot).latest_event_sequence >= 2L)
         | Current | Events _ -> false
       in
       Agent_server.Embedded.close embedded;
@@ -321,7 +326,7 @@ let submission_snapshot embedded =
       (Session_get { session_id; history = None })
     |> protocol_ok
   with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "unexpected submission snapshot"
 ;;
 
@@ -347,7 +352,7 @@ let submit_halt embedded =
       { kind = Plain_text; text = "stop at item-appended"; attachments = [] }
   in
   ignore
-    (Agent_client.Connection.request
+    (Agent_client.Connection.request_without_history
        (Agent_server.Embedded.connection embedded)
        (Session_send_message { session_id; attachment_id; idempotency_key; content })
      |> protocol_ok
@@ -438,11 +443,11 @@ let%expect_test "read-only sends do not consume history IDs" =
              })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_attach attached -> attached.attachment
+        | Agent_protocol.Public.Result.Session_attach attached -> attached.attachment
         | _ -> failwith "unexpected attach response"
       in
       let send connection attachment text key =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Session_send_message
              { session_id
@@ -515,10 +520,12 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           }
       in
       let create payload =
-        Agent_client.Connection.request connection (Schedule_create (request payload))
+        Agent_client.Connection.request_without_history
+          connection
+          (Schedule_create (request payload))
       in
       let overflow_rejected =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Schedule_create
              { (request "overflow") with
@@ -551,7 +558,8 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       Agent_server.Embedded.close embedded;
@@ -591,7 +599,7 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
       let created =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Schedule_create
              { session_id
@@ -610,7 +618,7 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
       in
       let rec await_terminal attempts =
         let schedule =
-          Agent_client.Connection.request
+          Agent_client.Connection.request_without_history
             connection
             (Schedule_get { session_id; schedule_id = created.id })
           |> protocol_ok
@@ -683,7 +691,8 @@ let%expect_test "ChatML session startup persists delayed schedules" =
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let schedule = List.hd_exn snapshot.schedules in
@@ -749,7 +758,8 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let job = List.hd_exn snapshot.jobs in
@@ -838,7 +848,8 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
             (Session_get { session_id; history = None })
           |> protocol_ok
           |> function
-          | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+          | Agent_protocol.Public.Result.Session_get snapshot ->
+            Agent_protocol.Public.Snapshot.fields snapshot
           | _ -> failwith "unexpected session response"
         in
         match snapshot.halted, snapshot.jobs with
@@ -925,7 +936,8 @@ let%expect_test "due schedules drain ChatML while idle and honor end_session" =
             (Session_get { session_id; history = None })
           |> protocol_ok
           |> function
-          | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+          | Agent_protocol.Public.Result.Session_get snapshot ->
+            Agent_protocol.Public.Snapshot.fields snapshot
           | _ -> failwith "unexpected session response"
         in
         if snapshot.halted
@@ -996,6 +1008,7 @@ let%expect_test "session handle attaches, mutates, and reduces pushed events" =
         let snapshot =
           Agent_client.Session_handle.projection handle
           |> Agent_client.Projection.snapshot
+          |> Agent_protocol.Public.Snapshot.fields
         in
         if observed_stopped snapshot.session.observed_state
         then snapshot
@@ -1066,7 +1079,7 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
         |> protocol_ok
       in
       let _ =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           (Agent_server.Embedded.connection embedded)
           (Session_stop
              { session_id = Agent_server.Embedded.session_id embedded
@@ -1081,7 +1094,8 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
         let attachment = Agent_client.Reconnect.attachment reconnect in
         let stopped =
           Agent_client.Projection.snapshot projection
-          |> fun (snapshot : Agent_protocol.Snapshot.t) ->
+          |> Agent_protocol.Public.Snapshot.fields
+          |> fun (snapshot : Agent_protocol.Public.Snapshot.Fields.t) ->
           observed_stopped snapshot.session.observed_state
         in
         let reattached =
@@ -1139,7 +1153,7 @@ let%expect_test "audit read returns redacted durable command outcomes" =
       |> ignore;
       let page = Agent_protocol.Page.Request.create ~limit:100 () |> protocol_ok in
       let audit =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Audit_read
              { page
@@ -1208,7 +1222,9 @@ let%expect_test "reset and pinned rebuild require exact stopped revisions" =
         |> protocol_ok
       in
       let current =
-        Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+        Agent_client.Session_handle.projection handle
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
       in
       let reset expected =
         Agent_client.Session_handle.reset
@@ -1283,7 +1299,7 @@ let%expect_test "session export returns a durable server-owned blob" =
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
       let response =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Session_export
              { session_id; attachment_id; format = Json; revision = None; history = None })
@@ -1315,7 +1331,7 @@ let%expect_test "session export returns a durable server-owned blob" =
         ~output:(Eio.Flow.buffer_sink downloaded)
       |> protocol_ok;
       let foreign_attachment_rejected =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Blob_read
              { session_id

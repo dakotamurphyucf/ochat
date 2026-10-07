@@ -160,6 +160,7 @@ let%expect_test
           let visible =
             Agent_client.Admin.get_session client before.identity.session_id
             |> protocol_ok
+            |> P.Public.Snapshot.fields
           in
           assert (
             List.exists visible.extension_status ~f:(fun status ->

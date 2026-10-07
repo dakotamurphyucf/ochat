@@ -25,6 +25,7 @@ val run_tool
          option
   -> ?runner:Ochat_function.runner
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> ?on_execution_event:(Tool_execution_event.t -> unit)
   -> unit
   -> Openai.Responses.Tool_output.Output.t
 

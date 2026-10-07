@@ -53,7 +53,7 @@ let root state =
 
 let outputs entries =
   List.filter entries ~f:(fun entry ->
-    P.History.equal_kind entry.P.History.kind Tool_output)
+    Support.Public_view.has_header entry (Result Function))
 ;;
 
 let run env environment boundary =
@@ -145,7 +145,11 @@ let run env environment boundary =
            "nested approval was not durably pending"
        | _ -> F.fail "selected invocation crash boundary was missed");
       F.require
-        (List.is_empty (outputs before.conversation.canonical_history))
+        (List.is_empty
+           (outputs
+              (List.map
+                 before.conversation.canonical_history
+                 ~f:Support.Public_view.history_of_internal)))
         "initial response was published before crash";
       F.require
         (Option.is_none invocation.output_entry_id)
@@ -232,15 +236,18 @@ let run env environment boundary =
         (List.is_empty recovered.deliveries && List.is_empty recovered.jobs)
         "invocation recovery fabricated background work";
       let entries = recovered.conversation.canonical_history in
-      let output = List.hd_exn (outputs entries) in
+      let output =
+        List.hd_exn
+          (outputs (List.map entries ~f:Support.Public_view.history_of_internal))
+      in
       F.require
         (Option.equal P.History.Id.equal invocation.output_entry_id (Some output.id))
         "publication receipt refers to another history item";
       F.require_equal
         "live and saved response"
-        [%sexp_of: P.History.entry list]
+        [%sexp_of: P.Public.History.t list]
         snapshot.canonical_history.entries
-        entries;
+        (List.map entries ~f:Support.Public_view.history_of_internal);
       (match !previous with
        | None -> previous := Some entries
        | Some expected ->

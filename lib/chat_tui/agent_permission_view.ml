@@ -24,7 +24,7 @@ let same (left : Agent_protocol.Permission.t) (right : Agent_protocol.Permission
 
 let sync model ~current projection =
   let next =
-    (Agent_projection.snapshot projection).permissions
+    (Agent_projection.fields projection).permissions
     |> List.find ~f:(fun p -> Agent_protocol.Permission.equal_state p.state Pending)
   in
   (match current, next with

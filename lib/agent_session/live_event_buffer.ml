@@ -26,23 +26,27 @@ let trim t =
   else t.events <- Fqueue.drop_exn t.events
 ;;
 
-let publish t ~anchor_sequence ~timestamp ~kind ~payload =
+let publish t ~anchor_sequence ~timestamp ~payload =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    let event =
-      Agent_protocol.Event.Recoverable.
-        { session_id = t.session_id
-        ; operation_id = t.operation_id
-        ; operation_sequence = t.next_sequence
-        ; anchor_sequence
-        ; timestamp
-        ; kind
-        ; payload
-        }
-    in
-    t.next_sequence <- Int64.(t.next_sequence + 1L);
-    t.events <- Fqueue.enqueue t.events event;
-    trim t;
-    event)
+    let open Result.Let_syntax in
+    if Int64.equal t.next_sequence Int64.max_value
+    then Error (Agent_protocol.Error.invalid_request "live operation sequence exhausted")
+    else (
+      let%map event =
+        Agent_protocol.Event.Recoverable.create
+          ~session_id:t.session_id
+          ~operation_id:t.operation_id
+          ~operation_sequence:t.next_sequence
+          ~anchor_sequence
+          ~timestamp
+          ~invocation_id:None
+          ~parent_invocation_id:None
+          payload
+      in
+      t.next_sequence <- Int64.succ t.next_sequence;
+      t.events <- Fqueue.enqueue t.events event;
+      trim t;
+      event))
 ;;
 
 let after t sequence =

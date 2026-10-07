@@ -44,7 +44,7 @@ let connection_headers t =
 let rpc_headers t =
   [ "content-type", "application/json"
   ; "accept", "application/json"
-  ; protocol_version_header, "1.0"
+  ; protocol_version_header, "2.0"
   ]
   @ connection_headers t
 ;;
@@ -95,7 +95,7 @@ let response_result command request_id envelope =
   | Agent_protocol.Envelope.Response response
     when Agent_protocol.Envelope.Request_id.compare response.id request_id = 0 ->
     Result.bind response.outcome ~f:(fun json ->
-      Agent_protocol.Method_result.of_json
+      Agent_protocol.Public.Result.of_json
         ~method_:(Agent_protocol.Command.method_name command)
         json)
   | Response _ -> Error (invalid_response "HTTP response identifier does not match")

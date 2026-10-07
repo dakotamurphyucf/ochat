@@ -14,9 +14,8 @@ val publish
   :  t
   -> anchor_sequence:int64
   -> timestamp:Agent_protocol.Timestamp.t
-  -> kind:Agent_protocol.Event.Recoverable.kind
-  -> payload:Jsonaf.t
-  -> Agent_protocol.Event.Recoverable.t
+  -> payload:Agent_protocol.Event.Recoverable.payload
+  -> (Agent_protocol.Event.Recoverable.t, Agent_protocol.Error.t) result
 
 val after : t -> int64 -> Agent_protocol.Event.Recoverable.t list
 val latest_sequence : t -> int64

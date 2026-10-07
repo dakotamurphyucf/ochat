@@ -33,7 +33,9 @@ let update_cursor cursor frame =
   if Option.is_some frame.id
   then (
     let event =
-      Jsonaf.of_string frame.data |> Agent_protocol.Event.Durable.of_json |> F.protocol_ok
+      Jsonaf.of_string frame.data
+      |> Agent_protocol.Public.Durable.of_json
+      |> F.protocol_ok
     in
     F.require Int64.(event.sequence = !cursor + 1L) "SSE gap or duplicate";
     cursor := event.sequence)

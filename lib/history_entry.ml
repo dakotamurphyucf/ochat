@@ -469,7 +469,7 @@ module Payload = struct
           ]
     ;;
 
-    let of_json value =
+    let of_validated_json value =
       let open Result.Let_syntax in
       let%bind fields = fields value in
       let%bind kind = required fields "type" string in
@@ -480,6 +480,16 @@ module Payload = struct
           (required fields "content" (list Content.of_json))
           ~f:(fun values -> Content values)
       | _ -> Error "unknown neutral output kind"
+    ;;
+
+    let of_json value ~limits =
+      let open Result.Let_syntax in
+      let%bind () =
+        Document_schema.Json.validate ~limits value
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+      in
+      of_validated_json value
     ;;
   end
 
@@ -635,7 +645,7 @@ module Payload = struct
         | "result" ->
           let%map kind = required fields "kind" Call_kind.of_json
           and relation = required fields "relation" Call_relation.of_json
-          and output = required fields "output" Output.of_json in
+          and output = required fields "output" Output.of_validated_json in
           Result { relation; kind; output }
         | "reasoning" ->
           Result.map

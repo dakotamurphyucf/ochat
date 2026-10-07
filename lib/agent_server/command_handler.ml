@@ -629,16 +629,31 @@ let handle_blob_read t context request =
       })
 ;;
 
-let rec forward_subscriber context subscriber =
-  match Agent_session.Subscriber.take subscriber with
-  | None -> ()
-  | Some (Error _) -> ()
-  | Some (Ok (Durable event)) ->
+let rec forward_subscriber context ~attachment subscriber =
+  let fail () =
+    Agent_session.Subscriber.close subscriber;
+    let error =
+      error Snapshot_required "session event stream requires a fresh snapshot"
+    in
     Connection_context.publish_notification
       context
-      (Principal_projection.durable (Connection_context.principal context) event
-       |> Agent_protocol.Event.Durable.to_notification);
-    forward_subscriber context subscriber
+      (Agent_protocol.Stream_error.create
+         ~session_id:attachment.Agent_protocol.Session.Attachment.session_id
+         ~attachment_id:attachment.id
+         error
+       |> Agent_protocol.Stream_error.to_notification)
+  in
+  match Agent_session.Subscriber.take subscriber with
+  | None -> ()
+  | Some (Error _) -> fail ()
+  | Some (Ok (Durable event)) ->
+    (match Principal_projection.durable (Connection_context.principal context) event with
+     | Error _ -> fail ()
+     | Ok event ->
+       Connection_context.publish_notification
+         context
+         (Agent_protocol.Public.Durable.to_notification event);
+       forward_subscriber context ~attachment subscriber)
   | Some (Ok (Recoverable event)) ->
     Option.iter
       (Principal_projection.recoverable (Connection_context.principal context) event)
@@ -646,29 +661,7 @@ let rec forward_subscriber context subscriber =
         Connection_context.publish_notification
           context
           (Agent_protocol.Event.Recoverable.to_notification event));
-    forward_subscriber context subscriber
-;;
-
-let authorize_attachment_mode principal mode =
-  if not (Agent_protocol.Principal.has_scope principal View_session_transcript)
-  then Error (error Permission_denied "attachment requires transcript scope")
-  else (
-    match mode with
-    | Agent_protocol.Session.Read_only -> Ok ()
-    | Read_write ->
-      if Agent_protocol.Principal.has_scope principal Send_messages
-      then Ok ()
-      else Error (error Permission_denied "read/write attachment requires send_messages")
-    | Owner_read_write ->
-      if
-        Agent_protocol.Principal.has_scope principal Send_messages
-        && Agent_protocol.Principal.has_scope principal Own_sessions
-      then Ok ()
-      else
-        Error
-          (error
-             Permission_denied
-             "owner attachment requires send_messages and own_sessions"))
+    forward_subscriber context ~attachment subscriber
 ;;
 
 let attach_entry
@@ -708,11 +701,10 @@ let attach_entry
     Connection_context.release_attachment_reservation context;
     failure
   | Ok (attachment, subscriber, snapshot, issued_reclaim_token) ->
-    let principal = Connection_context.principal context in
-    let snapshot = Principal_projection.snapshot principal snapshot in
     Connection_context.register_reserved_attachment context attachment;
     Option.iter subscriber ~f:(fun subscriber ->
-      Eio.Fiber.fork ~sw:t.sw (fun () -> forward_subscriber context subscriber));
+      Eio.Fiber.fork ~sw:t.sw (fun () ->
+        forward_subscriber context ~attachment subscriber));
     let replay =
       match after_sequence with
       | None -> Agent_protocol.Method_result.Attach.Snapshot snapshot
@@ -723,8 +715,7 @@ let attach_entry
              ~after_sequence
              ~through_sequence:snapshot.latest_event_sequence
          with
-         | Available events ->
-           Events (List.map events ~f:(Principal_projection.durable principal))
+         | Available events -> Events events
          | Snapshot_required -> Snapshot snapshot)
     in
     Ok
@@ -745,8 +736,7 @@ let handle_session_create t context command_audit request =
     | None, true ->
       Error (error Invalid_request "subscribe requires a requested attachment mode")
     | None, false -> Ok ()
-    | Some mode, _ ->
-      authorize_attachment_mode (Connection_context.principal context) mode
+    | Some _, _ -> Ok ()
   in
   let%bind entry =
     t.create_session
@@ -830,17 +820,11 @@ let handle_session_get t context request =
       request
       snapshot
   in
-  Agent_protocol.Method_result.Session_get
-    (Principal_projection.snapshot (Connection_context.principal context) snapshot)
+  Agent_protocol.Method_result.Session_get snapshot
 ;;
 
 let handle_session_attach t context command_audit request =
   let open Result.Let_syntax in
-  let%bind () =
-    authorize_attachment_mode
-      (Connection_context.principal context)
-      request.Agent_protocol.Session.Attach_request.requested_mode
-  in
   let%bind entry, _ =
     find_visible_entry t context request.Agent_protocol.Session.Attach_request.session_id
   in
@@ -1189,37 +1173,15 @@ let render_export request snapshot entries =
       ( "application/json"
       , "session.json"
       , `Object
-          [ "snapshot", Agent_protocol.Snapshot.to_json snapshot
-          ; "history", `Array (List.map entries ~f:Agent_protocol.History.entry_to_json)
+          [ "snapshot", Agent_protocol.Public.Snapshot.to_json snapshot
+          ; "history", `Array (List.map entries ~f:Agent_protocol.Public.History.to_json)
           ]
         |> Jsonaf.to_string )
   | Chatmd ->
-    let entries =
-      List.map entries ~f:(fun (entry : Agent_protocol.History.entry) ->
-        if not entry.redacted
-        then entry
-        else
-          { entry with
-            role = Assistant
-          ; kind = Message
-          ; redacted = false
-          ; payload =
-              `Object
-                [ "type", `String "message"
-                ; "role", `String "assistant"
-                ; ( "content"
-                  , `Array
-                      [ `Object
-                          [ "type", `String "input_text"
-                          ; "text", `String "[Tool content redacted]"
-                          ]
-                      ] )
-                ]
-          })
-    in
-    Agent_session.Chatmd_export.render_protocol entries
-    |> Result.map ~f:(fun history ->
-      "text/markdown; charset=utf-8", "session.chatmd", history)
+    Ok
+      ( "text/markdown; charset=utf-8"
+      , "session.chatmd"
+      , Agent_session.Chatmd_export.render_public entries )
 ;;
 
 let create_export_blob
@@ -1306,13 +1268,16 @@ let handle_session_export t context request =
       { session_id = request.session_id; history = request.history }
       snapshot
   in
-  let snapshot =
+  let%bind snapshot =
     Principal_projection.snapshot (Connection_context.principal context) snapshot
   in
+  let projected = Agent_protocol.Public.Snapshot.fields snapshot in
   let entries =
     if Option.exists request.history ~f:(fun history -> history.effective)
-    then (Option.value_exn snapshot.effective_history).entries
-    else snapshot.canonical_history.entries
+    then
+      Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
+        window.entries)
+    else projected.canonical_history.entries
   in
   let%bind media_type, display_name, content = render_export request snapshot entries in
   let%bind store_handle =
@@ -1331,8 +1296,8 @@ let handle_session_export t context request =
   in
   Agent_protocol.Method_result.Session_export
     { blob = (Agent_store.Blob_store.Handle.metadata handle).blob
-    ; session_revision = snapshot.revision
-    ; latest_event_sequence = snapshot.latest_event_sequence
+    ; session_revision = projected.revision
+    ; latest_event_sequence = projected.latest_event_sequence
     }
 ;;
 
@@ -2148,7 +2113,7 @@ let audit_outcome
       t
       context
       command
-      (outcome : (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result)
+      (outcome : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result)
   =
   let method_name = Agent_protocol.Command.method_name command in
   let level, name, outcome_payload =
@@ -2189,7 +2154,7 @@ let handle t ~context command =
   then Error (error Incompatible_protocol "connection must initialize first")
   else (
     let outcome =
-      Result.map
+      Result.bind
         (execute t context command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in

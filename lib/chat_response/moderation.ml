@@ -102,6 +102,8 @@ module Item = struct
            (Exn.to_string exn))
   ;;
 
+  let to_payload t = Result.bind (to_response_item t) ~f:Openai.Responses_history.of_item
+
   let text_input_message ~id ~role ~text =
     let item =
       Res.Item.Input_message

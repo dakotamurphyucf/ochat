@@ -232,3 +232,28 @@ let offline_environment (env : Eio_unix.Stdenv.base) : Eio_unix.Stdenv.base =
     method backend_id = env#backend_id
   end
 ;;
+
+let assert_public_user entries text =
+  let users =
+    List.filter entries ~f:(fun entry -> Public_view.has_header entry (Message User))
+  in
+  match users with
+  | [ entry ] ->
+    require
+      (List.equal String.equal (Public_view.history_text entry) [ text ])
+      "TUI submitted different public content"
+  | [] | _ :: _ :: _ -> failwith "TUI did not submit exactly one public user entry"
+;;
+
+let assert_public_rows model entries =
+  let expected =
+    Chat_tui.Conversation.project_public_entries entries |> Chat_tui.Conversation.rows
+  in
+  let actual = Chat_tui.Model.projected_rows model |> Array.to_list in
+  require
+    (List.equal Chat_tui.Projected_message.render_equal actual expected)
+    "TUI public row IDs, provenance, disclosure or readable content differ";
+  require
+    (List.is_empty (Chat_tui.Model.history_items model))
+    "attached public rows entered standalone canonical history"
+;;

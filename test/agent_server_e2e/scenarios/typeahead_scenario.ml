@@ -276,7 +276,9 @@ let run_host env name =
                 let sessions = Agent_client.Admin.list_sessions connection |> F.ok in
                 let session = List.hd_exn sessions in
                 let snapshot =
-                  Agent_client.Admin.get_session connection session.id |> F.ok
+                  Agent_client.Admin.get_session connection session.id
+                  |> F.ok
+                  |> Agent_protocol.Public.Snapshot.fields
                 in
                 F.require
                   (List.length snapshot.canonical_history.entries = 1)

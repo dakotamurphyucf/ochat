@@ -96,9 +96,11 @@ let%expect_test "persist_session materializes synthetic moderator messages" =
   [%expect
     {|
     <system>hello</system>
-    <msg role="assistant" id="moderation-overlay-1">
+    <assistant id="moderation-overlay-1" status="completed">
+    RAW|
     synthetic moderation output
-    </msg>
+    |RAW
+    </assistant>
     <msg role="developer" id="moderation-deletion-msg-1">
     Moderator deleted message "msg-1" from the effective transcript.
     </msg>

@@ -227,7 +227,7 @@ let execute ?audit ~env candidate =
                          }
                      ; idempotency_key = P.Idempotency_key.of_string id |> H.get
                      })
-                : P.Method_result.t);
+                : P.Public.Result.t);
              let rec wait () =
                let snapshot = H.snapshot embedded in
                Option.iter snapshot.failure ~f:(fun e -> raise (H.Protocol_error e));
@@ -313,6 +313,7 @@ let execute ?audit ~env candidate =
                     })
              with
              | Session_get snapshot ->
+               let snapshot = P.Public.Snapshot.fields snapshot in
                (match snapshot.session.desired_state, snapshot.session.observed_state with
                 | Stopped, Stopped -> ()
                 | _ ->

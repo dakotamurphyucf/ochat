@@ -33,6 +33,21 @@ let%expect_test "encoded byte accounting matches the independent JSON serializer
       require
         [%here]
         (Result.equal
+           Int.equal
+           Error.equal
+           (Json.validate_and_measure ~limits:(limits encoded_bytes) json)
+           (Ok encoded_bytes));
+      require
+        [%here]
+        (Result.equal
+           Unit.equal
+           Error.equal
+           (Json.validate ~limits:(limits (encoded_bytes - 1)) json)
+           (Json.validate_and_measure ~limits:(limits (encoded_bytes - 1)) json
+            |> Result.map ~f:ignore));
+      require
+        [%here]
+        (Result.equal
            Unit.equal
            Error.equal
            (Json.validate ~limits:(limits (encoded_bytes - 1)) json)

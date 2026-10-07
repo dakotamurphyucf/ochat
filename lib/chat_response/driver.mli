@@ -186,6 +186,7 @@ val run_completion_stream
   -> ?prompt_file:string
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
   -> ?on_history_event:(History_stream_event.t -> unit)
+  -> ?on_transcript_event:(Transcript.Stream.t -> unit)
   -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_history_tool_out:(History_entry.t -> unit)
   -> ?post_stream:In_memory_stream.post_stream

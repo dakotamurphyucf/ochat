@@ -459,15 +459,25 @@ let%expect_test "durable and recoverable events use independent ordering" =
     ; payload = `Object []
     }
   in
-  let live : Event.Recoverable.t =
-    { session_id
-    ; operation_id = Id.Operation.create_with generator
-    ; operation_sequence = 9L
-    ; anchor_sequence = 184L
-    ; timestamp
-    ; kind = Tool_progress
-    ; payload = `Object [ "message", `String "building" ]
-    }
+  let source = Transcript.Source_id.of_string "source" |> Result.ok_or_failwith in
+  let attempt = Transcript.Attempt_id.of_string "attempt" |> Result.ok_or_failwith in
+  let key =
+    Activity.Key.create ~scope:{ source; attempt } ~call_alias:"call" ~parent:None
+    |> ok_or_fail
+  in
+  let live =
+    Event.Recoverable.create
+      ~session_id
+      ~operation_id:(Id.Operation.create_with generator)
+      ~operation_sequence:9L
+      ~anchor_sequence:184L
+      ~timestamp
+      ~invocation_id:None
+      ~parent_invocation_id:None
+      (Tool_activity
+         (Activity.Tool.Progress
+            { key; progress = { channel = Activity; update = Append "building" } }))
+    |> ok_or_fail
   in
   print_endline
     (Jsonaf.to_string (Envelope.to_json (Event.Durable.to_notification durable)));
@@ -482,7 +492,7 @@ let%expect_test "durable and recoverable events use independent ordering" =
   [%expect
     {|
     {"jsonrpc":"2.0","method":"session.event","params":{"session_id":"ses_AAAAAAAAAAAAAAAAAAAAAAAA","sequence":184,"revision":27,"timestamp":"1970-01-01T00:00:00.000000000Z","kind":"history.appended","payload":{},"visibility":"hidden"}}
-    {"jsonrpc":"2.0","method":"session.live_event","params":{"session_id":"ses_AAAAAAAAAAAAAAAAAAAAAAAA","operation_id":"op_AAAAAAAAAAAAAAAAAAAAAAAA","operation_sequence":9,"anchor_sequence":184,"timestamp":"1970-01-01T00:00:00.000000000Z","kind":"tool.progress","payload":{"message":"building"}}} |}]
+    {"jsonrpc":"2.0","method":"session.live_event","params":{"session_id":"ses_AAAAAAAAAAAAAAAAAAAAAAAA","operation_id":"op_AAAAAAAAAAAAAAAAAAAAAAAA","operation_sequence":9,"anchor_sequence":184,"timestamp":"1970-01-01T00:00:00.000000000Z","kind":"tool.activity","payload":{"type":"progress","key":{"source":"source","attempt":"attempt","call_alias":"call"},"progress":{"channel":"activity","update":"append","text":"building"}}}} |}]
 ;;
 
 let%expect_test "protocol initialization canonicalizes features and dispatches" =

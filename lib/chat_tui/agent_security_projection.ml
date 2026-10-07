@@ -80,10 +80,9 @@ let permission_profile session =
   Option.value session.Agent_protocol.Session.spec.permission_profile ~default:"default"
 ;;
 
-let snapshot ~(current : Page.snapshot) (projection : Agent_protocol.Snapshot.t) =
-  let manifest, approval =
-    List.partition_tf projection.Agent_protocol.Snapshot.grants ~f:is_manifest
-  in
+let snapshot ~(current : Page.snapshot) (projection : Agent_protocol.Public.Snapshot.t) =
+  let projection = Agent_protocol.Public.Snapshot.fields projection in
+  let manifest, approval = List.partition_tf projection.grants ~f:is_manifest in
   { current with
     manifest_sha256 = first_active_manifest manifest
   ; live_manifest_sha256 = first_active_manifest manifest

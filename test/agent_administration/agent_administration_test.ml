@@ -304,7 +304,7 @@ let%expect_test "rebuild replaces actual prompt messages while upgrade retains h
         (request
            connection
            (command kind session.id attachment.id before.counters.revision target)
-         : Agent_protocol.Method_result.t);
+         : Agent_protocol.Public.Result.t);
       let _, after = state daemon session.id in
       let history = after.conversation.canonical_history in
       let text =
@@ -457,7 +457,7 @@ let seed_children entry attachment_id (before : Agent_session.Session_state.t) =
 
 let read_snapshot connection session_id =
   match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "expected snapshot"
 ;;
 
@@ -476,7 +476,9 @@ let wait_projection env handle sequence =
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 3. (fun () ->
     let rec loop () =
       let snapshot =
-        Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+        Agent_client.Session_handle.projection handle
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
       in
       if Int64.(snapshot.latest_event_sequence >= sequence)
       then snapshot
@@ -487,7 +489,7 @@ let wait_projection env handle sequence =
     loop ())
 ;;
 
-let assert_empty_children (snapshot : Agent_protocol.Snapshot.t) =
+let assert_empty_children (snapshot : Agent_protocol.Public.Snapshot.Fields.t) =
   assert (List.is_empty snapshot.canonical_history.entries);
   assert (List.is_empty snapshot.deferred_entries);
   assert (List.is_empty snapshot.permissions);
@@ -550,14 +552,28 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
     let session, attachment = create_session connection in
     let entry, before = state daemon session.id in
     seed_children entry attachment.id before;
-    let current = read_snapshot connection session.id in
+    let _, current_state = state daemon session.id in
+    let current =
+      Agent_session.Session_state.snapshot ~now:session.updated_at current_state
+    in
+    (* The seeded upgrade creates archives at real revisions; keep the synthetic
+       event after that state instead of rewinding below its archived revisions. *)
+    let revision = Int64.succ current.revision in
+    let sequence = Int64.succ current.latest_event_sequence in
+    let current =
+      { current with
+        revision
+      ; latest_event_sequence = sequence
+      ; session = { current.session with revision; latest_event_sequence = sequence }
+      }
+    in
     let event =
       Agent_protocol.Event.Durable.of_payload
         ~session_id:session.id
-        ~sequence:1L
-        ~revision:1L
+        ~sequence
+        ~revision
         ~timestamp:session.updated_at
-        (Session_updated session)
+        (Session_updated current.session)
     in
     let event = Agent_protocol.Event.Durable.with_replacement_snapshot event current in
     let principal =
@@ -567,9 +583,9 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
             [ View_session_transcript; View_security_state ]
       }
     in
-    let event = Agent_server.Principal_projection.durable principal event in
+    let event = Agent_server.Principal_projection.durable principal event |> ok in
     let projected =
-      Agent_protocol.Event.Durable.replacement_snapshot event |> ok |> Option.value_exn
+      Option.value_exn event.replacement_snapshot |> Agent_protocol.Public.Snapshot.fields
     in
     assert (List.length projected.permissions = 1);
     assert (
@@ -577,8 +593,8 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
       && List.is_empty projected.jobs
       && List.is_empty projected.schedules);
     assert (
-      Int64.equal projected.latest_event_sequence 1L
-      && Int64.equal projected.session.revision 1L);
+      Int64.equal projected.latest_event_sequence sequence
+      && Int64.equal projected.session.revision revision);
     Agent_client.Connection.close connection);
   print_endline
     "nested grants/jobs/schedules filtered even with security.read; per-event anchors \

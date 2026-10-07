@@ -26,8 +26,12 @@ let protocol_ok = function
     raise_s [%sexp "protocol operation failed", (error : Agent_protocol.Error.t)]
 ;;
 
-let request connection command =
+let request_public connection command =
   Agent_client.Connection.request connection command |> protocol_ok
+;;
+
+let request connection command =
+  Agent_client.Connection.request_without_history connection command |> protocol_ok
 ;;
 
 let idempotency_key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
@@ -197,7 +201,7 @@ let create_session connection ~key ~start_immediately =
       ; idempotency_key = idempotency_key (key ^ ":create")
       }
   in
-  match request connection (Session_create command_request) with
+  match request_public connection (Session_create command_request) with
   | Session_create created ->
     let attachment = Option.value_exn created.attachment in
     { id = created.session.id
@@ -229,8 +233,11 @@ let attach connection session ~key =
 ;;
 
 let snapshot connection session =
-  match request connection (Session_get { session_id = session.id; history = None }) with
+  match
+    request_public connection (Session_get { session_id = session.id; history = None })
+  with
   | Session_get snapshot ->
+    let snapshot = Agent_protocol.Public.Snapshot.fields snapshot in
     session.revision <- snapshot.session.revision;
     snapshot
   | _ -> fail "session.get returned the wrong result variant"
@@ -264,7 +271,9 @@ let rebuild_result connection session ~key ~expected_revision ~prompt_choice =
       ; idempotency_key = idempotency_key (key ^ ":rebuild")
       }
   in
-  Agent_client.Connection.request connection (Session_rebuild command_request)
+  Agent_client.Connection.request_without_history
+    connection
+    (Session_rebuild command_request)
 ;;
 
 let rebuild connection session ~key ~prompt_choice =
@@ -294,7 +303,9 @@ let upgrade_result connection session ~key ~expected_revision ~target_revision =
       ; idempotency_key = idempotency_key (key ^ ":upgrade")
       }
   in
-  Agent_client.Connection.request connection (Session_upgrade_prompt command_request)
+  Agent_client.Connection.request_without_history
+    connection
+    (Session_upgrade_prompt command_request)
 ;;
 
 let upgrade connection session ~key ~target_revision =
@@ -329,7 +340,7 @@ let json_contains marker json =
   loop json
 ;;
 
-let snapshot_has_marker (snapshot : Agent_protocol.Snapshot.t) version =
+let snapshot_has_marker (snapshot : Agent_protocol.Public.Snapshot.Fields.t) version =
   let marker = version_name version in
   List.exists snapshot.schedules ~f:(fun schedule ->
     json_contains marker schedule.Agent_protocol.Schedule.payload)
@@ -358,7 +369,7 @@ let cancel_schedule connection session index schedule =
 let cancel_pending_schedules connection session =
   snapshot connection session
   |> fun snapshot ->
-  snapshot.Agent_protocol.Snapshot.schedules
+  snapshot.Agent_protocol.Public.Snapshot.Fields.schedules
   |> List.filter ~f:(fun schedule ->
     match schedule.status with
     | Scheduled -> true

@@ -119,11 +119,18 @@ let attach_callbacks t =
   , fun failure -> report_error t failure )
 ;;
 
-let reconnect_once t connection =
+let reconnect_once t connection ~force_snapshot =
   let open Result.Let_syntax in
   let%bind () = initialize connection in
   let projection = Eio.Mutex.use_ro t.mutex (fun () -> t.projection) in
-  let after_sequence = (Projection.snapshot projection).latest_event_sequence in
+  let after_sequence =
+    if force_snapshot
+    then None
+    else
+      Some
+        (Agent_protocol.Public.Snapshot.fields (Projection.snapshot projection))
+          .latest_event_sequence
+  in
   let on_update, on_error = attach_callbacks t in
   let reclaim_token = Eio.Mutex.use_ro t.mutex (fun () -> t.reclaim_token) in
   match t.clock with
@@ -134,9 +141,9 @@ let reconnect_once t connection =
       ~connection
       ~session_id:t.session_id
       ~mode:t.mode
-      ~after_sequence
+      ?after_sequence
       ?reclaim_token
-      ~previous_projection:projection
+      ?previous_projection:(if force_snapshot then None else Some projection)
       ~on_update
       ~on_error
       ()
@@ -170,7 +177,7 @@ let connect t =
     |> Result.join
 ;;
 
-let rec reconnect_until t attempt =
+let rec reconnect_until t attempt ~force_snapshot =
   if attempts_exhausted t.policy attempt
   then Error (interrupted "maximum reconnect attempts exhausted")
   else (
@@ -181,17 +188,21 @@ let rec reconnect_until t attempt =
       match connect t with
       | Error failure when failure.retryable ->
         report_error t failure;
-        reconnect_until t (attempt + 1)
+        reconnect_until t (attempt + 1) ~force_snapshot
       | Error _ as failure -> failure
       | Ok connection ->
-        (match reconnect_once t connection with
+        (match reconnect_once t connection ~force_snapshot with
          | Ok handle -> Ok (connection, handle)
          | Error failure ->
            Connection.close connection;
            if failure.retryable
            then (
              report_error t failure;
-             reconnect_until t (attempt + 1))
+             let force_snapshot =
+               force_snapshot
+               || Agent_protocol.Error.equal_code failure.code Snapshot_required
+             in
+             reconnect_until t (attempt + 1) ~force_snapshot)
            else Error failure)))
 ;;
 
@@ -206,10 +217,16 @@ let rec monitor t handle =
   |> function
   | true -> ()
   | false ->
+    let force_snapshot =
+      Option.exists (Session_handle.last_error handle) ~f:(fun failure ->
+        Agent_protocol.Error.equal_code failure.code Snapshot_required)
+    in
     clear_current_handle t handle;
-    Connection.close t.connection;
+    Exn.protect
+      ~finally:(fun () -> Connection.close t.connection)
+      ~f:(fun () -> Session_handle.close handle);
     set_status t Disconnected;
-    (match reconnect_until t 1 with
+    (match reconnect_until t 1 ~force_snapshot with
      | Ok (connection, handle) ->
        if Eio.Mutex.use_ro t.mutex (fun () -> t.closed)
        then (

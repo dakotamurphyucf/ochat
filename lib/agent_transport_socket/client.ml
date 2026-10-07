@@ -1,9 +1,14 @@
 open! Core
 
+module Request_id = struct
+  include Agent_protocol.Envelope.Request_id
+  include Comparator.Make (Agent_protocol.Envelope.Request_id)
+end
+
 type pending =
   { method_ : string
   ; resolver :
-      (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result Eio.Promise.u
+      (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result Eio.Promise.u
   }
 
 type t =
@@ -11,7 +16,7 @@ type t =
   ; writer_mutex : Eio.Mutex.t
   ; state_mutex : Eio.Mutex.t
   ; notifications : Agent_protocol.Envelope.t Agent_session.Mailbox.t
-  ; mutable pending : (Agent_protocol.Envelope.Request_id.t, pending) Map.Poly.t
+  ; mutable pending : (Request_id.t, pending, Request_id.comparator_witness) Map.t
   ; mutable next_request_id : int64
   ; mutable closed : bool
   }
@@ -38,7 +43,7 @@ let resolve_all t failure =
       else (
         t.closed <- true;
         let pending = Map.data t.pending in
-        t.pending <- Map.Poly.empty;
+        t.pending <- Map.empty (module Request_id);
         pending))
   in
   List.iter pending ~f:(fun pending ->
@@ -63,7 +68,7 @@ let handle_response t response =
   Option.iter (take_pending t response.Agent_protocol.Envelope.id) ~f:(fun pending ->
     let result =
       Result.bind response.outcome ~f:(fun json ->
-        Agent_protocol.Method_result.of_json ~method_:pending.method_ json)
+        Agent_protocol.Public.Result.of_json ~method_:pending.method_ json)
     in
     Eio.Promise.resolve pending.resolver result)
 ;;
@@ -160,7 +165,7 @@ let connect ~sw ~net ~socket_path ~max_line_length ~notification_capacity =
     ; writer_mutex = Eio.Mutex.create ()
     ; state_mutex = Eio.Mutex.create ()
     ; notifications = Agent_session.Mailbox.create ~capacity:notification_capacity
-    ; pending = Map.Poly.empty
+    ; pending = Map.empty (module Request_id)
     ; next_request_id = 1L
     ; closed = false
     }

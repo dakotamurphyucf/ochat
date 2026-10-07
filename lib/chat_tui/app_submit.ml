@@ -35,13 +35,17 @@ let clear_editor ~model : unit =
   Model.set_draft_mode model Model.Plain
 ;;
 
-let get_user_message_item text =
-  let open Openai.Responses in
-  Item.Input_message
-    { Input_message.role = Input_message.User
-    ; content = [ Input_message.Text { text; _type = "input_text" } ]
-    ; _type = "message"
-    }
+let user_payload text =
+  let module P = History_entry.Payload in
+  P.Semantic.create
+    (Message
+       { form = Input
+       ; role = User
+       ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+       ; phase = Absent
+       })
+    ~metadata:P.Metadata.empty
+  |> Result.map ~f:P.authored
 ;;
 
 let apply_user_submit_effects_exn
@@ -60,7 +64,7 @@ let apply_user_submit_effects_exn
     | Model.Plain ->
       ignore (Model.apply_patch model (Add_user_message { text = user_msg }));
       let entry =
-        Openai.Responses_history.create ~allocator (get_user_message_item user_msg)
+        Result.bind (user_payload user_msg) ~f:(History_entry.create ~allocator)
         |> Result.ok_or_failwith
       in
       ignore @@ Model.add_history_item model entry
@@ -245,7 +249,7 @@ let start (ctx : Context.t) (submit_request : request) =
 let model_of_history history =
   Model.create
     ~history_items:history
-    ~messages:(Conversation.of_history (Openai.Responses_history.items_exn history))
+    ~messages:(Conversation.of_history history)
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -315,7 +319,7 @@ let%test_unit "start_from_current_session preserves canonical history" =
     |> Result.ok_or_failwith
   in
   let history =
-    [ Openai.Responses_history.create ~allocator (get_user_message_item "Hello")
+    [ Result.bind (user_payload "Hello") ~f:(History_entry.create ~allocator)
       |> Result.ok_or_failwith
     ]
   in

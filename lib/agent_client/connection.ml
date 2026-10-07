@@ -32,3 +32,12 @@ let close t =
       t.closed <- true;
       Transport.close t.transport))
 ;;
+
+let request_without_history t command =
+  match request t command with
+  | Ok (Agent_protocol.Public.Result.Non_history value) ->
+    Ok (Agent_protocol.Public.Result.Non_history.value value)
+  | Ok (Session_get _ | Session_attach _ | Session_create _) ->
+    Error (Agent_protocol.Error.invalid_request "unexpected history-bearing result")
+  | Error _ as failure -> failure
+;;

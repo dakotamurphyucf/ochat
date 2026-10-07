@@ -389,7 +389,7 @@ let require_json_content_type request =
 
 let require_protocol_version request =
   match P.Headers.get_multi (P.Request.headers request) protocol_version_header with
-  | [ "1" ] | [ "1.0" ] -> Ok ()
+  | [ "2" ] | [ "2.0" ] -> Ok ()
   | [ _ ] -> Error (error Incompatible_protocol "unsupported HTTP protocol version")
   | [] -> Error (error Incompatible_protocol "HTTP protocol version is required")
   | _ -> Error (error Invalid_request "HTTP protocol version must appear exactly once")

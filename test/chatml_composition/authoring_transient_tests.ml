@@ -160,7 +160,7 @@ let%expect_test
          wait 3;
          let compacted = F.snapshot embedded in
          List.iter compacted.canonical_history.entries ~f:(fun entry ->
-           match entry.P.History.provenance with
+           match entry.P.Public.History.provenance with
            | Runtime_authoring _ -> failwith "compaction retained reference output"
            | _ -> ());
          F.request
@@ -181,7 +181,7 @@ let%expect_test
          assert (List.is_empty current.jobs);
          assert (
            List.exists current.canonical_history.entries ~f:(fun entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_authoring { purpose = Rediscovery; _ } -> true
              | _ -> false));
          print_endline

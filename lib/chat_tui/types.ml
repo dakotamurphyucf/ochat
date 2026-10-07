@@ -1,3 +1,5 @@
+open! Core
+
 (* Shared data types for the Ochat terminal UI.  The {!Types} module
    holds only minimal, foundational definitions and therefore has no
    dependencies on heavier libraries such as Eio or Notty.  This design
@@ -13,6 +15,7 @@ type tool_output_kind =
   | Read_file of { path : string option }
   | Read_directory of { path : string option }
   | Other of { name : string option }
+[@@deriving equal]
 
 (* ------------------------------------------------------------------------ *)
 (*  Cmd constructors                                                        *)

@@ -49,19 +49,19 @@ let configure fixture =
 let text_count snapshot text =
   let window =
     Option.value
-      snapshot.Agent_protocol.Snapshot.effective_history
+      snapshot.Agent_protocol.Public.Snapshot.Fields.effective_history
       ~default:snapshot.canonical_history
   in
   List.count window.entries ~f:(fun entry ->
     String.is_substring
-      (Jsonaf.to_string entry.Agent_protocol.History.payload)
+      (Public_view.history_text entry |> String.concat ~sep:"\n")
       ~substring:text)
 ;;
 
 let has_text snapshot text = text_count snapshot text > 0
 
 let completed snapshot =
-  match snapshot.Agent_protocol.Snapshot.jobs with
+  match snapshot.Agent_protocol.Public.Snapshot.Fields.jobs with
   | [ { status = Succeeded; delivery = Delivered _; _ } ] ->
     text_count snapshot "MANUAL-BACKGROUND-DONE" = 1
     && has_text snapshot "background-result"
@@ -92,7 +92,7 @@ let self_check ~sw env fixture provider manual =
     let session, _ = F.attach client summary "manual-background-reattach" in
     ignore
       (F.await_snapshot env client session "background delivery" completed
-       : Agent_protocol.Snapshot.t);
+       : Agent_protocol.Public.Snapshot.Fields.t);
     ignore (F.schedule client session "manual-wake" "Wake" 0 : Agent_protocol.Schedule.t);
     let snapshot =
       F.await_snapshot env client session "post-result wake" (fun s ->

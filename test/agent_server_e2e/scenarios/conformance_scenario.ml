@@ -11,7 +11,7 @@ module Unix_driver = Support.Unix_driver
 type client =
   { request :
       Agent_protocol.Command.t
-      -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+      -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
   ; next_notification : unit -> Agent_protocol.Envelope.t option
   ; close : unit -> unit
   }
@@ -221,7 +221,11 @@ let with_daemon ~sw env fixture f =
   Exn.protect ~f:(fun () -> f daemon health) ~finally:(fun () -> stop_daemon env daemon)
 ;;
 
-let request client command = client.request command |> protocol_ok
+let request_public client command = client.request command |> protocol_ok
+
+let request client command =
+  request_public client command |> Support.Public_view.non_history
+;;
 
 let request_error client command =
   match client.request command with
@@ -230,7 +234,7 @@ let request_error client command =
     raise_s
       [%sexp
         "protocol operation unexpectedly succeeded"
-      , (result : Agent_protocol.Method_result.t)]
+      , (result : Agent_protocol.Public.Result.t)]
 ;;
 
 let initialize client =
@@ -243,7 +247,7 @@ let initialize client =
   let initialize_request =
     Agent_protocol.Initialize.Request.create
       ~implementation
-      ~protocol_min:Agent_protocol.Version.initial
+      ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
@@ -625,7 +629,7 @@ let create_session connection ~key =
       }
   in
   let create () =
-    match request connection (Session_create create_request) with
+    match request_public connection (Session_create create_request) with
     | Session_create created -> created
     | _ -> fail "session.create returned the wrong result variant"
   in
@@ -671,7 +675,7 @@ let attach_replay connection session_id ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_attach attach_request) with
+  match request_public connection (Session_attach attach_request) with
   | Session_attach ({ replay = Events _; _ } as attached) -> attached
   | Session_attach { replay = Current; _ } -> fail "session replay returned current"
   | Session_attach { replay = Snapshot _; _ } -> fail "session replay returned snapshot"
@@ -703,9 +707,12 @@ let list_contains_session connection session_id =
 ;;
 
 let get_matches_session connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
+  match request_public connection (Session_get { session_id; history = None }) with
   | Session_get snapshot ->
-    Agent_protocol.Id.Session.compare snapshot.session.id session_id = 0
+    Agent_protocol.Id.Session.compare
+      (Agent_protocol.Public.Snapshot.fields snapshot).session.id
+      session_id
+    = 0
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -721,7 +728,7 @@ let detach connection session_id attachment_id ~key =
 
 let sequences_are_contiguous events =
   List.for_alli events ~f:(fun index event ->
-    Int64.equal event.Agent_protocol.Event.Durable.sequence (Int64.of_int (index + 1)))
+    Int64.equal event.Agent_protocol.Public.Durable.sequence (Int64.of_int (index + 1)))
 ;;
 
 let lifecycle_observation connection ~key_prefix =
@@ -729,7 +736,7 @@ let lifecycle_observation connection ~key_prefix =
   let created, duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let started =
     start_session connection created.session attachment ~key:(key_prefix ^ ":start")
@@ -766,7 +773,7 @@ let lifecycle_observation connection ~key_prefix =
   ; stop_desired_state = stopped.session.desired_state
   ; replay_sequences_are_contiguous = sequences_are_contiguous events
   ; replay_kinds = List.map events ~f:(fun event -> event.kind)
-  ; replay_visibilities = List.map events ~f:(fun event -> event.visibility)
+  ; replay_visibilities = List.map events ~f:Support.Public_view.visibility
   ; detach_revision_delta = Int64.(detached.revision - stopped.mutation.revision)
   ; detach_sequence_delta =
       Int64.(detached.latest_event_sequence - stopped.mutation.latest_event_sequence)
@@ -875,7 +882,7 @@ let security_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   { pending_permission_count = permission_count connection created.session.id
   ; active_grant_count = grant_count connection created.session.id
@@ -993,7 +1000,7 @@ let jobs_schedules_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":session") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let first, second =
     create_schedule connection created.session attachment ~key:(key_prefix ^ ":schedule")
@@ -1102,7 +1109,7 @@ let blob_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":session") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let export = export_session connection created.session attachment in
   let chunks = download_blob connection created.session attachment export.blob 0L [] in
@@ -1154,7 +1161,7 @@ let attach_read_only ?(subscribe = false) connection session_id ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_attach attach_request) with
+  match request_public connection (Session_attach attach_request) with
   | Session_attach attached -> attached.attachment
   | _ -> fail "session.attach returned the wrong result variant"
 ;;
@@ -1164,7 +1171,7 @@ let error_observations connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let writer =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let export = export_session connection created.session writer in
   let reader =
@@ -1318,14 +1325,14 @@ let create_subscribed_session connection ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_create create_request) with
+  match request_public connection (Session_create create_request) with
   | Session_create created -> created
   | _ -> fail "session.create returned the wrong result variant"
 ;;
 
 let durable_notification = function
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    Agent_protocol.Event.Durable.of_json params |> protocol_ok |> Option.some
+    Agent_protocol.Public.Durable.of_json params |> protocol_ok |> Option.some
   | Notification _ -> None
   | Request _ | Response _ -> fail "notification stream returned a non-notification"
 ;;
@@ -1358,16 +1365,16 @@ let rec collect_events env connection session_id previous through events =
 let normalize_events events ~base_sequence ~base_revision =
   List.map events ~f:(fun event ->
     { relative_sequence =
-        Int64.(event.Agent_protocol.Event.Durable.sequence - base_sequence)
+        Int64.(event.Agent_protocol.Public.Durable.sequence - base_sequence)
     ; relative_revision = Int64.(event.revision - base_revision)
     ; kind = event.kind
-    ; visibility = event.visibility
+    ; visibility = Support.Public_view.visibility event
     })
 ;;
 
 let attached_writer created =
-  Option.value_exn created.Agent_protocol.Method_result.Create.attachment
-  |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+  Option.value_exn created.Agent_protocol.Public.Result.Create.attachment
+  |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
 ;;
 
 let schedule_event_trace env connection created ~key_prefix =
@@ -1408,7 +1415,7 @@ let event_order_observation env connection ~key_prefix =
   ; replay =
       List.filter replay ~f:(fun event ->
         Int64.(
-          event.Agent_protocol.Event.Durable.sequence
+          event.Agent_protocol.Public.Durable.sequence
           > created.mutation.latest_event_sequence))
       |> normalize
   }
@@ -1453,7 +1460,7 @@ let visibility_observation env writer_connection reader_connection ~key_prefix =
       ~key:(key_prefix ^ ":reader")
   in
   let writer_events = schedule_event_trace env writer_connection created ~key_prefix in
-  let through = (List.last_exn writer_events).Agent_protocol.Event.Durable.sequence in
+  let through = (List.last_exn writer_events).Agent_protocol.Public.Durable.sequence in
   let reader_events =
     collect_events
       env
@@ -1491,8 +1498,8 @@ let require_equal_visibility unix http =
 ;;
 
 let history_snapshot connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -1510,8 +1517,8 @@ let require_same_snapshot before after =
   if
     not
       (Poly.equal
-         (Agent_protocol.Snapshot.to_json before)
-         (Agent_protocol.Snapshot.to_json after))
+         (Support.Public_view.snapshot_to_json before)
+         (Support.Public_view.snapshot_to_json after))
   then fail "rejected or replayed history deletion changed session state"
 ;;
 
@@ -1524,7 +1531,7 @@ let reject_history_deletion
       id
       key_prefix
   =
-  let session_id = before.Agent_protocol.Snapshot.session.id in
+  let session_id = before.Agent_protocol.Public.Snapshot.Fields.session.id in
   let reader_error =
     request_error
       reader
@@ -1569,15 +1576,16 @@ let delete_history_replayed connection command =
 
 let require_deleted_history before after id =
   let expected =
-    List.filter before.Agent_protocol.Snapshot.canonical_history.entries ~f:(fun entry ->
-      Agent_protocol.History.Id.compare entry.id id <> 0)
+    List.filter
+      before.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
+      ~f:(fun entry -> Agent_protocol.History.Id.compare entry.id id <> 0)
   in
-  let actual = after.Agent_protocol.Snapshot.canonical_history.entries in
+  let actual = after.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries in
   if
     not
       (Poly.equal
-         (List.map expected ~f:Agent_protocol.History.entry_to_json)
-         (List.map actual ~f:Agent_protocol.History.entry_to_json))
+         (List.map expected ~f:Agent_protocol.Public.History.to_json)
+         (List.map actual ~f:Agent_protocol.Public.History.to_json))
   then fail "history deletion did not remove exactly the selected canonical occurrence";
   expected
 ;;
@@ -1585,20 +1593,15 @@ let require_deleted_history before after id =
 let require_history_replacement events expected =
   let windows =
     List.filter_map events ~f:(fun event ->
-      match
-        Agent_protocol.Event.Durable.Payload.of_json
-          ~kind:event.Agent_protocol.Event.Durable.kind
-          event.payload
-        |> protocol_ok
-      with
-      | History_replaced window -> Some window
+      match Support.Public_view.payload event with
+      | Some (History_replaced window) -> Some window
       | _ -> None)
   in
   match windows with
   | [ window ]
     when Poly.equal
-           (List.map window.entries ~f:Agent_protocol.History.entry_to_json)
-           (List.map expected ~f:Agent_protocol.History.entry_to_json) -> ()
+           (List.map window.entries ~f:Agent_protocol.Public.History.to_json)
+           (List.map expected ~f:Agent_protocol.Public.History.to_json) -> ()
   | _ -> fail "subscriber did not receive the committed history replacement"
 ;;
 

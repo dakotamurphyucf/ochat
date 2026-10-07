@@ -85,14 +85,7 @@ let finish_call ?timeout env host call_id =
           |> ignore);
       Option.is_none snapshot.session.active_operation
       && List.exists snapshot.canonical_history.entries ~f:(fun entry ->
-        match
-          Agent_session.History_codec.of_protocol entry
-          |> protocol_ok
-          |> Openai.Responses_history.item_exn
-        with
-        | Openai.Responses.Item.Function_call_output { call_id = actual; _ } ->
-          String.equal actual call_id
-        | _ -> false))
+        Option.exists (Host.function_output_call_id entry) ~f:(String.equal call_id)))
   with
   | Eio.Time.Timeout ->
     let snapshot = Host.snapshot host in
@@ -290,7 +283,7 @@ let%expect_test
               [%sexp (scenario : background_case), (completion : P.Completion.t option)]);
          let notifications =
            List.filter snapshot.canonical_history.entries ~f:(fun entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in
@@ -300,17 +293,11 @@ let%expect_test
          let history = snapshot.canonical_history.entries in
          let acknowledgement_index, _ =
            List.findi_exn history ~f:(fun _ entry ->
-             match
-               Agent_session.History_codec.of_protocol entry
-               |> protocol_ok
-               |> Openai.Responses_history.item_exn
-             with
-             | Openai.Responses.Item.Function_call_output { call_id = "begin"; _ } -> true
-             | _ -> false)
+             Option.exists (Host.function_output_call_id entry) ~f:(String.equal "begin"))
          in
          let notification_index, _ =
            List.findi_exn history ~f:(fun _ entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in

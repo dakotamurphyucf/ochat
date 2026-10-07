@@ -64,7 +64,7 @@
   mcp_discovery_cache
   fork
   compact_history)
- (libraries
+ (libraries ochat.transcript
   ochat.document_schema
   core
   core_unix

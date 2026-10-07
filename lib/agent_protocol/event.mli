@@ -130,37 +130,40 @@ module Durable : sig
 end
 
 module Recoverable : sig
-  type kind =
-    | Provider_stream
-    | Sourced_stream
-    | History_correlated_stream
-    | Tool_started
-    | Tool_progress
-    | Tool_trace
-    | Tool_finished
-    | Agent_call_classified
-    | Agent_call_progress
-    | Activity
-    | Compaction_progress
-  [@@deriving compare, equal, sexp]
+  type payload =
+    | Transcript of Transcript.Stream.t
+    | Tool_activity of Activity.Tool.event
+  [@@deriving sexp_of]
 
-  type t =
+  type t = private
     { session_id : Id.Session.t
     ; operation_id : Id.Operation.t
     ; operation_sequence : int64
     ; anchor_sequence : int64
     ; timestamp : Timestamp.t
-    ; kind : kind
-    ; payload : Jsonaf.t
+    ; invocation_id : Id.Invocation.t option
+    ; parent_invocation_id : Id.Invocation.t option
+    ; payload : payload
+    ; original_json : Jsonaf.t option
+      (** Immutable admitted received envelope, retaining unknown fields for exact
+          duplicate detection. Native events have [None]. *)
     }
-  [@@deriving sexp]
+  [@@deriving sexp_of]
 
-  (** [to_json t] encodes the parameters of a [session.live_event] notification. *)
+  (** Positive operation sequence, nonnegative durable anchor; complete encoded
+      envelope is bounded to 16 MiB. Invocation IDs are actual host IDs only. *)
+  val create
+    :  session_id:Id.Session.t
+    -> operation_id:Id.Operation.t
+    -> operation_sequence:int64
+    -> anchor_sequence:int64
+    -> timestamp:Timestamp.t
+    -> invocation_id:Id.Invocation.t option
+    -> parent_invocation_id:Id.Invocation.t option
+    -> payload
+    -> (t, Error.t) result
+
   val to_json : t -> Jsonaf.t
-
-  (** [of_json json] decodes a recoverable live event. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
-
-  (** [to_notification t] wraps the live event in a JSON-RPC notification. *)
   val to_notification : t -> Envelope.t
 end

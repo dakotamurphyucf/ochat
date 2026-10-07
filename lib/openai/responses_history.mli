@@ -60,3 +60,7 @@ val of_items
   -> allocator:History_entry.Allocator.t
   -> Responses.Item.t list
   -> (History_entry.t list, string) Result.t
+
+(** Provider producer projection of actual output parts; no inferred call kind,
+    JSON decode, canonical admission or provider replay. *)
+val output_to_neutral : Responses.Tool_output.Output.t -> History_entry.Payload.Output.t

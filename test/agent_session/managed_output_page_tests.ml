@@ -88,6 +88,71 @@ let%expect_test
        [%test_eq: string]
          "first answer\nsecond answer"
          (Page.completed_answer ~state ~receipt_id:input.id |> protocol_ok);
+       let module Payload = History_entry.Payload in
+       let neutral ~form ~content ~captured =
+         let semantic =
+           Payload.Semantic.create
+             (Message { form; role = Assistant; content; phase = Absent })
+             ~metadata:Payload.Metadata.empty
+           |> Result.ok_or_failwith
+         in
+         let payload =
+           if captured
+           then
+             Payload.captured
+               semantic
+               ~origin:Payload.Origin.unavailable
+               ~raw:
+                 (`Object
+                     [ "type", `String "future.assistant"
+                     ; "opaque", `Object [ "literal", `Number "1e+00" ]
+                     ])
+             |> Result.ok_or_failwith
+           else Payload.authored semantic
+         in
+         History_entry.create_with_id ~id:first.id payload
+         |> Agent_session.History_codec.to_protocol
+       in
+       let answer first =
+         let state =
+           { state with
+             conversation =
+               { state.conversation with canonical_history = [ input; first; second ] }
+           }
+         in
+         State.validate state |> protocol_ok;
+         Page.completed_answer ~state ~receipt_id:input.id
+       in
+       let captured =
+         neutral
+           ~form:Output
+           ~content:
+             [ Text
+                 { text = "captured answer"
+                 ; annotations = [ `Object [ "opaque_annotation", `True ] ]
+                 ; logprobs = Value (`Object [ "literal", `Number "1.00" ])
+                 }
+             ; Refusal "readable refusal"
+             ]
+           ~captured:true
+       in
+       let original = captured.payload in
+       [%test_eq: string]
+         "captured answer readable refusal\nsecond answer"
+         (answer captured |> protocol_ok);
+       assert (Jsonaf.exactly_equal original captured.payload);
+       [%test_eq: string]
+         "authored refusal\nsecond answer"
+         (answer
+            (neutral ~form:Output ~content:[ Refusal "authored refusal" ] ~captured:false)
+          |> protocol_ok);
+       List.iter
+         [ Payload.Semantic.Input, [ Payload.Content.Refusal "input refusal" ]
+         ; Output, [ Image { uri = "https://example.test/image"; detail = Absent } ]
+         ; Output, [ Unknown { kind = "future.content"; raw = `Object [] } ]
+         ]
+         ~f:(fun (form, content) ->
+           assert (Result.is_error (answer (neutral ~form ~content ~captured:true))));
        let signer = Agent_server.Managed_output_cursor.create () in
        let read ?(max_bytes = 4096) state receipt_id cursor =
          Page.read

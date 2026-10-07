@@ -15,6 +15,11 @@ module Invocation_id = struct
   let to_string t = t
 end
 
+type transcript_observer =
+  { parent : Transcript.Scope.parent
+  ; observe : Transcript.Stream.t -> unit
+  }
+
 let create_allocator ~parent_namespace invocation_id =
   History_entry.Allocator.create
     ~namespace:(parent_namespace ^ "/" ^ Invocation_id.to_string invocation_id)
@@ -87,6 +92,7 @@ let rec run_stream
           ~(on_event : Res.Response_stream.t -> unit)
           ~(on_sourced_event : Sourced_response_event.t -> unit)
           ~(on_tool_execution : Tool_execution_event.t -> unit)
+          ~transcript_observer
           ~(on_fn_out : Res.Function_call_output.t -> unit)
           ~(call_id_parent : string)
           ~(invocation_id : Invocation_id.t)
@@ -106,7 +112,53 @@ let rec run_stream
   (* ------------------------------------------------------------------ *)
   (* Recursive turn function                                             *)
   (* ------------------------------------------------------------------ *)
+  let next_attempt = ref 0 in
   let rec turn (hist : History_entry.t list) : History_entry.t list =
+    let transcript_scope, transcript_live =
+      match transcript_observer with
+      | None -> None, ref None
+      | Some observer ->
+        let source =
+          Transcript.Source_id.of_string (Invocation_id.to_string invocation_id)
+          |> Result.ok_or_failwith
+        in
+        let attempt =
+          Transcript.Attempt_id.of_string ("attempt:" ^ Int.to_string !next_attempt)
+          |> Result.ok_or_failwith
+        in
+        Int.incr next_attempt;
+        let scope =
+          Transcript.Scope.create ~source ~attempt ~relation:(Nested observer.parent)
+          |> Result.ok_or_failwith
+        in
+        ( Some scope
+        , ref
+            (Some
+               (Openai.Responses_live.create ~scope ~limits:Transcript.Admission.default))
+        )
+    in
+    let update_transcript update =
+      match transcript_observer, !transcript_live with
+      | None, _ -> ()
+      | Some observer, Some live ->
+        let live, observations = update live |> Result.ok_or_failwith in
+        transcript_live := Some live;
+        List.iter observations ~f:observer.observe
+      | Some _, None -> failwith "child observation outside an actual source"
+    in
+    let child_observer ~call_id =
+      match transcript_observer, transcript_scope with
+      | Some observer, Some scope ->
+        Some
+          { parent =
+              { scope = Transcript.Scope.key scope
+              ; call_entry_id = None
+              ; call_alias = Some call_id
+              }
+          ; observe = observer.observe
+          }
+      | None, _ | Some _, None -> None
+    in
     (* Tables for tracking function calls and reasoning items. *)
     let module Tool_call_kind = struct
       type t =
@@ -123,7 +175,8 @@ let rec run_stream
       let entry =
         Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
       in
-      new_entries := entry :: !new_entries
+      new_entries := entry :: !new_entries;
+      update_transcript (fun live -> Openai.Responses_live.finalized live entry)
     in
     let run_again = ref false in
     (* Execute a tool once its arguments have been streamed. *)
@@ -167,6 +220,7 @@ let rec run_stream
                         ~on_event
                         ~on_sourced_event
                         ~on_tool_execution:(Agent_trace.on_tool_execution trace)
+                        ?transcript_observer:(child_observer ~call_id)
                         ~on_fn_out
                         ?temperature
                         ?max_output_tokens
@@ -194,6 +248,8 @@ let rec run_stream
           Openai.Responses_history.create ~allocator fn_out_item |> Result.ok_or_failwith
         in
         new_entries := fn_out_entry :: fn_call_entry :: !new_entries;
+        update_transcript (fun live -> Openai.Responses_live.finalized live fn_call_entry);
+        update_transcript (fun live -> Openai.Responses_live.finalized live fn_out_entry);
         run_again := true;
         fn_out
     in
@@ -233,10 +289,16 @@ let rec run_stream
           |> Result.ok_or_failwith
         in
         new_entries := tool_out_entry :: tool_call_entry :: !new_entries;
+        update_transcript (fun live ->
+          Openai.Responses_live.finalized live tool_call_entry);
+        update_transcript (fun live ->
+          Openai.Responses_live.finalized live tool_out_entry);
         run_again := true
     in
     (* Streaming callback – forwards to caller while building history. *)
     let stream_cb (ev : Res.Response_stream.t) =
+      update_transcript (fun live ->
+        Openai.Responses_live.observe_legacy live ~entry_id:None ev);
       (match ev with
        (* Assistant text progress – accumulate and propagate *)
        | Res.Response_stream.Output_text_delta { delta; _ } ->
@@ -298,6 +360,7 @@ let rec run_stream
     Eio.Switch.run
     @@ fun sw ->
     (* Fire request. *)
+    update_transcript Openai.Responses_live.start;
     let stream =
       Res.post_response
         Res.Stream
@@ -313,6 +376,11 @@ let rec run_stream
         ~model:Res.Request.O3
     in
     Seq.iter stream_cb stream;
+    let completion =
+      Option.bind !transcript_live ~f:Openai.Responses_live.completion
+      |> Option.value ~default:Transcript.Stream.Incomplete
+    in
+    update_transcript (fun live -> Openai.Responses_live.finish live ~completion);
     let next_hist = hist @ List.rev !new_entries in
     if !run_again then turn next_hist else next_hist
   in
@@ -334,6 +402,7 @@ and execute_entries
       ~on_event
       ?on_sourced_event
       ?on_tool_execution
+      ?transcript_observer
       ~on_fn_out
       ?temperature
       ?max_output_tokens
@@ -356,6 +425,7 @@ and execute_entries
       ~on_event
       ~on_sourced_event:(Option.value on_sourced_event ~default:(fun _ -> ()))
       ~on_tool_execution:(Option.value on_tool_execution ~default:(fun _ -> ()))
+      ~transcript_observer
       ~on_fn_out
       ~call_id_parent:call_id
       ~invocation_id

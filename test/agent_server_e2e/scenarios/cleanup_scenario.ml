@@ -31,8 +31,12 @@ let protocol_ok = function
     raise_s [%sexp "protocol operation failed", (error : Agent_protocol.Error.t)]
 ;;
 
-let request connection command =
+let request_public connection command =
   Agent_client.Connection.request connection command |> protocol_ok
+;;
+
+let request connection command =
+  Agent_client.Connection.request_without_history connection command |> protocol_ok
 ;;
 
 let idempotency_key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
@@ -204,7 +208,7 @@ let create_session connection ~key ~start_immediately =
       ; idempotency_key = idempotency_key (key ^ ":create")
       }
   in
-  match request connection (Session_create command_request) with
+  match request_public connection (Session_create command_request) with
   | Session_create created ->
     let attachment = Option.value_exn created.attachment in
     { id = created.session.id
@@ -225,14 +229,17 @@ let attach connection session ~key =
       ; idempotency_key = idempotency_key (key ^ ":attach")
       }
   in
-  match request connection (Session_attach command_request) with
+  match request_public connection (Session_attach command_request) with
   | Session_attach attached -> session.attachment_id <- attached.attachment.id
   | _ -> fail "session.attach returned the wrong result variant"
 ;;
 
 let get_session connection session =
-  match request connection (Session_get { session_id = session.id; history = None }) with
+  match
+    request_public connection (Session_get { session_id = session.id; history = None })
+  with
   | Session_get snapshot ->
+    let snapshot = Agent_protocol.Public.Snapshot.fields snapshot in
     session.revision <- snapshot.session.revision;
     snapshot.session
   | _ -> fail "session.get returned the wrong result variant"
@@ -247,7 +254,9 @@ let stop_session_result connection session ~key =
       ; idempotency_key = idempotency_key (key ^ ":stop")
       }
   in
-  Agent_client.Connection.request connection (Session_stop command_request)
+  Agent_client.Connection.request_without_history
+    connection
+    (Session_stop command_request)
 ;;
 
 let stop_session connection session ~key =

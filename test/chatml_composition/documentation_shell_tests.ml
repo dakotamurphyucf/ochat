@@ -93,10 +93,13 @@ let%expect_test "public checker separates inspection, checks and approved report
                    P.Permission.equal_state p.state Pending);
               Option.is_some !pending
               && List.count snapshot.canonical_history.entries ~f:(fun entry ->
-                   P.History.equal_kind entry.kind Tool_output)
+                   Option.exists (P.Public.History.header entry) ~f:(function
+                     | Transcript.Header.Result _ -> true
+                     | _ -> false))
                  = 4)
           with
-          | Eio.Time.Timeout -> raise_s [%sexp (Host.snapshot host : P.Snapshot.t)]);
+          | Eio.Time.Timeout ->
+            raise_s [%sexp (Host.snapshot host : P.Public.Snapshot.Fields.t)]);
          assert (not (Eio.Path.is_file report_path));
          let snapshot = Host.snapshot host in
          [%test_eq: string] setup (shell_result snapshot "inspect").stdout;

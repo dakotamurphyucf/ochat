@@ -20,7 +20,7 @@ let configure env fixture =
 
 let start_session client created =
   let attachment =
-    (Option.value_exn created.Agent_protocol.Method_result.Create.attachment).attachment
+    (Option.value_exn created.Agent_protocol.Public.Result.Create.attachment).attachment
   in
   ignore
     (F.request
@@ -68,18 +68,18 @@ let with_host env environment fixture marker f =
         F.with_client ~sw env fixture (fun client -> f child client)))
 ;;
 
-let assert_unknown (snapshot : Agent_protocol.Snapshot.t) =
+let assert_unknown (snapshot : Agent_protocol.Public.Snapshot.Fields.t) =
   F.require
     (Option.is_some snapshot.session.active_operation)
     "unknown effect had no durable active operation";
   F.require
     (List.exists snapshot.canonical_history.entries ~f:(fun entry ->
-       Agent_protocol.History.equal_kind entry.kind Tool_call))
+       Support.Public_view.has_header entry (Call Function)))
     "tool intent was not committed before its side effect";
   F.require
     (not
        (List.exists snapshot.canonical_history.entries ~f:(fun entry ->
-          Agent_protocol.History.equal_kind entry.kind Tool_output)))
+          Support.Public_view.has_header entry (Result Function))))
     "tool completion was committed before the crash"
 ;;
 
@@ -132,7 +132,7 @@ let persisted_events env fixture session_id =
         |> F.store_ok))
 ;;
 
-let assert_interrupted env fixture (before : Agent_protocol.Snapshot.t) =
+let assert_interrupted env fixture (before : Agent_protocol.Public.Snapshot.Fields.t) =
   let operation = Option.value_exn before.session.active_operation in
   let interrupted =
     persisted_events env fixture before.session.id
@@ -190,17 +190,25 @@ let test env environment =
       in
       F.require_equal
         "unknown-effect original canonical history"
-        [%sexp_of: Agent_protocol.History.Window.t]
+        [%sexp_of: Agent_protocol.Public.History.Window.t]
         before.canonical_history
         { recovered.canonical_history with entries = prefix };
       (* Recovery closes the persisted invocation without replaying its uncertain
          effect. The cancellation acknowledgement is appended once, never a
          fabricated successful result or a replacement for the original call. *)
-      (match Agent_session.History_codec.all_of_protocol appended |> F.protocol_ok with
+      (match appended with
        | [ entry ] ->
-         (match Openai.Responses_history.item_exn entry with
-          | Function_call_output
-              { call_id = "crash-unknown-call"; output = Text encoded; _ } ->
+         let payload = Support.Public_view.full_payload entry in
+         (match
+            History_entry.Payload.Semantic.view (History_entry.Payload.semantic payload)
+          with
+          | Result { kind = Function; output = Text encoded; _ }
+            when History_entry.Payload.Presence.equal
+                   String.equal
+                   (History_entry.Payload.Semantic.metadata
+                      (History_entry.Payload.semantic payload))
+                     .call_id
+                   (Value "crash-unknown-call") ->
             (match
                Agent_protocol.Invocation.outcome_of_json (Jsonaf.of_string encoded)
                |> F.protocol_ok
@@ -217,7 +225,7 @@ let test env environment =
        | Some history ->
          F.require_equal
            "unknown-effect repeated recovery history"
-           [%sexp_of: Agent_protocol.History.Window.t]
+           [%sexp_of: Agent_protocol.Public.History.Window.t]
            history
            recovered.canonical_history);
       F.kill env child);

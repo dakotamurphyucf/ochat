@@ -33,7 +33,10 @@ let history_id sequence =
 ;;
 
 let row sequence text =
-  Projected_message.canonical_row ~entry_id:(history_id sequence) ("assistant", text)
+  Projected_message.canonical_row
+    ~editing_text:text
+    ~entry_id:(history_id sequence)
+    ("assistant", text)
 ;;
 
 let selected model =
@@ -188,6 +191,7 @@ let%expect_test
       ; message = "system", "notice"
       ; provenance = Placeholder
       ; source = Placeholder { local_id = "one"; kind = "notice" }
+      ; editing_text = None
       ; revision = 0
       }
   in
@@ -224,6 +228,6 @@ let%expect_test
     ((21:identity-interactions:0 21:identity-interactions:2
       21:identity-interactions:1)
      (21:identity-interactions:1)
-     ("system: Select a canonical history entry to delete.") 3)
+     ("system: Select a canonical history occurrence to delete.") 3)
     |}]
 ;;

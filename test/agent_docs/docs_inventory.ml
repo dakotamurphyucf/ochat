@@ -146,6 +146,8 @@ let module_rows env root =
          ; "chatmd_shell_spec/"
          ; "openai/responses"
          ; "history_entry"
+         ; "history_chatmd/"
+         ; "transcript/"
          ; "session_store"
          ; "source_loader"
          ]

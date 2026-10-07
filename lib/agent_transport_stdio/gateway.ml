@@ -49,7 +49,7 @@ let response connection (request : Agent_protocol.Envelope.request) =
       ~params:request.params
   in
   let%map result = Agent_client.Connection.request connection command in
-  Agent_protocol.Method_result.to_json result
+  Agent_protocol.Public.Result.to_json result
 ;;
 
 let dispatch connection outgoing on_error = function

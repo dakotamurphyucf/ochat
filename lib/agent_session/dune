@@ -117,7 +117,7 @@
   quota_key
   quota_manager
   start_queue)
- (libraries
+ (libraries ochat.history_chatmd ochat.transcript
   core
   digestif
   eio

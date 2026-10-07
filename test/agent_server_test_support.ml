@@ -363,7 +363,7 @@ let create_session ?(start_immediately = false) ?(key = "restart-create") connec
     (Session_create (create_request ~start_immediately ~key ()))
   |> protocol_ok
   |> function
-  | Agent_protocol.Method_result.Session_create result ->
+  | Agent_protocol.Public.Result.Session_create result ->
     result.session, (Option.value_exn result.attachment).attachment
   | _ -> failwith "unexpected create response"
 ;;

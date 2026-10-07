@@ -145,6 +145,11 @@ output after the initial prompt, with provenance and operation/receipt correlati
 They omit system/developer messages, reasoning and tool traffic. Readers do not
 consume each other's output. Redacted records retain a marker with a null payload.
 
+One-off child answers read assistant text and output refusal text from neutral
+message content, including captured messages. The committed payload stays
+unchanged. Image or unknown content fails explicitly rather than being flattened
+into answer text.
+
 Keep `next_cursor` even when `caught_up` is true. It identifies a position in that
 query's output, not completion of the child or its operation. Continue with the
 same session and receipt filter. To wait for new output, call `agent_wait` with

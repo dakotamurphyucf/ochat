@@ -230,14 +230,18 @@ let initialize connection =
   let%bind request =
     Agent_protocol.Initialize.Request.create
       ~implementation
-      ~protocol_min:Agent_protocol.Version.initial
+      ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
   in
-  match Agent_client.Connection.request connection (Protocol_initialize request) with
+  match
+    Agent_client.Connection.request_without_history
+      connection
+      (Protocol_initialize request)
+  with
   | Ok (Protocol_initialize _) -> Ok ()
   | Ok _ -> Error (Agent_protocol.Error.invalid_request "unexpected initialize response")
   | Error _ as failure -> failure

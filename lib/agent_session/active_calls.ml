@@ -1,76 +1,114 @@
 open! Core
+module P = Agent_protocol
 
-type t = (string, Agent_protocol.Event.Recoverable.t) Hashtbl.t
+module Key = struct
+  type t = P.Id.Operation.t * P.Activity.Key.t [@@deriving compare, hash, sexp_of]
+end
 
-let create () = Hashtbl.create (module String)
+type entry =
+  { operation_id : P.Id.Operation.t
+  ; sequence : int64
+  ; summary : P.Activity.Tool.summary
+  }
 
-let field payload name =
-  match payload with
-  | `Object fields -> List.Assoc.find fields name ~equal:String.equal
-  | _ -> None
+type t = (Key.t, entry) Hashtbl.t
+
+let create () = Hashtbl.create (module Key)
+
+let summary_limits =
+  match
+    Document_schema.Limits.create
+      ~max_bytes:4096
+      ~max_depth:32
+      ~max_fields:256
+      ~max_nodes:512
+  with
+  | Ok limits -> limits
+  | Error _ -> failwith "invalid active call summary limits"
 ;;
 
-let key event =
-  match field event.Agent_protocol.Event.Recoverable.payload "call_id" with
-  | Some (`String call_id) ->
-    Some (Agent_protocol.Id.Operation.to_string event.operation_id ^ ":" ^ call_id)
-  | _ -> None
+let observe t (event : P.Event.Recoverable.t) =
+  match event.payload with
+  | Transcript _ -> ()
+  | Tool_activity activity ->
+    let key = event.operation_id, P.Activity.Tool.key activity in
+    (match activity with
+     | Started descriptor ->
+       if Hashtbl.length t < 1024 || Hashtbl.mem t key
+       then (
+         let summary =
+           P.Activity.Tool.summary
+             descriptor.key
+             ~descriptor:(Some descriptor)
+             ~channels:[]
+             ~state:Running
+         in
+         match summary with
+         | Error _ -> Hashtbl.remove t key
+         | Ok summary ->
+           (match
+              Document_schema.Json.validate
+                ~limits:summary_limits
+                (P.Activity.Tool.summary_to_json summary)
+            with
+            | Error _ -> Hashtbl.remove t key
+            | Ok () ->
+              Hashtbl.set
+                t
+                ~key
+                ~data:
+                  { operation_id = event.operation_id
+                  ; sequence = event.operation_sequence
+                  ; summary
+                  }))
+     | Progress _ -> ()
+     | Finished _ -> Hashtbl.remove t key)
 ;;
 
-let bounded_payload = function
-  | `Object fields ->
-    `Object
-      (List.map fields ~f:(fun (name, value) ->
-         ( name
-         , match value with
-           | `String text when String.equal name "payload" && String.length text > 4096 ->
-             `String "<summary field omitted: exceeds 4096 bytes>"
-           | json -> json )))
-  | json -> json
-;;
-
-let observe t event =
-  Option.iter (key event) ~f:(fun key ->
-    match event.Agent_protocol.Event.Recoverable.kind with
-    | Tool_started when Hashtbl.length t < 1024 || Hashtbl.mem t key ->
-      Hashtbl.set t ~key ~data:{ event with payload = bounded_payload event.payload }
-    | Tool_finished -> Hashtbl.remove t key
-    | _ -> ())
-;;
-
-let finish t (event : Agent_protocol.Event.Durable.t) =
+let finish t (event : P.Event.Durable.t) =
   match event.kind with
   | Operation_completed | Operation_cancelled | Operation_failed | Operation_interrupted
     ->
-    (match Agent_protocol.Operation.of_json event.payload with
+    (match P.Operation.of_json event.payload with
      | Error _ -> ()
      | Ok operation ->
        Hashtbl.filter_inplace t ~f:(fun entry ->
-         Agent_protocol.Id.Operation.compare
-           entry.Agent_protocol.Event.Recoverable.operation_id
-           operation.id
-         <> 0))
-  | _ -> ()
+         not (P.Id.Operation.equal entry.operation_id operation.id)))
+  | Session_created
+  | Session_state_changed
+  | Session_updated
+  | Attachment_owner_changed
+  | History_message_deferred
+  | History_appended
+  | History_replaced
+  | Moderator_overlay_changed
+  | Moderator_notification
+  | Permission_requested
+  | Permission_resolved
+  | Grant_created
+  | Grant_revoked
+  | Operation_started
+  | Job_state_changed
+  | Schedule_created
+  | Schedule_state_changed
+  | Schedule_cancelled
+  | Prompt_upgraded
+  | Workspace_state_changed
+  | Session_error -> ()
 ;;
 
 let snapshot t =
   let calls =
     Hashtbl.data t
     |> List.sort ~compare:(fun a b ->
-      match
-        Agent_protocol.Id.Operation.compare
-          a.Agent_protocol.Event.Recoverable.operation_id
-          b.Agent_protocol.Event.Recoverable.operation_id
-      with
-      | 0 -> Int64.compare a.operation_sequence b.operation_sequence
+      match P.Id.Operation.compare a.operation_id b.operation_id with
+      | 0 -> Int64.compare a.sequence b.sequence
       | order -> order)
   in
   let agents =
-    List.filter calls ~f:(fun event ->
-      match field event.payload "agent_page_kind" with
-      | Some (`String _) -> true
-      | _ -> false)
+    List.filter calls ~f:(fun entry ->
+      Option.exists entry.summary.descriptor ~f:(fun d -> Option.is_some d.classification))
   in
-  ( List.map calls ~f:Agent_protocol.Event.Recoverable.to_json
-  , List.map agents ~f:Agent_protocol.Event.Recoverable.to_json )
+  let encode entry = P.Activity.Tool.summary_to_json entry.summary in
+  List.map calls ~f:encode, List.map agents ~f:encode
 ;;

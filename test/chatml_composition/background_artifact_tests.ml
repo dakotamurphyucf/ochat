@@ -68,7 +68,7 @@ let read_artifact client (reference : P.Job_artifact.t) =
   in
   Exn.protect
     ~finally:(fun () ->
-      Agent_client.Connection.request
+      Agent_client.Connection.request_without_history
         client
         (Session_detach
            { session_id = reference.session_id
@@ -81,7 +81,7 @@ let read_artifact client (reference : P.Job_artifact.t) =
       let bytes = Buffer.create 4096 in
       let rec read offset =
         match
-          Agent_client.Connection.request
+          Agent_client.Connection.request_without_history
             client
             (Blob_read
                { session_id = reference.session_id
@@ -112,7 +112,7 @@ let read_artifact client (reference : P.Job_artifact.t) =
 let rec await_result env client (job : J.t) =
   let current =
     match
-      Agent_client.Connection.request
+      Agent_client.Connection.request_without_history
         client
         (Job_get { session_id = job.session_id; job_id = job.id })
       |> protocol_ok

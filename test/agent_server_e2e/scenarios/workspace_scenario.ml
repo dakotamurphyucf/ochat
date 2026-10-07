@@ -124,8 +124,12 @@ let stop_daemon env daemon =
 
 let initialize connection = Unix_driver.initialize connection |> protocol_ok
 
-let request connection command =
+let request_public connection command =
   Agent_client.Connection.request connection command |> protocol_ok
+;;
+
+let request connection command =
+  Agent_client.Connection.request_without_history connection command |> protocol_ok
 ;;
 
 let with_daemon env environment fixture ~name f =
@@ -201,8 +205,8 @@ let create_session connection =
 ;;
 
 let session_snapshot connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -547,7 +551,7 @@ let failed_session_create connection =
   | Ok (result, _prompt_revision) ->
     raise_s
       [%sexp
-        "session.create unexpectedly succeeded", (result : Agent_protocol.Method_result.t)]
+        "session.create unexpectedly succeeded", (result : Agent_protocol.Public.Result.t)]
 ;;
 
 let test_no_filesystem_tool env environment =

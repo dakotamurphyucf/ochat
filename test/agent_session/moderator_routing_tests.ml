@@ -1,8 +1,35 @@
 open Core
 open Fixtures
 
+let diagnose_terminal_failure backend ~case_index ~actual ~expected =
+  let failures =
+    Agent_session.Memory_backend.events_after backend 0L
+    |> protocol_ok
+    |> List.filter_map ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
+      match event.kind with
+      | Operation_failed ->
+        let operation = Agent_protocol.Operation.of_json event.payload |> protocol_ok in
+        (match operation.state with
+         | Failed error ->
+           Some
+             [%sexp
+               (error.code : Agent_protocol.Error.code)
+             , (String.prefix error.message 8_192 : string)]
+         | Starting | Running | Cancelling | Completed | Cancelled | Interrupted _ -> None)
+      | _ -> None)
+    |> Fn.flip List.take 8
+  in
+  print_s
+    [%sexp
+      "moderator routing failure diagnostic"
+    , (case_index : int)
+    , (actual : int)
+    , (expected : int)
+    , (failures : Sexp.t list)]
+;;
+
 let%test_unit "streamed native and moderator services share pre and post routing" =
-  List.iter
+  List.iteri
     [ `Success
     ; `Custom
     ; `Invalid
@@ -33,7 +60,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
     ; `Custom_dispatch_rejected
     ; `Custom_observer_failed
     ]
-    ~f:(fun mode ->
+    ~f:(fun case_index mode ->
       let calls = ref 0
       and admitted = ref 0
       and post_calls = ref 0
@@ -448,9 +475,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
                  | _ -> false
                then 0
                else 1);
-             assert (
-               !post_calls
-               =
+             let expected_post_calls =
                if
                  before_execution_failure
                  ||
@@ -460,7 +485,16 @@ let%test_unit "streamed native and moderator services share pre and post routing
                then 0
                else if mixed
                then 2
-               else 1);
+               else 1
+             in
+             if !post_calls <> expected_post_calls
+             then
+               diagnose_terminal_failure
+                 backend
+                 ~case_index
+                 ~actual:!post_calls
+                 ~expected:expected_post_calls;
+             assert (!post_calls = expected_post_calls);
              assert (
                !requests
                =
@@ -509,7 +543,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
 let%test_unit
     "streamed moderator tools use actor publication and preserve post-hook failures"
   =
-  List.iter
+  List.iteri
     [ `Success
     ; `Deny
     ; `Disclosure
@@ -550,7 +584,7 @@ let%test_unit
     ; `Pre_reject_end_multi
     ; `End_session_multi
     ]
-    ~f:(fun mode ->
+    ~f:(fun case_index mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
       let host_calls = ref 0 in
@@ -1016,7 +1050,15 @@ let%test_unit
                     entry));
              let after = Agent_session.Session_actor.state actor |> protocol_ok in
              assert (Poly.equal state after));
-           assert (List.length state.invocations = if multi then 2 else 1);
+           let expected_invocations = if multi then 2 else 1 in
+           if List.length state.invocations <> expected_invocations
+           then
+             diagnose_terminal_failure
+               backend
+               ~case_index
+               ~actual:(List.length state.invocations)
+               ~expected:expected_invocations;
+           assert (List.length state.invocations = expected_invocations);
            let invocation =
              List.find_exn state.invocations ~f:(fun inv ->
                Option.equal

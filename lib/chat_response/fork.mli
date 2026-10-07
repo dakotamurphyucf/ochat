@@ -17,6 +17,13 @@ end
     [call_id]. *)
 val allocator : parent_namespace:string -> Invocation_id.t -> History_entry.Allocator.t
 
+(** Optional transient child read observer. The caller supplies the actual parent
+    scope and any actually known call entry ID; this grants no parent admission. *)
+type transcript_observer =
+  { parent : Transcript.Scope.parent
+  ; observe : Transcript.Stream.t -> unit
+  }
+
 (** [execute_entries ~env ~allocator ~history ~invocation_id ~call_id
     ~arguments ~tools ~tool_tbl ~on_event ~on_fn_out ()] runs a child to
     completion over the supplied parent history.
@@ -57,6 +64,7 @@ val execute_entries
   -> on_event:(Openai.Responses.Response_stream.t -> unit)
   -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> ?transcript_observer:transcript_observer
   -> on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?temperature:float
   -> ?max_output_tokens:int

@@ -13,15 +13,7 @@ let safe_string attr text =
 ;;
 
 let row ~width attr text = safe_string attr text |> I.hsnap ~align:`Left (Int.max 0 width)
-
-let output_text = function
-  | Openai.Responses.Tool_output.Output.Text text -> text
-  | Content parts ->
-    List.map parts ~f:(function
-      | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-      | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
-    |> String.concat ~sep:"\n"
-;;
+let output_text = Conversation.output_text
 
 let render_message ~width ~hi_engine ?(tool_output = None) ~role ~text () =
   Renderer_component_message.render_message
@@ -170,6 +162,7 @@ let render_block ~width ~hi_engine block =
   | Truncation -> row ~width truncation_attr "[earlier output truncated]"
   | Waiting -> row ~width muted_attr "Waiting for progress…"
   | Progress entry -> render_entry ~width ~hi_engine entry
+  | Outcome_unavailable -> row ~width muted_attr "Tool outcome unavailable"
   | Status outcome ->
     (match terminal_status (Some outcome) with
      | None -> I.empty
@@ -284,9 +277,7 @@ let render ~size:(width, height) ~model =
   let height = Int.max 0 height in
   let layout = Agent_page_layout.compute ~screen_w:width ~screen_h:height ~model in
   let calls = Model.active_agent_calls model in
-  let running =
-    List.count calls ~f:(fun call -> Option.is_none (Model.agent_call_outcome call))
-  in
+  let running = List.count calls ~f:Model.agent_call_is_running in
   let selected = Model.selected_agent_call model in
   let header =
     match running, Model.activity model with

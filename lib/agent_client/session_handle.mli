@@ -48,7 +48,12 @@ val reclaim_token : t -> string option
 
 val projection : t -> Projection.t
 val last_error : t -> Agent_protocol.Error.t option
+
+(** Closure means notification/renewal reduction has stopped; a stream error
+    retains a stale snapshot and requires repair. This does not mean the server
+    attachment was detached. [close] still attempts detach exactly once. *)
 val await_closed : t -> unit
+
 val is_closed : t -> bool
 
 val start

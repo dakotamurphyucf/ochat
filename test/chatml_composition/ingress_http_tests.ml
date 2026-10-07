@@ -127,7 +127,11 @@ let%expect_test
     ~inspect_request:(fun request _ -> if request = 3 then model_received := true)
     ~calls:[ "watch-call", "watch", `Null ]
     ~after_turn:(fun env handle entry ->
-      let snapshot = H.projection handle |> Agent_client.Projection.snapshot in
+      let snapshot =
+        H.projection handle
+        |> Agent_client.Projection.snapshot
+        |> P.Public.Snapshot.fields
+      in
       let registration_id, namespace =
         Ingress_socket_tests.registration_from_output snapshot
       in

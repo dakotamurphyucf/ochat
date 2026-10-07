@@ -415,7 +415,8 @@ let run env helper ~native_watch =
                   , (native_watch : bool)
                   , (!last_tool : string)]))
       in
-      let invoke_status sw daemon client parent name arguments =
+      let invoke_status ?(diagnose_failure = false) sw daemon client parent name arguments
+        =
         last_tool := name;
         let before = state daemon parent in
         (* Reuse the connection's invocation writer, as an interactive client
@@ -449,10 +450,70 @@ let run env helper ~native_watch =
                  (List.exists before.invocations ~f:(fun old ->
                     P.Id.Invocation.equal old.context.id invocation.context.id)))
         in
+        if
+          diagnose_failure
+          &&
+          match invocation.status with
+          | Published (Complete (`String _)) -> false
+          | _ -> true
+        then (
+          (* Foreground reconciliation can publish Cancelled after a worker
+             failure. Read the retained terminal from the same observation
+             interval, without another actor read or any transcript dump. *)
+          let bounded value = String.prefix value 8_192 in
+          let failure (value : P.Error.t) =
+            [%sexp (value.code : P.Error.code), (bounded value.message : string)]
+          in
+          let entry = R.load (D.registry daemon) parent |> protocol_ok in
+          let terminals =
+            match
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:before.counters.event_sequence
+                ~through_sequence:after.counters.event_sequence
+            with
+            | Snapshot_required -> [%sexp "terminal interval no longer retained"]
+            | Available events ->
+              List.filter_map events ~f:(fun (event : P.Event.Durable.t) ->
+                match event.kind with
+                | Operation_completed
+                | Operation_failed
+                | Operation_cancelled
+                | Operation_interrupted ->
+                  let summary =
+                    match P.Operation.of_json event.payload with
+                    | Error error -> [%sexp "invalid terminal", (failure error : Sexp.t)]
+                    | Ok operation ->
+                      let terminal =
+                        match operation.state with
+                        | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                        | Interrupted { reason; retryable } ->
+                          [%sexp
+                            "interrupted", (bounded reason : string), (retryable : bool)]
+                        | Starting | Running | Cancelling | Completed | Cancelled ->
+                          [%sexp (operation.state : P.Operation.state)]
+                      in
+                      [%sexp (operation.id : P.Id.Operation.t), (terminal : Sexp.t)]
+                  in
+                  Some [%sexp (event.sequence : int64), (summary : Sexp.t)]
+                | _ -> None)
+              |> fun values -> [%sexp (List.take values 8 : Sexp.t list)]
+          in
+          print_s
+            [%sexp
+              "helper foreground failure diagnostic"
+            , (native_watch : bool)
+            , (parent : P.Id.Session.t)
+            , (name : string)
+            , (invocation.context.id : P.Id.Invocation.t)
+            , (Option.map after.failure ~f:failure : Sexp.t option)
+            , (terminals : Sexp.t)]);
         invocation.status
       in
       let invoke sw daemon client parent name arguments =
-        match invoke_status sw daemon client parent name arguments with
+        match
+          invoke_status ~diagnose_failure:true sw daemon client parent name arguments
+        with
         | Published (Complete (`String source)) -> source
         | status ->
           raise_s [%sexp "helper invocation failed", (status : P.Invocation.status)]

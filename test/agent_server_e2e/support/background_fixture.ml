@@ -21,7 +21,15 @@ let result_ok = function
 ;;
 
 let key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
-let request client command = (Http_driver.request client command |> protocol_ok).result
+
+let request_public client command =
+  (Http_driver.request client command |> protocol_ok).result
+;;
+
+let request client command =
+  Http_driver.request_without_history client command |> protocol_ok
+;;
+
 let page () = Agent_protocol.Page.Request.create ~limit:100 () |> protocol_ok
 
 let reserve_port env =
@@ -100,7 +108,7 @@ let create client name =
     |> protocol_ok
   in
   match
-    request
+    request_public
       client
       (Session_create
          { spec
@@ -116,7 +124,7 @@ let create client name =
 
 let attach_after client summary name after_sequence =
   match
-    request
+    request_public
       client
       (Session_attach
          { session_id = summary.Agent_protocol.Session.id
@@ -136,9 +144,11 @@ let attach client summary name = attach_after client summary name (Some 0L)
 
 let snapshot client session =
   match
-    request client (Session_get { session_id = session.summary.id; history = None })
+    request_public
+      client
+      (Session_get { session_id = session.summary.id; history = None })
   with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "unexpected snapshot result"
 ;;
 
