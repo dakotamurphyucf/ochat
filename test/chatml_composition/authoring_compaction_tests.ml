@@ -6,6 +6,11 @@ module G = P.Authoring_guidance
 module State = Agent_session.Session_state
 module Q = Authoring_context_tests
 
+(* These foreground turns traverse authenticated reference pages and persist each
+   model/tool exchange. Bound the whole workflow separately from the runtime's
+   individual tool deadlines; the same budget applies to root and child sessions. *)
+let foreground_timeout = 90.
+
 let store_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_store.Store_error.t)]
@@ -296,7 +301,8 @@ let exercise with_session =
           H.compact handle ~expected_revision:(Some before.counters.revision)
           |> protocol_ok
           |> ignore;
-          wait_idle env entry);
+          (* Compaction also persists the summary and retires its inference work. *)
+          wait_idle_with_timeout ~timeout:15. env entry);
       [%test_eq: int] 1 !summary_requests;
       assert (!request_number = !initial_count);
       let compacted = A.state entry.actor |> protocol_ok in
@@ -329,7 +335,7 @@ let exercise with_session =
       |> ignore;
       (* Fresh retrieval, validation and execution form a full foreground
            turn, with the same completion bound as the initial turn. *)
-      wait_idle_with_timeout ~timeout:20. env entry)
+      wait_idle_with_timeout ~timeout:foreground_timeout env entry)
     ~settle:(fun env entry -> wait_idle env entry)
     (fun (state : State.t) ->
        assert (equal_stage !stage Finished);
@@ -372,6 +378,7 @@ let with_root
       f
   =
   with_daemon
+    ~completion_timeout:foreground_timeout
     ~sources
     ~calls
     ~request_counts

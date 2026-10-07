@@ -170,7 +170,10 @@ let%expect_test
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                  (* This bounds the complete workflow on each daemon, including
+                     15 invocations on the first. A control run used 15.3 seconds
+                     of process CPU; allow scheduling headroom for concurrent CI. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
                     let client =
                       Agent_server_wire_fixture.connect_unix
                         ~sw

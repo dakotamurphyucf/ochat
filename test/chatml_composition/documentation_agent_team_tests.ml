@@ -220,7 +220,9 @@ let with_team ?(sources = sources) ?reviewer_provider f =
                     |> protocol_ok
                     |> ignore;
                     let outcome = ref None in
-                    Background_shell_tests.wait env (fun () ->
+                    (* A completed tool also joins and persists the session's work;
+                       this observes the whole turn, including graceful child stop. *)
+                    Background_shell_tests.wait ~timeout:15. env (fun () ->
                       let current = state parent in
                       outcome
                       := List.find_map current.invocations ~f:(fun invocation ->

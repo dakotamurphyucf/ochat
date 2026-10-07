@@ -947,7 +947,7 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
-(test
+(executable
  (name agent_server_helper_test)
  (modules agent_server_helper_test agent_server_authored_helper_fixture)
  (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
@@ -956,12 +956,25 @@
   (glob_files chatml_extensibility_fixtures/x07-helper-session/bundle/*)
   (glob_files chatml_extensibility_fixtures/x05-child-session/*)
   (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
- (action
-  (run
-   %{test}
-   %{exe:../bin/ochat_agent_helper.exe}))
  (preprocess
   (pps ppx_jane ppx_blob)))
+
+; Distinct actions let Dune schedule both complete variants independently.
+(rule
+ (alias runtest)
+ (action
+  (run
+   %{exe:agent_server_helper_test.exe}
+   %{exe:../bin/ochat_agent_helper.exe}
+   helper)))
+
+(rule
+ (alias runtest)
+ (action
+  (run
+   %{exe:agent_server_helper_test.exe}
+   %{exe:../bin/ochat_agent_helper.exe}
+   native)))
 
 (library
  (name agent_server_authored_shell_test)

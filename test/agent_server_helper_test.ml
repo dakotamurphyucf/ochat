@@ -404,9 +404,11 @@ let run env helper ~native_watch =
             ~f:(fun () ->
               (* This watchdog bounds the multi-step functional workflow and its
                  document validation CPU, real helper I/O and restart/recovery.
-                 It is separate from every script/process/watch deadline. *)
+                 The first two workflows each consume roughly 280 CPU seconds;
+                 allow scheduling headroom when both variants run concurrently.
+                 This is separate from every script/process/watch deadline. *)
               match
-                Eio.Time.with_timeout (Eio.Stdenv.clock env) 300. (fun () ->
+                Eio.Time.with_timeout (Eio.Stdenv.clock env) 600. (fun () ->
                   let client =
                     { connection = connection daemon (principal ())
                     ; invocation_handles = Hashtbl.create (module P.Id.Session)
@@ -1618,7 +1620,11 @@ let run env helper ~native_watch =
               match
                 Eio.Fiber.first
                   (fun () ->
-                     Eio.Time.sleep (Eio.Stdenv.clock env) 10.;
+                     (* Observe recovered callback commits, including validation
+                        of the retained transcript. A paired control consumed the
+                        former ten-second budget in CPU work before committing;
+                        keep headroom without changing logical watch deadlines. *)
+                     Eio.Time.sleep (Eio.Stdenv.clock env) 30.;
                      (match !last_observed_state with
                       | Some current -> dump_last_observed current
                       | None ->

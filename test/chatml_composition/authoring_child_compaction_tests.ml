@@ -163,21 +163,24 @@ let with_child
                   }
                 |> protocol_ok
                 |> ignore;
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  let rec ready () =
-                    let current = state () in
-                    Option.iter current.failure ~f:(fun error ->
-                      raise_s [%sexp (error : P.Error.t)]);
-                    match
-                      Option.is_none current.active_operation
-                      && !child_requests >= fst (request_counts ())
-                    with
-                    | true -> ()
-                    | false ->
-                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                      ready ()
-                  in
-                  ready ());
+                Eio.Time.with_timeout_exn
+                  (Eio.Stdenv.clock env)
+                  Flow.foreground_timeout
+                  (fun () ->
+                     let rec ready () =
+                       let current = state () in
+                       Option.iter current.failure ~f:(fun error ->
+                         raise_s [%sexp (error : P.Error.t)]);
+                       match
+                         Option.is_none current.active_operation
+                         && !child_requests >= fst (request_counts ())
+                       with
+                       | true -> ()
+                       | false ->
+                         Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                         ready ()
+                     in
+                     ready ());
                 after_turn env handle child;
                 settle env child;
                 let final = state () in

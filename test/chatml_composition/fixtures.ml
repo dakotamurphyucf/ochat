@@ -70,6 +70,7 @@ let call_events calls =
 let with_daemon
       ?validation_host
       ?config_file
+      ?job_limits
       ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
       ?(completion_timeout = 20.)
@@ -136,6 +137,12 @@ let with_daemon
               Sexp.to_string_hum
                 [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)])
             |> Result.ok_or_failwith
+        in
+        let configuration =
+          match job_limits with
+          | None -> configuration
+          | Some (job_limits : Agent_server.Config.Server.job_limits) ->
+            { configuration with server = { configuration.server with job_limits } }
         in
         let requests = ref 0 in
         let provider_failure = ref None in
@@ -284,11 +291,21 @@ let with_daemon
                                | Resolved _ -> "resolved"
                                | Published _ -> "published"
                              in
-                             invocation.context.tool_name, status) ))
+                             let failure =
+                               match invocation.status with
+                               | Resolved (Fail error) | Published (Fail error) ->
+                                 Some (error.code, error.message)
+                               | Admitted | Dispatching | Resolved _ | Published _ -> None
+                             in
+                             ( invocation.context.provider_call_id
+                             , invocation.context.tool_name
+                             , status
+                             , failure )) ))
                        : (Agent_session.Session_state.Lifecycle.t
                          * Agent_protocol.Operation.t option
                          * int
-                         * (string * string) list)
+                         * (string option * string * string * (string * string) option)
+                             list)
                            option)]
               in
               let events =
