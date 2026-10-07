@@ -854,9 +854,35 @@ let%expect_test
           in
           [%test_eq: string] receipt_id (text replay "receipt_id");
           [%test_eq: string] "completed" (text replay "status");
-          [%test_eq: Sexp.t]
-            (Agent_session.Session_state.sexp_of_t before)
-            (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+          let after = state daemon child_id in
+          let before_sexp = Agent_session.Session_state.sexp_of_t before in
+          let after_sexp = Agent_session.Session_state.sexp_of_t after in
+          if not (Sexp.equal before_sexp after_sexp)
+          then (
+            let fields = function
+              | Sexp.List fields ->
+                List.map fields ~f:(function
+                  | Sexp.List [ Atom name; value ] -> name, value
+                  | _ -> failwith "unexpected state field sexp")
+              | _ -> failwith "unexpected state sexp"
+            in
+            let after_fields = fields after_sexp in
+            let changed =
+              List.filter_map (fields before_sexp) ~f:(fun (name, value) ->
+                match List.Assoc.find after_fields ~equal:String.equal name with
+                | Some next when Sexp.equal value next -> None
+                | Some _ | None -> Some name)
+            in
+            raise_s
+              [%sexp
+                "restart reads changed child state"
+              , (changed : string list)
+              , (before.counters : Agent_session.Session_state.Counters.t)
+              , (after.counters : Agent_session.Session_state.Counters.t)
+              , (before.identity.updated_at : P.Timestamp.t)
+              , (after.identity.updated_at : P.Timestamp.t)
+              , (before.lifecycle : Agent_session.Session_state.Lifecycle.t)
+              , (after.lifecycle : Agent_session.Session_state.Lifecycle.t)]);
           [%test_eq: int] 2 (List.length before.managed_submissions);
           let read_all cursor =
             invoke

@@ -1,9 +1,11 @@
 import fs from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 const tier = process.argv[2];
+// Match the concurrency used for local qualification. Several persistence
+// scenarios do CPU work inside bounded foreground operations.
 const commands = {
-  normal: ["runtest", "--force"],
-  e2e: ["build", "--force", "@agent-e2e-pr"],
+  normal: ["runtest", "--force", "-j", "2"],
+  e2e: ["build", "--force", "-j", "2", "@agent-e2e-pr"],
 };
 if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
 fs.mkdirSync(".ci-evidence", { recursive: true });

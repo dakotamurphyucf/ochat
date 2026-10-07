@@ -593,7 +593,10 @@ let run env helper ~native_watch =
       let await_watch ?(require_wake = true) daemon parent subscription_id =
         await (fun () ->
           let current = state daemon parent in
-          Option.is_none current.active_operation
+          (* Restart reads wait for their own committed notification. An
+             unrelated automatic follow-up need not be idle for that durable
+             completion to be observable; the later drain checks cover work. *)
+          ((not require_wake) || Option.is_none current.active_operation)
           && List.exists current.deliveries ~f:(fun delivery ->
             match delivery.context.work, delivery.status, delivery.wake_disposition with
             | Some (Subscription id), Committed _, _ when not require_wake ->
