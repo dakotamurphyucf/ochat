@@ -138,11 +138,7 @@ let%expect_test
         |> ignore;
         let state = Agent_session.Memory_backend.state backend in
         [%test_eq: int] 1 (List.length state.conversation.canonical_history);
-        let restored =
-          Agent_session.Session_persistence.restore_snapshot
-            (Sexp.to_string_mach (State.sexp_of_t state))
-          |> store_ok
-        in
+        let restored = restore_state state |> store_ok in
         assert (
           Completion.equal expected (List.hd_exn restored.deliveries).context.completion);
         check_completion
@@ -193,10 +189,7 @@ let%expect_test
       ]
       ~f:(fun result ->
         let corrupt = { state with jobs = [ { job with result } ] } in
-        assert (
-          Result.is_error
-            (Agent_session.Session_persistence.restore_snapshot
-               (Sexp.to_string_mach (State.sexp_of_t corrupt)))));
+        assert (Result.is_error (restore_state corrupt)));
     (* Model output can legitimately look like an envelope and must stay raw. *)
     let legacy = { job with kind = Model_call } in
     let legacy_completion = Completion.Succeeded (Option.value_exn job.result) in

@@ -138,11 +138,7 @@ let%expect_test
     let replay = Delta.t_of_sexp (Delta.sexp_of_t admission) in
     let replayed = (apply committed replay |> protocol_ok).state in
     assert (List.equal D.equal saved.deliveries replayed.deliveries);
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (State.sexp_of_t completed))
-      |> store_ok
-    in
+    let restored = restore_state completed |> store_ok in
     assert (List.equal D.equal restored.deliveries completed.deliveries);
     assert (
       List.equal P.History.equal_entry restored.conversation.canonical_history history);

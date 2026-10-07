@@ -213,7 +213,7 @@ let visible_messages_of_history (t : t) (history : History_entry.t list)
   : Types.message list
   =
   visible_history_items_of_history t history
-  |> History_entry.items
+  |> Openai.Responses_history.items_exn
   |> Conversation.of_history
 ;;
 
@@ -840,7 +840,8 @@ let enqueue_deferred_user_note t (submit_request : submit_request) =
           }
       in
       let entry =
-        History_entry.create ~allocator:t.history_allocator item |> Result.ok_or_failwith
+        Openai.Responses_history.create ~allocator:t.history_allocator item
+        |> Result.ok_or_failwith
       in
       Queue.enqueue t.session_controller.deferred_user_notes { entry };
       Ok true)
@@ -860,7 +861,7 @@ let dequeue_deferred_user_notes t =
 ;;
 
 let render_deferred_user_note ({ entry } : deferred_user_note) =
-  match History_entry.item entry with
+  match Openai.Responses_history.item_exn entry with
   | Openai.Responses.Item.Input_message message ->
     List.filter_map message.content ~f:(function
       | Text { text; _ } -> Some text

@@ -112,12 +112,19 @@ let assert_pair entries =
   require
     (Agent_protocol.History.equal_kind output.kind Tool_output)
     "deferred input split a tool pair";
-  let call_id = function
-    | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal "call_id"
-    | _ -> failwith "tool payload was not an object"
+  let call_id entry =
+    let metadata =
+      History_entry.Payload.of_json entry.Agent_protocol.History.payload
+      |> Result.ok_or_failwith
+      |> History_entry.Payload.semantic
+      |> History_entry.Payload.Semantic.metadata
+    in
+    metadata.call_id
   in
   require
-    (equal_json (call_id call.payload) (call_id output.payload))
+    (match call_id call, call_id output with
+     | Value call, Value output -> String.equal call output
+     | (Absent | Null | Value _), (Absent | Null | Value _) -> false)
     "tool output matched a different call";
   call_index
 ;;

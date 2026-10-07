@@ -526,8 +526,7 @@ let agent_allocator_namespace =
 ;;
 
 let create_history_entries ~allocator items =
-  List.map items ~f:(History_entry.create ~allocator)
-  |> Result.all
+  Openai.Responses_history.of_items ~preceding:[] ~allocator items
   |> Result.ok_or_failwith
 ;;
 
@@ -805,7 +804,7 @@ let rec run_agent
         ~parallel_tool_calls:true
         ~model
         ()
-      |> History_entry.items)
+      |> Openai.Responses_history.items_exn)
     else (
       let session_id =
         Option.first_some id session_id |> Option.value ~default:"nested-agent"
@@ -838,7 +837,8 @@ let rec run_agent
           ~tool_tbl
           init_entries
       in
-      extension_entries ~prefix:init_entries all_entries |> History_entry.items)
+      extension_entries ~prefix:init_entries all_entries
+      |> Openai.Responses_history.items_exn)
   in
   (* 6.  Extract assistant messages and concatenate them. *)
   (if has_script elements then List.drop all_items (List.length init_items) else all_items)
@@ -1053,7 +1053,7 @@ let run_completion
           ~model
           ()
         |> extension_entries ~prefix:init_entries
-        |> History_entry.items
+        |> Openai.Responses_history.items_exn
       in
       append_generated_items ~append ~save_doc ~show_tool_call:true all_items;
       if not (has_end_session_request !runtime_requests) then append "\n<user>\n\n</user>")
@@ -1081,7 +1081,8 @@ let run_completion
           init_entries
       in
       let generated =
-        extension_entries ~prefix:init_entries all_entries |> History_entry.items
+        extension_entries ~prefix:init_entries all_entries
+        |> Openai.Responses_history.items_exn
       in
       append_generated_items ~append ~save_doc ~show_tool_call:true generated;
       append "\n<user>\n\n</user>")
@@ -1340,7 +1341,7 @@ let run_completion_stream
         ~model
         ?post_stream
         ()
-      |> History_entry.items
+      |> Openai.Responses_history.items_exn
     in
     append_generated_items
       ~append:append_doc
@@ -1370,7 +1371,12 @@ let run_completion_stream
           |> Option.value_or_thunk ~default:(fun () ->
             History_entry.Allocator.allocate allocator |> Result.ok_or_failwith)
         in
-        let entry = History_entry.create_with_id ~id item in
+        let call_relation =
+          Openai.Responses_history.relation_for_item
+            ~history:(inputs @ List.rev !new_items)
+            item
+        in
+        let entry = Openai.Responses_history.create_with_id_exn ~call_relation ~id item in
         if
           not
             (List.exists !new_items ~f:(fun existing ->
@@ -1729,7 +1735,7 @@ let run_completion_stream
         then Compact_history.collapse_read_file_entries inputs
         else inputs
       in
-      let hist = History_entry.items request_entries in
+      let hist = Openai.Responses_history.items_exn request_entries in
       (* ────────────────── 3.  fire request in stream mode ──────────────── *)
       let events =
         In_memory_stream.For_testing.retry_stream_start

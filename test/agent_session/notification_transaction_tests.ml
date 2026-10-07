@@ -89,11 +89,7 @@ let%expect_test
          assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
          assert (
            Option.is_some (A.with_quiescent_state actor ~f:(fun _ -> Ok ()) |> protocol_ok));
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          assert_same_session_snapshot state restored;
          (match mode, restored.deliveries with
           | `Accepted, [ value ] ->

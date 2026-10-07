@@ -7,6 +7,7 @@ type replay =
 type t =
   { capacity : int
   ; mutex : Eio.Mutex.t
+  ; mutable documents : Document_schema.Document.t Int64.Map.t
   ; mutable events : Agent_protocol.Event.Durable.t list
   ; mutable changed : unit Eio.Promise.t * unit Eio.Promise.u
   }
@@ -30,28 +31,79 @@ let retain capacity events =
   if excess > 0 then List.drop events excess else events
 ;;
 
-let create ~capacity events =
+let validate_documents events documents =
+  let seen = Hash_set.create (module Int64) in
+  List.fold_result documents ~init:() ~f:(fun () document ->
+    let event = Durable_event_document.value document in
+    if Hash_set.mem seen event.sequence
+    then Error (error "duplicate replay event document sequence")
+    else (
+      Hash_set.add seen event.sequence;
+      match
+        List.find events ~f:(fun candidate ->
+          Int64.equal candidate.Agent_protocol.Event.Durable.sequence event.sequence)
+      with
+      | Some candidate
+        when Document_schema.Json.equal
+               (Agent_protocol.Event.Durable.to_json candidate)
+               (Agent_protocol.Event.Durable.to_json event) -> Ok ()
+      | _ -> Error (error "replay event document does not match its full event")))
+;;
+
+let create ?(documents = []) ~capacity events =
+  let%bind.Result () = validate_documents events documents in
   if capacity <= 0
   then Error (error "durable event replay capacity must be positive")
   else if not (is_contiguous events)
   then Error (error "initial durable events are not contiguous")
-  else
+  else (
+    let events = retain capacity events in
+    let retained =
+      Int64.Set.of_list
+        (List.map events ~f:(fun event -> event.Agent_protocol.Event.Durable.sequence))
+    in
+    let documents =
+      List.filter documents ~f:(fun document ->
+        Set.mem retained (Durable_event_document.value document).sequence)
+    in
     Ok
       { capacity
       ; mutex = Eio.Mutex.create ()
+      ; documents =
+          List.fold documents ~init:Int64.Map.empty ~f:(fun values document ->
+            Map.set
+              values
+              ~key:(Durable_event_document.value document).sequence
+              ~data:(Durable_event_document.document document))
       ; events = retain capacity events
       ; changed = Eio.Promise.create ()
-      }
+      })
 ;;
 
-let append t appended =
-  if not (List.is_empty appended)
-  then
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+let append ?(documents = []) t appended =
+  let%bind.Result () = validate_documents appended documents in
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if not (is_contiguous (t.events @ appended))
+    then Error (error "appended durable events are not contiguous")
+    else if List.is_empty appended
+    then Ok ()
+    else (
       t.events <- retain t.capacity (t.events @ appended);
+      t.documents
+      <- List.fold documents ~init:t.documents ~f:(fun values document ->
+           Map.set
+             values
+             ~key:(Durable_event_document.value document).sequence
+             ~data:(Durable_event_document.document document));
+      let retained =
+        Int64.Set.of_list
+          (List.map t.events ~f:(fun event -> event.Agent_protocol.Event.Durable.sequence))
+      in
+      t.documents <- Map.filter_keys t.documents ~f:(Set.mem retained);
       let _, notify = t.changed in
       t.changed <- Eio.Promise.create ();
-      Eio.Promise.resolve notify ())
+      Eio.Promise.resolve notify ();
+      Ok ()))
 ;;
 
 let changed t = Eio.Mutex.use_ro t.mutex (fun () -> fst t.changed)
@@ -148,23 +200,24 @@ let retained_references t ~session_id ~candidates ~max_events ~max_bytes =
           | _ ->
             Error (error "retention requires the owning session's full replay events")
         in
-        let%bind _ =
-          Agent_protocol.Event.Durable.of_json
-            (Agent_protocol.Event.Durable.to_json event)
+        let%bind limits =
+          Persistence_codec.limits ~max_bytes:(Int.max 1 max_bytes)
+          |> Result.map_error ~f:(fun value ->
+            error (Sexp.to_string_hum (Document_schema.Error.sexp_of_t value)))
         in
-        let%bind _ =
-          Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+        let%bind () = Durable_event_document.validate ~limits event in
+        let json =
+          match Map.find t.documents event.sequence with
+          | Some document -> Document_schema.Document.json document
+          | None -> Durable_event_document.to_jsonaf event
         in
-        let%bind _ = Agent_protocol.Event.Durable.extension_status event in
-        let%bind _ = Agent_protocol.Event.Durable.replacement_snapshot event in
-        let encoded =
-          Agent_protocol.Event.Durable.sexp_of_t event |> Sexp.to_string_mach
-        in
+        let encoded = Jsonaf.to_string json in
         match String.length encoded <= remaining with
         | false -> Error (error "retained replay window exceeds its byte budget")
         | true ->
-          Agent_store.Blob_reference_scan.begin_root scan;
-          Agent_store.Blob_reference_scan.feed scan encoded;
+          Agent_store.Document_fields.iter_strings json ~f:(fun value ->
+            Agent_store.Blob_reference_scan.begin_root scan;
+            Agent_store.Blob_reference_scan.feed scan value);
           Ok (remaining - String.length encoded))
     in
     Agent_store.Blob_reference_scan.references scan)

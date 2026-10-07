@@ -106,7 +106,7 @@ let search_call entry kind id =
 ;;
 
 let render_entry entry =
-  match History_entry.item entry with
+  match Openai.Responses_history.item_exn entry with
   | Item.Input_message message -> input_message entry message
   | Output_message message -> output_message entry message
   | Function_call call -> function_call entry call

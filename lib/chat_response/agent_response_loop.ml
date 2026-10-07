@@ -51,10 +51,8 @@ let compatibility_namespace =
     Printf.sprintf "agent-response-loop-%d" sequence
 ;;
 
-let create_entries ~allocator items =
-  List.map items ~f:(History_entry.create ~allocator)
-  |> Result.all
-  |> Result.ok_or_failwith
+let create_entries ?(preceding = []) ~allocator items =
+  Openai.Responses_history.of_items ~preceding ~allocator items |> Result.ok_or_failwith
 ;;
 
 let notify f value =
@@ -135,7 +133,7 @@ let rec run_entries
     then Compact_history.collapse_read_file_entries history
     else history
   in
-  let inputs = History_entry.items request_entries in
+  let inputs = Openai.Responses_history.items_exn request_entries in
   let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
   let post_stream =
     Option.value post_stream ~default:(fun ~sw ~dir ~inputs ->
@@ -171,7 +169,7 @@ let rec run_entries
           ~dir:response_dir
           ~inputs)
   in
-  let new_entries = create_entries ~allocator new_items in
+  let new_entries = create_entries ~preceding:history ~allocator new_items in
   let tool_calls =
     List.filter_map new_items ~f:(function
       | Res.Item.Function_call call -> Some (`Function call)
@@ -244,7 +242,7 @@ let rec run_entries
                     ~parent_call_id:call_id
                     ~post_stream
                     fork_history
-                  |> History_entry.items
+                  |> Openai.Responses_history.items_exn
                   |> final_message
                   |> fun text -> Output.Text text
                 | _ ->
@@ -266,7 +264,9 @@ let rec run_entries
         in
         Tool_call.output_item ~kind ~call_id ~output)
     in
-    let output_entries = create_entries ~allocator outputs in
+    let output_entries =
+      create_entries ~preceding:(history @ new_entries) ~allocator outputs
+    in
     run_entries
       ~ctx
       ~allocator
@@ -330,5 +330,5 @@ let run
     ~observer
     ?post_stream
     history
-  |> History_entry.items
+  |> Openai.Responses_history.items_exn
 ;;

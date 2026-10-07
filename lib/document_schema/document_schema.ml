@@ -166,9 +166,12 @@ module Json = struct
       let encoded_bytes = ref 2 in
       let index = ref 0 in
       let exceeds_limit = ref (available < 2) in
+      let seen_bits = ref 0 in
       while !index < String.length text && not !exceeds_limit do
+        let byte = text.[!index] in
+        seen_bits := !seen_bits lor Char.to_int byte;
         let width =
-          match text.[!index] with
+          match byte with
           | '"' | '\\' | '\b' | '\012' | '\n' | '\r' | '\t' -> 2
           | '\000' .. '\031' -> 6
           | _ -> 1
@@ -180,7 +183,12 @@ module Json = struct
       done;
       if !exceeds_limit
       then Error (Error.Limit_exceeded "bytes")
-      else charge_bytes !encoded_bytes
+      else
+        let open Result.Let_syntax in
+        let%map () = charge_bytes !encoded_bytes in
+        (* A successful charge visited every byte. If none had its high bit set,
+           the same bounded scan also proved that the string is valid UTF-8. *)
+        !seen_bits land 0x80 = 0
     in
     let open Result.Let_syntax in
     let rec walk t depth rev_path =
@@ -196,9 +204,9 @@ module Json = struct
           List.fold_result fields ~init:String.Set.empty ~f:(fun seen (key, value) ->
             incr fields_seen;
             let%bind () = charge_bytes (if Set.is_empty seen then 1 else 2) in
-            let%bind () = charge_string key in
+            let%bind is_ascii = charge_string key in
             let%bind () =
-              if String.Utf8.is_valid key
+              if is_ascii || String.Utf8.is_valid key
               then Ok ()
               else invalid (List.rev (key :: rev_path)) "invalid UTF-8 object key"
             in
@@ -223,8 +231,8 @@ module Json = struct
           then Ok ()
           else invalid (List.rev rev_path) "invalid JSON number"
         | `String text ->
-          let%bind () = charge_string text in
-          if String.Utf8.is_valid text
+          let%bind is_ascii = charge_string text in
+          if is_ascii || String.Utf8.is_valid text
           then Ok ()
           else invalid (List.rev rev_path) "invalid UTF-8 string"
         | `True | `Null -> charge_bytes 4
@@ -263,6 +271,7 @@ module Document = struct
     ; version : int
     ; payload : Json.t
     ; required_semantics : string list
+    ; admitted_limits : Limits.t
     }
 
   let format = "ochat.document"
@@ -273,15 +282,29 @@ module Document = struct
   let json t = t.json
   let to_string t = Jsonaf.to_string t.json
 
+  let validate t ~limits =
+    let admitted = t.admitted_limits in
+    if
+      limits.Limits.max_bytes >= admitted.max_bytes
+      && limits.max_depth >= admitted.max_depth
+      && limits.max_fields >= admitted.max_fields
+      && limits.max_nodes >= admitted.max_nodes
+    then Ok ()
+    else Json.validate ~limits t.json
+  ;;
+
   let string_field json name =
     match Json.field json ~name with
     | Value (`String value) when not (String.is_empty value) -> Ok value
     | Absent | Null | Value _ -> invalid [ name ] "required nonempty string"
   ;;
 
-  let inspect ~limits json =
+  (* Callers must establish full JSON admission under these exact limits. Fresh
+     input uses Json.validate; scalar edits may preserve an admitted tree's
+     structural totals and prove nonincreasing compact bytes after independently
+     validating each replacement. No caller-supplied certificate is accepted. *)
+  let inspect_validated ~limits json =
     let open Result.Let_syntax in
-    let%bind () = Json.validate ~limits json in
     let%bind () =
       match json with
       | `Object _ -> Ok ()
@@ -330,7 +353,12 @@ module Document = struct
         |> Result.map ~f:(fun (names, _) -> List.rev names)
       | Null | Value _ -> invalid [ "required_semantics" ] "expected array"
     in
-    { json; kind; version; payload; required_semantics }
+    { json; kind; version; payload; required_semantics; admitted_limits = limits }
+  ;;
+
+  let inspect ~limits json =
+    let%bind.Result () = Json.validate ~limits json in
+    inspect_validated ~limits json
   ;;
 
   let decode ~limits bytes =
@@ -343,7 +371,7 @@ module Document = struct
       else (
         match String.get text 0 with
         | '{' | '[' | '"' | 'n' | 't' | 'f' | '-' | '0' .. '9' ->
-          Result.bind (Json.decode ~limits bytes) ~f:(inspect ~limits)
+          Result.bind (Json.decode ~limits bytes) ~f:(inspect_validated ~limits)
         | _ -> Error Error.Unsupported_beta_format))
   ;;
 
@@ -372,6 +400,77 @@ module Document = struct
       | _ -> assert false
     in
     inspect ~limits json
+  ;;
+
+  let replace_payload_scalars t ~limits ~updates =
+    let open Result.Let_syntax in
+    let%bind () = validate t ~limits in
+    let scalar = function
+      | `Null | `True | `False | `String _ | `Number _ -> true
+      | `Object _ | `Array _ -> false
+    in
+    let%bind payload, grew =
+      List.fold_result
+        updates
+        ~init:(t.payload, false)
+        ~f:(fun (payload, grew) (path, value) ->
+          let invalid reason = invalid ("payload" :: path) reason in
+          let%bind () =
+            if List.is_empty path
+            then invalid "scalar path must be nonempty"
+            else if not (scalar value)
+            then invalid "replacement must be a scalar"
+            else Ok ()
+          in
+          let%bind () = Json.validate ~limits value in
+          let rec replace json = function
+            | [] -> invalid "scalar path must be nonempty"
+            | name :: rest ->
+              (match json with
+               | `Object fields ->
+                 let%bind previous =
+                   List.Assoc.find fields name ~equal:String.equal
+                   |> Result.of_option
+                        ~error:
+                          (Error.Invalid_field
+                             { path = "payload" :: path
+                             ; reason = "scalar field is absent"
+                             })
+                 in
+                 let%bind value, leaf_grew =
+                   match rest with
+                   | [] ->
+                     if not (scalar previous)
+                     then invalid "existing field must be a scalar"
+                     else
+                       Ok
+                         ( value
+                         , String.length (Jsonaf.to_string value)
+                           > String.length (Jsonaf.to_string previous) )
+                   | _ -> replace previous rest
+                 in
+                 let fields =
+                   List.map fields ~f:(fun (key, previous) ->
+                     key, if String.equal key name then value else previous)
+                 in
+                 Ok (`Object fields, leaf_grew)
+               | _ -> invalid "scalar path requires existing object members")
+          in
+          let%map payload, leaf_grew = replace payload path in
+          payload, grew || leaf_grew)
+    in
+    let json =
+      match t.json with
+      | `Object fields ->
+        `Object
+          (List.map fields ~f:(fun (name, value) ->
+             name, if String.equal name "payload" then payload else value))
+      | _ -> assert false
+    in
+    (* Scalar leaves retain every key, node and depth. If no compact scalar grew,
+       the original complete byte bound still holds; otherwise inspect the full
+       result. Either inspector refreshes payload and envelope metadata together. *)
+    if grew then inspect ~limits json else inspect_validated ~limits json
   ;;
 end
 
@@ -610,8 +709,13 @@ module Shape = struct
     | Array of
         { element : t
         ; identity_field : string option
+        ; allow_empty_identity : bool
         }
     | Nullable of t
+    | Tagged_object of
+        { discriminator : string
+        ; cases : t String.Map.t
+        }
 
   let value = Value
   let nullable t = Nullable t
@@ -622,14 +726,45 @@ module Shape = struct
     | None -> Ok (Object (String.Map.of_alist_exn fields))
   ;;
 
-  let array element ~identity_field =
+  let owns_identity shape key =
+    match shape with
+    | Object fields ->
+      (match Map.find fields key with
+       | Some Value -> true
+       | _ -> false)
+    | Value | Array _ | Nullable _ | Tagged_object _ -> false
+  ;;
+
+  let tagged_object ~discriminator cases =
+    if
+      String.is_empty discriminator
+      || List.is_empty cases
+      || List.exists cases ~f:(fun (tag, shape) ->
+        String.is_empty tag || not (owns_identity shape discriminator))
+      || Option.is_some (List.find_a_dup (List.map cases ~f:fst) ~compare:String.compare)
+    then
+      Error
+        (Error.Invalid_configuration
+           "tagged object requires unique nonempty tags and object cases owning the \
+            discriminator")
+    else Ok (Tagged_object { discriminator; cases = String.Map.of_alist_exn cases })
+  ;;
+
+  let array ?(allow_empty_identity = false) element ~identity_field =
     match identity_field, element with
-    | None, _ -> Ok (Array { element; identity_field })
+    | None, _ -> Ok (Array { element; identity_field; allow_empty_identity })
     | Some key, Object fields ->
       (match Map.find fields key with
-       | Some Value -> Ok (Array { element; identity_field })
-       | Some (Object _ | Array _ | Nullable _) | None ->
+       | Some Value -> Ok (Array { element; identity_field; allow_empty_identity })
+       | Some (Object _ | Array _ | Nullable _ | Tagged_object _) | None ->
          Error (Error.Invalid_configuration "array identity must be an owned value field"))
+    | Some key, Tagged_object { discriminator = _; cases } ->
+      if Map.for_all cases ~f:(fun shape -> owns_identity shape key)
+      then Ok (Array { element; identity_field; allow_empty_identity })
+      else
+        Error
+          (Error.Invalid_configuration
+             "every tagged array case must own the identity field")
     | Some _, (Value | Array _ | Nullable _) ->
       Error (Error.Invalid_configuration "identity array requires object elements")
   ;;
@@ -639,10 +774,16 @@ end
    codec on an old carrier cannot silently promote a formerly unknown field. *)
 type retained =
   | Empty
+  | Tagged of
+      { discriminator : string
+      ; tag : string
+      ; child : retained
+      }
   | Object of (string * retained_field) list
   | Array of
       { original_known : Json.t
       ; identity_field : string option
+      ; allow_empty_identity : bool
       ; entries : (string option * retained) list
       }
 
@@ -664,6 +805,10 @@ module Extension_carrier = struct
 end
 
 module Domain_codec = struct
+  type 'a encoding_validation =
+    | Roundtrip
+    | Original of ('a -> (unit, Error.t) Result.t)
+
   type 'a t =
     { limits : Limits.t
     ; kind : string
@@ -672,9 +817,19 @@ module Domain_codec = struct
     ; supported_semantics : String.Set.t
     ; decode_value : Json.t -> ('a, Error.t) Result.t
     ; encode_value : 'a -> (Json.t, Error.t) Result.t
+    ; encoding_validation : 'a encoding_validation
     }
 
-  let create ~limits ~kind ~version ~shape ~supported_semantics ~decode ~encode =
+  let create_internal
+        ~encoding_validation
+        ~limits
+        ~kind
+        ~version
+        ~shape
+        ~supported_semantics
+        ~decode
+        ~encode
+    =
     if
       String.is_empty kind
       || version <= 0
@@ -693,7 +848,41 @@ module Domain_codec = struct
         ; supported_semantics = String.Set.of_list supported_semantics
         ; decode_value = decode
         ; encode_value = encode
+        ; encoding_validation
         }
+  ;;
+
+  let create ~limits ~kind ~version ~shape ~supported_semantics ~decode ~encode =
+    create_internal
+      ~encoding_validation:Roundtrip
+      ~limits
+      ~kind
+      ~version
+      ~shape
+      ~supported_semantics
+      ~decode
+      ~encode
+  ;;
+
+  let create_validated
+        ~limits
+        ~kind
+        ~version
+        ~shape
+        ~supported_semantics
+        ~validate
+        ~decode
+        ~encode
+    =
+    create_internal
+      ~encoding_validation:(Original validate)
+      ~limits
+      ~kind
+      ~version
+      ~shape
+      ~supported_semantics
+      ~decode
+      ~encode
   ;;
 
   let check t document =
@@ -709,12 +898,12 @@ module Domain_codec = struct
           not (Set.mem t.supported_semantics name))
       with
       | Some name -> Error (Error.Required_semantics_unknown name)
-      | None -> Json.validate ~limits:t.limits (Document.json document))
+      | None -> Document.validate document ~limits:t.limits)
   ;;
 
-  let identity json key path =
+  let identity ?(allow_empty = false) json key path =
     match Json.field json ~name:key with
-    | Value (`String value) when not (String.is_empty value) -> Ok value
+    | Value (`String value) when allow_empty || not (String.is_empty value) -> Ok value
     | Absent | Null | Value _ ->
       invalid (path @ [ key ]) "required nonempty array identity string"
   ;;
@@ -725,6 +914,19 @@ module Domain_codec = struct
     | Shape.Value, _ -> Ok (json, Empty)
     | Nullable _, `Null -> Ok (`Null, Empty)
     | Nullable shape, _ -> split shape json path
+    | Tagged_object { discriminator; cases }, _ ->
+      let%bind tag = identity json discriminator path in
+      let%bind selected =
+        Map.find cases tag
+        |> Result.of_option
+             ~error:
+               (Error.Invalid_field
+                  { path = path @ [ discriminator ]
+                  ; reason = "unsupported discriminator"
+                  })
+      in
+      let%map known, child = split selected json path in
+      known, Tagged { discriminator; tag; child }
     | Object owned, `Object fields ->
       let%map known, retained =
         List.fold_result fields ~init:([], []) ~f:(fun (known, retained) (key, value) ->
@@ -735,7 +937,7 @@ module Domain_codec = struct
             (key, value) :: known, (key, Known child) :: retained)
       in
       `Object (List.rev known), Object (List.rev retained)
-    | Array { element; identity_field }, `Array values ->
+    | Array { element; identity_field; allow_empty_identity }, `Array values ->
       let%map known, entries, _, _ =
         List.fold_result
           values
@@ -744,7 +946,10 @@ module Domain_codec = struct
             let%bind key =
               match identity_field with
               | None -> Ok None
-              | Some key -> Result.map (identity value key path) ~f:Option.some
+              | Some key ->
+                Result.map
+                  (identity ~allow_empty:allow_empty_identity value key path)
+                  ~f:Option.some
             in
             let%bind () =
               match key with
@@ -763,7 +968,13 @@ module Domain_codec = struct
             , index + 1 ))
       in
       let known = `Array (List.rev known) in
-      known, Array { original_known = known; identity_field; entries = List.rev entries }
+      ( known
+      , Array
+          { original_known = known
+          ; identity_field
+          ; allow_empty_identity
+          ; entries = List.rev entries
+          } )
     | Object _, (`Null | `String _ | `Number _ | `True | `False | `Array _)
     | Array _, (`Null | `String _ | `Number _ | `True | `False | `Object _) ->
       invalid path "value does not match codec shape"
@@ -771,12 +982,13 @@ module Domain_codec = struct
 
   let rec has_unknown = function
     | Empty -> false
+    | Tagged { discriminator = _; tag = _; child } -> has_unknown child
     | Object fields ->
       List.exists fields ~f:(function
         | _, Unknown _ -> true
         | _, Known tree -> has_unknown tree)
-    | Array { original_known = _; identity_field = _; entries } ->
-      List.exists entries ~f:(fun (_, tree) -> has_unknown tree)
+    | Array { original_known = _; identity_field = _; allow_empty_identity = _; entries }
+      -> List.exists entries ~f:(fun (_, tree) -> has_unknown tree)
   ;;
 
   let decode t document =
@@ -787,18 +999,41 @@ module Domain_codec = struct
     { Extension_carrier.value; template = Some document; retained }
   ;;
 
-  let rec merge shape retained known path =
+  let rec merge (shape : Shape.t) (retained : retained) (known : Json.t) path =
     let open Result.Let_syntax in
     match retained, shape, known with
     | Empty, _, _ -> Ok known
+    | Tagged previous, Shape.Tagged_object { discriminator; cases }, _ ->
+      let%bind tag = identity known discriminator path in
+      let%bind selected =
+        Map.find cases tag
+        |> Result.of_option
+             ~error:
+               (Error.Invalid_field
+                  { path = path @ [ discriminator ]
+                  ; reason = "unsupported discriminator"
+                  })
+      in
+      if
+        String.equal previous.discriminator discriminator && String.equal previous.tag tag
+      then merge selected previous.child known path
+      else if has_unknown previous.child
+      then Error (Error.Extension_conflict path)
+      else Ok known
     | _, Shape.Nullable _, `Null ->
       if has_unknown retained then Error (Error.Extension_conflict path) else Ok known
     | _, Shape.Nullable shape, _ -> merge shape retained known path
-    | ( Array { original_known = _; identity_field = previous_identity; entries = _ }
-      , Shape.Array { element = _; identity_field }
+    | ( Array
+          { original_known = _
+          ; identity_field = previous_identity
+          ; allow_empty_identity = previous_allow_empty
+          ; entries = _
+          }
+      , Shape.Array { element = _; identity_field; allow_empty_identity }
       , _ )
       when has_unknown retained
-           && not (Option.equal String.equal previous_identity identity_field) ->
+           && ((not (Option.equal String.equal previous_identity identity_field))
+               || not (Bool.equal previous_allow_empty allow_empty_identity)) ->
       Error (Error.Extension_conflict path)
     | Object previous, Shape.Object owned, `Object fields ->
       (* Both lists originate in duplicate-checked JSON trees. Indexing keeps
@@ -843,8 +1078,8 @@ module Domain_codec = struct
             (original
              @ List.filter fields ~f:(fun (name, _) ->
                not (Map.mem previous_by_name name))))
-    | ( Array { original_known; identity_field = _; entries }
-      , Shape.Array { element; identity_field = None }
+    | ( Array { original_known; identity_field = _; allow_empty_identity = _; entries }
+      , Shape.Array { element; identity_field = None; allow_empty_identity = _ }
       , `Array values ) ->
       if has_unknown retained && not (Json.equal original_known known)
       then Error (Error.Extension_conflict path)
@@ -857,11 +1092,13 @@ module Domain_codec = struct
          | List.Or_unequal_lengths.Unequal_lengths ->
            Error (Error.Extension_conflict path)
          | Ok results -> Result.map (Result.all results) ~f:(fun values -> `Array values))
-    | ( Array { original_known = _; identity_field = _; entries }
-      , Shape.Array { element; identity_field = Some key }
+    | ( Array { original_known = _; identity_field = _; allow_empty_identity = _; entries }
+      , Shape.Array { element; identity_field = Some key; allow_empty_identity }
       , `Array values ) ->
       let%bind identities =
-        Result.all (List.map values ~f:(fun value -> identity value key path))
+        Result.all
+          (List.map values ~f:(fun value ->
+             identity ~allow_empty:allow_empty_identity value key path))
       in
       let identities = String.Set.of_list identities in
       let by_identity =
@@ -880,13 +1117,13 @@ module Domain_codec = struct
       let%map values =
         Result.all
           (List.map values ~f:(fun value ->
-             let%bind id = identity value key path in
+             let%bind id = identity ~allow_empty:allow_empty_identity value key path in
              match Map.find by_identity id with
              | None -> Ok value
              | Some retained -> merge element retained value (path @ [ id ])))
       in
       `Array values
-    | (Object _ | Array _), _, _ ->
+    | (Object _ | Array _ | Tagged _), _, _ ->
       if has_unknown retained then Error (Error.Extension_conflict path) else Ok known
   ;;
 
@@ -897,6 +1134,11 @@ module Domain_codec = struct
       | None -> Ok ()
       | Some document -> check t document
     in
+    let%bind () =
+      match t.encoding_validation with
+      | Roundtrip -> Ok ()
+      | Original validate -> validate carrier.value
+    in
     let%bind known = t.encode_value carrier.value in
     let%bind () = Json.validate ~limits:t.limits known in
     let%bind projection, unexpected = split t.shape known [ "payload" ] in
@@ -905,11 +1147,111 @@ module Domain_codec = struct
       then Error (Error.Extension_conflict [ "payload" ])
       else Ok ()
     in
-    let%bind _ = t.decode_value projection in
+    let%bind () =
+      match t.encoding_validation with
+      | Roundtrip -> t.decode_value projection |> Result.map ~f:(fun _ -> ())
+      | Original _ -> Ok ()
+    in
     let%bind payload = merge t.shape carrier.retained known [ "payload" ] in
     match carrier.template with
     | None -> Document.create ~limits:t.limits ~kind:t.kind ~version:t.version ~payload
     | Some template ->
       Document.replace_payload template ~limits:t.limits ~version:t.version ~payload
+  ;;
+
+  let combine_fields previous incoming ~f =
+    let open Result.Let_syntax in
+    let previous_by_name = String.Map.of_alist_exn previous in
+    let incoming_by_name = String.Map.of_alist_exn incoming in
+    let%map fields =
+      List.map previous ~f:(fun (name, value) ->
+        match Map.find incoming_by_name name with
+        | None -> Ok (name, value)
+        | Some incoming ->
+          Result.map (f name value incoming) ~f:(fun value -> name, value))
+      |> Result.all
+    in
+    fields
+    @ List.filter incoming ~f:(fun (name, _) -> not (Map.mem previous_by_name name))
+  ;;
+
+  let same_unknown previous incoming path =
+    if Json.equal previous incoming
+    then Ok previous
+    else Error (Error.Extension_conflict path)
+  ;;
+
+  let rec combine (shape : Shape.t) (previous : Json.t) (incoming : Json.t) path =
+    let open Result.Let_syntax in
+    match shape, previous, incoming with
+    | Value, _, _ -> same_unknown previous incoming path
+    | Nullable _, `Null, `Null -> Ok `Null
+    | Nullable shape, _, _ -> combine shape previous incoming path
+    | Tagged_object { discriminator; cases }, _, _ ->
+      let%bind tag = identity incoming discriminator path in
+      let%bind selected =
+        Map.find cases tag
+        |> Result.of_option ~error:(Error.Extension_conflict (path @ [ discriminator ]))
+      in
+      combine selected previous incoming path
+    | Object owned, `Object previous, `Object incoming ->
+      let%map fields =
+        combine_fields previous incoming ~f:(fun name previous incoming ->
+          match Map.find owned name with
+          | None -> same_unknown previous incoming (path @ [ name ])
+          | Some shape -> combine shape previous incoming (path @ [ name ]))
+      in
+      `Object fields
+    | ( Array { element; identity_field; allow_empty_identity }
+      , `Array previous
+      , `Array incoming ) ->
+      (match
+         List.map2 previous incoming ~f:(fun previous incoming ->
+           let%bind path =
+             match identity_field with
+             | None -> Ok path
+             | Some key ->
+               let%map id =
+                 identity ~allow_empty:allow_empty_identity incoming key path
+               in
+               path @ [ id ]
+           in
+           combine element previous incoming path)
+       with
+       | Unequal_lengths -> Error (Error.Extension_conflict path)
+       | Ok results -> Result.map (Result.all results) ~f:(fun values -> `Array values))
+    | (Object _ | Array _), _, _ -> Error (Error.Extension_conflict path)
+  ;;
+
+  let adopt t ~previous ~incoming =
+    let open Result.Let_syntax in
+    let%bind previous =
+      encode t (Extension_carrier.with_value previous incoming.Extension_carrier.value)
+    in
+    let%bind incoming = encode t incoming in
+    let%bind previous_known, _ =
+      split t.shape (Document.payload previous) [ "payload" ]
+    in
+    let%bind incoming_known, _ =
+      split t.shape (Document.payload incoming) [ "payload" ]
+    in
+    let%bind () =
+      if Json.equal previous_known incoming_known
+      then Ok ()
+      else Error (Error.Extension_conflict [ "payload" ])
+    in
+    let fields document =
+      match Document.json document with
+      | `Object fields -> fields
+      | _ -> assert false (* Document admission guarantees an object envelope. *)
+    in
+    let%bind fields =
+      combine_fields (fields previous) (fields incoming) ~f:(fun name previous incoming ->
+        if String.equal name "payload"
+        then combine t.shape previous incoming [ name ]
+        else same_unknown previous incoming [ name ])
+    in
+    let%bind document = Document.inspect ~limits:t.limits (`Object fields) in
+    decode t document
   ;;
 end

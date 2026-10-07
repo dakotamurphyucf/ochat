@@ -925,6 +925,13 @@
   (pps ppx_jane)))
 
 (library
+ (name agent_server_test_clock_test)
+ (modules agent_server_test_clock_test)
+ (libraries agent_server_test_support core eio eio.mock eio_main mtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name agent_server_generated_test)
  (modules agent_server_generated_test)
  (libraries agent_server_test_support core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)

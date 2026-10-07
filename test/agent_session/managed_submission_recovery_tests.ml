@@ -10,10 +10,7 @@ let step before delta payloads =
     Agent_session.Session_transition.apply ~now:timestamp before ~delta ~payloads
     |> protocol_ok
   in
-  let encoded = Delta.sexp_of_t next.delta |> Sexp.to_string_mach in
-  let replayed =
-    Delta.apply before (Sexp.of_string encoded |> Delta.t_of_sexp) |> protocol_ok
-  in
+  let replayed = Delta.apply before (restore_delta next.delta) |> protocol_ok in
   assert (List.equal M.equal next.state.managed_submissions replayed.managed_submissions);
   next.state
 ;;
@@ -74,12 +71,7 @@ let%expect_test
          not
            (List.exists compacted.conversation.canonical_history ~f:(fun value ->
               P.History.Id.equal value.id receipt.history_id)));
-       let restored =
-         State.sexp_of_t compacted
-         |> Sexp.to_string_mach
-         |> Agent_session.Session_persistence.restore_snapshot
-         |> store_ok
-       in
+       let restored = restore_state compacted |> store_ok in
        assert (M.equal (only compacted) (only restored));
        let operation =
          P.Operation.
@@ -104,10 +96,7 @@ let%expect_test
        let assigned = only running in
        assert (M.equal_status assigned.status (Assigned operation.id));
        let orphaned = { running with active_operation = None } in
-       assert (
-         Result.is_error
-           (Agent_session.Session_persistence.restore_snapshot
-              (State.sexp_of_t orphaned |> Sexp.to_string_mach)));
+       assert (Result.is_error (restore_state orphaned));
        let interrupted_operation =
          { operation with
            state = Interrupted { reason = "daemon restart"; retryable = false }

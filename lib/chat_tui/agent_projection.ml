@@ -14,16 +14,16 @@ let invalid message =
 ;;
 
 let decode_item payload =
-  Result.try_with (fun () -> Openai.Responses.Item.t_of_jsonaf payload)
-  |> Result.map_error ~f:(fun exn ->
-    invalid ("invalid projected history payload: " ^ Exn.to_string exn))
+  History_entry.Payload.of_json payload
+  |> Result.map_error ~f:(fun message ->
+    invalid ("invalid neutral projected history payload: " ^ message))
 ;;
 
 let decode_entry (entry : Agent_protocol.History.entry) =
   if entry.redacted
   then
     Ok
-      (History_entry.create_with_id
+      (Openai.Responses_history.create_with_id_exn
          ~id:entry.id
          (Openai.Responses.Item.Input_message
             { role = Assistant
@@ -52,7 +52,11 @@ let of_client_projection projection =
   { snapshot
   ; canonical_history
   ; visible_history
-  ; messages = Conversation.of_history (History_entry.items visible_history)
+  ; messages =
+      Conversation.of_history
+        (List.map visible_history ~f:(fun entry ->
+           Openai.Responses_history.to_presentation_item (History_entry.payload entry)
+           |> Result.ok_or_failwith))
   ; live_events = Agent_client.Projection.live_events projection
   ; terminal_operation = Agent_client.Projection.terminal_operation projection
   }

@@ -106,7 +106,9 @@ let with_host
 let initial_outcome (snapshot : P.Snapshot.t) call_id =
   List.find_map_exn snapshot.canonical_history.entries ~f:(fun entry ->
     match
-      Agent_session.History_codec.of_protocol entry |> protocol_ok |> History_entry.item
+      Agent_session.History_codec.of_protocol entry
+      |> protocol_ok
+      |> Openai.Responses_history.item_exn
     with
     | Openai.Responses.Item.Function_call_output
         { call_id = actual; output = Text text; _ }

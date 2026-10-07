@@ -125,7 +125,7 @@ module Cancellation_repair = struct
       match entries with
       | [] -> Ok acc
       | entry :: rest ->
-        let item = History_entry.item entry in
+        let item = Openai.Responses_history.item_exn entry in
         if dropping_trailing_reasoning
         then (
           match item with
@@ -155,7 +155,7 @@ module Cancellation_repair = struct
               let%bind output =
                 synthetic_output ~error item
                 |> Option.value_exn
-                |> History_entry.create ~allocator
+                |> Openai.Responses_history.create ~allocator
               in
               continue (entry :: output :: acc))
           | Item.Custom_tool_call call ->
@@ -167,7 +167,7 @@ module Cancellation_repair = struct
               let%bind output =
                 synthetic_output ~error item
                 |> Option.value_exn
-                |> History_entry.create ~allocator
+                |> Openai.Responses_history.create ~allocator
               in
               continue (entry :: output :: acc))
           | _ -> continue (entry :: acc))

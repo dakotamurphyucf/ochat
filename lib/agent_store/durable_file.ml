@@ -25,8 +25,9 @@ let temporary_target filename =
   | _ -> None
 ;;
 
-let write_temporary path contents =
+let write_temporary path contents ~on_open =
   Eio.Path.with_open_out ~create:(`Exclusive 0o600) path (fun flow ->
+    on_open ();
     Eio.Flow.copy_string contents flow;
     Eio.File.sync flow)
 ;;
@@ -47,19 +48,27 @@ let replace_eio ~env ~durability ~path contents =
   let temporary = temporary_path path in
   let temporary_eio = eio_path env temporary in
   let destination = eio_path env path in
-  try
-    write_temporary temporary_eio contents;
-    Eio.Path.rename temporary_eio destination;
-    (match durability with
-     | Flush_file -> ()
-     | Flush_file_and_directory ->
-       sync_directory_exn (eio_path env (Filename.dirname path)));
-    Ok ()
-  with
-  | exn ->
-    (try Eio.Path.unlink temporary_eio with
-     | _ -> ());
-    Error (Store_error.of_exn ~operation:"replace" ~path exn)
+  let owned = ref false in
+  Fun.protect
+    (fun () ->
+       try
+         write_temporary temporary_eio contents ~on_open:(fun () -> owned := true);
+         Eio.Path.rename temporary_eio destination;
+         owned := false;
+         (match durability with
+          | Flush_file -> ()
+          | Flush_file_and_directory ->
+            sync_directory_exn (eio_path env (Filename.dirname path)));
+         Ok ()
+       with
+       | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+         Error (Store_error.of_exn ~operation:"replace" ~path exn))
+    ~finally:(fun () ->
+      if !owned
+      then
+        Eio.Cancel.protect (fun () ->
+          try Eio.Path.unlink temporary_eio with
+          | Eio.Io _ | Core_unix.Unix_error _ -> ()))
 ;;
 
 let validate_path path =
@@ -87,6 +96,60 @@ let load ~env ~path =
       Error
         (Store_error.Io
            { operation = "load"; path; message = "path is not a regular file" }))
+;;
+
+let load_bounded ~env ~path ~max_bytes =
+  let open Result.Let_syntax in
+  let%bind () = validate_path path in
+  if max_bytes < 0
+  then Error (Store_error.Corrupt "negative bounded read limit")
+  else (
+    try
+      let file = eio_path env path in
+      match Eio.Path.kind ~follow:true file with
+      | `Not_found -> Error (Store_error.Missing path)
+      | `Regular_file ->
+        Eio.Path.with_open_in file (fun input ->
+          let size = (Eio.File.stat input).size |> Optint.Int63.to_int64 in
+          if Int64.(size < zero || size > of_int max_bytes)
+          then
+            Error
+              (Store_error.Document (Document_schema.Error.Limit_exceeded "file bytes"))
+          else (
+            let buffer = Buffer.create (Int.min 8192 max_bytes) in
+            let chunk = Cstruct.create 8192 in
+            let rec loop () =
+              let remaining = max_bytes - Buffer.length buffer in
+              let count =
+                try
+                  Eio.Flow.single_read
+                    input
+                    (Cstruct.sub
+                       chunk
+                       0
+                       (if remaining >= 8192 then 8192 else remaining + 1))
+                with
+                | End_of_file -> 0
+              in
+              if count = 0
+              then Ok (Buffer.contents buffer)
+              else if count > remaining
+              then
+                Error
+                  (Store_error.Document
+                     (Document_schema.Error.Limit_exceeded "file bytes"))
+              else (
+                Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
+                loop ())
+            in
+            loop ()))
+      | _ ->
+        Error
+          (Store_error.Io
+             { operation = "load"; path; message = "path is not a regular file" })
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"bounded load" ~path exn))
 ;;
 
 let sync_directory ~env ~path =

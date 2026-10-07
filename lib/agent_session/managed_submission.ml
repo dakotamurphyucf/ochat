@@ -210,3 +210,130 @@ let reconcile
      | true -> t
      | false -> { t with status; output_ids; updated_at = now })
 ;;
+
+module X = Persistence_codec
+module J = Agent_protocol.Json_codec
+
+let reference_of_jsonaf json =
+  D.reference_of_jsonaf json
+  |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+;;
+
+let outcome_to_jsonaf = function
+  | Completed -> `String "completed"
+  | Failed -> `String "failed"
+  | Cancelled -> `String "cancelled"
+  | Interrupted -> `String "interrupted"
+  | Invalidated -> `String "invalidated"
+;;
+
+let outcome_of_jsonaf =
+  J.enum
+    ~name:"managed outcome"
+    [ "completed", Completed
+    ; "failed", Failed
+    ; "cancelled", Cancelled
+    ; "interrupted", Interrupted
+    ; "invalidated", Invalidated
+    ]
+;;
+
+let status_to_jsonaf = function
+  | Deferred -> `Object [ "kind", `String "deferred" ]
+  | Ready -> `Object [ "kind", `String "ready" ]
+  | Assigned id ->
+    `Object [ "kind", `String "assigned"; "operation_id", P.Id.Operation.to_json id ]
+  | Terminal (id, outcome) ->
+    `Object
+      [ "kind", `String "terminal"
+      ; "operation_id", X.option_json P.Id.Operation.to_json id
+      ; "outcome", outcome_to_jsonaf outcome
+      ]
+;;
+
+let status_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind kind = X.required fields "kind" J.string in
+  match kind with
+  | "deferred" -> Ok Deferred
+  | "ready" -> Ok Ready
+  | "assigned" ->
+    Result.map (X.required fields "operation_id" P.Id.Operation.of_json) ~f:(fun id ->
+      Assigned id)
+  | "terminal" ->
+    let%bind id = X.required fields "operation_id" (X.nullable P.Id.Operation.of_json) in
+    let%map outcome = X.required fields "outcome" outcome_of_jsonaf in
+    Terminal (id, outcome)
+  | _ -> Error (P.Error.invalid_request "unknown managed submission status")
+;;
+
+let status_shape =
+  X.tagged_shape_exn
+    ~discriminator:"kind"
+    [ "deferred", X.fields_shape [ "kind" ]
+    ; "ready", X.fields_shape [ "kind" ]
+    ; "assigned", X.fields_shape [ "kind"; "operation_id" ]
+    ; "terminal", X.fields_shape [ "kind"; "operation_id"; "outcome" ]
+    ]
+;;
+
+let storage_to_jsonaf (t : t) =
+  `Object
+    [ "reference", D.reference_to_jsonaf t.reference
+    ; "key", P.Idempotency_key.to_json t.key
+    ; "request_sha256", X.text_json t.request_sha256
+    ; "generation", X.integer_json t.generation
+    ; "history_id", P.History.Id.to_json t.history_id
+    ; "created_at", P.Timestamp.to_json t.created_at
+    ; "updated_at", P.Timestamp.to_json t.updated_at
+    ; "status", status_to_jsonaf t.status
+    ; "output_ids", (X.list_json P.History.Id.to_json) t.output_ids
+    ]
+;;
+
+let storage_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind reference = X.required fields "reference" reference_of_jsonaf in
+  let%bind key = X.required fields "key" P.Idempotency_key.of_json in
+  let%bind request_sha256 = X.required fields "request_sha256" J.string in
+  let%bind generation = X.required fields "generation" X.integer in
+  let%bind history_id = X.required fields "history_id" P.History.Id.of_json in
+  let%bind created_at = X.required fields "created_at" P.Timestamp.of_json in
+  let%bind updated_at = X.required fields "updated_at" P.Timestamp.of_json in
+  let%bind status = X.required fields "status" status_of_jsonaf in
+  let%bind output_ids = X.required fields "output_ids" (X.list P.History.Id.of_json) in
+  let t : t =
+    { reference
+    ; key
+    ; request_sha256
+    ; generation
+    ; history_id
+    ; created_at
+    ; updated_at
+    ; status
+    ; output_ids
+    }
+  in
+  let%map () = validate t in
+  t
+;;
+
+let storage_shape =
+  X.shape_exn
+    [ "reference", D.reference_shape
+    ; "key", Document_schema.Shape.value
+    ; "request_sha256", Document_schema.Shape.value
+    ; "generation", Document_schema.Shape.value
+    ; "history_id", Document_schema.Shape.value
+    ; "created_at", Document_schema.Shape.value
+    ; "updated_at", Document_schema.Shape.value
+    ; "status", status_shape
+    ; "output_ids", X.array_shape_exn Document_schema.Shape.value
+    ]
+;;
+
+let to_jsonaf = storage_to_jsonaf
+let of_jsonaf = storage_of_jsonaf
+let shape = storage_shape

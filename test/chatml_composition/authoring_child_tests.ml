@@ -144,7 +144,13 @@ let%expect_test
             let report call =
               match result (state ()) call with
               | Complete (`String text) -> Jsonaf.of_string text
-              | _ -> failwith "child reference did not return its native result"
+              | other ->
+                raise_s
+                  [%sexp
+                    "child reference did not return its native result"
+                  , (call : string)
+                  , (other : I.outcome)
+                  , (model_invocation (state ()) call : I.t)]
             in
             let check call =
               let item = List.last_exn (Authoring_context_tests.items (report call)) in

@@ -256,9 +256,15 @@ let journal_tail env directory state =
       if
         Int64.(
           transaction.transaction_sequence
-          <= state.Agent_session.Session_state.counters.transaction_sequence)
+          <= (Agent_session.Session_persistence.Restored.state state)
+               .Agent_session.Session_state.counters
+               .transaction_sequence)
       then Ok state
-      else Agent_session.Session_persistence.apply_transaction state transaction))
+      else
+        Agent_session.Session_persistence.apply_transaction
+          ~limits:Document_schema.Limits.default
+          state
+          transaction))
 ;;
 
 let checkpoint env fixture session =
@@ -279,27 +285,26 @@ let checkpoint env fixture session =
   | Ok None -> None
   | Ok (Some installed) ->
     (match
-       Agent_session.Session_persistence.restore_snapshot installed.snapshot.payload
+       Agent_session.Session_persistence.restore_snapshot
+         ~limits:Document_schema.Limits.default
+         installed.snapshot
      with
      | Ok state ->
        (match
           journal_tail env (Filename.concat (Filename.dirname directory) "journal") state
         with
         | Error (Agent_store.Store_error.Missing _) -> None
-        | result -> Some (store_ok result))
+        | result ->
+          Some (Agent_session.Session_persistence.Restored.state (store_ok result)))
      | Error error ->
        raise_s [%sexp "background checkpoint decode", (error : Agent_store.Store_error.t)])
 ;;
 
 let moderator_state state =
-  let json = Option.value_exn state.Agent_session.Session_state.moderator in
-  let encoded =
-    match Jsonaf.member "identity_snapshot_sexp" json with
-    | Some (`String encoded) -> encoded
-    | _ -> failwith "moderator checkpoint has no identity snapshot"
-  in
   let snapshot =
-    Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string encoded)
+    Agent_session.Moderator_checkpoint.decode state.Agent_session.Session_state.moderator
+    |> protocol_ok
+    |> Option.value_exn
   in
   match snapshot.current_state with
   | String state -> state

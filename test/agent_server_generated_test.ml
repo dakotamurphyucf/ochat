@@ -164,12 +164,13 @@ let install_child
          |> store_ok
          : Agent_store.Journal.t);
       ignore
-        (Agent_session.Session_persistence.install_snapshot
-           ~env
-           ~handle
-           ~max_payload_length:1048576
-           ~transaction_hash:None
-           state
+        (Agent_server_test_support.authored_snapshot state
+         |> Result.bind
+              ~f:
+                (Agent_store.Snapshot.install
+                   ~env
+                   ~directory:(S.Handle.snapshot_directory handle)
+                   ~max_payload_length:1048576)
          |> store_ok
          : Agent_store.Snapshot.installed);
       ignore (D.advance ledger record Child_installed |> store_ok : D.record);

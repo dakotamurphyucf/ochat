@@ -155,7 +155,7 @@ let function_call call_id =
 
 let%expect_test "cancellation repair preserves duplicate occurrences and is idempotent" =
   let allocator = allocator () in
-  let create item = History_entry.create ~allocator item |> ok_exn in
+  let create item = Openai.Responses_history.create ~allocator item |> ok_exn in
   let duplicate = output_message "same-provider" "same" in
   let first = create duplicate in
   let second = create duplicate in

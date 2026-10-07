@@ -8,7 +8,13 @@ module State = Agent_session.Session_state
 module Persistence = Agent_session.Session_persistence
 
 let digest text = Digestif.SHA256.(digest_string text |> to_hex)
-let encoded state = State.sexp_of_t state |> Sexp.to_string_mach
+
+module Documents = Agent_session.Session_state_document
+
+let limits = document_limits
+let encoded state = Documents.encode (Documents.authored state) ~limits
+let snapshot state = snapshot_of_state state |> store_ok
+let restored state = restore_state state |> store_ok
 
 let%expect_test
     "generated checkpoint binds the original durable admission across reopen and \
@@ -104,6 +110,12 @@ let%expect_test
         }
       in
       State.validate state |> protocol_ok;
+      assert (
+        Result.is_error
+          (encoded { state with schema_version = State.current_schema_version - 1 }));
+      assert (
+        Result.is_error
+          (encoded { state with schema_version = State.current_schema_version + 1 }));
       let pending =
         { state with
           pending_initial_start = true
@@ -114,28 +126,39 @@ let%expect_test
         }
       in
       State.validate pending |> protocol_ok;
-      assert_same_session_snapshot
-        pending
-        (Persistence.restore_snapshot (encoded pending) |> store_ok);
-      (* Old generated sessions retain their original requested start setting after
-         a later stop. Migration must not synthesize a new start from that setting. *)
-      let legacy = { pending with schema_version = 11; pending_initial_start = false } in
-      let legacy_payload =
-        match State.sexp_of_t legacy with
-        | Sexp.List fields ->
-          Sexp.List
-            (List.filter fields ~f:(function
-               | Sexp.List (Atom "pending_initial_start" :: _) -> false
-               | _ -> true))
-          |> Sexp.to_string_mach
+      assert_same_session_snapshot pending (restored pending);
+      (* Complete named state requires the pending-start field; unsupported stored
+         envelope versions fail without interpreting old domain layouts. *)
+      let pending_document = encoded pending |> document_ok in
+      let payload =
+        match Document_schema.Document.payload pending_document with
+        | `Object fields ->
+          `Object
+            (List.filter fields ~f:(fun (key, _) ->
+               not (String.equal key "pending_initial_start")))
         | _ -> assert false
       in
-      let migrated = Persistence.restore_snapshot legacy_payload |> store_ok in
-      assert migrated.spec.protocol.start_immediately;
-      assert (not migrated.pending_initial_start);
-      assert (
-        Result.is_error
-          (Persistence.restore_snapshot (encoded { pending with schema_version = 11 })));
+      let missing =
+        Document_schema.Document.create ~limits ~kind:"session.state" ~version:1 ~payload
+        |> document_ok
+      in
+      assert (Result.is_error (Documents.decode ~limits missing));
+      List.iter [ 0; 2 ] ~f:(fun version ->
+        let json =
+          match Document_schema.Document.json pending_document with
+          | `Object fields ->
+            `Object
+              (List.map fields ~f:(fun (key, value) ->
+                 ( key
+                 , if String.equal key "schema_version"
+                   then `Number (Int.to_string version)
+                   else value )))
+          | _ -> assert false
+        in
+        assert (
+          Result.is_error
+            (Document_schema.Document.inspect ~limits json
+             |> Result.bind ~f:(Documents.decode ~limits))));
       let wire =
         P.Session.to_json (State.summary state) |> P.Session.of_json |> protocol_ok
       in
@@ -162,12 +185,11 @@ let%expect_test
         |> store_ok
       in
       let _ =
-        Persistence.install_snapshot
+        Agent_store.Snapshot.install
           ~env
-          ~handle
+          ~directory:(Store.Handle.snapshot_directory handle)
           ~max_payload_length:1048576
-          ~transaction_hash:None
-          state
+          (snapshot state)
         |> store_ok
       in
       let installed = D.advance ledger reserved Child_installed |> store_ok in
@@ -198,7 +220,11 @@ let%expect_test
         |> store_ok
         |> Option.value_exn
       in
-      let restored = Persistence.restore_snapshot saved.snapshot.payload |> store_ok in
+      let restored =
+        Persistence.restore_snapshot ~limits saved.snapshot
+        |> store_ok
+        |> Persistence.Restored.state
+      in
       assert_same_session_snapshot state restored;
       let resolved =
         D.resolve (Store.delegations store) (Option.value_exn restored.spec.delegation)
@@ -213,14 +239,16 @@ let%expect_test
       (* Valid structure is not authority: a different admission digest must fail
          the actual ledger lookup even though the checkpoint has consistent IDs. *)
       let substituted =
-        match D.Reference.sexp_of_t reference with
-        | Sexp.List fields ->
-          Sexp.List
-            (List.map fields ~f:(function
-               | Sexp.List [ Atom "admission_sha256"; _ ] ->
-                 Sexp.List [ Atom "admission_sha256"; Atom (digest "substituted policy") ]
-               | field -> field))
-          |> D.Reference.t_of_sexp
+        match D.reference_to_jsonaf reference with
+        | `Object fields ->
+          `Object
+            (List.map fields ~f:(fun (key, value) ->
+               ( key
+               , if String.equal key "admission_sha256"
+                 then `String (digest "substituted policy")
+                 else value )))
+          |> D.reference_of_jsonaf
+          |> store_ok
         | _ -> assert false
       in
       let substituted_state =
@@ -244,15 +272,11 @@ let%expect_test
       in
       List.iter invalid_states ~f:(fun invalid ->
         assert (Result.is_error (State.validate invalid));
-        assert (Result.is_error (Persistence.restore_snapshot (encoded invalid))));
+        assert (Result.is_error (encoded invalid)));
       List.iter [ 9; 10 ] ~f:(fun schema_version ->
         let downgraded = { state with schema_version } in
         assert (Result.is_error (State.upgrade_schema downgraded));
-        assert (Result.is_error (Persistence.restore_snapshot (encoded downgraded))));
-      let old = { original with schema_version = 10 } in
-      assert_same_session_snapshot
-        original
-        (Persistence.restore_snapshot (encoded old) |> store_ok);
+        assert (Result.is_error (encoded downgraded)));
       let transient_json =
         (* Embedded process-bound transient sessions are otherwise supported;
            exercise the generated-only restriction, not detached policy's ban. *)

@@ -1,61 +1,18 @@
-(** Session persistence helper.
-
-    `Session_store` wires the [`Session`](session.mli) data structure to the
-    file-system.  It decides where sessions live (`$HOME/.ochat/sessions/<id>`),
-    takes care of *schema migrations* when a stored snapshot was produced by an
-    older binary, and provides a couple of convenience functions that the CLI
-    surfaces as flags – reset, rebuild, and list.
-
-    The API is deliberately minimal: open a session with {!load_or_create},
-    mutate the resulting {!Session.t}, then persist it with {!save}.  All
-    helpers require an `Eio_unix.Stdenv.base` capability so they work equally
-    well in the main thread or inside a fibre/domain. *)
-
+(** Standalone session document persistence. The filename remains snapshot.bin,
+    but its contents are a complete named-field document. Unsupported beta
+    binaries are reported explicitly and never rewritten during reads. *)
 open! Core
 
 type id = string
 type path = Eio.Fs.dir_ty Eio.Path.t
 
-(** [base_dir ()] yields the root directory that stores *all* persisted
-    chat sessions.
-
-    Resolution rules:
-    • [$HOME] present ‒ returns ["$HOME/.ochat/sessions"].
-    • otherwise    ‒ returns ["./.ochat/sessions"].
-
-    Pure helper – it merely constructs the path string and never
-    touches the file-system. *)
 val base_dir : unit -> string
-
-(** [rel_path id] concatenates {!base_dir} with [id] and returns the
-     session directory as a plain string (no capability attached). *)
 val rel_path : id -> string
-
-(** [ensure_dir ~env id] returns an [`dir Path.t] rooted at the session
-    directory [id], creating the hierarchy recursively with permissions
-    [0o700] when necessary. *)
 val ensure_dir : env:Eio_unix.Stdenv.base -> id -> path
-
-(* Convenience alias so callers can simply write
-   [Session_store.path ~env id]. *)
 val path : env:Eio_unix.Stdenv.base -> id -> path
 
-(** [load_or_create ~env ~prompt_file ?id ?new_session ()] restores an
-     existing session *or* boot-straps a brand-new {!Session.t} when no
-     compatible snapshot is present.
-
-     Identifier selection (highest priority first):
-     1. explicit [?id] when [new_session = false];
-     2. freshly generated time/PRNG-derived MD5 identifier when [new_session = true];
-     3. MD5 digest of [prompt_file] (default).
-
-     If [snapshot.bin] exists under the chosen directory it is loaded and
-     migrated to the latest schema via {!Session.Legacy}.  Otherwise a new
-     record is created and the original markdown prompt is copied into the
-     directory as [prompt.chatmd] to keep the session self-contained.
-
-     The returned value lives purely in memory – call {!save} after making
-     changes. *)
+(** Missing snapshots create a session. Existing malformed/unsupported snapshots
+    raise their decode error without mutation. *)
 val load_or_create
   :  env:Eio_unix.Stdenv.base
   -> prompt_file:string
@@ -64,63 +21,24 @@ val load_or_create
   -> unit
   -> Session.t
 
-(** [read_existing ~env ~id] loads [snapshot.bin] for [id], upgrading any
-    supported legacy schema along the way.
-
-    Returns [None] when the snapshot is missing or unreadable. *)
+(** Returns None only for missing snapshots; existing invalid data raises. *)
 val read_existing : env:Eio_unix.Stdenv.base -> id:id -> Session.t option
 
-(** [read_current_file path] decodes the current V5 schema and falls back
-    through every supported legacy schema. Legacy snapshots are returned as
-    V5 values with empty shell security state. *)
-val read_current_file : Bin_prot_utils_eio.path -> (Session.t, Error.t) result
+(** Bounded document conversion/validation; no fallback to historical layouts. *)
+val read_current_file : path -> (Session.t, Error.t) Result.t
 
-type staged_v4_read =
-  | Missing
-  | Loaded of Session.V4.t
-  | Unreadable of Error.t
-
-(** [read_staged_v4_file path] decodes [path] by trying V4 through V0 without
-    modifying it. *)
-val read_staged_v4_file : Bin_prot_utils_eio.path -> (Session.V4.t, Error.t) result
-
-(** [read_staged_v4 ~env ~id] distinguishes a missing snapshot from an
-    existing snapshot that cannot be decoded. It tries V4, V3, V2, V1, and V0
-    in that order and never writes the snapshot. *)
-val read_staged_v4 : env:Eio_unix.Stdenv.base -> id:id -> staged_v4_read
-
-(** [save ~env session] atomically writes [session] to
-    [<session-dir>/snapshot.bin] while holding an exclusive Eio-created lock
-    file. An exclusive temporary file and rename preserve the prior snapshot
-    on write/rename failure; no fsync durability is promised. Lock and persistence
-    failures are returned. Initial directory-creation failures can raise. *)
+(** Preflights the complete document before creating directories or taking an
+    exclusive lock. An exclusive temporary file and rename preserve the prior
+    snapshot on write failure. No fsync durability is promised. Eio cancellation
+    propagates; ordinary filesystem failures are returned. *)
 val save : env:Eio_unix.Stdenv.base -> Session.t -> unit Or_error.t
 
-(** [save_exn] is the legacy exception-raising compatibility wrapper. New
-    executable boundaries should prefer [save] and render its typed error. *)
 val save_exn : env:Eio_unix.Stdenv.base -> Session.t -> unit
-
-(** [list ~env] enumerates *valid* sessions – i.e. directories that
-     contain a readable [snapshot.bin].  The function returns
-     [(id, prompt_file)] pairs and silently ignores damaged snapshots. *)
 val list : env:Eio_unix.Stdenv.base -> (id * string) list
 
-(** [reset_session ~env ~id ?prompt_file ()] archives the current
-    snapshot of session [id] and resets its in-memory state.
-
-    Behaviour:
-    • The existing [snapshot.bin] is moved to an [archive/] subdirectory
-      of the session directory using the timestamp format
-      "YYYYMMDD-HHMM.snapshot.bin".
-    • The loaded session value is passed through {!Session.reset}, which
-      clears the history and (optionally) updates the [prompt_file].
-    • When [prompt_file] is provided, the referenced markdown document is
-      copied into the session directory as [prompt.chatmd] and recorded
-      via [local_prompt_copy].
-    • The new snapshot is then written back to disk via {!save}.
-
-    The helper prints a short confirmation message on [stdout].  It exits
-    early with an error message if the session cannot be found. *)
+(** Preflight, archive a copy, then atomically replace while holding the same
+    lock. Decode/conversion failures leave the snapshot and archive untouched.
+    Reset preserves allocator high-water marks and unknown-field ownership. *)
 val reset_session
   :  env:Eio_unix.Stdenv.base
   -> id:id
@@ -129,22 +47,6 @@ val reset_session
   -> unit
   -> unit
 
-(** [rebuild_session ~env ~id ()] discards the current [snapshot.bin] of
-    session [id] and recreates a fresh one seeded solely by the
-    {i current} prompt file.  The helper is intended for the workflow
-    where the user edits the copied [prompt.chatmd] inside the session
-    directory and wants the persisted session state to reflect those
-    changes without starting the interactive TUI.
-
-    Behaviour:
-    • The existing snapshot is moved to [archive/] just like
-      {!reset_session}.
-    • A brand-new {!Session.t} value is created using the same
-      [prompt_file] and [local_prompt_copy] recorded in the archived
-      snapshot.  The new record therefore has an {b empty} history – the
-      interactive UI will re-parse the updated prompt on the next
-      launch.
-    • The per-session cache located at [<session-dir>/.chatmd/cache.bin]
-      is deleted to avoid stale tool outputs.
-    • A confirmation summary is printed to [stdout]. *)
+(** Resets the conversation, task list and metadata while preserving the prompt,
+    history allocator and preservation context; clears the cache after commit. *)
 val rebuild_session : env:Eio_unix.Stdenv.base -> id:id -> unit -> unit

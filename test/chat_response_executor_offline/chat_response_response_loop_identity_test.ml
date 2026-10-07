@@ -61,7 +61,7 @@ let output_message text : Res.Item.t =
 ;;
 
 let create_entry ~allocator item =
-  History_entry.create ~allocator item |> Result.ok_or_failwith
+  Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
 ;;
 
 let%expect_test "blocking loop preserves IDs and allocates each new occurrence once" =
@@ -97,7 +97,7 @@ let%expect_test "blocking loop preserves IDs and allocates each new occurrence o
   in
   let kinds =
     List.map history ~f:(fun entry ->
-      match History_entry.item entry with
+      match Openai.Responses_history.item_exn entry with
       | Input_message _ -> "input"
       | Function_call _ -> "call"
       | Function_call_output _ -> "output"
@@ -320,7 +320,7 @@ let%expect_test "fork history retains parent IDs and allocates one child instruc
   let retained_id = History_entry.id (List.hd_exn child) in
   let instruction = List.last_exn child in
   let instruction_call_id =
-    match History_entry.item instruction with
+    match Openai.Responses_history.item_exn instruction with
     | Res.Item.Function_call_output output -> output.call_id
     | _ -> failwith "Expected fork instruction output"
   in
@@ -345,7 +345,7 @@ let fork_instruction_text () =
       ~arguments:{|{"command":"inspect","arguments":["one"]}|}
       ~call_id:"prompt-contract"
   in
-  match History_entry.item (List.last_exn entries) with
+  match Openai.Responses_history.item_exn (List.last_exn entries) with
   | Res.Item.Function_call_output { output = Output.Text text; _ } -> text
   | _ -> failwith "Expected textual fork instruction"
 ;;

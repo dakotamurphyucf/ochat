@@ -71,7 +71,8 @@ let%expect_test "external event delivery commits receipts before changing the li
           ~initial_state:initial
           ~operation_worker:None
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit ~previous next ->
                   match !reject with
                   | true ->
@@ -543,11 +544,7 @@ let%expect_test "queued events retain actor ownership through checkpoint install
                 match run () with
                 | Ok false -> true
                 | _ -> false);
-              let restored =
-                Agent_session.Session_persistence.restore_snapshot
-                  (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-                |> store_ok
-              in
+              let restored = restore_state saved |> store_ok in
               let plan =
                 Agent_session.Invocation_recovery.plan
                   ~state:restored
@@ -833,21 +830,14 @@ let%expect_test
          Result.is_error
            (E.retire retired ~checkpoint_sha256:(String.make 64 'a') ~reason:"again"));
        let legacy = { failed_state with schema_version = 5 } in
-       let migrated =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t legacy))
-         |> store_ok
-       in
+       assert (Result.is_error (restore_state legacy));
+       let migrated = restore_state failed_state |> store_ok in
        assert (List.equal E.equal migrated.moderator_executions [ failed ]);
        assert (
          Result.is_error
            (Agent_session.Session_state.upgrade_schema
               { retired_state with schema_version = 5 }));
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t retired_state))
-         |> store_ok
-       in
+       let restored = restore_state retired_state |> store_ok in
        assert_same_session_snapshot restored retired_state;
        let projection = Agent_session.Session_state.extension_status restored in
        let projection_json =
@@ -1073,11 +1063,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
            Result.is_error
              (Agent_session.Session_state.upgrade_schema
                 { state with schema_version = 6 }));
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          assert_same_session_snapshot state restored;
          (match mode with
           | `Cancel -> ()

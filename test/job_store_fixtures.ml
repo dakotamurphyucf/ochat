@@ -89,7 +89,7 @@ let fail_metadata_rename
         armed := None;
         on_failure target;
         if after_rename then Original.rename directory source native_directory target;
-        failwith "injected metadata rename failure"
+        raise (Core_unix.Unix_error (EIO, "injected metadata rename failure", "metadata"))
       | _ -> Original.rename directory source native_directory target
     ;;
 

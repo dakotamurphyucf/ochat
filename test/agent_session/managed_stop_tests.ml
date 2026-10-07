@@ -78,10 +78,7 @@ let%expect_test
        assert_same_session_snapshot graceful (A.state actor |> protocol_ok);
        let saved_transition = List.last_exn !transitions in
        let replayed =
-         Agent_session.Session_delta.sexp_of_t saved_transition.delta
-         |> Sexp.to_string_mach
-         |> Sexp.of_string
-         |> Agent_session.Session_delta.t_of_sexp
+         restore_delta saved_transition.delta
          |> Agent_session.Session_delta.apply before
          |> protocol_ok
        in
@@ -115,12 +112,7 @@ let%expect_test
            P.History.equal_entry
            before.conversation.canonical_history
            stopped_state.conversation.canonical_history);
-       let restored =
-         State.sexp_of_t stopped_state
-         |> Sexp.to_string_mach
-         |> Agent_session.Session_persistence.restore_snapshot
-         |> store_ok
-       in
+       let restored = restore_state stopped_state |> store_ok in
        assert_same_session_snapshot stopped_state restored;
        assert (
          Result.is_error (State.upgrade_schema { restored with schema_version = 16 }));

@@ -383,7 +383,8 @@ val effective_entries : t -> History_entry.t list -> Moderation.Effective_entry.
 val effective_history_entries : t -> History_entry.t list -> History_entry.t list
 
 (** Reconstruct the effective conversation from a committed identity snapshot,
-    without creating a runtime or executing moderator code. *)
+    without creating a runtime, decoding provider DTOs or executing moderator
+    code. Inserted and replacement payloads retain their captured JSON. *)
 val effective_entries_of_snapshot
   :  Session.Moderator_state.Identity_snapshot.t
   -> History_entry.t list

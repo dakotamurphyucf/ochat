@@ -56,10 +56,8 @@ let compatibility_namespace =
     Printf.sprintf "response-loop-%d" sequence
 ;;
 
-let create_entries ~allocator items =
-  List.map items ~f:(History_entry.create ~allocator)
-  |> Result.all
-  |> Result.ok_or_failwith
+let create_entries ?(preceding = []) ~allocator items =
+  Openai.Responses_history.of_items ~preceding ~allocator items |> Result.ok_or_failwith
 ;;
 
 let max_response_retries = 5
@@ -189,7 +187,7 @@ let rec run_entries
     then Compact_history.collapse_read_file_entries history
     else history
   in
-  let inputs = History_entry.items request_entries in
+  let inputs = Openai.Responses_history.items_exn request_entries in
   let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
   let post =
     Option.value post ~default:(fun ~sw ~dir ~inputs ->
@@ -212,8 +210,8 @@ let rec run_entries
       ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock (Ctx.env ctx)))
       ~f:(fun () -> Eio.Switch.run (fun sw -> post ~sw ~dir:response_dir ~inputs))
   in
-  let new_entries = create_entries ~allocator response.output in
-  let new_items = History_entry.items new_entries in
+  let new_entries = create_entries ~preceding:history ~allocator response.output in
+  let new_items = Openai.Responses_history.items_exn new_entries in
   (* 2.  Extract any tool-call requests from the newly returned items. *)
   let tool_calls =
     List.filter_map new_items ~f:(function
@@ -293,7 +291,7 @@ let rec run_entries
                    fork_history
                in
                let result =
-                 [ History_entry.item (List.last_exn res) ]
+                 [ Openai.Responses_history.item_exn (List.last_exn res) ]
                  |> List.filter_map ~f:(function
                    | Res.Item.Output_message o ->
                      Some
@@ -331,7 +329,9 @@ let rec run_entries
           (Jsonaf.to_string (Res.Item.jsonaf_of_t data) ^ "\n");
         data)
     in
-    let output_entries = create_entries ~allocator outputs in
+    let output_entries =
+      create_entries ~preceding:(history @ new_entries) ~allocator outputs
+    in
     run_entries
       ~ctx
       ~allocator

@@ -45,7 +45,7 @@ let%expect_test "export includes previous history items" =
     |> Result.ok_or_failwith
   in
   let history =
-    List.map history_items ~f:(History_entry.create ~allocator)
+    List.map history_items ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in

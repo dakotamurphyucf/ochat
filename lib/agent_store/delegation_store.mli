@@ -186,3 +186,10 @@ val with_artifact_retention
   -> max_artifact_bytes:int
   -> f:(Agent_protocol.Id.Prompt_revision.t list -> ('a, Store_error.t) result)
   -> ('a, Store_error.t) result
+
+(** Complete private named-field reference representation, validated before
+    entering retained session state. Decoding grants no delegation authority. *)
+val reference_to_jsonaf : Reference.t -> Jsonaf.t
+
+val reference_of_jsonaf : Jsonaf.t -> (Reference.t, Store_error.t) result
+val reference_shape : Document_schema.Shape.t

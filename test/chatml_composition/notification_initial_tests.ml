@@ -25,16 +25,10 @@ let on_event ctx state event = match event with
 ;;
 
 let appended state =
-  let fields =
-    P.Json_codec.fields (Option.value_exn state.Agent_session.Session_state.moderator)
-    |> protocol_ok
-  in
-  let encoded =
-    P.Json_codec.required_as fields "identity_snapshot_sexp" P.Json_codec.string
-    |> protocol_ok
-  in
   let snapshot =
-    Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string encoded)
+    Agent_session.Moderator_checkpoint.decode state.Agent_session.Session_state.moderator
+    |> protocol_ok
+    |> Option.value_exn
   in
   match snapshot.current_state with
   | Int count -> count

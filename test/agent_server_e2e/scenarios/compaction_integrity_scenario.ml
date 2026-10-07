@@ -331,14 +331,8 @@ let expected_reminder id marker =
       ; _type = "message"
       }
   in
-  Agent_protocol.History.
-    { id
-    ; role = User
-    ; kind = Message
-    ; payload = Openai.Responses.Item.jsonaf_of_t item
-    ; provenance = Canonical
-    ; redacted = false
-    }
+  Openai.Responses_history.create_with_id_exn ~id item
+  |> Agent_session.History_codec.to_canonical
 ;;
 
 let assert_reminder before (reminder : Agent_protocol.History.entry) marker =

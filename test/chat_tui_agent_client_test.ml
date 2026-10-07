@@ -340,7 +340,9 @@ let trace_projection revision ~committed events =
           ; role = Assistant
           ; kind = Reasoning
           ; payload =
-              Openai.Responses.Item.jsonaf_of_t (Reasoning (trace_reasoning "think"))
+              Openai.Responses_history.of_item (Reasoning (trace_reasoning "think"))
+              |> Result.ok_or_failwith
+              |> History_entry.Payload.to_json
           }
         ]
   in

@@ -13,16 +13,15 @@ let%expect_test "bounded roots preserve framed references and expose incomplete 
     Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / journal_directory);
     let snapshot_id = P.Id.Blob.create ()
     and journal_id = P.Id.Blob.create () in
-    let snapshot : Snapshot.t =
-      { schema_version = 1
-      ; transaction_sequence = 0L
-      ; transaction_hash = None
-      ; event_sequence = 0L
-      ; created_at = timestamp
-      ; prompt_artifact = "fixture"
-      ; workspace_identity = "fixture"
-      ; payload = P.Id.Blob.to_string snapshot_id
-      }
+    let snapshot =
+      snapshot_record
+        ~transaction_sequence:0L
+        ~transaction_hash:None
+        ~event_sequence:0L
+        ~revision:0L
+        ~prompt_artifact:"fixture"
+        ~workspace_identity:"fixture"
+        (P.Id.Blob.to_string snapshot_id)
     in
     let installed =
       Snapshot.install
@@ -57,7 +56,9 @@ let%expect_test "bounded roots preserve framed references and expose incomplete 
     let actual =
       Snapshot.decode_file ~max_payload_length:4096 snapshot_bytes |> store_ok
     in
-    [%test_eq: string] snapshot.payload actual.payload;
+    [%test_eq: string]
+      (Document_schema.Document.to_string snapshot.payload)
+      (Document_schema.Document.to_string actual.payload);
     let journal_bytes =
       R.read
         reader

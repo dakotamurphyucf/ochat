@@ -510,9 +510,7 @@ let%expect_test
                 ~previous:(Some invocation)
                 (without_reference invocation))));
        let restored =
-         State.sexp_of_t state
-         |> Sexp.to_string_mach
-         |> Agent_session.Session_persistence.restore_snapshot
+         Agent_server_test_support.roundtrip_state state
          |> Result.map_error ~f:(fun error ->
            Sexp.to_string_hum (Agent_store.Store_error.sexp_of_t error))
          |> Result.ok_or_failwith

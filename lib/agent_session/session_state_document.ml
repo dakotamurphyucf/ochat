@@ -1,0 +1,672 @@
+open! Core
+module P = Agent_protocol
+module X = Persistence_codec
+module J = P.Json_codec
+module S = Session_state
+module Shapes = Session_record_shapes
+module D = Document_schema
+
+let pairs_to_jsonaf pairs =
+  `Array
+    (List.map pairs ~f:(fun (name, value) ->
+       `Object [ "name", `String name; "value", `String value ]))
+;;
+
+let pairs_of_jsonaf =
+  X.list (fun json ->
+    let open Result.Let_syntax in
+    let%bind fields = X.object_ json in
+    let%bind name = X.required fields "name" J.string in
+    let%map value = X.required fields "value" J.string in
+    name, value)
+;;
+
+let pairs_shape =
+  X.array_shape_exn
+    ~allow_empty_identity:true
+    ~identity_field:"name"
+    (X.fields_shape [ "name"; "value" ])
+;;
+
+let delegation_of_jsonaf json =
+  Agent_store.Delegation_store.reference_of_jsonaf json
+  |> Result.map_error ~f:(fun error ->
+    P.Error.invalid_request
+      (Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error)))
+;;
+
+let owner_lease_to_jsonaf (t : P.Session.Owner_lease.t) =
+  `Object
+    [ "generation", X.int64_json t.generation
+    ; "expires_at", P.Timestamp.to_json t.expires_at
+    ; ( "disconnect_grace_until"
+      , (X.option_json P.Timestamp.to_json) t.disconnect_grace_until )
+    ; "principal_id", (X.option_json P.Id.Principal.to_json) t.principal_id
+    ; "reclaim_token_sha256", (X.option_json X.text_json) t.reclaim_token_sha256
+    ]
+;;
+
+let owner_lease_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind generation = X.required fields "generation" X.nonnegative_int64 in
+  let%bind expires_at = X.required fields "expires_at" P.Timestamp.of_json in
+  let%bind disconnect_grace_until =
+    X.required fields "disconnect_grace_until" (X.nullable P.Timestamp.of_json)
+  in
+  let%bind principal_id =
+    X.required fields "principal_id" (X.nullable P.Id.Principal.of_json)
+  in
+  let%bind reclaim_token_sha256 =
+    X.required fields "reclaim_token_sha256" (X.nullable J.string)
+  in
+  let t : P.Session.Owner_lease.t =
+    { generation; expires_at; disconnect_grace_until; principal_id; reclaim_token_sha256 }
+  in
+  Ok t
+;;
+
+let owner_lease_shape =
+  X.shape_exn
+    [ "generation", Document_schema.Shape.value
+    ; "expires_at", Document_schema.Shape.value
+    ; "disconnect_grace_until", X.nullable_shape Document_schema.Shape.value
+    ; "principal_id", X.nullable_shape Document_schema.Shape.value
+    ; "reclaim_token_sha256", X.nullable_shape Document_schema.Shape.value
+    ]
+;;
+
+let attachment_to_jsonaf (t : P.Session.Attachment.t) =
+  `Object
+    [ "id", P.Id.Attachment.to_json t.id
+    ; "session_id", P.Id.Session.to_json t.session_id
+    ; ( "mode"
+      , (fun mode ->
+           `String
+             (match mode with
+              | P.Session.Owner_read_write -> "owner_read_write"
+              | Read_write -> "read_write"
+              | Read_only -> "read_only"))
+          t.mode )
+    ; "owner_lease", (X.option_json owner_lease_to_jsonaf) t.owner_lease
+    ]
+;;
+
+let attachment_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind id = X.required fields "id" P.Id.Attachment.of_json in
+  let%bind session_id = X.required fields "session_id" P.Id.Session.of_json in
+  let%bind mode =
+    X.required
+      fields
+      "mode"
+      (J.enum
+         ~name:"attachment mode"
+         [ "owner_read_write", P.Session.Owner_read_write
+         ; "read_write", Read_write
+         ; "read_only", Read_only
+         ])
+  in
+  let%bind owner_lease =
+    X.required fields "owner_lease" (X.nullable owner_lease_of_jsonaf)
+  in
+  let t : P.Session.Attachment.t = { id; session_id; mode; owner_lease } in
+  Ok t
+;;
+
+let attachment_shape =
+  X.shape_exn
+    [ "id", Document_schema.Shape.value
+    ; "session_id", Document_schema.Shape.value
+    ; "mode", Document_schema.Shape.value
+    ; "owner_lease", X.nullable_shape owner_lease_shape
+    ]
+;;
+
+let identity_to_jsonaf (t : S.Identity.t) =
+  `Object
+    [ "session_id", P.Id.Session.to_json t.session_id
+    ; "display_name", (X.option_json X.text_json) t.display_name
+    ; "creating_principal", (X.option_json P.Id.Principal.to_json) t.creating_principal
+    ; "created_at", P.Timestamp.to_json t.created_at
+    ; "updated_at", P.Timestamp.to_json t.updated_at
+    ; "labels", pairs_to_jsonaf t.labels
+    ; "generation", X.host_counter_to_json t.generation
+    ]
+;;
+
+let identity_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind session_id = X.required fields "session_id" P.Id.Session.of_json in
+  let%bind display_name = X.required fields "display_name" (X.nullable J.string) in
+  let%bind creating_principal =
+    X.required fields "creating_principal" (X.nullable P.Id.Principal.of_json)
+  in
+  let%bind created_at = X.required fields "created_at" P.Timestamp.of_json in
+  let%bind updated_at = X.required fields "updated_at" P.Timestamp.of_json in
+  let%bind labels = X.required fields "labels" pairs_of_jsonaf in
+  let%bind generation = X.required fields "generation" X.host_counter_of_json in
+  let t : S.Identity.t =
+    { session_id
+    ; display_name
+    ; creating_principal
+    ; created_at
+    ; updated_at
+    ; labels
+    ; generation
+    }
+  in
+  Ok t
+;;
+
+let identity_shape =
+  X.shape_exn
+    [ "session_id", Document_schema.Shape.value
+    ; "display_name", X.nullable_shape Document_schema.Shape.value
+    ; "creating_principal", X.nullable_shape Document_schema.Shape.value
+    ; "created_at", Document_schema.Shape.value
+    ; "updated_at", Document_schema.Shape.value
+    ; "labels", pairs_shape
+    ; "generation", Document_schema.Shape.value
+    ]
+;;
+
+let spec_to_jsonaf (t : S.Spec.t) =
+  `Object
+    [ "protocol", P.Session.Spec.to_json t.protocol
+    ; ( "prompt_definition_id"
+      , (X.option_json P.Id.Prompt_definition.to_json) t.prompt_definition_id )
+    ; "prompt_revision_id", P.Id.Prompt_revision.to_json t.prompt_revision_id
+    ; ( "delegation"
+      , (X.option_json Agent_store.Delegation_store.reference_to_jsonaf) t.delegation )
+    ; "workspace_instance", Workspace_instance.to_jsonaf t.workspace_instance
+    ; "permission_profile", X.text_json t.permission_profile
+    ; "permission_profile_digest", X.text_json t.permission_profile_digest
+    ; "runtime_policy", (X.option_json X.text_json) t.runtime_policy
+    ; "quota_key", (X.option_json Quota_key.to_jsonaf) t.quota_key
+    ]
+;;
+
+let spec_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind protocol = X.required fields "protocol" P.Session.Spec.of_json in
+  let%bind prompt_definition_id =
+    X.required fields "prompt_definition_id" (X.nullable P.Id.Prompt_definition.of_json)
+  in
+  let%bind prompt_revision_id =
+    X.required fields "prompt_revision_id" P.Id.Prompt_revision.of_json
+  in
+  let%bind delegation =
+    X.required fields "delegation" (X.nullable delegation_of_jsonaf)
+  in
+  let%bind workspace_instance =
+    X.required fields "workspace_instance" Workspace_instance.of_jsonaf
+  in
+  let%bind permission_profile = X.required fields "permission_profile" J.string in
+  let%bind permission_profile_digest =
+    X.required fields "permission_profile_digest" J.string
+  in
+  let%bind runtime_policy = X.required fields "runtime_policy" (X.nullable J.string) in
+  let%bind quota_key = X.required fields "quota_key" (X.nullable Quota_key.of_jsonaf) in
+  let t : S.Spec.t =
+    { protocol
+    ; prompt_definition_id
+    ; prompt_revision_id
+    ; delegation
+    ; workspace_instance
+    ; permission_profile
+    ; permission_profile_digest
+    ; runtime_policy
+    ; quota_key
+    }
+  in
+  Ok t
+;;
+
+let spec_shape =
+  X.shape_exn
+    [ "protocol", Shapes.protocol_spec
+    ; "prompt_definition_id", X.nullable_shape Document_schema.Shape.value
+    ; "prompt_revision_id", Document_schema.Shape.value
+    ; "delegation", X.nullable_shape Agent_store.Delegation_store.reference_shape
+    ; "workspace_instance", Workspace_instance.shape
+    ; "permission_profile", Document_schema.Shape.value
+    ; "permission_profile_digest", Document_schema.Shape.value
+    ; "runtime_policy", X.nullable_shape Document_schema.Shape.value
+    ; "quota_key", X.nullable_shape Quota_key.shape
+    ]
+;;
+
+let archive_kind_to_jsonaf = function
+  | S.Compaction_archive.Compaction -> `String "compaction"
+  | Reset -> `String "reset"
+  | Rebuild -> `String "rebuild"
+  | Upgrade -> `String "upgrade"
+;;
+
+let archive_kind_of_jsonaf =
+  J.enum
+    ~name:"archive kind"
+    [ "compaction", S.Compaction_archive.Compaction
+    ; "reset", Reset
+    ; "rebuild", Rebuild
+    ; "upgrade", Upgrade
+    ]
+;;
+
+let disposition_to_jsonaf (t : S.Compaction_archive.invocation_disposition) =
+  `Object
+    [ "invocation_id", P.Id.Invocation.to_json t.invocation_id
+    ; "interruption_reason", (X.option_json X.text_json) t.interruption_reason
+    ; "output_entry_id", (X.option_json P.History.Id.to_json) t.output_entry_id
+    ; "publication_discarded", (X.option_json X.text_json) t.publication_discarded
+    ]
+;;
+
+let disposition_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind invocation_id = X.required fields "invocation_id" P.Id.Invocation.of_json in
+  let%bind interruption_reason =
+    X.required fields "interruption_reason" (X.nullable J.string)
+  in
+  let%bind output_entry_id =
+    X.required fields "output_entry_id" (X.nullable P.History.Id.of_json)
+  in
+  let%bind publication_discarded =
+    X.required fields "publication_discarded" (X.nullable J.string)
+  in
+  let t : S.Compaction_archive.invocation_disposition =
+    { invocation_id; interruption_reason; output_entry_id; publication_discarded }
+  in
+  Ok t
+;;
+
+let disposition_shape =
+  X.shape_exn
+    [ "invocation_id", Document_schema.Shape.value
+    ; "interruption_reason", X.nullable_shape Document_schema.Shape.value
+    ; "output_entry_id", X.nullable_shape Document_schema.Shape.value
+    ; "publication_discarded", X.nullable_shape Document_schema.Shape.value
+    ]
+;;
+
+let archive_reference_to_jsonaf (t : S.Compaction_archive.t) =
+  `Object
+    [ "operation_id", P.Id.Operation.to_json t.operation_id
+    ; "revision", X.int64_json t.revision
+    ; "sha256", X.text_json t.sha256
+    ; "kind", archive_kind_to_jsonaf t.kind
+    ; ( "invocation_dispositions"
+      , (X.list_json disposition_to_jsonaf) t.invocation_dispositions )
+    ]
+;;
+
+let archive_reference_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind operation_id = X.required fields "operation_id" P.Id.Operation.of_json in
+  let%bind revision = X.required fields "revision" X.nonnegative_int64 in
+  let%bind sha256 = X.required fields "sha256" J.string in
+  let%bind kind = X.required fields "kind" archive_kind_of_jsonaf in
+  let%bind invocation_dispositions =
+    X.required fields "invocation_dispositions" (X.list disposition_of_jsonaf)
+  in
+  let t : S.Compaction_archive.t =
+    { operation_id; revision; sha256; kind; invocation_dispositions }
+  in
+  Ok t
+;;
+
+let archive_reference_shape =
+  X.shape_exn
+    [ "operation_id", Document_schema.Shape.value
+    ; "revision", Document_schema.Shape.value
+    ; "sha256", Document_schema.Shape.value
+    ; "kind", Document_schema.Shape.value
+    ; ( "invocation_dispositions"
+      , X.array_shape_exn ~identity_field:"invocation_id" disposition_shape )
+    ]
+;;
+
+let conversation_to_jsonaf (t : S.Conversation.t) =
+  `Object
+    [ "canonical_history", (X.list_json P.History.entry_to_json) t.canonical_history
+    ; ( "deferred_user_entries"
+      , (X.list_json P.History.entry_to_json) t.deferred_user_entries )
+    ; "initial_prompt_entry_count", X.integer_json t.initial_prompt_entry_count
+    ; "next_history_sequence", X.int64_json t.next_history_sequence
+    ; "reserved_history_through", X.int64_json t.reserved_history_through
+    ; "tasks", (X.list_json Fn.id) t.tasks
+    ; "kv_store", pairs_to_jsonaf t.kv_store
+    ; "compaction_generation", X.integer_json t.compaction_generation
+    ; ( "compaction_archives"
+      , (X.list_json archive_reference_to_jsonaf) t.compaction_archives )
+    ; "authoring_reference_index", (X.option_json Fn.id) t.authoring_reference_index
+    ; ( "authoring_publication"
+      , (X.option_json Chat_response.Authoring_publication.context_to_jsonaf)
+          t.authoring_publication )
+    ]
+;;
+
+let conversation_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind canonical_history =
+    X.required fields "canonical_history" (X.list P.History.entry_of_json)
+  in
+  let%bind deferred_user_entries =
+    X.required fields "deferred_user_entries" (X.list P.History.entry_of_json)
+  in
+  let%bind initial_prompt_entry_count =
+    X.required fields "initial_prompt_entry_count" X.integer
+  in
+  let%bind next_history_sequence =
+    X.required fields "next_history_sequence" X.nonnegative_int64
+  in
+  let%bind reserved_history_through =
+    X.required fields "reserved_history_through" X.nonnegative_int64
+  in
+  let%bind tasks = X.required fields "tasks" (X.list X.raw) in
+  let%bind kv_store = X.required fields "kv_store" pairs_of_jsonaf in
+  let%bind compaction_generation = X.required fields "compaction_generation" X.integer in
+  let%bind compaction_archives =
+    X.required fields "compaction_archives" (X.list archive_reference_of_jsonaf)
+  in
+  let%bind authoring_reference_index =
+    X.required fields "authoring_reference_index" (X.nullable X.raw)
+  in
+  let%bind authoring_publication =
+    X.required
+      fields
+      "authoring_publication"
+      (X.nullable Chat_response.Authoring_publication.context_of_jsonaf)
+  in
+  let t : S.Conversation.t =
+    { canonical_history
+    ; deferred_user_entries
+    ; initial_prompt_entry_count
+    ; next_history_sequence
+    ; reserved_history_through
+    ; tasks
+    ; kv_store
+    ; compaction_generation
+    ; compaction_archives
+    ; authoring_reference_index
+    ; authoring_publication
+    }
+  in
+  Ok t
+;;
+
+let conversation_shape =
+  X.shape_exn
+    [ "canonical_history", X.array_shape_exn ~identity_field:"id" Shapes.history_entry
+    ; "deferred_user_entries", X.array_shape_exn ~identity_field:"id" Shapes.history_entry
+    ; "initial_prompt_entry_count", Document_schema.Shape.value
+    ; "next_history_sequence", Document_schema.Shape.value
+    ; "reserved_history_through", Document_schema.Shape.value
+    ; "tasks", X.array_shape_exn Document_schema.Shape.value
+    ; "kv_store", pairs_shape
+    ; "compaction_generation", Document_schema.Shape.value
+    ; ( "compaction_archives"
+      , X.array_shape_exn ~identity_field:"operation_id" archive_reference_shape )
+    ; "authoring_reference_index", X.nullable_shape Document_schema.Shape.value
+    ; ( "authoring_publication"
+      , X.nullable_shape Chat_response.Authoring_publication.context_shape )
+    ]
+;;
+
+let lifecycle_to_jsonaf (t : S.Lifecycle.t) =
+  `Object
+    [ ( "desired"
+      , (fun value -> `String (P.Session.desired_state_to_string value)) t.desired )
+    ; "observed", P.Session.observed_state_to_json t.observed
+    ]
+;;
+
+let lifecycle_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind desired = X.required fields "desired" P.Session.desired_state_of_json in
+  let%bind observed = X.required fields "observed" P.Session.observed_state_of_json in
+  let t : S.Lifecycle.t = { desired; observed } in
+  Ok t
+;;
+
+let lifecycle_shape =
+  X.shape_exn [ "desired", Document_schema.Shape.value; "observed", Shapes.observed ]
+;;
+
+let counters_to_jsonaf (t : S.Counters.t) =
+  `Object
+    [ "revision", X.int64_json t.revision
+    ; "event_sequence", X.int64_json t.event_sequence
+    ; "transaction_sequence", X.int64_json t.transaction_sequence
+    ; "owner_lease_generation", X.int64_json t.owner_lease_generation
+    ]
+;;
+
+let counters_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind revision = X.required fields "revision" X.nonnegative_int64 in
+  let%bind event_sequence = X.required fields "event_sequence" X.nonnegative_int64 in
+  let%bind transaction_sequence =
+    X.required fields "transaction_sequence" X.nonnegative_int64
+  in
+  let%bind owner_lease_generation =
+    X.required fields "owner_lease_generation" X.nonnegative_int64
+  in
+  let t : S.Counters.t =
+    { revision; event_sequence; transaction_sequence; owner_lease_generation }
+  in
+  Ok t
+;;
+
+let counters_shape =
+  X.shape_exn
+    [ "revision", Document_schema.Shape.value
+    ; "event_sequence", Document_schema.Shape.value
+    ; "transaction_sequence", Document_schema.Shape.value
+    ; "owner_lease_generation", Document_schema.Shape.value
+    ]
+;;
+
+let state_to_jsonaf (t : S.t) =
+  `Object
+    [ "identity", identity_to_jsonaf t.identity
+    ; "spec", spec_to_jsonaf t.spec
+    ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
+    ; "pending_initial_start", X.bool_json t.pending_initial_start
+    ; "stop_epoch", X.int64_json t.stop_epoch
+    ; "parent_stop_epoch", (X.option_json X.int64_json) t.parent_stop_epoch
+    ; "conversation", conversation_to_jsonaf t.conversation
+    ; "active_operation", (X.option_json P.Operation.to_json) t.active_operation
+    ; ( "automatic_turn_budget"
+      , (X.option_json Automatic_turn_budget.to_jsonaf) t.automatic_turn_budget )
+    ; "permissions", (X.list_json P.Permission.to_json) t.permissions
+    ; "grants", (X.list_json P.Grant.to_json) t.grants
+    ; "jobs", (X.list_json P.Job.to_json) t.jobs
+    ; "schedules", (X.list_json P.Schedule.Storage.to_json) t.schedules
+    ; "invocations", (X.list_json P.Invocation.Storage.to_json) t.invocations
+    ; ( "managed_submissions"
+      , (X.list_json Managed_submission.to_jsonaf) t.managed_submissions )
+    ; "managed_stops", (X.list_json Managed_stop.to_jsonaf) t.managed_stops
+    ; ( "moderator_executions"
+      , (X.list_json P.Moderator_execution.to_json) t.moderator_executions )
+    ; "subscriptions", (X.list_json P.Subscription.Storage.to_json) t.subscriptions
+    ; "deliveries", (X.list_json P.Delivery.Storage.to_json) t.deliveries
+    ; ( "ingress_registrations"
+      , (X.list_json External_ingress.to_jsonaf) t.ingress_registrations )
+    ; "attachments", (X.list_json attachment_to_jsonaf) t.attachments
+    ; "moderator", (X.option_json Fn.id) t.moderator
+    ; "shell", Session.Shell_state.to_jsonaf t.shell
+    ; "halted", X.bool_json t.halted
+    ; "halt_reason", (X.option_json X.text_json) t.halt_reason
+    ; "failure", (X.option_json P.Error.to_json) t.failure
+    ; "counters", counters_to_jsonaf t.counters
+    ]
+;;
+
+let state_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind identity = X.required fields "identity" identity_of_jsonaf in
+  let%bind spec = X.required fields "spec" spec_of_jsonaf in
+  let%bind lifecycle = X.required fields "lifecycle" lifecycle_of_jsonaf in
+  let%bind pending_initial_start = X.required fields "pending_initial_start" J.bool in
+  let%bind stop_epoch = X.required fields "stop_epoch" X.nonnegative_int64 in
+  let%bind parent_stop_epoch =
+    X.required fields "parent_stop_epoch" (X.nullable X.nonnegative_int64)
+  in
+  let%bind conversation = X.required fields "conversation" conversation_of_jsonaf in
+  let%bind active_operation =
+    X.required fields "active_operation" (X.nullable P.Operation.of_json)
+  in
+  let%bind automatic_turn_budget =
+    X.required fields "automatic_turn_budget" (X.nullable Automatic_turn_budget.of_jsonaf)
+  in
+  let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
+  let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
+  let%bind jobs = X.required fields "jobs" (X.list P.Job.of_json) in
+  let%bind schedules =
+    X.required fields "schedules" (X.list P.Schedule.Storage.of_json)
+  in
+  let%bind invocations =
+    X.required fields "invocations" (X.list P.Invocation.Storage.of_json)
+  in
+  let%bind managed_submissions =
+    X.required fields "managed_submissions" (X.list Managed_submission.of_jsonaf)
+  in
+  let%bind managed_stops =
+    X.required fields "managed_stops" (X.list Managed_stop.of_jsonaf)
+  in
+  let%bind moderator_executions =
+    X.required fields "moderator_executions" (X.list P.Moderator_execution.of_json)
+  in
+  let%bind subscriptions =
+    X.required fields "subscriptions" (X.list P.Subscription.Storage.of_json)
+  in
+  let%bind deliveries =
+    X.required fields "deliveries" (X.list P.Delivery.Storage.of_json)
+  in
+  let%bind ingress_registrations =
+    X.required fields "ingress_registrations" (X.list External_ingress.of_jsonaf)
+  in
+  let%bind attachments = X.required fields "attachments" (X.list attachment_of_jsonaf) in
+  let%bind moderator = X.required fields "moderator" (X.nullable X.moderator_of_jsonaf) in
+  let%bind shell =
+    X.required fields "shell" (fun json ->
+      Session.Shell_state.of_jsonaf json |> Result.map_error ~f:P.Error.invalid_request)
+  in
+  let%bind halted = X.required fields "halted" J.bool in
+  let%bind halt_reason = X.required fields "halt_reason" (X.nullable J.string) in
+  let%bind failure = X.required fields "failure" (X.nullable P.Error.of_json) in
+  let%bind counters = X.required fields "counters" counters_of_jsonaf in
+  let t : S.t =
+    { schema_version = S.current_schema_version
+    ; identity
+    ; spec
+    ; lifecycle
+    ; pending_initial_start
+    ; stop_epoch
+    ; parent_stop_epoch
+    ; conversation
+    ; active_operation
+    ; automatic_turn_budget
+    ; permissions
+    ; grants
+    ; jobs
+    ; schedules
+    ; invocations
+    ; managed_submissions
+    ; managed_stops
+    ; moderator_executions
+    ; subscriptions
+    ; deliveries
+    ; ingress_registrations
+    ; attachments
+    ; moderator
+    ; shell
+    ; halted
+    ; halt_reason
+    ; failure
+    ; counters
+    }
+  in
+  let%map () = S.validate t in
+  t
+;;
+
+let state_shape =
+  X.shape_exn
+    [ "identity", identity_shape
+    ; "spec", spec_shape
+    ; "lifecycle", lifecycle_shape
+    ; "pending_initial_start", Document_schema.Shape.value
+    ; "stop_epoch", Document_schema.Shape.value
+    ; "parent_stop_epoch", X.nullable_shape Document_schema.Shape.value
+    ; "conversation", conversation_shape
+    ; "active_operation", X.nullable_shape Shapes.operation
+    ; "automatic_turn_budget", X.nullable_shape Automatic_turn_budget.shape
+    ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
+    ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
+    ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
+    ; "schedules", X.array_shape_exn ~identity_field:"id" Shapes.schedule
+    ; "invocations", X.array_shape_exn ~identity_field:"id" Shapes.invocation
+    ; ( "managed_submissions"
+      , X.array_shape_exn ~identity_field:"history_id" Managed_submission.shape )
+    ; "managed_stops", X.array_shape_exn ~identity_field:"id" Managed_stop.shape
+    ; ( "moderator_executions"
+      , X.array_shape_exn ~identity_field:"id" Shapes.moderator_execution )
+    ; "subscriptions", X.array_shape_exn ~identity_field:"id" Shapes.subscription
+    ; "deliveries", X.array_shape_exn ~identity_field:"id" Shapes.delivery
+    ; ( "ingress_registrations"
+      , X.array_shape_exn ~identity_field:"id" External_ingress.shape )
+    ; "attachments", X.array_shape_exn ~identity_field:"id" attachment_shape
+    ; "moderator", X.nullable_shape Moderator_checkpoint.shape
+    ; "shell", Session.Shell_state.shape
+    ; "halted", Document_schema.Shape.value
+    ; "halt_reason", X.nullable_shape Document_schema.Shape.value
+    ; "failure", X.nullable_shape Shapes.error
+    ; "counters", counters_shape
+    ]
+;;
+
+type t = S.t D.Extension_carrier.t
+
+let value = D.Extension_carrier.value
+let with_value = D.Extension_carrier.with_value
+let authored = D.Extension_carrier.of_authored_value
+let shape = state_shape
+
+let codec ~limits =
+  match
+    D.Domain_codec.create_validated
+      ~limits
+      ~kind:"session.state"
+      ~version:1
+      ~shape
+      ~supported_semantics:[]
+      ~validate:(fun state -> X.document_result (S.validate state))
+      ~decode:(fun json -> X.document_result (state_of_jsonaf json))
+      ~encode:(fun state -> Ok (state_to_jsonaf state))
+  with
+  | Ok codec -> codec
+  | Error error -> raise_s [%sexp "invalid session state codec", (error : D.Error.t)]
+;;
+
+let decode ~limits document =
+  let%bind.Result document = X.upgrade document ~limits ~kind:"session.state" in
+  D.Domain_codec.decode (codec ~limits) document
+;;
+
+let encode t ~limits = D.Domain_codec.encode (codec ~limits) t
+
+let adopt previous ~limits incoming =
+  D.Domain_codec.adopt (codec ~limits) ~previous ~incoming
+;;

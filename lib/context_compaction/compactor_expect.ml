@@ -28,7 +28,7 @@ let make_role_msg role text =
 ;;
 
 let create_entry allocator item =
-  History_entry.create ~allocator item |> Result.ok_or_failwith
+  Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
 ;;
 
 let%expect_test "compactor keeps the newest ten previous reminders" =
@@ -43,7 +43,7 @@ let%expect_test "compactor keeps the newest ten previous reminders" =
     Context_compaction.Compactor.For_testing.process_current_entries history
   in
   pruned
-  |> List.map ~f:History_entry.item
+  |> List.map ~f:Openai.Responses_history.item_exn
   |> List.iter ~f:(function
     | Openai.Responses.Item.Input_message
         { content = Openai.Responses.Input_message.Text { text; _ } :: _; _ } ->

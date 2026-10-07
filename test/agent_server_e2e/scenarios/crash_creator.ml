@@ -83,7 +83,13 @@ let run_child env ~root ~boundary ~recover =
                  |> F.store_ok
                in
                let delta =
-                 Sexp.of_string transaction.delta |> Agent_session.Session_delta.t_of_sexp
+                 Agent_session.Session_delta_document.decode
+                   ~limits:Document_schema.Limits.default
+                   transaction.delta
+                 |> Result.map_error ~f:(fun error ->
+                   Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+                 |> Result.ok_or_failwith
+                 |> Agent_session.Session_delta_document.value
                in
                (match resolved delta with
                 | None -> ()

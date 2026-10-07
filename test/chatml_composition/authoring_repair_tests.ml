@@ -215,6 +215,9 @@ let main input =
     id, "ochat_authoring_context", request
   in
   with_daemon
+  (* This guard covers the full paginated repair transcript and durable turn
+       finalization; each executed script retains its host execution limits. *)
+    ~completion_timeout:60.
     ~sources:
       [ ( "agent.chatmd"
         , [%blob "../chatml_extensibility_fixtures/x11-authoring-repair/agent.chatmd"] )

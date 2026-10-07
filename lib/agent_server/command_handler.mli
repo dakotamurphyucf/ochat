@@ -1,7 +1,7 @@
 open! Core
 
 type create_session =
-  command_audit:string option
+  command_audit:Document_schema.Document.t option
   -> principal:Agent_protocol.Principal.t
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result

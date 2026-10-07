@@ -1,428 +1,278 @@
-open Core
+open! Core
 
 type id = string
 type path = Eio.Fs.dir_ty Eio.Path.t
 
-(*--------------------------------------------------------------------------*)
-(*  Path helpers                                                            *)
-(*--------------------------------------------------------------------------*)
-
-let base_dir () : string =
-  match Sys.getenv "HOME" with
-  | Some home -> Filename.concat home ".ochat/sessions"
-  | None -> Filename.concat "." ".ochat/sessions"
+let base_dir () =
+  Filename.concat (Option.value (Sys.getenv "HOME") ~default:".") ".ochat/sessions"
 ;;
 
-let rel_path (id : id) : string = Filename.concat (base_dir ()) id
+let rel_path id = Filename.concat (base_dir ()) id
+let path ~env id = Eio.Path.(Eio.Stdenv.fs env / rel_path id)
 
-(*--------------------------------------------------------------------------*)
-(*  Public API                                                              *)
-(*--------------------------------------------------------------------------*)
-
-let ensure_dir ~env (id : id) : path =
-  let fs = Eio.Stdenv.fs env in
-  (* Guarantee the directory hierarchy exists.  [Io.mkdir] ensures
-     [~perm:0o700] and creates intermediate segments. *)
-  Io.mkdir ~exists_ok:true ~dir:fs (rel_path id);
-  Eio.Path.(fs / rel_path id)
+let ensure_dir ~env id =
+  Io.mkdir ~exists_ok:true ~dir:(Eio.Stdenv.fs env) (rel_path id);
+  path ~env id
 ;;
 
-let path ~env (id : id) : path =
-  let fs = Eio.Stdenv.fs env in
-  Eio.Path.(fs / rel_path id)
+let io_result f =
+  try Ok (f ()) with
+  | Eio.Io _ as exn -> Error (Error.of_exn exn)
 ;;
 
-let fs env = Eio.Stdenv.fs env
+let document_error error = Error.create_s [%sexp (error : Document_schema.Error.t)]
 
-(*--------------------------------------------------------------------------*)
-(*  High-level helpers                                                      *)
-(*--------------------------------------------------------------------------*)
-
-(* Generate a pseudo-random UUID string using md5 of timestamp and random bits. *)
-let uuid_v4 () : string =
-  let data =
-    let open Core in
-    let time_ns = Time_ns.to_int63_ns_since_epoch (Time_ns.now ()) |> Int63.to_string in
-    time_ns ^ Int.to_string (Random.bits ())
+let read_document_file snapshot =
+  let open Result.Let_syntax in
+  let%bind bytes =
+    try
+      io_result (fun () ->
+        Eio.Path.with_open_in snapshot (fun flow ->
+          let max_size =
+            Document_schema.Limits.max_bytes Document_schema.Limits.default
+          in
+          Eio.Buf_read.of_flow flow ~max_size |> Eio.Buf_read.take_all))
+    with
+    | Eio.Buf_read.Buffer_limit_exceeded ->
+      Or_error.error_string "session snapshot exceeds document byte limit"
   in
-  Md5.digest_string data |> Md5.to_hex
+  Document_schema.Document.decode ~limits:Document_schema.Limits.default bytes
+  |> Result.map_error ~f:document_error
 ;;
 
-let default_id_of_prompt (prompt_file : string) : string =
-  (* Use a deterministic hash of the [prompt_file] path so that consecutive
-     runs that load the same prompt without specifying [--session] still
-     resolve to the same on-disk directory.  This avoids the surprising
-     behaviour where conversations appear “lost” because a fresh UUID was
-     generated every time.  We prefer MD5 for its compact hexadecimal
-     encoding and availability in Core. *)
-  Core.Md5.(digest_string prompt_file |> to_hex)
+let restore document =
+  Session.Document.decode document |> Result.map_error ~f:document_error
 ;;
 
-type staged_v4_read =
-  | Missing
-  | Loaded of Session.V4.t
-  | Unreadable of Error.t
+let read_current_file snapshot = Result.bind (read_document_file snapshot) ~f:restore
 
-let read_staged_v4_file snapshot =
-  let errors = ref [] in
-  let attempt name read =
-    match Or_error.try_with read with
-    | Ok value -> Some value
-    | Error error ->
-      errors := Error.tag error ~tag:name :: !errors;
-      None
+let read_owned_snapshot snapshot ~id =
+  let open Result.Let_syntax in
+  let%bind document = read_document_file snapshot in
+  let%bind () =
+    match
+      Document_schema.Json.field (Document_schema.Document.payload document) ~name:"id"
+    with
+    | Value (`String stored_id) when String.equal stored_id id -> Ok ()
+    | Absent | Null | Value _ ->
+      Or_error.error_string "snapshot session ID does not match its directory"
   in
-  let validate session =
-    match Session.V4.validate session with
-    | Ok () -> session
-    | Error error -> failwith error
+  let%bind session = restore document in
+  if String.equal session.Session.id id
+  then Ok session
+  else Or_error.error_string "converted session ID does not match its directory"
+;;
+
+let read_existing ~env ~id =
+  let snapshot = Eio.Path.(path ~env id / "snapshot.bin") in
+  if Eio.Path.is_file snapshot
+  then Some (read_owned_snapshot snapshot ~id |> Or_error.ok_exn)
+  else None
+;;
+
+let load_prompt ~env ~prompt_file =
+  let source =
+    if Filename.is_absolute prompt_file then Eio.Stdenv.fs env else Eio.Stdenv.cwd env
   in
-  match attempt "V4" (fun () -> Session.V4.Io.File.read snapshot |> validate) with
-  | Some session -> Ok session
-  | None ->
-    let migrate name module_ upgrade =
-      attempt name (fun () ->
-        match Bin_prot_utils_eio.read_bin_prot module_ snapshot |> upgrade with
-        | Ok session -> session
-        | Error error -> failwith error)
-    in
-    (match migrate "V3" (module Session.Legacy.V3) Session.V4.of_v3 with
-     | Some session -> Ok session
-     | None ->
-       (match migrate "V2" (module Session.Legacy.V2) Session.V4.of_v2 with
-        | Some session -> Ok session
-        | None ->
-          (match migrate "V1" (module Session.Legacy.V1) Session.V4.of_v1 with
-           | Some session -> Ok session
-           | None ->
-             (match migrate "V0" (module Session.Legacy.V0) Session.V4.of_v0 with
-              | Some session -> Ok session
-              | None ->
-                Or_error.error_s
-                  [%sexp
-                    "snapshot is unreadable as V4, V3, V2, V1, or V0"
-                  , (!errors : Error.t list)]))))
+  Io.load_doc ~dir:source prompt_file
 ;;
 
-let read_current_file snapshot =
-  let validate session =
-    match Session.V5.validate session with
-    | Ok () -> session
-    | Error error -> failwith error
-  in
-  match
-    Or_error.try_with (fun () ->
-      Session.V5.Io.File.read snapshot |> validate |> Session.of_v5)
-  with
-  | Ok session -> Ok session
-  | Error v5_error ->
-    Result.map_error
-      (Result.map (read_staged_v4_file snapshot) ~f:(fun v4 ->
-         Session.V5.of_v4 v4 |> Session.of_v5))
-      ~f:(fun legacy_error ->
-        Error.create_s
-          [%sexp
-            "snapshot is unreadable as V5 or a supported legacy schema"
-          , { v5_error : Error.t; legacy_error : Error.t }])
+let copy_prompt ~env ~directory ~prompt_file =
+  let contents = load_prompt ~env ~prompt_file in
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(directory / "prompt.chatmd")
+    contents
 ;;
 
-let read_staged_v4 ~env ~(id : id) =
-  let dir = path ~env id in
-  let snapshot = Eio.Path.(dir / "snapshot.bin") in
-  if not (Eio.Path.is_file snapshot)
-  then Missing
-  else (
-    match read_staged_v4_file snapshot with
-    | Ok session -> Loaded session
-    | Error error -> Unreadable error)
-;;
-
-let read_existing ~env ~(id : id) : Session.t option =
-  let dir = path ~env id in
-  let snapshot = Eio.Path.(dir / "snapshot.bin") in
-  if not (Eio.Path.is_file snapshot)
-  then None
-  else (
-    match read_current_file snapshot with
-    | Ok session -> Some session
-    | Error _ -> None)
-;;
-
-let read_snapshot_file = read_current_file
-
-let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
-  (* Decide the session identifier to use.
-     Priority order: explicit [?id] parameter → random UUID for
-     [new_session] → deterministic hash of [prompt_file]. *)
+let load_or_create ~env ~prompt_file ?id ?(new_session = false) () =
   let id =
-    match id with
-    | Some id when not new_session -> id
-    | _ when new_session -> uuid_v4 ()
-    | _ -> default_id_of_prompt prompt_file
+    if new_session
+    then (Session.create ~prompt_file ()).id
+    else Option.value id ~default:(Md5.digest_string prompt_file |> Md5.to_hex)
   in
-  let dir = ensure_dir ~env id in
-  let ( / ) = Eio.Path.( / ) in
-  let snapshot = dir / "snapshot.bin" in
-  let newly_created_session () =
-    let prompt_copy_path = "prompt.chatmd" in
-    (* Attempt to copy the prompt file into the session directory; ignore errors. *)
-    (match
-       Or_error.try_with (fun () ->
-         (* When [prompt_file] is an absolute path, resolve it against the
-            process-wide [fs] capability.  Otherwise treat it as relative to
-            the current working directory so that launching [chat_tui] from a
-            parent directory (a common workflow) succeeds. *)
-         let dir_for_prompt =
-           if Filename.is_absolute prompt_file then fs env else Eio.Stdenv.cwd env
-         in
-         let contents = Io.load_doc ~dir:dir_for_prompt prompt_file in
-         let dst = dir / prompt_copy_path in
-         Eio.Path.save ~create:(`Or_truncate 0o600) dst contents)
-     with
-     | _ -> ());
-    Session.create ~id ~prompt_file ~local_prompt_copy:prompt_copy_path ()
-  in
-  (* Decide whether to load an existing snapshot or create a new one. *)
-  if (not new_session) && Eio.Path.is_file snapshot
-  then (
-    match read_current_file snapshot with
-    | Ok session -> session
-    | Error error -> Error.raise error)
-  else newly_created_session ()
+  let directory = path ~env id in
+  let snapshot = Eio.Path.(directory / "snapshot.bin") in
+  if Eio.Path.is_file snapshot
+  then read_owned_snapshot snapshot ~id |> Or_error.ok_exn
+  else (
+    let directory = ensure_dir ~env id in
+    let local_prompt_copy =
+      match io_result (fun () -> copy_prompt ~env ~directory ~prompt_file) with
+      | Ok () -> Some "prompt.chatmd"
+      | Error _ -> None
+    in
+    Session.create ~id ~prompt_file ?local_prompt_copy ())
 ;;
-
-(*--------------------------------------------------------------------------*)
-(*  Persistence – write snapshot                                            *)
-(*--------------------------------------------------------------------------*)
 
 let snapshot_sequence = Atomic.make 0
 
-let write_snapshot_atomic dir session =
-  let serial = Atomic.fetch_and_add snapshot_sequence 1 in
-  let name = sprintf "snapshot.%d.%d.tmp" (Core_unix.getpid () |> Pid.to_int) serial in
-  let temporary = Eio.Path.(dir / name) in
+let fresh_name prefix =
+  sprintf "%s.%08x.%d" prefix (Random.bits ()) (Atomic.fetch_and_add snapshot_sequence 1)
+;;
+
+let unlink_if_present path =
+  try Eio.Path.unlink path with
+  | Eio.Io (Eio.Fs.E (Not_found _), _) -> ()
+;;
+
+let write_snapshot_atomic directory bytes =
+  let temporary = Eio.Path.(directory / (fresh_name "snapshot" ^ ".tmp")) in
   let owned = ref false in
-  let buffer = Bin_prot.Utils.bin_dump ~header:true Session.bin_writer_t session in
   Fun.protect
     (fun () ->
        Eio.Path.with_open_out ~create:(`Exclusive 0o600) temporary (fun flow ->
          owned := true;
-         Eio.Flow.write flow [ Cstruct.of_bigarray buffer ]);
-       Eio.Path.rename temporary Eio.Path.(dir / "snapshot.bin"))
+         Eio.Flow.copy_string bytes flow);
+       Eio.Path.rename temporary Eio.Path.(directory / "snapshot.bin");
+       owned := false)
     ~finally:(fun () ->
-      if !owned
-      then
-        Eio.Cancel.protect (fun () ->
-          try Eio.Path.unlink temporary with
-          | _ -> ()))
+      if !owned then Eio.Cancel.protect (fun () -> unlink_if_present temporary))
 ;;
 
-let save ~env (session : Session.t) =
-  let dir = ensure_dir ~env session.id in
-  let ( / ) = Eio.Path.( / ) in
-  (*------------------------------------------------------------------*)
-  (*  Advisory lock                                                   *)
-  (*------------------------------------------------------------------*)
-  let lock = dir / "snapshot.bin.lock" in
-  let acquire_lock () =
-    (* Try to create the lock file with exclusive semantics.  This will
-       raise if the file already exists. *)
-    Eio.Path.save ~create:(`Exclusive 0o600) lock ""
-  in
-  let release_lock () =
-    Eio.Cancel.protect (fun () ->
-      try Eio.Path.unlink lock with
-      | _ -> ())
-  in
-  match Or_error.try_with acquire_lock with
-  | Error error ->
-    Or_error.error_s
-      [%sexp
-        "unable to acquire legacy session snapshot lock"
-      , { session_id = (session.id : string); error : Error.t }]
+let with_lock directory ~f =
+  let lock = Eio.Path.(directory / "snapshot.bin.lock") in
+  match io_result (fun () -> Eio.Path.save ~create:(`Exclusive 0o600) lock "") with
+  | Error error -> Error (Error.tag error ~tag:"unable to acquire session snapshot lock")
   | Ok () ->
-    protectx
-      ()
-      ~finally:(fun () -> release_lock ())
-      ~f:(fun () -> Or_error.try_with (fun () -> write_snapshot_atomic dir session))
+    Fun.protect f ~finally:(fun () ->
+      Eio.Cancel.protect (fun () -> unlink_if_present lock))
+;;
+
+let save ~env session =
+  let open Result.Let_syntax in
+  (* No directory, lock or existing file changes until full document preflight. *)
+  let%bind bytes =
+    Session.Document.to_string session |> Result.map_error ~f:document_error
+  in
+  let%bind directory = io_result (fun () -> ensure_dir ~env session.Session.id) in
+  with_lock directory ~f:(fun () ->
+    io_result (fun () -> write_snapshot_atomic directory bytes))
 ;;
 
 let save_exn ~env session = save ~env session |> Or_error.ok_exn
 
-(*--------------------------------------------------------------------------*)
-(*  Reset / archive                                                          *)
-(*--------------------------------------------------------------------------*)
-
-let reset_session ~env ~(id : id) ?prompt_file ?(keep_history = false) () : unit =
-  let dir = ensure_dir ~env id in
-  let ( / ) = Eio.Path.( / ) in
-  let snapshot = dir / "snapshot.bin" in
-  (* Ensure the session exists. *)
-  if not (Eio.Path.is_file snapshot)
-  then Core.eprintf "Error: session '%s' not found.\n" id
-  else (
-    (* Read current snapshot. *)
-    match read_snapshot_file snapshot with
-    | Error error ->
-      Core.eprintf
-        "Error: session '%s' could not be loaded: %s\n"
-        id
-        (Error.to_string_hum error)
-    | Ok session ->
-      (* Create archive directory. *)
-      let archive_dir = dir / "archive" in
-      (match Eio.Path.is_directory archive_dir with
-       | true -> ()
-       | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
-      (* Generate timestamped file name. *)
-      let timestamp () : string =
-        let open Core in
-        let tm = Core_unix.localtime (Core_unix.time ()) in
-        Printf.sprintf
-          "%04d%02d%02d-%02d%02d"
-          (tm.tm_year + 1900)
-          (tm.tm_mon + 1)
-          tm.tm_mday
-          tm.tm_hour
-          tm.tm_min
-      in
-      let archived_snapshot =
-        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
-      in
-      (* Move the existing snapshot to the archive path (overwrite if needed). *)
-      (try Eio.Path.rename snapshot archived_snapshot with
-       | _ -> ());
-      (* Build a reset session value. *)
-      let session_reset =
-        if keep_history
-        then Session.reset_keep_history ?prompt_file session
-        else Session.reset ?prompt_file session
-      in
-      (* When [prompt_file] is provided, attempt to copy it into the session dir
-       (prompt.chatmd) to keep the self-contained copy up-to-date. *)
-      let session_reset =
-        match prompt_file with
-        | None -> session_reset
-        | Some pf ->
-          let copy_name = "prompt.chatmd" in
-          (match
-             Or_error.try_with (fun () ->
-               let contents = Io.load_doc ~dir:(fs env) pf in
-               let dst = dir / copy_name in
-               Eio.Path.save ~create:(`Or_truncate 0o600) dst contents)
-           with
-           | _ -> ());
-          { session_reset with local_prompt_copy = Some copy_name }
-      in
-      (* Save the new snapshot. *)
-      save_exn ~env session_reset;
-      (* ------------------------------------------------------------------ *)
-      (*  Cache handling: remove cache unless [keep_history] is true.          *)
-      (* ------------------------------------------------------------------ *)
-      (match keep_history with
-       | true -> ()
-       | false ->
-         let chatmd_dir = dir / ".chatmd" in
-         let cache_file = Eio.Path.(chatmd_dir / "cache.bin") in
-         (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
-          | _ -> ()));
-      (* Print confirmation summary. Uses [Core.printf] for simplicity. *)
-      let history_len_before = List.length session.history in
-      printf
-        "Session '%s' reset%s. Archived snapshot: %s (history %d → %d)\n"
-        id
-        (if keep_history then " (history retained)" else "")
-        (Eio.Path.native_exn archived_snapshot)
-        history_len_before
-        (List.length session_reset.history))
+let archive_snapshot directory =
+  let archive = Eio.Path.(directory / "archive") in
+  if not (Eio.Path.is_directory archive) then Eio.Path.mkdir ~perm:0o700 archive;
+  let destination = Eio.Path.(archive / (fresh_name "snapshot" ^ ".bin")) in
+  (* Copy, never move, the old snapshot: a subsequent failed replacement leaves
+     the authoritative snapshot available at its original path. *)
+  Eio.Path.with_open_in
+    Eio.Path.(directory / "snapshot.bin")
+    (fun source ->
+       Eio.Path.with_open_out ~create:(`Exclusive 0o600) destination (fun sink ->
+         Eio.Flow.copy source sink));
+  destination
 ;;
 
-(*--------------------------------------------------------------------------*)
-(*  Rebuild session from prompt                                             *)
-(*--------------------------------------------------------------------------*)
-
-let rebuild_session ~env ~(id : id) () : unit =
-  let dir = ensure_dir ~env id in
-  let ( / ) = Eio.Path.( / ) in
-  let snapshot = dir / "snapshot.bin" in
-  if not (Eio.Path.is_file snapshot)
-  then Core.eprintf "Error: session '%s' not found.\n" id
-  else (
-    match read_snapshot_file snapshot with
-    | Error error ->
-      Core.eprintf
-        "Error: session '%s' could not be loaded: %s\n"
-        id
-        (Error.to_string_hum error)
-    | Ok old_session ->
-      (* Archive old snapshot *)
-      let archive_dir = dir / "archive" in
-      (match Eio.Path.is_directory archive_dir with
-       | true -> ()
-       | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
-      let timestamp () : string =
-        let open Core in
-        let tm = Core_unix.localtime (Core_unix.time ()) in
-        Printf.sprintf
-          "%04d%02d%02d-%02d%02d"
-          (tm.tm_year + 1900)
-          (tm.tm_mon + 1)
-          tm.tm_mday
-          tm.tm_hour
-          tm.tm_min
-      in
-      let archived_snapshot =
-        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
-      in
-      (try Eio.Path.rename snapshot archived_snapshot with
-       | _ -> ());
-      (* Remove cache file *)
-      let chatmd_dir = dir / ".chatmd" in
-      let cache_file = chatmd_dir / "cache.bin" in
-      (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
-       | _ -> ());
-      (* Create fresh session with same prompt info *)
-      let new_session =
-        Session.create
-          ~id
-          ~prompt_file:old_session.prompt_file
-          ?local_prompt_copy:old_session.local_prompt_copy
-          ()
-      in
-      save_exn ~env new_session;
-      Core.printf
-        "Session '%s' rebuilt from prompt. Archived snapshot: %s\n"
-        id
-        (Eio.Path.native_exn archived_snapshot))
+let clear_cache directory =
+  let cache = Eio.Path.(directory / ".chatmd" / "cache.bin") in
+  if Eio.Path.is_file cache then Eio.Path.unlink cache
 ;;
 
-(*--------------------------------------------------------------------------*)
-(*  Enumerate stored sessions                                               *)
-(*--------------------------------------------------------------------------*)
+let replace_session ~env ~id ~transform ~prompt_file ~clear_history_cache ~verb =
+  let directory = path ~env id in
+  let snapshot = Eio.Path.(directory / "snapshot.bin") in
+  if not (Eio.Path.is_file snapshot)
+  then
+    Eio.Flow.copy_string
+      (sprintf "Error: session '%s' not found.\n" id)
+      (Eio.Stdenv.stderr env)
+  else (
+    let result =
+      with_lock directory ~f:(fun () ->
+        let open Result.Let_syntax in
+        let%bind previous = read_owned_snapshot snapshot ~id in
+        let%bind prompt =
+          match prompt_file with
+          | None -> Ok None
+          | Some prompt_file ->
+            io_result (fun () ->
+              let contents = load_prompt ~env ~prompt_file in
+              Some (fresh_name "prompt" ^ ".chatmd", contents))
+        in
+        let next = transform previous in
+        let next =
+          match prompt with
+          | None -> next
+          | Some (filename, _) -> { next with Session.local_prompt_copy = Some filename }
+        in
+        let%bind bytes =
+          Session.Document.to_string next |> Result.map_error ~f:document_error
+        in
+        io_result (fun () ->
+          let archived = archive_snapshot directory in
+          (* Use an immutable new prompt path. Updating prompt.chatmd first would
+           change what the old snapshot references if its replacement failed.
+           An unacknowledged commit may leave an unreferenced prompt copy; it
+           must never remove a copy the committed snapshot could reference. *)
+          Option.iter prompt ~f:(fun (filename, contents) ->
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(directory / filename)
+              contents);
+          write_snapshot_atomic directory bytes;
+          if clear_history_cache then clear_cache directory;
+          archived))
+    in
+    match result with
+    | Error error ->
+      Eio.Flow.copy_string
+        (sprintf
+           "Error: session '%s' could not be %s: %s\n"
+           id
+           verb
+           (Error.to_string_hum error))
+        (Eio.Stdenv.stderr env)
+    | Ok archived ->
+      Eio.Flow.copy_string
+        (sprintf
+           "Session '%s' %s. Archived snapshot: %s\n"
+           id
+           verb
+           (Eio.Path.native_exn archived))
+        (Eio.Stdenv.stdout env))
+;;
 
-let list ~env : (id * string) list =
-  let fs = Eio.Stdenv.fs env in
-  let base_dir_path =
-    (* Ensure [base_dir] is expressed relative to the FS capability.  We
-       cannot assume the directory exists – return an empty list if it
-       does not. *)
-    Eio.Path.(fs / base_dir ())
-  in
-  if not (Eio.Path.is_directory base_dir_path)
+let reset_session ~env ~id ?prompt_file ?(keep_history = false) () =
+  replace_session
+    ~env
+    ~id
+    ~prompt_file
+    ~clear_history_cache:(not keep_history)
+    ~verb:"reset"
+    ~transform:(fun previous ->
+      if keep_history
+      then Session.reset_keep_history ?prompt_file previous
+      else Session.reset ?prompt_file previous)
+;;
+
+let rebuild_session ~env ~id () =
+  (* Rebuild preserves the allocator high-water mark and preservation context.
+     Starting from a fresh value would recycle IDs and silently discard fields. *)
+  replace_session
+    ~env
+    ~id
+    ~prompt_file:None
+    ~clear_history_cache:true
+    ~verb:"rebuilt"
+    ~transform:(fun previous ->
+      { (Session.reset previous) with tasks = []; kv_store = [] })
+;;
+
+let list ~env =
+  let base = Eio.Path.(Eio.Stdenv.fs env / base_dir ()) in
+  if not (Eio.Path.is_directory base)
   then []
-  else (
-    (* The special Unix entries "." and ".." are not included in the results. *)
-    let entries = Eio.Path.read_dir base_dir_path in
-    List.filter_map entries ~f:(fun entry ->
-      let dir_path = Eio.Path.(base_dir_path / entry) in
-      match Eio.Path.is_directory dir_path with
-      | false -> None
-      | true ->
-        let snapshot = Eio.Path.(dir_path / "snapshot.bin") in
-        (match Eio.Path.is_file snapshot with
-         | false -> None
-         | true ->
-           (match read_snapshot_file snapshot with
-            | Ok session -> Some (entry, session.prompt_file)
-            | Error _ -> None))))
+  else
+    Eio.Path.read_dir base
+    |> List.filter_map ~f:(fun id ->
+      let snapshot = Eio.Path.(base / id / "snapshot.bin") in
+      if not (Eio.Path.is_file snapshot)
+      then None
+      else (
+        match read_owned_snapshot snapshot ~id with
+        | Ok session -> Some (id, session.Session.prompt_file)
+        | Error _ -> None))
 ;;

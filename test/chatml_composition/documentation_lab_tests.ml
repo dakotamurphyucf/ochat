@@ -209,7 +209,7 @@ let%expect_test
            match
              Agent_session.History_codec.of_protocol entry
              |> protocol_ok
-             |> History_entry.item
+             |> Openai.Responses_history.item_exn
            with
            | Openai.Responses.Item.Function_call_output { call_id = "original"; _ } ->
              true

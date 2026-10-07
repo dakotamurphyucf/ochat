@@ -23,6 +23,14 @@ val replace
     [Missing] error when the path does not exist. *)
 val load : env:Eio_unix.Stdenv.base -> path:string -> (string, Store_error.t) result
 
+(** Bound allocation/read bytes before document parsing, including file growth.
+    Missing files retain their typed error; cancellation propagates. *)
+val load_bounded
+  :  env:Eio_unix.Stdenv.base
+  -> path:string
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
 (** [sync_directory ~env ~path] durably records prior directory-entry changes.
     [path] must be an absolute directory path. Opens an Eio-owned read-only
     file descriptor for the directory and performs fsync in an Eio system

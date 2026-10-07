@@ -17,7 +17,9 @@ let sources =
 let registration_from_output snapshot =
   List.find_map snapshot.P.Snapshot.canonical_history.entries ~f:(fun entry ->
     match
-      Agent_session.History_codec.of_protocol entry |> protocol_ok |> History_entry.item
+      Agent_session.History_codec.of_protocol entry
+      |> protocol_ok
+      |> Openai.Responses_history.item_exn
     with
     | Openai.Responses.Item.Function_call_output
         { call_id = "watch-call"; output = Text text; _ } ->
@@ -267,7 +269,7 @@ let%expect_test
        (match
           Agent_session.History_codec.of_protocol (List.hd_exn notifications)
           |> protocol_ok
-          |> History_entry.item
+          |> Openai.Responses_history.item_exn
         with
         | Input_message { role = User; _ } -> ()
         | _ -> failwith "notification used an unsupported provider role");

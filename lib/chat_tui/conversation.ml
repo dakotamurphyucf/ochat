@@ -96,7 +96,7 @@ let create_projection rows =
 
 let canonical_row entry =
   Option.map
-    (pair_of_item (History_entry.item entry))
+    (pair_of_item (Openai.Responses_history.item_exn entry))
     ~f:(fun message ->
       let entry_id = History_entry.id entry in
       Projected_message.canonical_row ~entry_id message)
@@ -110,7 +110,7 @@ let project_effective_entry
       ({ entry; provenance } : Chat_response.Moderation.Effective_entry.t)
   =
   Option.map
-    (pair_of_item (History_entry.item entry))
+    (pair_of_item (Openai.Responses_history.item_exn entry))
     ~f:(fun message ->
       let entry_id = History_entry.id entry in
       match provenance with

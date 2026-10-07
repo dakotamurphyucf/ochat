@@ -256,9 +256,7 @@ let%expect_test
                       I.of_json (I.to_json invocation) |> protocol_ok)
                 }
               in
-              Agent_session.Session_persistence.restore_snapshot
-                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-              |> store_ok
+              restore_state state |> store_ok
             in
             let starts = ref []
             and model_runs = ref 0
@@ -286,7 +284,8 @@ let%expect_test
                   ~compaction_env:None
                   ~initial_state:initial
                   ~persistence:
-                    { commit =
+                    { archive_reference
+                    ; commit =
                         (fun ~command_audit ~previous next ->
                           if !reject
                           then (
@@ -1295,11 +1294,7 @@ let%expect_test
                      (match mode with
                       | `Approve ->
                         let module S = Agent_session.Session_state in
-                        let restored =
-                          Agent_session.Session_persistence.restore_snapshot
-                            (Sexp.to_string_mach (S.sexp_of_t persisted))
-                          |> store_ok
-                        in
+                        let restored = restore_state persisted |> store_ok in
                         assert_same_session_snapshot persisted restored;
                         assert (
                           Result.is_error
@@ -1321,23 +1316,7 @@ let%expect_test
                         let legacy =
                           { persisted with permissions = [ changed ]; schema_version = 7 }
                         in
-                        let rec old_permission_field = function
-                          | Sexp.List [ Atom "owner"; List [ Atom "Operation"; id ] ] ->
-                            Sexp.List [ Atom "operation_id"; id ]
-                          | List fields -> List (List.map fields ~f:old_permission_field)
-                          | Atom _ as value -> value
-                        in
-                        let migrated =
-                          Agent_session.Session_persistence.restore_snapshot
-                            (Sexp.to_string_mach
-                               (old_permission_field (S.sexp_of_t legacy)))
-                          |> store_ok
-                        in
-                        [%test_eq: int] S.current_schema_version migrated.schema_version;
-                        assert (
-                          Agent_protocol.Permission.equal_owner
-                            (List.hd_exn migrated.permissions).owner
-                            changed.owner)
+                        assert (Result.is_error (restore_state legacy))
                       | _ -> ());
                      match mode with
                      | `Permission_stop ->

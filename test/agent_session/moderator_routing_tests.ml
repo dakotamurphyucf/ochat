@@ -1114,9 +1114,9 @@ let%test_unit
            in
            let saved_snapshot =
              match state.moderator with
-             | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
-               Session.Moderator_state.Identity_snapshot.t_of_sexp
-                 (Sexp.of_string encoded)
+             | Some (`Object [ ("identity_snapshot", encoded) ]) ->
+               Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+               |> Result.ok_or_failwith
              | _ -> assert false
            in
            let live = (Option.value_exn !live_snapshot) () in
@@ -1283,7 +1283,7 @@ let%test_unit
             let id =
               History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
             in
-            History_entry.create_with_id ~id item
+            Openai.Responses_history.create_with_id_exn ~id item
           in
           let request call_id =
             let call =
@@ -1324,7 +1324,7 @@ let%test_unit
               ~validate_work:(fun _ -> Error "no pending work")
               ~admit:(fun request ->
                 let call_id =
-                  match History_entry.item request.call with
+                  match Openai.Responses_history.item_exn request.call with
                   | Function_call c -> c.call_id
                   | _ -> assert false
                 in
@@ -1342,7 +1342,7 @@ let%test_unit
           let run request =
             let result = dispatch.run request ~authorize:ignore |> Option.value_exn in
             let call_id =
-              match History_entry.item request.call with
+              match Openai.Responses_history.item_exn request.call with
               | Function_call c -> c.call_id
               | _ -> assert false
             in

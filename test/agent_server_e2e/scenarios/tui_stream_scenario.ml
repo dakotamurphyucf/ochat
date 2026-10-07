@@ -251,10 +251,16 @@ let assert_pair entries =
     (Agent_protocol.History.equal_kind output.kind Tool_output)
     "tool pair is not adjacent";
   List.iter [ call; output ] ~f:(fun entry ->
+    let metadata =
+      History_entry.Payload.of_json entry.Agent_protocol.History.payload
+      |> Result.ok_or_failwith
+      |> History_entry.Payload.semantic
+      |> History_entry.Payload.Semantic.metadata
+    in
     F.require
-      (Poly.equal
-         (Jsonaf.member "call_id" entry.Agent_protocol.History.payload)
-         (Some (`String "tui-fork")))
+      (match metadata.call_id with
+       | Value call_id -> String.equal call_id "tui-fork"
+       | Absent | Null -> false)
       "canonical tool pair has wrong call identity")
 ;;
 

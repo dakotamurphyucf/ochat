@@ -2,6 +2,7 @@
  (name agent_session_test)
  (modules
   fixtures
+  document_adoption_tests
   actor_tests
   managed_output_cursor_tests
   managed_output_page_tests

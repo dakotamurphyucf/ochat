@@ -48,17 +48,22 @@ let validate t state transaction =
 let commit_one t journal state ~durability transaction =
   let open Result.Let_syntax in
   let%bind () = validate t state transaction in
+  let payload = Transaction.encode transaction in
   let transaction_hash = Transaction.hash transaction in
-  let%map journal_position =
-    Journal.append journal ~durability ~flags:0 ~payload:(Transaction.encode transaction)
-  in
+  let%map journal_position = Journal.append journal ~durability ~flags:0 ~payload in
   ( { transaction_sequence = transaction.transaction_sequence
     ; transaction_hash
     ; journal_position
     }
-  , { next_sequence = Int64.succ state.next_sequence
+  , { next_sequence =
+        (if Int64.equal state.next_sequence Int64.max_value
+         then state.next_sequence
+         else Int64.succ state.next_sequence)
     ; previous_hash = Some transaction_hash
-    ; failed = None
+    ; failed =
+        (if Int64.equal state.next_sequence Int64.max_value
+         then Some (Store_error.Corrupt "transaction sequence is exhausted")
+         else None)
     } )
 ;;
 

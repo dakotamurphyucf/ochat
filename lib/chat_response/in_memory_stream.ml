@@ -726,7 +726,7 @@ let prepare_turn_request_entries
   in
   let inputs =
     List.map effective ~f:(fun entry ->
-      History_entry.item entry.Moderation.Effective_entry.entry)
+      Openai.Responses_history.item_exn entry.Moderation.Effective_entry.entry)
   in
   let inputs =
     if Option.is_some (Runtime_semantics.should_end_session runtime_requests)
@@ -1021,7 +1021,12 @@ let append_history_item
   if is_finalized
   then st
   else (
-    let entry = History_entry.create_with_id ~id item in
+    let call_relation =
+      Openai.Responses_history.relation_for_item
+        ~history:(history_with_new_entries ~hist st)
+        item
+    in
+    let entry = Openai.Responses_history.create_with_id_exn ~call_relation ~id item in
     let entry = Option.value_map prepare_entry ~default:entry ~f:(fun f -> f entry) in
     (Option.value commit_entry ~default:c.on_history_item_appended) entry;
     let st = add_entry st entry in
@@ -1046,7 +1051,7 @@ let history_so_far ~history_compaction ~(hist : History_entry.t list) ~(st : str
 
 let request_items_so_far ~history_compaction ~hist ~st =
   let entries = history_so_far ~history_compaction ~hist ~st in
-  History_entry.items entries
+  Openai.Responses_history.items_exn entries
 ;;
 
 exception Openai_stream_idle_timeout of float
@@ -1269,7 +1274,7 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
          ~call_id
   in
   let txt =
-    [ History_entry.item (List.last_exn res) ]
+    [ Openai.Responses_history.item_exn (List.last_exn res) ]
     |> List.filter_map ~f:(function
       | Res.Item.Output_message o ->
         Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
@@ -1411,7 +1416,7 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
               ~moderator:c.moderator
               ~available_tools:c.tools
               ~now_ms:(now_ms c.env)
-              ~history:(History_entry.items hist)
+              ~history:(Openai.Responses_history.items_exn hist)
         in
         moderate ~kind ~name ~payload ~call_id ~item_id:(Some item_id)
       with
@@ -1508,7 +1513,7 @@ let prepare_host_tool_entry
         ~call_id
         ~id:(Some item_id)
     in
-    History_entry.create_with_id ~id:(History_entry.id entry) displayed
+    Openai.Responses_history.create_with_id_exn ~id:(History_entry.id entry) displayed
 ;;
 
 let commit_tool_call
@@ -1936,7 +1941,23 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
           ~source:c.source
           ~call_id
       in
-      let candidate_entry = History_entry.create_with_id ~id candidate_item in
+      let call_relation =
+        Openai.Responses_history.relation_for_item
+          ~history:(hist @ List.rev entries_rev)
+          candidate_item
+      in
+      let candidate_entry =
+        Openai.Responses_history.authored_output
+          ~kind:
+            (match kind with
+             | `Function -> History_entry.Payload.Call_kind.Function
+             | `Custom -> Custom)
+          ~call_id
+          ~call_relation
+          ~output:result
+        |> Result.ok_or_failwith
+        |> History_entry.create_with_id ~id
+      in
       (* Host persistence must precede canonical publication and observation.
          An extension commit replaces the generic history append so its outcome
          receipt and output can be saved in one transaction. *)
@@ -1974,7 +1995,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
                   ~moderator:c.moderator
                   ~available_tools:c.tools
                   ~now_ms:(now_ms c.env)
-                  ~history:(History_entry.items history)
+                  ~history:(Openai.Responses_history.items_exn history)
             in
             handle_result ~name ~kind:tool_kind ~item:candidate_item
             |> Result.map_error ~f:(fun message ->
@@ -2048,7 +2069,7 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       (match additions with
        | [] -> ()
        | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
-      let inputs = inputs @ History_entry.items additions in
+      let inputs = inputs @ Openai.Responses_history.items_exn additions in
       log_request c ~inputs;
       c.scope <- History_stream_event.Registry.create_scope c.registry;
       let events =

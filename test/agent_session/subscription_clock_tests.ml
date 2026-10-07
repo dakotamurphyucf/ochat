@@ -195,11 +195,7 @@ let%expect_test
            let final = List.hd_exn state.subscriptions in
            [%test_eq: int] 0 (A.expire_subscriptions actor |> protocol_ok);
            assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
-           let restored =
-             Agent_session.Session_persistence.restore_snapshot
-               (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-             |> store_ok
-           in
+           let restored = restore_state state |> store_ok in
            assert_same_session_snapshot state restored;
            print_s
              [%sexp

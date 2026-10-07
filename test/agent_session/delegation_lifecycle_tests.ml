@@ -23,7 +23,8 @@ let actor ~env ~sw ~state ~reject_save =
       ~initial_state:state
       ~operation_worker:None
       ~persistence:
-        { commit =
+        { archive_reference
+        ; commit =
             (fun ~command_audit ~previous next ->
               match reject_save next with
               | true -> Error (handoff_error "injected child stop save failure")
@@ -240,11 +241,7 @@ let%expect_test
        A.stop_delegated_at_epoch child ~reference ~epoch:1L |> protocol_ok |> ignore;
        let stopped = A.state child |> protocol_ok in
        assert (Option.equal Int64.equal stopped.parent_stop_epoch (Some 1L));
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (State.sexp_of_t stopped |> Sexp.to_string_mach)
-         |> store_ok
-       in
+       let restored = restore_state stopped |> store_ok in
        assert_same_session_snapshot stopped restored;
        A.start ~expected_parent_stop_epoch:1L child ~attachment_id:attachment.id
        |> protocol_ok

@@ -3829,7 +3829,7 @@ let rebuild_tool_output_index_for_items (model : t) (entries : History_entry.t l
   Hashtbl.clear model.tool_call_id_by_id;
   let call_info_by_id = Hashtbl.create (module String) in
   List.iter entries ~f:(fun entry ->
-    match History_entry.item entry with
+    match Openai.Responses_history.item_exn entry with
     | Res_item.Function_call fc ->
       let name = fc.name in
       let path =
@@ -3848,7 +3848,7 @@ let rebuild_tool_output_index_for_items (model : t) (entries : History_entry.t l
       Hashtbl.set call_info_by_id ~key:tc.call_id ~data:(name, path)
     | _ -> ());
   List.iter entries ~f:(fun entry ->
-    let it = History_entry.item entry in
+    let it = Openai.Responses_history.item_exn entry in
     let row_id = Projected_message.Id.canonical (History_entry.id entry) in
     match Conversation.pair_of_item it with
     | None -> ()

@@ -254,7 +254,7 @@ let replace_if_changed t model ~viewport_height projection =
 
 let canonical_tool_output projection call_id =
   List.find_map (Agent_projection.canonical_history projection) ~f:(fun entry ->
-    match History_entry.item entry with
+    match Openai.Responses_history.item_exn entry with
     | Openai.Responses.Item.Function_call_output output
       when String.equal output.call_id call_id -> Some output.output
     | Custom_tool_call_output output when String.equal output.call_id call_id ->

@@ -57,20 +57,94 @@ let replacements env environment =
     ; "rename", Before_rename, false
     ; "directory-sync", Before_directory_sync, true
     ]
-    ~f:(replacement_case env environment)
+    ~f:(replacement_case env environment);
+  let dir = directory env environment "io-replace-unexpected" in
+  let target = Filename.concat dir "CURRENT" in
+  replace env target "old" |> F.store_ok;
+  let wrapped =
+    Fault.wrap
+      env
+      ~boundary:Before_sync
+      ~matches:(String.is_prefix ~prefix:(target ^ ".tmp-"))
+      ~reached:(fun _ -> raise Exit)
+  in
+  let propagated =
+    try
+      ignore (replace wrapped target "new");
+      false
+    with
+    | Exit -> true
+  in
+  F.require propagated "unexpected provider exception was converted into an IO error";
+  F.require
+    (String.equal (F.read env target) "old")
+    "unexpected failure activated replacement";
+  F.require
+    (List.equal String.equal (Eio.Path.read_dir (F.path env dir)) [ "CURRENT" ])
+    "unexpected failure left owned staging files"
+;;
+
+let document_ok = function
+  | Ok value -> value
+  | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+;;
+
+let limits = Agent_store.Document_fields.limits ~max_bytes:4096 |> document_ok
+
+let named kind payload =
+  Document_schema.Document.create ~limits ~kind ~version:1 ~payload |> document_ok
+;;
+
+let text document =
+  Agent_store.Document_fields.required
+    (Document_schema.Document.payload document)
+    "text"
+    Agent_store.Document_fields.string
+  |> document_ok
 ;;
 
 let snapshot sequence payload =
-  Agent_store.Snapshot.
-    { schema_version = 1
-    ; transaction_sequence = sequence
-    ; transaction_hash = None
-    ; event_sequence = sequence
-    ; created_at = Agent_protocol.Timestamp.now ()
-    ; prompt_artifact = "fixture-prompt"
-    ; workspace_identity = "fixture-workspace"
-    ; payload
-    }
+  let session_id =
+    Agent_protocol.Id.Session.of_string "ses_persistence_fault"
+    |> Result.ok
+    |> Option.value_exn
+  in
+  let decimal value = `String (Int64.to_string value) in
+  let state =
+    named
+      "session.state"
+      (`Object
+          [ ( "identity"
+            , `Object
+                [ "session_id", `String (Agent_protocol.Id.Session.to_string session_id)
+                ; "generation", `String "0"
+                ] )
+          ; ( "counters"
+            , `Object
+                [ "transaction_sequence", decimal sequence
+                ; "revision", decimal sequence
+                ; "event_sequence", decimal sequence
+                ] )
+          ; ( "spec"
+            , `Object
+                [ "prompt_revision_id", `String "fixture-prompt"
+                ; ( "workspace_instance"
+                  , `Object [ "conflict_domain", `String "fixture-workspace" ] )
+                ] )
+          ; "text", `String payload
+          ])
+  in
+  Agent_store.Snapshot.create
+    ~limits
+    ~session_id
+    ~transaction_sequence:sequence
+    ~transaction_hash:(Some (String.make 64 '0'))
+    ~event_sequence:sequence
+    ~created_at:(Agent_protocol.Timestamp.now ())
+    ~prompt_artifact:"fixture-prompt"
+    ~workspace_identity:"fixture-workspace"
+    ~payload:state
+  |> F.store_ok
 ;;
 
 let install env dir value =
@@ -104,13 +178,13 @@ let snapshot_case env environment (name, boundary, after_rename) =
   let recovered = (load_snapshot env dir).snapshot in
   F.require
     (Int64.equal recovered.transaction_sequence (if after_rename then 2L else 1L)
-     && String.equal recovered.payload (if after_rename then "new" else "old"))
+     && String.equal (text recovered.payload) (if after_rename then "new" else "old"))
     "snapshot activation did not recover the exact committed checkpoint";
   ignore
     (install env dir (snapshot 3L "continued") |> F.store_ok
      : Agent_store.Snapshot.installed);
   F.require
-    (String.equal (load_snapshot env dir).snapshot.payload "continued")
+    (String.equal (text (load_snapshot env dir).snapshot.payload) "continued")
     "snapshot activation could not continue after recovery"
 ;;
 
@@ -194,6 +268,7 @@ let rotations env environment =
 
 let transaction session_id sequence previous =
   Agent_store.Transaction.create
+    ~limits
     ~session_id
     ~generation:0
     ~transaction_sequence:sequence
@@ -203,7 +278,8 @@ let transaction session_id sequence previous =
     ~last_event_sequence:None
     ~accepted_at_ns:sequence
     ~command_audit:None
-    ~delta:(Int64.to_string sequence)
+    ~delta:
+      (named "session.delta" (`Object [ "text", `String (Int64.to_string sequence) ]))
     ~durable_events:[]
   |> F.store_ok
 ;;
@@ -257,7 +333,8 @@ let writer_failure env environment (name, boundary, complete_frame) =
       ~initial:[]
       ~restore_snapshot:(fun _ -> assert false)
       ~apply:(fun history transaction ->
-        Ok (history @ [ transaction.Agent_store.Transaction.delta ]))
+        Ok (history @ [ text transaction.Agent_store.Transaction.delta ]))
+      ~validate_transaction:(fun _ -> Ok ())
       ~validate:(fun _ -> Ok ())
     |> F.store_ok
   in

@@ -145,7 +145,8 @@ let%expect_test "permission requests persist before wait and resolve by generati
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -234,7 +235,8 @@ let%expect_test "session approval creates a durable invocation grant" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -321,7 +323,8 @@ let%expect_test "permission timeout applies configured unattended fallback" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())

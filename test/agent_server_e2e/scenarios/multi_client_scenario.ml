@@ -444,6 +444,31 @@ let get_snapshot connection session_id =
 ;;
 
 let assert_accepted_messages snapshot sent_a sent_b =
+  let user_text entry =
+    let payload =
+      History_entry.Payload.of_json entry.Agent_protocol.History.payload
+      |> Result.ok_or_failwith
+    in
+    match
+      History_entry.Payload.semantic payload |> History_entry.Payload.Semantic.view
+    with
+    | Message
+        { form = Input
+        ; role = User
+        ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+        ; phase = Absent
+        } -> text
+    | _ -> fail "accepted writer message has different neutral semantics"
+  in
+  let same_message actual expected =
+    let module H = Agent_protocol.History in
+    H.Id.equal actual.H.id expected.H.id
+    && H.equal_role actual.role expected.role
+    && H.equal_kind actual.kind expected.kind
+    && H.equal_provenance actual.provenance expected.provenance
+    && Bool.equal actual.redacted expected.redacted
+    && String.equal (user_text actual) (user_text expected)
+  in
   let expected sent text =
     Agent_session.History_codec.user_text
       ~id:sent.Agent_protocol.Method_result.Send_message.history_id
@@ -465,14 +490,7 @@ let assert_accepted_messages snapshot sent_a sent_b =
     List.filter canonical ~f:(fun entry ->
       Agent_protocol.History.equal_role entry.role User)
   in
-  if
-    not
-      (List.equal
-         String.equal
-         (List.map actual ~f:(fun entry ->
-            Agent_protocol.History.entry_to_json entry |> Jsonaf.to_string))
-         (List.map expected ~f:(fun entry ->
-            Agent_protocol.History.entry_to_json entry |> Jsonaf.to_string)))
+  if not (List.equal same_message actual expected)
   then
     raise_s
       [%sexp

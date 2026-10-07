@@ -535,12 +535,11 @@ let%expect_test
             |> store_ok
           in
           let _ =
-            Agent_session.Session_persistence.install_snapshot
+            Agent_store.Snapshot.install
               ~env
-              ~handle:child_handle
+              ~directory:(Session_store.Handle.snapshot_directory child_handle)
               ~max_payload_length:1048576
-              ~transaction_hash:None
-              initial
+              (snapshot_of_state initial |> store_ok)
             |> store_ok
           in
           let _ = D.advance ledger reserved Child_installed |> store_ok in

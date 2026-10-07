@@ -34,7 +34,12 @@ val upgrade : Session_state.t -> Agent_protocol.Id.Prompt_revision.t -> Session_
     Candidate history repairs and the index commit atomically with administration.
     Persistence writes the archive before commit. No handlers are run. *)
 val archive
-  :  previous:Session_state.t
+  :  archive_reference:
+       (previous:Session_state.t
+        -> kind:Session_state.Compaction_archive.kind
+        -> Agent_protocol.Id.Operation.t
+        -> (Session_state.Compaction_archive.t, Agent_protocol.Error.t) result)
+  -> previous:Session_state.t
   -> Session_state.t
   -> Session_state.Compaction_archive.kind
   -> (Session_state.t, Agent_protocol.Error.t) result

@@ -1539,7 +1539,9 @@ let run_chat
       |> Result.ok_or_failwith
   in
   let history_items_prompt =
-    List.map history_items_prompt ~f:(History_entry.create ~allocator:history_allocator)
+    List.map
+      history_items_prompt
+      ~f:(Openai.Responses_history.create ~allocator:history_allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in

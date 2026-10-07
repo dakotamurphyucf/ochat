@@ -303,22 +303,39 @@ let await_stopped env client session =
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. wait
 ;;
 
-let require_submitted_content client session sent text =
-  let snapshot, _ = Http_driver.get_snapshot client session.summary.id |> result_ok in
-  let expected =
-    Agent_session.History_codec.user_text
-      ~id:sent.Agent_protocol.Method_result.Send_message.history_id
+let require_submitted_content
+      client
+      session
+      (sent : Agent_protocol.Method_result.Send_message.t)
       text
-    |> Agent_session.History_codec.to_protocol
-  in
+  =
+  let snapshot, _ = Http_driver.get_snapshot client session.summary.id |> result_ok in
   let actual =
     List.filter snapshot.canonical_history.entries ~f:(fun entry ->
       Agent_protocol.History.Id.compare entry.id sent.history_id = 0)
   in
   require
-    (Sexp.equal
-       ([%sexp_of: Agent_protocol.History.entry list] actual)
-       ([%sexp_of: Agent_protocol.History.entry list] [ expected ]))
+    (match actual with
+     | [ entry ] ->
+       let payload =
+         History_entry.Payload.of_json entry.payload |> Result.ok_or_failwith
+       in
+       Agent_protocol.History.equal_role entry.role User
+       && Agent_protocol.History.equal_kind entry.kind Message
+       && Agent_protocol.History.equal_provenance entry.provenance Canonical
+       && (not entry.redacted)
+       &&
+         (match
+            History_entry.Payload.semantic payload |> History_entry.Payload.Semantic.view
+          with
+         | Message
+             { form = Input
+             ; role = User
+             ; content = [ Text { text = actual; annotations = []; logprobs = Absent } ]
+             ; phase = Absent
+             } -> String.equal actual text
+         | _ -> false)
+     | [] | _ :: _ :: _ -> false)
     "replay fixture lost, duplicated, or altered its submitted content"
 ;;
 

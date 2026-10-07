@@ -15,7 +15,9 @@ let append_history_item_if_output_done
   =
   let model = runtime.model in
   let add item =
-    let entry = History_entry.create_with_id ~id:history_event.entry_id item in
+    let entry =
+      Openai.Responses_history.create_with_id_exn ~id:history_event.entry_id item
+    in
     ignore (Model.add_history_item model entry)
   in
   match history_event.source, history_event.event with
@@ -40,7 +42,7 @@ let apply_history_stream_batch runtime history_events =
 
 let append_raw_history_item_if_output_done (runtime : App_runtime.t) (ev : Res_stream.t) =
   let add item =
-    History_entry.create ~allocator:runtime.history_allocator item
+    Openai.Responses_history.create ~allocator:runtime.history_allocator item
     |> Result.ok_or_failwith
     |> Model.add_history_item runtime.model
     |> ignore
@@ -194,7 +196,7 @@ let apply_tool_output runtime throttler item =
     Stream_handler.handle_tool_out
       ~model
       ~entry_id:(History_entry.id item)
-      (History_entry.item item)
+      (Openai.Responses_history.item_exn item)
   in
   ignore (Model.apply_patches model patches);
   let changed_rows = changed_row_ids model patches in

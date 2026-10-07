@@ -29,7 +29,8 @@ let%expect_test "durable event replay detects retained and expired cursors" =
         [ durable_event session_id 1L; durable_event session_id 2L ]
       |> protocol_ok
     in
-    Agent_session.Durable_event_log.append log [ durable_event session_id 3L ];
+    Agent_session.Durable_event_log.append log [ durable_event session_id 3L ]
+    |> protocol_ok;
     let expired =
       Agent_session.Durable_event_log.replay log ~after_sequence:0L ~through_sequence:3L
     in
@@ -141,7 +142,7 @@ let%expect_test "history deletion pairs occurrences, not reused provider call ID
     List.mapi
       [ call; custom; output; custom_output; call; output ]
       ~f:(fun sequence item ->
-        History_entry.create_with_id
+        Openai.Responses_history.create_with_id_exn
           ~id:
             (History_entry.Id.create ~namespace:"pairs" ~sequence |> Result.ok_or_failwith)
           item)

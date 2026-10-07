@@ -123,7 +123,7 @@ let completed_answer ~state ~receipt_id =
       | true -> Error (P.Error.invalid_request "one-off answer was redacted")
       | false ->
         let%bind entry = Agent_session.History_codec.of_protocol entry in
-        (match History_entry.item entry with
+        (match Openai.Responses_history.item_exn entry with
          | Openai.Responses.Item.Output_message message ->
            Ok
              (List.map message.content ~f:(fun part -> part.text)

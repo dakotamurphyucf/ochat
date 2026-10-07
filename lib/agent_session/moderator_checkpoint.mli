@@ -1,5 +1,11 @@
 open Core
 
+(** Named-field nested checkpoint component. Its enclosing state/delta document
+    owns conversion and the extension carrier using [shape]. *)
+val encode : Session.Moderator_state.Identity_snapshot.t -> Jsonaf.t
+
+val shape : Document_schema.Shape.t
+
 (** Shared identity-safe decoding for runtime restoration and delegated authority.
     This reads persisted identity/state; it grants no manager or execution lease. *)
 val decode

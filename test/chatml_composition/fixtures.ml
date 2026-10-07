@@ -59,6 +59,7 @@ let with_daemon
       ?config_file
       ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+      ?(completion_timeout = 20.)
       ?settle
       ?after_turn
       ?after_turn_with_daemon
@@ -205,23 +206,69 @@ let with_daemon
                   }
                 |> protocol_ok
               in
+              let last_state = ref None in
               let final =
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  let rec wait () =
-                    Option.iter !provider_failure ~f:raise;
-                    let state = A.state entry.actor |> protocol_ok in
-                    Option.iter state.failure ~f:(fun error ->
-                      raise_s [%sexp (error : Agent_protocol.Error.t)]);
-                    match state.active_operation with
-                    | None
-                      when !requests >= fst (request_counts ())
-                           && List.is_empty state.conversation.deferred_user_entries ->
-                      state
-                    | _ ->
-                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                      wait ()
+                try
+                  Eio.Time.with_timeout_exn
+                    (Eio.Stdenv.clock env)
+                    completion_timeout
+                    (fun () ->
+                       let rec wait () =
+                         Option.iter !provider_failure ~f:raise;
+                         let state = A.state entry.actor |> protocol_ok in
+                         last_state := Some state;
+                         Option.iter state.failure ~f:(fun error ->
+                           raise_s [%sexp (error : Agent_protocol.Error.t)]);
+                         match state.active_operation with
+                         | None
+                           when !requests >= fst (request_counts ())
+                                && List.is_empty state.conversation.deferred_user_entries
+                           -> state
+                         | _ ->
+                           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                           wait ()
+                       in
+                       wait ())
+                with
+                | Eio.Time.Timeout ->
+                  let failures =
+                    match
+                      Agent_session.Durable_event_log.replay
+                        entry.durable_events
+                        ~after_sequence:0L
+                        ~through_sequence:Int64.max_value
+                    with
+                    | Snapshot_required -> []
+                    | Available events ->
+                      List.filter_map events ~f:(fun event ->
+                        match event.Agent_protocol.Event.Durable.kind with
+                        | Operation_failed -> Some event.payload
+                        | _ -> None)
                   in
-                  wait ())
+                  raise_s
+                    [%sexp
+                      "composition session did not finish"
+                    , (!requests : int)
+                    , (request_counts () : int * int)
+                    , (failures : Jsonaf.t list)
+                    , (Option.map !last_state ~f:(fun state ->
+                         ( state.Agent_session.Session_state.lifecycle
+                         , state.active_operation
+                         , List.length state.conversation.deferred_user_entries
+                         , List.map state.invocations ~f:(fun invocation ->
+                             let status =
+                               match invocation.Agent_protocol.Invocation.status with
+                               | Admitted -> "admitted"
+                               | Dispatching -> "dispatching"
+                               | Resolved _ -> "resolved"
+                               | Published _ -> "published"
+                             in
+                             invocation.context.tool_name, status) ))
+                       : (Agent_session.Session_state.Lifecycle.t
+                         * Agent_protocol.Operation.t option
+                         * int
+                         * (string * string) list)
+                           option)]
               in
               let events =
                 match

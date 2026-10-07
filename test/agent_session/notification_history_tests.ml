@@ -26,7 +26,7 @@ let%expect_test
     Notification.validate ~delivery entry |> protocol_ok;
     let runtime_entry = Codec.of_protocol entry |> protocol_ok in
     let text =
-      match History_entry.item runtime_entry with
+      match Openai.Responses_history.item_exn runtime_entry with
       | Input_message { role = User; content = [ Text { text; _ } ]; _ } -> text
       | _ -> failwith "notification used unsupported provider framing"
     in
@@ -41,7 +41,9 @@ let%expect_test
       |> Result.ok_or_failwith
     in
     let copy =
-      History_entry.create_with_id ~id:new_id (History_entry.item runtime_entry)
+      Openai.Responses_history.create_with_id_exn
+        ~id:new_id
+        (Openai.Responses_history.item_exn runtime_entry)
     in
     let restored = Codec.all_to_protocol ~previous:[ entry ] [ runtime_entry; copy ] in
     let copied = List.nth_exn restored 1 in
@@ -174,11 +176,7 @@ let%expect_test
             assert_same_session_snapshot
               final
               (Agent_session.Memory_backend.state backend);
-            let restored =
-              Agent_session.Session_persistence.restore_snapshot
-                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t final))
-              |> store_ok
-            in
+            let restored = restore_state final |> store_ok in
             let project state =
               (Agent_session.Session_state.snapshot ~now:timestamp state)
                 .effective_history
@@ -190,10 +188,10 @@ let%expect_test
               Session.Moderator_state.Identity_snapshot.Replacement.
                 { target_id = entry.id
                 ; value =
-                    Openai.Responses.Item.jsonaf_of_t worker_output_item
-                    |> Chatml.Chatml_value_codec.import_json
-                    |> Session.Snapshot.of_value
+                    Openai.Responses_history.of_item worker_output_item
                     |> Result.ok_or_failwith
+                    |> History_entry.Payload.semantic
+                    |> History_entry.Payload.authored
                 ; change_id = 0
                 ; script_label = None
                 }

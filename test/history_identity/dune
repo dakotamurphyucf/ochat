@@ -1,6 +1,6 @@
 (library
  (name history_entry_test)
- (modules history_entry_test)
+ (modules history_entry_test neutral_payload_test)
  (libraries core expect_test_helpers_core ochat.history_entry openai)
  (inline_tests)
  (preprocess

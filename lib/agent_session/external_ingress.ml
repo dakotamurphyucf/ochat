@@ -365,3 +365,214 @@ let validate_transition ~subscription ~previous next =
         | _ -> error Conflict "external ingress transition differs from its admission")
      | _ -> error Conflict "invalid external ingress admission or revocation transition")
 ;;
+
+module X = Persistence_codec
+module J = Agent_protocol.Json_codec
+
+let limits_to_jsonaf (t : limits) =
+  `Object
+    [ "max_payload_bytes", X.integer_json t.max_payload_bytes
+    ; "max_payload_depth", X.integer_json t.max_payload_depth
+    ; "max_receipts", X.integer_json t.max_receipts
+    ; "rate_count", X.integer_json t.rate_count
+    ; "rate_window_ms", X.integer_json t.rate_window_ms
+    ]
+;;
+
+let limits_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind max_payload_bytes = X.required fields "max_payload_bytes" X.integer in
+  let%bind max_payload_depth = X.required fields "max_payload_depth" X.integer in
+  let%bind max_receipts = X.required fields "max_receipts" X.integer in
+  let%bind rate_count = X.required fields "rate_count" X.integer in
+  let%bind rate_window_ms = X.required fields "rate_window_ms" X.integer in
+  let t : limits =
+    { max_payload_bytes; max_payload_depth; max_receipts; rate_count; rate_window_ms }
+  in
+  Ok t
+;;
+
+let limits_shape =
+  X.shape_exn
+    [ "max_payload_bytes", Document_schema.Shape.value
+    ; "max_payload_depth", Document_schema.Shape.value
+    ; "max_receipts", Document_schema.Shape.value
+    ; "rate_count", Document_schema.Shape.value
+    ; "rate_window_ms", Document_schema.Shape.value
+    ]
+;;
+
+let observer_to_jsonaf (t : P.Invocation.observer) =
+  `Object
+    [ "script_id", X.text_json t.script_id; "source_sha256", X.text_json t.source_sha256 ]
+;;
+
+let observer_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind script_id = X.required fields "script_id" J.string in
+  let%bind source_sha256 = X.required fields "source_sha256" J.string in
+  let t : P.Invocation.observer = { script_id; source_sha256 } in
+  Ok t
+;;
+
+let observer_shape =
+  X.shape_exn
+    [ "script_id", Document_schema.Shape.value
+    ; "source_sha256", Document_schema.Shape.value
+    ]
+;;
+
+let context_to_jsonaf (t : context) =
+  `Object
+    [ "id", P.Id.Capability.to_json t.id
+    ; "session_id", P.Id.Session.to_json t.session_id
+    ; "generation", X.integer_json t.generation
+    ; "subscription_id", P.Id.Subscription.to_json t.subscription_id
+    ; "epoch", X.integer_json t.epoch
+    ; "source", observer_to_jsonaf t.source
+    ; "producer", P.Id.Principal.to_json t.producer
+    ; "namespace", X.text_json t.namespace
+    ; "schema", Fn.id t.schema
+    ; "created_at", P.Timestamp.to_json t.created_at
+    ; "expires_at", P.Timestamp.to_json t.expires_at
+    ; "limits", limits_to_jsonaf t.limits
+    ]
+;;
+
+let context_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind id = X.required fields "id" P.Id.Capability.of_json in
+  let%bind session_id = X.required fields "session_id" P.Id.Session.of_json in
+  let%bind generation = X.required fields "generation" X.integer in
+  let%bind subscription_id =
+    X.required fields "subscription_id" P.Id.Subscription.of_json
+  in
+  let%bind epoch = X.required fields "epoch" X.integer in
+  let%bind source = X.required fields "source" observer_of_jsonaf in
+  let%bind producer = X.required fields "producer" P.Id.Principal.of_json in
+  let%bind namespace = X.required fields "namespace" J.string in
+  let%bind schema = X.required fields "schema" X.raw in
+  let%bind created_at = X.required fields "created_at" P.Timestamp.of_json in
+  let%bind expires_at = X.required fields "expires_at" P.Timestamp.of_json in
+  let%bind limits = X.required fields "limits" limits_of_jsonaf in
+  let t : context =
+    { id
+    ; session_id
+    ; generation
+    ; subscription_id
+    ; epoch
+    ; source
+    ; producer
+    ; namespace
+    ; schema
+    ; created_at
+    ; expires_at
+    ; limits
+    }
+  in
+  Ok t
+;;
+
+let context_shape =
+  X.shape_exn
+    [ "id", Document_schema.Shape.value
+    ; "session_id", Document_schema.Shape.value
+    ; "generation", Document_schema.Shape.value
+    ; "subscription_id", Document_schema.Shape.value
+    ; "epoch", Document_schema.Shape.value
+    ; "source", observer_shape
+    ; "producer", Document_schema.Shape.value
+    ; "namespace", Document_schema.Shape.value
+    ; "schema", Document_schema.Shape.value
+    ; "created_at", Document_schema.Shape.value
+    ; "expires_at", Document_schema.Shape.value
+    ; "limits", limits_shape
+    ]
+;;
+
+let receipt_to_jsonaf (t : receipt) =
+  `Object
+    [ "id", P.Id.Ingress_event.to_json t.id
+    ; "key", P.Idempotency_key.to_json t.key
+    ; "payload", Fn.id t.payload
+    ; "payload_sha256", X.text_json t.payload_sha256
+    ; "accepted_at", P.Timestamp.to_json t.accepted_at
+    ]
+;;
+
+let receipt_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind id = X.required fields "id" P.Id.Ingress_event.of_json in
+  let%bind key = X.required fields "key" P.Idempotency_key.of_json in
+  let%bind payload = X.required fields "payload" X.raw in
+  let%bind payload_sha256 = X.required fields "payload_sha256" J.string in
+  let%bind accepted_at = X.required fields "accepted_at" P.Timestamp.of_json in
+  let t : receipt = { id; key; payload; payload_sha256; accepted_at } in
+  Ok t
+;;
+
+let receipt_shape =
+  X.shape_exn
+    [ "id", Document_schema.Shape.value
+    ; "key", Document_schema.Shape.value
+    ; "payload", Document_schema.Shape.value
+    ; "payload_sha256", Document_schema.Shape.value
+    ; "accepted_at", Document_schema.Shape.value
+    ]
+;;
+
+let storage_to_jsonaf (t : t) =
+  `Object
+    [ "context", context_to_jsonaf t.context
+    ; "receipts", (X.list_json receipt_to_jsonaf) t.receipts
+    ; "revoked", (X.option_json X.text_json) t.revoked
+    ]
+;;
+
+let storage_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind context = X.required fields "context" context_of_jsonaf in
+  let%bind receipts = X.required fields "receipts" (X.list receipt_of_jsonaf) in
+  let%bind revoked = X.required fields "revoked" (X.nullable J.string) in
+  let t : t = { context; receipts; revoked } in
+  let%map () = validate t in
+  t
+;;
+
+let storage_shape =
+  X.shape_exn
+    [ "context", context_shape
+    ; "receipts", X.array_shape_exn ~identity_field:"id" receipt_shape
+    ; "revoked", X.nullable_shape Document_schema.Shape.value
+    ]
+;;
+
+let to_jsonaf t =
+  match storage_to_jsonaf t with
+  | `Object fields -> `Object (("id", P.Id.Capability.to_json t.context.id) :: fields)
+  | _ -> assert false
+;;
+
+let of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  let%bind id = X.required fields "id" P.Id.Capability.of_json in
+  let%bind t = storage_of_jsonaf json in
+  if P.Id.Capability.equal id t.context.id
+  then Ok t
+  else Error (P.Error.invalid_request "ingress storage identity mismatch")
+;;
+
+let shape =
+  X.shape_exn
+    [ "id", Document_schema.Shape.value
+    ; "context", context_shape
+    ; "receipts", X.array_shape_exn ~identity_field:"id" receipt_shape
+    ; "revoked", X.nullable_shape Document_schema.Shape.value
+    ]
+;;

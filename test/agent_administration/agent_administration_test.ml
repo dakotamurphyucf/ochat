@@ -407,12 +407,34 @@ let seeded_schedule state =
 ;;
 
 let seed_children entry attachment_id (before : Agent_session.Session_state.t) =
+  (* Keep seeded deferred content outside the moderator's live reserved range
+     and give it its own occurrence instead of cloning a canonical host ID. *)
+  let sequence =
+    Int64.max
+      before.conversation.next_history_sequence
+      before.conversation.reserved_history_through
+  in
+  let deferred_id =
+    History_entry.Id.create
+      ~namespace:(Agent_protocol.Id.Session.to_string before.identity.session_id)
+      ~sequence:(Int64.to_int_exn sequence)
+    |> Result.ok_or_failwith
+  in
+  let deferred =
+    Agent_session.History_codec.user_text
+      ~id:deferred_id
+      "deferred administration message"
+    |> Agent_session.History_codec.to_canonical
+  in
+  let next_sequence = Int64.succ sequence in
   let candidate =
     { before with
       Agent_session.Session_state.conversation =
         { before.conversation with
           initial_prompt_entry_count = 0
-        ; deferred_user_entries = before.conversation.canonical_history
+        ; deferred_user_entries = [ deferred ]
+        ; next_history_sequence = next_sequence
+        ; reserved_history_through = next_sequence
         }
     ; permissions = [ seeded_permission before ]
     ; grants = [ seeded_grant before ]

@@ -145,7 +145,7 @@ let create
       }
   in
   let%bind canonical_payload, call_id =
-    match History_entry.item request.call with
+    match Openai.Responses_history.item_exn request.call with
     | Function_call call -> Ok (call.arguments, call.call_id)
     | Custom_tool_call call -> Ok (call.input, call.call_id)
     | _ ->

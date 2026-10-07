@@ -563,7 +563,7 @@ let allocate_initial ~namespace ~next_sequence items =
     |> Result.map_error ~f:failure
   in
   let%map history =
-    List.map items ~f:(History_entry.create ~allocator)
+    List.map items ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.map_error ~f:failure
   in
@@ -720,15 +720,7 @@ let create_moderator
     let current_snapshot () =
       Manager.identity_snapshot manager
       |> Result.map_error ~f:failure
-      |> Result.map ~f:(fun snapshot ->
-        Some
-          (`Object
-              [ ( "identity_snapshot_sexp"
-                , `String
-                    (Sexp.to_string_mach
-                       ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot))
-                )
-              ]))
+      |> Result.map ~f:(fun snapshot -> Some (Moderator_checkpoint.encode snapshot))
     in
     let start () =
       if Option.is_some (Manager.extension_definition manager) || !started
@@ -775,14 +767,7 @@ let create_moderator
     Ok (Some moderator_pair, start)
 ;;
 
-let encode_moderator_snapshot snapshot =
-  `Object
-    [ ( "identity_snapshot_sexp"
-      , `String
-          (Sexp.to_string_mach
-             ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot)) )
-    ]
-;;
+let encode_moderator_snapshot = Moderator_checkpoint.encode
 
 let moderator_snapshot = function
   | None -> Ok None
@@ -1008,7 +993,7 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
       | Plain_text -> Ok (plain_user_item content.text)
       | Chatmd -> chatmd_user_item ~ctx ~run_agent:converter_runner paths content.text
     in
-    History_entry.create_with_id ~id item
+    Openai.Responses_history.create_with_id_exn ~id item
 ;;
 
 type inherited_managed =
@@ -1753,7 +1738,10 @@ let build_with_services
            content.Agent_protocol.Session.Message_content.kind, content.attachments
          with
          | Plain_text, [] ->
-           Ok (History_entry.create_with_id ~id (plain_user_item content.text))
+           Ok
+             (Openai.Responses_history.create_with_id_exn
+                ~id
+                (plain_user_item content.text))
          | Chatmd, _ | Plain_text, _ :: _ ->
            Error
              (failure

@@ -62,3 +62,10 @@ val reconcile
   -> now:Agent_protocol.Timestamp.t
   -> t
   -> t
+
+(** Complete, validated named-field storage representation. Public receipt
+    projections remain separate. *)
+val to_jsonaf : t -> Jsonaf.t
+
+val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+val shape : Document_schema.Shape.t

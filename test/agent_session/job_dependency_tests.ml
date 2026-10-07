@@ -103,11 +103,7 @@ let%expect_test
             | Waiting_completion saved -> assert (J.equal_dependency dependency saved)
             | _ -> assert false);
            let saved = Agent_session.Memory_backend.state backend in
-           let restored =
-             Agent_session.Session_persistence.restore_snapshot
-               (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-             |> store_ok
-           in
+           let restored = restore_state saved |> store_ok in
            assert (Result.is_ok (Agent_session.Session_state.validate restored));
            let forged =
              { waiting with

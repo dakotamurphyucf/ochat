@@ -181,11 +181,7 @@ let%expect_test
        F.rejected "rate uses commit time" (prepare "two");
        now := F.at 1_501;
        prepare "two" |> protocol_ok |> proposal |> ignore;
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-         |> store_ok
-       in
+       let restored = restore_state saved |> store_ok in
        assert_same_session_snapshot saved restored;
        assert_same_session_snapshot saved (Agent_session.Memory_backend.state backend);
        print_endline

@@ -6,8 +6,8 @@ module S = Session.Moderator_state.Identity_snapshot
 let conflict message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
 let checkpoint snapshot =
-  S.sexp_of_t snapshot
-  |> Sexp.to_string_mach
+  S.to_jsonaf snapshot
+  |> Jsonaf.to_string
   |> Digestif.SHA256.digest_string
   |> Digestif.SHA256.to_hex
 ;;
@@ -19,15 +19,13 @@ let same_value a b =
 let installed ~state ~(snapshot : S.t) =
   match state.Session_state.moderator with
   | Some saved
-    when Jsonaf.exactly_equal saved (Runtime_builder.encode_moderator_snapshot snapshot)
-    -> Ok ()
+    when Document_schema.Json.equal
+           saved
+           (Runtime_builder.encode_moderator_snapshot snapshot) -> Ok ()
   | _ -> conflict "queued event requires the exact installed moderator checkpoint"
 ;;
 
-let encoded_event event =
-  `Object
-    [ "snapshot_sexp", `String (Sexp.to_string_mach (Session.Snapshot.sexp_of_t event)) ]
-;;
+let encoded_event event = `Object [ "snapshot", Session.Snapshot.to_jsonaf event ]
 
 let captured_timer event =
   Result.bind (Session.Snapshot.to_value event) ~f:Chat_response.Schedule_delivery.decode
@@ -38,12 +36,12 @@ let receipt_snapshot (receipt : E.t) =
   let open Result.Let_syntax in
   match receipt.context.phase, receipt.context.event with
   | Internal_event, `Object fields ->
-    (match List.Assoc.find fields ~equal:String.equal "snapshot_sexp" with
-     | Some (`String sexp) ->
+    (match List.Assoc.find fields ~equal:String.equal "snapshot" with
+     | Some json ->
        let%bind event =
-         Result.try_with (fun () -> Session.Snapshot.t_of_sexp (Sexp.of_string sexp))
-         |> Result.map_error ~f:(fun _ ->
-           P.Error.invalid_request "invalid captured queued event snapshot")
+         Session.Snapshot.of_jsonaf json
+         |> Result.map_error ~f:(fun error ->
+           P.Error.invalid_request ("invalid captured queued event snapshot: " ^ error))
        in
        Ok (Some event)
      | _ -> Ok None)

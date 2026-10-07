@@ -267,7 +267,7 @@ let%expect_test "rebuild_tool_output_index classifies history items" =
     |> Result.ok_or_failwith
   in
   let entries =
-    List.map history ~f:(History_entry.create ~allocator)
+    List.map history ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in
@@ -368,7 +368,7 @@ let%expect_test
     |> Result.ok_or_failwith
   in
   let visible_history =
-    List.map visible_history ~f:(History_entry.create ~allocator)
+    List.map visible_history ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in

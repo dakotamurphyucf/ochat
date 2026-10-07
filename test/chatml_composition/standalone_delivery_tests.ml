@@ -242,8 +242,7 @@ let%expect_test
              |> protocol_ok
              |> Option.value_exn));
         let restored =
-          Agent_session.Session_persistence.restore_snapshot
-            (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
+          Agent_server_test_support.roundtrip_state saved
           |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
           |> protocol_ok
         in

@@ -314,11 +314,15 @@ let%expect_test
             | other -> raise_s [%sexp (other : I.outcome)]);
            let references = guidance state in
            List.iter references ~f:(fun reference ->
+             let payload =
+               Agent_session.History_codec.of_canonical reference
+               |> protocol_ok
+               |> Openai.Responses_history.item_exn
+               |> Openai.Responses.Item.jsonaf_of_t
+             in
              assert (
                List.exists !initial ~f:(fun item ->
-                 Jsonaf.exactly_equal
-                   reference.payload
-                   (Openai.Responses.Item.jsonaf_of_t item))));
+                 Jsonaf.exactly_equal payload (Openai.Responses.Item.jsonaf_of_t item))));
            let topics =
              List.concat_map references ~f:(fun entry ->
                match entry.P.History.provenance with

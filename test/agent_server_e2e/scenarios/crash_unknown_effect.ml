@@ -128,6 +128,7 @@ let persisted_events env fixture session_id =
         |> Agent_store.Transaction.decode
         |> F.store_ok
         |> Agent_session.Session_persistence.durable_events
+             ~limits:Document_schema.Limits.default
         |> F.store_ok))
 ;;
 
@@ -197,7 +198,7 @@ let test env environment =
          fabricated successful result or a replacement for the original call. *)
       (match Agent_session.History_codec.all_of_protocol appended |> F.protocol_ok with
        | [ entry ] ->
-         (match History_entry.item entry with
+         (match Openai.Responses_history.item_exn entry with
           | Function_call_output
               { call_id = "crash-unknown-call"; output = Text encoded; _ } ->
             (match

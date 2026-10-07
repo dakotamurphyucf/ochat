@@ -61,8 +61,7 @@ let%expect_test
     ~settle:(fun _ _ -> ())
     (fun state ->
        let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
+         Agent_server_test_support.roundtrip_state state
          |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
          |> protocol_ok
        in

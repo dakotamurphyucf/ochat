@@ -29,11 +29,14 @@ let model_of_history history =
     |> ok_or_fail
   in
   let history =
-    List.map history ~f:(History_entry.create ~allocator) |> Result.all |> ok_or_fail
+    List.map history ~f:(Openai.Responses_history.create ~allocator)
+    |> Result.all
+    |> ok_or_fail
   in
   Chat_tui.Model.create
     ~history_items:history
-    ~messages:(Chat_tui.Conversation.of_history (History_entry.items history))
+    ~messages:
+      (Chat_tui.Conversation.of_history (Openai.Responses_history.items_exn history))
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -1325,7 +1328,7 @@ let%expect_test "user submission waits for startup overlay before beginning a tu
        let _, started_history = Option.value_exn !started in
        let effective =
          Manager.effective_history_entries moderator.manager started_history
-         |> History_entry.items
+         |> Openai.Responses_history.items_exn
          |> Chat_tui.Conversation.of_history
        in
        print_messages effective;

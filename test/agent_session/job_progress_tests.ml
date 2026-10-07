@@ -115,10 +115,7 @@ let%expect_test
             if Agent_protocol.Id.Job.equal job.id live.id then live else job)
       }
     in
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t corrupt))));
+    assert (Result.is_error (restore_state corrupt));
     Eio.Promise.resolve release_u ();
     let result = Eio.Promise.await finished |> protocol_ok in
     (match result.resolved.status with

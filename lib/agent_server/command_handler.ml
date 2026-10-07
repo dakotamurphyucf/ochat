@@ -1,7 +1,7 @@
 open! Core
 
 type create_session =
-  command_audit:string option
+  command_audit:Document_schema.Document.t option
   -> principal:Agent_protocol.Principal.t
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
@@ -439,7 +439,7 @@ let handle_idempotent t context command identity execute =
       Error (error Idempotency_conflict "idempotency key was used for another request")
     | Missing ->
       let%bind _ = pending_record t key digest identity.retention in
-      let command_audit =
+      let%bind command_audit =
         Agent_store.Idempotency_store.Command_audit.
           { key
           ; request_digest = digest
@@ -449,6 +449,7 @@ let handle_idempotent t context command identity execute =
                | Protected -> true)
           }
         |> Agent_store.Idempotency_store.Command_audit.encode
+        |> Result.map_error ~f:persistence_error
       in
       store_outcome t key digest (execute (Some command_audit)))
 ;;

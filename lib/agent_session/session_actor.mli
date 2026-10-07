@@ -4,10 +4,15 @@ open! Core
 
 type persistence =
   { commit :
-      command_audit:string option
+      command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
       -> Session_transition.t
       -> (unit, Agent_protocol.Error.t) result
+  ; archive_reference :
+      previous:Session_state.t
+      -> kind:Session_state.Compaction_archive.kind
+      -> Agent_protocol.Id.Operation.t
+      -> (Session_state.Compaction_archive.t, Agent_protocol.Error.t) result
   }
 
 type services =
@@ -505,7 +510,7 @@ val reset
 
 val reset_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> reset_options
@@ -517,7 +522,7 @@ val reset_with_command_audit
     have mutated the actor; candidates carry the captured revision. *)
 val commit_administration
   :  t
-  -> command_audit:string option
+  -> command_audit:Document_schema.Document.t option
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> kind:Session_state.Compaction_archive.kind
@@ -533,7 +538,7 @@ val upgrade_prompt
 
 val upgrade_prompt_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> target_revision:Agent_protocol.Id.Prompt_revision.t
@@ -572,7 +577,7 @@ val replace_workspace
 val start_with_command_audit
   :  ?expected_parent_stop_epoch:int64
   -> t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -583,7 +588,7 @@ val queue_start
 
 val queue_start_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -599,7 +604,7 @@ val stop
 
 val stop_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> mode:Agent_protocol.Session.stop_mode
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -662,7 +667,7 @@ val submit_message
 
 val submit_message_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
@@ -689,7 +694,7 @@ val submit_managed_message
     an exact revision; rejects borrowed moderator work. Commits before broadcast. *)
 val delete_history
   :  t
-  -> ?command_audit:string
+  -> ?command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> Agent_protocol.History.Id.t
@@ -712,7 +717,7 @@ val compact
 
 val compact_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64 option
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -807,7 +812,7 @@ val cancel_operation
 
 val cancel_operation_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -885,7 +890,7 @@ val respond_permission
 
 val respond_permission_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> principal_id:Agent_protocol.Id.Principal.t option
   -> permission_id:Agent_protocol.Id.Permission.t
@@ -903,7 +908,7 @@ val revoke_grant
 
 val revoke_grant_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> grant_id:Agent_protocol.Id.Grant.t
   -> reason:string
@@ -1008,7 +1013,7 @@ val authorize_writer
     separate privileged operation below. *)
 val cancel_job
   :  t
-  -> ?command_audit:string
+  -> ?command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> job_id:Agent_protocol.Id.Job.t
   -> unit
@@ -1021,7 +1026,7 @@ val cancel_job_internal
 
 val cancel_job_internal_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> job_id:Agent_protocol.Id.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
@@ -1044,7 +1049,7 @@ val change_schedule
 
 val change_schedule_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> event:[ `Created | `Cancelled ]
   -> Agent_protocol.Schedule.t
@@ -1372,7 +1377,7 @@ val attach_with_snapshot
 
 val attach_with_snapshot_and_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> principal_id:Agent_protocol.Id.Principal.t option
   -> reclaim_token:string option
   -> mode:Agent_protocol.Session.attachment_mode
@@ -1388,7 +1393,7 @@ val detach : t -> Agent_protocol.Id.Attachment.t -> (unit, Agent_protocol.Error.
 
 val detach_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> Agent_protocol.Id.Attachment.t
   -> (unit, Agent_protocol.Error.t) result
 
@@ -1402,7 +1407,7 @@ val renew_owner
 
 val renew_owner_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> lease_generation:int64
   -> ( Agent_protocol.Session.Owner_lease.t * Agent_protocol.Session.t

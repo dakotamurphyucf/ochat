@@ -368,7 +368,7 @@ let%expect_test "host preparation routes canonical calls before owned admission"
                    |> Agent_session.History_codec.of_protocol
                    |> protocol_ok
                  in
-                 (match History_entry.item call with
+                 (match Openai.Responses_history.item_exn call with
                   | Function_call call ->
                     [%test_eq: string] name call.name;
                     [%test_eq: string] "\"redacted\"" call.arguments

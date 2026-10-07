@@ -12,6 +12,7 @@ let receipts state = State.authoring_references state |> protocol_ok |> R.receip
 let replay state delta =
   let transaction =
     Agent_store.Transaction.create
+      ~limits:document_limits
       ~session_id:state.State.identity.session_id
       ~generation:state.identity.generation
       ~transaction_sequence:Int64.(state.counters.transaction_sequence + 1L)
@@ -22,14 +23,14 @@ let replay state delta =
       ~accepted_at_ns:
         (P.Timestamp.to_time_ns timestamp |> Time_ns.to_int_ns_since_epoch |> Int64.of_int)
       ~command_audit:None
-      ~delta:(Delta.sexp_of_t delta |> Sexp.to_string_mach)
+      ~delta:(delta_document delta)
       ~durable_events:[]
     |> store_ok
     |> Agent_store.Transaction.encode
     |> Agent_store.Transaction.decode
     |> store_ok
   in
-  Agent_session.Session_persistence.apply_transaction state transaction |> store_ok
+  replay_transaction state transaction |> store_ok
 ;;
 
 let%expect_test
@@ -51,12 +52,7 @@ let%expect_test
         expected
         (receipts compacted));
     let index = Option.value_exn compacted.conversation.authoring_reference_index in
-    let rejects state =
-      assert (
-        Result.is_error
-          (Agent_session.Session_persistence.restore_snapshot
-             (State.sexp_of_t state |> Sexp.to_string_mach)))
-    in
+    let rejects state = assert (Result.is_error (restore_state state)) in
     rejects { compacted with schema_version = 17 };
     rejects { compacted with identity = { compacted.identity with generation = 1 } };
     let bad_index =
@@ -70,13 +66,32 @@ let%expect_test
         conversation =
           { compacted.conversation with authoring_reference_index = Some bad_index }
       };
-    let legacy = F.restore { initial with schema_version = 17 } in
-    assert (Option.is_none legacy.conversation.authoring_reference_index);
-    let redacted =
-      replay appended (Canonical_history_replaced [ { value with redacted = true } ])
-      |> F.restore
-    in
-    assert (List.is_empty (receipts redacted));
+    assert (Result.is_error (restore_state { initial with schema_version = 17 }));
+    let fresh = F.restore initial in
+    assert (Option.is_none fresh.conversation.authoring_reference_index);
+    assert (
+      Result.is_error
+        (replay_transaction
+           appended
+           (Agent_store.Transaction.create
+              ~limits:document_limits
+              ~session_id:appended.identity.session_id
+              ~generation:appended.identity.generation
+              ~transaction_sequence:Int64.(appended.counters.transaction_sequence + 1L)
+              ~previous_transaction_hash:None
+              ~session_revision:Int64.(appended.counters.revision + 1L)
+              ~first_event_sequence:None
+              ~last_event_sequence:None
+              ~accepted_at_ns:
+                (P.Timestamp.to_time_ns timestamp
+                 |> Time_ns.to_int_ns_since_epoch
+                 |> Int64.of_int)
+              ~command_audit:None
+              ~delta:
+                (delta_document
+                   (Canonical_history_replaced [ { value with redacted = true } ]))
+              ~durable_events:[]
+            |> store_ok)));
     let reset = Delta.apply compacted (Reset_generation 1) |> protocol_ok |> F.restore in
     assert (List.is_empty (receipts reset));
     List.iter [ true; false ] ~f:(fun keep_history ->
@@ -94,15 +109,15 @@ let%expect_test
       in
       assert (Option.is_none reset.conversation.authoring_reference_index));
     print_endline
-      "journal + snapshot retain receipts after compaction; redaction and reset clear \
-       them";
+      "journal + snapshot retain receipts after compaction; redaction rejects and reset \
+       clears them";
     print_endline
-      "legacy absence migrates; old-schema, changed-generation and future-index \
+      "empty current index restores; old-schema, changed-generation and future-index \
        smuggling rejected");
   [%expect
     {|
-    journal + snapshot retain receipts after compaction; redaction and reset clear them
-    legacy absence migrates; old-schema, changed-generation and future-index smuggling rejected
+    journal + snapshot retain receipts after compaction; redaction rejects and reset clears them
+    empty current index restores; old-schema, changed-generation and future-index smuggling rejected
     |}]
 ;;
 

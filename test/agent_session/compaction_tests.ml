@@ -18,7 +18,8 @@ let%expect_test "compaction atomically replaces history and advances its generat
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -119,7 +120,8 @@ let compaction_cancel_actor ~sw env workspace_instance state_committed =
     ~mailbox_capacity:32
     ~compaction_env:None
     ~initial_state:(compaction_cancel_state workspace_instance)
-    ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+    ~persistence:
+      { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
     ~operation_worker:None
     ~services
 ;;

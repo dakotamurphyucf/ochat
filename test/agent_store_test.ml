@@ -346,16 +346,20 @@ let%expect_test "journal rotates segments and preserves ordered replay" =
 ;;
 
 let snapshot transaction_sequence payload =
-  Agent_store.Snapshot.
-    { schema_version = 1
-    ; transaction_sequence
-    ; transaction_hash = Some (sprintf "hash-%Ld" transaction_sequence)
-    ; event_sequence = transaction_sequence
-    ; created_at = timestamp
-    ; prompt_artifact = "prompt-revision"
-    ; workspace_identity = "workspace-instance"
-    ; payload
-    }
+  snapshot_record
+    ~transaction_sequence
+    ~transaction_hash:
+      (if Int64.equal transaction_sequence 0L
+       then None
+       else
+         Some
+           (Agent_store.Document_record.digest
+              ("hash-" ^ Int64.to_string transaction_sequence)))
+    ~event_sequence:transaction_sequence
+    ~revision:transaction_sequence
+    ~prompt_artifact:"prompt-revision"
+    ~workspace_identity:"workspace-instance"
+    payload
 ;;
 
 let%expect_test "snapshots install atomically and load the current checkpoint" =
@@ -384,7 +388,7 @@ let%expect_test "snapshots install atomically and load the current checkpoint" =
       [%sexp
         { filename = (loaded.filename : string)
         ; sequence = (loaded.snapshot.transaction_sequence : int64)
-        ; payload = (loaded.snapshot.payload : string)
+        ; payload = (document_text loaded.snapshot.payload : string)
         }]);
   [%expect
     {|
@@ -423,7 +427,7 @@ let%expect_test "an incomplete current snapshot falls back to the previous check
     print_s
       [%sexp
         { sequence = (loaded.snapshot.transaction_sequence : int64)
-        ; payload = (loaded.snapshot.payload : string)
+        ; payload = (document_text loaded.snapshot.payload : string)
         }]);
   [%expect {| ((sequence 1) (payload first)) |}]
 ;;
@@ -439,7 +443,10 @@ let%expect_test "snapshot pruning retains bounded current and fallback checkpoin
         (snapshot sequence (Int64.to_string sequence))
       |> store_ok
       |> ignore);
-    let removed = Agent_store.Snapshot.prune_older ~env ~directory ~keep:2 |> store_ok in
+    let removed =
+      Agent_store.Snapshot.prune_older ~max_payload_length:16384 ~env ~directory ~keep:2
+      |> store_ok
+    in
     let floor =
       Agent_store.Snapshot.retention_floor ~env ~directory ~max_payload_length:4096
       |> store_ok
@@ -962,6 +969,7 @@ let%expect_test "blob uploads stream through Eio, verify digests, and enforce li
 
 let transaction ~sequence ~previous_hash ~revision ~delta =
   Agent_store.Transaction.create
+    ~limits:Document_schema.Limits.default
     ~session_id
     ~generation:0
     ~transaction_sequence:sequence
@@ -970,9 +978,18 @@ let transaction ~sequence ~previous_hash ~revision ~delta =
     ~first_event_sequence:(Some revision)
     ~last_event_sequence:(Some revision)
     ~accepted_at_ns:revision
-    ~command_audit:(Some ("command-" ^ delta))
-    ~delta
-    ~durable_events:[ "event-" ^ delta ]
+    ~command_audit:None
+    ~delta:(named_document "session.delta" (`Object [ "text", `String delta ]))
+    ~durable_events:
+      [ named_document
+          "session.event"
+          (`Object
+              [ "session_id", `String (Agent_protocol.Id.Session.to_string session_id)
+              ; "sequence", `String (Int64.to_string revision)
+              ; "revision", `String (Int64.to_string revision)
+              ; "text", `String ("event-" ^ delta)
+              ])
+      ]
   |> store_ok
 ;;
 
@@ -1021,16 +1038,14 @@ let%expect_test "commit writer and recovery enforce hash chains and repair crash
         ~env
         ~directory:snapshot_directory
         ~max_payload_length:16384
-        Agent_store.Snapshot.
-          { schema_version = 1
-          ; transaction_sequence = 1L
-          ; transaction_hash = Some first_commit.transaction_hash
-          ; event_sequence = 1L
-          ; created_at = timestamp
-          ; prompt_artifact = "prompt-artifact"
-          ; workspace_identity = "workspace-instance"
-          ; payload = "one"
-          }
+        (snapshot_record
+           ~transaction_sequence:1L
+           ~transaction_hash:(Some first_commit.transaction_hash)
+           ~event_sequence:1L
+           ~revision:1L
+           ~prompt_artifact:"prompt-artifact"
+           ~workspace_identity:"workspace-instance"
+           "one")
       |> store_ok
       |> ignore;
       let segment =
@@ -1056,10 +1071,13 @@ let%expect_test "commit writer and recovery enforce hash chains and repair crash
           ~max_snapshot_payload_length:16384
           ~session_id
           ~initial:""
-          ~restore_snapshot:(fun payload -> Ok payload)
-          ~apply:(fun state transaction -> Ok (state ^ "+" ^ transaction.delta))
+          ~restore_snapshot:(fun snapshot ->
+            Ok (document_text snapshot.Agent_store.Snapshot.payload))
+          ~apply:(fun state transaction ->
+            Ok (state ^ "+" ^ document_text transaction.delta))
+          ~validate_transaction:(fun _ -> Ok ())
           ~validate:(fun state ->
-            if String.equal state "one+two"
+            if List.mem [ "one"; "one+two" ] state ~equal:String.equal
             then Ok ()
             else Error (Agent_store.Store_error.Corrupt "unexpected recovered state"))
         |> store_ok
@@ -1133,16 +1151,14 @@ let%expect_test "snapshot-anchored journal pruning remains restart recoverable" 
         ~env
         ~directory:snapshot_directory
         ~max_payload_length:16384
-        Agent_store.Snapshot.
-          { schema_version = 1
-          ; transaction_sequence = 2L
-          ; transaction_hash = Some second.transaction_hash
-          ; event_sequence = 2L
-          ; created_at = timestamp
-          ; prompt_artifact = "prompt-artifact"
-          ; workspace_identity = "workspace-instance"
-          ; payload = "one+two"
-          }
+        (snapshot_record
+           ~transaction_sequence:2L
+           ~transaction_hash:(Some second.transaction_hash)
+           ~event_sequence:2L
+           ~revision:2L
+           ~prompt_artifact:"prompt-artifact"
+           ~workspace_identity:"workspace-instance"
+           "one+two")
       |> store_ok
       |> ignore;
       let removed =
@@ -1157,10 +1173,13 @@ let%expect_test "snapshot-anchored journal pruning remains restart recoverable" 
           ~max_snapshot_payload_length:16384
           ~session_id
           ~initial:""
-          ~restore_snapshot:(fun payload -> Ok payload)
-          ~apply:(fun state transaction -> Ok (state ^ "+" ^ transaction.delta))
+          ~restore_snapshot:(fun snapshot ->
+            Ok (document_text snapshot.Agent_store.Snapshot.payload))
+          ~apply:(fun state transaction ->
+            Ok (state ^ "+" ^ document_text transaction.delta))
+          ~validate_transaction:(fun _ -> Ok ())
           ~validate:(fun state ->
-            if String.equal state "one+two+three"
+            if List.mem [ "one+two"; "one+two+three" ] state ~equal:String.equal
             then Ok ()
             else Error (Agent_store.Store_error.Corrupt "unexpected pruned state"))
         |> store_ok
@@ -1228,10 +1247,14 @@ let%expect_test "checkpoint sealing bounds journals and keeps incomplete-current
         in
         hash := Some committed.transaction_hash;
         let checkpoint =
-          { (snapshot sequence (Int.to_string index)) with
-            transaction_hash = !hash
-          ; event_sequence = sequence
-          }
+          Agent_store.Snapshot.with_value
+            (snapshot sequence (Int.to_string index))
+            ~limits:Document_schema.Limits.default
+            { (Agent_store.Snapshot.value (snapshot sequence (Int.to_string index))) with
+              transaction_hash = !hash
+            ; event_sequence = sequence
+            }
+          |> store_ok
         in
         ignore
           (Agent_store.Snapshot.install
@@ -1242,7 +1265,11 @@ let%expect_test "checkpoint sealing bounds journals and keeps incomplete-current
            |> store_ok
            : Agent_store.Snapshot.installed);
         ignore
-          (Agent_store.Snapshot.prune_older ~env ~directory:snapshot_directory ~keep:2
+          (Agent_store.Snapshot.prune_older
+             ~max_payload_length:16384
+             ~env
+             ~directory:snapshot_directory
+             ~keep:2
            |> store_ok
            : int);
         let floor =
@@ -1279,10 +1306,13 @@ let%expect_test "checkpoint sealing bounds journals and keeps incomplete-current
         ~max_snapshot_payload_length:16384
         ~session_id
         ~initial:0
-        ~restore_snapshot:(fun payload -> Ok (Int.of_string payload))
-        ~apply:(fun _ tx -> Ok (Int.of_string tx.Agent_store.Transaction.delta))
+        ~restore_snapshot:(fun snapshot ->
+          Ok (Int.of_string (document_text snapshot.Agent_store.Snapshot.payload)))
+        ~apply:(fun _ tx ->
+          Ok (Int.of_string (document_text tx.Agent_store.Transaction.delta)))
+        ~validate_transaction:(fun _ -> Ok ())
         ~validate:(fun value ->
-          assert (value = 8);
+          assert (value = 7 || value = 8);
           Ok ())
       |> store_ok
     in

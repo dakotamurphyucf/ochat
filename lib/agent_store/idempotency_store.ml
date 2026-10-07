@@ -1,14 +1,60 @@
-open Core
+open! Core
+module D = Document_schema
+module F = Document_fields
 
 module Key = struct
-  type t =
-    { principal_id : Agent_protocol.Id.Principal.t
-    ; session_id : Agent_protocol.Id.Session.t option
-    ; method_name : string
-    ; idempotency_key : Agent_protocol.Idempotency_key.t
-    }
-  [@@deriving compare, sexp]
+  module T = struct
+    type t =
+      { principal_id : Agent_protocol.Id.Principal.t
+      ; session_id : Agent_protocol.Id.Session.t option
+      ; method_name : string
+      ; idempotency_key : Agent_protocol.Idempotency_key.t
+      }
+    [@@deriving compare, sexp]
+  end
+
+  include T
+  include Comparator.Make (T)
 end
+
+let key_json (key : Key.t) =
+  `Object
+    [ "principal_id", Agent_protocol.Id.Principal.to_json key.principal_id
+    ; "session_id", F.option_json key.session_id ~f:Agent_protocol.Id.Session.to_json
+    ; "method_name", `String key.method_name
+    ; "idempotency_key", Agent_protocol.Idempotency_key.to_json key.idempotency_key
+    ]
+;;
+
+let key_decode json =
+  let open Result.Let_syntax in
+  let%bind principal_id =
+    F.required json "principal_id" (fun json ->
+      Agent_protocol.Id.Principal.of_json json |> F.protocol)
+  in
+  let%bind session_id =
+    F.optional json "session_id" (fun json ->
+      Agent_protocol.Id.Session.of_json json |> F.protocol)
+  in
+  let%bind method_name = F.required json "method_name" F.string in
+  let%bind idempotency_key =
+    F.required json "idempotency_key" (fun json ->
+      Agent_protocol.Idempotency_key.of_json json |> F.protocol)
+  in
+  let%map () =
+    if String.is_empty method_name
+    then F.invalid "method_name" "must be nonempty"
+    else Ok ()
+  in
+  Key.{ principal_id; session_id; method_name; idempotency_key }
+;;
+
+let key_shape =
+  F.shape
+    (List.map
+       [ "principal_id"; "session_id"; "method_name"; "idempotency_key" ]
+       ~f:(fun name -> name, D.Shape.value))
+;;
 
 module Command_audit = struct
   type t =
@@ -18,15 +64,60 @@ module Command_audit = struct
     }
   [@@deriving sexp]
 
-  let encode t = Sexp.to_string_mach ([%sexp_of: t] t)
+  let kind = "session.command_audit"
 
-  let decode encoded =
-    try Ok ([%of_sexp: t] (Sexp.of_string encoded)) with
-    | exn ->
-      Error
-        (Store_error.Corrupt ("command audit receipt decode failed: " ^ Exn.to_string exn))
+  let codec =
+    let decode json =
+      let open Result.Let_syntax in
+      let%bind key = F.required json "key" key_decode in
+      let%bind request_digest = F.required json "request_digest" F.string in
+      let%map protected_record = F.required json "protected_record" F.boolean in
+      { key; request_digest; protected_record }
+    in
+    let encode value =
+      Ok
+        (`Object
+            [ "key", key_json value.key
+            ; "request_digest", `String value.request_digest
+            ; ("protected_record", if value.protected_record then `True else `False)
+            ])
+    in
+    match
+      D.Domain_codec.create
+        ~limits:D.Limits.default
+        ~kind
+        ~version:1
+        ~shape:
+          (F.shape
+             [ "key", key_shape
+             ; "request_digest", D.Shape.value
+             ; "protected_record", D.Shape.value
+             ])
+        ~supported_semantics:[]
+        ~decode
+        ~encode
+    with
+    | Ok codec -> codec
+    | Error error ->
+      raise_s [%sexp "invalid static command audit codec", (error : D.Error.t)]
   ;;
+
+  let restore document =
+    let open Result.Let_syntax in
+    let%bind document = F.upgrade document ~limits:D.Limits.default ~kind |> F.store in
+    D.Domain_codec.decode codec document |> F.store
+  ;;
+
+  let encode_carrier carrier = D.Domain_codec.encode codec carrier |> F.store
+  let encode value = encode_carrier (D.Extension_carrier.of_authored_value value)
+  let decode document = restore document |> Result.map ~f:D.Extension_carrier.value
 end
+
+let cache_limits =
+  match F.limits ~max_bytes:(D.Limits.max_bytes D.Limits.default) with
+  | Ok limits -> limits
+  | Error error -> raise_s [%sexp "invalid static cache limits", (error : D.Error.t)]
+;;
 
 type outcome =
   | Pending
@@ -70,19 +161,14 @@ module Persisted = struct
     ; retention : retention
     }
   [@@deriving sexp]
-
-  type t =
-    { version : int
-    ; records : record list
-    }
-  [@@deriving sexp]
 end
 
 type t =
   { env : Eio_unix.Stdenv.base
   ; path : string
   ; mutex : Eio.Mutex.t
-  ; mutable records : (Key.t, Persisted.record) Map.Poly.t
+  ; mutable records : (Key.t, Persisted.record, Key.comparator_witness) Map.t
+  ; mutable carrier : Persisted.record list D.Extension_carrier.t
   }
 
 let version = 1
@@ -127,36 +213,231 @@ let restore_record (record : Persisted.record) =
     })
 ;;
 
-let map_of_records records =
-  List.fold records ~init:Map.Poly.empty ~f:(fun map record ->
-    Map.set map ~key:record.key ~data:record)
+let record_id (key : Key.t) = Document_record.digest (Jsonaf.to_string (key_json key))
+
+let persisted_json (record : Persisted.record) =
+  let open Result.Let_syntax in
+  let%map outcome =
+    match record.outcome with
+    | Pending -> Ok (`Object [ "tag", `String "pending" ])
+    | Success encoded ->
+      let%map value = D.Json.decode ~limits:cache_limits encoded in
+      `Object [ "tag", `String "success"; "value", value ]
+    | Failure error ->
+      Ok
+        (`Object [ "tag", `String "failure"; "error", Agent_protocol.Error.to_json error ])
+  in
+  `Object
+    [ "record_id", `String (record_id record.key)
+    ; "key", key_json record.key
+    ; "request_digest", `String record.request_digest
+    ; ( "accepted_transaction_sequence"
+      , F.option_json record.accepted_transaction_sequence ~f:F.decimal_json )
+    ; "outcome", outcome
+    ; "created_at", Agent_protocol.Timestamp.to_json record.created_at
+    ; "expires_at", F.option_json record.expires_at ~f:Agent_protocol.Timestamp.to_json
+    ; ( "retention"
+      , `String
+          (match record.retention with
+           | Standard -> "standard"
+           | Protected -> "protected") )
+    ]
 ;;
 
-let save t records =
-  let persisted = Persisted.{ version; records = Map.data records } in
-  Durable_file.replace
-    ~env:t.env
-    ~durability:Flush_file_and_directory
-    ~path:t.path
-    (Sexp.to_string_mach ([%sexp_of: Persisted.t] persisted))
+let decode_persisted json =
+  let open Result.Let_syntax in
+  let%bind key = F.required json "key" key_decode in
+  let%bind identity = F.required json "record_id" F.digest in
+  let%bind () =
+    if String.equal identity (record_id key)
+    then Ok ()
+    else F.invalid "record_id" "does not match owned key"
+  in
+  let%bind request_digest = F.required json "request_digest" F.string in
+  let%bind accepted_transaction_sequence =
+    F.optional json "accepted_transaction_sequence" F.decimal
+  in
+  let%bind outcome =
+    F.required json "outcome" (fun json ->
+      let%bind tag = F.required json "tag" F.string in
+      match tag with
+      | "pending" -> Ok Persisted.Pending
+      | "success" ->
+        let%map value = F.required json "value" Result.return in
+        Persisted.Success (Jsonaf.to_string value)
+      | "failure" ->
+        let%map error =
+          F.required json "error" (fun value ->
+            Agent_protocol.Error.of_json value |> F.protocol)
+        in
+        Persisted.Failure error
+      | _ -> F.invalid "outcome" "unsupported outcome tag")
+  in
+  let%bind created_at =
+    F.required json "created_at" (fun value ->
+      Agent_protocol.Timestamp.of_json value |> F.protocol)
+  in
+  let%bind expires_at =
+    F.optional json "expires_at" (fun value ->
+      Agent_protocol.Timestamp.of_json value |> F.protocol)
+  in
+  let%bind retention =
+    F.required json "retention" (fun json ->
+      let%bind tag = F.string json in
+      match tag with
+      | "standard" -> Ok Standard
+      | "protected" -> Ok Protected
+      | _ -> F.invalid "retention" "unsupported retention policy")
+  in
+  let%map () =
+    match expires_at with
+    | Some expires when Agent_protocol.Timestamp.compare expires created_at < 0 ->
+      F.invalid "expires_at" "precedes creation"
+    | None | Some _ -> Ok ()
+  in
+  Persisted.
+    { key
+    ; request_digest
+    ; accepted_transaction_sequence
+    ; outcome
+    ; created_at
+    ; expires_at
+    ; retention
+    }
+;;
+
+let codec =
+  let outcome_shape =
+    D.Shape.tagged_object
+      ~discriminator:"tag"
+      [ "pending", F.shape [ "tag", D.Shape.value ]
+      ; "success", F.shape [ "tag", D.Shape.value; "value", D.Shape.value ]
+      ; "failure", F.shape [ "tag", D.Shape.value; "error", D.Shape.value ]
+      ]
+  in
+  let outcome_shape =
+    match outcome_shape with
+    | Ok shape -> shape
+    | Error error -> raise_s [%sexp (error : D.Error.t)]
+  in
+  let record_shape =
+    F.shape
+      [ "record_id", D.Shape.value
+      ; "key", key_shape
+      ; "request_digest", D.Shape.value
+      ; "accepted_transaction_sequence", D.Shape.value
+      ; "outcome", outcome_shape
+      ; "created_at", D.Shape.value
+      ; "expires_at", D.Shape.value
+      ; "retention", D.Shape.value
+      ]
+  in
+  let records_shape =
+    match D.Shape.array record_shape ~identity_field:(Some "record_id") with
+    | Ok shape -> shape
+    | Error error -> raise_s [%sexp (error : D.Error.t)]
+  in
+  let decode json =
+    let open Result.Let_syntax in
+    let%bind values = F.required json "records" F.array in
+    Result.all (List.map values ~f:decode_persisted)
+  in
+  let encode records =
+    Result.all (List.map records ~f:persisted_json)
+    |> Result.map ~f:(fun values -> `Object [ "records", `Array values ])
+  in
+  match
+    D.Domain_codec.create
+      ~limits:cache_limits
+      ~kind:"store.idempotency_cache"
+      ~version
+      ~shape:(F.shape [ "records", records_shape ])
+      ~supported_semantics:[]
+      ~decode
+      ~encode
+  with
+  | Ok codec -> codec
+  | Error error -> raise_s [%sexp "invalid static cache codec", (error : D.Error.t)]
+;;
+
+let map_of_records records =
+  match
+    Map.of_alist
+      (module Key)
+      (List.map records ~f:(fun (record : Persisted.record) -> record.key, record))
+  with
+  | `Ok map -> Ok map
+  | `Duplicate_key _ -> Error (Store_error.Corrupt "duplicate persisted idempotency key")
+;;
+
+let restore_document document =
+  let open Result.Let_syntax in
+  let%bind document =
+    F.upgrade document ~limits:cache_limits ~kind:"store.idempotency_cache" |> F.store
+  in
+  D.Domain_codec.decode codec document |> F.store
+;;
+
+(* Expiration is an explicit owner operation retiring exactly these record
+   identities, while preserving every other envelope/nested unknown field. *)
+let retire_carrier carrier retiring =
+  match D.Extension_carrier.template carrier with
+  | None -> Ok carrier
+  | Some document ->
+    let rec retain = function
+      | `Object fields ->
+        `Object
+          (List.map fields ~f:(fun (name, value) ->
+             if String.equal name "payload"
+             then name, retain value
+             else if String.equal name "records"
+             then (
+               match value with
+               | `Array records ->
+                 ( name
+                 , `Array
+                     (List.filter records ~f:(fun record ->
+                        match D.Json.field record ~name:"record_id" with
+                        | Value (`String id) ->
+                          not (List.mem retiring id ~equal:String.equal)
+                        | Absent | Null | Value _ -> true)) )
+               | _ -> name, value)
+             else name, value))
+      | json -> json
+    in
+    let open Result.Let_syntax in
+    let%bind document =
+      D.Document.inspect ~limits:cache_limits (retain (D.Document.json document))
+      |> F.store
+    in
+    restore_document document
+;;
+
+let save t ?(retiring = []) records =
+  let open Result.Let_syntax in
+  let%bind carrier = retire_carrier t.carrier retiring in
+  let carrier = D.Extension_carrier.with_value carrier (Map.data records) in
+  let%bind document = D.Domain_codec.encode codec carrier |> F.store in
+  let%bind restored = restore_document document in
+  let%map () =
+    Durable_file.replace
+      ~env:t.env
+      ~durability:Flush_file_and_directory
+      ~path:t.path
+      (D.Document.to_string document)
+  in
+  t.carrier <- restored
 ;;
 
 let load ~env ~path =
   let open Result.Let_syntax in
-  let%bind contents = Durable_file.load ~env ~path in
-  try
-    let persisted = [%of_sexp: Persisted.t] (Sexp.of_string contents) in
-    if persisted.version > version
-    then Error (Store_error.Schema_too_new persisted.version)
-    else if persisted.version < version
-    then Error (Store_error.Migration_required persisted.version)
-    else
-      Result.all (List.map persisted.records ~f:restore_record)
-      |> Result.map ~f:(fun records ->
-        map_of_records records |> Map.map ~f:persist_record)
-  with
-  | exn ->
-    Error (Store_error.Corrupt ("idempotency store decode failed: " ^ Exn.to_string exn))
+  let%bind contents =
+    Durable_file.load_bounded ~env ~path ~max_bytes:(D.Limits.max_bytes cache_limits)
+  in
+  let%bind document = D.Document.decode ~limits:cache_limits contents |> F.store in
+  let%bind carrier = restore_document document in
+  let%map records = map_of_records (D.Extension_carrier.value carrier) in
+  records, carrier
 ;;
 
 let open_or_create ~env ~path =
@@ -167,10 +448,15 @@ let open_or_create ~env ~path =
          { operation = "open idempotency store"; path; message = "path must be absolute" })
   else (
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
-    let records = if Eio.Path.is_file file then load ~env ~path else Ok Map.Poly.empty in
-    Result.bind records ~f:(fun records ->
-      let t = { env; path; mutex = Eio.Mutex.create (); records } in
-      if Eio.Path.is_file file then Ok t else Result.map (save t records) ~f:(fun () -> t)))
+    let exists = Eio.Path.is_file file in
+    let loaded =
+      if exists
+      then load ~env ~path
+      else Ok (Map.empty (module Key), D.Extension_carrier.of_authored_value [])
+    in
+    Result.bind loaded ~f:(fun (records, carrier) ->
+      let t = { env; path; mutex = Eio.Mutex.create (); records; carrier } in
+      if exists then Ok t else Result.map (save t records) ~f:(fun () -> t)))
 ;;
 
 let restore_record_exn record =
@@ -192,97 +478,64 @@ let lookup t ~key ~request_digest =
 let with_retained_references t ~candidates ~max_records ~max_bytes ~f =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     let open Result.Let_syntax in
-    let corrupt message = Error (Store_error.Corrupt message) in
-    try
-      let%bind () =
-        match
-          max_records >= 0 && max_bytes >= 0 && Map.length t.records <= max_records
-        with
-        | true -> Ok ()
-        | false -> corrupt "cached response retention exceeds its record budget"
-      in
-      let%bind reader =
-        Retention_reader.create
-          ~env:t.env
-          ~root:(Filename.dirname t.path)
-          ~max_entries:1
-          ~max_bytes
-      in
-      let%bind bytes =
-        Retention_reader.read reader ~path:(Filename.basename t.path) ~max_bytes
-      in
-      let%bind disk =
-        Result.try_with (fun () -> Sexp.of_string bytes |> Persisted.t_of_sexp)
-        |> Result.map_error ~f:(fun _ ->
-          Store_error.Corrupt "invalid retained idempotency file")
-      in
-      let%bind () =
-        match Int.compare disk.version version with
-        | 0 -> Ok ()
-        | n when n > 0 -> Error (Store_error.Schema_too_new disk.version)
-        | _ -> Error (Store_error.Migration_required disk.version)
-      in
-      let%bind () =
-        match List.length disk.records <= max_records - Map.length t.records with
-        | true -> Ok ()
-        | false -> corrupt "cached response retention exceeds its record budget"
-      in
-      let%bind scan =
-        Blob_reference_scan.create candidates
-        |> Result.map_error ~f:(fun error ->
-          Store_error.Corrupt error.Agent_protocol.Error.message)
-      in
-      let feed text =
-        Blob_reference_scan.begin_root scan;
-        Blob_reference_scan.feed scan text
-      in
-      let pending = ref false in
-      let inspect (record : Persisted.record) =
-        let%map restored = restore_record record in
-        feed (Persisted.sexp_of_record record |> Sexp.to_string_mach);
-        match restored.outcome with
-        | Pending -> pending := true
-        | Success value -> feed (Jsonaf.to_string value)
-        | Failure failure ->
-          feed (Agent_protocol.Error.to_json failure |> Jsonaf.to_string)
-      in
-      let seen = String.Hash_set.create () in
-      let%bind () =
-        List.fold_result disk.records ~init:() ~f:(fun () record ->
-          let key = Key.sexp_of_t record.Persisted.key |> Sexp.to_string_mach in
-          match Hash_set.mem seen key with
-          | true -> corrupt "duplicate retained idempotency key"
-          | false ->
-            Hash_set.add seen key;
-            inspect record)
-      in
-      let remaining = ref (max_bytes - String.length bytes) in
-      let%bind () =
-        Map.fold t.records ~init:(Ok ()) ~f:(fun ~key:_ ~data:record checked ->
-          let%bind () = checked in
-          let%bind () =
-            match record.Persisted.outcome with
-            | Success encoded when String.length encoded > !remaining ->
-              corrupt "cached response retention exceeds its byte budget"
-            | _ -> Ok ()
-          in
-          let encoded = Persisted.sexp_of_record record |> Sexp.to_string_mach in
-          match String.length encoded <= !remaining with
-          | false -> corrupt "cached response retention exceeds its byte budget"
-          | true ->
-            remaining := !remaining - String.length encoded;
-            inspect record)
-      in
-      match !pending with
-      | true -> Ok None
-      | false -> Result.map (f (Blob_reference_scan.references scan)) ~f:Option.some
-    with
-    | exn ->
-      Error
-        (Store_error.of_exn
-           ~operation:"retain cached response references"
-           ~path:t.path
-           exn))
+    let%bind () =
+      if max_records >= 0 && max_bytes >= 0 && Map.length t.records <= max_records
+      then Ok ()
+      else
+        Error (Store_error.Corrupt "cached response retention exceeds its record budget")
+    in
+    let%bind reader =
+      Retention_reader.create
+        ~env:t.env
+        ~root:(Filename.dirname t.path)
+        ~max_entries:1
+        ~max_bytes
+    in
+    let%bind bytes =
+      Retention_reader.read reader ~path:(Filename.basename t.path) ~max_bytes
+    in
+    let%bind document = D.Document.decode ~limits:cache_limits bytes |> F.store in
+    let%bind disk_carrier = restore_document document in
+    let disk = D.Extension_carrier.value disk_carrier in
+    let%bind _ = map_of_records disk in
+    let%bind () =
+      if List.length disk <= max_records - Map.length t.records
+      then Ok ()
+      else
+        Error (Store_error.Corrupt "cached response retention exceeds its record budget")
+    in
+    let%bind scan =
+      Blob_reference_scan.create candidates
+      |> Result.map_error ~f:(fun error ->
+        Store_error.Corrupt error.Agent_protocol.Error.message)
+    in
+    let feed text =
+      Blob_reference_scan.begin_root scan;
+      Blob_reference_scan.feed scan text
+    in
+    let inspect_document document =
+      feed (D.Document.to_string document);
+      F.iter_strings (D.Document.json document) ~f:feed
+    in
+    inspect_document document;
+    let%bind memory_document =
+      D.Domain_codec.encode
+        codec
+        (D.Extension_carrier.with_value t.carrier (Map.data t.records))
+      |> F.store
+    in
+    let memory_bytes = D.Document.to_string memory_document in
+    let%bind () = Retention_reader.charge_bytes reader (String.length memory_bytes) in
+    inspect_document memory_document;
+    let pending records =
+      List.exists records ~f:(fun (record : Persisted.record) ->
+        match record.outcome with
+        | Pending -> true
+        | Success _ | Failure _ -> false)
+    in
+    if pending disk || pending (Map.data t.records)
+    then Ok None
+    else Result.map (f (Blob_reference_scan.references scan)) ~f:Option.some)
 ;;
 
 let record t record =
@@ -342,7 +595,7 @@ let mark_accepted t ~key ~request_digest ~transaction_sequence =
 ;;
 
 let reconcile_one
-      (records : (Key.t, Persisted.record) Map.Poly.t)
+      (records : (Key.t, Persisted.record, Key.comparator_witness) Map.t)
       (audit : Command_audit.t)
       transaction_sequence
   =
@@ -405,8 +658,12 @@ let prune_expired t ~now =
     let removed = Map.length t.records - Map.length records in
     if removed = 0
     then Ok 0
-    else
-      Result.map (save t records) ~f:(fun () ->
+    else (
+      let retiring =
+        Map.fold t.records ~init:[] ~f:(fun ~key ~data:record ids ->
+          if is_expired ~now record then record_id key :: ids else ids)
+      in
+      Result.map (save t ~retiring records) ~f:(fun () ->
         t.records <- records;
-        removed))
+        removed)))
 ;;

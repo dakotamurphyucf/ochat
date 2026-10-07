@@ -53,9 +53,9 @@ let%expect_test
         P.Id.Blob.equal
         (List.sort [ first; second ] ~compare:P.Id.Blob.compare)
         (references log candidates));
-    Log.append log [ notification 3L `Null ];
+    Log.append log [ notification 3L `Null ] |> protocol_ok;
     assert (List.equal P.Id.Blob.equal [ second ] (references log candidates));
-    Log.append log [ notification 4L `Null ];
+    Log.append log [ notification 4L `Null ] |> protocol_ok;
     assert (List.is_empty (references log candidates));
     print_endline "notification and replacement snapshot retained both references";
     print_endline "each reference disappeared only after its event was evicted");
@@ -95,15 +95,23 @@ let%expect_test "uncertain replay roots refuse retention proof without partial r
     in
     List.iter invalid ~f:(fun (name, event) ->
       let log = Log.create ~capacity:8 [ good ] |> protocol_ok in
-      Log.append log [ event ];
-      assert (
-        Result.is_error
-          (Log.retained_references
-             log
-             ~session_id
-             ~candidates:[ id ]
-             ~max_events:8
-             ~max_bytes:65536));
+      if String.equal name "replay gap"
+      then (
+        let changed = Log.changed log in
+        assert (Result.is_error (Log.append log [ event ]));
+        assert (Option.is_none (Eio.Promise.peek changed));
+        assert (Option.equal Int64.equal (Log.latest_sequence log) (Some 1L));
+        assert (List.equal P.Id.Blob.equal [ id ] (references log [ id ])))
+      else (
+        Log.append log [ event ] |> protocol_ok;
+        assert (
+          Result.is_error
+            (Log.retained_references
+               log
+               ~session_id
+               ~candidates:[ id ]
+               ~max_events:8
+               ~max_bytes:65536)));
       print_endline (name ^ ": refused"));
     let log = Log.create ~capacity:8 [ good; replacement ] |> protocol_ok in
     List.iter

@@ -142,7 +142,8 @@ let%expect_test "a linked initial start retains its workspace before resource ad
             if String.is_substring payload ~substring:"(stage Linked)"
             then (
               armed := false;
-              failwith "injected lost link acknowledgement"))
+              raise
+                (Core_unix.Unix_error (EIO, "injected lost link acknowledgement", target))))
         in
         let directory, fs_path = Eio.Stdenv.fs env in
         let observed_env =

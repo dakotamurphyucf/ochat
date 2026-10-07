@@ -7,8 +7,6 @@ module State = Agent_session.Session_state
 module B = Agent_session.Runtime_builder
 module Persistence = Agent_session.Session_persistence
 
-let encode state = State.sexp_of_t state |> Sexp.to_string_mach
-
 let requests : P.Invocation.follow_up =
   { request_turn = true; request_compaction = false; end_session = None }
 ;;
@@ -284,7 +282,7 @@ let%expect_test
          assert (
            List.for_all saved.invocations ~f:(fun invocation ->
              P.Id.Session.equal invocation.context.session_id session_id));
-         let restored = Persistence.restore_snapshot (encode saved) |> store_ok in
+         let restored = restore_state saved |> store_ok in
          assert (E.equal receipt (List.hd_exn restored.moderator_executions));
          print_s
            [%sexp
@@ -754,7 +752,7 @@ let%expect_test
       ; moderator_executions = [ completed ]
       }
     in
-    let restored = Persistence.restore_snapshot (encode saved) |> store_ok in
+    let restored = restore_state saved |> store_ok in
     let later = { after with current_state = Session.Snapshot.Int 2 } in
     let later_state =
       { restored with moderator = Some (B.encode_moderator_snapshot later) }
@@ -817,9 +815,10 @@ let%expect_test
       (E.of_json (replace "schema_version" (`Number "3") wire));
     rejected
       "schema14 cannot carry delegated decisions"
-      (Persistence.restore_snapshot (encode { saved with schema_version = 14 }));
+      (restore_state { saved with schema_version = 14 });
     let legacy = { initial with schema_version = 14 } in
-    let upgraded = Persistence.restore_snapshot (encode legacy) |> store_ok in
+    assert (Result.is_error (restore_state legacy));
+    let upgraded = restore_state initial |> store_ok in
     [%test_eq: int] State.current_schema_version upgraded.schema_version;
     assert (List.is_empty upgraded.moderator_executions);
     let ordinary =

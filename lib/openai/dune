@@ -5,6 +5,7 @@
   completions
   embeddings
   responses
+  responses_history
   responses_wire
   responses_request
   responses_sse
@@ -14,6 +15,7 @@
   grader)
  (private_modules responses_json)
  (libraries
+  ochat.history_entry
   io
   jsonaf_ext
   ca-certs

@@ -102,7 +102,7 @@ let equal_shell_state left right =
   Sexp.equal (Session.Shell_state.sexp_of_t left) (Session.Shell_state.sexp_of_t right)
 ;;
 
-let%test_unit "Session V5 round-trips shell state and legacy/reset paths add no trust" =
+let%test_unit "Session documents round-trip shell state and reset paths add no trust" =
   Eio_main.run (fun env ->
     let shell_state =
       { Session.Shell_state.empty with approval_grants = [ sample_approval_grant ] }
@@ -120,11 +120,9 @@ let%test_unit "Session V5 round-trips shell state and legacy/reset paths add no 
     Fun.protect
       ~finally:(fun () -> if Eio.Path.is_file path then Eio.Path.unlink path)
       (fun () ->
-         Session.V5.Io.File.write path (Session.to_v5 session);
-         let restored = Session.V5.Io.File.read path |> Session.of_v5 in
+         Session.Io.File.write path session;
+         let restored = Session.Io.File.read path in
          assert (equal_shell_state restored.shell_state shell_state));
-    let migrated = Session.to_v4 session |> Session.V5.of_v4 |> Session.of_v5 in
-    assert (equal_shell_state migrated.shell_state Session.Shell_state.empty);
     assert (
       equal_shell_state (Session.reset session).shell_state Session.Shell_state.empty);
     assert (

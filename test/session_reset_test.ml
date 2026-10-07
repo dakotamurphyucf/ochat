@@ -10,7 +10,7 @@ let%expect_test "session reset clears history and updates prompt" =
     History_entry.Allocator.create ~namespace:"reset-production" ~next_sequence:0
     |> Result.ok_or_failwith
   in
-  let entry = History_entry.create ~allocator item |> Result.ok_or_failwith in
+  let entry = Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith in
   let session =
     Session.create
       ~id:"reset-production"
@@ -29,35 +29,4 @@ let%expect_test "session reset clears history and updates prompt" =
   print_s
     [%sexp { history_len : int; prompt_ok : bool; reset_next : int; retained_next : int }];
   [%expect {| ((history_len 0) (prompt_ok true) (reset_next 1) (retained_next 1)) |}]
-;;
-
-let%expect_test "staged reset never rewinds history identity" =
-  let item : Openai.Responses.Item.t =
-    Openai.Responses.Item.Reasoning
-      { summary = []; _type = "reasoning"; id = "r"; status = None }
-  in
-  let legacy : Session.Legacy.V3.t =
-    { version = 3
-    ; id = "reset"
-    ; prompt_file = "orig.md"
-    ; local_prompt_copy = None
-    ; history = [ item ]
-    ; tasks = []
-    ; moderator_snapshot = None
-    ; kv_store = []
-    ; vfs_root = "vfs"
-    }
-  in
-  let staged =
-    match Session.V4.of_v3 legacy with
-    | Ok session -> session
-    | Error error -> failwith error
-  in
-  let reset = Session.V4.reset staged in
-  print_s
-    [%sexp
-      { history_length = (List.length reset.history : int)
-      ; next_history_sequence = (reset.next_history_sequence : int)
-      }];
-  [%expect {| ((history_length 0) (next_history_sequence 1)) |}]
 ;;

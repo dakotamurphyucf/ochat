@@ -60,7 +60,7 @@ let apply_user_submit_effects_exn
     | Model.Plain ->
       ignore (Model.apply_patch model (Add_user_message { text = user_msg }));
       let entry =
-        History_entry.create ~allocator (get_user_message_item user_msg)
+        Openai.Responses_history.create ~allocator (get_user_message_item user_msg)
         |> Result.ok_or_failwith
       in
       ignore @@ Model.add_history_item model entry
@@ -114,7 +114,9 @@ let apply_user_submit_effects_exn
                (Res_item.jsonaf_of_t user_msg |> Jsonaf.to_string)
       in
       let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
-      let entry = History_entry.create ~allocator user_msg |> Result.ok_or_failwith in
+      let entry =
+        Openai.Responses_history.create ~allocator user_msg |> Result.ok_or_failwith
+      in
       ignore (Model.apply_patch model (Add_user_message { text = txt }));
       ignore (Model.add_history_item model entry))
 ;;
@@ -243,7 +245,7 @@ let start (ctx : Context.t) (submit_request : request) =
 let model_of_history history =
   Model.create
     ~history_items:history
-    ~messages:(Conversation.of_history (History_entry.items history))
+    ~messages:(Conversation.of_history (Openai.Responses_history.items_exn history))
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -313,7 +315,7 @@ let%test_unit "start_from_current_session preserves canonical history" =
     |> Result.ok_or_failwith
   in
   let history =
-    [ History_entry.create ~allocator (get_user_message_item "Hello")
+    [ Openai.Responses_history.create ~allocator (get_user_message_item "Hello")
       |> Result.ok_or_failwith
     ]
   in

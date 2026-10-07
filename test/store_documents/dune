@@ -1,0 +1,5 @@
+(library
+ (name store_document_tests)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_store ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

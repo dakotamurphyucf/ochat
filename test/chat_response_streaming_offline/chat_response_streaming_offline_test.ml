@@ -1211,8 +1211,8 @@ let%expect_test "tool completion before added executes once with stable identiti
     , (List.map history ~f:entry_kind : string list)
     , (History_entry.Id.equal (History_entry.id call) (History_entry.id output) : bool)
     , (String.equal
-         (call_id (History_entry.item call))
-         (call_id (History_entry.item output))
+         (call_id (Openai.Responses_history.item_exn call))
+         (call_id (Openai.Responses_history.item_exn output))
        : bool)
     , (History_entry.Id.equal (History_entry.id callback) (History_entry.id output)
        : bool)];
@@ -1347,7 +1347,7 @@ let%expect_test "queued user entry follows tool output in the next request" =
   in
   let initial = input_entry allocator in
   let queued_user =
-    History_entry.create
+    Openai.Responses_history.create
       ~allocator
       (Res.Item.Input_message
          { role = User
@@ -1795,7 +1795,7 @@ module Redaction_probe = struct
     List.iter (observers t) ~f:(fun events ->
       assert (List.equal String.equal (payloads events) expected));
     List.iter history ~f:(fun entry ->
-      match History_entry.item entry with
+      match Openai.Responses_history.item_exn entry with
       | Res.Item.Function_call call -> assert (String.equal call.arguments safe_payload)
       | Custom_tool_call call -> assert (String.equal call.input safe_payload)
       | _ -> ())

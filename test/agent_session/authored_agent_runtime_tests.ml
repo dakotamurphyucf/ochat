@@ -434,12 +434,11 @@ let on_event ctx state event = match event with
               }
             |> store_ok
           in
-          Agent_session.Session_persistence.install_snapshot
+          Agent_store.Snapshot.install
             ~env
-            ~handle
+            ~directory:(Store.Handle.snapshot_directory handle)
             ~max_payload_length:1048576
-            ~transaction_hash:None
-            initial
+            (snapshot_record initial ~transaction_hash:None)
           |> store_ok
           |> ignore;
           List.iter [ D.Child_installed; Linked ] ~f:(fun stage ->

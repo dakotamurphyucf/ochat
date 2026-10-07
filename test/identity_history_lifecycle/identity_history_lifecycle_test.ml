@@ -140,7 +140,8 @@ let stream_history ~env ~allocator history =
 ;;
 
 let find_entry history predicate =
-  List.find_exn history ~f:(fun entry -> predicate (History_entry.item entry))
+  List.find_exn history ~f:(fun entry ->
+    predicate (Openai.Responses_history.item_exn entry))
 ;;
 
 let moderator_artifact ~replace_id ~delete_id =
@@ -188,7 +189,7 @@ let provenance_name = function
 ;;
 
 let entry_kind entry =
-  match History_entry.item entry with
+  match Openai.Responses_history.item_exn entry with
   | Res.Item.Input_message { role = Developer; _ } -> "developer"
   | Input_message _ -> "input"
   | Function_call _ -> "function-call"
@@ -225,7 +226,7 @@ let%expect_test
   let initial = materialize_prompt ~env ~allocator in
   let developer = List.hd_exn initial in
   let multipart_parts =
-    match History_entry.item developer with
+    match Openai.Responses_history.item_exn developer with
     | Res.Item.Input_message message -> List.length message.content
     | _ -> 0
   in
@@ -272,7 +273,7 @@ let%expect_test
   let tool_relations =
     List.filter_map streamed ~f:(fun entry ->
       Option.map
-        (call_id (History_entry.item entry))
+        (call_id (Openai.Responses_history.item_exn entry))
         ~f:(fun call_id -> call_id, History_entry.Id.to_string (History_entry.id entry)))
   in
   let compacted =

@@ -120,7 +120,9 @@ let rec run_stream
     let reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
     let new_entries : History_entry.t list ref = ref [] in
     let add_item item =
-      let entry = History_entry.create ~allocator item |> Result.ok_or_failwith in
+      let entry =
+        Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
+      in
       new_entries := entry :: !new_entries
     in
     let run_again = ref false in
@@ -186,10 +188,10 @@ let rec run_stream
         in
         let fn_out_item = Res.Item.Function_call_output fn_out in
         let fn_call_entry =
-          History_entry.create ~allocator fn_call_item |> Result.ok_or_failwith
+          Openai.Responses_history.create ~allocator fn_call_item |> Result.ok_or_failwith
         in
         let fn_out_entry =
-          History_entry.create ~allocator fn_out_item |> Result.ok_or_failwith
+          Openai.Responses_history.create ~allocator fn_out_item |> Result.ok_or_failwith
         in
         new_entries := fn_out_entry :: fn_call_entry :: !new_entries;
         run_again := true;
@@ -223,10 +225,12 @@ let rec run_stream
         in
         let tool_out_item = Res.Item.Custom_tool_call_output tool_out in
         let tool_call_entry =
-          History_entry.create ~allocator tool_call_item |> Result.ok_or_failwith
+          Openai.Responses_history.create ~allocator tool_call_item
+          |> Result.ok_or_failwith
         in
         let tool_out_entry =
-          History_entry.create ~allocator tool_out_item |> Result.ok_or_failwith
+          Openai.Responses_history.create ~allocator tool_out_item
+          |> Result.ok_or_failwith
         in
         new_entries := tool_out_entry :: tool_call_entry :: !new_entries;
         run_again := true
@@ -303,7 +307,7 @@ let rec run_stream
         ?reasoning
         ~parallel_tool_calls:true
         net
-        ~inputs:(History_entry.items hist)
+        ~inputs:(Openai.Responses_history.items_exn hist)
         ~tools
         ~sw
         ~model:Res.Request.O3
@@ -337,7 +341,7 @@ and execute_entries
       ()
   =
   let instruction =
-    History_entry.create ~allocator (instruction_item ~arguments ~call_id)
+    Openai.Responses_history.create ~allocator (instruction_item ~arguments ~call_id)
     |> Result.ok_or_failwith
   in
   let clone_history = history @ [ instruction ] in
@@ -368,7 +372,7 @@ and execute_entries
   List.filter full_history ~f:(fun entry ->
     not (Hash_set.mem clone_ids (History_entry.id entry)))
   |> List.filter_map ~f:(fun entry ->
-    match History_entry.item entry with
+    match Openai.Responses_history.item_exn entry with
     | Res.Item.Output_message message ->
       Some
         (List.map message.content ~f:(fun content -> content.text)
@@ -379,7 +383,7 @@ and execute_entries
 
 let history_entries ~allocator ~history:entries ~arguments ~call_id =
   let instruction =
-    History_entry.create ~allocator (instruction_item ~arguments ~call_id)
+    Openai.Responses_history.create ~allocator (instruction_item ~arguments ~call_id)
     |> Result.ok_or_failwith
   in
   entries @ [ instruction ]

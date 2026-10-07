@@ -47,7 +47,7 @@ let history_id_attribute id =
 
 let history_entry_as_chatmd entry =
   let history_id = history_id_attribute (History_entry.id entry) in
-  match History_entry.item entry with
+  match Openai.Responses_history.item_exn entry with
   | Res_item.Input_message message ->
     let role = Openai.Responses.Input_message.role_to_string message.role in
     let content =
@@ -138,7 +138,9 @@ module Checkpoint = struct
   let empty () = Hashtbl.create (module History_entry.Id)
 
   let fingerprint entry =
-    History_entry.item entry |> Openai.Responses.Item.sexp_of_t |> Sexp.to_string_mach
+    Openai.Responses_history.item_exn entry
+    |> Openai.Responses.Item.sexp_of_t
+    |> Sexp.to_string_mach
   ;;
 
   let of_entries entries =

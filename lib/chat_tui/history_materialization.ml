@@ -2,8 +2,8 @@ open! Core
 
 let create_entry ~allocator converted =
   match converted.Chat_response.Converter.history_id with
-  | Some id -> Ok (History_entry.create_with_id ~id converted.item)
-  | None -> History_entry.create ~allocator converted.item
+  | Some id -> Ok (Openai.Responses_history.create_with_id_exn ~id converted.item)
+  | None -> Openai.Responses_history.create ~allocator converted.item
 ;;
 
 let prepare_allocator allocator converted =
@@ -70,7 +70,7 @@ let from_prompt ~allocator ~ctx ~run_agent elements =
 ;;
 
 let resume_or_materialize
-      ~(session : Session.V4.t option)
+      ~(session : Session.t option)
       ~allocator
       ~ctx
       ~run_agent

@@ -120,7 +120,8 @@ let%expect_test "observed and unobserved entry execution preserve payloads and I
     |> Result.ok_or_failwith
   in
   let create_initial allocator =
-    History_entry.create ~allocator (input_message "hello") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (input_message "hello")
+    |> Result.ok_or_failwith
   in
   let blocking_allocator = create_allocator () in
   let blocking_initial = create_initial blocking_allocator in
@@ -188,8 +189,8 @@ let%expect_test "observed and unobserved entry execution preserve payloads and I
     [%sexp
       (List.equal
          item_equal
-         (History_entry.items blocking_history)
-         (History_entry.items observed_history)
+         (Openai.Responses_history.items_exn blocking_history)
+         (Openai.Responses_history.items_exn observed_history)
        : bool)
     , (ids blocking_history : int list)
     , (ids observed_history : int list)
@@ -215,7 +216,8 @@ let%expect_test "observed fork keeps child identity and history isolated" =
     |> Result.ok_or_failwith
   in
   let initial =
-    History_entry.create ~allocator (input_message "start") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (input_message "start")
+    |> Result.ok_or_failwith
   in
   let fork_call : Res.Function_call.t =
     { name = "fork"
@@ -262,7 +264,7 @@ let%expect_test "observed fork keeps child identity and history isolated" =
   in
   let kinds =
     List.map history ~f:(fun entry ->
-      match History_entry.item entry with
+      match Openai.Responses_history.item_exn entry with
       | Res.Item.Input_message _ -> "input"
       | Function_call _ -> "call"
       | Function_call_output _ -> "output"
@@ -295,7 +297,7 @@ let%expect_test "observed fork keeps child identity and history isolated" =
   in
   let parent_has_child_payload =
     List.exists history ~f:(fun entry ->
-      match History_entry.item entry with
+      match Openai.Responses_history.item_exn entry with
       | Res.Item.Output_message message ->
         List.exists message.content ~f:(fun part -> String.equal part.text "child result")
       | _ -> false)

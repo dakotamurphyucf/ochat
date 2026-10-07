@@ -77,6 +77,8 @@ type t =
   ; managed_output_cursors : Managed_output_cursor.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
+  ; document_limits : Document_schema.Limits.t
+  ; journal_document_limits : Document_schema.Limits.t
   }
 
 module Legacy_provenance = struct
@@ -275,16 +277,7 @@ let moderator_json legacy =
     match
       legacy.moderator_state.identity_snapshot, legacy.moderator_state.legacy_snapshot
     with
-    | Some snapshot, _ ->
-      Ok
-        (Some
-           (`Object
-               [ ( "identity_snapshot_sexp"
-                 , `String
-                     (Sexp.to_string_mach
-                        ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot))
-                 )
-               ]))
+    | Some snapshot, _ -> Ok (Some (Agent_session.Moderator_checkpoint.encode snapshot))
     | None, None -> Ok None
     | None, Some _ ->
       Error
@@ -3181,10 +3174,133 @@ let unload_stopped_runtime t runtime_owner state events =
   | Running, _, _ | Stopped, false, _ | Stopped, true, None -> ()
 ;;
 
-let prune_snapshot t handle journal _installed =
+let validate_recovery_archives t handle state =
+  List.fold_result
+    state.Agent_session.Session_state.conversation.compaction_archives
+    ~init:()
+    ~f:(fun () reference ->
+      Agent_session.Compaction_archive.read
+        ~env:t.env
+        ~handle
+        ~max_payload_length:t.limits.snapshot_payload_limit
+        reference
+      |> Result.map ~f:ignore
+      |> Result.map_error ~f:(fun error ->
+        Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message))
+;;
+
+let validate_recovery_state t handle = function
+  | None ->
+    Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+  | Some restored ->
+    let open Result.Let_syntax in
+    let%bind () = Agent_session.Session_persistence.validate restored in
+    validate_recovery_archives
+      t
+      handle
+      (Agent_session.Session_persistence.Restored.state restored)
+;;
+
+let validate_recovery_document t handle = function
+  | None ->
+    Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+  | Some document ->
+    let open Result.Let_syntax in
+    let state = Agent_session.Session_state_document.value document in
+    let%bind () =
+      Agent_session.Session_state.validate state
+      |> Result.map_error ~f:(fun error ->
+        Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
+    in
+    validate_recovery_archives t handle state
+;;
+
+let restore_recovery_document t snapshot =
+  Agent_session.Session_persistence.restore_snapshot ~limits:t.document_limits snapshot
+  |> Result.map ~f:(fun restored ->
+    Some (Agent_session.Session_persistence.Restored.state_document restored))
+;;
+
+let apply_recovery_document t state transaction =
+  match state with
+  | None -> Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+  | Some document ->
+    Agent_session.Session_persistence.apply_document
+      document
+      ~limits:t.document_limits
+      transaction
+    |> Result.map ~f:Option.some
+;;
+
+let equivalent_recovery_documents t left right =
+  let open Result.Let_syntax in
+  let encode = function
+    | None ->
+      Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+    | Some document ->
+      Agent_session.Session_state_document.encode document ~limits:t.document_limits
+      |> Result.map ~f:(fun document ->
+        Document_schema.Document.json document |> Jsonaf.to_string)
+      |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+  in
+  let%bind left = encode left in
+  let%map right = encode right in
+  (* Compare the complete admitted document, including unknown field order and
+     numeric spellings. Known values/counters alone cannot prove preservation. *)
+  String.equal left right
+;;
+
+let restore_recovery_state t snapshot =
+  Agent_session.Session_persistence.restore_snapshot ~limits:t.document_limits snapshot
+  |> Result.map ~f:Option.some
+;;
+
+let apply_recovery_transaction t state transaction =
+  match state with
+  | None -> Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+  | Some state ->
+    Agent_session.Session_persistence.apply_transaction
+      ~limits:t.document_limits
+      state
+      transaction
+    |> Result.map ~f:Option.some
+;;
+
+let create_retention_preflight t handle journal =
+  Agent_store.Recovery.Retention_preflight.create
+    ~env:t.env
+    ~journal
+    ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
+    ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+    ~initial:None
+    ~restore_snapshot:(restore_recovery_document t)
+    ~apply:(apply_recovery_document t)
+    ~equivalent:(equivalent_recovery_documents t)
+    ~validate_transaction:
+      (Agent_session.Session_persistence.validate_transaction
+         ~limits:t.journal_document_limits)
+    ~validate:(validate_recovery_document t handle)
+;;
+
+let prune_snapshot t handle journal persistence _installed =
   let open Result.Let_syntax in
   let directory = Agent_store.Session_store.Handle.snapshot_directory handle in
-  let%bind _ = Agent_store.Snapshot.prune_older ~env:t.env ~directory ~keep:2 in
+  let%bind () =
+    match Agent_session.Session_persistence.retention_preflight persistence with
+    | Some preflight -> Agent_store.Recovery.Retention_preflight.check preflight
+    | None ->
+      Agent_store.Recovery.Retention_preflight.check
+        (create_retention_preflight t handle journal)
+  in
+  let%bind () = Agent_store.Journal.validate_seal_checkpoint journal in
+  let%bind _ =
+    Agent_store.Snapshot.prune_older
+      ~env:t.env
+      ~directory
+      ~keep:2
+      ~max_payload_length:t.limits.snapshot_payload_limit
+  in
   let%bind transaction_sequence =
     Agent_store.Snapshot.retention_floor
       ~env:t.env
@@ -3244,6 +3360,7 @@ let actor_services
   let install_snapshot state =
     match
       Agent_session.Session_persistence.install_snapshot
+        persistence
         ~env:t.env
         ~handle
         ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3253,7 +3370,7 @@ let actor_services
     | Error _ -> ()
     | Ok installed ->
       ignore
-        (prune_snapshot t handle journal installed
+        (prune_snapshot t handle journal persistence installed
          : (unit, Agent_store.Store_error.t) result);
       last_snapshot_sequence := state.counters.event_sequence;
       last_snapshot_at := Eio.Time.now (Eio.Stdenv.clock t.env)
@@ -3275,7 +3392,13 @@ let actor_services
           |> Base64.encode_exn ~pad:false ~alphabet:Base64.uri_safe_alphabet)
     ; state_committed =
         (fun state events ->
-          Agent_session.Durable_event_log.append durable_events events;
+          Agent_session.Durable_event_log.append
+            ~documents:
+              (Agent_session.Session_persistence.take_replay_documents persistence)
+            durable_events
+            events
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+          |> Result.ok_or_failwith;
           release_stopped_capacity capacity events;
           unload_stopped_runtime t runtime_owner state events;
           ignore
@@ -3435,6 +3558,7 @@ let checkpoint_entry t handle journal persistence actor =
     let open Result.Let_syntax in
     let%bind installed =
       Agent_session.Session_persistence.install_snapshot
+        persistence
         ~env:t.env
         ~handle
         ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3442,7 +3566,8 @@ let checkpoint_entry t handle journal persistence actor =
         state
       |> Result.map_error ~f:protocol_of_store
     in
-    prune_snapshot t handle journal installed |> Result.map_error ~f:protocol_of_store)
+    prune_snapshot t handle journal persistence installed
+    |> Result.map_error ~f:protocol_of_store)
 ;;
 
 let close_entry t handle journal persistence runtime writer actor capacity =
@@ -3632,8 +3757,15 @@ let create_loaded_entry
   =
   let open Result.Let_syntax in
   let%bind profile = permission_profile_revision t state.spec.permission_profile_digest in
+  let documents = Agent_session.Session_persistence.take_replay_documents persistence in
+  let initial_events =
+    match documents with
+    | [] -> initial_events
+    | _ -> List.map documents ~f:Agent_session.Durable_event_document.value
+  in
   let%bind durable_events =
     Agent_session.Durable_event_log.create
+      ~documents
       ~capacity:t.limits.event_replay_capacity
       initial_events
   in
@@ -3753,8 +3885,15 @@ let create_unloaded_entry
   =
   let open Result.Let_syntax in
   let%bind profile = permission_profile_revision t state.spec.permission_profile_digest in
+  let documents = Agent_session.Session_persistence.take_replay_documents persistence in
+  let initial_events =
+    match documents with
+    | [] -> initial_events
+    | _ -> List.map documents ~f:Agent_session.Durable_event_document.value
+  in
   let%bind durable_events =
     Agent_session.Durable_event_log.create
+      ~documents
       ~capacity:t.limits.event_replay_capacity
       initial_events
   in
@@ -3909,8 +4048,12 @@ let finish_creation_with_runtime
      | Ok (journal, writer) ->
        let persistence =
          Agent_session.Session_persistence.create
+           ~retention_preflight:(Some (create_retention_preflight t handle journal))
+           ~limits:t.journal_document_limits
+           ~archive_limits:t.document_limits
+           ~restored:(Agent_session.Session_persistence.Restored.authored state)
            ~archive:
-             (Agent_session.Compaction_archive.write
+             (Agent_session.Compaction_archive.write_document
                 ~env:t.env
                 ~handle
                 ~max_payload_length:t.limits.snapshot_payload_limit)
@@ -3929,6 +4072,7 @@ let finish_creation_with_runtime
           let state = creation.Agent_session.Session_transition.state in
           let snapshot_result =
             Agent_session.Session_persistence.install_snapshot
+              persistence
               ~env:t.env
               ~handle
               ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3970,6 +4114,7 @@ let persist_initial_snapshot t handle journal persistence state =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
+      persistence
       ~env:t.env
       ~handle
       ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3978,7 +4123,8 @@ let persist_initial_snapshot t handle journal persistence state =
     |> Result.map_error ~f:protocol_of_store
   in
   ignore
-    (prune_snapshot t handle journal installed : (unit, Agent_store.Store_error.t) result);
+    (prune_snapshot t handle journal persistence installed
+     : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
@@ -3991,8 +4137,12 @@ let finish_unloaded_creation t handle state ~command_audit =
   in
   let persistence =
     Agent_session.Session_persistence.create
+      ~retention_preflight:(Some (create_retention_preflight t handle journal))
+      ~limits:t.journal_document_limits
+      ~archive_limits:t.document_limits
+      ~restored:(Agent_session.Session_persistence.Restored.authored state)
       ~archive:
-        (Agent_session.Compaction_archive.write
+        (Agent_session.Compaction_archive.write_document
            ~env:t.env
            ~handle
            ~max_payload_length:t.limits.snapshot_payload_limit)
@@ -4129,7 +4279,7 @@ let validate_import_request request legacy source_path =
       spec.execution_host, spec.persistence, spec.liveness, spec.start_immediately
     with
     | Daemon, Durable, Detached, false ->
-      Session.V5.validate (Session.to_v5 legacy)
+      Session.validate legacy
       |> Result.map_error ~f:(fun message -> unavailable Migration_required message)
     | _ ->
       Error
@@ -4266,14 +4416,17 @@ let initial_recovery_state t handle =
       ~f:Result.return
   in
   let%bind state =
-    Agent_session.Session_persistence.restore_snapshot installed.snapshot.payload
+    Agent_session.Session_persistence.restore_snapshot
+      ~limits:t.document_limits
+      installed.snapshot
     |> Result.map_error ~f:protocol_of_store
   in
+  let state = Agent_session.Session_persistence.Restored.state state in
   let%map () = validate_snapshot handle installed state in
   state
 ;;
 
-let open_recovery t handle initial =
+let open_recovery t handle =
   let open Result.Let_syntax in
   let%bind journal =
     Agent_store.Journal.open_existing
@@ -4284,25 +4437,27 @@ let open_recovery t handle initial =
       ~max_segment_frames:t.limits.max_segment_frames
     |> Result.map_error ~f:protocol_of_store
   in
-  let validate state =
-    Agent_session.Session_state.validate state
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-  in
-  let%map recovery =
+  let%bind recovery =
     Agent_store.Recovery.load
       ~env:t.env
       ~journal
       ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
       ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
-      ~session_id:initial.Agent_session.Session_state.identity.session_id
-      ~initial
-      ~restore_snapshot:Agent_session.Session_persistence.restore_snapshot
-      ~apply:Agent_session.Session_persistence.apply_transaction
-      ~validate
+      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+      ~initial:None
+      ~restore_snapshot:(restore_recovery_state t)
+      ~apply:(apply_recovery_transaction t)
+      ~validate_transaction:
+        (Agent_session.Session_persistence.validate_transaction
+           ~limits:t.journal_document_limits)
+      ~validate:(validate_recovery_state t handle)
     |> Result.map_error ~f:protocol_of_store
   in
-  journal, recovery
+  let%map state =
+    recovery.state
+    |> Result.of_option ~error:(corrupt "durable session has no restored state")
+  in
+  journal, { recovery with state }
 ;;
 
 let recovered_revision = restore_state_source
@@ -4550,10 +4705,12 @@ let commit_recovery_boundary
   transition
 ;;
 
-let recovered_events recovery =
+let recovered_events t recovery =
   Result.all
     (List.map recovery.Agent_store.Recovery.transactions ~f:(fun transaction ->
-       Agent_session.Session_persistence.durable_events transaction))
+       Agent_session.Session_persistence.event_documents
+         ~limits:t.journal_document_limits
+         transaction))
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:protocol_of_store
 ;;
@@ -4613,6 +4770,7 @@ let persist_recovered_state t handle journal persistence state =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
+      persistence
       ~env:t.env
       ~handle
       ~max_payload_length:t.limits.snapshot_payload_limit
@@ -4621,7 +4779,8 @@ let persist_recovered_state t handle journal persistence state =
     |> Result.map_error ~f:protocol_of_store
   in
   ignore
-    (prune_snapshot t handle journal installed : (unit, Agent_store.Store_error.t) result);
+    (prune_snapshot t handle journal persistence installed
+     : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
@@ -4663,10 +4822,11 @@ let recover_runtime
 
 let recover_open_handle t handle =
   let open Result.Let_syntax in
-  let%bind initial = initial_recovery_state t handle in
-  let%bind journal, recovery = open_recovery t handle initial in
+  let%bind journal, recovery = open_recovery t handle in
   let%bind () = reconcile_command_audits t recovery in
-  let state = recovery.Agent_store.Recovery.state in
+  let state =
+    Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
+  in
   let%bind parent_stop = parent_stop_recovery t state in
   let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
   let%bind revision = recovered_revision t state in
@@ -4689,7 +4849,10 @@ let recover_open_handle t handle =
   let%bind first_sequence, reserved_history_through =
     recovery_reservation t (Int64.of_int invocations.next_sequence)
   in
-  let%bind durable_events = recovered_events recovery in
+  let%bind recovered_event_documents = recovered_events t recovery in
+  let durable_events =
+    List.map recovered_event_documents ~f:Agent_session.Durable_event_document.value
+  in
   let%bind observed, capacity =
     prepare_recovery_capacity
       t
@@ -4700,8 +4863,12 @@ let recover_open_handle t handle =
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
   let persistence =
     Agent_session.Session_persistence.create
+      ~retention_preflight:(Some (create_retention_preflight t handle journal))
+      ~limits:t.journal_document_limits
+      ~archive_limits:t.document_limits
+      ~restored:recovery.state
       ~archive:
-        (Agent_session.Compaction_archive.write
+        (Agent_session.Compaction_archive.write_document
            ~env:t.env
            ~handle
            ~max_payload_length:t.limits.snapshot_payload_limit)
@@ -4710,6 +4877,9 @@ let recover_open_handle t handle =
       ~durability:t.durability
       ~previous_transaction_hash:recovery.latest_transaction_hash
   in
+  Agent_session.Session_persistence.restore_replay_documents
+    persistence
+    recovered_event_documents;
   match
     commit_recovery_boundary
       ~parent_stop
@@ -4994,6 +5164,10 @@ let initialize_generated_layout t state ~staging_directory =
     ~f:(fun () ->
       let persistence =
         Agent_session.Session_persistence.create
+          ~retention_preflight:None
+          ~limits:t.journal_document_limits
+          ~archive_limits:t.document_limits
+          ~restored:(Agent_session.Session_persistence.Restored.authored state)
           ~archive:(fun _ _ -> Error (corrupt "creation cannot archive history"))
           ~command_accepted:(fun _ _ -> ())
           ~writer
@@ -5007,6 +5181,7 @@ let initialize_generated_layout t state ~staging_directory =
       let state = transition.Agent_session.Session_transition.state in
       let%bind _ =
         Agent_session.Session_persistence.install_snapshot_at
+          persistence
           ~env:t.env
           ~directory:(Filename.concat staging_directory "snapshot")
           ~max_payload_length:t.limits.snapshot_payload_limit
@@ -7051,6 +7226,16 @@ let create
     ; authoring_validation_host
     ; durability
     ; limits
+    ; document_limits =
+        Agent_session.Persistence_codec.limits ~max_bytes:limits.snapshot_payload_limit
+        |> Result.map_error ~f:(fun e ->
+          Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
+        |> Result.ok_or_failwith
+    ; journal_document_limits =
+        Agent_session.Persistence_codec.limits ~max_bytes:limits.max_journal_payload
+        |> Result.map_error ~f:(fun e ->
+          Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
+        |> Result.ok_or_failwith
     ; generated_creation =
         { limits = bundle_limits
         ; create = (fun borrowed request -> create_from_native t borrowed request)

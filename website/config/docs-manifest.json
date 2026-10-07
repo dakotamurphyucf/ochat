@@ -4952,5 +4952,13 @@
     "title": "Documentation lab sample tutorial: workspace/sample-project/tutorials/passing.md",
     "reviewNote": "Included in the complete inline source reader and archive; the application walkthrough is public.",
     "provenance": "authored"
+  },
+  {
+    "id": "neutral-history-persistence",
+    "source": "docs-src/neutral-history-persistence.md",
+    "disposition": "repository-only",
+    "title": "Neutral durable history",
+    "reviewNote": "Accepted contributor architecture for canonical neutral history and durable document ownership. Provider runtime adoption remains a separate follow-up.",
+    "provenance": "authored"
   }
 ]

@@ -62,7 +62,7 @@ let history_entry item =
     History_entry.Allocator.create ~namespace:"streaming-fixture" ~next_sequence:0
     |> Result.ok_or_failwith
   in
-  History_entry.create ~allocator item |> Result.ok_or_failwith
+  Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
 ;;
 
 let describe_event = function
@@ -84,7 +84,7 @@ let describe_event = function
   | `Tool_execution (op_id, Execution.Progress { call_id; progress = _ }) ->
     sprintf "%d:replace:%s" op_id call_id
   | `Tool_output (op_id, entry) ->
-    (match History_entry.item entry with
+    (match Openai.Responses_history.item_exn entry with
      | Res.Item.Function_call_output output -> sprintf "%d:output:%s" op_id output.call_id
      | Res.Item.Custom_tool_call_output output ->
        sprintf "%d:custom-output:%s" op_id output.call_id
@@ -512,14 +512,14 @@ let%expect_test
       }
   in
   let unfinished_entry =
-    History_entry.create ~allocator:runtime.history_allocator unfinished
+    Openai.Responses_history.create ~allocator:runtime.history_allocator unfinished
     |> Result.ok_or_failwith
   in
   Chat_tui.Model.set_history_items model [ unfinished_entry ];
   send (`Streaming_error (op_id, Chat_tui.App_streaming.Cancelled));
   pump_until (fun () -> Option.is_none runtime.Chat_tui.App_runtime.op);
   let repair =
-    match Chat_tui.Model.history_items model |> History_entry.items with
+    match Chat_tui.Model.history_items model |> Openai.Responses_history.items_exn with
     | [ Res.Item.Function_call call; Res.Item.Function_call_output output ] ->
       let text =
         match output.output with
@@ -694,7 +694,7 @@ let%expect_test
     [%sexp
       (Chat_tui.Model.messages model : (string * string) list)
     , (List.exists
-         (Chat_tui.Model.history_items model |> History_entry.items)
+         (Chat_tui.Model.history_items model |> Openai.Responses_history.items_exn)
          ~f:(function
            | Res.Item.Function_call_output output -> String.equal output.call_id "custom"
            | _ -> false)
@@ -761,7 +761,7 @@ let%expect_test "Chat tool calls receive completion before canonical outputs" =
       (outcomes : bool list)
     , (Chat_tui.Model.messages model : (string * string) list)
     , (List.exists
-         (Chat_tui.Model.history_items model |> History_entry.items)
+         (Chat_tui.Model.history_items model |> Openai.Responses_history.items_exn)
          ~f:(function
            | Res.Item.Function_call_output _ -> true
            | _ -> false)

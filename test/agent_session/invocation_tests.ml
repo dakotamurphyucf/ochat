@@ -50,7 +50,7 @@ let%test_unit
                 }
           in
           let call =
-            History_entry.create_with_id ~id:(id 0) call_item
+            Openai.Responses_history.create_with_id_exn ~id:(id 0) call_item
             |> Agent_session.History_codec.to_protocol
           in
           let admitted =
@@ -88,7 +88,7 @@ let%test_unit
                 }
           in
           let output =
-            History_entry.create_with_id ~id:(id 1) output_item
+            Openai.Responses_history.create_with_id_exn ~id:(id 1) output_item
             |> Agent_session.History_codec.to_protocol
           in
           let invocation =
@@ -106,7 +106,7 @@ let%test_unit
             | `Existing | `Bad_output | `Published -> [ call; output ]
             | `Reused_id ->
               [ call
-              ; History_entry.create_with_id ~id:(id 1) call_item
+              ; Openai.Responses_history.create_with_id_exn ~id:(id 1) call_item
                 |> Agent_session.History_codec.to_protocol
               ]
             | `Collision ->
@@ -118,7 +118,7 @@ let%test_unit
                 | _ -> assert false
               in
               [ call
-              ; History_entry.create_with_id ~id:(id 8) other
+              ; Openai.Responses_history.create_with_id_exn ~id:(id 8) other
                 |> Agent_session.History_codec.to_protocol
               ]
             | _ -> [ call ]
@@ -165,7 +165,11 @@ let%test_unit
                 |> protocol_ok
               in
               let administrative =
-                Agent_session.Administration.archive ~previous:state candidate Reset
+                Agent_session.Administration.archive
+                  ~archive_reference
+                  ~previous:state
+                  candidate
+                  Reset
                 |> protocol_ok
               in
               Agent_session.Session_state.validate administrative |> protocol_ok;
@@ -185,12 +189,7 @@ let%test_unit
                 if keep_history && not (Poly.equal mode `Removed)
                 then assert (Option.is_some disposition.output_entry_id)
                 else assert (Option.is_some disposition.publication_discarded));
-              let restored_admin =
-                Agent_session.Session_persistence.restore_snapshot
-                  (Sexp.to_string_mach
-                     (Agent_session.Session_state.sexp_of_t administrative))
-                |> store_ok
-              in
+              let restored_admin = restore_state administrative |> store_ok in
               assert (
                 Sexp.equal
                   (Agent_session.Session_state.sexp_of_t administrative)
@@ -204,11 +203,7 @@ let%test_unit
             let delta = D.t_of_sexp (D.sexp_of_t delta) in
             let restored = D.apply state delta |> protocol_ok in
             Agent_session.Session_state.validate restored |> protocol_ok;
-            let restored =
-              Agent_session.Session_persistence.restore_snapshot
-                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t restored))
-              |> store_ok
-            in
+            let restored = restore_state restored |> store_ok in
             let actual = List.hd_exn restored.invocations in
             (match mode, actual.status with
              | (`Admitted | `Dispatching), Published (Cancelled "restart") -> ()
@@ -561,12 +556,11 @@ let%test_unit
         assert (Result.is_error (publish (publication_output caps ())));
         assert (
           Result.is_error
-            (publish (History_entry.with_item output (History_entry.item wrong))));
-        let restored =
-          Agent_session.Session_persistence.restore_snapshot
-            (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t published))
-          |> store_ok
-        in
+            (publish
+               (Openai.Responses_history.with_item_exn
+                  output
+                  (Openai.Responses_history.item_exn wrong))));
+        let restored = restore_state published |> store_ok in
         assert (Poly.equal restored.invocations published.invocations);
         (* History compaction retains the receipt and permits no new publication identity. *)
         let compacted =

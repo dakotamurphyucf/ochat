@@ -65,12 +65,7 @@ let statuses report =
   List.map report.Presence.observations ~f:(fun observation -> observation.presence)
 ;;
 
-let restore state =
-  State.sexp_of_t state
-  |> Sexp.to_string_mach
-  |> Agent_session.Session_persistence.restore_snapshot
-  |> store_ok
-;;
+let restore state = restore_state state |> store_ok
 
 let%expect_test
     "guidance provenance survives projections and compaction archives without claiming \
@@ -122,8 +117,7 @@ let%expect_test
         ; script_label = None
         ; value =
             guidance_entry.payload
-            |> Chatml.Chatml_value_codec.import_json
-            |> Session.Snapshot.of_value
+            |> History_entry.Payload.of_json
             |> Result.ok_or_failwith
         }
     in
@@ -259,10 +253,7 @@ let%expect_test "guidance requires schema 10 and rejects forged codec identities
       }
     in
     assert (Result.is_error (State.validate invalid));
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.restore_snapshot
-           (State.sexp_of_t invalid |> Sexp.to_string_mach)));
+    assert (Result.is_error (restore_state invalid));
     print_s
       [%sexp
         "schema 9 migrates empty; cannot smuggle provenance; future metadata fails closed"]);

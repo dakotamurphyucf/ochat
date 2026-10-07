@@ -1,6 +1,7 @@
-open Core
+open! Core
 module P = Agent_protocol
 module Store = Agent_store
+module D = Document_schema
 module Reader = Store.Retention_reader
 module Scan = Store.Blob_reference_scan
 module Segment = Store.Journal_segment
@@ -8,16 +9,16 @@ module Segment = Store.Journal_segment
 let corrupt message = Error (Store.Store_error.Corrupt message)
 
 let protocol result =
-  Result.map_error result ~f:(fun failure ->
-    Store.Store_error.Corrupt failure.P.Error.message)
+  Result.map_error result ~f:(fun e -> Store.Store_error.Corrupt e.P.Error.message)
 ;;
 
+let doc result = Result.map_error result ~f:(fun e -> Store.Store_error.Document e)
 let temporary name = String.is_substring name ~substring:".tmp-"
 
 let scan
       ~reader
       ~handle
-      ~(state : Session_state.t)
+      ~state
       ~journal_current
       ~transaction_hash
       ~max_file_bytes
@@ -25,17 +26,22 @@ let scan
       ~candidates
   =
   let open Result.Let_syntax in
-  let%bind () = Session_state.validate state |> protocol in
+  let%bind limits = Persistence_codec.limits ~max_bytes:max_frame_bytes |> doc in
+  let value = Session_state_document.value state in
   let session_id = Store.Session_store.Handle.session_id handle in
+  let%bind () = Session_state.validate value |> protocol in
   let%bind () =
-    match P.Id.Session.equal session_id state.identity.session_id with
-    | true -> Ok ()
-    | false -> corrupt "retention state belongs to another session"
+    if P.Id.Session.equal session_id value.identity.session_id
+    then Ok ()
+    else corrupt "retention state belongs to another session"
   in
   let%bind scan = Scan.create candidates |> protocol in
   let feed bytes =
     Scan.begin_root scan;
     Scan.feed scan bytes
+  in
+  let feed_document document =
+    Store.Document_fields.iter_strings (D.Document.json document) ~f:feed
   in
   let archives = ref String.Map.empty in
   let remember reference =
@@ -45,36 +51,31 @@ let scan
       archives := Map.set !archives ~key:name ~data:reference;
       Ok ()
     | Some previous ->
-      (match
-         Sexp.equal
-           (Session_state.Compaction_archive.sexp_of_t previous)
-           (Session_state.Compaction_archive.sexp_of_t reference)
-       with
-       | true -> Ok ()
-       | false -> corrupt "retained archive references disagree")
+      if
+        D.Json.equal
+          (Session_state_document.archive_reference_to_jsonaf previous)
+          (Session_state_document.archive_reference_to_jsonaf reference)
+      then Ok ()
+      else corrupt "retained archive references disagree"
   in
   let observe_state state =
+    let value = Session_state_document.value state in
     let%bind () =
-      match P.Id.Session.equal state.Session_state.identity.session_id session_id with
-      | true -> Ok ()
-      | false -> corrupt "retained state belongs to another session"
+      if P.Id.Session.equal session_id value.identity.session_id
+      then Ok ()
+      else corrupt "retained state belongs to another session"
     in
-    let encoded = Session_state.sexp_of_t state |> Sexp.to_string_mach in
-    let%bind () =
-      match String.length encoded <= max_file_bytes with
-      | true ->
-        feed encoded;
-        Ok ()
-      | false -> corrupt "decoded retention state exceeds its byte limit"
-    in
+    let%bind document = Session_state_document.encode state ~limits |> doc in
+    feed_document document;
     List.fold_result
-      state.conversation.compaction_archives
+      value.conversation.compaction_archives
       ~init:()
       ~f:(fun () reference -> remember reference)
   in
   let%bind () = observe_state state in
+  (* Inspect exact stored metadata and links for every fallback before current
+    domain restoration. No reference-absence decision precedes this preflight. *)
   let%bind names = Reader.list reader ~directory:"snapshot" in
-  let checkpoint_states = ref [] in
   let%bind snapshots =
     List.fold_result names ~init:[] ~f:(fun snapshots name ->
       match name with
@@ -89,67 +90,50 @@ let scan
             ~path:(Filename.concat "snapshot" name)
             ~max_bytes:max_file_bytes
         in
-        let%bind snapshot =
-          Store.Snapshot.decode_file ~max_payload_length:max_frame_bytes bytes
+        let%bind stored =
+          Store.Snapshot.decode_stored_file ~max_payload_length:max_frame_bytes bytes
         in
-        let%bind restored = Session_persistence.restore_snapshot snapshot.payload in
+        let metadata = Store.Snapshot.Stored.metadata stored in
         let%bind () =
-          match
+          if
             String.equal
               name
-              (sprintf "snapshot-%016Ld.bin" snapshot.transaction_sequence)
-            && Int64.equal
-                 restored.counters.transaction_sequence
-                 snapshot.transaction_sequence
-            && Int64.equal restored.counters.event_sequence snapshot.event_sequence
-            && String.equal
-                 snapshot.prompt_artifact
-                 (P.Id.Prompt_revision.to_string restored.spec.prompt_revision_id)
-            && String.equal
-                 snapshot.workspace_identity
-                 restored.spec.workspace_instance.conflict_domain
-            && ((not (Int64.equal snapshot.transaction_sequence 0L))
-                || Option.is_none snapshot.transaction_hash)
-          with
-          | true -> Ok ()
-          | false -> corrupt "retained snapshot metadata disagrees with its state"
+              (sprintf "snapshot-%016Ld.bin" metadata.transaction_sequence)
+          then Ok ()
+          else corrupt "noncanonical retained snapshot filename"
         in
-        let%map () = observe_state restored in
-        checkpoint_states := restored :: !checkpoint_states;
         feed bytes;
-        { Store.Snapshot.filename = name; snapshot } :: snapshots
-      | _ -> corrupt "unknown file in retained snapshot directory")
+        Ok ({ Store.Snapshot.filename = name; stored } :: snapshots)
+      | _ -> corrupt "unknown retained snapshot file")
   in
   let%bind () =
     match List.mem names "CURRENT" ~equal:String.equal, snapshots with
     | false, [] -> Ok ()
-    | false, _ -> corrupt "retained snapshots have no current pointer"
+    | false, _ -> corrupt "retained snapshots have no pointer"
     | true, _ ->
       let%bind pointer = Reader.read reader ~path:"snapshot/CURRENT" ~max_bytes:256 in
-      (match
-         List.exists snapshots ~f:(fun snapshot ->
-           String.equal snapshot.Store.Snapshot.filename (String.strip pointer))
-       with
-       | true -> Ok ()
-       | false -> corrupt "snapshot pointer refers to a missing retained snapshot")
+      if
+        List.exists snapshots ~f:(fun snapshot ->
+          String.equal snapshot.Store.Snapshot.filename (String.strip pointer))
+      then Ok ()
+      else corrupt "retained snapshot pointer is missing"
   in
   let%bind names = Reader.list reader ~directory:"journal" in
   let%bind pointer = Reader.read reader ~path:"journal/CURRENT" ~max_bytes:256 in
   let%bind () =
-    match String.equal (String.strip pointer) (Segment.Id.filename journal_current) with
-    | true -> Ok ()
-    | false -> corrupt "retained journal pointer differs from the live writer"
+    if String.equal (String.strip pointer) (Segment.Id.filename journal_current)
+    then Ok ()
+    else corrupt "journal pointer differs from live writer"
   in
   let%bind segments =
     List.fold_result names ~init:[] ~f:(fun segments name ->
-      match name with
-      | "CURRENT" -> Ok segments
-      | name when temporary name -> Ok segments
-      | name ->
+      if String.equal name "CURRENT" || temporary name
+      then Ok segments
+      else (
         let%bind id = Segment.Id.of_filename name in
-        (match String.equal name (Segment.Id.filename id) with
-         | true -> Ok ((id, name) :: segments)
-         | false -> corrupt "retained journal segment has a noncanonical name"))
+        if String.equal name (Segment.Id.filename id)
+        then Ok ((id, name) :: segments)
+        else corrupt "noncanonical retained segment filename"))
   in
   let segments =
     List.sort segments ~compare:(fun (a, _) (b, _) -> Segment.Id.compare a b)
@@ -161,26 +145,16 @@ let scan
         | None -> Ok ()
         | Some previous ->
           let%bind next = Segment.Id.next previous in
-          (match Segment.Id.equal id next with
-           | true -> Ok ()
-           | false -> corrupt "retained journal segment sequence has a gap")
+          if Segment.Id.equal id next
+          then Ok ()
+          else corrupt "retained journal segment gap"
       in
       Some id)
   in
   let%bind () =
     match List.last segments with
     | Some (id, _) when Segment.Id.equal id journal_current -> Ok ()
-    | _ -> corrupt "retained journal does not end at its current segment"
-  in
-  let rec observe_delta = function
-    | Session_delta.Batch deltas ->
-      List.fold_result deltas ~init:() ~f:(fun () delta -> observe_delta delta)
-    | Created state ->
-      let%bind state = Session_state.upgrade_schema state |> protocol in
-      let%bind () = Session_state.validate state |> protocol in
-      observe_state state
-    | Compaction_archived reference -> remember reference
-    | _ -> Ok ()
+    | _ -> corrupt "retained journal lacks its current segment"
   in
   let%bind transactions =
     List.fold_result segments ~init:[] ~f:(fun transactions (_, name) ->
@@ -198,78 +172,101 @@ let scan
         then corrupt "incomplete retained journal prevents collection"
         else Ok ()
       in
-      let%map transactions =
-        List.fold_result segment.entries ~init:transactions ~f:(fun transactions entry ->
-          match Store.Frame.flags entry.Segment.frame with
-          | 1 -> Ok transactions
-          | 0 ->
-            let%bind transaction =
-              Store.Transaction.decode (Store.Frame.payload entry.frame)
-            in
-            let%bind delta =
-              Result.try_with (fun () ->
-                Sexp.of_string transaction.delta |> Session_delta.t_of_sexp)
-              |> Result.map_error ~f:(fun _ ->
-                Store.Store_error.Corrupt "invalid retained session delta")
-            in
-            let%bind () = observe_delta delta in
-            let%map events = Session_persistence.durable_events transaction in
-            feed (Session_delta.sexp_of_t delta |> Sexp.to_string_mach);
-            List.iter events ~f:(fun event ->
-              feed (P.Event.Durable.sexp_of_t event |> Sexp.to_string_mach));
-            transaction :: transactions
-          | _ -> corrupt "unknown retained journal frame kind")
-      in
       feed bytes;
-      transactions)
+      List.fold_result segment.entries ~init:transactions ~f:(fun transactions entry ->
+        match Store.Frame.flags entry.Segment.frame with
+        | 1 -> Ok transactions
+        | 0 ->
+          let%bind record =
+            Store.Document_record.of_frame entry.frame ~limits ~expected_digest:None
+            |> Result.map_error ~f:Store.Document_fields.record_error
+          in
+          let%map stored = Store.Transaction.Stored.of_record record in
+          stored :: transactions
+        | _ -> corrupt "unknown retained frame flags"))
   in
   let transactions = List.rev transactions in
-  let%bind () =
-    List.fold_result !checkpoint_states ~init:() ~f:(fun () checkpoint ->
-      match checkpoint.Session_state.counters.transaction_sequence with
-      | 0L ->
-        (match Int64.equal checkpoint.counters.revision 0L with
-         | true -> Ok ()
-         | false -> corrupt "initial checkpoint has a noninitial revision")
-      | sequence ->
-        (match
-           List.find transactions ~f:(fun transaction ->
-             Int64.equal transaction.Store.Transaction.transaction_sequence sequence)
-         with
-         | Some transaction
-           when Int64.equal checkpoint.counters.revision transaction.session_revision
-                && Int.equal checkpoint.identity.generation transaction.generation ->
-           Ok ()
-         | _ -> corrupt "checkpoint state disagrees with its journal anchor"))
+  let%bind head =
+    Store.Recovery.validate_stored_retained ~session_id ~snapshots ~transactions
   in
-  let%bind head = Store.Recovery.validate_retained ~session_id ~snapshots ~transactions in
   let%bind () =
-    match
-      Int64.equal head.transaction_sequence state.counters.transaction_sequence
+    if
+      Int64.equal head.transaction_sequence value.counters.transaction_sequence
       && Option.equal String.equal head.transaction_hash transaction_hash
-      && Int64.equal head.session_revision state.counters.revision
-      && Int64.equal head.event_sequence state.counters.event_sequence
-      && Int.equal head.generation state.identity.generation
-    with
-    | true -> Ok ()
-    | false -> corrupt "retained journal head differs from the actor checkpoint"
+      && Int64.equal head.session_revision value.counters.revision
+      && Int64.equal head.event_sequence value.counters.event_sequence
+      && Int.equal head.generation value.identity.generation
+    then Ok ()
+    else corrupt "retained head differs from actor checkpoint"
+  in
+  let%bind transactions =
+    List.map transactions ~f:(fun stored ->
+      feed_document
+        (Store.Document_record.document (Store.Transaction.Stored.record stored));
+      let%bind transaction = Store.Transaction.restore stored ~limits in
+      let%map () = Session_persistence.validate_transaction ~limits transaction in
+      transaction)
+    |> Result.all
+  in
+  let rec observe_delta = function
+    | Session_delta.Batch changes ->
+      List.fold_result changes ~init:() ~f:(fun () change -> observe_delta change)
+    | Created state ->
+      List.fold_result
+        state.conversation.compaction_archives
+        ~init:()
+        ~f:(fun () reference -> remember reference)
+    | Compaction_archived reference -> remember reference
+    | _ -> Ok ()
+  in
+  let%bind () =
+    List.fold_result transactions ~init:() ~f:(fun () transaction ->
+      let%bind delta =
+        Session_delta_document.decode ~limits transaction.Store.Transaction.delta |> doc
+      in
+      observe_delta (Session_delta_document.value delta))
+  in
+  let%bind () =
+    List.fold_result snapshots ~init:() ~f:(fun () installed ->
+      feed_document
+        (Store.Document_record.document
+           (Store.Snapshot.Stored.record installed.Store.Snapshot.stored));
+      let%bind snapshot = Store.Snapshot.restore installed.stored ~limits in
+      let%bind restored = Session_persistence.restore_snapshot ~limits snapshot in
+      let%bind () =
+        observe_state (Session_persistence.Restored.state_document restored)
+      in
+      let after =
+        List.filter transactions ~f:(fun transaction ->
+          Int64.(
+            transaction.Store.Transaction.transaction_sequence
+            > snapshot.transaction_sequence))
+      in
+      let%bind final =
+        List.fold_result
+          after
+          ~init:restored
+          ~f:(Session_persistence.apply_transaction ~limits)
+      in
+      let%bind () = Session_persistence.validate final in
+      observe_state (Session_persistence.Restored.state_document final))
   in
   let%bind names = Reader.list reader ~directory:"archive" in
   let%bind contents =
     List.fold_result names ~init:String.Map.empty ~f:(fun contents name ->
-      match temporary name with
-      | true -> Ok contents
-      | false ->
+      if temporary name
+      then Ok contents
+      else (
         let%bind operation =
           List.find_map [ "compaction"; "reset"; "rebuild"; "upgrade" ] ~f:(fun prefix ->
             String.chop_prefix name ~prefix:(prefix ^ "-"))
           |> Result.of_option
-               ~error:(Store.Store_error.Corrupt "unknown retained archive filename")
+               ~error:(Store.Store_error.Corrupt "unknown archive filename")
         in
         let%bind operation =
           String.chop_suffix operation ~suffix:".frame"
           |> Result.of_option
-               ~error:(Store.Store_error.Corrupt "invalid retained archive filename")
+               ~error:(Store.Store_error.Corrupt "invalid archive filename")
         in
         let%bind _ = P.Id.Operation.of_string operation |> protocol in
         let%bind bytes =
@@ -278,26 +275,21 @@ let scan
             ~path:(Filename.concat "archive" name)
             ~max_bytes:max_file_bytes
         in
-        let%bind payload =
-          match
-            Store.Frame.decode
-              ~max_payload_length:max_frame_bytes
-              ~contents:bytes
-              ~offset:0
-          with
-          | Ok (Complete { frame; next_offset })
-            when next_offset = String.length bytes && Store.Frame.flags frame = 0 ->
-            Ok (Store.Frame.payload frame)
-          | _ -> corrupt "invalid retained archive frame"
+        let%bind record, state =
+          Compaction_archive.decode_record
+            ~max_payload_length:max_frame_bytes
+            ~expected_digest:None
+            bytes
+          |> protocol
         in
-        let%bind archived = Session_persistence.restore_snapshot payload in
-        let%bind () = observe_state archived in
+        feed_document (Store.Document_record.document record);
+        let%bind () = observe_state state in
         feed bytes;
-        Ok (Map.set contents ~key:name ~data:bytes))
+        Ok (Map.set contents ~key:name ~data:bytes)))
   in
   let%bind () =
-    Map.fold !archives ~init:(Ok ()) ~f:(fun ~key:name ~data:reference checked ->
-      let%bind () = checked in
+    Map.fold !archives ~init:(Ok ()) ~f:(fun ~key:name ~data:reference result ->
+      let%bind () = result in
       let%bind bytes =
         Map.find contents name
         |> Result.of_option

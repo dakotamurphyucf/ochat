@@ -7,6 +7,15 @@ let controlled_monotonic_clock real_clock =
   let logical_now = ref (Eio.Time.Mono.now real_clock) in
   let last_real = ref !logical_now in
   let paused = ref false in
+  (* The fixture owns clock transitions. Sleepers borrow the current promise;
+     only pause/resume/advance rotate and complete it, waking every waiter to
+     recheck logical time. A paused clock never polls the real clock in a loop. *)
+  let changed = ref (Eio.Promise.create ()) in
+  let notify_change () =
+    let _, resolver = !changed in
+    changed := Eio.Promise.create ();
+    Eio.Promise.resolve resolver ()
+  in
   let now () =
     let actual = Eio.Time.Mono.now real_clock in
     (match !paused with
@@ -23,27 +32,123 @@ let controlled_monotonic_clock real_clock =
 
     let now = now
 
-    let sleep_until () deadline =
+    let rec sleep_until () deadline =
       let current = now () in
       match Mtime.compare deadline current <= 0 with
       | true -> Eio.Fiber.yield ()
-      | false -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline)
+      | false ->
+        (* Capture this generation before yielding, so a transition cannot be
+           lost between observing the state and registering the wait. Real timer
+           completion alone never proves a controlled deadline has elapsed. *)
+        let change, _ = !changed in
+        (match !paused with
+         | true -> Eio.Promise.await change
+         | false ->
+           Eio.Fiber.first
+             (fun () -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline))
+             (fun () -> Eio.Promise.await change));
+        sleep_until () deadline
     ;;
   end
   in
   let pause () =
     ignore (now ());
-    paused := true
+    paused := true;
+    notify_change ()
   in
   let resume () =
     ignore (now ());
-    paused := false
+    paused := false;
+    notify_change ()
   in
   let advance seconds =
     let span = Mtime.Span.of_float_ns (seconds *. 1_000_000_000.) |> Option.value_exn in
-    logical_now := Mtime.add_span (now ()) span |> Option.value_exn
+    logical_now := Mtime.add_span (now ()) span |> Option.value_exn;
+    notify_change ()
   in
   Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance
+;;
+
+(* Logical wall time advances only after a completed wait. The fixture owns
+   transitions; sleepers borrow a generation so pauses cancel stale real timers
+   and valid completed real waits advance the earliest pending logical deadline. *)
+let controlled_wall_clock real_clock ~initial =
+  let logical_now = ref initial in
+  let paused = ref false in
+  let waiters = ref [] in
+  let changed = ref (Eio.Promise.create ()) in
+  let notify_change () =
+    let _, resolver = !changed in
+    changed := Eio.Promise.create ();
+    Eio.Promise.resolve resolver ()
+  in
+  let advance_to deadline =
+    logical_now := Float.max !logical_now deadline;
+    notify_change ()
+  in
+  let module Clock = struct
+    type t = unit
+    type time = float
+
+    let now () = !logical_now
+
+    let rec wait deadline =
+      match Float.(deadline <= !logical_now) with
+      | true -> Eio.Fiber.yield ()
+      | false ->
+        let change, _ = !changed in
+        (match !paused with
+         | true -> Eio.Promise.await change
+         | false ->
+           let completed =
+             Eio.Fiber.first
+               (fun () ->
+                  Eio.Time.sleep real_clock (deadline -. !logical_now);
+                  true)
+               (fun () ->
+                  Eio.Promise.await change;
+                  false)
+           in
+           (* Cancellation cleanup can yield: only this still-current,
+              unpaused generation may complete the logical wait. *)
+           if completed && (not !paused) && phys_equal change (fst !changed)
+           then (
+             (* A valid real wait advances shared virtual time to the earliest
+                pending logical deadline. It need not be that waiter's own real
+                timer: cooperative CPU work can make several timers runnable. *)
+             let earliest =
+               List.fold !waiters ~init:deadline ~f:(fun earliest (_, candidate) ->
+                 if Float.(candidate > !logical_now)
+                 then Float.min earliest candidate
+                 else earliest)
+             in
+             advance_to earliest));
+        wait deadline
+    ;;
+
+    let sleep_until () deadline =
+      match Float.(deadline <= !logical_now) with
+      | true -> Eio.Fiber.yield ()
+      | false ->
+        let token = ref () in
+        waiters := (token, deadline) :: !waiters;
+        Exn.protect
+          ~finally:(fun () ->
+            waiters
+            := List.filter !waiters ~f:(fun (other, _) -> not (phys_equal token other)))
+          ~f:(fun () -> wait deadline)
+    ;;
+  end
+  in
+  let pause () =
+    paused := true;
+    notify_change ()
+  in
+  let resume () =
+    paused := false;
+    notify_change ()
+  in
+  Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance_to
 ;;
 
 let protocol_ok = function
@@ -261,4 +366,40 @@ let create_session ?(start_immediately = false) ?(key = "restart-create") connec
   | Agent_protocol.Method_result.Session_create result ->
     result.session, (Option.value_exn result.attachment).attachment
   | _ -> failwith "unexpected create response"
+;;
+
+(* Current documents for restart fixtures. These use the real complete schema,
+   never a historical runtime serialization wrapped in a JSON string. *)
+let state_document state =
+  Agent_session.Session_state_document.authored state
+  |> Agent_session.Session_state_document.encode ~limits:Document_schema.Limits.default
+  |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+;;
+
+let roundtrip_state state =
+  let open Result.Let_syntax in
+  let%bind document = state_document state in
+  let%map restored =
+    Agent_session.Session_state_document.decode
+      ~limits:Document_schema.Limits.default
+      document
+    |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+  in
+  Agent_session.Session_state_document.value restored
+;;
+
+let authored_snapshot (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind payload = state_document state in
+  Agent_store.Snapshot.create
+    ~limits:Document_schema.Limits.default
+    ~session_id:state.identity.session_id
+    ~transaction_sequence:state.counters.transaction_sequence
+    ~transaction_hash:None
+    ~event_sequence:state.counters.event_sequence
+    ~created_at:state.identity.updated_at
+    ~prompt_artifact:
+      (Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+    ~workspace_identity:state.spec.workspace_instance.conflict_domain
+    ~payload
 ;;

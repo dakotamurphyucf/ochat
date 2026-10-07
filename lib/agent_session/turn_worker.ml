@@ -344,15 +344,7 @@ let moderator_snapshot = function
        raise
          (Worker_failure
             (Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()))
-     | Ok snapshot ->
-       Some
-         (`Object
-             [ ( "identity_snapshot_sexp"
-               , `String
-                   (Sexp.to_string_mach
-                      ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot))
-               )
-             ]))
+     | Ok snapshot -> Some (Moderator_checkpoint.encode snapshot))
 ;;
 
 let moderate_appended_history config history on_runtime_request =

@@ -65,6 +65,7 @@
   fork
   compact_history)
  (libraries
+  ochat.document_schema
   core
   core_unix
   openai

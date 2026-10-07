@@ -83,14 +83,14 @@ let compact_entries_configured
   try
     if not (Config.is_valid config) then invalid_arg "invalid compaction configuration";
     let devs, comps, relevant_entries =
-      partition_history ~item:History_entry.item history
+      partition_history ~item:Openai.Responses_history.item_exn history
     in
     let open Result.Let_syntax in
     let%bind compacted =
       let relevant_items =
         select_relevant
           config
-          (History_entry.items relevant_entries)
+          (Openai.Responses_history.items_exn relevant_entries)
           ~score:(fun prompt -> Relevance_judge.score_relevance ?env config ~prompt)
       in
       summarise ~relevant_items ~env
@@ -110,12 +110,13 @@ let compact_entries_configured
     let retained = devs @ comps in
     let%bind () =
       if
-        estimated_tokens (History_entry.items retained @ [ item ]) <= config.context_limit
+        estimated_tokens (Openai.Responses_history.items_exn retained @ [ item ])
+        <= config.context_limit
       then Ok ()
       else Error (Failure "compaction exceeds context_limit; original history retained")
     in
     let%map reminder =
-      History_entry.create ~allocator item
+      Openai.Responses_history.create ~allocator item
       |> Result.map_error ~f:(fun error -> Failure error)
     in
     List.concat [ devs; comps; [ reminder ] ]
@@ -138,7 +139,10 @@ let compact_entries ~allocator ~env ~history =
 ;;
 
 module For_testing = struct
-  let process_current_entries history = partition_history ~item:History_entry.item history
+  let process_current_entries history =
+    partition_history ~item:Openai.Responses_history.item_exn history
+  ;;
+
   let compact_entries_with = compact_entries_with
   let compact_entries_configured = compact_entries_configured
   let select_relevant = select_relevant

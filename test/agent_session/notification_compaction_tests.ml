@@ -65,12 +65,7 @@ let%expect_test
           | Error { code = Conflict; _ } -> ()
           | _ -> failwith "compaction did not invalidate old notification proposal");
          assert_same_session_snapshot compacted (A.state actor |> protocol_ok);
-         let restored =
-           State.sexp_of_t compacted
-           |> Sexp.to_string_mach
-           |> Agent_session.Session_persistence.restore_snapshot
-           |> store_ok
-         in
+         let restored = restore_state compacted |> store_ok in
          assert (List.equal P.Delivery.equal compacted.deliveries restored.deliveries);
          assert (A.deliver_idle_notifications actor (prepare ()) |> protocol_ok);
          let final = await_idle actor in
@@ -157,12 +152,7 @@ let%expect_test
          assert (not (A.deliver_idle_notifications actor (prepare current) |> protocol_ok));
          assert_same_session_snapshot current (A.state actor |> protocol_ok);
          assert_same_session_snapshot current (Agent_session.Memory_backend.state backend);
-         let restored =
-           State.sexp_of_t current
-           |> Sexp.to_string_mach
-           |> Agent_session.Session_persistence.restore_snapshot
-           |> store_ok
-         in
+         let restored = restore_state current |> store_ok in
          assert (not (N.has_idle_work restored));
          assert (Option.is_none restored.active_operation);
          print_s

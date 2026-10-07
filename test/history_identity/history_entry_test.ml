@@ -16,10 +16,16 @@ let%expect_test "allocation, namespaces, payload replacement, and validation" =
   let other =
     History_entry.Allocator.create ~namespace:"session:b" ~next_sequence:0 |> ok_exn
   in
-  let first = History_entry.create ~allocator (reasoning "provider") |> ok_exn in
-  let second = History_entry.create ~allocator (reasoning "provider") |> ok_exn in
-  let third = History_entry.create ~allocator:other (reasoning "provider") |> ok_exn in
-  let replaced = History_entry.with_item first (reasoning "replacement") in
+  let first =
+    Openai.Responses_history.create ~allocator (reasoning "provider") |> ok_exn
+  in
+  let second =
+    Openai.Responses_history.create ~allocator (reasoning "provider") |> ok_exn
+  in
+  let third =
+    Openai.Responses_history.create ~allocator:other (reasoning "provider") |> ok_exn
+  in
+  let replaced = Openai.Responses_history.with_item_exn first (reasoning "replacement") in
   print_s
     [%sexp
       { first = (History_entry.Id.to_string (History_entry.id first) : string)
@@ -146,12 +152,12 @@ let%expect_test "batch and collection high-water invariants" =
   let at_watermark =
     History_entry.Id.create ~namespace:"batch" ~sequence:8
     |> ok_exn
-    |> fun id -> History_entry.create_with_id ~id item
+    |> fun id -> Openai.Responses_history.create_with_id_exn ~id item
   in
   let foreign =
     History_entry.Id.create ~namespace:"foreign" ~sequence:Int.max_value
     |> ok_exn
-    |> fun id -> History_entry.create_with_id ~id item
+    |> fun id -> Openai.Responses_history.create_with_id_exn ~id item
   in
   print_s
     [%sexp
@@ -181,8 +187,8 @@ let%expect_test "identical call IDs remain distinct history occurrences" =
       ; status = None
       }
   in
-  let first = History_entry.create ~allocator call |> ok_exn in
-  let second = History_entry.create ~allocator call |> ok_exn in
+  let first = Openai.Responses_history.create ~allocator call |> ok_exn in
+  let second = Openai.Responses_history.create ~allocator call |> ok_exn in
   print_s
     [%sexp
       (not (History_entry.Id.equal (History_entry.id first) (History_entry.id second))

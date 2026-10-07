@@ -30,7 +30,18 @@ let history_entry text =
     { id = history_id
     ; role = User
     ; kind = Message
-    ; payload = Openai.Responses.Item.jsonaf_of_t (item text)
+    ; payload =
+        History_entry.Payload.Semantic.create
+          (Message
+             { form = Input
+             ; role = User
+             ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+             ; phase = Absent
+             })
+          ~metadata:History_entry.Payload.Metadata.empty
+        |> Result.ok_or_failwith
+        |> History_entry.Payload.authored
+        |> History_entry.Payload.to_json
     ; provenance = Canonical
     ; redacted = false
     }

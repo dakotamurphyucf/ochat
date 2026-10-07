@@ -153,7 +153,9 @@ let frame_events contents =
         let events =
           match transaction with
           | Ok transaction ->
-            Agent_session.Session_persistence.durable_events transaction
+            Agent_session.Session_persistence.durable_events
+              ~limits:Document_schema.Limits.default
+              transaction
             |> Result.map_error ~f:(fun error ->
               Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
             |> Result.ok_or_failwith

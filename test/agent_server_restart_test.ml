@@ -189,10 +189,10 @@ let on_event = fun ctx state event -> match event with
           in
           let snapshot_value state =
             match state.Agent_session.Session_state.moderator with
-            | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
+            | Some (`Object [ ("identity_snapshot", encoded) ]) ->
               let snapshot =
-                Session.Moderator_state.Identity_snapshot.t_of_sexp
-                  (Sexp.of_string encoded)
+                Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+                |> Result.ok_or_failwith
               in
               (match snapshot.current_state with
                | Session.Snapshot.Int value -> value
@@ -755,7 +755,7 @@ let%expect_test "shutdown gives admitted timer delivery a bounded grace before r
          and the shutdown fiber's grace sleep are controlled by the test. This
          keeps a slow machine from expiring grace while we release the gate. *)
       let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
-      let mono_clock, pause_mono, _resume_mono, advance_mono =
+      let mono_clock, pause_mono, resume_mono, advance_mono =
         controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
       in
       pause_mono ();
@@ -859,8 +859,22 @@ let on_event ctx state event = match event with
                           Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
                           wait predicate
                       in
+                      let rec wait_initial_schedule () =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match state.schedules with
+                        | [] ->
+                          (* Bootstrap the same idle work as the scheduler without
+                             advancing the timer before the checkpoint is held. *)
+                          Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
+                          |> protocol_ok
+                          |> ignore;
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait_initial_schedule ()
+                        | [ { status = Scheduled; _ } ] -> ()
+                        | _ -> failwith "initial timer must remain scheduled"
+                      in
                       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-                        ignore (wait (fun state -> not (List.is_empty state.schedules)));
+                        wait_initial_schedule ();
                         let registered, register = Eio.Promise.create () in
                         let expire, expire_grace = Eio.Promise.create () in
                         Exn.protect
@@ -875,6 +889,10 @@ let on_event ctx state event = match event with
                                is held, so even its initial admission is ordered. *)
                                 logical_now := !logical_now +. 1.;
                                 advance_mono 1.;
+                                (* Keep scheduler polling alive after the due-time
+                                   step. The held gate and separate grace promise
+                                   still order delivery admission and retirement. *)
+                                resume_mono ();
                                 ignore
                                   (wait (fun state ->
                                      List.exists state.schedules ~f:(fun timer ->
@@ -1176,9 +1194,10 @@ let%expect_test
         in
         let reviews state =
           match state.Agent_session.Session_state.moderator with
-          | Some (`Object [ ("identity_snapshot_sexp", `String value) ]) ->
+          | Some (`Object [ ("identity_snapshot", value) ]) ->
             let snapshot =
-              Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string value)
+              Session.Moderator_state.Identity_snapshot.of_jsonaf value
+              |> Result.ok_or_failwith
             in
             (match snapshot.current_state with
              | Session.Snapshot.Array reviews -> List.length reviews
@@ -1534,7 +1553,7 @@ let%test_unit
               entry.actor
               ~attachment_id:attachment.id
               [ Agent_session.History_codec.to_protocol
-                  (History_entry.create_with_id ~id item)
+                  (Openai.Responses_history.create_with_id_exn ~id item)
               ]
             |> protocol_ok
             |> ignore;
@@ -2109,12 +2128,10 @@ let on_event : context -> int -> event -> int task = fun ctx state event -> Task
             let snapshot =
               match state.moderator with
               | Some (`Object fields) ->
-                (match
-                   List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal
-                 with
-                 | Some (`String encoded) ->
-                   Session.Moderator_state.Identity_snapshot.t_of_sexp
-                     (Sexp.of_string encoded)
+                (match List.Assoc.find fields "identity_snapshot" ~equal:String.equal with
+                 | Some encoded ->
+                   Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+                   |> Result.ok_or_failwith
                  | _ -> assert false)
               | _ -> assert false
             in

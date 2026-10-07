@@ -18,11 +18,15 @@ let%expect_test
     ~inspect_request:(fun request inputs ->
       match request, !rendered with
       | 3, Some entry ->
+        let payload =
+          Agent_session.History_codec.of_canonical entry
+          |> protocol_ok
+          |> Openai.Responses_history.item_exn
+          |> Openai.Responses.Item.jsonaf_of_t
+        in
         let matches =
           List.filter inputs ~f:(fun item ->
-            Jsonaf.exactly_equal
-              (Openai.Responses.Item.jsonaf_of_t item)
-              entry.P.History.payload)
+            Jsonaf.exactly_equal (Openai.Responses.Item.jsonaf_of_t item) payload)
         in
         [%test_eq: int] 1 (List.length matches);
         (match List.hd_exn matches with

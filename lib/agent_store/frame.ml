@@ -68,23 +68,42 @@ let validate_payload_length ~max_payload_length length =
   else Ok ()
 ;;
 
+module Encoded = struct
+  type t =
+    { bytes : string
+    ; checksum_hex : string
+    }
+
+  let bytes t = t.bytes
+  let checksum_hex t = t.checksum_hex
+
+  let create ~max_payload_length ~flags payload =
+    let open Result.Let_syntax in
+    let%bind () = validate_flags flags in
+    let payload_length = String.length payload in
+    let%map () = validate_payload_length ~max_payload_length payload_length in
+    let framed_length = header_length + payload_length + checksum_length in
+    let bytes = Bytes.create framed_length in
+    Stdlib.Bytes.blit_string magic 0 bytes 0 (String.length magic);
+    set_uint16_be bytes 8 current_version;
+    set_uint16_be bytes 10 flags;
+    set_int64_be bytes 12 (Int64.of_int payload_length);
+    Stdlib.Bytes.blit_string payload 0 bytes header_length payload_length;
+    let checksum_offset = header_length + payload_length in
+    let body = Stdlib.Bytes.sub_string bytes 0 checksum_offset in
+    let checksum = Digestif.SHA256.digest_string body in
+    Stdlib.Bytes.blit_string
+      (Digestif.SHA256.to_raw_string checksum)
+      0
+      bytes
+      checksum_offset
+      checksum_length;
+    { bytes = Bytes.to_string bytes; checksum_hex = Digestif.SHA256.to_hex checksum }
+  ;;
+end
+
 let encode ~max_payload_length ~flags payload =
-  let open Result.Let_syntax in
-  let%bind () = validate_flags flags in
-  let payload_length = String.length payload in
-  let%map () = validate_payload_length ~max_payload_length payload_length in
-  let framed_length = header_length + payload_length + checksum_length in
-  let bytes = Bytes.create framed_length in
-  Stdlib.Bytes.blit_string magic 0 bytes 0 (String.length magic);
-  set_uint16_be bytes 8 current_version;
-  set_uint16_be bytes 10 flags;
-  set_int64_be bytes 12 (Int64.of_int payload_length);
-  Stdlib.Bytes.blit_string payload 0 bytes header_length payload_length;
-  let checksum_offset = header_length + payload_length in
-  let body = Stdlib.Bytes.sub_string bytes 0 checksum_offset in
-  let checksum = Digestif.SHA256.(digest_string body |> to_raw_string) in
-  Stdlib.Bytes.blit_string checksum 0 bytes checksum_offset checksum_length;
-  Bytes.to_string bytes
+  Encoded.create ~max_payload_length ~flags payload |> Result.map ~f:Encoded.bytes
 ;;
 
 let decode_length ~max_payload_length contents offset =

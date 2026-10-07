@@ -73,13 +73,15 @@ let pointers state =
     | _ -> None)
 ;;
 
-let wait_idle env entry =
-  Background_shell_tests.wait env (fun () ->
+let wait_idle_with_timeout ~timeout env entry =
+  Background_shell_tests.wait ~timeout env (fun () ->
     let state = A.state entry.Agent_server.Session_registry.actor |> protocol_ok in
     Option.iter state.failure ~f:(fun error -> raise_s [%sexp (error : P.Error.t)]);
     Option.is_none state.active_operation
     && List.is_empty state.conversation.deferred_user_entries)
 ;;
+
+let wait_idle env entry = wait_idle_with_timeout ~timeout:5. env entry
 
 let with_offline_compaction f =
   (* Isolated expect-test process: always use the real compactor's offline branch,
@@ -273,12 +275,7 @@ let exercise with_session =
           match entry.P.History.provenance with
           | Runtime_authoring _ -> failwith "compaction retained reference contents"
           | _ -> ());
-        let restored =
-          State.sexp_of_t compacted
-          |> Sexp.to_string_mach
-          |> Agent_session.Session_persistence.restore_snapshot
-          |> store_ok
-        in
+        let restored = Agent_server_test_support.roundtrip_state compacted |> store_ok in
         let remembered =
           State.authoring_references restored
           |> protocol_ok
@@ -297,7 +294,9 @@ let exercise with_session =
           }
         |> protocol_ok
         |> ignore;
-        wait_idle env entry)
+        (* Fresh retrieval, validation and execution form a full foreground
+           turn, with the same completion bound as the initial turn. *)
+        wait_idle_with_timeout ~timeout:20. env entry)
       ~settle:(fun env entry -> wait_idle env entry)
       (fun (state : State.t) ->
          assert (equal_stage !stage Finished);

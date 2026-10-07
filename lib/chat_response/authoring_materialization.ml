@@ -87,6 +87,21 @@ let estimated_tokens messages =
     ~f:(fun message -> (String.length (Jsonaf.to_string message.payload) + 2) / 3)
 ;;
 
+let neutral_user_payload text =
+  let module Payload = History_entry.Payload in
+  Payload.Semantic.create
+    (Message
+       { form = Input
+       ; role = User
+       ; content = [ Payload.Content.Text { text; annotations = []; logprobs = Absent } ]
+       ; phase = Absent
+       })
+    ~metadata:Payload.Metadata.empty
+  |> Result.ok_or_failwith
+  |> Payload.authored
+  |> Payload.to_json
+;;
+
 let entry (message : message) ~id =
   H.
     { id
@@ -180,15 +195,7 @@ let create ?max_tokens ~context ~host ~policy ~capabilities ~scope () =
         ^ "]\n"
         ^ String.concat ~sep:"\n\n" (List.map topic.fragments ~f:(fun f -> f.Corpus.text))
       in
-      let module R = Openai.Responses in
-      let payload =
-        R.Item.Input_message
-          { role = User
-          ; content = [ R.Input_message.Text { text = content; _type = "input_text" } ]
-          ; _type = "message"
-          }
-        |> R.Item.jsonaf_of_t
-      in
+      let payload = neutral_user_payload content in
       let%map guidance =
         G.create
           ~context_identity
@@ -282,16 +289,7 @@ let refresh t ~known ~effective =
   in
   let%map pointers =
     List.map pointers ~f:(fun pointer ->
-      let module R = Openai.Responses in
-      let payload =
-        R.Item.Input_message
-          { role = User
-          ; content =
-              [ R.Input_message.Text { text = pointer.text; _type = "input_text" } ]
-          ; _type = "message"
-          }
-        |> R.Item.jsonaf_of_t
-      in
+      let payload = neutral_user_payload pointer.text in
       let create =
         match pointer.surface_id with
         | None -> G.create ~purpose:Rediscovery

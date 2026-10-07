@@ -146,7 +146,9 @@ let%expect_test "provider input contains committed guidance once across foregrou
         List.iter saved ~f:(fun entry ->
           assert (
             List.exists inputs ~f:(fun item ->
-              Jsonaf.exactly_equal entry.payload (Openai.Responses.Item.jsonaf_of_t item))));
+              Jsonaf.exactly_equal
+                (runtime_history_payload entry)
+                (Openai.Responses.Item.jsonaf_of_t item))));
         Stdlib.List.to_seq []
       in
       Agent_session.Turn_worker.create
@@ -160,12 +162,7 @@ let%expect_test "provider input contains committed guidance once across foregrou
         (worker_config env post_stream))
     (fun _ actor writer backend ->
        let first = finished actor in
-       let restored =
-         Agent_session.Session_state.sexp_of_t first
-         |> Sexp.to_string_mach
-         |> Agent_session.Session_persistence.restore_snapshot
-         |> store_ok
-       in
+       let restored = restore_state first |> store_ok in
        assert (List.equal H.equal_entry (guidance first) (guidance restored));
        let references =
          Agent_session.Session_state.authoring_references restored
@@ -246,7 +243,7 @@ let%expect_test
           assert (
             List.exists inputs ~f:(fun item ->
               Jsonaf.exactly_equal
-                entry.H.payload
+                (runtime_history_payload entry)
                 (Openai.Responses.Item.jsonaf_of_t item))));
         (match !policy with
          | Preload _ -> assert (List.length saved > 1)
@@ -287,11 +284,7 @@ let%expect_test
        |> ignore;
        let compacted = finished actor in
        assert (!requests = 1);
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Agent_session.Session_state.sexp_of_t compacted |> Sexp.to_string_mach)
-         |> store_ok
-       in
+       let restored = restore_state compacted |> store_ok in
        let known =
          Agent_session.Session_state.authoring_references restored
          |> protocol_ok
@@ -373,8 +366,8 @@ let%expect_test
                   ; change_id = 0
                   ; script_label = None
                   ; value =
-                      Chatml.Chatml_value_codec.import_json old.payload
-                      |> Session.Snapshot.of_value
+                      old.payload
+                      |> History_entry.Payload.of_json
                       |> Result.ok_or_failwith
                   }
               ]

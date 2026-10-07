@@ -33,6 +33,11 @@
   managed_submission_tracking
   prompt_catalog
   security_grant
+  session_record_shapes
+  persistence_codec
+  session_state_document
+  session_delta_document
+  durable_event_document
   session_state
   moderator_checkpoint
   delegation_authority
@@ -117,6 +122,7 @@
   digestif
   eio
   eio.unix
+  ochat.document_schema
   ochat.agent_protocol
   ochat.agent_store
   chatmd

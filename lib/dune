@@ -10,7 +10,7 @@
  (name history_entry)
  (public_name ochat.history_entry)
  (modules history_entry)
- (libraries core jsonaf openai)
+ (libraries core jsonaf jsonaf_ext document_schema)
  (preprocess
   (pps ppx_jane)))
 
@@ -21,7 +21,7 @@
 (library
  (name session)
  (public_name ochat.session)
- (modules session session_store)
+ (modules session session_store session_json)
  (wrapped false)
  (libraries
   core
@@ -31,6 +31,8 @@
   openai
   bin_prot_utils_eio
   chatml
+  jsonaf
+  document_schema
   history_entry)
  (preprocess
   (pps ppx_jane)))

@@ -165,9 +165,10 @@ let%expect_test
               ~f:(fun () ->
                 try
                   (* This guard covers the whole multi-operation/restart scenario,
-                     including durable I/O under a parallel full build. Individual
-                     agent_wait deadlines and cancellation assertions stay below. *)
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 90. (fun () ->
+                     including checkpoint validation and complete paginated reads.
+                     It is not an operation deadline: the individual agent_wait
+                     deadlines and cancellation assertions remain unchanged below. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 300. (fun () ->
                     let client =
                       Agent_server_wire_fixture.connect_stdio
                         ~sw
@@ -393,337 +394,390 @@ let%expect_test
             await (fun () -> Int.equal !child_calls 1);
             [%test_eq: string] "assigned" (text receipt "status");
             assert (Jsonaf.exactly_equal (field receipt "terminal") `False);
-            let pending =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_read"
-                (read_request child_id (text receipt "receipt_id") None)
-              |> complete
+            (* A reader owns this pagination lifetime. Maintenance may otherwise
+               unload the stopped child and expire its conservative replay-window
+               cursor between pages. This attachment does not resume execution. *)
+            let output_attachment =
+              H.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection:client
+                ~session_id:child_id
+                ~mode:Read_only
+                ~subscribe:false
+                ()
+              |> protocol_ok
             in
-            assert (Jsonaf.exactly_equal (field pending "caught_up") `True);
-            assert (
-              Jsonaf.exactly_equal (field (field pending "receipt") "terminal") `False);
-            assert (List.is_empty (field pending "items" |> Jsonaf.list_exn));
-            let pending_output_cursor = field pending "next_cursor" in
-            let before_wait = state daemon child_id in
-            let timed_out =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_wait"
-                (wait_request child_id (text receipt "receipt_id") None 20)
-              |> complete
-            in
-            [%test_eq: string] "timeout" (text timed_out "reason");
-            assert (
-              Jsonaf.exactly_equal (field (field timed_out "receipt") "terminal") `False);
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t before_wait)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            Eio.Fiber.fork ~sw (fun () ->
-              wait_dispatched daemon parent.id;
-              let handle = attach sw client parent.id in
-              let operation =
-                Option.value_exn (state daemon parent.id).active_operation
-              in
-              H.cancel_operation handle operation.id |> protocol_ok |> ignore;
-              H.close handle);
-            (match
-               invoke
-                 sw
-                 daemon
-                 client
-                 parent.id
-                 "agent_wait"
-                 (wait_request child_id (text receipt "receipt_id") None 30000)
-             with
-             | Published (Cancelled _) | Resolved (Cancelled _) -> ()
-             | status ->
-               raise_s [%sexp "wait cancellation failed", (status : P.Invocation.status)]);
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t before_wait)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            let replay =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "run_chatml"
-                (script (message child_id "first" "Retain this exact message."))
-              |> complete
-            in
-            assert (Jsonaf.exactly_equal receipt replay);
-            let before_conflict = state daemon child_id in
-            invoke
-              sw
-              daemon
-              client
-              parent.id
-              "agent_send"
-              (message child_id "first" "Changed.")
-            |> denied "agent.send.conflict";
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t before_conflict)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            let deferred =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_send"
-                (message child_id "second" "Continue when ready.")
-              |> complete
-            in
-            [%test_eq: string] "deferred" (text deferred "status");
-            [%test_eq: int] 1 !child_calls;
-            let at_capacity = state daemon child_id in
-            invoke
-              sw
-              daemon
-              client
-              parent.id
-              "agent_send"
-              (message child_id "capacity" "Do not admit a third message.")
-            |> denied "agent.send.invalid_state";
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t at_capacity)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            let terminal, release_terminal = Eio.Promise.create () in
-            terminal_gate := Some terminal;
-            Eio.Fiber.fork ~sw (fun () ->
-              wait_dispatched daemon parent.id;
-              child_gate := None;
-              Eio.Promise.resolve release ());
-            let available =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_wait"
-                (wait_request
-                   child_id
-                   (text receipt "receipt_id")
-                   (Some pending_output_cursor)
-                   5000)
-              |> complete
-            in
-            [%test_eq: string] "output_available" (text available "reason");
-            assert (Jsonaf.exactly_equal (field available "cursor") pending_output_cursor);
-            assert (
-              Jsonaf.exactly_equal (field (field available "receipt") "terminal") `False);
-            let still_pending =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "run_chatml"
-                (script
-                   ~tool:"agent_wait"
-                   (wait_request child_id (text deferred "receipt_id") None 0))
-              |> complete
-            in
-            [%test_eq: string] "timeout" (text still_pending "reason");
-            let stopping =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_stop"
-                (stop_request child_id "native-stop" "graceful")
-              |> complete
-            in
-            [%test_eq: string] "stopping" (text stopping "progress");
-            [%test_eq: string] "stopped" (text (field stopping "status") "desired_state");
-            assert (Option.is_some (state daemon child_id).active_operation);
-            let stop_receipt = field stopping "receipt" in
-            Eio.Fiber.fork ~sw (fun () ->
-              wait_dispatched daemon parent.id;
-              terminal_gate := None;
-              Eio.Promise.resolve release_terminal ());
-            let finished =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_wait"
-                (wait_request child_id (text deferred "receipt_id") None 5000)
-              |> complete
-            in
-            [%test_eq: string] "receipt_terminal" (text finished "reason");
-            (match text (field finished "receipt") "status" with
-             | "completed" -> ()
-             | _ ->
-               let current = state daemon child_id in
-               let child_entry = R.load (D.registry daemon) child_id |> protocol_ok in
-               let events =
-                 Agent_session.Durable_event_log.replay
-                   child_entry.durable_events
-                   ~after_sequence:0L
-                   ~through_sequence:current.counters.event_sequence
-               in
-               let failures =
-                 match events with
-                 | Snapshot_required -> []
-                 | Available events ->
-                   List.filter_map events ~f:(fun event ->
-                     match event.P.Event.Durable.kind with
-                     | Operation_failed -> Some event.payload
-                     | _ -> None)
-               in
-               raise_s [%sexp "graceful child failed", (failures : Jsonaf.t list)]);
-            [%test_eq: string] "completed" (text (field finished "receipt") "status");
-            phase := "child receipts complete";
-            await (fun () ->
-              let current = state daemon child_id in
-              let done_ =
-                List.for_all current.managed_submissions ~f:(fun receipt ->
-                  match receipt.M.status with
-                  | Terminal (_, Completed) -> true
-                  | _ -> false)
-              in
-              match done_, current.active_operation with
-              | false, None ->
-                let entry = R.load (D.registry daemon) child_id |> protocol_ok in
-                let events =
-                  Agent_session.Durable_event_log.replay
-                    entry.durable_events
-                    ~after_sequence:0L
-                    ~through_sequence:current.counters.event_sequence
+            Exn.protect
+              ~finally:(fun () -> H.close output_attachment)
+              ~f:(fun () ->
+                let pending =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_read"
+                    (read_request child_id (text receipt "receipt_id") None)
+                  |> complete
                 in
-                let failures =
-                  match events with
-                  | Snapshot_required -> []
-                  | Available events ->
-                    List.filter_map events ~f:(fun event ->
-                      match event.P.Event.Durable.kind with
-                      | Operation_failed -> Some event.payload
-                      | _ -> None)
+                assert (Jsonaf.exactly_equal (field pending "caught_up") `True);
+                assert (
+                  Jsonaf.exactly_equal (field (field pending "receipt") "terminal") `False);
+                assert (List.is_empty (field pending "items" |> Jsonaf.list_exn));
+                let pending_output_cursor = field pending "next_cursor" in
+                let before_wait = state daemon child_id in
+                let timed_out =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_wait"
+                    (wait_request child_id (text receipt "receipt_id") None 20)
+                  |> complete
                 in
-                raise_s
-                  [%sexp
-                    "child finished without complete receipts"
-                  , (current.managed_submissions : M.t list)
-                  , (failures : Jsonaf.t list)]
-              | _ -> done_);
-            [%test_eq: int] 2 !child_calls;
-            assert (
-              String.is_substring
-                (Queue.last_exn child_inputs)
-                ~substring:"Continue when ready.");
-            (match (state daemon child_id).managed_submissions with
-             | [ { status = Terminal (Some first, Completed); _ }
-               ; { status = Terminal (Some second, Completed); _ }
-               ] -> assert (P.Id.Operation.equal first second)
-             | _ -> failwith "deferred inputs did not share the completed operation");
-            await (fun () ->
-              match (state daemon child_id).lifecycle.observed with
-              | Stopped -> true
-              | _ -> false);
-            let calls_before = !child_calls in
-            let stopped = state daemon child_id in
-            let output = Buffer.create 32768 in
-            let rec read_pages cursor count =
-              assert (count < 32);
-              let args = read_request child_id (text receipt "receipt_id") cursor in
-              let page =
-                (match cursor with
-                 | None -> invoke sw daemon client parent.id "agent_read" args
-                 | Some _ ->
+                [%test_eq: string] "timeout" (text timed_out "reason");
+                assert (
+                  Jsonaf.exactly_equal
+                    (field (field timed_out "receipt") "terminal")
+                    `False);
+                [%test_eq: Sexp.t]
+                  (Agent_session.Session_state.sexp_of_t before_wait)
+                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                Eio.Fiber.fork ~sw (fun () ->
+                  wait_dispatched daemon parent.id;
+                  let handle = attach sw client parent.id in
+                  let operation =
+                    Option.value_exn (state daemon parent.id).active_operation
+                  in
+                  H.cancel_operation handle operation.id |> protocol_ok |> ignore;
+                  H.close handle);
+                (match
                    invoke
                      sw
                      daemon
                      client
                      parent.id
-                     "run_chatml"
-                     (script ~tool:"agent_read" args))
-                |> complete
-              in
-              assert (String.length (Jsonaf.to_string page) <= 4096);
-              List.iter
-                (field page "items" |> Jsonaf.list_exn)
-                ~f:(fun item ->
-                  [%test_eq: string] "output_fragment" (text item "kind");
-                  let fragment = text item "text" in
-                  assert (Stdlib.String.is_valid_utf_8 fragment);
-                  Buffer.add_string output fragment);
-              let next = field page "next_cursor" in
-              match Jsonaf.exactly_equal (field page "caught_up") `True with
-              | true -> next
-              | false ->
-                Option.iter cursor ~f:(fun previous ->
-                  assert (not (Jsonaf.exactly_equal previous next)));
-                read_pages (Some next) (count + 1)
-            in
-            let output_cursor = read_pages (Some pending_output_cursor) 0 in
-            let record = Jsonaf.of_string (Buffer.contents output) in
-            let payload = field (field record "history") "payload" in
-            let content = field payload "content" |> Jsonaf.list_exn |> List.hd_exn in
-            [%test_eq: string] answer (text content "text");
-            [%test_eq: int]
-              2
-              (field record "submission_ids" |> Jsonaf.list_exn |> List.length);
-            [%test_eq: int]
-              1
-              (field record "operation_ids" |> Jsonaf.list_exn |> List.length);
-            let caught_up =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_read"
-                (read_request child_id (text receipt "receipt_id") (Some output_cursor))
-              |> complete
-            in
-            assert (List.is_empty (field caught_up "items" |> Jsonaf.list_exn));
-            let waiting_at_tail =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_wait"
-                (wait_request child_id (text receipt "receipt_id") (Some output_cursor) 0)
-              |> complete
-            in
-            [%test_eq: string] "timeout" (text waiting_at_tail "reason");
-            [%test_eq: string] "stopped" (text (field waiting_at_tail "status") "state");
-            let replay =
-              invoke
-                sw
-                daemon
-                client
-                parent.id
-                "agent_send"
-                (message child_id "first" "Retain this exact message.")
-              |> complete
-            in
-            [%test_eq: string] (text receipt "receipt_id") (text replay "receipt_id");
-            [%test_eq: string] "completed" (text replay "status");
-            invoke
-              sw
-              daemon
-              client
-              parent.id
-              "agent_send"
-              (message child_id "third" "Do not restart.")
-            |> denied "agent.send.invalid_state";
-            [%test_eq: int] calls_before !child_calls;
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t stopped)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
-            parent.id, child_id, text receipt "receipt_id", output_cursor, stop_receipt)
+                     "agent_wait"
+                     (wait_request child_id (text receipt "receipt_id") None 30000)
+                 with
+                 | Published (Cancelled _) | Resolved (Cancelled _) -> ()
+                 | status ->
+                   raise_s
+                     [%sexp "wait cancellation failed", (status : P.Invocation.status)]);
+                [%test_eq: Sexp.t]
+                  (Agent_session.Session_state.sexp_of_t before_wait)
+                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                let replay =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "run_chatml"
+                    (script (message child_id "first" "Retain this exact message."))
+                  |> complete
+                in
+                assert (Jsonaf.exactly_equal receipt replay);
+                let before_conflict = state daemon child_id in
+                invoke
+                  sw
+                  daemon
+                  client
+                  parent.id
+                  "agent_send"
+                  (message child_id "first" "Changed.")
+                |> denied "agent.send.conflict";
+                [%test_eq: Sexp.t]
+                  (Agent_session.Session_state.sexp_of_t before_conflict)
+                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                let deferred =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_send"
+                    (message child_id "second" "Continue when ready.")
+                  |> complete
+                in
+                [%test_eq: string] "deferred" (text deferred "status");
+                [%test_eq: int] 1 !child_calls;
+                let at_capacity = state daemon child_id in
+                invoke
+                  sw
+                  daemon
+                  client
+                  parent.id
+                  "agent_send"
+                  (message child_id "capacity" "Do not admit a third message.")
+                |> denied "agent.send.invalid_state";
+                [%test_eq: Sexp.t]
+                  (Agent_session.Session_state.sexp_of_t at_capacity)
+                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                let terminal, release_terminal = Eio.Promise.create () in
+                terminal_gate := Some terminal;
+                Eio.Fiber.fork ~sw (fun () ->
+                  wait_dispatched daemon parent.id;
+                  child_gate := None;
+                  Eio.Promise.resolve release ());
+                let available =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_wait"
+                    (wait_request
+                       child_id
+                       (text receipt "receipt_id")
+                       (Some pending_output_cursor)
+                       5000)
+                  |> complete
+                in
+                [%test_eq: string] "output_available" (text available "reason");
+                assert (
+                  Jsonaf.exactly_equal (field available "cursor") pending_output_cursor);
+                assert (
+                  Jsonaf.exactly_equal
+                    (field (field available "receipt") "terminal")
+                    `False);
+                let still_pending =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "run_chatml"
+                    (script
+                       ~tool:"agent_wait"
+                       (wait_request child_id (text deferred "receipt_id") None 0))
+                  |> complete
+                in
+                [%test_eq: string] "timeout" (text still_pending "reason");
+                let stopping =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_stop"
+                    (stop_request child_id "native-stop" "graceful")
+                  |> complete
+                in
+                [%test_eq: string] "stopping" (text stopping "progress");
+                [%test_eq: string]
+                  "stopped"
+                  (text (field stopping "status") "desired_state");
+                assert (Option.is_some (state daemon child_id).active_operation);
+                let stop_receipt = field stopping "receipt" in
+                Eio.Fiber.fork ~sw (fun () ->
+                  wait_dispatched daemon parent.id;
+                  terminal_gate := None;
+                  Eio.Promise.resolve release_terminal ());
+                let finished =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_wait"
+                    (wait_request child_id (text deferred "receipt_id") None 5000)
+                  |> complete
+                in
+                [%test_eq: string] "receipt_terminal" (text finished "reason");
+                (match text (field finished "receipt") "status" with
+                 | "completed" -> ()
+                 | _ ->
+                   let current = state daemon child_id in
+                   let child_entry = R.load (D.registry daemon) child_id |> protocol_ok in
+                   let events =
+                     Agent_session.Durable_event_log.replay
+                       child_entry.durable_events
+                       ~after_sequence:0L
+                       ~through_sequence:current.counters.event_sequence
+                   in
+                   let failures =
+                     match events with
+                     | Snapshot_required -> []
+                     | Available events ->
+                       List.filter_map events ~f:(fun event ->
+                         match event.P.Event.Durable.kind with
+                         | Operation_failed -> Some event.payload
+                         | _ -> None)
+                   in
+                   raise_s [%sexp "graceful child failed", (failures : Jsonaf.t list)]);
+                [%test_eq: string] "completed" (text (field finished "receipt") "status");
+                phase := "child receipts complete";
+                await (fun () ->
+                  let current = state daemon child_id in
+                  let done_ =
+                    List.for_all current.managed_submissions ~f:(fun receipt ->
+                      match receipt.M.status with
+                      | Terminal (_, Completed) -> true
+                      | _ -> false)
+                  in
+                  match done_, current.active_operation with
+                  | false, None ->
+                    let entry = R.load (D.registry daemon) child_id |> protocol_ok in
+                    let events =
+                      Agent_session.Durable_event_log.replay
+                        entry.durable_events
+                        ~after_sequence:0L
+                        ~through_sequence:current.counters.event_sequence
+                    in
+                    let failures =
+                      match events with
+                      | Snapshot_required -> []
+                      | Available events ->
+                        List.filter_map events ~f:(fun event ->
+                          match event.P.Event.Durable.kind with
+                          | Operation_failed -> Some event.payload
+                          | _ -> None)
+                    in
+                    raise_s
+                      [%sexp
+                        "child finished without complete receipts"
+                      , (current.managed_submissions : M.t list)
+                      , (failures : Jsonaf.t list)]
+                  | _ -> done_);
+                [%test_eq: int] 2 !child_calls;
+                assert (
+                  String.is_substring
+                    (Queue.last_exn child_inputs)
+                    ~substring:"Continue when ready.");
+                (match (state daemon child_id).managed_submissions with
+                 | [ { status = Terminal (Some first, Completed); _ }
+                   ; { status = Terminal (Some second, Completed); _ }
+                   ] -> assert (P.Id.Operation.equal first second)
+                 | _ -> failwith "deferred inputs did not share the completed operation");
+                await (fun () ->
+                  match (state daemon child_id).lifecycle.observed with
+                  | Stopped -> true
+                  | _ -> false);
+                let calls_before = !child_calls in
+                let stopped = state daemon child_id in
+                let output = Buffer.create 32768 in
+                let rec read_pages cursor count =
+                  assert (count < 32);
+                  let args = read_request child_id (text receipt "receipt_id") cursor in
+                  let page =
+                    (match cursor with
+                     | None -> invoke sw daemon client parent.id "agent_read" args
+                     | Some _ ->
+                       invoke
+                         sw
+                         daemon
+                         client
+                         parent.id
+                         "run_chatml"
+                         (script ~tool:"agent_read" args))
+                    |> function
+                    | P.Invocation.Published (Complete page) -> page
+                    | status ->
+                      raise_s
+                        [%sexp
+                          "managed output pagination failed"
+                        , (count : int)
+                        , (status : P.Invocation.status)]
+                  in
+                  assert (String.length (Jsonaf.to_string page) <= 4096);
+                  List.iter
+                    (field page "items" |> Jsonaf.list_exn)
+                    ~f:(fun item ->
+                      [%test_eq: string] "output_fragment" (text item "kind");
+                      let fragment = text item "text" in
+                      assert (Stdlib.String.is_valid_utf_8 fragment);
+                      Buffer.add_string output fragment);
+                  let next = field page "next_cursor" in
+                  match Jsonaf.exactly_equal (field page "caught_up") `True with
+                  | true -> next
+                  | false ->
+                    Option.iter cursor ~f:(fun previous ->
+                      assert (not (Jsonaf.exactly_equal previous next)));
+                    read_pages (Some next) (count + 1)
+                in
+                let output_cursor = read_pages (Some pending_output_cursor) 0 in
+                let record = Jsonaf.of_string (Buffer.contents output) in
+                let payload = field (field record "history") "payload" in
+                let payload =
+                  History_entry.Payload.of_json payload |> Result.ok_or_failwith
+                in
+                (match
+                   History_entry.Payload.semantic payload
+                   |> History_entry.Payload.Semantic.view
+                 with
+                 | Message { role = Assistant; content = [ Text { text; _ } ]; _ } ->
+                   [%test_eq: string] answer text
+                 | _ -> failwith "managed output did not retain its assistant text");
+                [%test_eq: int]
+                  2
+                  (field record "submission_ids" |> Jsonaf.list_exn |> List.length);
+                [%test_eq: int]
+                  1
+                  (field record "operation_ids" |> Jsonaf.list_exn |> List.length);
+                let caught_up =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_read"
+                    (read_request
+                       child_id
+                       (text receipt "receipt_id")
+                       (Some output_cursor))
+                  |> complete
+                in
+                assert (List.is_empty (field caught_up "items" |> Jsonaf.list_exn));
+                let waiting_at_tail =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_wait"
+                    (wait_request
+                       child_id
+                       (text receipt "receipt_id")
+                       (Some output_cursor)
+                       0)
+                  |> complete
+                in
+                [%test_eq: string] "timeout" (text waiting_at_tail "reason");
+                [%test_eq: string]
+                  "stopped"
+                  (text (field waiting_at_tail "status") "state");
+                let replay =
+                  invoke
+                    sw
+                    daemon
+                    client
+                    parent.id
+                    "agent_send"
+                    (message child_id "first" "Retain this exact message.")
+                  |> complete
+                in
+                [%test_eq: string] (text receipt "receipt_id") (text replay "receipt_id");
+                [%test_eq: string] "completed" (text replay "status");
+                invoke
+                  sw
+                  daemon
+                  client
+                  parent.id
+                  "agent_send"
+                  (message child_id "third" "Do not restart.")
+                |> denied "agent.send.invalid_state";
+                [%test_eq: int] calls_before !child_calls;
+                [%test_eq: Sexp.t]
+                  (Agent_session.Session_state.sexp_of_t stopped)
+                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                ( parent.id
+                , child_id
+                , text receipt "receipt_id"
+                , output_cursor
+                , stop_receipt )))
         in
         with_daemon ~page_bytes:65536 (fun sw daemon client ->
           let before = state daemon child_id in

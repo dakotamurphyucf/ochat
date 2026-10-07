@@ -104,11 +104,7 @@ let%expect_test
         ~payloads:[]
       |> protocol_ok
     in
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t committed.state))
-      |> store_ok
-    in
+    let restored = restore_state committed.state |> store_ok in
     assert (Jsonaf.exactly_equal envelope (D.to_json (List.hd_exn restored.deliveries)));
     assert (
       Result.is_error

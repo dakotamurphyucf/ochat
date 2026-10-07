@@ -105,7 +105,8 @@ let with_actor
           ~initial_state:initial
           ~operation_worker:None
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit ~previous next ->
                   match reject_save next with
                   | true -> Error (handoff_error "injected job transition failure")

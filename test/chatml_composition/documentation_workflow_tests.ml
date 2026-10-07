@@ -58,9 +58,9 @@ let complete = function
   | outcome -> raise_s [%sexp (outcome : P.Invocation.outcome)]
 ;;
 
-let finish_call env host call_id =
+let finish_call ?timeout env host call_id =
   try
-    Background_shell_tests.wait env (fun () ->
+    Background_shell_tests.wait ?timeout env (fun () ->
       let snapshot = Host.snapshot host in
       List.iter snapshot.permissions ~f:(fun permission ->
         if
@@ -88,7 +88,7 @@ let finish_call env host call_id =
         match
           Agent_session.History_codec.of_protocol entry
           |> protocol_ok
-          |> History_entry.item
+          |> Openai.Responses_history.item_exn
         with
         | Openai.Responses.Item.Function_call_output { call_id = actual; _ } ->
           String.equal actual call_id
@@ -303,7 +303,7 @@ let%expect_test
              match
                Agent_session.History_codec.of_protocol entry
                |> protocol_ok
-               |> History_entry.item
+               |> Openai.Responses_history.item_exn
              with
              | Openai.Responses.Item.Function_call_output { call_id = "begin"; _ } -> true
              | _ -> false)

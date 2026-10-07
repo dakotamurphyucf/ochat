@@ -56,13 +56,10 @@ let%expect_test
     let escaped =
       sprintf "\"\\u%04x%s\"" (Char.to_int id.[0]) (String.drop_prefix id 1)
     in
-    let rec escape = function
-      | Sexp.Atom value when String.equal value encoded -> Sexp.Atom escaped
-      | List values -> List (List.map values ~f:escape)
-      | value -> value
-    in
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
-    let bytes = Eio.Path.load file |> Sexp.of_string |> escape |> Sexp.to_string_mach in
+    let bytes =
+      String.substr_replace_all (Eio.Path.load file) ~pattern:encoded ~with_:escaped
+    in
     Eio.Path.save ~create:(`Or_truncate 0o600) file bytes;
     assert (
       List.equal
@@ -192,17 +189,22 @@ let%expect_test
     assert (Result.is_error (check ~max_bytes:1 ()));
     Eio.Path.save ~create:(`Or_truncate 0o600) file "corrupt";
     assert (Result.is_error (check ()));
-    let rec duplicate (sexp : Sexp.t) : Sexp.t =
-      match sexp with
-      | Sexp.List [ Atom "records"; List [ record ] ] ->
-        List [ Atom "records"; List [ record; record ] ]
-      | List values -> List (List.map values ~f:duplicate)
-      | value -> value
+    let rec duplicate = function
+      | `Object fields ->
+        `Object
+          (List.map fields ~f:(fun (name, value) ->
+             if String.equal name "records"
+             then (
+               match value with
+               | `Array [ record ] -> name, `Array [ record; record ]
+               | _ -> name, value)
+             else name, duplicate value))
+      | json -> json
     in
     Eio.Path.save
       ~create:(`Or_truncate 0o600)
       file
-      (Sexp.of_string original |> duplicate |> Sexp.to_string_mach);
+      (Jsonaf.of_string original |> duplicate |> Jsonaf.to_string);
     assert (Result.is_error (check ()));
     Eio.Path.unlink file;
     let target = Filename.concat root "foreign" in

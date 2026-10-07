@@ -22,7 +22,16 @@ let reached env filename =
       |> Agent_store.Transaction.decode
       |> F.store_ok
     in
-    (match Sexp.of_string transaction.delta |> Delta.t_of_sexp |> accepted with
+    (match
+       Agent_session.Session_delta_document.decode
+         ~limits:Document_schema.Limits.default
+         transaction.delta
+       |> Result.map_error ~f:(fun error ->
+         Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+       |> Result.ok_or_failwith
+       |> Agent_session.Session_delta_document.value
+       |> accepted
+     with
      | false -> ()
      | true ->
        Eio.Flow.copy_string "ingress-receipt-saved\n" (Eio.Stdenv.stdout env);

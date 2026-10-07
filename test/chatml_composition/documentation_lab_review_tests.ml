@@ -14,7 +14,7 @@ let json_outcome outcome =
   | value -> value
 ;;
 
-let await_watch env host id =
+let await_watch ?timeout env host id =
   let delivered () =
     List.find_map (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
       match entry.P.History.provenance with
@@ -22,7 +22,7 @@ let await_watch env host id =
         (match
            Agent_session.History_codec.of_protocol entry
            |> protocol_ok
-           |> History_entry.item
+           |> Openai.Responses_history.item_exn
          with
          | Res.Item.Input_message { content = [ Text { text; _ } ]; _ } ->
            let _, body = String.lsplit2_exn text ~on:'\n' in
@@ -36,7 +36,7 @@ let await_watch env host id =
          | _ -> failwith "unexpected runtime notification framing")
       | _ -> None)
   in
-  Background_shell_tests.wait env (fun () ->
+  Background_shell_tests.wait ?timeout env (fun () ->
     Option.is_some (delivered ())
     && Option.is_none (Host.snapshot host).session.active_operation);
   Option.value_exn (delivered ())
@@ -135,10 +135,13 @@ let%expect_test
       { Agent_server.Daemon.default_options with model_post_stream = Some provider }
     (fun env _ host ->
        Exn.protect ~finally:release_review ~f:(fun () ->
+         (* These waits cover durable workflow completion, independently of the
+            lab's unchanged response deadline and individual script budgets. *)
+         let await_watch = await_watch ~timeout:30. in
          let invoke id name fields =
            queued := [ id, name, `Object fields ];
            Workflow.send host id "Perform the requested lab review operation.";
-           Workflow.finish_call env host id;
+           Workflow.finish_call ~timeout:30. env host id;
            Host.initial_outcome (Host.snapshot host) id
          in
          let call id name fields = invoke id name fields |> json_outcome in

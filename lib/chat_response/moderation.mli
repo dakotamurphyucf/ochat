@@ -217,9 +217,11 @@ module Identity_overlay : sig
     }
   [@@deriving sexp]
 
+  (** The replacement retains its complete neutral payload, including capture
+      provenance. Applying it preserves the canonical target host ID. *)
   type replacement =
     { target_id : History_entry.Id.t
-    ; item : Res.Item.t
+    ; item : History_entry.Payload.t
     ; change_id : int
     ; script_label : string option
     }

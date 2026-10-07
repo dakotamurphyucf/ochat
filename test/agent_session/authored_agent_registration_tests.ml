@@ -198,7 +198,7 @@ let%expect_test
         let dispatch json =
           let original, invocation = publication_call caps () in
           let call =
-            History_entry.with_item
+            Openai.Responses_history.with_item_exn
               original
               (Chat_response.Tool_call.call_item
                  ~kind:Function

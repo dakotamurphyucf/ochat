@@ -436,10 +436,35 @@ let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_delegation t in
   let%bind () =
-    List.fold_result
-      (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
-      ~init:()
-      ~f:(fun () entry -> Agent_protocol.History.validate_entry entry)
+    let%bind snapshot = Moderator_checkpoint.decode t.moderator in
+    match snapshot with
+    | None -> Ok ()
+    | Some snapshot ->
+      Session.Moderator_state.Identity_snapshot.validate_history_ids
+        snapshot
+        ~history_ids:
+          (List.map
+             (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+             ~f:(fun entry -> entry.Agent_protocol.History.id))
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    match
+      List.find_a_dup
+        (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+        ~compare:(fun a b ->
+          Agent_protocol.History.Id.compare a.Agent_protocol.History.id b.id)
+    with
+    | None -> Ok ()
+    | Some _ -> Error (Agent_protocol.Error.invalid_request "duplicate history identity")
+  in
+  let%bind () =
+    let%bind entries =
+      History_codec.all_of_protocol
+        (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+    in
+    History_entry.validate_relations entries
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
   in
   let%bind () =
     match t.automatic_turn_budget with
@@ -826,28 +851,25 @@ let effective_entry ~canonical (entry : Chat_response.Moderation.Effective_entry
 ;;
 
 let effective_history t =
-  Option.bind t.moderator ~f:(fun json ->
-    match Jsonaf.member "identity_snapshot_sexp" json with
-    | Some (`String encoded) ->
-      let snapshot =
-        Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string encoded)
-      in
-      let history =
-        History_codec.all_of_protocol t.conversation.canonical_history
-        |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-        |> Result.ok_or_failwith
-      in
-      Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
+  match Moderator_checkpoint.decode t.moderator with
+  | Error error -> failwith error.Agent_protocol.Error.message
+  | Ok None -> None
+  | Ok (Some snapshot) ->
+    let history =
+      History_codec.all_of_protocol t.conversation.canonical_history
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
       |> Result.ok_or_failwith
-      |> List.map
-           ~f:
-             (effective_entry
-                ~canonical:
-                  (History_codec.canonical_encoder
-                     ~previous:t.conversation.canonical_history))
-      |> history_window
-      |> Option.some
-    | _ -> None)
+    in
+    Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
+    |> Result.ok_or_failwith
+    |> List.map
+         ~f:
+           (effective_entry
+              ~canonical:
+                (History_codec.canonical_encoder
+                   ~previous:t.conversation.canonical_history))
+    |> history_window
+    |> Option.some
 ;;
 
 let moderator_projection t =

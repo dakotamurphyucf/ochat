@@ -14,6 +14,121 @@ let store_ok = function
     raise_s [%sexp "unexpected store error", (error : Agent_store.Store_error.t)]
 ;;
 
+let document_limits = Document_schema.Limits.default
+
+let document_ok = function
+  | Ok value -> value
+  | Error error ->
+    raise_s [%sexp "unexpected document error", (error : Document_schema.Error.t)]
+;;
+
+let state_document state =
+  Agent_session.Session_state_document.encode
+    (Agent_session.Session_state_document.authored state)
+    ~limits:document_limits
+  |> document_ok
+;;
+
+let delta_document delta =
+  Agent_session.Session_delta_document.create
+    delta
+    ~limits:document_limits
+    ~state_document:Agent_session.Session_state_document.authored
+  |> document_ok
+  |> Agent_session.Session_delta_document.document
+;;
+
+let restore_delta delta =
+  Agent_session.Session_delta_document.decode
+    ~limits:document_limits
+    (delta_document delta)
+  |> document_ok
+  |> Agent_session.Session_delta_document.value
+;;
+
+let event_document event =
+  Agent_session.Durable_event_document.create event ~limits:document_limits
+  |> document_ok
+  |> Agent_session.Durable_event_document.document
+;;
+
+let snapshot_of_state ?transaction_hash state =
+  let open Result.Let_syntax in
+  let%bind payload =
+    Agent_session.Session_state_document.encode
+      (Agent_session.Session_state_document.authored state)
+      ~limits:document_limits
+    |> Result.map_error ~f:(fun error ->
+      Agent_store.Store_error.Corrupt
+        (Sexp.to_string_hum (Document_schema.Error.sexp_of_t error)))
+  in
+  (* Standalone authored test snapshots have no journal. Supply an explicit
+     fixture anchor for progressed states; callers exercising a physical chain
+     pass its actual persisted transaction digest. *)
+  let transaction_hash =
+    Option.value
+      transaction_hash
+      ~default:
+        (if Int64.equal state.counters.transaction_sequence 0L
+         then None
+         else Some (String.make 64 'a'))
+  in
+  Agent_store.Snapshot.create
+    ~limits:document_limits
+    ~session_id:state.Agent_session.Session_state.identity.session_id
+    ~transaction_sequence:state.counters.transaction_sequence
+    ~transaction_hash
+    ~event_sequence:state.counters.event_sequence
+    ~created_at:state.identity.updated_at
+    ~prompt_artifact:
+      (Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+    ~workspace_identity:state.spec.workspace_instance.conflict_domain
+    ~payload
+;;
+
+let snapshot_record state ~transaction_hash =
+  snapshot_of_state ~transaction_hash state |> store_ok
+;;
+
+let restore_state state =
+  let open Result.Let_syntax in
+  let%bind snapshot = snapshot_of_state state in
+  let%map restored =
+    Agent_session.Session_persistence.restore_snapshot ~limits:document_limits snapshot
+  in
+  Agent_session.Session_persistence.Restored.state restored
+;;
+
+let replay_transaction state transaction =
+  Agent_session.Session_persistence.apply_transaction
+    ~limits:document_limits
+    (Agent_session.Session_persistence.Restored.authored state)
+    transaction
+  |> Result.map ~f:Agent_session.Session_persistence.Restored.state
+;;
+
+let runtime_history_payload entry =
+  Agent_session.History_codec.of_canonical entry
+  |> protocol_ok
+  |> Openai.Responses_history.item_exn
+  |> Openai.Responses.Item.jsonaf_of_t
+;;
+
+let command_audit ~principal_id ~session_id request_digest =
+  Agent_store.Idempotency_store.Command_audit.encode
+    { key =
+        { principal_id
+        ; session_id = Some session_id
+        ; method_name = "session.start"
+        ; idempotency_key =
+            Agent_protocol.Idempotency_key.of_string "fixture-start" |> protocol_ok
+        }
+    ; request_digest
+    ; protected_record = false
+    }
+  |> store_ok
+;;
+
 (* Compare the complete snapshots, including counters and recovery metadata. *)
 let assert_same_session_snapshot expected actual =
   [%test_eq: Sexp.t]
@@ -63,6 +178,14 @@ let permission_id =
 
 let operation_id =
   Agent_protocol.Id.Operation.of_string "op_agent_session_test" |> protocol_ok
+;;
+
+let archive_reference ~previous ~kind operation_id =
+  Agent_session.Compaction_archive.reference_for
+    (Agent_session.Session_state_document.authored previous)
+    ~limits:Document_schema.Limits.default
+    ~kind
+    operation_id
 ;;
 
 let history_id =
@@ -149,14 +272,8 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
 ;;
 
 let actor_entry =
-  Agent_protocol.History.
-    { id = history_id
-    ; role = User
-    ; kind = Message
-    ; payload = `Object [ "text", `String "hello" ]
-    ; provenance = Canonical
-    ; redacted = false
-    }
+  Agent_session.History_codec.user_text ~id:history_id "hello"
+  |> Agent_session.History_codec.to_protocol
 ;;
 
 let with_actor_workspace f =
@@ -294,7 +411,7 @@ let completed_worker_result
     |> Result.map_error ~f:(fun message ->
       Agent_protocol.Error.create Internal_error ~message ~retryable:false ())
   in
-  let entry = History_entry.create_with_id ~id worker_output_item in
+  let entry = Openai.Responses_history.create_with_id_exn ~id worker_output_item in
   let%map () = capabilities.commit_entry entry in
   Agent_session.Operation_worker.Summary.
     { final_history = input.history @ [ entry ]
@@ -363,7 +480,8 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
           ~initial_state:initial
           ~operation_worker:(Some worker)
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit ~previous next ->
                   if reject next
                   then Error (handoff_error "injected invocation save failure")
@@ -433,7 +551,7 @@ let publication_call caps ?(custom = false) () =
         ; status = None
         }
   in
-  let call = History_entry.create_with_id ~id item in
+  let call = Openai.Responses_history.create_with_id_exn ~id item in
   let invocation =
     Agent_protocol.Invocation.create
       { (invocation_fixture ()).context with
@@ -476,7 +594,7 @@ let publication_output
         ; status = None
         }
   in
-  History_entry.create_with_id ~id item
+  Openai.Responses_history.create_with_id_exn ~id item
 ;;
 
 let resolve_publication caps invocation =
@@ -671,7 +789,7 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
     then initial
     else (
       let call =
-        History_entry.create_with_id
+        Openai.Responses_history.create_with_id_exn
           ~id:history_id
           (Openai.Responses.Item.Function_call
              { name = "read_file"
@@ -709,7 +827,8 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
   let persistence = Agent_session.Memory_backend.persistence backend in
   let persistence =
     Agent_session.Session_actor.
-      { commit =
+      { archive_reference
+      ; commit =
           (fun ~command_audit ~previous transition ->
             if
               reject_archive

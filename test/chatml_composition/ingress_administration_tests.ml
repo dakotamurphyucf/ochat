@@ -97,9 +97,7 @@ let%expect_test
           assert (
             List.is_empty after.ingress_registrations && List.is_empty after.subscriptions);
           let restored =
-            Agent_session.Session_state.sexp_of_t after
-            |> Sexp.to_string_mach
-            |> Agent_session.Session_persistence.restore_snapshot
+            Agent_server_test_support.roundtrip_state after
             |> Background_recovery_tests.store_ok
           in
           assert (List.is_empty restored.ingress_registrations);

@@ -40,7 +40,15 @@ let reached env boundary filename =
       |> Agent_store.Transaction.decode
       |> F.store_ok
     in
-    let delta = Sexp.of_string transaction.delta |> Delta.t_of_sexp in
+    let delta =
+      Agent_session.Session_delta_document.decode
+        ~limits:Document_schema.Limits.default
+        transaction.delta
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+      |> Result.ok_or_failwith
+      |> Agent_session.Session_delta_document.value
+    in
     (match matches boundary delta with
      | false -> ()
      | true ->

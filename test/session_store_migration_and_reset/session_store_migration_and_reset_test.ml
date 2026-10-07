@@ -23,79 +23,35 @@ let with_temp_home f =
         Eio.Cancel.protect (fun () -> Eio.Path.rmtree Eio.Path.(Eio.Stdenv.fs env / root))))
 ;;
 
+let with_quiet_env env f =
+  Eio.Switch.run (fun sw ->
+    let source, sink = Eio_unix.pipe sw in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Flow.copy source (Eio.Flow.buffer_sink (Buffer.create 128)));
+    let quiet =
+      object
+        method fs = env#fs
+        method cwd = env#cwd
+        method stdin = env#stdin
+        method stdout = sink
+        method stderr = sink
+        method net = env#net
+        method domain_mgr = env#domain_mgr
+        method process_mgr = env#process_mgr
+        method clock = env#clock
+        method mono_clock = env#mono_clock
+        method secure_random = env#secure_random
+        method debug = env#debug
+        method backend_id = env#backend_id
+      end
+    in
+    Fun.protect (fun () -> f quiet) ~finally:(fun () -> Eio.Flow.close sink))
+;;
+
 let snapshot_path ~env id = Eio.Path.(Session_store.ensure_dir ~env id / "snapshot.bin")
 
 let reasoning id =
   Openai.Responses.Item.Reasoning { summary = []; _type = "reasoning"; id; status = None }
-;;
-
-let%expect_test "production store loads V0 through V3 fixtures" =
-  with_temp_home
-  @@ fun env ->
-  let history = [ reasoning "same"; reasoning "same" ] in
-  let write module_ id value =
-    Bin_prot_utils_eio.write_bin_prot module_ (snapshot_path ~env id) value
-  in
-  write
-    (module Session.Legacy.V0)
-    "v0"
-    Session.Legacy.V0.
-      { id = "v0"
-      ; prompt_file = "prompt"
-      ; history
-      ; tasks = []
-      ; kv_store = []
-      ; vfs_root = "vfs"
-      };
-  write
-    (module Session.Legacy.V1)
-    "v1"
-    Session.Legacy.V1.
-      { version = 1
-      ; id = "v1"
-      ; prompt_file = "prompt"
-      ; history
-      ; tasks = []
-      ; kv_store = []
-      ; vfs_root = "vfs"
-      };
-  write
-    (module Session.Legacy.V2)
-    "v2"
-    Session.Legacy.V2.
-      { version = 2
-      ; id = "v2"
-      ; prompt_file = "prompt"
-      ; local_prompt_copy = None
-      ; history
-      ; tasks = []
-      ; kv_store = []
-      ; vfs_root = "vfs"
-      };
-  write
-    (module Session.Legacy.V3)
-    "v3"
-    Session.Legacy.V3.
-      { version = 3
-      ; id = "v3"
-      ; prompt_file = "prompt"
-      ; local_prompt_copy = None
-      ; history
-      ; tasks = []
-      ; moderator_snapshot = None
-      ; kv_store = []
-      ; vfs_root = "vfs"
-      };
-  let loaded =
-    List.map [ "v0"; "v1"; "v2"; "v3" ] ~f:(fun id ->
-      Session_store.load_or_create ~env ~prompt_file:"unused" ~id ())
-  in
-  print_s
-    [%sexp
-      (List.map loaded ~f:(fun session ->
-         session.Session.id, List.length session.history, session.next_history_sequence)
-       : (string * int * int) list)];
-  [%expect {| ((v0 2 2) (v1 2 2) (v2 2 2) (v3 2 2)) |}]
 ;;
 
 let%expect_test "production store preserves an unreadable snapshot" =
@@ -141,7 +97,9 @@ let%test_unit "store reset modes preserve the allocator watermark" =
     History_entry.Allocator.create ~namespace:"reset" ~next_sequence:0
     |> Result.ok_or_failwith
   in
-  let entry = History_entry.create ~allocator (reasoning "r") |> Result.ok_or_failwith in
+  let entry =
+    Openai.Responses_history.create ~allocator (reasoning "r") |> Result.ok_or_failwith
+  in
   let session =
     Session.create
       ~id:"reset"
@@ -151,18 +109,11 @@ let%test_unit "store reset modes preserve the allocator watermark" =
       ()
   in
   Session_store.save_exn ~env session;
-  let silence f =
-    let previous = Caml_unix.dup Caml_unix.stdout in
-    let sink = Caml_unix.openfile "/dev/null" [ Caml_unix.O_WRONLY ] 0o600 in
-    Caml_unix.dup2 sink Caml_unix.stdout;
-    Exn.protect ~f ~finally:(fun () ->
-      Caml_unix.dup2 previous Caml_unix.stdout;
-      Caml_unix.close sink;
-      Caml_unix.close previous)
-  in
-  silence (fun () -> Session_store.reset_session ~env ~id:"reset" ~keep_history:true ());
+  with_quiet_env env (fun env ->
+    Session_store.reset_session ~env ~id:"reset" ~keep_history:true ());
   let retained = Session_store.load_or_create ~env ~prompt_file:"unused" ~id:"reset" () in
-  silence (fun () -> Session_store.reset_session ~env ~id:"reset" ~keep_history:false ());
+  with_quiet_env env (fun env ->
+    Session_store.reset_session ~env ~id:"reset" ~keep_history:false ());
   let cleared = Session_store.load_or_create ~env ~prompt_file:"unused" ~id:"reset" () in
   [%test_eq: int] (List.length retained.history) 1;
   [%test_eq: int] retained.next_history_sequence 1;
@@ -198,4 +149,130 @@ let%test_unit "failed snapshot rename cleans temporary and lock files" =
   assert (Result.is_error (Session_store.save ~env session));
   [%test_eq: string] (Eio.Path.load Eio.Path.(destination / "keep")) "preserved";
   [%test_eq: string list] (Eio.Path.read_dir dir) [ "snapshot.bin" ]
+;;
+
+let%expect_test "directory identity mismatch fails without redirecting a save" =
+  with_temp_home
+  @@ fun env ->
+  let snapshot = snapshot_path ~env "requested" in
+  Session.Io.File.write snapshot (Session.create ~id:"different" ~prompt_file:"prompt" ());
+  let bytes = Eio.Path.load snapshot in
+  let rejected =
+    Or_error.try_with (fun () ->
+      Session_store.load_or_create ~env ~prompt_file:"prompt" ~id:"requested" ())
+    |> Result.is_error
+  in
+  print_s
+    [%sexp
+      { rejected : bool
+      ; original_intact = (String.equal bytes (Eio.Path.load snapshot) : bool)
+      ; no_other_directory =
+          (not (Eio.Path.is_directory (Session_store.path ~env "different")) : bool)
+      }];
+  [%expect {| ((rejected true) (original_intact true) (no_other_directory true)) |}]
+;;
+
+let%expect_test "invalid authored values fail before making storage directories" =
+  with_temp_home
+  @@ fun env ->
+  let invalid =
+    { (Session.create ~id:"invalid" ~prompt_file:"prompt" ()) with
+      next_history_sequence = -1
+    }
+  in
+  let rejected = Session_store.save ~env invalid |> Result.is_error in
+  print_s
+    [%sexp
+      { rejected : bool
+      ; no_directory =
+          (not (Eio.Path.is_directory (Session_store.path ~env "invalid")) : bool)
+      }];
+  [%expect {| ((rejected true) (no_directory true)) |}]
+;;
+
+let%expect_test "reset changes prompt through a new immutable copy" =
+  with_temp_home
+  @@ fun env ->
+  let directory = Session_store.ensure_dir ~env "prompt-reset" in
+  let old_prompt = Eio.Path.(directory / "prompt.chatmd") in
+  let replacement = Eio.Path.(directory / "replacement.chatmd") in
+  Eio.Path.save ~create:(`Exclusive 0o600) old_prompt "old prompt";
+  Eio.Path.save ~create:(`Exclusive 0o600) replacement "new prompt";
+  let session =
+    Session.create
+      ~id:"prompt-reset"
+      ~prompt_file:"original"
+      ~local_prompt_copy:"prompt.chatmd"
+      ()
+  in
+  Session_store.save_exn ~env session;
+  with_quiet_env env (fun env ->
+    Session_store.reset_session
+      ~env
+      ~id:session.id
+      ~prompt_file:(Eio.Path.native_exn replacement)
+      ());
+  let restored = Session_store.read_existing ~env ~id:session.id |> Option.value_exn in
+  let copy = Option.value_exn restored.local_prompt_copy in
+  print_s
+    [%sexp
+      { old_prompt_intact = (String.equal (Eio.Path.load old_prompt) "old prompt" : bool)
+      ; different_copy = (not (String.equal copy "prompt.chatmd") : bool)
+      ; new_prompt = (Eio.Path.load Eio.Path.(directory / copy) : string)
+      }];
+  [%expect
+    {| ((old_prompt_intact true) (different_copy true) (new_prompt "new prompt")) |}]
+;;
+
+let%expect_test "unknown-bearing reset fails before archive or snapshot mutation" =
+  with_temp_home
+  @@ fun env ->
+  let base =
+    Session.create
+      ~id:"future-reset"
+      ~prompt_file:"prompt"
+      ~moderator_snapshot:
+        (Session.Moderator_snapshot.create ~script_id:"mod" ~script_source_hash:"hash" ())
+      ()
+  in
+  let unwrap = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+  in
+  let rec extend json = function
+    | [] ->
+      (match json with
+       | `Object fields -> `Object (fields @ [ "future", `True ])
+       | _ -> assert false)
+    | name :: rest ->
+      (match json with
+       | `Object fields ->
+         `Object
+           (List.map fields ~f:(fun (key, value) ->
+              key, if String.equal key name then extend value rest else value))
+       | _ -> assert false)
+  in
+  let document =
+    Session.Document.encode base
+    |> unwrap
+    |> Document_schema.Document.json
+    |> fun json ->
+    extend json [ "payload"; "moderator_state"; "legacy_snapshot" ]
+    |> Document_schema.Document.inspect ~limits:Document_schema.Limits.default
+    |> unwrap
+  in
+  let session = Session.Document.decode document |> unwrap in
+  Session_store.save_exn ~env session;
+  let directory = Session_store.path ~env session.id in
+  let snapshot = Eio.Path.(directory / "snapshot.bin") in
+  let before = Eio.Path.load snapshot in
+  with_quiet_env env (fun env -> Session_store.reset_session ~env ~id:session.id ());
+  print_s
+    [%sexp
+      { unchanged = (String.equal before (Eio.Path.load snapshot) : bool)
+      ; no_archive = (not (Eio.Path.is_directory Eio.Path.(directory / "archive")) : bool)
+      ; no_lock =
+          (not (Eio.Path.is_file Eio.Path.(directory / "snapshot.bin.lock")) : bool)
+      }];
+  [%expect {| ((unchanged true) (no_archive true) (no_lock true)) |}]
 ;;

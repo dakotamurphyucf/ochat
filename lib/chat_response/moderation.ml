@@ -508,7 +508,7 @@ module Entry_projection = struct
   let project_item entry =
     Item.of_response_item
       ~id:(History_entry.id entry |> History_entry.Id.to_string)
-      (History_entry.item entry)
+      (Openai.Responses_history.item_exn entry)
   ;;
 
   let project_history entries = List.map entries ~f:project_item
@@ -578,7 +578,7 @@ module Identity_overlay = struct
 
   type replacement =
     { target_id : History_entry.Id.t
-    ; item : Res.Item.t
+    ; item : History_entry.Payload.t
     ; change_id : int
     ; script_label : string option
     }
@@ -632,7 +632,7 @@ module Identity_overlay = struct
           | Some replacement ->
             Some
               Effective_entry.
-                { entry = History_entry.with_item entry replacement.item
+                { entry = History_entry.with_payload entry replacement.item
                 ; provenance =
                     Moderator_replacement
                       { target_id = replacement.target_id

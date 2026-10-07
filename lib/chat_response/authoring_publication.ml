@@ -137,3 +137,45 @@ let validate_output invocation entry =
     Error
       (P.Error.invalid_request "invocation output provenance is not usable model input")
 ;;
+
+let context_to_jsonaf t =
+  `Object
+    [ "version", `Number (Int.to_string t.version)
+    ; "scope", `String t.scope
+    ; "identity", `String t.identity
+    ; "policy", `String t.policy
+    ]
+;;
+
+let context_of_jsonaf json =
+  let module J = P.Json_codec in
+  let open Result.Let_syntax in
+  let%bind fields = J.fields json in
+  let%bind version = J.required_as fields "version" (J.bounded_int ~min:1 ~max:1) in
+  let%bind scope = J.required_as fields "scope" J.string in
+  let%bind identity = J.required_as fields "identity" J.string in
+  let%bind policy = J.required_as fields "policy" J.string in
+  let valid_hash text =
+    String.length text = 64
+    && String.for_all text ~f:(function
+      | 'a' .. 'f' | '0' .. '9' -> true
+      | _ -> false)
+  in
+  if String.is_empty scope || not (valid_hash identity && valid_hash policy)
+  then Error (P.Error.invalid_request "invalid authoring publication context")
+  else Ok { version; scope; identity; policy }
+;;
+
+let context_shape =
+  match
+    Document_schema.Shape.object_
+      [ "version", Document_schema.Shape.value
+      ; "scope", Document_schema.Shape.value
+      ; "identity", Document_schema.Shape.value
+      ; "policy", Document_schema.Shape.value
+      ]
+  with
+  | Ok shape -> shape
+  | Error error ->
+    raise_s [%sexp "invalid authoring context shape", (error : Document_schema.Error.t)]
+;;

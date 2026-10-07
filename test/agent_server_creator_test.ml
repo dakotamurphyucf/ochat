@@ -563,9 +563,19 @@ let%expect_test
                 in
                 (match outputs with
                  | [ entry ] ->
+                   let payload =
+                     History_entry.Payload.of_json entry.payload |> Result.ok_or_failwith
+                   in
+                   let output =
+                     match
+                       History_entry.Payload.Semantic.view
+                         (History_entry.Payload.semantic payload)
+                     with
+                     | Result { output = Text text; _ } -> text
+                     | _ -> failwith "expected a neutral text tool result"
+                   in
                    let outcome =
-                     field entry.payload "output"
-                     |> Jsonaf.string_exn
+                     output
                      |> Jsonaf.of_string
                      |> P.Invocation.outcome_of_json
                      |> protocol_ok

@@ -106,7 +106,7 @@ let rebuild state revision =
   }
 ;;
 
-let archive ~previous (candidate : Session_state.t) kind =
+let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let open Result.Let_syntax in
   let%bind candidate, invocation_dispositions =
     match kind with
@@ -169,11 +169,8 @@ let archive ~previous (candidate : Session_state.t) kind =
           }
         , dispositions ))
   in
-  let reference =
-    Compaction_archive.reference_for
-      previous
-      ~kind
-      (Agent_protocol.Id.Operation.create ())
+  let%bind reference =
+    archive_reference ~previous ~kind (Agent_protocol.Id.Operation.create ())
   in
   Ok
     { candidate with

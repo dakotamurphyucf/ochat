@@ -19,7 +19,8 @@ let assistant number text =
       ; _type = "message"
       }
   in
-  History_entry.create_with_id ~id item |> Agent_session.History_codec.to_protocol
+  Openai.Responses_history.create_with_id_exn ~id item
+  |> Agent_session.History_codec.to_protocol
 ;;
 
 let%expect_test

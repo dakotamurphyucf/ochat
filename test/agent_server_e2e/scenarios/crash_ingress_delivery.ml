@@ -63,7 +63,9 @@ let with_host env environment fixture ~recover f =
 let registration snapshot =
   List.find_map snapshot.P.Snapshot.canonical_history.entries ~f:(fun entry ->
     match
-      Agent_session.History_codec.of_protocol entry |> F.protocol_ok |> History_entry.item
+      Agent_session.History_codec.of_protocol entry
+      |> F.protocol_ok
+      |> Openai.Responses_history.item_exn
     with
     | Openai.Responses.Item.Function_call_output { output = Text text; _ } ->
       (match Jsonaf.of_string text |> P.Invocation.outcome_of_json |> F.protocol_ok with

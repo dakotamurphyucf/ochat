@@ -98,11 +98,7 @@ let%expect_test
        assert_same_session_snapshot initial (Agent_session.Memory_backend.state backend);
        let delivered = deliver append |> protocol_ok in
        let saved = current () in
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-         |> store_ok
-       in
+       let restored = restore_state saved |> store_ok in
        assert_same_session_snapshot saved restored;
        let checked = B.frame ~state:restored ~observer delivered |> protocol_ok in
        assert (Frame.equal frame checked);
@@ -195,11 +191,7 @@ let%expect_test
            ; operation_id = None
            ; job = None
            ; phase = Internal_event
-           ; event =
-               `Object
-                 [ ( "snapshot_sexp"
-                   , `String (Sexp.to_string_mach (Session.Snapshot.sexp_of_t forged)) )
-                 ]
+           ; event = `Object [ "snapshot", Session.Snapshot.to_jsonaf forged ]
            ; checkpoint_sha256 = String.make 64 'c'
            ; created_at = timestamp
            }

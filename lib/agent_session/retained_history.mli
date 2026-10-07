@@ -11,7 +11,7 @@
 val scan
   :  reader:Agent_store.Retention_reader.t
   -> handle:Agent_store.Session_store.Handle.t
-  -> state:Session_state.t
+  -> state:Session_state_document.t
   -> journal_current:Agent_store.Journal_segment.Id.t
   -> transaction_hash:string option
   -> max_file_bytes:int

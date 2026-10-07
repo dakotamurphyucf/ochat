@@ -123,3 +123,10 @@ module Mutation_response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+
+(** Complete current durable record projection. Required-null option fields;
+    independent of the public protocol's historical envelope variants. *)
+module Storage : sig
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end

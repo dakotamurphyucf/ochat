@@ -2,10 +2,15 @@ open! Core
 
 type persistence =
   { commit :
-      command_audit:string option
+      command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
       -> Session_transition.t
       -> (unit, Agent_protocol.Error.t) result
+  ; archive_reference :
+      previous:Session_state.t
+      -> kind:Session_state.Compaction_archive.kind
+      -> Agent_protocol.Id.Operation.t
+      -> (Session_state.Compaction_archive.t, Agent_protocol.Error.t) result
   }
 
 type services =
@@ -581,7 +586,9 @@ and compaction_outcome =
 
 type packed =
   | Pack :
-      string option * 'a request * ('a, Agent_protocol.Error.t) result Eio.Promise.u
+      Document_schema.Document.t option
+      * 'a request
+      * ('a, Agent_protocol.Error.t) result Eio.Promise.u
       -> packed
 
 type permission_waiter =
@@ -627,7 +634,7 @@ type t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
-  ; mutable command_audit : string option
+  ; mutable command_audit : Document_schema.Document.t option
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
@@ -1896,7 +1903,13 @@ let commit_administration t attachment_id expected_revision kind candidate =
       Error (error Conflict "administrative candidate does not match the captured state")
     else Session_state.validate candidate
   in
-  let%bind state = Administration.archive ~previous:t.state candidate kind in
+  let%bind state =
+    Administration.archive
+      ~archive_reference:t.persistence.archive_reference
+      ~previous:t.state
+      candidate
+      kind
+  in
   transition
     t
     ~delta:(Session_delta.Created state)
@@ -5025,8 +5038,11 @@ let compaction_terminal_base_delta t operation = function
   | Compacted history ->
     let open Result.Let_syntax in
     let%bind generation = compaction_generation t in
-    let archive =
-      Compaction_archive.reference t.state operation.Agent_protocol.Operation.id
+    let%bind archive =
+      t.persistence.archive_reference
+        ~previous:t.state
+        ~kind:Compaction
+        operation.Agent_protocol.Operation.id
     in
     let history =
       History_codec.all_to_protocol

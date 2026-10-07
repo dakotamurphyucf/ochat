@@ -34,7 +34,7 @@ let stream_function_call ~output_index ~item_id ~call_id ~arguments =
 ;;
 
 let input_entry allocator =
-  History_entry.create
+  Openai.Responses_history.create
     ~allocator
     (Res.Item.Input_message
        { role = User; content = [ input_text "hello" ]; _type = "message" })
@@ -42,7 +42,7 @@ let input_entry allocator =
 ;;
 
 let entry_kind entry =
-  match History_entry.item entry with
+  match Openai.Responses_history.item_exn entry with
   | Res.Item.Input_message _ -> "input"
   | Function_call _ -> "function-call"
   | Custom_tool_call _ -> "custom-call"

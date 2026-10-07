@@ -484,7 +484,9 @@ let status_of_json json =
     in
     let%bind deadline = Json_codec.required_as fields "deadline" Timestamp.of_json in
     let%bind completion_schema =
-      Json_codec.optional_as fields "completion_schema" (fun json -> Ok json)
+      match Json_codec.optional fields "completion_schema" with
+      | None | Some `Null -> Ok None
+      | Some json -> Ok (Some json)
     in
     let%bind max_output_bytes =
       Json_codec.required_as

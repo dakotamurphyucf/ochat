@@ -9,11 +9,18 @@ type replay =
 type t
 
 val create
-  :  capacity:int
+  :  ?documents:Durable_event_document.t list
+  -> capacity:int
   -> Agent_protocol.Event.Durable.t list
   -> (t, Agent_protocol.Error.t) result
 
-val append : t -> Agent_protocol.Event.Durable.t list -> unit
+(** Supplied documents must match the full event at their unique sequence.
+    Association or continuity errors leave the replay owner unchanged. *)
+val append
+  :  ?documents:Durable_event_document.t list
+  -> t
+  -> Agent_protocol.Event.Durable.t list
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Capture before reading the actor snapshot, then await outside the actor and
     this log's mutex. Resolves on the next nonempty committed append, including

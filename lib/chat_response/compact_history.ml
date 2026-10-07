@@ -92,6 +92,8 @@ let collapse_read_file_history
 ;;
 
 let collapse_read_file_entries ?placeholder entries =
-  let items = collapse_read_file_history ?placeholder (History_entry.items entries) in
-  List.map2_exn entries items ~f:History_entry.with_item
+  let items =
+    collapse_read_file_history ?placeholder (Openai.Responses_history.items_exn entries)
+  in
+  List.map2_exn entries items ~f:Openai.Responses_history.with_item_exn
 ;;

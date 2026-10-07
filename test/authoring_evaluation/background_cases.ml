@@ -238,7 +238,7 @@ let execute_checked ?audit ?replay_job_delivery ~env ~finish candidate =
       match
         Agent_session.History_codec.of_protocol notification
         |> H.get
-        |> History_entry.item
+        |> Openai.Responses_history.item_exn
       with
       | Openai.Responses.Item.Input_message
           { role = User; content = Text { text; _ } :: _; _ } ->

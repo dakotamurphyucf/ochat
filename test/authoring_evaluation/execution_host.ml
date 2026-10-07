@@ -433,7 +433,11 @@ let run
 
 let outcome (snapshot : P.Snapshot.t) call_id =
   List.find_map_exn snapshot.canonical_history.entries ~f:(fun entry ->
-    match Agent_session.History_codec.of_protocol entry |> get |> History_entry.item with
+    match
+      Agent_session.History_codec.of_protocol entry
+      |> get
+      |> Openai.Responses_history.item_exn
+    with
     | Openai.Responses.Item.Function_call_output
         { call_id = actual; output = Text text; _ }
       when String.equal actual call_id ->

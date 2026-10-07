@@ -669,3 +669,86 @@ let discard_uninstalled_staging t expected =
         ~destination:(Data_root.session_path t.root record.admission.child_session_id)
     | Child_installed | Linked -> Ok ())
 ;;
+
+let reference_to_jsonaf (t : Reference.t) =
+  `Object
+    [ ( "key"
+      , `Object
+          [ "parent_session_id", P.Id.Session.to_json t.key.parent_session_id
+          ; "parent_generation", `Number (Int.to_string t.key.parent_generation)
+          ; "principal_id", P.Id.Principal.to_json t.key.principal_id
+          ; "idempotency_key", P.Idempotency_key.to_json t.key.idempotency_key
+          ] )
+    ; "child_session_id", P.Id.Session.to_json t.child_session_id
+    ; "revision_id", P.Id.Prompt_revision.to_json t.revision_id
+    ; "request_sha256", `String t.request_sha256
+    ; "admission_sha256", `String t.admission_sha256
+    ]
+;;
+
+let reference_of_jsonaf json =
+  let module J = P.Json_codec in
+  let decoded =
+    let open Result.Let_syntax in
+    let%bind fields = J.fields json in
+    let%bind key =
+      J.required_as fields "key" (fun json ->
+        let%bind fields = J.fields json in
+        let%bind parent_session_id =
+          J.required_as fields "parent_session_id" P.Id.Session.of_json
+        in
+        let%bind parent_generation =
+          J.required_as
+            fields
+            "parent_generation"
+            (J.bounded_int ~min:0 ~max:Int.max_value)
+        in
+        let%bind principal_id =
+          J.required_as fields "principal_id" P.Id.Principal.of_json
+        in
+        let%map idempotency_key =
+          J.required_as fields "idempotency_key" P.Idempotency_key.of_json
+        in
+        Key.{ parent_session_id; parent_generation; principal_id; idempotency_key })
+    in
+    let%bind child_session_id =
+      J.required_as fields "child_session_id" P.Id.Session.of_json
+    in
+    let%bind revision_id =
+      J.required_as fields "revision_id" P.Id.Prompt_revision.of_json
+    in
+    let%bind request_sha256 = J.required_as fields "request_sha256" J.string in
+    let%map admission_sha256 = J.required_as fields "admission_sha256" J.string in
+    Reference.{ key; child_session_id; revision_id; request_sha256; admission_sha256 }
+  in
+  let open Result.Let_syntax in
+  let%bind t =
+    decoded |> Result.map_error ~f:(fun e -> Store_error.Corrupt e.P.Error.message)
+  in
+  let%map () = validate_reference t in
+  t
+;;
+
+let reference_shape =
+  let module S = Document_schema.Shape in
+  let object_ fields =
+    match S.object_ fields with
+    | Ok shape -> shape
+    | Error error ->
+      raise_s
+        [%sexp "invalid delegation reference shape", (error : Document_schema.Error.t)]
+  in
+  object_
+    [ ( "key"
+      , object_
+          [ "parent_session_id", S.value
+          ; "parent_generation", S.value
+          ; "principal_id", S.value
+          ; "idempotency_key", S.value
+          ] )
+    ; "child_session_id", S.value
+    ; "revision_id", S.value
+    ; "request_sha256", S.value
+    ; "admission_sha256", S.value
+    ]
+;;
