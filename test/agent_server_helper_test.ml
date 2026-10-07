@@ -90,6 +90,14 @@ let function_call name arguments =
 
 let run env helper ~native_watch =
   Mirage_crypto_rng_unix.use_default ();
+  let watched_session = ref None in
+  let last_observed_state = ref None in
+  let state daemon id =
+    let current = state daemon id in
+    if Option.exists !watched_session ~f:(P.Id.Session.equal id)
+    then last_observed_state := Some current;
+    current
+  in
   let root = temporary_root env |> Caml_unix.realpath in
   let path file = Eio.Path.(Eio.Stdenv.fs env / file) in
   Exn.protect
@@ -1445,33 +1453,190 @@ let run env helper ~native_watch =
       with_daemon (fun sw daemon client ->
         restart_step "next daemon started";
         let step name f =
-          match
-            Eio.Time.with_timeout (Eio.Stdenv.clock env) 10. (fun () -> Ok (f ()))
-          with
-          | Ok result -> result
-          | Error _ ->
-            let current = state daemon parent_id in
+          let started = Eio.Time.now (Eio.Stdenv.clock env) in
+          let started_cpu = Stdlib.Sys.time () in
+          let started_mono = Eio.Time.Mono.now mono_clock in
+          let started_wall = Eio.Time.now clock in
+          let dump_last_observed (current : Agent_session.Session_state.t) =
+            let bounded text = String.prefix text 512 in
+            let failure (error : P.Error.t) =
+              [%sexp
+                (error.code : P.Error.code)
+              , (bounded error.message : string)
+              , (error.retryable : bool)]
+            in
+            let completion = function
+              | P.Completion.Succeeded _ -> [%sexp "succeeded"]
+              | Failed error ->
+                [%sexp
+                  "failed"
+                , (bounded error.code : string)
+                , (bounded error.message : string)]
+              | Cancelled reason -> [%sexp "cancelled", (bounded reason : string)]
+              | Expired -> [%sexp "expired"]
+            in
             let failures =
-              List.filter current.moderator_executions ~f:(fun receipt ->
-                match receipt.status with
-                | Completed _ -> false
-                | _ -> true)
+              List.filter_map current.moderator_executions ~f:(fun receipt ->
+                let status =
+                  match receipt.status with
+                  | Completed _ -> None
+                  | Running -> Some [%sexp "running"]
+                  | Interrupted reason ->
+                    Some [%sexp "interrupted", (bounded reason : string)]
+                  | Failed error ->
+                    Some
+                      [%sexp
+                        "failed"
+                      , (bounded error.code : string)
+                      , (bounded error.message : string)]
+                in
+                Option.map status ~f:(fun status ->
+                  [%sexp
+                    (receipt.context.id : P.Id.Moderator_execution.t)
+                  , (receipt.context.phase : P.Moderator_execution.phase)
+                  , (status : Sexp.t)]))
+              |> fun values -> List.take values 8
             in
             let subscriptions =
-              List.filter current.subscriptions ~f:(fun subscription ->
-                P.Id.Subscription.equal subscription.context.id cursor_watch
-                || P.Id.Subscription.equal subscription.context.id receipt_watch)
+              List.filter_map current.subscriptions ~f:(fun subscription ->
+                if
+                  P.Id.Subscription.equal subscription.context.id cursor_watch
+                  || P.Id.Subscription.equal subscription.context.id receipt_watch
+                then
+                  Some
+                    [%sexp
+                      (subscription.context.id : P.Id.Subscription.t)
+                    , (subscription.epoch : int)
+                    , (subscription.timer_id : P.Id.Schedule.t option)
+                    , (subscription.job_id : P.Id.Job.t option)
+                    , (Option.map subscription.result ~f:completion : Sexp.t option)]
+                else None)
             in
             let jobs =
-              List.map current.jobs ~f:(fun job -> job.id, job.status, job.delivery)
+              List.map current.jobs ~f:(fun job ->
+                let status =
+                  match job.status with
+                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                  | Interrupted reason -> [%sexp "interrupted", (bounded reason : string)]
+                  | Waiting_completion _ -> [%sexp "waiting_completion"]
+                  | Waiting_permission _ -> [%sexp "waiting_permission"]
+                  | Queued | Running | Succeeded | Cancelled ->
+                    [%sexp (job.status : P.Job.status)]
+                in
+                let terminal =
+                  match P.Job.terminal_completion job with
+                  | Ok value -> Option.map value ~f:completion
+                  | Error error ->
+                    Some [%sexp "terminal unavailable", (failure error : Sexp.t)]
+                in
+                [%sexp
+                  (job.id : P.Id.Job.t)
+                , (status : Sexp.t)
+                , (terminal : Sexp.t option)
+                , (job.delivery : P.Job.delivery)])
+              |> fun values -> List.take values 24
             in
-            raise_s
-              [%sexp
-                (name : string)
-              , (subscriptions : P.Subscription.t list)
-              , (failures : P.Moderator_execution.t list)
-              , (List.rev !restart_steps : (string * float) list)
-              , (jobs : (P.Id.Job.t * P.Job.status * P.Job.delivery) list)]
+            let active_operation =
+              Option.map current.active_operation ~f:(fun operation ->
+                let status =
+                  match operation.state with
+                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                  | Interrupted { reason; retryable } ->
+                    [%sexp "interrupted", (bounded reason : string), (retryable : bool)]
+                  | Starting | Running | Cancelling | Completed | Cancelled ->
+                    [%sexp (operation.state : P.Operation.state)]
+                in
+                [%sexp (operation.id : P.Id.Operation.t), (status : Sexp.t)])
+            in
+            let queued =
+              match Agent_session.Moderator_checkpoint.decode current.moderator with
+              | Error error -> [%sexp "invalid checkpoint", (failure error : Sexp.t)]
+              | Ok None -> [%sexp "no checkpoint"]
+              | Ok (Some snapshot) ->
+                let head =
+                  Option.map (List.hd snapshot.queued_internal_events) ~f:(function
+                    | Session.Snapshot.Variant (tag, _) -> bounded tag
+                    | Unit | Bool _ | Int _ | Float _ | String _ | Array _ | Record _ ->
+                      "non-variant")
+                in
+                [%sexp
+                  (List.length snapshot.queued_internal_events : int)
+                , (head : string option)
+                , (snapshot.halted : bool)]
+            in
+            let observed =
+              match current.lifecycle.observed with
+              | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+              | Stopped
+              | Queued_for_slot
+              | Starting
+              | Recovering
+              | Idle
+              | Running_turn _
+              | Compacting _
+              | Waiting_for_permission _
+              | Stopping ->
+                [%sexp (current.lifecycle.observed : P.Session.observed_state)]
+            in
+            Eio.traceln
+              "%s"
+              (Sexp.to_string_hum
+                 [%sexp
+                   (name : string)
+                 , (native_watch : bool)
+                 , (current.lifecycle.desired : P.Session.desired_state)
+                 , (observed : Sexp.t)
+                 , (current.halted : bool)
+                 , (active_operation : Sexp.t option)
+                 , (Option.map current.failure ~f:failure : Sexp.t option)
+                 , (queued : Sexp.t)
+                 , (subscriptions : Sexp.t list)
+                 , (failures : Sexp.t list)
+                 , (List.rev !restart_steps : (string * float) list)
+                 , ( "real seconds"
+                   , (Eio.Time.now (Eio.Stdenv.clock env) -. started : float) )
+                 , ("CPU seconds", (Stdlib.Sys.time () -. started_cpu : float))
+                 , ( "logical Mono seconds"
+                   , (Mtime.span started_mono (Eio.Time.Mono.now mono_clock)
+                      |> Mtime.Span.to_float_ns
+                      |> fun ns -> ns /. 1_000_000_000.
+                      : float) )
+                 , ("logical wall seconds", (Eio.Time.now clock -. started_wall : float))
+                 , (jobs : Sexp.t list)])
+          in
+          watched_session := Some parent_id;
+          last_observed_state := None;
+          Exn.protect
+            ~finally:(fun () ->
+              watched_session := None;
+              last_observed_state := None)
+            ~f:(fun () ->
+              (* Pinned Eio.Time.with_timeout is this timer-first Fiber.first.
+                 Log only the immutable last observation before cancellation
+                 joins: protected cleanup may otherwise prevent a timeout dump.
+                 This is cached state, not a fresh read at the deadline. *)
+              match
+                Eio.Fiber.first
+                  (fun () ->
+                     Eio.Time.sleep (Eio.Stdenv.clock env) 10.;
+                     (match !last_observed_state with
+                      | Some current -> dump_last_observed current
+                      | None ->
+                        Eio.traceln
+                          "%s"
+                          (Sexp.to_string_hum
+                             [%sexp
+                               (name : string), "no parent state observed before deadline"]));
+                     Error `Timeout)
+                  (fun () -> Ok (f ()))
+              with
+              | Ok result -> result
+              | Error `Timeout ->
+                raise_s
+                  [%sexp
+                    (name : string)
+                  , "helper restart step timed out; last observed state logged at \
+                     deadline"])
         in
         let before_calls = !child_calls in
         assert (

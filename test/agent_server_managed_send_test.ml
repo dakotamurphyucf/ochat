@@ -999,39 +999,45 @@ let%expect_test
             |> complete
           in
           [%test_eq: string] "stopped" (text stopped_again "progress");
-          H.close handle;
-          let quiet = state daemon child_id in
-          let ledger = Agent_store.Session_store.delegations (D.store daemon) in
-          let record =
-            Agent_store.Delegation_store.resolve
-              ledger
-              (Option.value_exn quiet.spec.delegation)
-            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-            |> protocol_ok
-          in
-          Eio.Fiber.fork ~sw (fun () ->
-            wait_dispatched daemon parent_id;
-            Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
-            Agent_store.Delegation_store.revoke ledger record Authority_changed
-            |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
-            |> protocol_ok
-            |> ignore);
-          invoke
-            sw
-            daemon
-            client
-            parent_id
-            "agent_wait"
-            (`Object
-                [ "session_id", P.Id.Session.to_json child_id
-                ; "cursor", field refreshed "next_cursor"
-                ; "timeout_ms", `Number "30000"
-                ])
-          |> denied "agent.management.denied";
-          assert_same_state
-            quiet
-            (state daemon child_id)
-            ~context:"quiet authority revocation");
+          (* Keep this stopped child attached through the read-only authority check.
+             Closing its last attachment permits maintenance to evict it; a later
+             managed read then commits a recovery history reservation. That is a
+             separate lifecycle transaction, not a mutation by agent_wait. *)
+          Exn.protect
+            ~finally:(fun () -> H.close handle)
+            ~f:(fun () ->
+              let quiet = state daemon child_id in
+              let ledger = Agent_store.Session_store.delegations (D.store daemon) in
+              let record =
+                Agent_store.Delegation_store.resolve
+                  ledger
+                  (Option.value_exn quiet.spec.delegation)
+                |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                |> protocol_ok
+              in
+              Eio.Fiber.fork ~sw (fun () ->
+                wait_dispatched daemon parent_id;
+                Eio.Time.sleep (Eio.Stdenv.clock env) 0.05;
+                Agent_store.Delegation_store.revoke ledger record Authority_changed
+                |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+                |> protocol_ok
+                |> ignore);
+              invoke
+                sw
+                daemon
+                client
+                parent_id
+                "agent_wait"
+                (`Object
+                    [ "session_id", P.Id.Session.to_json child_id
+                    ; "cursor", field refreshed "next_cursor"
+                    ; "timeout_ms", `Number "30000"
+                    ])
+              |> denied "agent.management.denied";
+              assert_same_state
+                quiet
+                (state daemon child_id)
+                ~context:"quiet authority revocation"));
         print_endline
           "waits distinguish output from terminal receipts; timeout/cancellation \
            preserve children; quiet revocation denies disclosure";
