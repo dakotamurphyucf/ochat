@@ -96,10 +96,13 @@ let verify_observer client session_id =
   assert (not (List.is_empty snapshot.canonical_history.entries));
   List.iter snapshot.canonical_history.entries ~f:(fun entry ->
     assert (Agent_protocol.History.equal_role entry.role System);
-    assert (
-      String.equal
-        (Jsonaf.member_exn "role" entry.payload |> Jsonaf.string_exn)
-        "developer"));
+    let payload = History_entry.Payload.of_json entry.payload |> Result.ok_or_failwith in
+    match
+      History_entry.Payload.Semantic.view (History_entry.Payload.semantic payload)
+    with
+    | Message { role; _ } -> assert (History_entry.Payload.Role.equal role Developer)
+    | Call _ | Result _ | Reasoning _ | Unknown _ ->
+      failwith "tutorial prompt is not a neutral message");
   match
     Agent_client.Connection.request
       client
