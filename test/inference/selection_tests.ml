@@ -159,3 +159,47 @@ let%test_unit
     Result.is_error
       (S.capture original ~target:selected ~limits:(bounded (full_bytes - 1))))
 ;;
+
+let%test_unit "approved selection change preserves wrapper and target future fields" =
+  let selected =
+    R.Target.of_json
+      (`Object
+          (("future_target", `Object [ "exact", `Number "1e+00" ])
+           :: object_fields (R.Target.to_json (target ()))))
+      ~limits
+    |> ok
+  in
+  let raw =
+    `Object
+      [ "future_before", `Null
+      ; "target", R.Target.to_json selected
+      ; "state", `String "captured"
+      ; "future_after", `String "完成"
+      ]
+  in
+  let original = S.of_json raw ~limits |> ok in
+  let changed_target =
+    R.Target.with_model selected ~model:"approved-model" ~limits |> ok
+  in
+  assert (Result.is_error (S.capture original ~target:changed_target ~limits));
+  let changed = S.change original ~target:changed_target ~limits |> ok in
+  let expected =
+    `Object
+      (List.map (object_fields raw) ~f:(fun (name, value) ->
+         ( name
+         , if String.equal name "target" then R.Target.to_json changed_target else value )))
+  in
+  assert (Jsonaf.exactly_equal expected (S.to_json changed));
+  assert (Jsonaf.exactly_equal raw (S.to_json original));
+  assert (
+    D.Json.equal
+      (D.Json.field (R.Target.to_json changed_target) ~name:"future_target"
+       |> function
+       | D.Json.Value value -> value
+       | _ -> assert false)
+      (`Object [ "exact", `Number "1e+00" ]));
+  let too_small = bounded (String.length (Jsonaf.to_string raw) - 1) in
+  assert (Result.is_error (S.change original ~target:selected ~limits:too_small));
+  let exact = bounded (String.length (Jsonaf.to_string raw)) in
+  assert (Result.is_error (S.change original ~target:changed_target ~limits:exact))
+;;

@@ -49,7 +49,10 @@ let%expect_test
       ~daemon_options:
         { Agent_server.Daemon.default_options with
           qualify_chatml_extensions = true
-        ; model_post_stream = Some post_stream
+        ; inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream
         }
       (fun env workspace embedded ->
          let root = Filename.dirname workspace in

@@ -56,11 +56,21 @@ let with_capabilities ~env ~declarations ~files f =
           |> failwith
       in
       let ctx =
-        Chat_response.Ctx.create
+        let inference =
+          Inference_fixture.create
+            ~namespace:P.Id.Transaction.(create () |> to_string)
+            ~default_model:"evaluation-metadata"
+            ~post_stream:(fun ~sw:_ ~inputs:_ ->
+              failwith "metadata construction attempted inference")
+        in
+        Inference_fixture.ctx
+          inference
+          ~config:(Chat_response.Config.of_elements prompt_elements)
           ~env
           ~dir:root
           ~tool_dir:root
           ~cache:(Chat_response.Cache.create ~max_size:1 ())
+          ()
       in
       let host =
         R.host
@@ -123,6 +133,19 @@ let call_events calls =
         ; item_id = id
         ; output_index = index
         ; type_ = "response.function_call_arguments.done"
+        }
+    ; Output_item_done
+        { item =
+            Function_call
+              { name
+              ; arguments = Jsonaf.to_string arguments
+              ; call_id = id
+              ; _type = "function_call"
+              ; id = Some id
+              ; status = Some "completed"
+              }
+        ; output_index = index
+        ; type_ = "response.output_item.done"
         }
     ])
   |> Stdlib.List.to_seq
@@ -241,7 +264,10 @@ let with_session
               ~options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream = Some post_stream
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream
                 }
               ()
             |> get
@@ -316,7 +342,10 @@ let with_session
               ~daemon_options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream = Some post_stream
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream
                 }
               { prompt_file = Filename.concat root "agent.chatmd"
               ; workspace

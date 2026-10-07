@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"agent_tool_persistence_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 module Contract = Chat_response.Agent_tool_contract
 module P = Agent_protocol
@@ -69,7 +81,7 @@ let%expect_test
         report policy "invalid ID" (input [ "session_id", `String "bad" ]);
         Eio.Switch.run (fun sw ->
           let ctx =
-            Chat_response.Ctx.create
+            fixture_ctx
               ~env
               ~dir
               ~tool_dir:dir

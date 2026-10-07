@@ -286,6 +286,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/managed_submission_tracking.mli` | [contract](../../lib/agent_session/managed_submission_tracking.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_wait_tool.mli` | [contract](../../lib/agent_session/managed_wait_tool.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/memory_backend.mli` | [contract](../../lib/agent_session/memory_backend.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/model_job_target.mli` | [contract](../../lib/agent_session/model_job_target.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_checkpoint.mli` | [contract](../../lib/agent_session/moderator_checkpoint.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_event.mli` | [contract](../../lib/agent_session/moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_observation.mli` | [contract](../../lib/agent_session/moderator_observation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -421,9 +422,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/extension_compiler.mli` | [contract](../../lib/chat_response/extension_compiler.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fetch.mli` | [contract](../../lib/chat_response/fetch.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fork.mli` | [contract](../../lib/chat_response/fork.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/fork_history.mli` | [contract](../../lib/chat_response/fork_history.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/chat_response/generated_admission.mli` | [contract](../../lib/chat_response/generated_admission.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/history_stream_event.mli` | [contract](../../lib/chat_response/history_stream_event.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chat_response/in_memory_stream.mli` | [contract](../../lib/chat_response/in_memory_stream.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/inference_config.mli` | [contract](../../lib/chat_response/inference_config.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/chat_response/ingress_delivery.mli` | [contract](../../lib/chat_response/ingress_delivery.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/ingress_operations.mli` | [contract](../../lib/chat_response/ingress_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/initial_prompt_history.mli` | [contract](../../lib/chat_response/initial_prompt_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -433,6 +436,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/moderation.mli` | [contract](../../lib/chat_response/moderation.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_invocation.mli` | [contract](../../lib/chat_response/moderator_invocation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_manager.mli` | [contract](../../lib/chat_response/moderator_manager.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/chat_response/neutral_turn.mli` | [contract](../../lib/chat_response/neutral_turn.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/chat_response/notification_operations.mli` | [contract](../../lib/chat_response/notification_operations.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/one_off_request.mli` | [contract](../../lib/chat_response/one_off_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/one_off_script.mli` | [contract](../../lib/chat_response/one_off_script.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -584,6 +588,12 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/inference/observation.mli` | [contract](../../lib/inference/observation.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference/request.mli` | [contract](../../lib/inference/request.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
+| `lib/inference_client/inference_client.mli` | [contract](../../lib/inference_client/inference_client.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/inference_host.mli` | [contract](../../lib/inference_host/inference_host.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_runtime/inference_runtime.mli` | [contract](../../lib/inference_runtime/inference_runtime.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/openai/inference_adapter.mli` | [contract](../../lib/openai/inference_adapter.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/openai/inference_input.mli` | [contract](../../lib/openai/inference_input.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/openai/inference_output.mli` | [contract](../../lib/openai/inference_output.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/responses.mli` | [contract](../../lib/openai/responses.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_codec.mli` | [contract](../../lib/openai/responses_codec.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_driver.mli` | [contract](../../lib/openai/responses_driver.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -941,6 +951,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/meta_prompting/task_intf.doc.md) | `docs-src/lib/meta_prompting/task_intf.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/meta_prompting.doc.md) | `docs-src/lib/meta_prompting.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/mime.doc.md) | `docs-src/lib/mime.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/neutral-inference.md) | `docs-src/lib/neutral-inference.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/notty-eio/notty_eio.doc.md) | `docs-src/lib/notty-eio/notty_eio.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/notty_scroll_box.doc.md) | `docs-src/lib/notty_scroll_box.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/oauth/oauth2_client_credentials.doc.md) | `docs-src/lib/oauth/oauth2_client_credentials.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

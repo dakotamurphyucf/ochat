@@ -1,13 +1,15 @@
-open Core
+open! Core
 open Meta_prompting
 
-(* We explicitly avoid providing an Eio environment and make sure the
-   [Rubric_critic_judge] falls back to the deterministic 0.5 score
-   when the OpenAI API key is absent. *)
-
-let%expect_test "rubric_critic offline fallback" =
+let%expect_test "requested rubric critic requires selected inference" =
   let module J = (val Evaluator.rubric_critic_judge : Evaluator.Judge) in
-  let score = J.evaluate "Some arbitrary answer." in
-  printf "%.1f" score;
-  [%expect "0.5"]
+  let required =
+    try
+      ignore (J.evaluate "Some arbitrary answer." : float);
+      false
+    with
+    | Evaluator.Configuration_required -> true
+  in
+  print_s [%sexp (required : bool)];
+  [%expect {| true |}]
 ;;

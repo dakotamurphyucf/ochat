@@ -18,6 +18,7 @@ module Spec = struct
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; inference_target : (Inference.Selection.t[@sexp.opaque])
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
@@ -80,6 +81,13 @@ module Lifecycle = struct
   [@@deriving sexp]
 end
 
+module Runtime_initialization = struct
+  type t =
+    | Ready
+    | Pending of { fresh_history : bool }
+  [@@deriving equal, sexp]
+end
+
 module Counters = struct
   type t =
     { revision : int64
@@ -95,6 +103,7 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool [@sexp.default false]
   ; stop_epoch : int64 [@sexp.default 0L]
   ; parent_stop_epoch : int64 option [@sexp.option]
@@ -104,6 +113,7 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; model_job_targets : Model_job_target.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; managed_submissions : Managed_submission.t list [@sexp.list]
@@ -122,11 +132,13 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 20
+let current_schema_version = 21
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if t.schema_version = 20
+  then Ok { t with schema_version = current_schema_version }
   else if Option.is_some t.conversation.authoring_publication
   then
     Error
@@ -334,6 +346,7 @@ let create ~identity ~spec ~initial_history =
   ; identity
   ; spec
   ; lifecycle = { desired; observed = Stopped }
+  ; runtime_initialization = Ready
   ; pending_initial_start = false
   ; stop_epoch = 0L
   ; parent_stop_epoch = None
@@ -355,6 +368,7 @@ let create ~identity ~spec ~initial_history =
   ; permissions = []
   ; grants = []
   ; jobs = []
+  ; model_job_targets = []
   ; schedules = []
   ; invocations = []
   ; managed_submissions = []
@@ -432,9 +446,54 @@ let validate_delegation t =
   | _ -> invalid ()
 ;;
 
+let validate_model_job_targets t =
+  let open Result.Let_syntax in
+  let seen = Hash_set.create (module Agent_protocol.Id.Job) in
+  let%bind () =
+    List.fold_result t.model_job_targets ~init:() ~f:(fun () binding ->
+      let id = Model_job_target.job_id binding in
+      let%bind job =
+        List.find t.jobs ~f:(fun job -> Agent_protocol.Id.Job.equal job.id id)
+        |> Result.of_option
+             ~error:
+               (Agent_protocol.Error.invalid_request
+                  "inference target references an absent job")
+      in
+      match job.kind with
+      | Model_call
+        when Int.equal job.generation (Model_job_target.generation binding)
+             && Agent_protocol.Id.Session.equal job.session_id t.identity.session_id
+             && not (Hash_set.mem seen id) ->
+        Hash_set.add seen id;
+        Ok ()
+      | Model_call
+      | Nested_agent
+      | Scheduled_event
+      | Async_tool
+      | Shell_process
+      | Compaction ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "model job target kind, owner, generation or uniqueness is invalid"))
+  in
+  List.fold_result t.jobs ~init:() ~f:(fun () job ->
+    match job.kind with
+    | Model_call when not (Hash_set.mem seen job.id) ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "model job lacks an explicit inference selection")
+    | Model_call
+    | Nested_agent
+    | Scheduled_event
+    | Async_tool
+    | Shell_process
+    | Compaction -> Ok ())
+;;
+
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_delegation t in
+  let%bind () = validate_model_job_targets t in
   let%bind () =
     let%bind snapshot = Moderator_checkpoint.decode t.moderator in
     match snapshot with

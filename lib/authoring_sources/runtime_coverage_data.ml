@@ -200,11 +200,11 @@ let moderator_features =
 
 let implementation_sources =
   [ ( "lib/agent_session/administration.ml"
-    , "94300dd5855b5a8eb9e08db67864104322f1f90b1dd5cf83c7166ff4c4595d9f" )
+    , "cafb3aee7ac975d5870c235ff4ce74a6ee5bf4572ee6bfd01757635596cc3732" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "55389b420ad48c316ca827233c8d62e10c1ed12f8761bdb410690fe4efd271ec" )
+    , "bbc6e17c8b379cc1eb36a8258e3fcbb1f98d5c9fcf01cf33aab8c80e029c4bdc" )
   ; ( "lib/agent_server/runtime_owner.ml"
-    , "3bcaa009e3edb797d59489a087f7d4010ad22f79efcf40707f4c10f0ace6becf" )
+    , "5c16c8a52f69598b0d78985a7436a14dd5c339312b2bb08ffb2a44187045cf34" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
     , "395c05cb876b720af5c416d65202281e2878c3fd8732cebf56263d4f1edde0e4" )
   ; ( "lib/agent_server/managed_output_cursor.ml"
@@ -226,7 +226,7 @@ let implementation_sources =
   ; ( "lib/agent_protocol/subscription.ml"
     , "a5447544cbe1cd55302cd70a3c50bf7f6b0ec07ad3af8ce1f70b7b90dfbd07bc" )
   ; ( "lib/agent_server/job_scheduler.ml"
-    , "f04a2acf1d396d9263f6c5e68c2d89b7ff436315394710da9ebfd5f75319494a" )
+    , "9726493aa7e5dccfdd88dcca50f9f98846f6fee37ed32707d33ac8387545be7b" )
   ; ( "lib/agent_server/schedule_scheduler.ml"
     , "707e2c688bb5dec7be852fa5654237f9c512d1569b3513eb849bcff628f8bb31" )
   ; ( "lib/agent_session/background_execution.ml"
@@ -254,7 +254,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "3c9e62b0f11666b6e5916b21c5b3ee1c8a2a3184ec9ffc4066927dee3457f44e" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "35a28902477f5ca62494b539cdf5c86cda2bdbb68ce9d5587b45959f3db767a0" )
+    , "722580470deef2fac956c0da992f03999f31ab74fffbe951dd54faf12eb346dc" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"
@@ -289,16 +289,16 @@ let implementation_sources =
 let topic_contracts =
   [ ( "one_off_v1"
     , "runtime.lifecycle"
-    , "cccd4f8959e399e2323c3cb03610b89b624d7a6f770f70d665c78bf56ca0fe6a" )
+    , "763ccb16441f43ef89b4f49e3c9a9bb7626593e9c6579151ef41d8f6ae3ed872" )
   ; ( "tool_v1"
     , "runtime.lifecycle"
-    , "91bc98a2a3610925b335c235c5bf195b14ba45037381327b8b892d14671bff02" )
+    , "36f78528f6fc354438170d9e9f66c677a38414d398ea9a6b8f565dfd82e8b95b" )
   ; ( "moderator_v1"
     , "runtime.lifecycle"
-    , "9b23dbef29415d385ff4cbada5df11b0ef8267976aa5b6b71cb447f339ef2b38" )
+    , "9f92ebb3d130aac68a0f7be19e7a9709fa0aaace145af49a6401a7d49c22cb4c" )
   ; ( "delegated_moderator_v1"
     , "runtime.lifecycle"
-    , "54df141bb77ffb7b1088dad7d2221496a3020ac02e7fb6291c3b998521b2238b" )
+    , "294a5744de2faab1d95da0218dad26b1ab739b831d30ec610534ee64823b5212" )
   ; ( "one_off_v1"
     , "runtime.execution"
     , "ee959d78220fa58d10fd56ce306f87828f5ca4c83a6dc0ad5203e43231717956" )

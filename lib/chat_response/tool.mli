@@ -40,6 +40,15 @@ val agent_page_classification
   :  Prompt.Chat_markdown.tool
   -> (string * Tool_execution_event.agent_page_kind) option
 
+(** Validate configured read-file roots through the same source-relative host
+    resolver used during tool construction. Performs filesystem inspection only;
+    other declaration variants are not constructed, discovered or executed.
+    This is not a complete runtime preflight or an execution permission grant. *)
+val validate_read_roots
+  :  Shell_runtime.Host.t
+  -> Prompt.Chat_markdown.tool
+  -> (unit, Shell_runtime.Host.error) result
+
 (** [of_declaration ~sw ~ctx ~run_agent decl] maps a single ChatMarkdown
     [`<tool …/>`] declaration to its runtime implementation.  The
     function inspects the variant constructor of [decl] and returns the

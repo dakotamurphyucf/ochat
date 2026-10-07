@@ -423,7 +423,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 20)
+    ((schema 21)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -725,7 +725,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 20) (records 0))
+    ((version 21) (records 0))
     true
     true
     true
@@ -847,7 +847,10 @@ let%expect_test "named compaction archives admit typed state and preserve captur
         [ { archived with
             conversation = { archived.conversation with initial_prompt_entry_count = -1 }
           }
-        ; { archived with jobs = [ legacy_job ] }
+        ; { archived with
+            jobs = [ legacy_job ]
+          ; model_job_targets = [ model_job_binding archived legacy_job ]
+          }
         ]
       in
       let raw_archive child =
@@ -1022,7 +1025,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 20) (records 0)) |}]
+  [%expect {| ((version 21) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -1225,7 +1228,7 @@ let%expect_test "named invocation snapshots preserve pending publication" =
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 20) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 21) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;

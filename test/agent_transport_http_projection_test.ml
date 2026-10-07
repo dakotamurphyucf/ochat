@@ -1,4 +1,14 @@
 open! Core
+
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 open Agent_server_test_support
 module P = Agent_protocol
 module H = Piaf
@@ -76,6 +86,7 @@ let%expect_test "HTTP session projection rejection closes queued replay and atta
         Eio.Switch.run (fun sw ->
           let daemon =
             Agent_server.Daemon.start
+              ~options:(inference_options ())
               ~sw
               ~env
               ~config:(config root root prompt_file)

@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"generated_admission_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module G = Chat_response.Generated_admission
 module C = Chat_response.Tool_capability
 module CM = Prompt.Chat_markdown
@@ -75,7 +87,7 @@ let () =
             CM.parse_chat_inputs ~source:"parent.chatmd" ~dir:root parent_source
           in
           let ctx =
-            Chat_response.Ctx.create
+            fixture_ctx
               ~env
               ~dir:root
               ~tool_dir:root

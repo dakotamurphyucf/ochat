@@ -161,7 +161,10 @@ let model_post_stream ?before_tool_call marker ~sw:_ ~inputs =
 
 let options ?before_tool_call marker =
   { Agent_server.Daemon.default_options with
-    model_post_stream = Some (model_post_stream ?before_tool_call marker)
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(model_post_stream ?before_tool_call marker)
   }
 ;;
 
@@ -684,8 +687,11 @@ let require_reviewer_result marker observed allowed =
 
 let gated_model_options marker gate base =
   { (base : Agent_server.Daemon.options) with
-    model_post_stream =
-      Some (model_post_stream ~before_tool_call:(fun () -> Eio.Promise.await gate) marker)
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:
+          (model_post_stream ~before_tool_call:(fun () -> Eio.Promise.await gate) marker)
   }
 ;;
 

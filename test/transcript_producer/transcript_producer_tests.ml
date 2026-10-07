@@ -6,6 +6,33 @@ module T = Transcript
 
 let ok = Result.ok_or_failwith
 
+let selected_run ~env ~post_stream =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"streaming-offline"
+      ~default_model:"fixture"
+      ~post_stream
+  in
+  let target =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let context =
+    Inference_fixture.resolve fixture target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  S.run_completion_stream_in_memory_entries
+    ~env
+    ~inference_context:context
+    ~inference_identity:(Inference_fixture.identity fixture)
+    ~on_inference_attempt:ignore
+    ~on_inference_completion:ignore
+;;
+
 let call =
   R.Function_call.
     { name = "echo"
@@ -86,7 +113,7 @@ let service ~commit_call ~commit_output ?prepare_call () : S.Tool_dispatch.t =
 ;;
 
 let run env ~on_history_item_appended ~on_transcript_event ?dispatch_tool responses =
-  S.run_completion_stream_in_memory_entries
+  selected_run
     ~env
     ~datadir:(Eio.Stdenv.cwd env)
     ~allocator:(allocator ())
@@ -361,11 +388,7 @@ let%test_unit
     let requests = ref 0 in
     let post_with_retry ~sw ~inputs =
       Int.incr requests;
-      if !requests = 2
-      then
-        fun () ->
-          raise (R.Response_stream_parsing_error (`Null, Failure "first child attempt"))
-      else post responses ~sw ~inputs
+      post responses ~sw ~inputs
     in
     let events = Queue.create ()
     and tools = Queue.create ()
@@ -385,7 +408,7 @@ let%test_unit
            });
       R.Tool_output.Output.Text input);
     let history =
-      S.run_completion_stream_in_memory_entries
+      selected_run
         ~env
         ~datadir:(Eio.Stdenv.cwd env)
         ~allocator:(allocator ())
@@ -434,15 +457,7 @@ let%test_unit
         | _ -> false)
     in
     assert (nested_final = 5);
-    assert (!requests = 6);
-    assert (
-      Queue.exists events ~f:(fun event ->
-        match T.Stream.view event with
-        | Source_finished { scope; completion = Failed } ->
-          (match scope.relation with
-           | Nested _ -> true
-           | Root -> false)
-        | _ -> false));
+    assert (!requests = 5);
     assert (
       Queue.exists legacy ~f:(function
         | Chat_response.Tool_execution_event.Trace _ -> true

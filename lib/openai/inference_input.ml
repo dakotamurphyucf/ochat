@@ -96,6 +96,12 @@ let content assets ~output = function
     else (
       match raw with
       | `Object original ->
+        let open Result.Let_syntax in
+        let%bind () =
+          match Document_schema.Json.field raw ~name:"type" with
+          | Value (`String "input_file") -> Ok ()
+          | _ -> invalid
+        in
         (match List.Assoc.find original ~equal:String.equal "file_url" with
          | Some (`String reference) ->
            let open Result.Let_syntax in

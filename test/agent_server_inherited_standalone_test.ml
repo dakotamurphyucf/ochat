@@ -126,9 +126,10 @@ let on_event ctx state event = match event with
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
                   ; independent_lifetime_policy = Some "standalone-fixture-v1"
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs:_ ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
                           Int.incr requests;
                           match !pending_call with
                           | false -> Stdlib.Seq.empty
@@ -153,6 +154,19 @@ let on_event ctx state event = match event with
                                 ; item_id = "report-item"
                                 ; output_index = 0
                                 ; type_ = "response.function_call_arguments.done"
+                                }
+                            ; Output_item_done
+                                { item =
+                                    Function_call
+                                      { name = !requested_tool
+                                      ; arguments = {|{"root":"data","file":"value.txt"}|}
+                                      ; call_id = sprintf "report-%d" !requests
+                                      ; _type = "function_call"
+                                      ; id = Some "report-item"
+                                      ; status = Some "completed"
+                                      }
+                                ; output_index = 0
+                                ; type_ = "response.output_item.done"
                                 }
                             ]
                             |> Stdlib.List.to_seq)

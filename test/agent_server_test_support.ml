@@ -1,5 +1,61 @@
 open! Core
 
+(** Explicit synthetic selected backend for offline daemon fixtures. The mock
+    owns response completion; observations are intentionally not a durable usage
+    ledger in these tests. This fixture initializes its RNG before allocating a
+    fresh host namespace, including when constructed before the Eio harness.
+    Production compositions must supply actual tracking. *)
+let inference_policy ~default_model ~post_stream =
+  Mirage_crypto_rng_unix.use_default ();
+  let namespace =
+    Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
+  in
+  let fixture = Inference_fixture.create ~namespace ~default_model ~post_stream in
+  Agent_server.Session_factory.
+    { capture_inference_target =
+        (fun ~prompt_revision_id:_ ~config ->
+          Inference_fixture.capture_config fixture config)
+    ; recapture_inference_target =
+        (fun ~current ~prompt_revision_id:_ ~config ->
+          Inference_fixture.recapture_config fixture ~current config)
+    ; migrate_inference_target = None
+    ; migrate_model_job_target = None
+    ; approve_inference_target_change =
+        (fun ~current ~proposed ->
+          let open Result.Let_syntax in
+          let%bind context = Inference_fixture.resolve fixture current in
+          Inference_runtime.Context.derive context ~target:proposed
+          |> Result.map ~f:ignore)
+    ; resolve_inference_context = Inference_fixture.resolve fixture
+    ; runtime_inference_ports =
+        (fun _ ->
+          Ok
+            { identity = Inference_fixture.identity fixture
+            ; on_attempt = ignore
+            ; on_observation = ignore
+            ; on_completion = ignore
+            })
+    }
+;;
+
+let delegation_stage payload =
+  let document =
+    Document_schema.Document.decode ~limits:Document_schema.Limits.default payload
+    |> Result.map_error ~f:(fun _ -> "invalid fixture delegation document")
+    |> Result.ok_or_failwith
+  in
+  assert (String.equal (Document_schema.Document.kind document) "delegation.intent");
+  assert (Int.equal (Document_schema.Document.version document) 6);
+  match
+    Document_schema.Json.field (Document_schema.Document.payload document) ~name:"stage"
+  with
+  | Value (`String "reserved") -> Agent_store.Delegation_store.Reserved
+  | Value (`String "artifact_installed") -> Artifact_installed
+  | Value (`String "child_installed") -> Child_installed
+  | Value (`String "linked") -> Linked
+  | Absent | Null | Value _ -> failwith "invalid fixture delegation stage"
+;;
+
 (* Keep actual polling/I/O waits while controlling the time observed by durable
    deadline bookkeeping. Resuming excludes time spent paused; it never jumps
    past deadlines merely because fixture work was slow. *)

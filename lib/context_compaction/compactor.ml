@@ -1,49 +1,22 @@
 open! Core
 module S = Summarizer
 
-(*------------------------------------------------------------------*)
-(*  Helpers                                                          *)
-(*------------------------------------------------------------------*)
-
-let build_system_summary_message
-      ?(role = Openai.Responses.Input_message.User)
-      (summary : string)
-  : Openai.Responses.Item.t
-  =
-  let open Openai.Responses in
-  let open Input_message in
-  let text_item text : content_item = Text { text; _type = "input_text" } in
-  let msg : Input_message.t =
-    { role; content = [ text_item summary ]; _type = "message" }
-  in
-  Item.Input_message msg
-;;
-
-let partition_history ~item history =
-  let open Openai.Responses in
-  let is_previous_compaction = function
-    | Item.Input_message { role = User; content = Input_message.Text { text; _ } :: _; _ }
-      -> String.strip text |> String.is_prefix ~prefix:"<system-reminder>"
-    | _ -> false
-  in
-  let _, devs, comps, relevant_items =
+let partition_history history =
+  let _, policies, reminders, relevant =
     List.fold_right
       history
       ~init:(0, [], [], [])
-      ~f:(fun entry (retained, devs, comps, items) ->
-        let payload = item entry in
-        if is_previous_compaction payload
+      ~f:(fun entry (count, policies, reminders, relevant) ->
+        if History_view.is_reminder entry
         then
-          if retained < 10
-          then retained + 1, devs, entry :: comps, entry :: items
-          else retained, devs, comps, items
-        else (
-          match payload with
-          | Item.Input_message { role = System | Developer; _ } ->
-            retained, entry :: devs, comps, entry :: items
-          | _ -> retained, devs, comps, entry :: items))
+          if count < 10
+          then count + 1, policies, entry :: reminders, entry :: relevant
+          else count, policies, reminders, relevant
+        else if History_view.is_policy entry
+        then count, entry :: policies, reminders, entry :: relevant
+        else count, policies, reminders, entry :: relevant)
   in
-  devs, comps, relevant_items
+  policies, reminders, relevant
 ;;
 
 let token_codec = lazy (Tikitoken.create_codec Tiktoken_data.o200k_base)
@@ -54,8 +27,7 @@ let estimated_tokens items =
     (module Int)
     items
     ~f:(fun item ->
-      let text = Openai.Responses.Item.jsonaf_of_t item |> Jsonaf.to_string in
-      8 + List.length (Tikitoken.encode ~codec ~text))
+      8 + List.length (Tikitoken.encode ~codec ~text:(S.render_transcript [ item ])))
 ;;
 
 let select_relevant ~score config items =
@@ -66,34 +38,19 @@ let select_relevant ~score config items =
     let last = List.length groups - 1 in
     List.filteri groups ~f:(fun index group ->
       index = last
-      || List.exists group ~f:(function
-        | Openai.Responses.Item.Input_message { role = System | Developer; _ } -> true
-        | _ -> false)
+      || List.exists group ~f:History_view.is_policy
       || Float.(score (S.render_transcript group) >= config.relevance_threshold))
     |> List.concat)
 ;;
 
-let compact_entries_configured
-      ~config
-      ~summarise
-      ~allocator
-      ~env
-      ~(history : History_entry.t list)
-  =
-  try
-    if not (Config.is_valid config) then invalid_arg "invalid compaction configuration";
-    let devs, comps, relevant_entries =
-      partition_history ~item:Openai.Responses_history.item_exn history
-    in
+let compact_entries_configured ~config ~score ~summarise ~allocator ~env ~history =
+  if not (Config.is_valid config)
+  then Error (Invalid_argument "invalid compaction configuration")
+  else (
+    let policies, reminders, relevant = partition_history history in
     let open Result.Let_syntax in
     let%bind compacted =
-      let relevant_items =
-        select_relevant
-          config
-          (Openai.Responses_history.items_exn relevant_entries)
-          ~score:(fun prompt -> Relevance_judge.score_relevance ?env config ~prompt)
-      in
-      summarise ~relevant_items ~env
+      summarise ~relevant_items:(select_relevant ~score config relevant) ~env
     in
     let summary =
       sprintf
@@ -106,45 +63,54 @@ let compact_entries_configured
          </system-reminder>"
         compacted
     in
-    let item = build_system_summary_message summary in
-    let retained = devs @ comps in
+    let payload = History_view.message ~role:User summary in
+    (* A private preview ID is never returned or reserved; estimation reads only
+       semantic text. Durable allocation happens only after the budget check. *)
+    let preview_id =
+      History_entry.Id.create ~namespace:"compaction-preview" ~sequence:0
+      |> Result.ok_or_failwith
+    in
+    let preview = History_entry.create_with_id ~id:preview_id payload in
+    let retained = policies @ reminders in
     let%bind () =
-      if
-        estimated_tokens (Openai.Responses_history.items_exn retained @ [ item ])
-        <= config.context_limit
+      if estimated_tokens (retained @ [ preview ]) <= config.context_limit
       then Ok ()
       else Error (Failure "compaction exceeds context_limit; original history retained")
     in
     let%map reminder =
-      Openai.Responses_history.create ~allocator item
+      History_entry.create ~allocator payload
       |> Result.map_error ~f:(fun error -> Failure error)
     in
-    List.concat [ devs; comps; [ reminder ] ]
-  with
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
-  | exn -> Error exn
+    retained @ [ reminder ])
 ;;
 
-let compact_entries_with ~summarise ~allocator ~env ~history =
+let compact_entries ~inference ~allocator ~env ~history =
+  let config = Config.load ?env () in
   compact_entries_configured
-    ~config:(Config.load ?env ())
-    ~summarise
+    ~config
+    ~score:(fun prompt -> Relevance_judge.score_relevance ~inference config ~prompt)
+    ~summarise:(S.summarise ~inference)
     ~allocator
     ~env
     ~history
 ;;
 
-let compact_entries ~allocator ~env ~history =
-  compact_entries_with ~summarise:S.summarise ~allocator ~env ~history
-;;
-
 module For_testing = struct
-  let process_current_entries history =
-    partition_history ~item:Openai.Responses_history.item_exn history
+  let process_current_entries = partition_history
+
+  let compact_entries_configured ~config =
+    compact_entries_configured ~config ~score:(fun _ -> 0.5)
   ;;
 
-  let compact_entries_with = compact_entries_with
-  let compact_entries_configured = compact_entries_configured
+  let compact_entries_with ~summarise ~allocator ~env ~history =
+    compact_entries_configured
+      ~config:(Config.load ?env ())
+      ~summarise
+      ~allocator
+      ~env
+      ~history
+  ;;
+
   let select_relevant = select_relevant
   let estimated_tokens = estimated_tokens
 end

@@ -34,8 +34,11 @@ let with_daemon f =
               ~process_start_identity:None
               ~options:
                 { Agent_server.Daemon.default_options with
-                  model_post_stream =
-                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model request")
+                  inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                        failwith "unexpected model request")
                 }
               ()
             |> protocol_ok

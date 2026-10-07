@@ -71,6 +71,19 @@ let function_call name arguments =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string arguments
+            ; call_id = "helper-call"
+            ; _type = "function_call"
+            ; id = Some "helper-item"
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
   |> Stdlib.List.to_seq
 ;;
@@ -368,7 +381,13 @@ let run env helper ~native_watch =
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options:{ D.default_options with model_post_stream = Some provider }
+              ~options:
+                { D.default_options with
+                  inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
+                }
               ()
             |> protocol_ok
           in

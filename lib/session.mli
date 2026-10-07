@@ -325,6 +325,7 @@ type t =
   { version : int (** Authoring schema version.                    *)
   ; id : string (** Globally-unique session identifier.          *)
   ; prompt_file : string (** Absolute path of the source prompt file.     *)
+  ; inference_target : Inference.Selection.t
   ; local_prompt_copy : string option
     (** Optional prompt copy inside the session directory.    *)
   ; history : History.t
@@ -354,6 +355,7 @@ type t =
 val create
   :  ?id:string
   -> prompt_file:string
+  -> ?inference_target:Inference.Selection.t
   -> ?local_prompt_copy:string
   -> ?history:History.t
   -> ?next_history_sequence:int
@@ -384,7 +386,8 @@ val allocator : t -> (History_entry.Allocator.t, string) result
 val validate : t -> (unit, string) result
 
 module Document : sig
-  (** Complete standalone.session v1 document. Generic conversion precedes the
+  (** Complete standalone.session v2 document. Version1 converts to an explicit
+      unresolved inference selection before current native decoding. Generic conversion precedes the
       validated current decoder. Unknown fields survive edits; ambiguous edits
       return Extension_conflict before any file write. *)
   val encode : t -> (Document_schema.Document.t, Document_schema.Error.t) Result.t

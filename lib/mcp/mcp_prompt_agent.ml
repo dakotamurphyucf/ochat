@@ -35,9 +35,15 @@ let of_chatmd_file_with_run_agent
          -> string
          -> CM.content_item list
          -> string)
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?(on_inference_observation = fun _ -> ())
       ~(env : Eio_unix.Stdenv.base)
       ~(core : Mcp_server_core.t)
       ~(path : _ Eio.Path.t)
+      ()
   : JT.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt
   =
   (* ------------------------------------------------------------------ *)
@@ -89,7 +95,17 @@ let of_chatmd_file_with_run_agent
               @@ fun _sw ->
               let cache = Chat_response.Cache.create ~max_size:256 () in
               let ctx =
-                Chat_response.Ctx.create ~env ~dir:prompt_dir ~cache ~tool_dir:env#cwd
+                Chat_response.Ctx.create
+                  ~inference_context
+                  ~inference_identity
+                  ~on_inference_attempt
+                  ~on_inference_completion
+                  ~on_inference_observation
+                  ~env
+                  ~dir:prompt_dir
+                  ~cache
+                  ~tool_dir:env#cwd
+                  ()
               in
               run_agent
                 ?prompt_dir:(Some prompt_dir)
@@ -101,16 +117,27 @@ let of_chatmd_file_with_run_agent
             send_progress ~progress:1.0 ?total:None ?message:(Some "Completed") ();
             Ok (`String result)
           with
-          | exn ->
+          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | Chat_response.In_memory_stream.Inference_failed _ ->
             send_progress ~progress:1.0 ?total:None ?message:(Some "Failed") ();
-            Error (Printf.sprintf "Agent execution failed: %s" (Exn.to_string exn)))
+            Error "Selected inference did not complete")
        | _ -> Error "Missing field 'input' (string)")
     | _ -> Error "arguments must be object"
   in
   tool_spec, handler, prompt
 ;;
 
-let of_chatmd_file ~env ~core ~path =
+let of_chatmd_file
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?on_inference_observation
+      ~env
+      ~core
+      ~path
+      ()
+  =
   of_chatmd_file_with_run_agent
     ~run_agent:(fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
       Chat_response.Driver.run_agent
@@ -120,7 +147,13 @@ let of_chatmd_file ~env ~core ~path =
         ~ctx
         prompt
         items)
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ?on_inference_observation
     ~env
     ~core
     ~path
+    ()
 ;;

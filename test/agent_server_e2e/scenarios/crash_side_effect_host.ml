@@ -82,7 +82,10 @@ let run env ~config_path ~marker =
   let config = load_config wrapped config_path in
   let options =
     { Agent_server.Daemon.default_options with
-      model_post_stream = Some (model_post_stream env marker)
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:(model_post_stream env marker)
     }
   in
   Eio.Switch.run (fun sw ->

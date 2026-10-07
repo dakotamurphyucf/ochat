@@ -28,6 +28,100 @@ let observe_rename (Eio.Resource.T (directory, handler) as native_directory) rea
     (directory, Eio.Resource.handler (H (Eio.Fs.Pi.Dir, (module Directory)) :: bindings))
 ;;
 
+let%test_unit
+    "failed host initialization preserves acknowledged selection and releases ownership"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    let path = Eio.Path.(Eio.Stdenv.fs env / root) in
+    Exn.protect
+      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true path)
+      ~f:(fun () ->
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(path / "parent.chatmd")
+          "<developer>Durable before initialization.</developer>";
+        let callbacks = ref 0 in
+        let session_id = ref None in
+        let policy =
+          inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model dispatch")
+        in
+        let policy =
+          { policy with
+            runtime_inference_ports =
+              (fun actor ->
+                Int.incr callbacks;
+                let state = A.state actor |> protocol_ok in
+                session_id := Some state.identity.session_id;
+                assert (Int64.(state.counters.transaction_sequence >= 1L));
+                (match Inference.Selection.view state.spec.inference_target with
+                 | Captured _ -> ()
+                 | Unresolved -> assert false);
+                (match state.runtime_initialization with
+                 | Pending { fresh_history = true } -> ()
+                 | Ready | Pending { fresh_history = false } -> assert false);
+                raise Exit)
+          }
+        in
+        Eio.Switch.run (fun sw ->
+          let daemon =
+            Daemon.start
+              ~sw
+              ~env
+              ~config:(config root root (Filename.concat root "parent.chatmd"))
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:{ Daemon.default_options with inference_policy = policy }
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              (match
+                 Agent_server.Session_factory.create_session
+                   (Daemon.factory daemon)
+                   ~command_audit:None
+                   ~principal:(principal ())
+                   (create_request ())
+               with
+               | exception Exit -> ()
+               | exception exn -> raise exn
+               | Ok _ | Error _ -> assert false);
+              assert (Int.equal !callbacks 1);
+              let id = Option.value_exn !session_id in
+              let index =
+                Agent_store.Session_index.find
+                  (Agent_store.Session_store.session_index (Daemon.store daemon))
+                  id
+                |> Option.value_exn
+              in
+              (match index.session.observed_state with
+               | Failed failure ->
+                 assert (String.equal failure.message "runtime initialization failed")
+               | _ -> assert false);
+              (* Reopening the same durable handle proves the failed unregistered
+                 actor/writer released their ownership rather than leaking locks. *)
+              let restored =
+                Agent_server.Session_factory.recover_session (Daemon.factory daemon) index
+                |> protocol_ok
+              in
+              Exn.protect ~finally:restored.close ~f:(fun () ->
+                let state = A.state restored.actor |> protocol_ok in
+                assert (Int.equal !callbacks 1);
+                (match state.runtime_initialization with
+                 | Pending { fresh_history = true } -> ()
+                 | Ready | Pending { fresh_history = false } -> assert false);
+                (match state.lifecycle.observed with
+                 | Failed _ -> ()
+                 | _ -> assert false);
+                assert (Option.is_some state.failure))))))
+;;
+
 let%expect_test "child publication never reacquires its parent runtime from the actor" =
   List.iter [ false; true ] ~f:(fun moderated ->
     Eio_main.run (fun env ->
@@ -71,15 +165,13 @@ let on_event ctx state event = Task.pure(state)
               in
               (* Observe real persisted stages without recursively entering the
                ledger mutex from its filesystem callback. *)
-              if
-                String.is_substring payload ~substring:"(stage Child_installed)"
-                && not !paused
+              if D.equal_stage (delegation_stage payload) Child_installed && not !paused
               then (
                 paused := true;
                 Eio.Promise.resolve installed_u ();
                 Eio.Promise.await proceed);
               if
-                String.is_substring payload ~substring:"(stage Linked)"
+                D.equal_stage (delegation_stage payload) Linked
                 && Option.is_none (Eio.Promise.peek linked)
               then Eio.Promise.resolve linked_u ())
           in
@@ -113,8 +205,10 @@ let on_event ctx state event = Task.pure(state)
                 ~options:
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream =
-                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
                   }
                 ()
               |> protocol_ok

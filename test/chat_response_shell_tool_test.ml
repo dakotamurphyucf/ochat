@@ -1,4 +1,16 @@
 open! Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_response_shell_tool_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 module Lang = Chatml.Chatml_lang
 module MC = Chatmd_shell_spec.Manifest_compiler
@@ -140,7 +152,7 @@ let agent_runtime_or_fail = function
 let with_agent_runtime_input env root source f =
   let elements = CM.parse_chat_inputs ~source:"agent.chatmd" ~dir:root source in
   let cache = Chat_response.Cache.create ~max_size:1 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir:root ~tool_dir:root ~cache in
+  let ctx = fixture_ctx ~env ~dir:root ~tool_dir:root ~cache in
   let host =
     Chat_response.Agent_runtime.host
       ~env

@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 let ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -110,6 +119,7 @@ let with_host ?(prompt = "<developer>Offline gap regression.</developer>") f =
         Eio.Switch.run (fun sw ->
           let host =
             Agent_server.Embedded.start
+              ~daemon_options:(inference_options ())
               ~sw
               ~env
               { prompt_file

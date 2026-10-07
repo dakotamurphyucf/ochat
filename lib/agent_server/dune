@@ -48,6 +48,9 @@
   eio
   eio.unix
   mirage-crypto-rng.unix
+  ochat.inference
+  ochat.inference_runtime
+  ochat.inference_client
   ochat.transcript
   ochat.history_entry
   ochat.agent_protocol

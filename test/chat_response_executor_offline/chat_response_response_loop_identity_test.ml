@@ -64,12 +64,24 @@ let create_entry ~allocator item =
   Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
 ;;
 
+let stream_response (response : Res.Response.t) =
+  List.mapi response.output ~f:(fun output_index item ->
+    let item = Res.Response_stream.Item.t_of_jsonaf (Res.Item.jsonaf_of_t item) in
+    Res.Response_stream.Output_item_done
+      { item; output_index; type_ = "response.output_item.done" })
+  |> Stdlib.List.to_seq
+;;
+
+let fixture_ctx ~env ~dir ~cache ~namespace ~post_stream =
+  Inference_fixture.create ~namespace ~default_model:"test-model" ~post_stream
+  |> fun fixture -> Inference_fixture.ctx fixture ~env ~dir ~tool_dir:dir ~cache ()
+;;
+
 let%expect_test "blocking loop preserves IDs and allocates each new occurrence once" =
   Eio_main.run
   @@ fun env ->
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:1 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~tool_dir:dir ~cache in
   let allocator =
     History_entry.Allocator.create ~namespace:"blocking-test" ~next_sequence:0
     |> Result.ok_or_failwith
@@ -84,14 +96,13 @@ let%expect_test "blocking loop preserves IDs and allocates each new occurrence o
     Queue.of_list [ response [ function_call ]; response [ output_message "done" ] ]
   in
   let request_inputs = Queue.create () in
-  let post : Loop.post =
-    fun ~sw:_ ~dir:_ ~inputs ->
+  let post_stream : Inference_fixture.post_stream =
+    fun ~sw:_ ~inputs ->
     Queue.enqueue request_inputs inputs;
-    Queue.dequeue_exn responses
+    stream_response (Queue.dequeue_exn responses)
   in
-  let history =
-    Loop.run_entries ~ctx ~allocator ~post ~model:Res.Request.Gpt4 ~tool_tbl [ initial ]
-  in
+  let ctx = fixture_ctx ~env ~dir ~cache ~namespace:"blocking" ~post_stream in
+  let history = Loop.run_entries ~ctx ~allocator ~tool_tbl [ initial ] in
   let ids =
     List.map history ~f:(fun entry -> History_entry.Id.sequence (History_entry.id entry))
   in
@@ -117,13 +128,6 @@ let%expect_test "blocking request payload matches entry projection" =
   Eio_main.run
   @@ fun env ->
   let dir = Eio.Stdenv.cwd env in
-  let ctx =
-    Chat_response.Ctx.create
-      ~env
-      ~dir
-      ~tool_dir:dir
-      ~cache:(Chat_response.Cache.create ~max_size:1 ())
-  in
   let allocator =
     History_entry.Allocator.create ~namespace:"payload-parity" ~next_sequence:0
     |> Result.ok_or_failwith
@@ -131,17 +135,23 @@ let%expect_test "blocking request payload matches entry projection" =
   let initial_items = [ input_message "one"; input_message "two" ] in
   let initial_entries = List.map initial_items ~f:(create_entry ~allocator) in
   let posted = ref [] in
-  let post : Loop.post =
-    fun ~sw:_ ~dir:_ ~inputs ->
+  let post_stream : Inference_fixture.post_stream =
+    fun ~sw:_ ~inputs ->
     posted := inputs;
-    response []
+    stream_response (response [])
+  in
+  let ctx =
+    fixture_ctx
+      ~env
+      ~dir
+      ~cache:(Chat_response.Cache.create ~max_size:1 ())
+      ~namespace:"payload"
+      ~post_stream
   in
   ignore
     (Chat_response.Driver.run_entries
        ~ctx
        ~allocator
-       ~post
-       ~model:Res.Request.Gpt4
        ~tool_tbl:(String.Table.create ())
        initial_entries
      : History_entry.t list);

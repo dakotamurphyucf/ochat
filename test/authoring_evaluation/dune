@@ -2,7 +2,7 @@
  (name authoring_evaluation)
  (modules runner tasks driver report execution_audit suite responses_provider responses_http reference_backend execution_host execution_cases moderator_cases background_cases child_cases repair_cases digest_cases)
  (libraries core core_unix jsonaf eio eio_main mirage-crypto-rng.unix cohttp-eio tls-eio ca-certs
-  ochat.chat_response ochat.agent_server ochat.agent_client agent_server_test_support)
+  ochat.chat_response ochat.agent_server ochat.agent_client agent_server_test_support inference_fixture)
  (preprocess (pps ppx_jane ppx_jsonaf_conv)))
 
 (library

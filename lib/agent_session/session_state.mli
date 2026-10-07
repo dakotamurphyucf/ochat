@@ -20,6 +20,10 @@ module Spec : sig
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; inference_target : (Inference.Selection.t[@sexp.opaque])
+      (** Private frozen session selection, independent of children/model jobs.
+          Historical absence converts to explicit Unresolved and grants no
+          backend defaults or execution authority. *)
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
@@ -90,6 +94,17 @@ module Lifecycle : sig
   [@@deriving sexp]
 end
 
+(** Private activation gate. Pending records a selected configuration durably
+    before initializer effects. It is never inferred from empty history. Recovery
+    keeps Pending unloaded; only explicit activation may retry. Automatic jobs
+    and runtime work require Ready. *)
+module Runtime_initialization : sig
+  type t =
+    | Ready
+    | Pending of { fresh_history : bool }
+  [@@deriving equal, sexp]
+end
+
 module Counters : sig
   type t =
     { revision : int64
@@ -105,6 +120,7 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool
     (** New generated creation's durable, unconsumed start intent. Older sessions
         never infer this from their original start_immediately configuration. *)
@@ -120,6 +136,11 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; model_job_targets : Model_job_target.t list
+    (** Exactly one private ID/generation binding per retained Model_call job.
+        Source is captured at admission, root recipe target after prompt fetch;
+        neither follows later parent selection changes. Unknown binding members
+        remain owned by the state document carrier. *)
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; managed_submissions : Managed_submission.t list [@sexp.list]

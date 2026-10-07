@@ -43,6 +43,16 @@ type persist_mode =
   ]
 
 module For_testing : sig
+  val select_session_target
+    :  Inference.Selection.t
+    -> session_id:string
+    -> capture:
+         (unit
+          -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+    -> ( Inference.Request.Target.t * Inference.Selection.t * bool
+         , Inference_runtime.Preparation_error.t )
+         Result.t
+
   val should_warm_history_before_redraw : runtime:App_runtime.t -> model:Model.t -> bool
   val cursor_for_frame : model:Model.t -> int * int -> (int * int) option
 end
@@ -113,7 +123,12 @@ end
     ]}
  *)
 val run_chat
-  :  ?typeahead_config:Type_ahead_config.t
+  :  inference_host:Inference_host.t
+  -> resolve_typeahead:Inference_runtime.resolver
+  -> migrate_inference_target:
+       (Chat_response.Config.t
+        -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+  -> ?typeahead_config:Type_ahead_config.t
   -> env:Eio_unix.Stdenv.base
   -> prompt_file:string
   -> ?session:Session.t
@@ -131,7 +146,8 @@ val run_chat
     for history, execution, permissions, compaction, and persistence; editor
     and viewport state remain local to this process. *)
 val run_agent_session
-  :  env:Eio_unix.Stdenv.base
+  :  ?typeahead_inference:Inference_client.Execution.t
+  -> env:Eio_unix.Stdenv.base
   -> client:Agent_session_client.t
   -> ?textmate_grammar_files:string list
   -> ?typeahead_config:Type_ahead_config.t

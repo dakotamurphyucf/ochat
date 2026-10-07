@@ -2942,7 +2942,7 @@ let runtime_foundation ~sources =
         "Creation retries, lifetimes and inherited authority"
         [ "runtime.delegation.generated" ]
         [ ( "## Create, retry and retain authority"
-          , "1fe4d0034367286bcfbb781acf2a01eac7fdf5f72a416143cd04c60fd1033f83" )
+          , "dc6b4d3d15cc186f4459c2a0b07462afa8bd6d4221d75c9b2f2cab3e2f591610" )
         ]
     ; make_child
         "runtime.delegation.submissions"
@@ -3268,7 +3268,7 @@ let runtime_foundation ~sources =
          ; review =
              Audited
                { excerpt_sha256 =
-                   [ "a98281f44e0119f40b75e98a8c15fb8d6d70d18a0b132dbcdadf00731530c61b" ]
+                   [ "bfeead5e6f60c7ed6d3a6a548e68d741d852532d9aca896f3f4bc9e42dda114e" ]
                ; evidence =
                    [ "lib/agent_session/administration.ml"
                    ; "lib/agent_session/session_actor.ml"

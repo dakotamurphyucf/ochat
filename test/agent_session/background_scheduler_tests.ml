@@ -119,7 +119,12 @@ let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
           }
     in
     let start () =
-      Scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~capacity
+      Scheduler.start
+        ~sw
+        ~clock:(Eio.Stdenv.clock env)
+        ~registry
+        ~capacity
+        ~model_job_inference:(fun _ _ -> failwith "unexpected model job inference")
     in
     let scheduler = start () in
     Exn.protect

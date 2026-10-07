@@ -188,7 +188,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "1f55553034edc4c9570b304028c4b2712c33da5e1b7911f84577f6b8b719a5a9" )
+    , "1ba6abd7f5e260b63fe5cd7e12dadb8f8837193e9f95499de912c5baae31a10a" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "46e1d8969a881efd0a3600ac521dc3d810acef6648410d01b8591c8be084f4bd" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"
@@ -236,7 +236,7 @@ let implementation_sources =
   ; ( "lib/agent_session/session_management_native.ml"
     , "8ccb5239373707dacbceec1ce9a0c5146eea5360921ad0a5209bcc2928bce806" )
   ; ( "lib/agent_store/delegation_store.ml"
-    , "78de5650ba09925cfef777ef73f25ba9143dfd91b11c776796dc20b36caafd71" )
+    , "4b3d701da53563ca782a458771707f187715192b53033ea2461aecdbe1cf9f1a" )
   ; ( "lib/chat_response/authoring_context.ml"
     , "b9d759b7df1c3dfb613756547325ad8b52082b571cc5e51a7a03c6bedbd009b8" )
   ; ( "lib/chat_response/authoring_validation.ml"
@@ -259,19 +259,19 @@ let topic_contracts =
     , "551884bf0e3eec7b15c19abef77502c75744211a8a51494ca79cf603e9c56e97" )
   ; ( "one_off_v1"
     , "runtime.delegation.generated"
-    , "1c681cc423ab9dfc570afedd1ad30aea4b5dbef78c3ba321a1e8066a84414ffe" )
+    , "6318c6d6fb266000bfb3a3228fcba731dfccb62526af5a80a1252f8aa6f75041" )
   ; ( "one_off_v1"
     , "runtime.delegation.creation"
-    , "0b047231ec51f0e8cf06d466d085caf0c333372893ab6e0020c34b3d6e4cd37a" )
+    , "2ed821ba7b4b9497341ab4e64c03289a61c38ade071a88b16566d8addf86e010" )
   ; ( "one_off_v1"
     , "runtime.delegation.submissions"
-    , "38db24e0cc2022436d79a97e38a7943dae6332feca07bf2dae74049c07dda041" )
+    , "e38fee8056921f7a06bd602311b64547b868c0d090613c35a6193d4709c51706" )
   ; ( "one_off_v1"
     , "runtime.delegation.output"
-    , "a2ab28015b98de8b6a3223f83c89efd43aee098edc9091e217e073144d29e548" )
+    , "f7aabcd1eebd7738793f66946fe98830f1a61223db9e4323539b444141ca3072" )
   ; ( "one_off_v1"
     , "runtime.delegation.stop-helper"
-    , "5e6739ce939b2140be374dc29b4e8c2285bd26e4744ba8ec0fc8a3b31d07b98f" )
+    , "a64384e0c4ca6fe44f3ce2c2f7a3ea033f49ea46a3ff30d38e6585e23517fd99" )
   ; ( "tool_v1"
     , "runtime.native.requests"
     , "02325a15bb50a98d9798c025a0a1b0e03d2e13f69390081944d9edef6cfcf5b4" )
@@ -280,19 +280,19 @@ let topic_contracts =
     , "dd874d6d66ab4fd587ad87e581c41eb6600770a503fd9194ced62ae506e0f4ca" )
   ; ( "tool_v1"
     , "runtime.delegation.generated"
-    , "7c66a5de9306d6770f97a9c9779feae5309f9fe8d1e48cd1581554cb49bd172a" )
+    , "c1d475fcf26295c9847590003f6023869d39dee18d88e692a33e2a8523509254" )
   ; ( "tool_v1"
     , "runtime.delegation.creation"
-    , "1b290a706275dc483612c71bcdbe2fc5f10c7e0a2295fd69a32b4f61905f15dd" )
+    , "c8219b0b7416ef7cfbebccb75ecdaeed0530e5be52541210fc2dbcbe06d7ce80" )
   ; ( "tool_v1"
     , "runtime.delegation.submissions"
-    , "f790c56a9bf45a518569f1f59e9fd3ff407687cb1e0b76ad2b9b9278b8ea5bb7" )
+    , "8b5defe4e99599c165d74204329f47881aba6ec9197c9950de1576e62fc67d60" )
   ; ( "tool_v1"
     , "runtime.delegation.output"
-    , "0835d139068c6829819fe9574be80d7c8c92b739e311622e5586537b280b58ab" )
+    , "47f692c2cd1e676ac926bb482764a240f81f5158d67ef3beb5a8d9f6a735f851" )
   ; ( "tool_v1"
     , "runtime.delegation.stop-helper"
-    , "30abafcb863a36fdabb49f627073ba8ad135f4476d4ae7d216c2d121bbf098c9" )
+    , "60cac0056f315eb3a9e0296d33f8ecf62e66b6bdc5748a9372a17310eece3f00" )
   ; ( "moderator_v1"
     , "runtime.native.requests"
     , "a53edf3b450b1e3bc159be090d9dae6bc3f17ec6ca299dac919da9e59346a09a" )
@@ -301,19 +301,19 @@ let topic_contracts =
     , "ad8e067d874c286eb4b067084b9558113617985ba0a190284290c15c583c3294" )
   ; ( "moderator_v1"
     , "runtime.delegation.generated"
-    , "a8bd717847254354135148aa624396b8838e51f528232d6e58c91d1b636c691b" )
+    , "0747a80f85b27855d2bb7ded8a24526eff2d92d9f362d5c8b1fabb06025bef11" )
   ; ( "moderator_v1"
     , "runtime.delegation.creation"
-    , "7566912501ffb02cb8d2511f7707c656e1b31e2285bee393235e7e4644e94f3d" )
+    , "ba134e2c7ea6766c31de617ce8fc891c0a61ecf0aaefcd34eba3c8529486c3b1" )
   ; ( "moderator_v1"
     , "runtime.delegation.submissions"
-    , "b591d10713e309a574d9cd3e7c2c4c06498d6e1f2bc15a5babf9ad1d79f4ca85" )
+    , "525e19dc8be66db7a896839317aa5a2e859f47ca25c9d658ed56b4c8f4705538" )
   ; ( "moderator_v1"
     , "runtime.delegation.output"
-    , "39a7b2fa16bc497dc6133daf7f61029f0c35e53f5caae6970fca4efd961c690b" )
+    , "320c62158e13a88cfc5e918fbb294a6518f67830f0eec0a7b90f0b3bb5c71b8d" )
   ; ( "moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "9f09e5f18125b88c4676475991b6913295f7d86ea7dc64d375d4d0b4cab3e1c9" )
+    , "19391614d6c1fd3d4e4797d321c54913ce4fdeefbe8f94f4ec4d4455dbda656e" )
   ; ( "delegated_moderator_v1"
     , "runtime.native.requests"
     , "4649c8a1085768c7496e036df2e710439927d2df79826fe0d73a5a95e0e7fd61" )
@@ -322,18 +322,18 @@ let topic_contracts =
     , "4abe98ad1b9f860a28a97775f1c35c2e232f41f4c8c93e6e3c7ceb78ba38bd40" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.generated"
-    , "5f5e5fc881afbe568424bb664144e87dc90610efdae2d15ac8971dfd915738cc" )
+    , "4a0967140271740eff9af6806c07e990f1bfe5086c3147d7a2f639ef9641d316" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.creation"
-    , "5636f37b41b022c06e00ecd71eee6f2e48e8936de1acaf830a2b24dc738abf83" )
+    , "b37a1bef483587eca050d5be506af7f9be28a45d22da5abf875fc85b29ad0351" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.submissions"
-    , "151d9bed6bc32ae52bdba29cb3cb8eb261f5512e8c1a507f4549192afa90448d" )
+    , "6dadcedf4ff705054384ba47a3c0c34ac83de5f2207d0f4fce1d0029433794fb" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.output"
-    , "2c8bd91b376f617a30eb7deafe84632c6d517a845b74e6a17da7e120ba1aeeda" )
+    , "b33ae539810ef1c925c2539349e95e3f83f60b41209d83f9e2dadd568439f641" )
   ; ( "delegated_moderator_v1"
     , "runtime.delegation.stop-helper"
-    , "458c1ab9831c098a3294c5386944cd7e5c20df519edc5ddd71bc921982ec8429" )
+    , "8db32cb3380d2ecc6c52794c0d7c5885bdf6bf8353eedc8b79b35c809ff0b07c" )
   ]
 ;;

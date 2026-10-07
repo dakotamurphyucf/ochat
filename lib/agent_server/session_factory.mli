@@ -37,6 +37,60 @@ type limits =
   ; ingress : Agent_session.Staged_ingress.limits
   }
 
+(** Host-owned, acknowledged inference tracking for this actual actor.
+    Identity allocation and attempt callbacks preserve durable ownership; they
+    are never invented from a presentation callback or ambient backend. *)
+type runtime_inference_ports =
+  { identity : Chat_response.Neutral_turn.Identity.t
+  ; on_attempt : Inference_runtime.Attempt.t -> unit
+  ; on_observation : Inference.Observation.t -> unit
+  ; on_completion : Inference_client.Completion.t -> unit
+  }
+
+(** Composition-root selection policy. Capture and migration are distinct host
+    decisions: reading targetless storage never invokes normal source capture.
+    A missing migration callback leaves historical data inspectable but refuses
+    model execution. Resolve checks the exact stored selection against current
+    adapter eligibility and credentials policy without changing that selection.
+    Capture, migration, approval and resolution perform no login, network or
+    model effects. Model/settings updates retain target-owned future fields;
+    independently admitted child/job selections remain unchanged. *)
+
+type inference_policy =
+  { capture_inference_target :
+      prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
+      -> config:Chat_response.Config.t
+      -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; recapture_inference_target :
+      current:Inference.Request.Target.t
+      -> prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
+      -> config:Chat_response.Config.t
+      -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; migrate_inference_target :
+      (Agent_session.Session_state.Spec.t
+       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+        option
+  ; migrate_model_job_target :
+      (Agent_session.Session_state.Spec.t
+       -> Agent_protocol.Job.t
+       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+        option
+  ; approve_inference_target_change :
+      current:Inference.Request.Target.t
+      -> proposed:Inference.Request.Target.t
+      -> (unit, Inference_runtime.Preparation_error.t) Result.t
+  ; resolve_inference_context : Inference_runtime.resolver
+  ; runtime_inference_ports :
+      Agent_session.Session_actor.t
+      -> (runtime_inference_ports, Inference_runtime.Preparation_error.t) Result.t
+  }
+
+type model_job_inference =
+  { context : Inference_runtime.Context.t
+  ; capture_recipe_target :
+      Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
+  }
+
 type t
 
 type generated_lifetime =
@@ -59,7 +113,7 @@ val create
   -> job_capacity:Job_capacity.t
   -> tool_dir:string
   -> home:string
-  -> model_post_stream:Agent_session.Runtime_builder.model_post_stream option
+  -> inference_policy:inference_policy
   -> qualify_chatml_extensions:bool
   -> session_helpers:Agent_session.Session_management_channel.grant list
   -> independent_lifetime_policy:string option
@@ -68,6 +122,16 @@ val create
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits
   -> t
+
+(** Resolve this exact job's durable source selection, explicitly migrating and
+    acknowledging its capture if authorized. Returned recipe capture is bound to
+    this job generation/attempt; no current-parent derivation or ambient fallback.
+    The caller has claimed the actual running job before recipe execution. *)
+val model_job_inference
+  :  t
+  -> Session_registry.entry
+  -> Agent_protocol.Job.t
+  -> (model_job_inference, Agent_protocol.Error.t) Result.t
 
 (** [install_catalogs] atomically publishes catalogs used for future session
     creation while retaining permission revisions pinned by existing sessions. *)
@@ -85,10 +149,11 @@ val create_session
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
 
-(** [prepare_administration t entry candidate ~fresh_history] validates and
-    initializes detached runtime state without actor callbacks or reservations.
-    Close all preparation resources before returning immutable candidate state.
-    The caller must compare-and-set the captured revision at actor commit. *)
+(** Validate pinned source/profile/workspace and explicitly approved target
+    recapture without evaluating initializers. Return Pending selected state.
+    The caller must fence/retire old resources and atomically compare-and-set this
+    candidate before constructing any new runtime. Failed initialization retains
+    the selected configuration as durable notactivated evidence. *)
 val prepare_administration
   :  t
   -> Session_registry.entry

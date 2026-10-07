@@ -1243,3 +1243,134 @@ let%test_unit
        let state = Agent_session.Session_actor.state actor |> protocol_ok in
        assert (Option.is_some (List.hd_exn state.invocations).output_entry_id))
 ;;
+
+let%test_unit "stream invocation admits captured calls without legacy projection" =
+  let module S = Agent_session.Stream_invocation in
+  let module P = History_entry.Payload in
+  let module W = Openai.Responses_wire in
+  List.iter [ Chat_response.Tool_call.Kind.Function; Custom ] ~f:(fun kind ->
+    let original = "{\"secret\":\"original\"}" in
+    let execution = "{\"secret\":\"execution\"}" in
+    let canonical = "{\"secret\":\"redacted\"}" in
+    let raw =
+      `Object
+        [ "future", `Object [ "number", `Number "1e+00"; "nullable", `Null ]
+        ; ( "type"
+          , `String
+              (match kind with
+               | Function -> "function_call"
+               | Custom -> "custom_tool_call") )
+        ; "id", `String "actual-provider-item"
+        ; "call_id", `String "actual-provider-alias"
+        ; "name", `String "selected_tool"
+        ; ( (match kind with
+             | Function -> "arguments"
+             | Custom -> "input")
+          , `String canonical )
+        ; "status", `String "completed"
+        ]
+    in
+    let origin =
+      W.Origin.create
+        ~provider:"openai.responses"
+        ~account:None
+        ~endpoint:"https://fixture.invalid/responses"
+      |> Result.map_error ~f:(fun _ -> "wire origin")
+      |> Result.ok_or_failwith
+    in
+    let payload =
+      W.Item.decode raw ~origin
+      |> Result.map_error ~f:(fun _ -> "wire item")
+      |> Result.ok_or_failwith
+      |> Openai.Responses_history.of_wire_item
+      |> Result.ok_or_failwith
+    in
+    (match P.representation payload with
+     | Captured { raw = stored; _ } -> assert (Document_schema.Json.equal stored raw)
+     | Authored | Reconstructed _ -> assert false);
+    assert (Result.is_error (Openai.Responses_history.to_item payload));
+    let call = History_entry.create_with_id ~id:history_id payload in
+    let before = P.to_json payload |> Jsonaf.to_string in
+    let request : Chat_response.In_memory_stream.Tool_dispatch.request =
+      { kind
+      ; original_name = "original_tool"
+      ; original_payload = original
+      ; name = "selected_tool"
+      ; payload = execution
+      ; rejection = None
+      ; call
+      ; history = [ call ]
+      ; source = None
+      ; parent_call_id = None
+      }
+    in
+    let input : Agent_session.Operation_worker.Input.t =
+      { session_id
+      ; session_generation = 0
+      ; operation =
+          { id = operation_id
+          ; generation = 0
+          ; kind = Turn User_submit
+          ; state = Running
+          ; started_at = timestamp
+          ; updated_at = timestamp
+          }
+      ; history = [ call ]
+      }
+    in
+    let create request =
+      S.create
+        ~completion_contract:None
+        ~input
+        ~request
+        ~implementation_revision:"actual-revision"
+        ~capability_fingerprint:"actual-capability"
+        ~now:(fun () -> timestamp)
+        ~value:
+          (S.parse_input ~kind:request.kind ~payload:request.payload
+           |> Result.ok_or_failwith)
+    in
+    let invocation = create request |> protocol_ok in
+    assert (String.equal invocation.context.tool_name request.name);
+    assert (
+      Option.equal
+        String.equal
+        invocation.context.provider_call_id
+        (Some "actual-provider-alias"));
+    assert (
+      Option.equal
+        History_entry.Id.equal
+        invocation.context.call_entry_id
+        (Some history_id));
+    let routing = Option.value_exn invocation.routing in
+    let exact fingerprint bytes =
+      assert (
+        String.equal
+          fingerprint.Agent_protocol.Invocation.sha256
+          (Chatmd_shell_spec.Source_ref.digest bytes));
+      assert (Int.equal fingerprint.byte_length (String.length bytes))
+    in
+    exact routing.original_payload original;
+    exact routing.final_payload execution;
+    exact (Option.value_exn routing.canonical_payload) canonical;
+    assert (Result.is_error (create { request with name = "different_tool" }));
+    assert (
+      Result.is_error
+        (create
+           { request with
+             kind =
+               (match kind with
+                | Function -> Custom
+                | Custom -> Function)
+           }));
+    let semantic = P.semantic payload in
+    let unbound =
+      P.Semantic.create (P.Semantic.view semantic) ~metadata:P.Metadata.empty
+      |> Result.ok_or_failwith
+      |> P.authored
+      |> History_entry.create_with_id ~id:history_id
+    in
+    assert (Result.is_error (create { request with call = unbound }));
+    assert (
+      String.equal before (P.to_json (History_entry.payload call) |> Jsonaf.to_string)))
+;;

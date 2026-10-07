@@ -13,23 +13,36 @@
     An {!type:t} bundles one or more such judges and exposes
     {!val:evaluate}.  The function runs every judge (concurrently when
     an [Eio] environment is supplied), combines the raw numbers with an
-    {!module:Aggregator} and memoises the result so that repeated calls
-    with the same candidate are O(1).
+    {!module:Aggregator}. Offline evaluation memoises repeated candidates;
+    selected inference evaluates each actual attempt independently.
 
     All scores are normalised to the closed interval \[0, 1\] where 0
     denotes a poor / losing answer and 1 denotes an excellent / winning
     answer.  Callers should treat the absolute value as an un-calibrated
-    heuristic.  When a judge fails (exception, timeout, missing API key)
-    the framework converts the error into a neutral score of 0.5 to keep
-    downstream logic simple and deterministic in CI.
-*)
+    heuristic. Expected completion/parse failures use each judge's established
+    fallback policy; missing selected execution is a configuration failure and
+    cancellation propagates. *)
 
 open! Core
+
+(** Missing selected inference for a model judge is a configuration failure,
+    preserved through outer judge/self-consistency guards. Pure/injected judges
+    can execute offline. Cancellation and strict observation failures are not
+    converted by model helpers into numeric success. *)
+exception Configuration_required
 
 (** {1 Primitive types} *)
 
 (** A floating-point score in the range \[0, 1\].  Higher is better. *)
 type score = float
+
+module Score : sig
+  type t = score
+
+  (** Complete finite JSON number in [0,max]. No clipping or trailing response
+      text. Rubric values 0–10 are normalized by their existing caller. *)
+  val of_string : string -> max:float -> t option
+end
 
 (** {1 Judge interfaces} *)
 
@@ -40,7 +53,11 @@ module type Judge = sig
   (** [evaluate ?env candidate] returns a quality [score] for
       [candidate].  [env] provides Eio resources (network, filesystem
       …) and may be omitted for offline or pure judges. *)
-  val evaluate : ?env:Eio_unix.Stdenv.base -> string -> score
+  val evaluate
+    :  ?env:Eio_unix.Stdenv.base
+    -> ?inference:Inference_client.Execution.t
+    -> string
+    -> score
 end
 
 module type Pairwise_judge = sig
@@ -53,6 +70,7 @@ module type Pairwise_judge = sig
     :  incumbent:string
     -> challenger:string
     -> ?env:Eio_unix.Stdenv.base
+    -> ?inference:Inference_client.Execution.t
     -> unit
     -> score
 end
@@ -66,9 +84,10 @@ type judge =
 (** {1 Built-in judges}
 
     The constants below expose commonly used judges so that callers do
-    not need to instantiate them manually.  All of them degrade
-    gracefully to a deterministic score of 0.5 when the required
-    OpenAI credentials are absent. *)
+    not need to instantiate them manually. Expected completion failures follow
+    each judge's established fallback: the ordinary model judges use 0.5 and
+    reward-model failures are dropped by the outer evaluator. Missing selected
+    inference is a configuration error rather than an offline score. *)
 
 (** Elo-style arena that repeatedly pits prompts against each other and
     updates their ratings using the logistic Elo formula.  The returned
@@ -80,7 +99,8 @@ val pairwise_arena_judge : (module Pairwise_judge)
     sub-scores normalised to \[0, 1\]. *)
 val rubric_critic_judge : (module Judge)
 
-(** High-fidelity reward model powered by OpenAI’s *grader* endpoint. *)
+(** Selected no-tool inference under the existing reward rubric. The scalar is
+    strict finite [0,1], not a calibrated-equivalence claim about a provider grader. *)
 val prompt_reward_model_judge : (module Judge)
 
 (** Same reward-model judge but with a custom rubric for *tool
@@ -132,10 +152,11 @@ val default : t
 
 (** [evaluate ?env t ?best candidate] obtains a score for [candidate] by
     running all judges in [t] and aggregating the results.  Results are
-    cached, therefore repeated calls with the same [candidate] are
-    effectively free. *)
+    cached only for offline evaluation; selected model attempts are not skipped
+    or conflated across configurations/incumbents. *)
 val evaluate
   :  ?env:Eio_unix.Stdenv.base
+  -> ?inference:Inference_client.Execution.t
   -> t
   -> ?best:string (** incumbent answer in a pairwise setting *)
   -> string (** candidate answer *)

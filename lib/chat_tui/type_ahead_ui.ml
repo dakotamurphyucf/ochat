@@ -210,11 +210,11 @@ let create_with ~sw ~sleep ~complete ~config ~model ~host ~emit =
   }
 ;;
 
-let create ~sw ~env ~config ~model ~host ~emit =
+let create ~sw ~env ~inference ~config ~model ~host ~emit =
   create_with
     ~sw
     ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock env))
-    ~complete:(Type_ahead_provider.complete_suffix ~env ~config)
+    ~complete:(Type_ahead_provider.complete_suffix ~env ~inference ~config)
     ~config
     ~model
     ~host

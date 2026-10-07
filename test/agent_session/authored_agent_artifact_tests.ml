@@ -66,6 +66,7 @@ let%expect_test "authored reservations preserve source identity through durable 
               ; capability_pins = pins
               ; lifetime = Owned
               ; created_at = artifact.created_at
+              ; inference_target = None
               }
             in
             D.reserve

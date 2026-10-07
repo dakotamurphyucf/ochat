@@ -60,9 +60,78 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
+let inference_policy env =
+  let module D = Openai.Responses_driver in
+  (* This case exercises the actual adapter over the isolated HTTP/SSE server.
+     Capture the selected endpoint and credential explicitly at the fixture
+     boundary; never replace the provider request assertions with a mock stream. *)
+  let endpoint = Sys.getenv_exn "API_URL" ^ "/v1/responses" in
+  let capabilities =
+    D.Capability.create
+      ~baseline:
+        (List.map
+           [ D.Capability.Text_input
+           ; Function_tools
+           ; Opaque_replay
+           ; Setting "max_output_tokens"
+           ; Setting "reasoning"
+           ]
+           ~f:(fun feature -> feature, D.Capability.Supported))
+      ~models:[]
+    |> Or_error.ok_exn
+  in
+  let profile =
+    D.Profile.create
+      ~id:"generated-loopback-fixture"
+      ~account:None
+      ~endpoint
+      ~capabilities
+      ~defaults:[]
+    |> Or_error.ok_exn
+  in
+  let driver =
+    D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> Or_error.ok_exn
+  in
+  let lease = D.Auth.bearer "generated-local-fixture" in
+  let host =
+    Inference_host.create
+      driver
+      ~profile
+      ~profile_revision:None
+      ~auth:(fun ~sw:_ _ -> lease)
+      ~default_model:"gpt-4.1"
+      ~namespace:Agent_protocol.Id.Transaction.(create () |> to_string)
+      ~limits:Inference_runtime.Limits.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Session_factory.
+    { capture_inference_target =
+        (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; recapture_inference_target =
+        (fun ~current ~prompt_revision_id:_ ~config ->
+          Inference_host.recapture_config host ~current config)
+    ; migrate_inference_target = None
+    ; migrate_model_job_target = None
+    ; approve_inference_target_change =
+        (fun ~current:_ ~proposed ->
+          Inference_host.resolve host proposed |> Result.map ~f:ignore)
+    ; resolve_inference_context = Inference_host.resolve host
+    ; runtime_inference_ports =
+        (fun _ ->
+          Ok
+            { identity = Inference_host.identity host
+            ; on_attempt = ignore
+            ; on_observation = ignore
+            ; on_completion = ignore
+            })
+    }
+;;
+
 let run_child env root =
-  (* API_URL is read when Openai.Responses initializes. This executable is launched
-     with isolated loopback configuration, never an ambient provider endpoint/key. *)
+  (* The child explicitly captures this isolated loopback configuration; no
+     ambient provider endpoint or credential is permitted. *)
   assert (
     Option.exists (Sys.getenv "API_URL") ~f:(String.is_prefix ~prefix:"http://127.0.0.1:"));
   [%test_eq: string option] (Some "generated-local-fixture") (Sys.getenv "OPENAI_API_KEY");
@@ -84,7 +153,11 @@ let run_child env root =
           ~tool_dir:root
           ~home:root
           ~process_start_identity:None
-          ~options:{ Daemon.default_options with qualify_chatml_extensions = true }
+          ~options:
+            { Daemon.default_options with
+              inference_policy = inference_policy env
+            ; qualify_chatml_extensions = true
+            }
           ()
         |> protocol_ok
       in

@@ -1,7 +1,7 @@
 (library
  (name chat_response_streaming_offline_test)
  (modules fixtures chat_response_streaming_offline_test notification_input_tests)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   chat_response

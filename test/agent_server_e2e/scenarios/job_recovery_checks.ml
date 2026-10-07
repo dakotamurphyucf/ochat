@@ -68,20 +68,25 @@ let queued_once snapshot =
 
 let retry_checkpoint env fixture policy =
   let result = ref None in
-  Host.with_ env fixture ~options:Agent_server.Daemon.default_options (fun sw daemon ->
-    F.with_client ~sw env fixture (fun client ->
-      let session = F.create client "retry:create" in
-      let job = job session policy in
-      ignore
-        (Actor.add_job (actor daemon session) job |> F.protocol_ok : Agent_protocol.Job.t);
-      let snapshot =
-        F.await_snapshot env client session "first retry backoff" queued_once
-      in
-      let queued = find snapshot job.id in
-      F.require
-        (Option.is_some queued.next_run_at && Option.is_none queued.completed_at)
-        "retry deadline was not durably queued";
-      result := Some (session, queued)));
+  Host.with_
+    env
+    fixture
+    ~options:(Host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw daemon ->
+       F.with_client ~sw env fixture (fun client ->
+         let session = F.create client "retry:create" in
+         let job = job session policy in
+         ignore
+           (Actor.add_job (actor daemon session) job |> F.protocol_ok
+            : Agent_protocol.Job.t);
+         let snapshot =
+           F.await_snapshot env client session "first retry backoff" queued_once
+         in
+         let queued = find snapshot job.id in
+         F.require
+           (Option.is_some queued.next_run_at && Option.is_none queued.completed_at)
+           "retry deadline was not durably queued";
+         result := Some (session, queued)));
   Option.value_exn !result
 ;;
 
@@ -96,51 +101,59 @@ let assert_unchanged expected actual =
 let retry_case env environment name policy =
   let fixture = fixture env environment name in
   let session, queued = retry_checkpoint env fixture policy in
-  Host.with_ env fixture ~options:Agent_server.Daemon.default_options (fun sw daemon ->
-    F.with_client ~sw env fixture (fun client ->
-      let initial = find (F.snapshot client session) queued.id in
-      assert_unchanged queued initial;
-      let terminal =
-        F.await_snapshot env client session "bounded retries delivered" (fun state ->
-          match (find state queued.id).delivery with
-          | Delivered _ -> true
-          | _ -> false)
-      in
-      let completed = find terminal queued.id in
-      F.require
-        (completed.attempt = 2
-         &&
-         match completed.status with
-         | Failed _ -> true
-         | _ -> false)
-        "retry attempt limit was not enforced";
-      let owner = actor daemon session in
-      let before = Actor.state owner |> F.protocol_ok in
-      F.require
-        (Result.is_error
-           (Actor.complete_job
-              owner
-              ~job_id:queued.id
-              ~generation:queued.generation
-              ~attempt:1
-              (Agent_session.Runtime_builder.Model_succeeded `Null)))
-        "late completion overwrote a terminal retry";
-      let after = Actor.state owner |> F.protocol_ok in
-      F.require
-        (Int64.equal
-           before.counters.transaction_sequence
-           after.counters.transaction_sequence)
-        "rejected completion still committed a transaction"));
-  Host.with_ env fixture ~options:Agent_server.Daemon.default_options (fun sw _daemon ->
-    F.with_client ~sw env fixture (fun client ->
-      let completed = find (F.snapshot client session) queued.id in
-      F.require
-        (completed.attempt = 2
-         &&
-         match completed.delivery with
-         | Delivered _ -> true
-         | _ -> false)
-        "delivered failure was retried after a second reopen"))
+  Host.with_
+    env
+    fixture
+    ~options:(Host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw daemon ->
+       F.with_client ~sw env fixture (fun client ->
+         let initial = find (F.snapshot client session) queued.id in
+         assert_unchanged queued initial;
+         let terminal =
+           F.await_snapshot env client session "bounded retries delivered" (fun state ->
+             match (find state queued.id).delivery with
+             | Delivered _ -> true
+             | _ -> false)
+         in
+         let completed = find terminal queued.id in
+         F.require
+           (completed.attempt = 2
+            &&
+            match completed.status with
+            | Failed _ -> true
+            | _ -> false)
+           "retry attempt limit was not enforced";
+         let owner = actor daemon session in
+         let before = Actor.state owner |> F.protocol_ok in
+         F.require
+           (Result.is_error
+              (Actor.complete_job
+                 owner
+                 ~job_id:queued.id
+                 ~generation:queued.generation
+                 ~attempt:1
+                 (Agent_session.Runtime_builder.Model_succeeded `Null)))
+           "late completion overwrote a terminal retry";
+         let after = Actor.state owner |> F.protocol_ok in
+         F.require
+           (Int64.equal
+              before.counters.transaction_sequence
+              after.counters.transaction_sequence)
+           "rejected completion still committed a transaction"));
+  Host.with_
+    env
+    fixture
+    ~options:(Host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw _daemon ->
+       F.with_client ~sw env fixture (fun client ->
+         let completed = find (F.snapshot client session) queued.id in
+         F.require
+           (completed.attempt = 2
+            &&
+            match completed.delivery with
+            | Delivered _ -> true
+            | _ -> false)
+           "delivered failure was retried after a second reopen"))
 ;;
 
 let run env environment =

@@ -195,7 +195,12 @@ let%expect_test
     let legacy_completion = Completion.Succeeded (Option.value_exn job.result) in
     check_completion (Some legacy_completion) (J.terminal_completion legacy |> protocol_ok);
     let legacy_delivery = delivery legacy resolved legacy_completion in
-    State.validate { state with jobs = [ legacy ]; deliveries = [ legacy_delivery ] }
+    State.validate
+      { state with
+        jobs = [ legacy ]
+      ; model_job_targets = [ model_job_binding state legacy ]
+      ; deliveries = [ legacy_delivery ]
+      }
     |> protocol_ok;
     print_endline
       "four corrupt deliveries rejected; envelope-shaped model output preserved");

@@ -1,6 +1,34 @@
 open Core
 module F = Fixtures
 module Stream = Chat_response.In_memory_stream
+
+let selected_run ~env ~post_stream =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"streaming-offline"
+      ~default_model:"fixture"
+      ~post_stream
+  in
+  let target =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let context =
+    Inference_fixture.resolve fixture target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Stream.run_completion_stream_in_memory_entries
+    ~env
+    ~inference_context:context
+    ~inference_identity:(Inference_fixture.identity fixture)
+    ~on_inference_attempt:ignore
+    ~on_inference_completion:ignore
+;;
+
 module Input = Stream.Safe_point_input
 module P = Agent_protocol
 module Res = Openai.Responses
@@ -140,7 +168,7 @@ let%expect_test
           | false -> failwith "notification loop bypassed its budget"
         in
         let run () =
-          Stream.run_completion_stream_in_memory_entries
+          selected_run
             ~env
             ~allocator
             ~history:[ F.input_entry allocator ]
@@ -269,7 +297,7 @@ let%expect_test
       | _ -> failwith "coalesced wake issued an extra request"
     in
     let history =
-      Stream.run_completion_stream_in_memory_entries
+      selected_run
         ~env
         ~allocator
         ~history:[ F.input_entry allocator ]

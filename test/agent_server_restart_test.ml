@@ -102,6 +102,14 @@ let operator_grant principal ~source_sha256 ~manifest_sha256 =
 
 let start_daemon sw env config root =
   Agent_server.Daemon.start
+    ~options:
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:(fun ~sw:_ ~inputs:_ ->
+              failwith "unexpected recovery fixture model dispatch")
+      }
     ~sw
     ~env
     ~config
@@ -174,9 +182,10 @@ let on_event = fun ctx state event -> match event with
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         incr model_calls;
                         failwith "idle lifecycle must not call a provider")
                 }
@@ -422,9 +431,10 @@ let on_event = fun ctx state event -> Task.pure(state + 1)
                 ~options:
                   { Agent_server.Daemon.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs:_ ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
                           failwith "failed initialization must not call a model")
                   }
                 ()
@@ -506,9 +516,10 @@ let on_event = fun ctx state event -> match event with
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         incr model_calls;
                         failwith "unexpected model")
                 }
@@ -687,8 +698,10 @@ let on_event ctx state event = match event with
               ~options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
                 }
               ()
             |> protocol_ok
@@ -830,8 +843,10 @@ let on_event ctx state event = match event with
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream =
-                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
                   }
                 ()
               |> protocol_ok
@@ -1045,6 +1060,20 @@ let%expect_test
                 ; output_index = index
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name
+                      ; arguments =
+                          Jsonaf.to_string (`Object [ "revision", `String revision ])
+                      ; call_id = id
+                      ; _type = "function_call"
+                      ; id = Some id
+                      ; status = Some "completed"
+                      }
+                ; output_index = index
+                ; type_ = "response.output_item.done"
+                }
             ])
           |> Stdlib.List.to_seq
         in
@@ -1080,7 +1109,10 @@ let%expect_test
             ~options:
               { Agent_server.Daemon.default_options with
                 qualify_chatml_extensions = true
-              ; model_post_stream = Some post_stream
+              ; inference_policy =
+                  Agent_server_test_support.inference_policy
+                    ~default_model:"fixture-model"
+                    ~post_stream
               }
             ()
           |> protocol_ok
@@ -1426,7 +1458,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)));
   [%expect
     {|
-    ((expected_transaction 5) (checkpoint_transaction 5)
+    ((expected_transaction 8) (checkpoint_transaction 8)
      (checkpoint_is_latest true))
     |}]
 ;;
@@ -2111,8 +2143,11 @@ let on_event : context -> int -> event -> int task = fun ctx state event -> Task
                 ~process_start_identity:None
                 ~options:
                   { Agent_server.Daemon.default_options with
-                    model_post_stream =
-                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model execution")
+                    inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                          failwith "unexpected model execution")
                   }
                 ()
               |> protocol_ok

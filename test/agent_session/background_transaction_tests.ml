@@ -151,8 +151,13 @@ let%expect_test
             | true ->
               let stored = current backend job in
               let restored =
-                Agent_session.Session_state.t_of_sexp
-                  (Agent_session.Session_state.sexp_of_t state)
+                Agent_session.Session_state_document.encode
+                  (Agent_session.Session_state_document.authored state)
+                  ~limits:document_limits
+                |> document_ok
+                |> Agent_session.Session_state_document.decode ~limits:document_limits
+                |> document_ok
+                |> Agent_session.Session_state_document.value
               in
               Agent_session.Session_state.validate restored |> protocol_ok;
               let decoded = J.of_json (J.to_json stored) |> protocol_ok in

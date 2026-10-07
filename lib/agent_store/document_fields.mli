@@ -55,6 +55,14 @@ val expect
   -> version:int
   -> (unit, Document_schema.Error.t) Result.t
 
+(** Explicit supported family versions, checked on the stored original document
+    before any conversion or current typed reader. *)
+val expect_versions
+  :  Document_schema.Document.t
+  -> kind:string
+  -> versions:int list
+  -> (unit, Document_schema.Error.t) Result.t
+
 val record_error : Document_record.Error.t -> Store_error.t
 
 (** Feed decoded string values, including unknown members and escaped IDs.

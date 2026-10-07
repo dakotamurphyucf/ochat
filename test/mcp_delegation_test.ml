@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"mcp_delegation_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module A = Chat_response.Agent_runtime
 module C = Chat_response.Tool_capability
 module B = Chat_response.Background_request
@@ -45,7 +57,7 @@ let%expect_test "inherited MCP identity and live catalog cannot silently change"
                     CM.parse_chat_inputs ~source:"parent.chatmd" ~dir:path source
                   in
                   let ctx =
-                    Chat_response.Ctx.create
+                    fixture_ctx
                       ~env
                       ~dir:path
                       ~tool_dir:path

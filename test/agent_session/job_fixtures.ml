@@ -79,6 +79,7 @@ let with_actor
       ?(now = fun () -> timestamp)
       ?monotonic_now
       ?(make_job_results = fun _ _ _ -> None)
+      ?(state_committed = fun _ _ -> ())
       ?(subscription_limits = Agent_session.Staged_subscriptions.default_limits)
       ?(schedule_limits = Agent_session.Staged_schedules.default_limits)
       ?(notification_limits = Agent_session.Staged_notifications.default_limits)
@@ -128,7 +129,7 @@ let with_actor
             ; notification_limits
             ; ingress_limits
             ; subscription_limits
-            ; state_committed = (fun _ _ -> ())
+            ; state_committed
             }
       in
       Exn.protect

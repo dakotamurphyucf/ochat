@@ -36,6 +36,7 @@ let denied snapshot id =
 ;;
 
 let%expect_test "public ChatML reviewer retains decisions and defers later report writes" =
+  Mirage_crypto_rng_unix.use_default ();
   let requests = ref 0 in
   let post_stream ~sw:_ ~inputs:_ =
     incr requests;
@@ -63,7 +64,12 @@ let%expect_test "public ChatML reviewer retains decisions and defers later repor
     ~workspace_files:Documentation_shell_tests.workspace_files
     ~permission_profile:(E.interactive_permission_profile ~authorize_shell_manifest:true)
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     (fun env workspace host ->
        Host.send host "Save full check evidence, then ask before replacing it.";
        let pending = ref None in
@@ -144,6 +150,7 @@ let%expect_test "public model-review variant preserves policy and fails closed o
       |> failwith
   in
   Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
     let root_name = Agent_server_test_support.temporary_root env in
     let root_name = Eio_posix.Low_level.realpath root_name in
     let root = Eio.Path.(Eio.Stdenv.fs env / root_name) in
@@ -170,7 +177,32 @@ let%expect_test "public model-review variant preserves policy and fails closed o
           CM.parse_chat_inputs ~source:"model-agent.chatmd" ~dir:root model_agent
         in
         let cache = Chat_response.Cache.create ~max_size:1 () in
-        let ctx = Chat_response.Ctx.create ~env ~dir:root ~tool_dir:root ~cache in
+        let review_calls = ref 0 in
+        let inference =
+          Inference_fixture.create
+            ~namespace:"docs-model-review"
+            ~default_model:"gpt-6-astra"
+            ~post_stream:(fun ~sw:_ ~inputs ->
+              Int.incr review_calls;
+              let request =
+                `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t)
+                |> Jsonaf.to_string
+              in
+              assert (String.is_substring request ~substring:"You have no tools");
+              assert (String.is_substring request ~substring:"approval reviewer");
+              let answer =
+                match !review_calls with
+                | 1 -> {|{"decision":"allow_once"}|}
+                | 2 -> "not a decision"
+                | _ -> failwith "unexpected nested model review"
+              in
+              Documentation_agent_team_tests.answer
+                ~id:("review-" ^ Int.to_string !review_calls)
+                answer)
+        in
+        let ctx =
+          Inference_fixture.ctx inference ~env ~dir:root ~tool_dir:root ~cache ()
+        in
         let host =
           R.host
             ~env
@@ -184,24 +216,8 @@ let%expect_test "public model-review variant preserves policy and fails closed o
             ~prompt_elements
           |> ok
         in
-        let review_calls = ref 0 in
-        let run_agent ?prompt_dir:_ ?session_id:_ ?observer:_ ~source ~ctx:_ prompt items =
-          incr review_calls;
-          [%test_eq: string] "shell-model-reviewer:lantern-report-review" source;
-          assert (String.is_substring prompt ~substring:"gpt-6-astra");
-          let reviewer =
-            CM.parse_chat_inputs ~source:"reviewer.chatmd" ~dir:root prompt
-          in
-          assert (
-            not
-              (List.exists reviewer ~f:(function
-                 | CM.Tool _ -> true
-                 | _ -> false)));
-          assert (not (List.is_empty items));
-          match !review_calls with
-          | 1 -> {|{"decision":"allow_once"}|}
-          | 2 -> "not a decision"
-          | _ -> failwith "unexpected nested model review"
+        let run_agent ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ =
+          failwith "shell model review must use the selected no-tool inference port"
         in
         Eio.Switch.run (fun sw ->
           let runtime =

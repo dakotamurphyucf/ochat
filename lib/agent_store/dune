@@ -28,7 +28,7 @@
   audit_store
   prompt_artifact_store
   migration)
- (libraries
+ (libraries ochat.inference
   core
   core_unix
   bin_prot

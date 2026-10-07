@@ -42,6 +42,7 @@ let run_tool
       ~tool_tbl
       ~on_fork
       ?runner
+      ?inference_parent
       ?on_tool_execution
       ?on_execution_event
       ()
@@ -79,6 +80,7 @@ let run_tool
     ~name
     ~payload
     ~runner
+    ?inference_parent
     ?on_tool_execution
     ?on_execution_event
     ()

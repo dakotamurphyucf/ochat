@@ -91,9 +91,73 @@ let collapse_read_file_history
     | _ -> item)
 ;;
 
-let collapse_read_file_entries ?placeholder entries =
-  let items =
-    collapse_read_file_history ?placeholder (Openai.Responses_history.items_exn entries)
+let collapse_read_file_entries
+      ?(placeholder = "(stale) file content removed — see newer read_file output later")
+      entries
+  =
+  let module P = History_entry.Payload in
+  let key kind alias =
+    (match kind with
+     | P.Call_kind.Function -> "function:"
+     | Custom -> "custom:")
+    ^ alias
   in
-  List.map2_exn entries items ~f:Openai.Responses_history.with_item_exn
+  let calls = ref String.Map.empty in
+  let aliases = ref String.Map.empty in
+  let latest = ref String.Map.empty in
+  let indexed =
+    List.mapi entries ~f:(fun index entry ->
+      let semantic = P.semantic (History_entry.payload entry) in
+      let metadata = P.Semantic.metadata semantic in
+      let path =
+        match P.Semantic.view semantic with
+        | Call { kind; name; input_bytes; _ } ->
+          let path =
+            if String.equal name "read_file"
+            then read_file_path_of_arguments input_bytes
+            else None
+          in
+          calls
+          := Map.set
+               !calls
+               ~key:(History_entry.Id.to_string (History_entry.id entry))
+               ~data:(kind, path);
+          (match metadata.call_id with
+           | Value alias -> aliases := Map.set !aliases ~key:(key kind alias) ~data:path
+           | Absent | Null -> ());
+          None
+        | Result { kind; relation; _ } ->
+          (match relation with
+           | Bound id ->
+             Map.find !calls (History_entry.Id.to_string id)
+             |> Option.bind ~f:(fun (owner, path) ->
+               if P.Call_kind.equal kind owner then path else None)
+           | Unresolved ->
+             (match metadata.call_id with
+              | Value alias -> Map.find !aliases (key kind alias) |> Option.join
+              | Absent | Null -> None))
+        | Message _ | Reasoning _ | Unknown _ -> None
+      in
+      Option.iter path ~f:(fun path -> latest := Map.set !latest ~key:path ~data:index);
+      index, entry, path)
+  in
+  List.map indexed ~f:(fun (index, entry, path) ->
+    match path with
+    | None -> entry
+    | Some path
+      when Option.value_map (Map.find !latest path) ~default:true ~f:(Int.equal index) ->
+      entry
+    | Some _ ->
+      let semantic = P.semantic (History_entry.payload entry) in
+      (match P.Semantic.view semantic with
+       | Result { kind; relation; _ } ->
+         let edited =
+           P.Semantic.create
+             (Result { kind; relation; output = Text placeholder })
+             ~metadata:(P.Semantic.metadata semantic)
+           |> Result.ok_or_failwith
+           |> P.authored
+         in
+         History_entry.with_payload entry edited
+       | Message _ | Call _ | Reasoning _ | Unknown _ -> entry))
 ;;

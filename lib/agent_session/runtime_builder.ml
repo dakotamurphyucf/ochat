@@ -17,8 +17,6 @@ type model_job_outcome =
   | Model_succeeded of Jsonaf.t
   | Model_failed of string
 
-type model_post_stream = Chat_response.In_memory_stream.post_stream
-
 type resources =
   { native : Agent_runtime.t
   ; definition : Chat_response.Extension_compiler.definition option
@@ -90,6 +88,7 @@ type background_executor =
 
 type t =
   { worker : Operation_worker.t
+  ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; parse_user_content :
       id:History_entry.Id.t
@@ -98,7 +97,7 @@ type t =
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
-  ; mutable moderator_snapshot : Jsonaf.t option
+  ; moderator_snapshot : unit -> Jsonaf.t option
   ; moderator_manager : Manager.t option
   ; moderator_tools : Request.Tool.t list
   ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
@@ -123,7 +122,10 @@ type t =
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
-      recipe:string
+      inference_context:Inference_runtime.Context.t
+      -> capture_recipe_target:
+           (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
+      -> recipe:string
       -> payload:Jsonaf.t
       -> (model_job_outcome, Agent_protocol.Error.t) result
   ; enqueue_model_job_completion :
@@ -143,7 +145,12 @@ type job_services =
   ; call_model :
       recipe:string
       -> payload:Jsonaf.t
-      -> execute:(unit -> (Moderation.Capabilities.model_call_result, string) result)
+      -> execute:
+           (inference_context:Inference_runtime.Context.t
+            -> before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+            -> capture_recipe_target:
+                 (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
+            -> (Moderation.Capabilities.model_call_result, string) result)
       -> (Moderation.Capabilities.model_call_result, string) result
   }
 
@@ -175,12 +182,27 @@ let cache paths =
   Chat_response.Cache.load ~file ~max_size:1_000 ()
 ;;
 
-let context ~env paths cache =
+let context
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      paths
+      cache
+  =
   Chat_response.Ctx.create
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ~on_inference_observation
     ~env
     ~dir:paths.Runtime_paths.prompt_dir
     ~tool_dir:paths.tool_dir
     ~cache
+    ()
 ;;
 
 let response_dir paths = Eio.Path.(paths.Runtime_paths.session_dir / "responses")
@@ -399,6 +421,11 @@ let prepare_resources_internal
       ~delegated_moderator
       ~native_service_revision
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
       ~sw
       ~paths
       ~storage_paths
@@ -420,7 +447,17 @@ let prepare_resources_internal
   let elements = Prompt_revision.elements revision in
   let response_dir = response_dir storage_paths in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
-  let ctx = context ~env paths (cache storage_paths) in
+  let ctx =
+    context
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      paths
+      (cache storage_paths)
+  in
   let%bind host = host ~env ~paths ~session_id ~elements in
   create_authored_resources
     ~additional_native_registrations:native_registrations
@@ -453,6 +490,11 @@ let prepare_authored_resources
       ~tool_name
       ~native_service_revision
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
       ~sw
       ~paths
       ~storage_paths
@@ -480,6 +522,11 @@ let prepare_authored_resources
     prepare_resources_internal
       ~native_registrations
       ~delegated_moderator:true
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
       ~native_service_revision
       ~env
       ~sw
@@ -570,19 +617,6 @@ let allocate_initial ~namespace ~next_sequence items =
   history, History_entry.Allocator.next_sequence allocator
 ;;
 
-let model_config elements =
-  let config = Config.of_elements elements in
-  let model =
-    Option.value_map config.model ~default:Request.Gpt4 ~f:Request.model_of_str_exn
-  in
-  let reasoning =
-    Option.map config.reasoning_effort ~f:(fun effort ->
-      Request.Reasoning.
-        { effort = Some (Effort.of_str_exn effort); summary = Some Summary.Detailed })
-  in
-  config, model, reasoning
-;;
-
 let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_dir =
   let exec_context : Chat_response.Model_executor.exec_context =
     { ctx
@@ -650,18 +684,28 @@ let create_moderator
       model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_dir
     in
     let session_text = Agent_protocol.Id.Session.to_string session_id in
-    let legacy_recipe =
-      Chat_response.Model_executor.recipe_agent_prompt_v1
-        executor
-        ~session_id:session_text
-    in
     let durable_recipe : Moderation.Capabilities.model_recipe =
       { call =
           (fun ~payload ->
             job_services.call_model
               ~recipe:Chat_response.Model_executor.agent_prompt_v1_name
               ~payload
-              ~execute:(fun () -> legacy_recipe.call ~payload))
+              ~execute:
+                (fun
+                  ~inference_context ~before_inference_attempt ~capture_recipe_target ->
+                let recipe =
+                  Chat_response.Model_executor.recipe_agent_prompt_v1
+                    executor
+                    ~session_id:session_text
+                    ~inference_context
+                    ~before_inference_attempt
+                    ~capture_recipe_target:(fun target ->
+                      capture_recipe_target target
+                      |> Result.map_error ~f:(fun error ->
+                        error.Agent_protocol.Error.message))
+                    ()
+                in
+                recipe.call ~payload))
       ; spawn =
           (fun ~payload ->
             job_services.spawn_model
@@ -823,7 +867,14 @@ let enqueue_internal_event moderator ?prepare payload =
   enqueue_internal_value ?prepare moderator value
 ;;
 
-let execute_model_job moderator session_id ~recipe ~payload =
+let execute_model_job
+      moderator
+      session_id
+      ~inference_context
+      ~capture_recipe_target
+      ~recipe
+      ~payload
+  =
   match moderator with
   | None -> Error (failure "session prompt has no ChatML moderator")
   | Some (_, executor) ->
@@ -834,6 +885,11 @@ let execute_model_job moderator session_id ~recipe ~payload =
         Chat_response.Model_executor.recipe_agent_prompt_v1
           executor
           ~session_id:(Agent_protocol.Id.Session.to_string session_id)
+          ~inference_context
+          ~capture_recipe_target:(fun target ->
+            capture_recipe_target target
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+          ()
       in
       handler.call ~payload
       |> Result.map_error ~f:failure
@@ -1053,6 +1109,11 @@ let build_with_services
       ~extension_services
       ~sw
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
       ~paths
       ~storage_paths
       ~source
@@ -1066,7 +1127,6 @@ let build_with_services
       ~approval_provider
       ~approval_store
       ~permission_profile
-      ~model_post_stream
       ~review_permission
       ~schedule_services
       ~job_services
@@ -1178,14 +1238,6 @@ let build_with_services
           artifact.revision_id
       , true )
   in
-  let%bind generation_config =
-    match delegated with
-    | false -> Ok (model_config elements)
-    | true ->
-      (try Ok (model_config elements) with
-       | Failure _ ->
-         Error (failure "unsupported generated model/reasoning configuration"))
-  in
   let%bind () =
     Agent_store.Prompt_artifact_store.verify_tree ~root:materialized_tree artifact
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
@@ -1193,7 +1245,17 @@ let build_with_services
   let response_dir = response_dir storage_paths in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
-  let ctx = context ~env paths cache in
+  let ctx =
+    context
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      paths
+      cache
+  in
   let declares_one_off = declares_native elements Run_chatml_tool.name in
   let%bind agent_runtime, definition, managed, authoring =
     match source with
@@ -1620,7 +1682,6 @@ let build_with_services
         (standalone @ moderator_dispatch @ [ native ])
       |> Script_tool_calls.with_model_preparation script_tools ~selected:declared ~input)
   in
-  let config, model, reasoning = generation_config in
   let notification_source =
     Option.bind moderator ~f:(fun (moderator, _) ->
       Manager.invocation_observer moderator.manager)
@@ -1663,21 +1724,19 @@ let build_with_services
       ?notification_input
       ?initial_notification_input
       { env
+      ; inference_context
+      ; inference_identity
+      ; on_inference_attempt
+      ; on_inference_completion
+      ; on_inference_observation
       ; response_dir
       ; tools
       ; tool_tbl
-      ; temperature = config.temperature
-      ; max_output_tokens = config.max_tokens
-      ; reasoning
       ; moderator = Option.map moderator ~f:fst
       ; permission_profile
       ; review_permission
       ; history_compaction = false
       ; parallel_tool_calls = true
-      ; model
-      ; prompt_cache_key = Some (Agent_protocol.Id.Session.to_string session_id)
-      ; prompt_cache_retention = None
-      ; post_stream = model_post_stream
       ; agent_page_classifications = agent_runtime.classifications
       ; delegated_permission_tools =
           (match script_tools with
@@ -1748,14 +1807,16 @@ let build_with_services
                 "generated sessions accept plain_text messages without implicit resource \
                  loading"))
   in
-  let rec runtime =
+  let published_moderator_snapshot = ref moderator_snapshot in
+  let runtime =
     { worker
+    ; inference_execution = Chat_response.Ctx.inference_execution ctx
     ; now
     ; parse_user_content
     ; initial_history
     ; initial_prompt_entry_count = List.length initial_history
     ; reserved_history_through
-    ; moderator_snapshot
+    ; moderator_snapshot = (fun () -> !published_moderator_snapshot)
     ; moderator_manager =
         Option.map moderator ~f:(fun (moderator, _) ->
           moderator.Chat_response.In_memory_stream.manager)
@@ -1872,7 +1933,7 @@ let build_with_services
         (fun () ->
           let open Result.Let_syntax in
           let%map snapshot = start_moderator_once () in
-          runtime.moderator_snapshot <- snapshot;
+          published_moderator_snapshot := snapshot;
           snapshot)
     ; enqueue_internal_event = enqueue_internal_event moderator
     ; drain_internal_events = drain_internal_events ~env ~session_id ~tools moderator
@@ -1880,7 +1941,7 @@ let build_with_services
         (match delegated with
          | false -> execute_model_job moderator session_id
          | true ->
-           fun ~recipe:_ ~payload:_ ->
+           fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
              Error
                (failure "generated moderators must use inherited tools for model work"))
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
@@ -1890,11 +1951,27 @@ let build_with_services
   Ok runtime
 ;;
 
-let build ~sw ~env ~paths ~storage_paths ~revision =
+let build
+      ~sw
+      ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      ~paths
+      ~storage_paths
+      ~revision
+  =
   build_with_services
     ~native_registrations:[]
     ~sw
     ~env
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ~on_inference_observation
     ~paths
     ~storage_paths
     ~source:(Authored revision)
@@ -1906,6 +1983,11 @@ let build_with_extensions
       ~services
       ~sw
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
       ~paths
       ~storage_paths
       ~revision
@@ -1914,6 +1996,11 @@ let build_with_extensions
     ~native_registrations
     ~sw
     ~env
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ~on_inference_observation
     ~paths
     ~storage_paths
     ~source:(Authored revision)
@@ -1943,3 +2030,5 @@ let build_authored_child ~services ~revision ~prepared ~authority ~history =
     ~existing_history:(Some history)
     ~extension_services:(Some services)
 ;;
+
+let inference_execution t = t.inference_execution

@@ -1,0 +1,4 @@
+(library
+ (name inference_fixture)
+ (libraries core eio ochat.openai ochat.chat_response inference inference_runtime inference_client transcript)
+ (preprocess (pps ppx_jane)))

@@ -154,7 +154,13 @@ let with_team ?(sources = sources) ?reviewer_provider f =
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options:{ D.default_options with model_post_stream = Some provider }
+              ~options:
+                { D.default_options with
+                  inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
+                }
               ()
             |> protocol_ok
           in

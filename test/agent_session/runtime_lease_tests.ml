@@ -5,15 +5,17 @@ module Owner = Agent_server.Runtime_owner
 module Builder = Agent_session.Runtime_builder
 
 let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
+  let inference = Inference_ports.create ~config:Chat_response.Config.default () in
   { worker =
       Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
         failwith "unexpected model operation")
+  ; inference_execution = Inference_ports.execution inference
   ; now = Agent_protocol.Timestamp.now
   ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
   ; initial_history = []
   ; initial_prompt_entry_count = 0
   ; reserved_history_through = 0
-  ; moderator_snapshot = None
+  ; moderator_snapshot = (fun () -> None)
   ; moderator_manager = None
   ; moderator_tools = []
   ; moderator_script_tools = script_tools
@@ -29,7 +31,9 @@ let runtime ?script_tools ?check_execution ?activity ~close () : Builder.t =
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
   ; drain_internal_events = (fun _ -> failwith "unexpected event drain")
-  ; execute_model_job = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+  ; execute_model_job =
+      (fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
+        failwith "unexpected model job")
   ; enqueue_model_job_completion = (fun ?prepare:_ _ -> failwith "unexpected completion")
   ; close
   }
@@ -654,4 +658,162 @@ let%expect_test
     Owner.close_and_wait owner;
     print_s [%sexp (!closes : int), (Owner.is_loaded owner : bool)]);
   [%expect {| (1 false) |}]
+;;
+
+let%expect_test "administration initialization fences committed stopped cleanup" =
+  List.iter [ false; true ] ~f:(fun fenced ->
+    let on_commit = ref (fun (_ : Agent_session.Session_state.t) -> ()) in
+    with_actor
+      ~state_committed:(fun state _ -> !on_commit state)
+      (fun _env sw actor writer _backend ->
+         let module State = Agent_session.Session_state in
+         A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+         let before = A.state actor |> protocol_ok in
+         let queued, queue = Eio.Promise.create () in
+         let entered, enter = Eio.Promise.create () in
+         let release, finish = Eio.Promise.create () in
+         let cleanup = ref None in
+         let initialized = ref 0 in
+         let initialization_revision = ref None in
+         let closed = ref 0 in
+         let owner =
+           Owner.create_with_unload
+             ~actor
+             ~initial:(Some (runtime ~close:(fun () -> incr closed) ()))
+             ~before_unload:(fun ~closing:_ ->
+               if Option.is_none (Eio.Promise.peek entered)
+               then Eio.Promise.resolve enter ();
+               Eio.Promise.await release;
+               Ok ())
+             ~build:(fun () ->
+               incr initialized;
+               let expected = A.state actor |> protocol_ok in
+               (match expected.runtime_initialization with
+                | Pending _ -> ()
+                | Ready -> failwith "initialization did not read the committed selection");
+               let scope = A.begin_initialization actor ~expected |> protocol_ok in
+               Exn.protect
+                 ~f:(fun () ->
+                   A.complete_initialization actor ~scope ~candidate:expected
+                   |> protocol_ok
+                   |> ignore)
+                 ~finally:(fun () ->
+                   Eio.Cancel.protect (fun () ->
+                     A.end_initialization actor ~scope |> protocol_ok));
+               initialization_revision
+               := Some (A.state actor |> protocol_ok).counters.revision;
+               Ok (runtime ~close:(fun () -> incr closed) ()))
+         in
+         Exn.protect
+           ~finally:(fun () ->
+             if Option.is_none (Eio.Promise.peek release)
+             then Eio.Promise.resolve finish ())
+           ~f:(fun () ->
+             let candidate =
+               Agent_session.Administration.rebuild
+                 before
+                 (Agent_protocol.Id.Prompt_revision.create ())
+               |> protocol_ok
+             in
+             let candidate =
+               { candidate with
+                 runtime_initialization = Pending { fresh_history = true }
+               }
+             in
+             (on_commit
+              := fun state ->
+                   match state.runtime_initialization, !cleanup with
+                   | Pending _, None ->
+                     cleanup
+                     := Some
+                          (Eio.Fiber.fork_promise ~sw (fun () ->
+                             Eio.Promise.resolve queue ();
+                             Owner.unload_and_wait owner))
+                   | Ready, _ | Pending _, Some _ -> ());
+             let commit () =
+               A.commit_administration
+                 actor
+                 ~command_audit:None
+                 ~attachment_id:writer.id
+                 ~expected_revision:before.counters.revision
+                 ~kind:Rebuild
+                 candidate
+               |> Result.map ~f:(fun _ -> ())
+             in
+             let before_initialize () =
+               (* This is the actual stop-cleanup task queued by State_committed. The
+             split control lets it acquire ownership; the fenced route retains
+             ownership through the same yield and all initialization admission. *)
+               Eio.Promise.await queued;
+               match fenced with
+               | false -> Eio.Promise.await entered
+               | true ->
+                 Eio.Fiber.yield ();
+                 assert (Option.is_none (Eio.Promise.peek entered))
+             in
+             let result =
+               match fenced with
+               | true ->
+                 Owner.reinitialize_administration
+                   owner
+                   ~validate:(fun () -> Ok ())
+                   ~commit
+                   ~before_initialize
+               | false ->
+                 let open Result.Let_syntax in
+                 let%bind () = Owner.unload owner in
+                 let%bind () = commit () in
+                 before_initialize ();
+                 let%bind () = Owner.ensure_loaded owner in
+                 let%map state = A.state actor in
+                 State.summary state
+             in
+             (match fenced, result with
+              | false, Error { code = Conflict; retryable = true; message; _ } ->
+                [%test_eq: string]
+                  "session runtime is waiting for background cleanup"
+                  message;
+                [%test_eq: int] 0 !initialized;
+                let committed = A.state actor |> protocol_ok in
+                [%test_eq: int]
+                  (before.identity.generation + 1)
+                  committed.identity.generation;
+                [%test_eq: int64]
+                  (Int64.succ before.counters.revision)
+                  committed.counters.revision;
+                (match committed.runtime_initialization with
+                 | Pending _ -> ()
+                 | Ready -> failwith "split route unexpectedly initialized")
+              | true, Ok summary ->
+                let ready = A.state actor |> protocol_ok in
+                [%test_eq: int] 1 !initialized;
+                [%test_eq: int] (before.identity.generation + 1) ready.identity.generation;
+                [%test_eq: int64]
+                  Int64.(before.counters.revision + 2L)
+                  (Option.value_exn !initialization_revision);
+                (* Runtime installation separately records its moderator snapshot. *)
+                [%test_eq: int64]
+                  Int64.(before.counters.revision + 3L)
+                  ready.counters.revision;
+                [%test_eq: int64] ready.counters.revision summary.revision;
+                (match ready.runtime_initialization with
+                 | Ready -> ()
+                 | Pending _ -> failwith "fenced command returned Pending");
+                assert (not (Owner.is_loaded owner))
+              | _ -> failwith "administration fence changed the expected outcome");
+             Eio.Promise.resolve finish ();
+             Eio.Promise.await_exn (Option.value_exn !cleanup) |> protocol_ok;
+             if not fenced
+             then (
+               Owner.ensure_loaded owner |> protocol_ok;
+               Owner.unload owner |> protocol_ok);
+             [%test_eq: int] 1 !initialized;
+             [%test_eq: int] 2 !closed;
+             Owner.close_and_wait owner;
+             print_s [%sexp (fenced : bool), "one committed selection; cleanup joined"])));
+  [%expect
+    {|
+    (false "one committed selection; cleanup joined")
+    (true "one committed selection; cleanup joined")
+    |}]
 ;;

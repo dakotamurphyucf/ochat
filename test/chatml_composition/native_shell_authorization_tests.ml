@@ -47,7 +47,16 @@ let%expect_test
           }
         in
         Eio.Switch.run (fun sw ->
-          (match E.start ~sw ~env (options false) with
+          let denied_options =
+            { Agent_server.Daemon.default_options with
+              inference_policy =
+                Agent_server_test_support.inference_policy
+                  ~default_model:"fixture-model"
+                  ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                    failwith "unapproved shell metadata requested inference")
+            }
+          in
+          (match E.start ~sw ~env ~daemon_options:denied_options (options false) with
            | Error error ->
              if not (String.is_substring error.message ~substring:"manifest")
              then raise_s [%sexp (error : P.Error.t)];
@@ -69,7 +78,10 @@ let%expect_test
           in
           let daemon_options =
             { Agent_server.Daemon.default_options with
-              model_post_stream = Some post_stream
+              inference_policy =
+                Agent_server_test_support.inference_policy
+                  ~default_model:"fixture-model"
+                  ~post_stream
             }
           in
           let host = E.start ~sw ~env ~daemon_options (options true) |> protocol_ok in

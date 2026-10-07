@@ -47,6 +47,13 @@ type reset_options = Administration.reset_options =
 
 type t
 
+module Initialization_scope : sig
+  (** Process-local capability issued only to a trusted Pending constructor.
+      Bound to one actor, stable source/complete Selection and generation; it is
+      never reconstructed from durable Pending state or exposed by RPC. *)
+  type t
+end
+
 (** Mailbox-level regression support; not exposed by any wire method. *)
 module For_testing : sig
   (** Deliver a completed worker result through the real priority mailbox.
@@ -476,6 +483,16 @@ val set_operation_worker
   -> Operation_worker.t option
   -> (unit, Agent_protocol.Error.t) result
 
+(** Install or clear the actual selected runtime and inference execution together.
+    Some/None mismatches reject; Pending initialization rejects installation.
+    The constructor and legacy worker-only setter retain no inferred execution.
+    No callback reenters the runtime owner's mutex during compaction. *)
+val set_runtime_worker
+  :  t
+  -> worker:Operation_worker.t option
+  -> inference:Inference_client.Execution.t option
+  -> (unit, Agent_protocol.Error.t) result
+
 val change_moderator
   :  t
   -> Jsonaf.t option
@@ -527,6 +544,91 @@ val commit_administration
   -> expected_revision:int64
   -> kind:Session_state.Compaction_archive.kind
   -> Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Issue one exclusive constructor scope against the actual Pending basis.
+    Requires a captured target. Actor-owned jobs/schedules, tracking counters,
+    reservations and acknowledged shell grants may advance without replacing the
+    basis. Accepted authorized Stop permanently revokes even a stopped no-op. *)
+val begin_initialization
+  :  t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+(** Retire the issuing actor's scope idempotently, without a durable write. Wrong
+    actors reject. The host must call this under cancellation protection on every
+    exit before exposing the constructed runtime. *)
+val end_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Admit a fresh queued Model_call under the active constructor capability.
+    Uses ordinary job validation and atomic source binding. *)
+val add_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Admit and claim a fresh immediate, Not_required Model_call in one serialized
+    actor request. Reuses ordinary admission/claim invariants; their two ordered
+    durable commits remain crash-safe under Pending recovery. Stop cannot
+    interleave between them. *)
+val start_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Check active scope and its actually admitted running job's exact ID,
+    generation and attempt. Retired/revoked/stale scopes yield false; another
+    actor's token rejects. No authority is derived from persisted Pending. *)
+val initialization_model_job_is_current
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> (bool, Agent_protocol.Error.t) result
+
+(** Capture / complete only a running attempt actually admitted by this scope.
+    Capability checks and durable mutation share the same actor request. *)
+val capture_initialization_recipe_target
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val complete_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> Runtime_builder.model_job_outcome
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Trusted completion retains the scope's stable basis and requires it active.
+    Only initialized history/count/reservations, moderator and shell reviewer
+    checkpoints are overlaid. Actual jobs/bindings/schedules, tracking commits
+    and shell grants remain authoritative. Marks Ready without a second archive. *)
+val complete_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> candidate:Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Record failed activation under the active scope's stable basis. Retains
+    Pending and actual durable effects/configuration; no rollback is claimed. *)
+val fail_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Error.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val upgrade_prompt
@@ -919,6 +1021,37 @@ val change_job
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.Job.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Trusted host selection capture. The caller resolves explicit source or
+    migration policy first. Successful return acknowledges the complete durable
+    selection before runtime activation; no backend lookup or authority grant. *)
+val capture_inference_target
+  :  t
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Migration capture uses an explicitly approved target for this exact retained
+    job. It never derives from the parent's current selection. *)
+val capture_model_job_source
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Persist the root recipe's effective target before its first model/moderator
+    effect. Only the exact running attempt may capture; repetition must retain
+    the complete same target, including future fields and presence. *)
+val capture_recipe_target
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 val add_job
   :  t

@@ -158,7 +158,7 @@
 (library
  (name chat_response_shell_tool_test)
  (modules chat_response_shell_tool_test)
- (libraries
+ (libraries inference_fixture
   core
   mirage-crypto-rng.unix
   eio
@@ -307,7 +307,7 @@
 (library
  (name relative_path_resolution_test)
  (modules relative_path_resolution_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   eio
@@ -585,7 +585,7 @@
 (library
  (name mcp_delegation_test)
  (modules mcp_delegation_test)
- (libraries core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
+ (libraries inference_fixture core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
  (inline_tests (deps mcp_delegation_peer.exe))
  (preprocess (pps ppx_jane ppx_expect)))
 
@@ -787,7 +787,7 @@
 (library
  (name agent_server_permission_test)
  (modules agent_server_permission_test)
- (libraries
+ (libraries inference_fixture
   core
   eio
   eio_main
@@ -843,7 +843,7 @@
 (library
  (name agent_transport_stdio_test)
  (modules agent_transport_stdio_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -858,7 +858,7 @@
 (library
  (name agent_transport_socket_test)
  (modules agent_transport_socket_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -907,14 +907,14 @@
 (library
  (name agent_server_gap_test)
  (modules agent_server_gap_test)
- (libraries core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
+ (libraries agent_server_test_support core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_server_embedded_test)
  (modules agent_server_embedded_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -929,7 +929,7 @@
 (library
  (name agent_server_test_support)
  (modules agent_server_test_support)
- (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (libraries mirage-crypto-rng.unix inference_fixture core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
  (preprocess
   (pps ppx_jane)))
 
@@ -1227,7 +1227,7 @@
 (executable
  (name generated_admission_test)
  (modules generated_admission_test)
- (libraries core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
+ (libraries inference_fixture core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
  (preprocess (pps ppx_jane)))
 
 (rule

@@ -155,6 +155,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
                   |> protocol_ok
               ; lifetime
               ; created_at = timestamp
+              ; inference_target = None
               }
             in
             let record =

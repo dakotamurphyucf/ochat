@@ -52,6 +52,7 @@ let reset_state (state : Session_state.t) options =
   ; permissions = []
   ; grants = (if options.keep_grants then state.grants else [])
   ; jobs = []
+  ; model_job_targets = []
   ; schedules = []
   ; invocations = []
   ; managed_submissions = []

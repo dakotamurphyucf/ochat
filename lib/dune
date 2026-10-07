@@ -33,6 +33,7 @@
   chatml
   jsonaf
   document_schema
+  inference
   history_entry)
  (preprocess
   (pps ppx_jane)))
@@ -192,7 +193,7 @@
  (name ochat_function)
  (public_name ochat.ochat_function)
  (modules ochat_function)
- (libraries core openai jsonaf io)
+ (libraries core openai jsonaf io transcript)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 

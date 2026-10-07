@@ -1,5 +1,13 @@
 open! Core
 
+module Initialization_scope = struct
+  type t =
+    { owner : unit ref
+    ; expected : Session_state.t
+    ; mutable jobs : Agent_protocol.Id.Job.t list
+    }
+end
+
 type persistence =
   { commit :
       command_audit:Document_schema.Document.t option
@@ -331,6 +339,9 @@ type _ request =
   | Snapshot : Agent_protocol.Snapshot.t request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
+  | Set_runtime_worker :
+      Operation_worker.t option * Inference_client.Execution.t option
+      -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
   | Set_automatic_turn_pauses :
       Chat_response.Runtime_semantics.pause_condition list
@@ -356,6 +367,14 @@ type _ request =
       * int64
       * Session_state.Compaction_archive.kind
       * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Begin_initialization : Session_state.t -> Initialization_scope.t request
+  | End_initialization : Initialization_scope.t -> unit request
+  | Complete_initialization :
+      Initialization_scope.t * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Fail_initialization :
+      Initialization_scope.t * Agent_protocol.Error.t
       -> Agent_protocol.Session.t request
   | Start :
       Agent_protocol.Id.Attachment.t * int64 option
@@ -473,6 +492,46 @@ type _ request =
   | Change_job :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Job.t
       -> Agent_protocol.Session.t request
+  | Capture_inference_target :
+      Inference.Request.Target.t * Document_schema.Limits.t
+      -> unit request
+  | Capture_model_job_source :
+      Agent_protocol.Id.Job.t
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Capture_recipe_target :
+      Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Add_initialization_model_job :
+      Initialization_scope.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Start_initialization_model_job :
+      Initialization_scope.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Initialization_model_job_is_current :
+      Initialization_scope.t * Agent_protocol.Id.Job.t * int * int
+      -> bool request
+  | Capture_initialization_recipe_target :
+      Initialization_scope.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Complete_initialization_model_job :
+      Initialization_scope.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Runtime_builder.model_job_outcome
+      -> Agent_protocol.Job.t request
   | Add_job : Agent_protocol.Job.t -> Agent_protocol.Job.t request
   | Read_job : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
   | Publish_job_progress :
@@ -608,6 +667,7 @@ type t =
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
   ; mutable operation_worker : Operation_worker.t option
+  ; mutable inference_execution : Inference_client.Execution.t option
   ; compaction_env : Eio_unix.Stdenv.base option
   ; owner_lease_duration_ms : int
   ; max_attachments : int
@@ -621,6 +681,8 @@ type t =
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
+  ; initialization_owner : unit ref
+  ; mutable initialization_scope : Initialization_scope.t option
   ; mutable job_scopes : job_scope list
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
@@ -1352,7 +1414,25 @@ let set_operation_worker t worker =
     | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
     | None, None, false | Some _, _, _ ->
       t.operation_worker <- worker;
+      t.inference_execution <- None;
       Ok ())
+;;
+
+let set_runtime_worker t worker inference =
+  let open Result.Let_syntax in
+  let%bind () =
+    match worker, inference with
+    | None, None -> Ok ()
+    | Some _, Some _ ->
+      (match t.state.runtime_initialization with
+       | Ready -> Ok ()
+       | Pending _ -> Error (error Invalid_state "runtime initialization is not complete"))
+    | None, Some _ | Some _, None ->
+      Error
+        (error Invalid_request "worker and selected inference must be installed together")
+  in
+  let%map () = set_operation_worker t worker in
+  t.inference_execution <- inference
 ;;
 
 let change_moderator t moderator =
@@ -1401,6 +1481,11 @@ let lifecycle t ~desired ~observed =
 
 let start_internal ?expected_parent_stop_epoch t =
   if
+    match t.state.runtime_initialization with
+    | Pending _ -> true
+    | Ready -> false
+  then Error (error Invalid_state "runtime initialization must complete before start")
+  else if
     Option.exists expected_parent_stop_epoch ~f:(fun epoch ->
       not (Option.equal Int64.equal t.state.parent_stop_epoch (Some epoch)))
   then Error (error Conflict "parent stopped while child start was being prepared")
@@ -1427,13 +1512,20 @@ let queue_start_internal t =
 ;;
 
 let activate_queued_start t =
-  match t.state.lifecycle.desired, t.state.lifecycle.observed with
-  | Running, Queued_for_slot ->
-    let open Result.Let_syntax in
-    let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
-    lifecycle t ~desired:Running ~observed:Idle
-  | Running, (Starting | Idle | Running_turn _) -> Ok (Session_state.summary t.state)
-  | _, _ -> Error (error Invalid_state "session has no queued start intent")
+  if
+    match t.state.runtime_initialization with
+    | Pending _ -> true
+    | Ready -> false
+  then
+    Error (error Invalid_state "runtime initialization must complete before activation")
+  else (
+    match t.state.lifecycle.desired, t.state.lifecycle.observed with
+    | Running, Queued_for_slot ->
+      let open Result.Let_syntax in
+      let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
+      lifecycle t ~desired:Running ~observed:Idle
+    | Running, (Starting | Idle | Running_turn _) -> Ok (Session_state.summary t.state)
+    | _, _ -> Error (error Invalid_state "session has no queued start intent"))
 ;;
 
 let background_terminal_result (job : Agent_protocol.Job.t) completion =
@@ -1674,6 +1766,7 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
           []
           []
     in
+    t.initialization_scope <- None;
     (match mode with
      | Cancel ->
        cancel_independent_moderator t;
@@ -1705,6 +1798,7 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
         [ Session_delta.Active_operation_changed (Some operation) ]
         []
     in
+    t.initialization_scope <- None;
     if Agent_protocol.Session.equal_stop_mode mode Cancel
     then (
       abort_all_staged_work t;
@@ -1914,6 +2008,185 @@ let commit_administration t attachment_id expected_revision kind candidate =
     t
     ~delta:(Session_delta.Created state)
     ~payloads:(Administration.payloads ~previous:t.state state)
+;;
+
+(* Initialization may durably admit jobs and tracking before its final local
+   runtime state is available. Those records are never replaced by an earlier
+   constructor snapshot. History reservations alone may also advance. *)
+let initialization_basis (basis : Session_state.t) (state : Session_state.t) =
+  { state with
+    identity = { state.identity with updated_at = basis.identity.updated_at }
+  ; counters = basis.counters
+  ; jobs = basis.jobs
+  ; model_job_targets = basis.model_job_targets
+  ; schedules = basis.schedules
+  ; shell =
+      { state.shell with
+        manifest_grants = basis.shell.manifest_grants
+      ; approval_grants = basis.shell.approval_grants
+      }
+  ; conversation =
+      { state.conversation with
+        next_history_sequence = basis.conversation.next_history_sequence
+      ; reserved_history_through = basis.conversation.reserved_history_through
+      }
+  }
+;;
+
+let validate_initialization_basis t (expected : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match expected.runtime_initialization, t.state.runtime_initialization with
+    | Pending _, Pending _ -> Ok ()
+    | Ready, _ | _, Ready -> Error (error Conflict "initialization is not pending")
+  in
+  if
+    Option.is_some t.state.active_operation
+    || t.idle_moderator_borrowed
+    || (not (List.is_empty t.job_scopes))
+    || (not
+          (Sexp.equal
+             (Session_state.sexp_of_t expected)
+             (Session_state.sexp_of_t (initialization_basis expected t.state))))
+    || not
+         (Document_schema.Json.equal
+            (Inference.Selection.to_json expected.spec.inference_target)
+            (Inference.Selection.to_json t.state.spec.inference_target))
+  then Error (error Conflict "initialization basis changed while resources were prepared")
+  else Ok ()
+;;
+
+let validate_initialization_owner t (scope : Initialization_scope.t) =
+  (* Physical identity is deliberate capability ownership, never domain equality. *)
+  if phys_equal t.initialization_owner scope.owner
+  then Ok ()
+  else Error (error Conflict "initialization scope belongs to another actor")
+;;
+
+let validate_initialization_scope t scope =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  let%bind () =
+    match t.initialization_scope with
+    | Some active when phys_equal active scope -> Ok ()
+    | Some _ | None -> Error (error Conflict "initialization scope is no longer active")
+  in
+  validate_initialization_basis t scope.expected
+;;
+
+let begin_initialization t expected =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_basis t expected in
+  let%bind () =
+    match Inference.Selection.view t.state.spec.inference_target with
+    | Captured _ -> Ok ()
+    | Unresolved ->
+      Error (error Migration_required "initialization requires a captured target")
+  in
+  match t.initialization_scope with
+  | Some _ -> Error (error Conflict "another initialization scope is active")
+  | None ->
+    let scope =
+      Initialization_scope.{ owner = t.initialization_owner; expected; jobs = [] }
+    in
+    t.initialization_scope <- Some scope;
+    Ok scope
+;;
+
+let end_initialization t scope =
+  let open Result.Let_syntax in
+  let%map () = validate_initialization_owner t scope in
+  match t.initialization_scope with
+  | Some active when phys_equal active scope -> t.initialization_scope <- None
+  | Some _ | None -> ()
+;;
+
+let complete_initialization t scope (candidate : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let expected = scope.Initialization_scope.expected in
+  let projection =
+    { candidate with
+      conversation = expected.conversation
+    ; moderator = expected.moderator
+    ; shell = expected.shell
+    }
+    |> initialization_basis expected
+  in
+  let%bind () =
+    if
+      (not
+         (Sexp.equal
+            (Session_state.sexp_of_t expected)
+            (Session_state.sexp_of_t projection)))
+      || not
+           (Document_schema.Json.equal
+              (Inference.Selection.to_json expected.spec.inference_target)
+              (Inference.Selection.to_json candidate.spec.inference_target))
+    then Error (error Conflict "initialization candidate changed non-initializer fields")
+    else Ok ()
+  in
+  let current = t.state in
+  let state =
+    { current with
+      runtime_initialization = Ready
+    ; failure = None
+    ; lifecycle =
+        { current.lifecycle with
+          observed =
+            (match current.lifecycle.observed with
+             | Failed _ -> Agent_protocol.Session.Stopped
+             | ( Stopped
+               | Queued_for_slot
+               | Starting
+               | Recovering
+               | Idle
+               | Running_turn _
+               | Compacting _
+               | Waiting_for_permission _
+               | Stopping ) as observed -> observed)
+        }
+    ; conversation =
+        { current.conversation with
+          canonical_history = candidate.conversation.canonical_history
+        ; initial_prompt_entry_count = candidate.conversation.initial_prompt_entry_count
+        ; next_history_sequence =
+            Int64.max
+              current.conversation.next_history_sequence
+              candidate.conversation.next_history_sequence
+        ; reserved_history_through =
+            Int64.max
+              current.conversation.reserved_history_through
+              candidate.conversation.reserved_history_through
+        }
+    ; moderator = candidate.moderator
+    ; shell =
+        { current.shell with extension_snapshots = candidate.shell.extension_snapshots }
+    }
+  in
+  let%bind () = Session_state.validate state in
+  transition
+    t
+    ~delta:(Session_delta.Created state)
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.Session_updated (Session_state.summary state)
+      ]
+;;
+
+let fail_initialization t scope failure =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let lifecycle =
+    { t.state.lifecycle with Session_state.Lifecycle.observed = Failed failure }
+  in
+  transition
+    t
+    ~delta:
+      (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ]
 ;;
 
 let reset_internal t attachment_id expected_revision options =
@@ -2356,7 +2629,17 @@ let idle_actor_available t =
   && Option.is_none t.state.failure
 ;;
 
-let idle_moderator_eligible t = idle_actor_available t && not (has_pending_permission t)
+let runtime_ready t =
+  match
+    t.state.runtime_initialization, Inference.Selection.view t.state.spec.inference_target
+  with
+  | Ready, Captured _ -> true
+  | Pending _, _ | Ready, Unresolved -> false
+;;
+
+let idle_moderator_eligible t =
+  runtime_ready t && idle_actor_available t && not (has_pending_permission t)
+;;
 
 let claim_queued_event t id operation_id snapshot =
   let open Result.Let_syntax in
@@ -5159,15 +5442,24 @@ let compaction_failure exn =
 exception Compaction_cancel_requested
 
 let compute_compaction t allocator history =
-  match
-    Context_compaction.Compactor.compact_entries ~allocator ~env:t.compaction_env ~history
-  with
-  | Error exn -> Compaction_failed (compaction_failure exn)
-  | Ok history ->
-    (match History_entry.validate ~allocator history with
-     | Ok () -> Compacted history
-     | Error message ->
-       Compaction_failed (error Conflict ("invalid compacted history: " ^ message)))
+  match t.inference_execution with
+  | None ->
+    Compaction_failed
+      (error Configuration_invalid "compaction requires selected runtime inference")
+  | Some inference ->
+    (match
+       Context_compaction.Compactor.compact_entries
+         ~inference
+         ~allocator
+         ~env:t.compaction_env
+         ~history
+     with
+     | Error exn -> Compaction_failed (compaction_failure exn)
+     | Ok history ->
+       (match History_entry.validate ~allocator history with
+        | Ok () -> Compacted history
+        | Error message ->
+          Compaction_failed (error Conflict ("invalid compacted history: " ^ message))))
 ;;
 
 let run_compaction t operation allocator history =
@@ -6993,6 +7285,78 @@ let find_job t job_id =
   |> Result.of_option ~error:(error Invalid_request "job was not found")
 ;;
 
+let capture_inference_target t target limits =
+  let open Result.Let_syntax in
+  let%bind _ =
+    Inference.Selection.capture t.state.spec.inference_target ~target ~limits
+    |> Result.map_error ~f:(fun failure ->
+      error
+        Invalid_request
+        (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t failure)))
+  in
+  transition t ~delta:(Session_delta.Inference_target_captured target) ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let find_model_job_target t job_id generation =
+  let open Result.Let_syntax in
+  let%bind job = find_job t job_id in
+  let%bind () =
+    if
+      Int.equal job.generation generation
+      && Int.equal generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "model job capture belongs to a stale generation")
+  in
+  let%bind () =
+    match job.kind with
+    | Model_call -> Ok ()
+    | Nested_agent | Scheduled_event | Async_tool | Shell_process | Compaction ->
+      Error
+        (error Invalid_request "only an actual model job may capture an inference target")
+  in
+  let%map binding =
+    List.find t.state.model_job_targets ~f:(fun binding ->
+      Agent_protocol.Id.Job.equal (Model_job_target.job_id binding) job_id
+      && Int.equal (Model_job_target.generation binding) generation)
+    |> Result.of_option
+         ~error:(error Invalid_request "model job target binding is absent")
+  in
+  job, binding
+;;
+
+let capture_model_job_source t job_id generation target limits =
+  let open Result.Let_syntax in
+  let%bind _, binding = find_model_job_target t job_id generation in
+  let%bind captured = Model_job_target.capture_source binding ~target ~limits in
+  transition t ~delta:(Session_delta.Model_job_target_captured captured) ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let capture_recipe_target t job_id generation attempt target limits =
+  let open Result.Let_syntax in
+  let%bind job, binding = find_model_job_target t job_id generation in
+  let%bind () =
+    match job.status with
+    | Running when Int.equal job.attempt attempt -> Ok ()
+    | Running
+    | Queued
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ ->
+      Error (error Conflict "recipe capture is not owned by this running attempt")
+  in
+  let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
+  transition
+    t
+    ~delta:(Session_delta.Model_job_recipe_target_captured captured)
+    ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
 let job_with_progress t (job : Agent_protocol.Job.t) =
   let progress =
     List.find_map t.job_scopes ~f:(fun scope ->
@@ -7471,6 +7835,85 @@ let complete_job t job_id generation attempt outcome =
   job
 ;;
 
+let add_initialization_model_job t scope (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let%bind () =
+    match job.kind, job.status with
+    | Model_call, Queued when Int.equal job.attempt 0 -> Ok ()
+    | _ ->
+      Error (error Invalid_request "initialization requires a fresh queued model job")
+  in
+  let%map job = add_job t job in
+  scope.Initialization_scope.jobs <- job.id :: scope.jobs;
+  job
+;;
+
+let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match job.delivery with
+    | Not_required when job_is_due t job -> Ok ()
+    | Not_required | Pending | Delivered _ | Discarded _ ->
+      Error
+        (error
+           Invalid_request
+           "synchronous initialization job must be immediate and not deliverable")
+  in
+  let%bind job = add_initialization_model_job t scope job in
+  let%bind claimed = claim_job t job.id job.generation in
+  Result.of_option
+    claimed
+    ~error:(error Conflict "initialization job could not be claimed")
+;;
+
+let initialization_model_job_is_current t scope job_id generation attempt =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  match validate_initialization_scope t scope with
+  | Error _ -> Ok false
+  | Ok () ->
+    Ok
+      (List.mem scope.Initialization_scope.jobs job_id ~equal:Agent_protocol.Id.Job.equal
+       && List.exists t.state.jobs ~f:(fun job ->
+         Agent_protocol.Id.Job.equal job.id job_id
+         && Int.equal job.generation generation
+         && Int.equal job.attempt attempt
+         && Agent_protocol.Job.equal_kind job.kind Model_call
+         &&
+         match job.status with
+         | Running -> true
+         | Queued
+         | Waiting_permission _
+         | Waiting_completion _
+         | Succeeded
+         | Failed _
+         | Cancelled
+         | Interrupted _ -> false))
+;;
+
+let validate_initialization_model_job t scope job_id generation attempt =
+  let open Result.Let_syntax in
+  let%bind active =
+    initialization_model_job_is_current t scope job_id generation attempt
+  in
+  if active
+  then Ok ()
+  else Error (error Conflict "initialization does not own this running model attempt")
+;;
+
+let capture_initialization_recipe_target t scope job_id generation attempt target limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_model_job t scope job_id generation attempt in
+  capture_recipe_target t job_id generation attempt target limits
+;;
+
+let complete_initialization_model_job t scope job_id generation attempt outcome =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_model_job t scope job_id generation attempt in
+  complete_job t job_id generation attempt outcome
+;;
+
 let finish_background_scopes t job_id generation attempt =
   List.filter t.job_scopes ~f:(fun scope ->
     (not scope.active)
@@ -7925,19 +8368,22 @@ let schedule_is_due t (schedule : Agent_protocol.Schedule.t) =
 ;;
 
 let due_schedules t =
-  let open Result.Let_syntax in
-  let%map schedules =
-    List.filter_map t.state.schedules ~f:(fun schedule ->
-      match schedule.Agent_protocol.Schedule.status with
-      | Scheduled when Int.equal schedule.generation t.state.identity.generation ->
-        Some
-          (schedule_is_due t schedule
-           |> Result.map ~f:(fun due -> Option.some_if due schedule))
-      | _ -> None)
-    |> Result.all
-    |> Result.map ~f:List.filter_opt
-  in
-  t.state.lifecycle.observed, schedules
+  if not (runtime_ready t)
+  then Ok (t.state.lifecycle.observed, [])
+  else
+    let open Result.Let_syntax in
+    let%map schedules =
+      List.filter_map t.state.schedules ~f:(fun schedule ->
+        match schedule.Agent_protocol.Schedule.status with
+        | Scheduled when Int.equal schedule.generation t.state.identity.generation ->
+          Some
+            (schedule_is_due t schedule
+             |> Result.map ~f:(fun due -> Option.some_if due schedule))
+        | _ -> None)
+      |> Result.all
+      |> Result.map ~f:List.filter_opt
+    in
+    t.state.lifecycle.observed, schedules
 ;;
 
 let claim_schedule t schedule_id generation =
@@ -9267,6 +9713,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        Result.map (cancel_job_internal t id) ~f:ignore)
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
+  | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
   | Enable_automatic_turn_budget policy ->
     (match
        t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
@@ -9318,6 +9765,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     upgrade_prompt_internal t attachment_id expected_revision target_revision
   | Commit_administration (attachment_id, expected_revision, kind, state) ->
     commit_administration t attachment_id expected_revision kind state
+  | Begin_initialization expected -> begin_initialization t expected
+  | End_initialization scope -> end_initialization t scope
+  | Complete_initialization (scope, candidate) ->
+    complete_initialization t scope candidate
+  | Fail_initialization (scope, failure) -> fail_initialization t scope failure
   | Start (attachment_id, expected_parent_stop_epoch) ->
     with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
   | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
@@ -9458,6 +9910,21 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Revoke_grant (attachment_id, grant_id, reason) ->
     revoke_grant t attachment_id grant_id reason
   | Change_job (attachment_id, job) -> change_job t attachment_id job
+  | Capture_inference_target (target, limits) -> capture_inference_target t target limits
+  | Capture_model_job_source (job_id, generation, target, limits) ->
+    capture_model_job_source t job_id generation target limits
+  | Capture_recipe_target (job_id, generation, attempt, target, limits) ->
+    capture_recipe_target t job_id generation attempt target limits
+  | Add_initialization_model_job (scope, job) -> add_initialization_model_job t scope job
+  | Start_initialization_model_job (scope, job) ->
+    start_initialization_model_job t scope job
+  | Initialization_model_job_is_current (scope, job_id, generation, attempt) ->
+    initialization_model_job_is_current t scope job_id generation attempt
+  | Capture_initialization_recipe_target
+      (scope, job_id, generation, attempt, target, limits) ->
+    capture_initialization_recipe_target t scope job_id generation attempt target limits
+  | Complete_initialization_model_job (scope, job_id, generation, attempt, outcome) ->
+    complete_initialization_model_job t scope job_id generation attempt outcome
   | Add_job job -> add_job t job
   | Claim_job (job_id, generation) -> claim_job t job_id generation
   | Complete_job (job_id, generation, attempt, outcome) ->
@@ -9526,6 +9993,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        Result.map (inspect t.state) ~f:Option.some
      | _ -> Ok None)
   | Shutdown ->
+    t.initialization_scope <- None;
     abort_all_staged_work t;
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
@@ -9620,6 +10088,7 @@ let create_with_owner_lease_duration
     ; subscribers = ref Map.Poly.empty
     ; permission_waiters = ref Map.Poly.empty
     ; operation_worker
+    ; inference_execution = None
     ; compaction_env
     ; owner_lease_duration_ms
     ; max_attachments
@@ -9632,6 +10101,8 @@ let create_with_owner_lease_duration
     ; queued_event_borrow = None
     ; foreground_moderator = None
     ; invocation_executions = []
+    ; initialization_owner = ref ()
+    ; initialization_scope = None
     ; job_scopes = []
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
@@ -9698,6 +10169,10 @@ let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)
 ;;
 
+let set_runtime_worker t ~worker ~inference =
+  call t ~priority:Priority (Set_runtime_worker (worker, inference))
+;;
+
 let change_moderator t moderator = call t (Change_moderator moderator)
 let shell_approval_grants t = call t Shell_approval_grants
 
@@ -9714,6 +10189,15 @@ let commit_administration t ~command_audit ~attachment_id ~expected_revision ~ki
     ?command_audit
     (Commit_administration (attachment_id, expected_revision, kind, state))
 ;;
+
+let begin_initialization t ~expected = call t (Begin_initialization expected)
+let end_initialization t ~scope = call t ~priority:Priority (End_initialization scope)
+
+let complete_initialization t ~scope ~candidate =
+  call t (Complete_initialization (scope, candidate))
+;;
+
+let fail_initialization t ~scope failure = call t (Fail_initialization (scope, failure))
 
 let reset t ~attachment_id ~expected_revision options =
   call t ~priority:Priority (Reset (attachment_id, expected_revision, options))
@@ -9960,6 +10444,53 @@ let revoke_grant_with_command_audit t ~command_audit ~attachment_id ~grant_id ~r
 ;;
 
 let change_job t ~attachment_id job = call t (Change_job (attachment_id, job))
+
+let capture_inference_target t ~target ~limits =
+  call t (Capture_inference_target (target, limits))
+;;
+
+let capture_model_job_source t ~job_id ~generation ~target ~limits =
+  call t (Capture_model_job_source (job_id, generation, target, limits))
+;;
+
+let capture_recipe_target t ~job_id ~generation ~attempt ~target ~limits =
+  call t (Capture_recipe_target (job_id, generation, attempt, target, limits))
+;;
+
+let add_initialization_model_job t ~scope job =
+  call t (Add_initialization_model_job (scope, job))
+;;
+
+let start_initialization_model_job t ~scope job =
+  call t (Start_initialization_model_job (scope, job))
+;;
+
+let initialization_model_job_is_current t ~scope ~job_id ~generation ~attempt =
+  call t (Initialization_model_job_is_current (scope, job_id, generation, attempt))
+;;
+
+let capture_initialization_recipe_target
+      t
+      ~scope
+      ~job_id
+      ~generation
+      ~attempt
+      ~target
+      ~limits
+  =
+  call
+    t
+    (Capture_initialization_recipe_target
+       (scope, job_id, generation, attempt, target, limits))
+;;
+
+let complete_initialization_model_job t ~scope ~job_id ~generation ~attempt outcome =
+  call
+    t
+    ~priority:Priority
+    (Complete_initialization_model_job (scope, job_id, generation, attempt, outcome))
+;;
+
 let add_job t job = call t (Add_job job)
 let read_job t ~job_id = call t (Read_job job_id)
 

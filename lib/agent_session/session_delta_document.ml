@@ -136,6 +136,35 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "permission_changed"; "value", P.Permission.to_json value ])
   | Grant_changed value ->
     Ok (`Object [ "kind", `String "grant_changed"; "value", P.Grant.to_json value ])
+  | Inference_target_captured target | Inference_target_changed target ->
+    let%map () =
+      Inference.Request.Target.validate target ~limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+    in
+    `Object
+      [ ( "kind"
+        , `String
+            (match delta with
+             | Inference_target_captured _ -> "inference_target_captured"
+             | _ -> "inference_target_changed") )
+      ; "target", Inference.Request.Target.to_json target
+      ]
+  | Model_job_target_captured binding
+  | Model_job_recipe_target_captured binding
+  | Model_job_target_restored binding ->
+    Ok
+      (`Object
+          [ ( "kind"
+            , `String
+                (match delta with
+                 | Model_job_target_captured _ -> "model_job_target_captured"
+                 | Model_job_recipe_target_captured _ ->
+                   "model_job_recipe_target_captured"
+                 | _ -> "model_job_target_restored") )
+          ; "value", Model_job_target.to_json binding
+          ])
   | Job_changed value ->
     let%bind () =
       match value.P.Job.status with
@@ -377,6 +406,26 @@ let atom_of_jsonaf ~limits json =
   | "grant_changed" ->
     Result.map (X.required fields "value" P.Grant.of_json) ~f:(fun value ->
       Delta.Grant_changed value)
+  | "inference_target_captured" | "inference_target_changed" ->
+    let%map target =
+      X.required fields "target" (fun json ->
+        Inference.Request.Target.of_json json ~limits
+        |> Result.map_error ~f:(fun error ->
+          P.Error.invalid_request
+            (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))))
+    in
+    if String.equal kind "inference_target_captured"
+    then Delta.Inference_target_captured target
+    else Delta.Inference_target_changed target
+  | "model_job_target_captured"
+  | "model_job_recipe_target_captured"
+  | "model_job_target_restored" ->
+    let%map binding = X.required fields "value" (Model_job_target.of_json ~limits) in
+    if String.equal kind "model_job_target_captured"
+    then Delta.Model_job_target_captured binding
+    else if String.equal kind "model_job_recipe_target_captured"
+    then Delta.Model_job_recipe_target_captured binding
+    else Delta.Model_job_target_restored binding
   | "job_changed" ->
     Result.map (X.required fields "value" P.Job.of_json) ~f:(fun value ->
       Delta.Job_changed value)
@@ -537,6 +586,16 @@ let shape =
              ; ( "grant_changed"
                , X.shape_exn
                    [ "kind", D.Shape.value; "value", Session_record_shapes.grant ] )
+             ; ( "inference_target_captured"
+               , X.shape_exn [ "kind", D.Shape.value; "target", D.Shape.value ] )
+             ; ( "inference_target_changed"
+               , X.shape_exn [ "kind", D.Shape.value; "target", D.Shape.value ] )
+             ; ( "model_job_target_captured"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
+             ; ( "model_job_recipe_target_captured"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
+             ; ( "model_job_target_restored"
+               , X.shape_exn [ "kind", D.Shape.value; "value", Model_job_target.shape ] )
              ; ( "job_changed"
                , X.shape_exn [ "kind", D.Shape.value; "value", Session_record_shapes.job ]
                )
@@ -632,20 +691,83 @@ let decode_payload ~limits json =
   Delta.Batch changes
 ;;
 
+let upgrade document ~limits =
+  let module F = Agent_store.Document_fields in
+  let open Result.Let_syntax in
+  let%bind step =
+    D.Conversion.Step.of_function ~kind:"session.delta" ~from_version:1 ~f:(fun payload ->
+      let%bind changes = F.required payload "changes" F.array in
+      let%bind changes =
+        List.map changes ~f:(fun change ->
+          let%bind kind = F.required change "kind" F.string in
+          match kind with
+          | "created" ->
+            let%bind raw = F.required change "state" Result.return in
+            let%bind state = D.Document.inspect ~limits raw in
+            let%bind state = Session_state_document.upgrade state ~limits in
+            (match change with
+             | `Object fields ->
+               Ok
+                 [ `Object
+                     (List.map fields ~f:(fun (name, value) ->
+                        ( name
+                        , if String.equal name "state"
+                          then D.Document.json state
+                          else value )))
+                 ]
+             | _ -> assert false)
+          | "job_changed" ->
+            let%bind job = F.required change "value" Result.return in
+            let%map binding = Session_state_document.legacy_model_job_target job in
+            change
+            :: Option.to_list
+                 (Option.map binding ~f:(fun value ->
+                    `Object
+                      [ "kind", `String "model_job_target_restored"; "value", value ]))
+          | _ -> Ok [ change ])
+        |> Result.all
+      in
+      match payload with
+      | `Object fields ->
+        Ok
+          (`Object
+              (List.map fields ~f:(fun (name, value) ->
+                 ( name
+                 , if String.equal name "changes"
+                   then `Array (List.concat changes)
+                   else value ))))
+      | _ -> F.invalid "payload" "must be an object")
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "session.delta", 2 ]
+      ~max_steps:1
+      ~max_operations:100_000
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
+
 let codec ~limits =
-  X.codec_exn
+  D.Domain_codec.create
     ~limits
     ~kind:"session.delta"
+    ~version:2
     ~shape
-    ~decode:(decode_payload ~limits)
+    ~supported_semantics:[]
+    ~decode:(fun json -> decode_payload ~limits json |> X.document_result)
     ~encode:(fun _ ->
       Error
-        (P.Error.invalid_request "immutable delta document is captured at construction"))
+        (D.Error.Invalid_field
+           { path = []; reason = "immutable delta document is captured at construction" }))
+  |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
 ;;
 
 let decode ~limits document =
   let open Result.Let_syntax in
-  let%bind document = X.upgrade document ~limits ~kind:"session.delta" in
+  let%bind document = upgrade document ~limits in
   let%map carrier = D.Domain_codec.decode (codec ~limits) document in
   { value = D.Extension_carrier.value carrier; document }
 ;;
@@ -661,7 +783,7 @@ let create value ~limits ~state_document =
     D.Document.create
       ~limits
       ~kind:"session.delta"
-      ~version:1
+      ~version:2
       ~payload:(`Object [ "changes", `Array changes ])
   in
   (* Decode authored output too: one set of validators governs both paths. *)
@@ -884,7 +1006,8 @@ end
 let apply t ?transaction_metadata ~limits previous =
   let open Result.Let_syntax in
   let%bind next =
-    Delta.apply (Session_state_document.value previous) t.value |> X.document_result
+    Delta.apply ~limits (Session_state_document.value previous) t.value
+    |> X.document_result
   in
   let candidate = Session_state_document.with_value previous next in
   let%bind changes = raw_changes t in
@@ -923,6 +1046,10 @@ let apply t ?transaction_metadata ~limits previous =
       match kind with
       | "permission_changed" -> member "permissions" "id" Session_record_shapes.permission
       | "grant_changed" -> member "grants" "id" Session_record_shapes.grant
+      | "model_job_target_captured"
+      | "model_job_recipe_target_captured"
+      | "model_job_target_restored" ->
+        member "model_job_targets" "job_id" Model_job_target.shape
       | "job_changed" -> member "jobs" "id" Session_record_shapes.job
       | "schedule_changed" -> member "schedules" "id" Session_record_shapes.schedule
       | "invocation_changed" | "invocation_reconciled" ->

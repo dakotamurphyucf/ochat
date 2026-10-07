@@ -20,7 +20,7 @@ let source_ref source =
 ;;
 
 let script ?(id = "matcher") ?(limits = S.default_limits) kind source =
-  { S.id = id
+  { S.id
   ; language = "chatml"
   ; kind
   ; source = Inline source
@@ -197,7 +197,11 @@ let%expect_test "shell surfaces snapshot globals modules aliases and exports" =
         value.name, List.map value.exports ~f:(fun export -> export.name))
     in
     let aliases = List.map surface.type_aliases ~f:(fun value -> value.name) in
-    print_s [%sexp (globals : string list), (modules : (string * string list) list), (aliases : string list)]
+    print_s
+      [%sexp
+        (globals : string list)
+      , (modules : (string * string list) list)
+      , (aliases : string list)]
   in
   snapshot Surface.shell_effect_surface;
   [%expect
@@ -237,32 +241,38 @@ let%test_unit "composed shell surfaces contain no name collisions" =
     ; Surface.shell_audit_surface
     ]
     ~f:(fun surface ->
-      let unique names =
-        List.length names = Set.length (String.Set.of_list names)
-      in
+      let unique names = List.length names = Set.length (String.Set.of_list names) in
       assert (unique (List.map surface.globals ~f:(fun value -> value.name)));
       assert (unique (List.map surface.modules ~f:(fun value -> value.name)));
       assert (unique (List.map surface.type_aliases ~f:(fun value -> value.name))));
-  assert
-    (not
-       (List.exists Surface.shell_matcher_surface.globals ~f:(fun value ->
-          String.equal value.name "print")))
+  assert (
+    not
+      (List.exists Surface.shell_matcher_surface.globals ~f:(fun value ->
+         String.equal value.name "print")))
 ;;
 
 let hook_source kind =
   match kind with
   | S.Shell_matcher ->
-    "let initial_state = ()\nlet match_command = fun ev st -> Task.bind(Match.yes(\"yes\"), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let match_command = fun ev st -> Task.bind(Match.yes(\"yes\"), fun ignored -> \
+     Task.pure(st))"
   | Shell_reviewer ->
-    "let initial_state = ()\nlet review = fun ev st -> Task.bind(Review.defer(), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let review = fun ev st -> Task.bind(Review.defer(), fun ignored -> Task.pure(st))"
   | Shell_before_interceptor ->
-    "let initial_state = ()\nlet before = fun ev st -> Task.bind(Intercept.continue(), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let before = fun ev st -> Task.bind(Intercept.continue(), fun ignored -> \
+     Task.pure(st))"
   | Shell_after_interceptor ->
-    "let initial_state = ()\nlet after = fun ev st -> Task.bind(Result.keep(), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let after = fun ev st -> Task.bind(Result.keep(), fun ignored -> Task.pure(st))"
   | Shell_effect_analyzer ->
-    "let initial_state = ()\nlet analyze = fun ev st -> Task.bind(Effect.network(), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let analyze = fun ev st -> Task.bind(Effect.network(), fun ignored -> Task.pure(st))"
   | Shell_audit_filter ->
-    "let initial_state = ()\nlet filter = fun ev st -> Task.bind(Audit.keep(), fun ignored -> Task.pure(st))"
+    "let initial_state = ()\n\
+     let filter = fun ev st -> Task.bind(Audit.keep(), fun ignored -> Task.pure(st))"
   | Moderator -> assert false
 ;;
 
@@ -301,21 +311,32 @@ let audit_event () =
 let event_for_kind = function
   | S.Shell_after_interceptor -> result_event ()
   | Shell_audit_filter -> audit_event ()
-  | Shell_matcher | Shell_reviewer | Shell_before_interceptor | Shell_effect_analyzer -> event ()
+  | Shell_matcher | Shell_reviewer | Shell_before_interceptor | Shell_effect_analyzer ->
+    event ()
   | Moderator -> assert false
 ;;
 
 let%expect_test "all six extension kinds execute through the generic host runtime" =
   Eio_main.run (fun env ->
     List.iter
-      [ S.Shell_matcher; Shell_reviewer; Shell_before_interceptor; Shell_after_interceptor
-      ; Shell_effect_analyzer; Shell_audit_filter
+      [ S.Shell_matcher
+      ; Shell_reviewer
+      ; Shell_before_interceptor
+      ; Shell_after_interceptor
+      ; Shell_effect_analyzer
+      ; Shell_audit_filter
       ]
       ~f:(fun kind ->
-        let compiled = C.compile ~script:(script ~id:(S.kind_to_string kind) kind (hook_source kind)) |> ok_exn in
-        let instance = C.instantiate ~env ~lifecycle:Invocation compiled |> extension_ok in
+        let compiled =
+          C.compile ~script:(script ~id:(S.kind_to_string kind) kind (hook_source kind))
+          |> ok_exn
+        in
+        let instance =
+          C.instantiate ~env ~lifecycle:Invocation compiled |> extension_ok
+        in
         let value = event_for_kind kind in
-        print_s [%sexp (C.call instance ~context:value ~event:value |> extension_ok : C.action)]));
+        print_s
+          [%sexp (C.call instance ~context:value ~event:value |> extension_ok : C.action)]));
   [%expect
     {|
     (Match true yes)
@@ -330,7 +351,8 @@ let%expect_test "matcher failures use action-sensitive conservative defaults" =
   let failure = Shell_runtime.Runtime.For_testing.matcher_failure in
   List.iter [ Chatmd_shell_spec.Shell_spec.Allow; Ask; Deny ] ~f:(fun action ->
     printf "%b\n" (failure action Conservative_failure));
-  [%expect {|
+  [%expect
+    {|
     false
     true
     true |}]
@@ -340,7 +362,9 @@ let%expect_test "fuel exhaustion rolls back state" =
   Eio_main.run (fun env ->
     let limits = { C.default_limits with fuel = 1 } in
     let compiled = C.compile ~script:(script Shell_matcher matcher_source) |> ok_exn in
-    let instance = C.instantiate ~env ~limits ~lifecycle:Session compiled |> extension_ok in
+    let instance =
+      C.instantiate ~env ~limits ~lifecycle:Session compiled |> extension_ok
+    in
     match C.call instance ~context:(event ()) ~event:(event ()) with
     | Ok _ -> print_endline "unexpected"
     | Error diagnostic -> print_endline diagnostic.message);
@@ -354,9 +378,7 @@ let%expect_test "stateful extension calls are serialized" =
     let call () = C.call instance ~context:(event ()) ~event:(event ()) |> extension_ok in
     let left = ref None in
     let right = ref None in
-    Eio.Fiber.both
-      (fun () -> left := Some (call ()))
-      (fun () -> right := Some (call ()))
+    Eio.Fiber.both (fun () -> left := Some (call ())) (fun () -> right := Some (call ()))
     |> ignore;
     print_s [%sexp ([ Option.value_exn !left; Option.value_exn !right ] : C.action list)]);
   [%expect {| ((Match true 0) (Match true 1)) |}]
@@ -435,7 +457,12 @@ let%expect_test "model reviewer enforces timeout strict JSON and metadata" =
         ~env
         ~id:"malformed"
         ~complete:(fun ~prompt:_ ->
-          Ok { text = "not-json"; model = "test"; input_tokens = None; output_tokens = None })
+          Ok
+            { text = "not-json"
+            ; model = "test"
+            ; input_tokens = None
+            ; output_tokens = None
+            })
         ()
     in
     let timed_out =
@@ -469,7 +496,8 @@ let%expect_test "model reviewer enforces timeout strict JSON and metadata" =
     | Error message -> print_endline message
     | Ok review ->
       let metadata = Option.value_exn review.metadata in
-      printf "%s:%s:%d:%d\n"
+      printf
+        "%s:%s:%d:%d\n"
         metadata.reviewer_id
         (Option.value_exn metadata.model)
         (Option.value_exn metadata.input_tokens)
@@ -484,13 +512,18 @@ let%expect_test "model reviewer enforces timeout strict JSON and metadata" =
 ;;
 
 let%expect_test "typed codecs round trip and reject unknown fields" =
-  let value = shell_context () |> Shell_runtime.Chatml_context_value.of_context |> Shell_runtime.Chatml_context_value.encode in
+  let value =
+    shell_context ()
+    |> Shell_runtime.Chatml_context_value.of_context
+    |> Shell_runtime.Chatml_context_value.encode
+  in
   let decoded = Shell_runtime.Chatml_context_value.decode value |> codec_ok in
   let round_trip = Shell_runtime.Chatml_context_value.encode decoded in
   printf "%b\n" (String.equal (value_string value) (value_string round_trip));
   let unknown =
     match value with
-    | L.VRecord fields -> L.VRecord (Map.set fields ~key:"secret_environment" ~data:(L.VString "secret"))
+    | L.VRecord fields ->
+      L.VRecord (Map.set fields ~key:"secret_environment" ~data:(L.VString "secret"))
     | _ -> assert false
   in
   (match Shell_runtime.Chatml_context_value.decode unknown with
@@ -500,7 +533,9 @@ let%expect_test "typed codecs round trip and reject unknown fields" =
     Shell_runtime.Chatml_effect_value.Replace [ "network"; "read:/tmp" ]
   in
   let effect_value = Shell_runtime.Chatml_effect_value.encode analyzer_result in
-  let decoded_effect = Shell_runtime.Chatml_effect_value.decode effect_value |> codec_ok in
+  let decoded_effect =
+    Shell_runtime.Chatml_effect_value.decode effect_value |> codec_ok
+  in
   print_s [%sexp (decoded_effect : Shell_runtime.Chatml_effect_value.t)];
   let approval = Shell_runtime.Chatml_approval_value.Deny "unsafe" in
   let approval =
@@ -522,7 +557,9 @@ let%expect_test "typed codecs round trip and reject unknown fields" =
     |> codec_ok
     |> Shell_runtime.Chatml_result_value.encode
   in
-  printf "%b\n" (String.equal (value_string result_value) (value_string result_round_trip));
+  printf
+    "%b\n"
+    (String.equal (value_string result_value) (value_string result_round_trip));
   let audit_value = audit_event () in
   let audit_round_trip =
     Shell_runtime.Chatml_audit_value.decode audit_value
@@ -542,7 +579,9 @@ let%expect_test "typed codecs round trip and reject unknown fields" =
 ;;
 
 let manifest_of_source env source =
-  let elements = CM.parse_chat_inputs ~source:"digest.chatmd" ~dir:(Eio.Stdenv.cwd env) source in
+  let elements =
+    CM.parse_chat_inputs ~source:"digest.chatmd" ~dir:(Eio.Stdenv.cwd env) source
+  in
   let runtimes, scripts =
     List.fold elements ~init:([], []) ~f:(fun (runtimes, scripts) -> function
       | CM.Shell_runtime runtime -> runtime :: runtimes, scripts
@@ -595,8 +634,13 @@ let%expect_test "unused scripts produce warnings and executable material exclude
     in
     let _, material =
       MC.compile_with_material
-        { runtimes; tools = []; scripts; legacy_tools = []; moderator_runtime = None
-        ; platform = Macos; supported_features = Chatmd_shell_spec.Feature.phase3
+        { runtimes
+        ; tools = []
+        ; scripts
+        ; legacy_tools = []
+        ; moderator_runtime = None
+        ; platform = Macos
+        ; supported_features = Chatmd_shell_spec.Feature.phase3
         }
       |> ok_exn
     in
@@ -643,14 +687,18 @@ let%test_unit "generic and compatibility runtime facades preserve type equality"
   let moderator_state : Chatml_host_runtime.session -> Chatml.Chatml_lang.value =
     Chatml_moderator_runtime.current_state
   in
-  ignore (host_state, moderator_state : _ * _)
+  ignore ((host_state, moderator_state) : _ * _)
 ;;
 
 let%expect_test "all script kinds serialize limits and round-trip through ChatMD" =
   Eio_main.run (fun env ->
     List.iter
-      [ S.Shell_matcher; Shell_reviewer; Shell_before_interceptor; Shell_after_interceptor
-      ; Shell_effect_analyzer; Shell_audit_filter
+      [ S.Shell_matcher
+      ; Shell_reviewer
+      ; Shell_before_interceptor
+      ; Shell_after_interceptor
+      ; Shell_effect_analyzer
+      ; Shell_audit_filter
       ]
       ~f:(fun kind ->
         let declaration =
@@ -658,11 +706,18 @@ let%expect_test "all script kinds serialize limits and round-trip through ChatMD
             (script ~id:(S.kind_to_string kind) kind (hook_source kind))
         in
         let parsed =
-          CM.parse_chat_inputs ~source:"round-trip.chatmd" ~dir:(Eio.Stdenv.cwd env) declaration
+          CM.parse_chat_inputs
+            ~source:"round-trip.chatmd"
+            ~dir:(Eio.Stdenv.cwd env)
+            declaration
         in
         match parsed with
         | [ CM.Shell_script script ] ->
-          printf "%s:%d:%d\n" (S.kind_to_string script.kind) script.limits.fuel script.limits.max_tasks
+          printf
+            "%s:%d:%d\n"
+            (S.kind_to_string script.kind)
+            script.limits.fuel
+            script.limits.max_tasks
         | _ -> print_endline "unexpected"));
   [%expect
     {|
@@ -690,8 +745,13 @@ let%expect_test "extension compilation fails during preparation before authoriza
     in
     let manifest, material =
       MC.compile_with_material
-        { runtimes; tools = []; scripts; legacy_tools = []; moderator_runtime = None
-        ; platform = Macos; supported_features = Chatmd_shell_spec.Feature.phase3
+        { runtimes
+        ; tools = []
+        ; scripts
+        ; legacy_tools = []
+        ; moderator_runtime = None
+        ; platform = Macos
+        ; supported_features = Chatmd_shell_spec.Feature.phase3
         }
       |> ok_exn
     in
@@ -759,4 +819,34 @@ let%expect_test "ChatMD and manifest retain all six typed extension kinds" =
     effects:shell_effect_analyzer
     matcher:shell_matcher
     reviewer:shell_reviewer |}]
+;;
+
+exception Reviewer_observer_failed
+
+let%expect_test
+    "model reviewer preserves strict observer timeout and cancellation exceptions"
+  =
+  Eio_main.run (fun env ->
+    let propagated exn =
+      let reviewer =
+        Shell_runtime.Model_reviewer.create
+          ~env
+          ~id:"strict"
+          ~complete:(fun ~prompt:_ -> raise exn)
+          ()
+      in
+      try
+        ignore
+          (Shell_runtime.Model_reviewer.review_result reviewer (approval_request ())
+           : (Shell_access.Approval.review, string) Result.t);
+        false
+      with
+      | Reviewer_observer_failed | Eio.Time.Timeout | Eio.Cancel.Cancelled _ -> true
+    in
+    printf
+      "observer=%b timeout=%b cancellation=%b\n"
+      (propagated Reviewer_observer_failed)
+      (propagated Eio.Time.Timeout)
+      (propagated (Eio.Cancel.Cancelled (Failure "cancelled"))));
+  [%expect {| observer=true timeout=true cancellation=true |}]
 ;;

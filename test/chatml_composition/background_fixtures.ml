@@ -119,9 +119,10 @@ let with_background_daemon
                       job_result_max_bytes
                     ; job_result_inline_bytes = Int.min (64 * 1024) job_result_max_bytes
                     }
-                ; model_post_stream =
-                    Some
-                      (fun ~sw ~inputs ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw ~inputs ->
                         incr requests;
                         match model_post_stream with
                         | Some post -> post ~sw ~inputs

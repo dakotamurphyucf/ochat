@@ -53,7 +53,18 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "inference/" ], "../neutral-inference-contracts.md"
+    [ ( [ "inference_runtime/"
+        ; "inference_client/"
+        ; "inference_host/"
+        ; "openai/inference_"
+        ; "neutral_turn"
+        ; "inference_config"
+        ; "fork_history"
+        ; "model_job_target"
+        ; "context_compaction/history_view"
+        ]
+      , "../lib/neutral-inference.md" )
+    ; [ "inference/" ], "../neutral-inference-contracts.md"
     ; [ "authoring_context" ], "../guide/authoring-context-tool.md"
     ; [ "authoring_corpus" ], "../guide/authoring-topic-corpus.md"
     ; [ "authoring_sources" ], "../guide/authoring-source-bundle.md"
@@ -150,6 +161,10 @@ let module_rows env root =
          ; "history_chatmd/"
          ; "transcript/"
          ; "inference/"
+         ; "inference_runtime/"
+         ; "inference_client/"
+         ; "inference_host/"
+         ; "openai/inference_"
          ; "session_store"
          ; "source_loader"
          ]

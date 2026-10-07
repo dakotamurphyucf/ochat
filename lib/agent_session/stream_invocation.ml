@@ -145,12 +145,26 @@ let create
       }
   in
   let%bind canonical_payload, call_id =
-    match Openai.Responses_history.item_exn request.call with
-    | Function_call call -> Ok (call.arguments, call.call_id)
-    | Custom_tool_call call -> Ok (call.input, call.call_id)
-    | _ ->
+    let semantic = History_entry.Payload.semantic (History_entry.payload request.call) in
+    let invalid () =
       Error
-        (Agent_protocol.Error.invalid_request "invocation requires a canonical tool call")
+        (Agent_protocol.Error.invalid_request
+           "invocation requires its matching canonical tool call")
+    in
+    match History_entry.Payload.Semantic.view semantic with
+    | Call { kind; name; input_bytes; _ } ->
+      let kind_matches =
+        match kind, request.kind with
+        | Function, Function | Custom, Custom -> true
+        | Function, Custom | Custom, Function -> false
+      in
+      if not (kind_matches && String.equal name request.name)
+      then invalid ()
+      else (
+        match (History_entry.Payload.Semantic.metadata semantic).call_id with
+        | Value call_id when not (String.is_empty call_id) -> Ok (input_bytes, call_id)
+        | Absent | Null | Value _ -> invalid ())
+    | Message _ | Result _ | Reasoning _ | Unknown _ -> invalid ()
   in
   let routing =
     I.

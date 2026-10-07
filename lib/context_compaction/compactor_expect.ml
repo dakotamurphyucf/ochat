@@ -75,7 +75,8 @@ let%expect_test "entry compaction retains IDs and allocates one reminder" =
   let ordinary = create_entry allocator (make_user_msg "discard me") in
   let before = History_entry.Allocator.next_sequence allocator in
   let result =
-    Context_compaction.Compactor.compact_entries
+    Context_compaction.Compactor.For_testing.compact_entries_with
+      ~summarise:(fun ~relevant_items:_ ~env:_ -> Ok "summary")
       ~allocator
       ~env:None
       ~history:[ system; ordinary; developer; duplicate_one; duplicate_two ]
@@ -144,6 +145,11 @@ let%expect_test "relevance is opt-in and policy and latest input remain pinned" 
   let items =
     [ make_role_msg Developer "policy"; make_user_msg "old"; make_user_msg "latest" ]
   in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"relevance" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let items = List.map items ~f:(create_entry allocator) in
   let calls = ref 0 in
   let score _ =
     incr calls;
@@ -211,4 +217,46 @@ let%expect_test "cancelled entry compaction does not allocate" =
       (cancelled : bool)
     , (History_entry.Allocator.next_sequence allocator = before : bool)];
   [%expect {| (true true) |}]
+;;
+
+let%expect_test "captured policy survives compaction and summary is authored" =
+  let module P = History_entry.Payload in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"captured" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let original = create_entry allocator (make_role_msg Developer "policy") in
+  let semantic = P.semantic (History_entry.payload original) in
+  let payload =
+    P.captured
+      semantic
+      ~origin:P.Origin.unavailable
+      ~raw:(`Object [ "future", `Number "1.00"; "nullable", `Null ])
+    |> Result.ok_or_failwith
+  in
+  let original = History_entry.with_payload original payload in
+  let result =
+    Context_compaction.Compactor.For_testing.compact_entries_with
+      ~summarise:(fun ~relevant_items ~env:_ ->
+        assert (List.length relevant_items = 1);
+        Ok "saved")
+      ~allocator
+      ~env:None
+      ~history:[ original ]
+    |> Result.ok_exn
+  in
+  let first = List.hd_exn result in
+  let last = List.last_exn result in
+  let unchanged =
+    String.equal
+      (Jsonaf.to_string (P.to_json payload))
+      (Jsonaf.to_string (P.to_json (History_entry.payload first)))
+  in
+  let authored =
+    match P.representation (History_entry.payload last) with
+    | Authored -> true
+    | Captured _ | Reconstructed _ -> false
+  in
+  printf "captured_unchanged=%b new_authored=%b\n" unchanged authored;
+  [%expect {| captured_unchanged=true new_authored=true |}]
 ;;

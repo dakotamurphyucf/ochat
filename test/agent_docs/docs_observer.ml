@@ -139,6 +139,7 @@ let run env root =
   Eio.Switch.run (fun sw ->
     let daemon =
       Agent_server.Daemon.start
+        ~options:(Docs_smoke.offline_options ())
         ~sw
         ~env
         ~config

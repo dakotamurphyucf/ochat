@@ -83,6 +83,7 @@ let%expect_test
     }
   in
   Job_fixtures.with_actor ~prepare_state:initial (fun _ _ actor writer backend ->
+    Inference_ports.install_compaction_runtime actor |> protocol_ok;
     let before = A.state actor |> protocol_ok in
     let restored = restore before in
     let projected state =

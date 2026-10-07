@@ -1,5 +1,15 @@
 open! Core
 
+let offline_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"offline-documentation-fixture"
+        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          failwith "documentation lifecycle examples must not dispatch inference")
+  }
+;;
+
 let shell_examples env root =
   let module S = Chatmd_shell_spec.Chatmd_script_spec in
   let module C = Shell_runtime.Chatml_extension in
@@ -194,7 +204,10 @@ let timer env root workspace =
         ; event_capacity = 128
         }
     in
-    let host = Agent_server.Embedded.start ~sw ~env options |> protocol_exn in
+    let host =
+      Agent_server.Embedded.start ~daemon_options:(offline_options ()) ~sw ~env options
+      |> protocol_exn
+    in
     Fun.protect
       ~finally:(fun () -> Agent_server.Embedded.close host)
       (fun () ->

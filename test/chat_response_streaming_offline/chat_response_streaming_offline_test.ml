@@ -9,6 +9,33 @@ module Res = Openai.Responses
 module Session = Session
 module Stream = Chat_response.In_memory_stream
 
+let selected_run ~env ~post_stream =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"streaming-offline"
+      ~default_model:"fixture"
+      ~post_stream
+  in
+  let target =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let context =
+    Inference_fixture.resolve fixture target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Stream.run_completion_stream_in_memory_entries
+    ~env
+    ~inference_context:context
+    ~inference_identity:(Inference_fixture.identity fixture)
+    ~on_inference_attempt:ignore
+    ~on_inference_completion:ignore
+;;
+
 let ok_or_fail = function
   | Ok value -> value
   | Error msg -> failwith msg
@@ -27,8 +54,18 @@ let stream_custom_call ~output_index ~item_id ~call_id ~input =
       ; output_index
       ; type_ = "response.output_item.added"
       }
-  , Res.Response_stream.Custom_tool_call_input_done
-      { input; item_id; output_index; type_ = "response.custom_tool_call_input.done" } )
+  , Res.Response_stream.Output_item_done
+      { item =
+          Custom_function
+            { name = "echo"
+            ; input
+            ; call_id
+            ; _type = "custom_tool_call"
+            ; id = Some item_id
+            }
+      ; output_index
+      ; type_ = "response.output_item.done"
+      } )
 ;;
 
 let stream_message ~output_index ~item_id text =
@@ -62,7 +99,7 @@ let run_entry_stream
       ~responses
       ~tool_tbl
       ?(parallel_tool_calls = false)
-      ?(on_history_event = ignore)
+      ?(on_transcript_event = ignore)
       ?(on_history_tool_out = ignore)
       ()
   =
@@ -72,11 +109,11 @@ let run_entry_stream
   let responses = Queue.of_list responses in
   let post_stream ~sw:_ ~inputs:_ = Queue.dequeue_exn responses |> Stdlib.List.to_seq in
   let history =
-    Stream.run_completion_stream_in_memory_entries
+    selected_run
       ~env
       ~allocator
       ~history:[ input_entry allocator ]
-      ~on_history_event
+      ~on_transcript_event
       ~on_history_tool_out
       ~tools:(Some [])
       ~tool_tbl
@@ -99,6 +136,13 @@ let fork_test_events () =
     match added with
     | Res.Response_stream.Output_item_added ({ item = Function_call call; _ } as event) ->
       Res.Response_stream.Output_item_added
+        { event with item = Function_call { call with name = "fork" } }
+    | _ -> assert false
+  in
+  let done_ =
+    match done_ with
+    | Res.Response_stream.Output_item_done ({ item = Function_call call; _ } as event) ->
+      Res.Response_stream.Output_item_done
         { event with item = Function_call { call with name = "fork" } }
     | _ -> assert false
   in
@@ -136,7 +180,7 @@ let%expect_test "fork cannot publish child history or consume the root deferred 
       Queue.dequeue_exn responses |> Stdlib.List.to_seq
     in
     let history =
-      Stream.run_completion_stream_in_memory_entries
+      selected_run
         ~env
         ~allocator
         ~history:[ initial ]
@@ -1141,23 +1185,38 @@ let%expect_test "stream identity survives event order and finalization" =
       ~namespace:"message-order"
       ~responses:[ reordered ]
       ~tool_tbl
-      ~on_history_event:(Queue.enqueue history_events)
+      ~on_transcript_event:(Queue.enqueue history_events)
       ()
   in
-  let event_ids =
+  let item_keys =
     Queue.to_list history_events
-    |> List.map ~f:(fun event -> History_entry.Id.sequence event.entry_id)
+    |> List.filter_map ~f:(fun event ->
+      match Transcript.Stream.view event with
+      | Item_announced item | Item_finalized { item; _ } ->
+        Some (Transcript.Item.key item)
+      | Changed { target = Content part; _ } | Part_announced part ->
+        Some (Transcript.Item.key part.item)
+      | _ -> None)
+  in
+  assert (List.for_all item_keys ~f:(Transcript.Item.Key.equal (List.hd_exn item_keys)));
+  let finalized_ids =
+    Queue.to_list history_events
+    |> List.filter_map ~f:(fun event ->
+      match Transcript.Stream.view event with
+      | Item_finalized { entry; _ } ->
+        Some (History_entry.Id.sequence (History_entry.id entry))
+      | _ -> None)
   in
   let final_message =
     List.find_exn history ~f:(fun entry -> String.equal (entry_kind entry) "message")
   in
   print_s
     [%sexp
-      (event_ids : int list)
+      (finalized_ids : int list)
     , (History_entry.Id.sequence (History_entry.id final_message) : int)
     , (List.map history ~f:entry_kind : string list)
     , (History_entry.Allocator.next_sequence allocator : int)];
-  [%expect {| ((1 1 1 1) 1 (input message) 2) |}]
+  [%expect {| ((1) 1 (input message) 2) |}]
 ;;
 
 let%expect_test "tool completion before added executes once with stable identities" =
@@ -1301,7 +1360,7 @@ let%expect_test "native execution stops when authorization yields to session ter
     Int.incr ran;
     Res.Tool_output.Output.Text "unexpected");
   let history =
-    Stream.run_completion_stream_in_memory_entries
+    selected_run
       ~env
       ~allocator
       ~history:[ input_entry allocator ]
@@ -1398,7 +1457,7 @@ let%expect_test "queued user entry follows tool output in the next request" =
       |> Stdlib.List.to_seq
   in
   let history =
-    Stream.run_completion_stream_in_memory_entries
+    selected_run
       ~env
       ~allocator
       ~history:[ initial ]
@@ -1423,7 +1482,7 @@ let%expect_test "queued user entry follows tool output in the next request" =
     |}]
 ;;
 
-let%expect_test "stream retry discards failed attempt before identity publication" =
+let%expect_test "selected stream parsing failure propagates without an implicit retry" =
   Eio_main.run
   @@ fun env ->
   let allocator =
@@ -1434,35 +1493,33 @@ let%expect_test "stream retry discards failed attempt before identity publicatio
   let observed = Queue.create () in
   let post_stream ~sw:_ ~inputs:_ =
     Int.incr attempts;
-    if Int.equal !attempts 1
-    then
-      fun () ->
-        raise
-          (Res.Response_stream_parsing_error
-             (`Object [], Failure "invalid stream response"))
-    else
-      stream_message ~output_index:0 ~item_id:"message-retry" "done" |> Stdlib.List.to_seq
+    fun () ->
+      raise
+        (Res.Response_stream_parsing_error (`Object [], Failure "invalid stream response"))
   in
-  let history =
-    Stream.run_completion_stream_in_memory_entries
-      ~env
-      ~allocator
-      ~history:[ input_entry allocator ]
-      ~on_history_event:(Queue.enqueue observed)
-      ~tools:(Some [])
-      ~tool_tbl:(Hashtbl.create (module String))
-      ~post_stream
-      ()
-  in
+  let history = [ input_entry allocator ] in
+  (match
+     selected_run
+       ~env
+       ~allocator
+       ~history
+       ~on_transcript_event:(Queue.enqueue observed)
+       ~tools:(Some [])
+       ~tool_tbl:(Hashtbl.create (module String))
+       ~post_stream
+       ()
+   with
+   | exception Res.Response_stream_parsing_error _ -> ()
+   | _ -> failwith "expected original parsing failure");
+  assert (
+    not
+      (Queue.exists observed ~f:(fun event ->
+         match Transcript.Stream.view event with
+         | Item_finalized _ -> true
+         | _ -> false)));
   print_s
-    [%sexp
-      (!attempts : int)
-    , (Queue.length observed : int)
-    , (List.map history ~f:entry_kind : string list)
-    , (List.map history ~f:(fun entry ->
-         History_entry.Id.sequence (History_entry.id entry))
-       : int list)];
-  [%expect {| (2 3 (input message) (0 1)) |}]
+    [%sexp (!attempts : int), (History_entry.Allocator.next_sequence allocator : int)];
+  [%expect {| (1 1) |}]
 ;;
 
 let%expect_test "stream callbacks publish before the response tail is requested" =
@@ -1490,11 +1547,14 @@ let%expect_test "stream callbacks publish before the response tail is requested"
     stream
   in
   let history =
-    Stream.run_completion_stream_in_memory_entries
+    selected_run
       ~env
       ~allocator
       ~history:[ input_entry allocator ]
-      ~on_event:(fun _ -> Int.incr observed)
+      ~on_transcript_event:(fun event ->
+        match Transcript.Stream.view event with
+        | Source_started _ | Source_finished _ -> ()
+        | _ -> Int.incr observed)
       ~tools:(Some [])
       ~tool_tbl:(Hashtbl.create (module String))
       ~post_stream
@@ -1532,11 +1592,14 @@ let%expect_test "parsing failure after publication propagates without replay" =
       else Seq.Nil
   in
   (match
-     Stream.run_completion_stream_in_memory_entries
+     selected_run
        ~env
        ~allocator
        ~history:[ input_entry allocator ]
-       ~on_event:(fun _ -> Int.incr observed)
+       ~on_transcript_event:(fun event ->
+         match Transcript.Stream.view event with
+         | Source_started _ | Source_finished _ -> ()
+         | _ -> Int.incr observed)
        ~tools:(Some [])
        ~tool_tbl:(Hashtbl.create (module String))
        ~post_stream
@@ -1551,10 +1614,12 @@ let%expect_test "parsing failure after publication propagates without replay" =
 let%expect_test "conflicting completion payload fails before duplicate execution" =
   Eio_main.run
   @@ fun env ->
+  let executions = ref 0 in
   let tool_tbl : (string, Ochat_function.runner) Hashtbl.t =
     Hashtbl.create (module String)
   in
   Hashtbl.set tool_tbl ~key:"echo" ~data:(fun ~invocation:_ payload ->
+    Int.incr executions;
     Res.Tool_output.Output.Text payload);
   let added, first =
     stream_function_call
@@ -1581,8 +1646,10 @@ let%expect_test "conflicting completion payload fails before duplicate execution
         : History_entry.Allocator.t * History_entry.t list);
      print_endline "unexpected success"
    with
-   | Failure message -> print_endline message);
-  [%expect {| Conflicting completion for streamed tool item conflict-1 |}]
+   | Inference_runtime.Contract_violation Conflicting_candidate ->
+     print_endline "conflicting finalized candidate rejected");
+  [%test_eq: int] 1 !executions;
+  [%expect {| conflicting finalized candidate rejected |}]
 ;;
 
 let%expect_test "file-backed stream exposes final canonical message identity" =
@@ -1610,11 +1677,29 @@ let%expect_test "file-backed stream exposes final canonical message identity" =
     in
     stream
   in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"file-stream"
+      ~default_model:"fixture"
+      ~post_stream
+  in
+  let ctx =
+    Inference_fixture.ctx
+      fixture
+      ~env
+      ~dir:(Eio.Stdenv.cwd env)
+      ~tool_dir:(Eio.Stdenv.cwd env)
+      ~cache:(Chat_response.Cache.create ~max_size:1 ())
+      ()
+  in
   Chat_response.Driver.run_completion_stream
     ~env
     ~output_file
-    ~post_stream
-    ~on_history_event:(Queue.enqueue history_events)
+    ~inference_context:ctx.inference_context
+    ~inference_identity:ctx.inference_identity
+    ~on_inference_attempt:ignore
+    ~on_inference_completion:ignore
+    ~on_transcript_event:(Queue.enqueue history_events)
     ~on_final_history:(fun history -> final_history := Some history)
     ();
   let history = Option.value_exn !final_history in
@@ -1622,21 +1707,28 @@ let%expect_test "file-backed stream exposes final canonical message identity" =
     List.find_exn history ~f:(fun entry -> String.equal (entry_kind entry) "message")
   in
   let message_id = History_entry.id message in
+  let finalized =
+    Queue.to_list history_events
+    |> List.filter_map ~f:(fun event ->
+      match Transcript.Stream.view event with
+      | Item_finalized { entry; _ } -> Some entry
+      | _ -> None)
+  in
   print_s
     [%sexp
-      (Queue.length history_events : int)
-    , (Queue.for_all history_events ~f:(fun event ->
-         History_entry.Id.equal event.entry_id message_id)
+      (List.length finalized : int)
+    , (List.for_all finalized ~f:(fun entry ->
+         History_entry.Id.equal (History_entry.id entry) message_id)
        : bool)
     , (List.map history ~f:entry_kind : string list)];
-  [%expect {| (3 true (input message)) |}]
+  [%expect {| (1 true (input message)) |}]
 ;;
 
 module Redaction_probe = struct
   type t =
-    { direct : Res.Response_stream.t Queue.t
-    ; sourced : Res.Response_stream.t Queue.t
-    ; correlated : Res.Response_stream.t Queue.t
+    { direct : Transcript.Stream.t Queue.t
+    ; sourced : Transcript.Stream.t Queue.t
+    ; correlated : Transcript.Stream.t Queue.t
     ; executed : string Queue.t
     }
 
@@ -1656,14 +1748,18 @@ module Redaction_probe = struct
     }
   ;;
 
-  let event_payload = function
-    | Res.Response_stream.Output_item_added { item = Function_call call; _ } ->
-      Some call.arguments
-    | Output_item_added { item = Custom_function call; _ } -> Some call.input
-    | Function_call_arguments_delta event -> Some event.delta
-    | Function_call_arguments_done event -> Some event.arguments
-    | Custom_tool_call_input_delta event -> Some event.delta
-    | Custom_tool_call_input_done event -> Some event.input
+  let event_payload event =
+    match Transcript.Stream.view event with
+    | Item_announced { header = Some (Transcript.Header.Call _); _ } -> Some ""
+    | Changed { target = Call_input _; change = Append text | Replace text; _ } ->
+      Some text
+    | Item_finalized { entry; _ } ->
+      (match
+         History_entry.Payload.Semantic.view
+           (History_entry.Payload.semantic (History_entry.payload entry))
+       with
+       | Call { input_bytes; _ } -> Some input_bytes
+       | _ -> None)
     | _ -> None
   ;;
 
@@ -1692,7 +1788,7 @@ module Redaction_probe = struct
       History_entry.Allocator.create ~namespace:"redaction-unit" ~next_sequence:0
       |> Result.ok_or_failwith
     in
-    Stream.run_completion_stream_in_memory_entries
+    selected_run
       ~env
       ~datadir:directory
       ~allocator
@@ -1702,9 +1798,8 @@ module Redaction_probe = struct
       ~parallel_tool_calls:false
       ~redact_tool_payload:redact
       ~post_stream
-      ~on_event:(Queue.enqueue t.direct)
-      ~on_sourced_event:(fun event -> Queue.enqueue t.sourced event.event)
-      ~on_history_event:(fun event -> Queue.enqueue t.correlated event.event)
+      ~on_transcript_event:(fun event ->
+        List.iter (observers t) ~f:(fun observer -> Queue.enqueue observer event))
       ()
   ;;
 
@@ -1790,7 +1885,7 @@ module Redaction_probe = struct
   ;;
 
   let check_completed t history =
-    let expected = [ ""; safe_payload; safe_payload ] in
+    let expected = [ ""; safe_payload ] in
     assert (List.equal String.equal (Queue.to_list t.executed) [ payload ]);
     List.iter (observers t) ~f:(fun events ->
       assert (List.equal String.equal (payloads events) expected));

@@ -357,8 +357,35 @@ let with_reducer_context
   in
   let cwd = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:1 () in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_moderation_safe_points_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "reducer fixture unexpectedly dispatched inference")
+  in
+  let inference_context =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun _ -> "fixture capture")
+    |> Result.ok_or_failwith
+    |> Inference_fixture.resolve fixture
+    |> Result.map_error ~f:(fun _ -> "fixture context")
+    |> Result.ok_or_failwith
+  in
   let services : Chat_tui.App_context.Services.t =
-    { env; ui_sw; cwd; cache; datadir = cwd; session = None }
+    { env
+    ; inference_context
+    ; inference_identity = Inference_fixture.identity fixture
+    ; on_inference_attempt = (fun _ -> ())
+    ; on_inference_completion = (fun _ -> ())
+    ; on_inference_observation = (fun _ -> ())
+    ; typeahead_inference = None
+    ; ui_sw
+    ; cwd
+    ; cache
+    ; datadir = cwd
+    ; session = None
+    }
   in
   let shared : Chat_tui.App_context.Resources.t = { services; streams; ui } in
   let runtime =
@@ -868,10 +895,16 @@ let%expect_test "background model completion surfaces while idle without user ac
     (fun ~runtime:_ ~services ~send_input:_ ~send_internal ~pump:_ ~pump_until ~stop ->
        let ctx =
          Chat_response.Ctx.create
+           ~inference_context:services.inference_context
+           ~inference_identity:services.inference_identity
+           ~on_inference_attempt:services.on_inference_attempt
+           ~on_inference_completion:services.on_inference_completion
+           ~on_inference_observation:services.on_inference_observation
            ~env:services.env
            ~dir:services.cwd
            ~tool_dir:services.cwd
            ~cache:services.cache
+           ()
        in
        let exec_context : Chat_response.Model_executor.exec_context =
          { ctx
@@ -888,7 +921,8 @@ let%expect_test "background model completion surfaces while idle without user ac
                  | _ -> ""
                in
                "echo:" ^ input)
-         ; fetch_prompt = (fun ~ctx:_ ~prompt ~is_local:_ -> Ok (prompt, None))
+         ; fetch_prompt =
+             (fun ~ctx:_ ~prompt:_ ~is_local:_ -> Ok ("<user>fixture</user>", None))
          }
        in
        let executor =
@@ -903,6 +937,7 @@ let%expect_test "background model completion surfaces while idle without user ac
          Chat_response.Model_executor.recipe_agent_prompt_v1
            executor
            ~session_id:moderator.session_id
+           ()
        in
        let payload =
          `Object

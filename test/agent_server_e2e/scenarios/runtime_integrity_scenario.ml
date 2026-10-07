@@ -82,9 +82,10 @@ let marker fixture =
 
 let options fixture calls =
   { Agent_server.Daemon.default_options with
-    model_post_stream =
-      Some
-        (fun ~sw ~inputs ->
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw ~inputs ->
           calls := inputs :: !calls;
           P.model_post_stream (marker fixture) ~sw ~inputs)
   }
@@ -389,7 +390,10 @@ let test_budget env environment =
   let count = ref 0 in
   let host_options =
     { Agent_server.Daemon.default_options with
-      model_post_stream = Some (budget_stream count)
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:(budget_stream count)
     }
   in
   Daemon_host.with_ env fixture ~options:host_options (fun sw _daemon ->

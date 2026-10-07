@@ -33,6 +33,10 @@ module Trace = struct
     ]
 
   type t =
+    | Inference_live of Transcript.Stream.t
+    (** Already admitted neutral child event with its actual source/attempt.
+          This is transient observation, not canonical history or tool authority.
+          Consumers must route it as transcript data, not parent tool activity. *)
     | Tool_started of
         { call_id : string
         ; name : string
@@ -61,18 +65,25 @@ module Invocation = struct
     ; delivery : delivery
     }
 
-  type t = observers option
+  type t =
+    { observers : observers option
+    ; inference_parent : Transcript.Scope.parent option
+    }
 
-  let silent = None
-  let create progress = Some { progress; trace = ignore; delivery = Protected }
-  let create_with_trace ~progress ~trace = Some { progress; trace; delivery = Protected }
+  let silent = { observers = None; inference_parent = None }
+  let observed observers = { observers = Some observers; inference_parent = None }
+  let create progress = observed { progress; trace = ignore; delivery = Protected }
+
+  let create_with_trace ~progress ~trace =
+    observed { progress; trace; delivery = Protected }
+  ;;
 
   let create_strict_with_trace ~progress ~trace =
-    Some { progress; trace; delivery = Propagate }
+    observed { progress; trace; delivery = Propagate }
   ;;
 
   let emit t progress =
-    match t with
+    match t.observers with
     | None -> ()
     | Some observers ->
       (match observers.delivery with
@@ -82,7 +93,7 @@ module Invocation = struct
   ;;
 
   let emit_trace t trace =
-    match t with
+    match t.observers with
     | None -> ()
     | Some observers ->
       (match observers.delivery with
@@ -90,7 +101,9 @@ module Invocation = struct
        | Propagate -> observers.trace trace)
   ;;
 
-  let is_observed = Option.is_some
+  let is_observed t = Option.is_some t.observers
+  let with_inference_parent t ~parent = { t with inference_parent = Some parent }
+  let inference_parent t = t.inference_parent
 end
 
 type runner = invocation:Invocation.t -> string -> Openai.Responses.Tool_output.Output.t

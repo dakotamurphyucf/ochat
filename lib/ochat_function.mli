@@ -84,6 +84,10 @@ module Trace : sig
     ]
 
   type t =
+    | Inference_live of Transcript.Stream.t
+    (** Already admitted neutral child event with its actual source/attempt.
+          This is transient observation, not canonical history or tool authority.
+          Consumers must route it as transcript data, not parent tool activity. *)
     | Tool_started of
         { call_id : string
         ; name : string
@@ -138,6 +142,13 @@ module Invocation : sig
       Silent invocations discard it. Protected constructors suppress exceptions;
       strict construction propagates them. *)
   val emit_trace : t -> Trace.t -> unit
+
+  (** Immutable actual tool-owner correlation, independent of observation. This
+      does not make a silent invocation observed. Absence means that the caller
+      did not have an actual parent scope; no relation is inferred from aliases. *)
+  val with_inference_parent : t -> parent:Transcript.Scope.parent -> t
+
+  val inference_parent : t -> Transcript.Scope.parent option
 
   (** [is_observed t] is [true] for either protected or strict observation. *)
   val is_observed : t -> bool

@@ -113,7 +113,35 @@ let probe_nested_source env root host =
   let cache =
     Chat_response.Cache.load ~file:Eio.Path.(source / "cache.bin") ~max_size:10 ()
   in
-  let ctx = Chat_response.Ctx.create ~env ~dir:tree ~tool_dir:source ~cache in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:Agent_protocol.Id.Transaction.(to_string (create ()))
+      ~default_model:"o3"
+      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected specification inference")
+  in
+  let preparation_ok result =
+    Result.map_error result ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let target =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> preparation_ok
+  in
+  let context = Inference_fixture.resolve fixture target |> preparation_ok in
+  let ctx =
+    Chat_response.Ctx.create
+      ~inference_context:context
+      ~inference_identity:(Inference_fixture.identity fixture)
+      ~on_inference_attempt:ignore
+      ~on_inference_observation:ignore
+      ~on_inference_completion:ignore
+      ~env
+      ~dir:tree
+      ~tool_dir:source
+      ~cache
+      ()
+  in
   let fetched =
     Result.try_with (fun () -> Chat_response.Fetch.get ~ctx name ~is_local:true)
   in
@@ -152,7 +180,16 @@ let run_host env sw root =
       ; event_capacity = 128
       }
   in
-  let host = Agent_server.Embedded.start ~sw ~env options |> ok in
+  let daemon_options =
+    { Agent_server.Daemon.default_options with
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"o3"
+          ~post_stream:(fun ~sw:_ ~inputs:_ ->
+            failwith "unexpected specification inference")
+    }
+  in
+  let host = Agent_server.Embedded.start ~sw ~env ~daemon_options options |> ok in
   Exn.protect
     ~finally:(fun () -> Agent_server.Embedded.close host)
     ~f:(fun () ->

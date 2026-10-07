@@ -160,6 +160,25 @@ val with_administration
   -> (unit -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Hold the owner fence across fresh pure admission validation, old resource
+    retirement, selected-state commit, initialization and final stopped-runtime
+    retirement. No leases or unloading may exist. [before_initialize] is a pure
+    allocator update after the durable commit; none of the callbacks may reenter
+    this owner.
+
+    A failed commit leaves the old durable configuration stopped and rebuildable.
+    Once [commit] succeeds, initialization failure retains the selected durable
+    configuration and its ordinary failure evidence; it never rolls back effects
+    or permits recommitting a stale revision. The returned summary describes the
+    actual initialized state. Exceptions and cancellation propagate unchanged
+    after releasing the owner fence. *)
+val reinitialize_administration
+  :  t
+  -> validate:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> commit:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> before_initialize:(unit -> unit)
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 val parse_user_content
   :  t
   -> id:History_entry.Id.t
@@ -230,6 +249,9 @@ val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
     releases the runtime mutex without poisoning subsequent completion delivery. *)
 val execute_model_job
   :  t
+  -> inference_context:Inference_runtime.Context.t
+  -> capture_recipe_target:
+       (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
   -> recipe:string
   -> payload:Jsonaf.t
   -> (Agent_session.Runtime_builder.model_job_outcome, Agent_protocol.Error.t) result

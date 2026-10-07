@@ -53,7 +53,7 @@ type transcript_observer =
     may raise instead of returning a reply. Optional model parameters are
     forwarded to each nested request. *)
 val execute_entries
-  :  env:Eio_unix.Stdenv.base
+  :  ctx:Eio_unix.Stdenv.base Ctx.t
   -> allocator:History_entry.Allocator.t
   -> history:History_entry.t list
   -> invocation_id:Invocation_id.t
@@ -61,8 +61,6 @@ val execute_entries
   -> arguments:string
   -> tools:Openai.Responses.Request.Tool.t list
   -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
-  -> on_event:(Openai.Responses.Response_stream.t -> unit)
-  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> ?transcript_observer:transcript_observer
   -> on_fn_out:(Openai.Responses.Function_call_output.t -> unit)

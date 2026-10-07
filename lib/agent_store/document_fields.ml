@@ -127,3 +127,13 @@ let rec iter_strings json ~f =
   | `Array values -> List.iter values ~f:(fun value -> iter_strings value ~f)
   | `Null | `True | `False | `Number _ -> ()
 ;;
+
+let expect_versions document ~kind ~versions =
+  let version = Document_schema.Document.version document in
+  if List.mem versions version ~equal:Int.equal
+  then expect document ~kind ~version
+  else (
+    match versions with
+    | first :: _ -> expect document ~kind ~version:first
+    | [] -> Error (D.Error.Invalid_configuration "supported versions must not be empty"))
+;;

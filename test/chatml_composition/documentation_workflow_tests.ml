@@ -114,7 +114,12 @@ let%expect_test
     ~sources:ledger_sources
     ~workspace_files
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     (fun env workspace host ->
        let call id action file note =
          queued
@@ -204,7 +209,12 @@ let%expect_test
       ~permission_profile:
         (E.interactive_permission_profile ~authorize_shell_manifest:true)
       ~daemon_options:
-        { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+        { Agent_server.Daemon.default_options with
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream
+        }
       (fun env _ host ->
          send
            host

@@ -145,6 +145,7 @@ let%expect_test
     "embedded transient and durable hosts execute compiled X01 and X04 through shared \
      runtime"
   =
+  Mirage_crypto_rng_unix.use_default ();
   List.iter [ false; true ] ~f:(fun durable ->
     List.iter [ One_off; Standalone; Background ] ~f:(fun recipe ->
       let sources, name, input =
@@ -172,7 +173,10 @@ let%expect_test
       in
       let daemon_options =
         { Agent_server.Daemon.default_options with
-          model_post_stream = Some post_stream
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream
         ; chatml_runtime_policy =
             { Chat_response.Runtime_semantics.default_policy with
               honor_request_turn = false

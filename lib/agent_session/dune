@@ -38,6 +38,7 @@
   session_state_document
   session_delta_document
   durable_event_document
+  model_job_target
   session_state
   moderator_checkpoint
   delegation_authority
@@ -117,7 +118,7 @@
   quota_key
   quota_manager
   start_queue)
- (libraries ochat.history_chatmd ochat.transcript
+ (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif
   eio

@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_response_converter_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
 module CM = Prompt.Chat_markdown
@@ -21,7 +33,7 @@ let%expect_test "string_of_items handles text and image" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let basic txt : CM.content_item =
     CM.Basic
       { type_ = "text"
@@ -59,7 +71,7 @@ let%expect_test "to_items converts user message with basic text" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   (* Build a CM.msg representing: <msg role="user">hello</msg> *)
   let basic_item : CM.content_item =
     CM.Basic
@@ -102,7 +114,7 @@ let%expect_test "id-less assistant input survives JSON round trip" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let elements = CM.parse_chat_inputs ~dir "<assistant>prior response</assistant>" in
   let item = Converter.to_items ~ctx ~run_agent:stub_run_agent elements |> List.hd_exn in
   let decoded =
@@ -123,7 +135,7 @@ let%expect_test "to_items converts <tool_call type=custom_tool_call>" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let tool_call : CM.tool_call =
     { id = "call_1"; function_ = { name = "my_tool"; arguments = "" } }
   in
@@ -157,7 +169,7 @@ let%expect_test "to_items converts <tool_response type=custom_tool_call>" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let msg : CM.msg =
     { role = "tool"
     ; type_ = Some "custom_tool_call"
@@ -190,7 +202,7 @@ let%expect_test "to_items converts <msg role=tool type=custom_tool_call>" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let msg : CM.msg =
     { role = "tool"
     ; type_ = Some "custom_tool_call"
@@ -221,7 +233,7 @@ let%expect_test "parse_chat_inputs retains inline script and converter ignores i
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let elements =
     CM.parse_chat_inputs
       ~dir

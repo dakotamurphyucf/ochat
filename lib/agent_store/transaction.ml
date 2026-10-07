@@ -84,7 +84,7 @@ module Stored = struct
     in
     let%bind () = validate_event_range metadata in
     let%bind delta = F.required payload "delta" (F.document ~limits) in
-    let%bind () = F.expect delta ~kind:"session.delta" ~version:1 in
+    let%bind () = F.expect_versions delta ~kind:"session.delta" ~versions:[ 1; 2 ] in
     let%bind audit = F.optional payload "command_audit" (F.document ~limits) in
     let%bind () =
       match audit with

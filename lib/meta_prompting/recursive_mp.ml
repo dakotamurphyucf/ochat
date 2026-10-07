@@ -28,12 +28,7 @@ type transform_strategy =
   ; apply : P.t -> ?env:Eio_unix.Stdenv.base -> iteration:int -> context:Context.t -> P.t
   }
 
-(* Forward declaration of [transform_prompt] – defined later after the
-   OpenAI helper functions.  We use a normal [let rec] to enable the
-   earlier definition of the default strategy without resorting to
-   mutable references. *)
-
-(* Transformation logic – defined later after the OpenAI helper
+(* Transformation logic – defined later after the selected inference helper
    [ask_llm] to avoid forward-reference issues.  *)
 
 (*********************************************************************
@@ -74,8 +69,8 @@ type refine_params =
         below [1. -. bayes_alpha] (e.g. 0.05 for a 95 % credible bound). *)
   ; bandit_enabled : bool
   ; strategies : transform_strategy list
-  ; proposer_model : Openai.Responses.Request.model option
-  ; executor_model : Openai.Responses.Request.model option
+  ; proposer_model : string option
+  ; executor_model : string option
   }
 
 (* [default_params] and [make_params] will be redefined further below,
@@ -89,23 +84,7 @@ type refine_params =
 
 (* Fallback-compatible environment variable lookup. *)
 let getenv_opt var = Core.Sys.getenv var
-let api_key_opt = lazy (getenv_opt "OPENAI_API_KEY")
 
-(* Optional soft token-budget (maximum output tokens) – set via
-   [META_PROMPT_BUDGET] environment variable.  When the variable is
-   absent or malformed we leave the parameter to the OpenAI default. *)
-let budget_opt =
-  lazy
-    (match getenv_opt "META_PROMPT_BUDGET" with
-     | None -> None
-     | Some s ->
-       (try Some (Int.of_string s) with
-        | _ -> None))
-;;
-
-(*------------------------------------------------------------------*)
-(*                        OpenAI API helpers                         *)
-(*------------------------------------------------------------------*)
 let remove_reasoning s =
   let len = String.length s in
   let open Int in
@@ -140,270 +119,204 @@ let remove_reasoning s =
   loop 0
 ;;
 
-(* [ask_llm prompt] sends [prompt] to the completions endpoint and
-   returns the assistant reply, or [None] if the call failed for any
-   reason (missing API key, network error, unexpected JSON …).  The
-   helper runs its IO inside a fresh [Eio_main.run] to avoid threading
-   capabilities through the entire call-chain – acceptable here given
-   the short synchronous workload and the low iteration counts used by
-   recursive meta-prompting. *)
-let ask_llm ~env ~user_content ~context ?model ?guidelines : string option =
-  match Lazy.force api_key_opt with
-  | None -> None
-  | Some _key ->
-    (try
-       let dir = Eio.Stdenv.fs env in
-       let net = Eio.Stdenv.net env in
-       let open Openai.Responses in
-       let open Input_message in
-       (* Construct the system prompt asking the model to improve the
+(* [ask_llm] returns the selected assistant text, or [None] on an expected
+   completion failure. Existing environment capabilities own file/vector I/O;
+   cancellation and strict host callbacks propagate. *)
+let ask_llm ~env ~user_content ~(context : Context.t) ?model ?guidelines =
+  let inference = Inference_support.require context.inference in
+  let dir = Eio.Stdenv.fs env in
+  let net = Eio.Stdenv.net env in
+  (* Construct the system prompt asking the model to improve the
           user-supplied prompt.  Optionally append additional guidelines
           supplied via the [?guidelines] parameter when their injection
           is enabled through the [META_PROMPT_GUIDELINES] environment
           variable (defaults to enabled). *)
-       let guidelines_enabled =
-         match getenv_opt "META_PROMPT_GUIDELINES" with
-         | None -> true
-         | Some v ->
-           (match String.lowercase (String.strip v) with
-            | "0" | "false" | "off" -> false
-            | _ -> true)
-       in
-       let is_edit =
-         match context.Context.action with
-         | Update -> true
-         | Generate -> false
-       in
-       let system_prompt =
-         let open Prompts in
-         match context.model_to_optimize, context.prompt_type, is_edit with
-         | Some O3, General, true -> openai_system_edit_instructions_prompt_o3
-         | Some O3, General, false -> openai_system_instructions_prompt_o3
-         | _, General, true -> openai_system_edit_instructions_prompt
-         | _, General, false -> openai_system_instructions_prompt
-         | _, Tool, true -> openai_tool_description_prompt
-         | _, Tool, false -> openai_tool_description_prompt
-       in
-       let system_text =
-         match guidelines, guidelines_enabled with
-         | Some g, true when not (String.is_empty (String.strip g)) ->
-           system_prompt
-           ^ Printf.sprintf "\n\n<additional-guidelines>\n%s\n</additional-guidelines>" g
-         | _ -> system_prompt
-       in
-       let system_text =
-         let guardrails_default = Templates.system_prompt_guardrails in
-         let guardrails =
-           let path =
-             Eio.Path.(
-               dir / "meta-prompt" / "integration" / "system_prompt_guardrails.txt")
-           in
-           try Eio.Path.load path with
-           | _ -> guardrails_default
-         in
-         let insert_after_marker text marker insertion =
-           match String.substr_index text ~pattern:marker with
-           | None -> None
-           | Some idx ->
-             let before = String.prefix text (idx + String.length marker) in
-             let after = String.drop_prefix text (idx + String.length marker) in
-             Some (before ^ "\n" ^ insertion ^ "\n" ^ after)
-         in
-         match insert_after_marker system_text "Self-Check" guardrails with
-         | Some s ->
-           (match String.substr_index s ~pattern:"# Output Format" with
-            | Some _ -> s
-            | None -> s)
-         | None ->
-           (match String.substr_index system_text ~pattern:"# Output Format" with
-            | Some idx ->
-              let before = String.prefix system_text idx in
-              let after = String.drop_prefix system_text idx in
-              before ^ "\n" ^ guardrails ^ "\n" ^ after
-            | None -> system_text ^ "\n" ^ guardrails)
-       in
-       let system_msg : Input_message.t =
-         { role = Developer
-         ; content = [ Text { text = system_text; _type = "input_text" } ]
-         ; _type = "message"
-         }
-       in
-       (* ----------------------------------------------------------- *)
-       (* Optional Vector-DB context retrieval                       *)
-       (* ----------------------------------------------------------- *)
-       let context_k =
-         match getenv_opt "META_PROMPT_CTX_K" with
-         | Some s ->
-           (try Int.of_string s with
-            | _ -> 0)
-         | None -> 0
-       in
-       let vector_ctx_opt =
-         if context_k <= 0
-         then None
-         else (
-           let vector_db_folder =
-             Option.value (getenv_opt "VECTOR_DB_FOLDER") ~default:".md_index"
-           in
-           let vec_file = vector_db_folder ^ "/vectors.ml.binio" in
-           let vec_path = Eio.Path.(dir / vec_file) in
-           let vecs =
-             try Vdb.Vec.read_vectors_from_disk vec_path with
-             | _ -> [||]
-           in
-           if Array.length vecs = 0
-           then None
-           else (
-             let corpus = Vdb.create_corpus vecs in
-             let bm25_file = Eio.Path.(dir / (vector_db_folder ^ "/bm25.ml.binio")) in
-             let bm25 =
-               try Bm25.read_from_disk bm25_file with
-               | _ -> Bm25.create []
+  let guidelines_enabled =
+    match getenv_opt "META_PROMPT_GUIDELINES" with
+    | None -> true
+    | Some v ->
+      (match String.lowercase (String.strip v) with
+       | "0" | "false" | "off" -> false
+       | _ -> true)
+  in
+  let is_edit =
+    match context.Context.action with
+    | Update -> true
+    | Generate -> false
+  in
+  let system_prompt =
+    let open Prompts in
+    let model_to_optimize =
+      Option.first_some
+        context.model_to_optimize
+        (Some
+           (Inference.Request.Target.model
+              (Inference_runtime.Context.target
+                 (Inference_client.Execution.context inference))))
+    in
+    match model_to_optimize, context.prompt_type, is_edit with
+    | Some "o3", General, true -> openai_system_edit_instructions_prompt_o3
+    | Some "o3", General, false -> openai_system_instructions_prompt_o3
+    | _, General, true -> openai_system_edit_instructions_prompt
+    | _, General, false -> openai_system_instructions_prompt
+    | _, Tool, true -> openai_tool_description_prompt
+    | _, Tool, false -> openai_tool_description_prompt
+  in
+  let system_text =
+    match guidelines, guidelines_enabled with
+    | Some g, true when not (String.is_empty (String.strip g)) ->
+      system_prompt
+      ^ Printf.sprintf "\n\n<additional-guidelines>\n%s\n</additional-guidelines>" g
+    | _ -> system_prompt
+  in
+  let system_text =
+    let guardrails_default = Templates.system_prompt_guardrails in
+    let guardrails =
+      let path =
+        Eio.Path.(dir / "meta-prompt" / "integration" / "system_prompt_guardrails.txt")
+      in
+      try Eio.Path.load path with
+      | Eio.Io _ -> guardrails_default
+    in
+    let insert_after_marker text marker insertion =
+      match String.substr_index text ~pattern:marker with
+      | None -> None
+      | Some idx ->
+        let before = String.prefix text (idx + String.length marker) in
+        let after = String.drop_prefix text (idx + String.length marker) in
+        Some (before ^ "\n" ^ insertion ^ "\n" ^ after)
+    in
+    match insert_after_marker system_text "Self-Check" guardrails with
+    | Some s ->
+      (match String.substr_index s ~pattern:"# Output Format" with
+       | Some _ -> s
+       | None -> s)
+    | None ->
+      (match String.substr_index system_text ~pattern:"# Output Format" with
+       | Some idx ->
+         let before = String.prefix system_text idx in
+         let after = String.drop_prefix system_text idx in
+         before ^ "\n" ^ guardrails ^ "\n" ^ after
+       | None -> system_text ^ "\n" ^ guardrails)
+  in
+  let context_k =
+    match getenv_opt "META_PROMPT_CTX_K" with
+    | Some s ->
+      (try Int.of_string s with
+       | _ -> 0)
+    | None -> 0
+  in
+  let vector_ctx_opt =
+    if context_k <= 0
+    then None
+    else (
+      let vector_db_folder =
+        Option.value (getenv_opt "VECTOR_DB_FOLDER") ~default:".md_index"
+      in
+      let vec_file = vector_db_folder ^ "/vectors.ml.binio" in
+      let vec_path = Eio.Path.(dir / vec_file) in
+      let vecs =
+        try Vdb.Vec.read_vectors_from_disk vec_path with
+        | Eio.Cancel.Cancelled _ as exn -> raise exn
+        | _ -> [||]
+      in
+      if Array.length vecs = 0
+      then None
+      else (
+        let corpus = Vdb.create_corpus vecs in
+        let bm25_file = Eio.Path.(dir / (vector_db_folder ^ "/bm25.ml.binio")) in
+        let bm25 =
+          try Bm25.read_from_disk bm25_file with
+          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | _ -> Bm25.create []
+        in
+        (* obtain embedding for the user prompt text *)
+        let embed_resp =
+          try
+            Some
+              (Openai.Embeddings.post_openai_embeddings
+                 net
+                 ~input:[ user_content.P.body ])
+          with
+          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | _ -> None
+        in
+        match embed_resp with
+        | None -> None
+        | Some resp ->
+          (match resp.data with
+           | [] -> None
+           | first :: _ ->
+             let arr = Array.of_list first.embedding in
+             let emb = Owl.Mat.of_array arr (Array.length arr) 1 |> Owl.Mat.transpose in
+             let indices =
+               Vdb.query_hybrid
+                 corpus
+                 ~bm25
+                 ~beta:0.4
+                 ~embedding:emb
+                 ~text:user_content.P.body
+                 ~k:context_k
              in
-             (* obtain embedding for the user prompt text *)
-             let embed_resp =
-               try
-                 Some
-                   (Openai.Embeddings.post_openai_embeddings
-                      net
-                      ~input:[ user_content.P.body ])
-               with
-               | _ -> None
-             in
-             match embed_resp with
-             | None -> None
-             | Some resp ->
-               (match resp.data with
-                | [] -> None
-                | first :: _ ->
-                  let arr = Array.of_list first.embedding in
-                  let emb =
-                    Owl.Mat.of_array arr (Array.length arr) 1 |> Owl.Mat.transpose
-                  in
-                  let indices =
-                    Vdb.query_hybrid
-                      corpus
-                      ~bm25
-                      ~beta:0.4
-                      ~embedding:emb
-                      ~text:user_content.P.body
-                      ~k:context_k
-                  in
-                  let docs =
-                    Vdb.get_docs Eio.Path.(dir / vector_db_folder) corpus indices
-                  in
-                  (match docs with
-                   | [] -> None
-                   | _ ->
-                     Some
-                       (List.mapi docs ~f:(fun i d ->
-                          Printf.sprintf "### Context %d\n%s" (i + 1) d)
-                        |> String.concat ~sep:"\n\n---\n")))))
-       in
-       let tag =
-         match context.prompt_type with
-         | Context.General -> "current-prompt"
-         | Context.Tool -> "current-tool-description"
-       in
-       let user_msg : Input_message.t =
-         { role = User
-         ; content =
-             [ Text
-                 { text =
-                     sprintf
-                       "%s\n<%s>\n%s\n</%s>"
-                       (Option.value user_content.header ~default:"")
-                       tag
-                       user_content.body
-                       tag
-                 ; _type = "input_text"
-                 }
-             ]
-         ; _type = "message"
-         }
-       in
-       let inputs : Item.t list =
-         match vector_ctx_opt with
-         | None -> [ Item.Input_message system_msg; Item.Input_message user_msg ]
-         | Some ctx ->
-           let ctx_msg : Input_message.t =
-             { role = User
-             ; content =
-                 [ Text
-                     { text = "Relevant context snippets:\n" ^ ctx; _type = "input_text" }
-                 ]
-             ; _type = "message"
-             }
-           in
-           [ Item.Input_message system_msg
-           ; Item.Input_message ctx_msg
-           ; Item.Input_message user_msg
-           ]
-       in
-       let max_output_tokens = 1000000 in
-       let chosen_model = Option.value model ~default:Request.Gpt5 in
-       let ({ Response.output; _ } : Response.t) =
-         Eio.Switch.run (fun sw ->
-           post_response
-             Default
-             ~sw
-             ~reasoning:{ effort = Some High; summary = Some Detailed }
-             ~max_output_tokens
-             ~model:chosen_model
-             ~dir
-             net
-             ~inputs)
-       in
-       Log.emit `Debug (Sexp.to_string_hum [%sexp (output : Item.t list)]);
-       (* Extract the assistant text from the first [Output_message]
-                 item.  We ignore any additional items (reasoning blocks,
-                 annotations …) – the transformation agent is expected to
-                 return a single improved prompt. *)
-       let rec first_text = function
-         | [] -> None
-         | Item.Output_message om :: _ ->
-           (match om.Output_message.content with
-            | [] -> None
-            | { text; _ } :: _ -> Some text)
-         | _ :: tl -> first_text tl
-       in
-       let res = first_text output in
-       match is_edit, res with
-       | true, Some res ->
-         (* remove raw reasoning xml tags and content <reasoning> ....</reasoning> from the output *)
-         let clean_res = remove_reasoning res in
-         Some clean_res
-       | false, _ -> res
-       | _, None ->
-         Log.emit `Debug "ask_llm: no response from LLM";
-         None
-     with
-     | exn ->
-       Log.emit `Debug (Printf.sprintf "ask_llm: %s" (Core.Exn.to_string exn));
-       None)
+             let docs = Vdb.get_docs Eio.Path.(dir / vector_db_folder) corpus indices in
+             (match docs with
+              | [] -> None
+              | _ ->
+                Some
+                  (List.mapi docs ~f:(fun i d ->
+                     Printf.sprintf "### Context %d\n%s" (i + 1) d)
+                   |> String.concat ~sep:"\n\n---\n")))))
+  in
+  let tag =
+    match context.prompt_type with
+    | General -> "current-prompt"
+    | Tool -> "current-tool-description"
+  in
+  let user_text =
+    sprintf
+      "%s\n<%s>\n%s\n</%s>"
+      (Option.value user_content.P.header ~default:"")
+      tag
+      user_content.body
+      tag
+  in
+  let messages =
+    match vector_ctx_opt with
+    | None -> [ History_entry.Payload.Role.Developer, system_text; User, user_text ]
+    | Some text ->
+      [ Developer, system_text
+      ; User, "Relevant context snippets:\n" ^ text
+      ; User, user_text
+      ]
+  in
+  match
+    Inference_support.complete
+      inference
+      ?model
+      ~settings:
+        [ Inference_support.setting
+            "reasoning"
+            (`Object [ "effort", `String "high"; "summary", `String "detailed" ])
+        ; Inference_support.setting "max_output_tokens" (`Number "1000000")
+        ]
+      ~messages
+      ()
+  with
+  | Ok text -> Some (if is_edit then remove_reasoning text else text)
+  | Error _ -> None
 ;;
 
 (*********************************************************************
  *  LLM-powered prompt transformation                                *
  ********************************************************************)
 
-(* We can now safely define the LLM helper, transformation function
-   and default strategies, as the OpenAI plumbing has already been
+(* We can now define the transformation function and default strategies,
+   as the selected inference helper has already been
    declared above. *)
 
 let rec transform_prompt ?env ~(context : Context.t) (p : P.t) ~(iteration : int) : P.t =
-  (* Choose proposer model – explicit context takes precedence over
-     environment variable fallbacks. *)
-  let proposer_model_opt : Openai.Responses.Request.model option =
-    match context.proposer_model with
-    | Some _ as m -> m
-    | None ->
-      (match Core.Sys.getenv "META_PROPOSER_MODEL" with
-       | None -> None
-       | Some s ->
-         (try Some (Openai.Responses.Request.model_of_str_exn s) with
-          | _ -> None))
-  in
+  let proposer_model_opt = context.proposer_model in
+  let _ = Inference_support.require context.inference in
   match env with
   | Some e ->
     (match
@@ -455,6 +368,7 @@ let meta_factory_online_strategy : transform_strategy =
   { name = "meta_factory_online"
   ; apply =
       (fun p ?env ~iteration ~context ->
+        let _ = Inference_support.require context.Context.inference in
         match env with
         | None -> P.add_metadata p ~key:"iteration" ~value:(Int.to_string iteration)
         | Some e ->
@@ -462,6 +376,7 @@ let meta_factory_online_strategy : transform_strategy =
           (match
              Prompt_factory_online.iterate_revised_prompt
                ~env:e
+               ~inference:(Inference_support.require context.inference)
                ~goal
                ~current_prompt:p.body
                ~proposer_model:context.proposer_model
@@ -596,7 +511,12 @@ let refine
               tag
         }
     in
-    E.evaluate ?env:context.env params.evaluator ?best (P.to_string p)
+    E.evaluate
+      ?env:context.env
+      ?inference:context.inference
+      params.evaluator
+      ?best
+      (P.to_string p)
   in
   (* ------------------------------------------------------------------ *)
   (* Bandit state                                                       *)

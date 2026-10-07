@@ -1537,10 +1537,15 @@ let commit_prepared
       ~fresh_history
       candidate
   =
-  Runtime_owner.with_administration entry.Session_registry.runtime (fun () ->
-    let open Result.Let_syntax in
-    let%bind candidate = t.prepare_administration entry candidate ~fresh_history in
-    let%map session =
+  let open Result.Let_syntax in
+  let%bind candidate = t.prepare_administration entry candidate ~fresh_history in
+  Runtime_owner.reinitialize_administration
+    entry.Session_registry.runtime
+    ~validate:(fun () ->
+      let%bind state = Agent_session.Session_actor.state entry.actor in
+      let%bind () = validate_stopped_revision state expected_revision in
+      Agent_session.Session_actor.authorize_writer entry.actor ~attachment_id)
+    ~commit:(fun () ->
       Agent_session.Session_actor.commit_administration
         entry.actor
         ~command_audit
@@ -1548,9 +1553,9 @@ let commit_prepared
         ~expected_revision
         ~kind
         candidate
-    in
-    Agent_session.History_id_source.discard_reserved entry.history_ids;
-    session)
+      |> Result.map ~f:ignore)
+    ~before_initialize:(fun () ->
+      Agent_session.History_id_source.discard_reserved entry.history_ids)
 ;;
 
 let handle_session_rebuild t context command_audit request =

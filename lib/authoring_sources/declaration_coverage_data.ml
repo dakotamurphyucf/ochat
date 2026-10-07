@@ -235,7 +235,7 @@ let implementation_sources =
   ; ( "lib/chat_response/shell_tool.ml"
     , "5d21f554475442cc67f0feaabaa3635f30fc5c678c926ca916eb99f804ef35ac" )
   ; ( "lib/chat_response/tool.ml"
-    , "5a02982d6061e992ec5af248a1f9d9e17b672616fd8077ca2d1026838b977846" )
+    , "a413b40412ee0783bf1eef8df5fbf0b6149b4c46b2cab7f2e3b214e20c37fce4" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "f604a8e767cae51c15b31eb0d8a266d9ea1efd429f77cbb7b068940d38a2768e" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"
@@ -248,7 +248,7 @@ let implementation_sources =
     , "c64b5c5033c352628fb8fc89b13fb382ee965b999c29293eb0e8f9df220ce97a" )
   ; ( "lib/chatmd_shell_spec/shell_tool_spec.ml"
     , "85214971617bee329014f225c9374c0c9202130be66309c84d54c23944ed73c4" )
-  ; "lib/functions.ml", "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7"
+  ; "lib/functions.ml", "05c5428d7870e3fe9711a3f3239ae1e0919c86fa5022c4ea5c7944559d7d2eb2"
   ; ( "lib/mcp/mcp_tool.ml"
     , "f9e69c49231b625fb479a77182b606113ae9369dce8df1c67c99c3eaddfdac49" )
   ]

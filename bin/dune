@@ -1,9 +1,15 @@
+(library
+ (name inference_composition)
+ (modules inference_composition)
+ (libraries core eio ochat.openai ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.chat_response ochat.agent_protocol ochat.transcript ochat.agent_server)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (package ochat)
  (public_name ochat)
  (name main)
  (modules main)
- (libraries
+ (libraries inference_composition
   lwt_eio
   io
   dune_describe
@@ -96,7 +102,7 @@
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)
- (libraries
+ (libraries inference_composition
   core
   eio_main
   jsonaf
@@ -163,7 +169,7 @@
  (public_name mcp_server)
  (name mcp_server)
  (modules mcp_server)
- (libraries
+ (libraries inference_composition
   core
   eio_main
   ochat.mcp_types
@@ -181,7 +187,7 @@
  (name mp_refine_run)
  (public_name mp-refine-run)
  (modules mp_refine_run)
- (libraries core eio_main log ochat.meta_prompting core_unix.command_unix)
+ (libraries inference_composition core eio_main log ochat.meta_prompting core_unix.command_unix)
  (preprocess
   (pps ppx_jane)))
 
@@ -198,7 +204,7 @@
  (name ochat_agent_server)
  (public_name ochat-agent-server)
  (modules ochat_agent_server)
- (libraries
+ (libraries inference_composition
   core
   core_unix.command_unix
   eio
@@ -216,7 +222,7 @@
  (name ochat_agent_stdio)
  (public_name ochat-agent-stdio)
  (modules ochat_agent_stdio)
- (libraries
+ (libraries inference_composition
   core
   core_unix.command_unix
   eio

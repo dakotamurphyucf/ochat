@@ -63,10 +63,13 @@ let install t (runtime : Agent_session.Runtime_builder.t) =
       Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
   in
   let%bind _ =
-    Agent_session.Session_actor.change_moderator t.actor runtime.moderator_snapshot
+    Agent_session.Session_actor.change_moderator t.actor (runtime.moderator_snapshot ())
   in
   let%map () =
-    Agent_session.Session_actor.set_operation_worker t.actor (Some runtime.worker)
+    Agent_session.Session_actor.set_runtime_worker
+      t.actor
+      ~worker:(Some runtime.worker)
+      ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
   in
   t.runtime <- Some runtime
 ;;
@@ -161,7 +164,7 @@ let retire_runtime_locked t =
   t.runtime <- None;
   match
     ignore
-      (Agent_session.Session_actor.set_operation_worker t.actor None
+      (Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
        : (unit, Agent_protocol.Error.t) result);
     Option.iter previous ~f:(release_runtime_locked t)
   with
@@ -338,7 +341,9 @@ let unload_locked t =
   | [], None -> Ok ()
   | [], Some runtime ->
     let open Result.Let_syntax in
-    let%map () = Agent_session.Session_actor.set_operation_worker t.actor None in
+    let%map () =
+      Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
+    in
     t.runtime <- None;
     release_runtime_locked t runtime
 ;;
@@ -444,7 +449,7 @@ let retire_after_administration t =
   t.runtime <- None;
   Eio.Cancel.protect (fun () ->
     ignore
-      (Agent_session.Session_actor.set_operation_worker t.actor None
+      (Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
        : (unit, Agent_protocol.Error.t) result);
     Option.iter previous ~f:(fun runtime ->
       ignore
@@ -472,6 +477,29 @@ let with_administration t f =
   match result with
   | Ok result -> result
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let reinitialize_administration t ~validate ~commit ~before_initialize =
+  with_owner_lock t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if t.closed
+      then Error (closed_error ())
+      else if Option.is_some t.unloading || not (List.is_empty t.background_leases)
+      then Error (background_busy ())
+      else validate ()
+    in
+    let%bind () = unload_locked t in
+    let%bind () = commit () in
+    before_initialize ();
+    let%bind () = ensure_loaded_locked t in
+    let%bind state = Agent_session.Session_actor.state t.actor in
+    let%map () =
+      match state.lifecycle.desired with
+      | Stopped -> unload_locked t
+      | Running -> Ok ()
+    in
+    Agent_session.Session_state.summary state)
 ;;
 
 let parse_user_content t ~id content =
@@ -980,14 +1008,18 @@ module For_testing = struct
   ;;
 end
 
-let execute_model_job t ~recipe ~payload =
+let execute_model_job t ~inference_context ~capture_recipe_target ~recipe ~payload =
   let outcome =
     Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
       match
         let open Result.Let_syntax in
         let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
         let runtime = Option.value_exn t.runtime in
-        runtime.execute_model_job ~recipe ~payload
+        runtime.execute_model_job
+          ~inference_context
+          ~capture_recipe_target
+          ~recipe
+          ~payload
       with
       | result -> Ok result
       | exception (Eio.Cancel.Cancelled _ as exn) ->

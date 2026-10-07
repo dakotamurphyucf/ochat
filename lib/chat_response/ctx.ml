@@ -50,7 +50,13 @@
 *)
 
 type 'env t =
-  { env : 'env
+  { inference_relation : Transcript.Scope.relation
+  ; inference_context : Inference_runtime.Context.t
+  ; inference_identity : Neutral_turn.Identity.t
+  ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+  ; on_inference_completion : Inference_client.Completion.t -> unit
+  ; on_inference_observation : Inference.Observation.t -> unit
+  ; env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
   ; tool_dir : Eio.Fs.dir_ty Eio.Path.t
@@ -62,12 +68,83 @@ type 'env t =
   }
 
 (** [create ~env ~dir ~cache] builds a fresh context from its parts. *)
-let create ~env ~dir ~tool_dir ~cache = { env; dir; tool_dir; cache }
+let create
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?(inference_relation = Transcript.Scope.Root)
+      ?(on_inference_observation = fun _ -> ())
+      ~env
+      ~dir
+      ~tool_dir
+      ~cache
+      ()
+  =
+  { inference_relation
+  ; inference_context
+  ; inference_identity
+  ; on_inference_attempt
+  ; on_inference_completion
+  ; on_inference_observation
+  ; env
+  ; dir
+  ; tool_dir
+  ; cache
+  }
+;;
 
-(** [of_env ~env ~cache] is a shorthand for
-    {[create ~env ~dir:(Eio.Stdenv.fs env) ~tool_dir:(Eio.Stdenv.cwd env) ~cache]}. *)
-let of_env ~env ~cache =
-  { env; dir = Eio.Stdenv.fs env; tool_dir = Eio.Stdenv.cwd env; cache }
+let of_env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?inference_relation
+      ?on_inference_observation
+      ~env
+      ~cache
+      ()
+  =
+  create
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ?on_inference_observation
+    ?inference_relation
+    ~env
+    ~dir:(Eio.Stdenv.fs env)
+    ~tool_dir:(Eio.Stdenv.cwd env)
+    ~cache
+    ()
+;;
+
+exception Inference_admission_rejected
+
+let with_inference t ~inference_context = { t with inference_context }
+
+let with_inference_attempt_guard t ~before_attempt =
+  { t with
+    on_inference_attempt =
+      (fun attempt ->
+        before_attempt attempt;
+        t.on_inference_attempt attempt)
+  }
+;;
+
+let with_inference_parent t ~parent =
+  { t with inference_relation = Transcript.Scope.Nested parent }
+;;
+
+let inference_execution t =
+  Inference_client.Execution.create
+    ~context:t.inference_context
+    ~identity:t.inference_identity
+    ~relation:t.inference_relation
+    ~before_dispatch:(fun _ -> ())
+    ~on_attempt:t.on_inference_attempt
+    ~on_observation:t.on_inference_observation
+    ~on_completion:t.on_inference_completion
 ;;
 
 (** [net t] exposes the network namespace ([env#net]). *)

@@ -119,273 +119,104 @@ are compactions from previous conversations with the user.
 |}
 ;;
 
-let max_stub_chars = 2_000
+module Completion_error = Inference_client.Execution.Completion_error
 
-exception Missing_summary
-exception Retries_exhausted of exn
+exception Failed of Completion_error.t
 
-let string_of_input_content (content : Openai.Responses.Input_message.content_item list)
-  : string
-  =
-  let open Openai.Responses.Input_message in
-  content
-  |> List.map ~f:(function
-    | Text { text; _ } -> text
-    | Image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
-  |> String.concat ~sep:"\n"
-;;
+let render_transcript = History_view.render
+let grouped_items = History_view.grouped
 
-let string_of_output_content (content : Openai.Responses.Output_message.content list)
-  : string
-  =
-  content |> List.map ~f:(fun part -> part.text) |> String.concat ~sep:"\n"
-;;
-
-let render_item (item : Openai.Responses.Item.t) : string option =
-  let open Openai.Responses in
-  let string_of_tool_output (output : Tool_output.Output.t) : string =
-    match output with
-    | Tool_output.Output.Text text -> text
-    | Content parts ->
-      parts
-      |> List.map ~f:(function
-        | Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
-      |> String.concat ~sep:"\n"
-  in
-  match item with
-  | Item.Input_message { content; role; _ } ->
-    if List.is_empty content
-    then None
-    else
-      sprintf
-        "%s: %s"
-        (Input_message.role_to_string role)
-        (string_of_input_content content)
-      |> Some
-  | Item.Output_message { content; _ } ->
-    if List.is_empty content
-    then None
-    else sprintf "Assistant: %s" (string_of_output_content content) |> Some
-  | Function_call { name; arguments; call_id; _ } ->
-    sprintf "Function call (%s): %s(%s)" call_id name arguments |> Some
-  | Custom_tool_call { name; input; call_id; _ } ->
-    sprintf "Custom tool call (%s): %s(%s)" call_id name input |> Some
-  | Function_call_output { call_id; output; _ } ->
-    let output = string_of_tool_output output in
-    sprintf "Function call output (%s): %s" call_id output |> Some
-  | Custom_tool_call_output { call_id; output; _ } ->
-    let output = string_of_tool_output output in
-    sprintf "Custom tool call output (%s): %s" call_id output |> Some
-  | _ -> None
-;;
-
-let render_transcript (items : Openai.Responses.Item.t list) : string =
-  items |> List.filter_map ~f:render_item |> String.concat ~sep:"\n"
+let retryable = function
+  | Completion_error.Outcome (Failed (Transport Protocol)) -> true
+  | Dispatch _ | Outcome _ | No_text -> false
 ;;
 
 let retry_request ~sleep ~request =
   let rec loop attempt =
     match request () with
-    | summary -> summary
-    | (exception Openai.Responses.Response_stream_parsing_error (_, cause))
-    | (exception Openai.Responses.Response_parsing_error (_, cause)) ->
-      if attempt >= 3
-      then raise (Retries_exhausted cause)
-      else (
-        sleep (Float.of_int attempt);
-        loop (attempt + 1))
+    | Error failure when retryable failure && attempt < 3 ->
+      sleep (Float.of_int attempt);
+      loop (attempt + 1)
+    | result -> result
   in
   loop 1
 ;;
 
-let is_previous_compaction (item : Openai.Responses.Item.t) =
-  let open Openai.Responses in
-  match item with
-  | Item.Input_message { role = User; content = Text { text; _ } :: _; _ } ->
-    String.strip text |> String.is_prefix ~prefix:"<system-reminder>"
-  | _ -> false
-;;
-
-let is_shared_context (item : Openai.Responses.Item.t) =
-  let open Openai.Responses in
-  match item with
-  | Item.Input_message { role = System | Developer; _ } -> true
-  | _ -> is_previous_compaction item
-;;
-
-let call_key (item : Openai.Responses.Item.t) =
-  let open Openai.Responses in
-  match item with
-  | Item.Function_call { call_id; _ } -> Some ("function:" ^ call_id)
-  | Item.Custom_tool_call { call_id; _ } -> Some ("custom:" ^ call_id)
-  | _ -> None
-;;
-
-let output_key (item : Openai.Responses.Item.t) =
-  let open Openai.Responses in
-  match item with
-  | Item.Function_call_output { call_id; _ } -> Some ("function:" ^ call_id)
-  | Item.Custom_tool_call_output { call_id; _ } -> Some ("custom:" ^ call_id)
-  | _ -> None
-;;
-
-let grouped_items items =
-  let update_pending pending item =
-    let pending =
-      match call_key item with
-      | None -> pending
-      | Some key -> Set.add pending key
-    in
-    match output_key item with
-    | None -> pending
-    | Some key -> Set.remove pending key
+let rolling_entry entries text =
+  let namespaces =
+    List.map entries ~f:(fun entry -> History_entry.Id.namespace (History_entry.id entry))
+    |> String.Set.of_list
   in
-  let rec consume_calls pending acc = function
-    | [] -> List.rev acc, []
-    | item :: rest ->
-      let pending = update_pending pending item in
-      let acc = item :: acc in
-      if Set.is_empty pending then List.rev acc, rest else consume_calls pending acc rest
+  let rec unused candidate =
+    if Set.mem namespaces candidate then unused (candidate ^ ":") else candidate
   in
-  let rec loop acc = function
-    | [] -> List.rev acc
-    | item :: rest ->
-      (match call_key item with
-       | None -> loop ([ item ] :: acc) rest
-       | Some key ->
-         let group, rest =
-           consume_calls (Set.singleton (module String) key) [ item ] rest
-         in
-         loop (group :: acc) rest)
+  let id =
+    History_entry.Id.create ~namespace:(unused "compaction-rolling") ~sequence:0
+    |> Result.ok_or_failwith
   in
-  loop [] items
-;;
-
-let rolling_summary_item text =
-  let open Openai.Responses in
-  Item.Input_message
-    { role = User
-    ; content =
-        [ Input_message.Text
-            { text =
-                Printf.sprintf
-                  "<previous-compaction-result>\n%s\n</previous-compaction-result>"
-                  text
-            ; _type = "input_text"
-            }
-        ]
-    ; _type = "message"
-    }
+  History_entry.create_with_id
+    ~id
+    (History_view.message
+       ~role:User
+       (sprintf "<previous-compaction-result>\n%s\n</previous-compaction-result>" text))
 ;;
 
 let label_results results =
-  results
-  |> List.mapi ~f:(fun index result ->
-    Printf.sprintf
-      "<compaction-part index=\"%d\">\n%s\n</compaction-part>"
-      (index + 1)
-      result)
+  List.mapi results ~f:(fun index result ->
+    sprintf "<compaction-part index=\"%d\">\n%s\n</compaction-part>" (index + 1) result)
   |> String.concat ~sep:"\n"
 ;;
 
 let summarise_with ~sleep ~request ~relevant_items =
   let run items = retry_request ~sleep ~request:(fun () -> request items) in
-  match run relevant_items with
-  | summary -> Ok summary
-  | exception Retries_exhausted whole_history_cause ->
-    let shared, compactable = List.partition_tf relevant_items ~f:is_shared_context in
-    let groups = grouped_items compactable in
-    (match List.length groups with
-     | 0 | 1 -> Error whole_history_cause
-     | group_count ->
-       let first_groups, second_groups = List.split_n groups ((group_count + 1) / 2) in
-       let first_items = List.concat [ shared; List.concat first_groups ] in
-       (match run first_items with
-        | first_result ->
-          let second_items =
-            List.concat
-              [ shared; [ rolling_summary_item first_result ]; List.concat second_groups ]
-          in
-          (match run second_items with
-           | second_result -> Ok (label_results [ first_result; second_result ])
-           | exception Retries_exhausted cause -> Error cause
-           | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-           | exception exn -> Error exn)
-        | exception Retries_exhausted cause -> Error cause
-        | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-        | exception exn -> Error exn))
-  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-  | exception exn -> Error exn
+  let result =
+    match run relevant_items with
+    | Error failure when retryable failure ->
+      let shared, compactable =
+        List.partition_tf relevant_items ~f:History_view.is_shared
+      in
+      let groups = grouped_items compactable in
+      (match List.length groups with
+       | 0 | 1 -> Error failure
+       | count ->
+         let first, second = List.split_n groups ((count + 1) / 2) in
+         let open Result.Let_syntax in
+         let%bind first_result = run (shared @ List.concat first) in
+         let%map second_result =
+           run
+             (shared @ [ rolling_entry relevant_items first_result ] @ List.concat second)
+         in
+         label_results [ first_result; second_result ])
+    | result -> result
+  in
+  Result.map_error result ~f:(fun failure -> Failed failure)
 ;;
 
-let find_text output =
-  let open Openai.Responses in
-  let rec loop = function
-    | [] -> None
-    | Item.Output_message om :: rest ->
-      let text = string_of_output_content om.Output_message.content in
-      if String.is_empty text then loop rest else Some text
-    | _ :: rest -> loop rest
+let summarise ~inference ~relevant_items ~env =
+  let sleep =
+    Option.value_map env ~default:ignore ~f:(fun env ->
+      Eio.Time.sleep (Eio.Stdenv.clock env))
   in
-  loop output
-;;
-
-let request_summary ~env items =
-  let open Openai.Responses in
-  let transcript = render_transcript items in
-  let dir = Eio.Stdenv.fs env in
-  let net = Eio.Stdenv.net env in
-  let text_item text : Input_message.content_item = Text { text; _type = "input_text" } in
-  let mk_input role text : Item.t =
-    Item.Input_message { role; content = [ text_item text ]; _type = "message" }
+  let setting =
+    Inference.Request.Setting.create
+      ~name:"max_output_tokens"
+      ~value:(Value (`Number "100000"))
+      ~provenance:Execution_override
+      ~limits:Transcript.Admission.default
+    |> Result.map_error ~f:(fun _ -> "invalid fixed compaction setting")
+    |> Result.ok_or_failwith
   in
-  let inputs =
-    [ mk_input Developer prompt
-    ; mk_input User (sprintf "<conversation>%s</conversation>" transcript)
-    ]
-  in
-  let reasoning = Request.Reasoning.{ effort = None; summary = None } in
-  let response =
+  summarise_with ~sleep ~relevant_items ~request:(fun items ->
     Eio.Switch.run (fun sw ->
-      post_response
-        Default
+      Inference_client.Execution.complete_text
+        inference
         ~sw
-        ~max_output_tokens:100000
-        ~model:(Request.Unknown "gpt-5.6-sol")
-        ~dir
-        ~reasoning
-        net
-        ~inputs)
-  in
-  match find_text response.Response.output with
-  | Some text -> text
-  | None -> raise Missing_summary
-;;
-
-let summarise
-      ~(relevant_items : Openai.Responses.Item.t list)
-      ~(env : Eio_unix.Stdenv.base option)
-  : (string, exn) Result.t
-  =
-  Log.emit `Info
-  @@ sprintf "Summarizer.summarise: %d relevant items" (List.length relevant_items);
-  let transcript = render_transcript relevant_items in
-  let api_key_present = Option.is_some (Sys.getenv "OPENAI_API_KEY") in
-  match env, api_key_present with
-  | None, _ | _, false -> Ok (String.prefix transcript max_stub_chars)
-  | Some env, true ->
-    let dir = Eio.Stdenv.fs env in
-    let result =
-      summarise_with
-        ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock env))
-        ~request:(request_summary ~env)
-        ~relevant_items
-    in
-    Result.iter_error result ~f:(fun exn ->
-      eprintf "Summarizer.summarise: %s\n%!" (Exn.to_string exn);
-      Io.log ~dir ~file:"Summarizer.summarise.error-log.txt" (Exn.to_string exn));
-    result
+        ~settings:[ setting ]
+        ~messages:
+          [ Developer, prompt
+          ; User, sprintf "<conversation>%s</conversation>" (render_transcript items)
+          ]
+        ()))
 ;;
 
 module For_testing = struct

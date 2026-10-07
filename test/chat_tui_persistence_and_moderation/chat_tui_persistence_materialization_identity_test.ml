@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_persistence_materialization_identity_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 
 let stub_run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items = "nested"
@@ -14,7 +26,7 @@ let allocator_exn namespace next_sequence =
 let materialize ~env ~namespace source =
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let elements = CM.parse_chat_inputs ~dir source in
   Chat_tui.History_materialization.from_prompt
     ~allocator:(allocator_exn namespace 0)
@@ -245,7 +257,7 @@ let%expect_test "nonempty staged session resumes without converting prompt" =
   in
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items =
     failwith "prompt conversion should not run"
   in

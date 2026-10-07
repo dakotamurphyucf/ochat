@@ -1,5 +1,4 @@
 open Core
-module Model = Openai.Responses.Request
 
 type prompt_type =
   | General
@@ -10,11 +9,12 @@ type action =
   | Update
 
 type t =
-  { proposer_model : Model.model option
+  { proposer_model : string option
   ; rng : Random.State.t
   ; env : Eio_unix.Stdenv.base option
+  ; inference : Inference_client.Execution.t option
   ; guidelines : string option
-  ; model_to_optimize : Model.model option
+  ; model_to_optimize : string option
   ; action : action
   ; prompt_type : prompt_type
   }
@@ -24,14 +24,15 @@ let default () : t =
   { proposer_model = None
   ; rng = Random.State.make [| 0x1337beef |]
   ; env = None
+  ; inference = None
   ; guidelines = None
-  ; model_to_optimize = Some Model.O3
+  ; model_to_optimize = None
   ; action = Generate
   ; prompt_type = General
   }
 ;;
 
-let with_proposer_model (ctx : t) ~(model : Model.model option) : t =
+let with_proposer_model (ctx : t) ~(model : string option) : t =
   { ctx with proposer_model = model }
 ;;
 

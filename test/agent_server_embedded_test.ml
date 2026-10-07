@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> Stdlib.Seq.empty)
+  }
+;;
+
 let protocol_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -84,7 +93,12 @@ let%expect_test "invalid authoring files fail before creating an embedded durabl
         }
       in
       (match
-         Agent_server.Embedded.start ~sw ~env ~authoring_package_files:[ file ] options
+         Agent_server.Embedded.start
+           ~daemon_options:(inference_options ())
+           ~sw
+           ~env
+           ~authoring_package_files:[ file ]
+           options
        with
        | Error error -> [%test_eq: Agent_protocol.Error.code] Invalid_request error.code
        | Ok host ->
@@ -111,7 +125,14 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let probe = Agent_server.Embedded.connect embedded in
       let initialized =
         Agent_client.Session_handle.initialize
@@ -183,7 +204,14 @@ let%expect_test "closing an embedded client releases its backpressured publisher
           ; event_capacity = 0
           }
         in
-        let host = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+        let host =
+          Agent_server.Embedded.start
+            ~daemon_options:(inference_options ())
+            ~sw
+            ~env
+            options
+          |> protocol_ok
+        in
         let connection = Agent_server.Embedded.connection host in
         let stop =
           Agent_protocol.Command.Session_stop
@@ -225,7 +253,14 @@ let%expect_test "session creation returns the requested attachment after session
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let original =
         Agent_client.Connection.request
@@ -274,8 +309,8 @@ let%expect_test "session creation returns the requested attachment after session
           }]));
   [%expect
     {|
-    ((attachment_mode Read_only) (first_event_present false) (revision 3)
-     (sequence 1))
+    ((attachment_mode Read_only) (first_event_present true) (revision 6)
+     (sequence 2))
     |}]
 ;;
 
@@ -379,7 +414,14 @@ let%expect_test "submitted user moderation runs once before turn-start or provid
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       Exn.protect
         ~f:(fun () ->
           let before = submission_snapshot embedded in
@@ -418,7 +460,14 @@ let%expect_test "read-only sends do not consume history IDs" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let writer = Agent_server.Embedded.connection embedded in
       let reader = Agent_server.Embedded.connect embedded in
       Agent_client.Session_handle.initialize
@@ -502,7 +551,14 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
@@ -594,7 +650,14 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
@@ -682,7 +745,14 @@ let%expect_test "ChatML session startup persists delayed schedules" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let snapshot =
@@ -749,7 +819,14 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let snapshot =
@@ -838,7 +915,14 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let rec await_delivery attempts =
@@ -926,7 +1010,14 @@ let%expect_test "due schedules drain ChatML while idle and honor end_session" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let rec await_halt attempts =
@@ -982,7 +1073,14 @@ let%expect_test "session handle attaches, mutates, and reduces pushed events" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let _ =
         Agent_client.Session_handle.initialize
@@ -1053,7 +1151,14 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let statuses = ref [] in
       let reconnect =
@@ -1143,7 +1248,14 @@ let%expect_test "audit read returns redacted durable command outcomes" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       Agent_client.Connection.request
@@ -1200,7 +1312,14 @@ let%expect_test "reset and pinned rebuild require exact stopped revisions" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       Agent_client.Session_handle.initialize
@@ -1294,7 +1413,14 @@ let%expect_test "session export returns a durable server-owned blob" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
@@ -1379,7 +1505,14 @@ let%expect_test "stopped sessions require exact confirmation and can be removed"
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       Agent_client.Session_handle.initialize

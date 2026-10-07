@@ -51,6 +51,7 @@ let%expect_test "compaction atomically replaces history and advances its generat
         [ initial_entry ]
       |> protocol_ok
       |> ignore;
+      Inference_ports.install_compaction_runtime actor |> protocol_ok;
       let before = Agent_session.Session_actor.state actor |> protocol_ok in
       let stale_revision_rejected =
         Agent_session.Session_actor.compact
@@ -285,6 +286,7 @@ let%expect_test
         ignore
           (Agent_session.Session_actor.start actor ~attachment_id:writer.id |> protocol_ok
            : Agent_protocol.Session.t);
+        Inference_ports.install_compaction_runtime actor |> protocol_ok;
         ignore
           (Agent_session.Session_actor.compact
              actor

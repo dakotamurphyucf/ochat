@@ -44,6 +44,18 @@ val capture
   -> limits:Document_schema.Limits.t
   -> (t, Error.t) Result.t
 
+(** Replace a selection only after the host approves the target-change policy.
+    This is distinct from immutable [capture]. Both original and replacement
+    satisfy [limits]; wrapper unknown members and order remain unchanged. For
+    model/settings changes, callers use [Request.Target.with_model] or
+    [Request.Target.with_setting] to retain the target's own unknown fields.
+    This operation grants no authority and performs no dispatch. *)
+val change
+  :  t
+  -> target:Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (t, Error.t) Result.t
+
 (** Exact private storage JSON. The wrapper has [state] equal to ["unresolved"]
     with no [target] member, or ["captured"] with a required target decoded by
     [Request.Target.of_json]. Other state tags, a target on an unresolved value,

@@ -73,9 +73,10 @@ let%expect_test "inherited validation uses the child's surface and tools after r
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
                   ; authoring_validation_host = Some host
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs ->
                           Int.incr requests;
                           match List.last inputs with
                           | Some (Openai.Responses.Item.Function_call_output _) ->
@@ -100,6 +101,19 @@ let%expect_test "inherited validation uses the child's surface and tools after r
                                 ; item_id = "validation-item"
                                 ; output_index = 0
                                 ; type_ = "response.function_call_arguments.done"
+                                }
+                            ; Output_item_done
+                                { item =
+                                    Function_call
+                                      { name = "ochat_validate"
+                                      ; arguments = Jsonaf.to_string !candidate
+                                      ; call_id = sprintf "validation-%d" !requests
+                                      ; _type = "function_call"
+                                      ; id = Some "validation-item"
+                                      ; status = Some "completed"
+                                      }
+                                ; output_index = 0
+                                ; type_ = "response.output_item.done"
                                 }
                             ]
                             |> Stdlib.List.to_seq)

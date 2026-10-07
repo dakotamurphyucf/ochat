@@ -1,19 +1,46 @@
 open! Core
 
-let prompt = "Unit test prompt for relevance scoring"
-
-let%expect_test "relevance judge – default config" =
-  let cfg = Context_compaction.Config.default in
-  let score = Context_compaction.Relevance_judge.score_relevance cfg ~prompt in
-  let relevant = Context_compaction.Relevance_judge.is_relevant cfg ~prompt in
-  printf !"Score: %.3f  Relevant: %b\n" score relevant;
-  [%expect "Score: 0.500  Relevant: true"]
+let%expect_test
+    "relevance preserves three samples and rejects malformed or out-of-range scores"
+  =
+  let samples = ref [ Ok "0.9"; Ok "1.1"; Ok "0.2 extra" ] in
+  let calls = ref 0 in
+  let score =
+    Context_compaction.Relevance_judge.For_testing.score_samples ~sample:(fun () ->
+      incr calls;
+      let result = List.hd_exn !samples in
+      samples := List.tl_exn !samples;
+      result)
+  in
+  printf "calls=%d score=%.3f\n" !calls score;
+  [%expect {| calls=3 score=0.633 |}]
 ;;
 
-let%expect_test "relevance judge – high threshold" =
-  let cfg = { Context_compaction.Config.default with relevance_threshold = 0.8 } in
-  let score = Context_compaction.Relevance_judge.score_relevance cfg ~prompt in
-  let relevant = Context_compaction.Relevance_judge.is_relevant cfg ~prompt in
-  printf !"Score: %.3f  Relevant: %b\n" score relevant;
-  [%expect "Score: 0.500  Relevant: false"]
+let%expect_test "expected inference failures use the existing neutral relevance fallback" =
+  let score =
+    Context_compaction.Relevance_judge.For_testing.score_samples ~sample:(fun () ->
+      Error (Outcome (Failed (Authentication Missing))))
+  in
+  printf "score=%.3f\n" score;
+  [%expect {| score=0.500 |}]
+;;
+
+exception Observer_failed
+
+let%expect_test "relevance does not swallow observer failure or cancellation" =
+  let propagated exn =
+    try
+      ignore
+        (Context_compaction.Relevance_judge.For_testing.score_samples ~sample:(fun () ->
+           raise exn)
+         : float);
+      false
+    with
+    | Observer_failed | Eio.Cancel.Cancelled _ -> true
+  in
+  printf
+    "observer=%b cancellation=%b\n"
+    (propagated Observer_failed)
+    (propagated (Eio.Cancel.Cancelled (Failure "cancelled")));
+  [%expect {| observer=true cancellation=true |}]
 ;;

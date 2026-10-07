@@ -32,6 +32,10 @@ val start
   -> clock:_ Eio.Time.clock
   -> registry:Session_registry.t
   -> capacity:Job_capacity.t
+  -> model_job_inference:
+       (Session_registry.entry
+        -> Agent_protocol.Job.t
+        -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t)
   -> t
 
 (** [cancel t job_id] cooperatively cancels the running Eio worker, if any.

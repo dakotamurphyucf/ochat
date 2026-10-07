@@ -59,6 +59,29 @@ let install_child
       ()
     |> store_ok
   in
+  let inference_target =
+    match Inference.Selection.view parent.spec.inference_target with
+    | Unresolved -> failwith "generated fixture requires its captured parent selection"
+    | Captured target ->
+      let config =
+        Prompt.Chat_markdown.parse_chat_inputs
+          ~source:"generated-fixture.chatmd"
+          ~dir:
+            Eio.Path.(
+              Eio.Stdenv.fs env
+              / parent.spec.workspace_instance.canonical_root.native_path)
+          source
+        |> Chat_response.Config.of_elements
+      in
+      Chat_response.Inference_config.apply_overrides
+        target
+        config
+        ~limits:Document_schema.Limits.default
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+      |> Result.ok_or_failwith
+      |> Option.some
+  in
   let admission : D.Admission.t =
     { child_session_id = child_id
     ; revision_id = artifact.revision_id
@@ -70,6 +93,7 @@ let install_child
     ; parent_revision_id = parent.spec.prompt_revision_id
     ; parent_stop_epoch = Some parent.stop_epoch
     ; authored_tool = None
+    ; inference_target
     ; authority_sha256 =
         Agent_session.Delegation_authority.fingerprint parent |> protocol_ok
     ; capability_pins
@@ -116,6 +140,13 @@ let install_child
         }
     ; prompt_definition_id = None
     ; prompt_revision_id = artifact.revision_id
+    ; inference_target =
+        Inference.Selection.captured
+          (Option.value_exn admission.inference_target)
+          ~limits:Document_schema.Limits.default
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+        |> Result.ok_or_failwith
     ; delegation = Some (D.reference record)
     ; quota_key = None
     }
@@ -204,9 +235,10 @@ let%expect_test
           let options =
             { Daemon.default_options with
               qualify_chatml_extensions = true
-            ; model_post_stream =
-                Some
-                  (fun ~sw:_ ~inputs:_ ->
+            ; inference_policy =
+                Agent_server_test_support.inference_policy
+                  ~default_model:"fixture-model"
+                  ~post_stream:(fun ~sw:_ ~inputs:_ ->
                     Int.incr requests;
                     failwith "unexpected provider request")
             }
@@ -428,6 +460,19 @@ let%expect_test
                 ; output_index = 0
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name = "read_file"
+                      ; arguments = {|{"root":"data","file":"value.txt"}|}
+                      ; call_id = "read"
+                      ; _type = "function_call"
+                      ; id = Some "read-item"
+                      ; status = Some "completed"
+                      }
+                ; output_index = 0
+                ; type_ = "response.output_item.done"
+                }
             ]
             |> Stdlib.List.to_seq
           | 2 -> Stdlib.Seq.empty
@@ -447,7 +492,10 @@ let%expect_test
         let options =
           { Daemon.default_options with
             qualify_chatml_extensions = true
-          ; model_post_stream = Some post_stream
+          ; inference_policy =
+              Agent_server_test_support.inference_policy
+                ~default_model:"fixture-model"
+                ~post_stream
           }
         in
         let start sw =
@@ -785,9 +833,10 @@ let%expect_test
                 { Daemon.default_options.factory_limits with
                   delegation_max_depth = depth
                 }
-            ; model_post_stream =
-                Some
-                  (fun ~sw:_ ~inputs:_ ->
+            ; inference_policy =
+                Agent_server_test_support.inference_policy
+                  ~default_model:"fixture-model"
+                  ~post_stream:(fun ~sw:_ ~inputs:_ ->
                     Int.incr requests;
                     match !requests % 2 with
                     | 0 -> Stdlib.Seq.empty
@@ -811,6 +860,19 @@ let%expect_test
                           ; item_id = "nested-item"
                           ; output_index = 0
                           ; type_ = "response.function_call_arguments.done"
+                          }
+                      ; Output_item_done
+                          { item =
+                              Function_call
+                                { name = "run_chatml"
+                                ; arguments = nested_request
+                                ; call_id = sprintf "nested-%d" !requests
+                                ; _type = "function_call"
+                                ; id = Some "nested-item"
+                                ; status = Some "completed"
+                                }
+                          ; output_index = 0
+                          ; type_ = "response.output_item.done"
                           }
                       ]
                       |> Stdlib.List.to_seq)

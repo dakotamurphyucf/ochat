@@ -105,14 +105,19 @@ let finished actor =
 ;;
 
 let worker_config env post_stream =
+  let inference =
+    Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+  in
   Agent_session.Turn_worker.Config.
     { env
+    ; inference_context = inference.context
+    ; inference_identity = inference.identity
+    ; on_inference_attempt = ignore
+    ; on_inference_observation = ignore
+    ; on_inference_completion = ignore
     ; response_dir = Eio.Path.(Eio.Stdenv.fs env / "/tmp")
     ; tools = []
     ; tool_tbl = String.Table.create ()
-    ; temperature = None
-    ; max_output_tokens = None
-    ; reasoning = None
     ; moderator = None
     ; permission_profile =
         permission_policy
@@ -123,10 +128,6 @@ let worker_config env post_stream =
     ; review_permission = (fun _ -> assert false)
     ; history_compaction = false
     ; parallel_tool_calls = true
-    ; model = Openai.Responses.Request.O3
-    ; prompt_cache_key = None
-    ; prompt_cache_retention = None
-    ; post_stream = Some post_stream
     ; agent_page_classifications = []
     ; delegated_permission_tools = String.Set.empty
     ; redact_tool_payload = (fun ~name:_ text -> text)
@@ -234,6 +235,7 @@ let%expect_test
   let policy = ref (Spec.Preload [ "chatml.tasks" ]) in
   let requests = ref 0 in
   with_handoff_actor
+    ~inference:(Inference_ports.compaction_execution ())
     ~make_worker:(fun env ready ->
       let plans = ref [] in
       let post_stream ~sw:_ ~inputs =
@@ -306,10 +308,10 @@ let%expect_test
          ignore (finished actor : Agent_session.Session_state.t));
        assert (!requests = 3);
        print_endline
-         "compaction makes no provider request; manual turns receive one committed, \
-          deduplicated pointer and no primer");
+         "compaction uses separate selected auxiliary inference; manual turns receive \
+          one committed, deduplicated pointer and no primer");
   [%expect
-    {| compaction makes no provider request; manual turns receive one committed, deduplicated pointer and no primer |}]
+    {| compaction uses separate selected auxiliary inference; manual turns receive one committed, deduplicated pointer and no primer |}]
 ;;
 
 let%expect_test

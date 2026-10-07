@@ -23,17 +23,19 @@ let%expect_test
     Job_fixtures.with_actor
       ~prepare_state:(Setup.initial mode registry)
       (fun _ _ actor writer backend ->
-         A.set_operation_worker
+         A.set_runtime_worker
            actor
-           (Some
-              (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
-                 Int.incr runs;
-                 let state = A.state actor |> protocol_ok in
-                 Completed
-                   { final_history = input.history
-                   ; moderator_snapshot = state.moderator
-                   ; runtime_requests = []
-                   })))
+           ~worker:
+             (Some
+                (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+                   Int.incr runs;
+                   let state = A.state actor |> protocol_ok in
+                   Completed
+                     { final_history = input.history
+                     ; moderator_snapshot = state.moderator
+                     ; runtime_requests = []
+                     })))
+           ~inference:(Some (Inference_ports.compaction_execution ()))
          |> protocol_ok;
          let prepare () =
            N.prepare_idle

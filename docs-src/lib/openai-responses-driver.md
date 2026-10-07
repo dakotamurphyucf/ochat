@@ -1,8 +1,8 @@
 # Explicit Responses preparation and HTTP/SSE driver
 
-`Openai.Responses_driver` is an additive, usable inference boundary around
-`Openai.Responses.Codec`. The legacy runtime entry points have not yet been
-migrated; OCH-56 owns that adoption. The driver neither executes tools nor
+`Openai.Responses_driver` is the provider-local inference boundary around
+`Openai.Responses.Codec`. The [neutral inference runtime](neutral-inference.md)
+selects it through `Openai.Inference_adapter`. The driver neither executes tools nor
 allocates or persists conversation entries. Host moderation, final admission,
 canonical history, tool permissions, execution, recovery and final run completion
 remain with their existing owners.
@@ -38,8 +38,9 @@ and invalid values fail during pure preparation, before authentication/network.
 schemas and settings. Final guidance must already be present. Raw history
 objects retain unknown fields, exact call strings, presence and opaque reasoning.
 Opaque replay requires affirmative support; the host is responsible for matching
-capture origin before passing raw opaque history. Actual non-null caller or
-namespace metadata and `async=true` reject until their host mapping is selected.
+capture origin before passing raw opaque history. A direct caller marker is replayable and eligible for the existing local tool
+path; unknown/program caller metadata, non-null namespace metadata, and
+`async=true` reject until their host mapping is selected.
 Null metadata is retained only where the selected codec field is nullable;
 for example, `function_call.namespace` remains non-null while
 `function_call_output.namespace` permits null. Tool names are unique, and

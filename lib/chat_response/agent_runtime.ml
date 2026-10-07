@@ -123,6 +123,17 @@ let declarations elements =
   }
 ;;
 
+let validate_tool_paths host ~prompt_elements =
+  let errors =
+    (declarations prompt_elements).tools
+    |> List.filter_map ~f:(fun declaration ->
+      match Tool.validate_read_roots host declaration with
+      | Ok () -> None
+      | Error error -> Some (diagnostic error.code error.message))
+  in
+  if List.is_empty errors then Ok () else Error errors
+;;
+
 let platform () =
   match Core_unix.Utsname.sysname (Core_unix.uname ()) with
   | "Darwin" -> S.Macos
@@ -340,59 +351,36 @@ let shell_registry
         Some registry, Some manifest, Some security_status))
 ;;
 
-let xml_escape value =
-  value
-  |> String.substr_replace_all ~pattern:"&" ~with_:"&amp;"
-  |> String.substr_replace_all ~pattern:"\"" ~with_:"&quot;"
-  |> String.substr_replace_all ~pattern:"<" ~with_:"&lt;"
-  |> String.substr_replace_all ~pattern:">" ~with_:"&gt;"
-;;
-
-let reviewer_prompt model =
-  let config =
-    Option.value_map model ~default:"" ~f:(fun model ->
-      sprintf "<config model=\"%s\"/>" (xml_escape model))
+let model_completion ~ctx ~agent:_ ~model =
+  let inference = Ctx.inference_execution ctx in
+  let selected_model =
+    Option.value
+      model
+      ~default:
+        (Inference.Request.Target.model
+           (Inference_runtime.Context.target
+              (Inference_client.Execution.context inference)))
   in
-  config
-  ^ "<system>You are a shell-command approval reviewer. Return only the strict JSON "
-  ^ "decision requested by the user message. You have no tools and cannot execute \
-     commands.</system>"
-;;
-
-let reviewer_item prompt =
-  CM.Basic
-    { type_ = "input_text"
-    ; text = Some prompt
-    ; image_url = None
-    ; document_url = None
-    ; is_local = false
-    ; cleanup_html = false
-    ; markdown = false
-    }
-;;
-
-let model_completion ~ctx ~run_agent ~agent ~model =
   let complete ~prompt =
-    try
-      let text =
-        run_agent
-          ?prompt_dir:None
-          ?session_id:None
-          ?observer:None
-          ~source:("shell-model-reviewer:" ^ agent)
-          ~ctx
-          (reviewer_prompt model)
-          [ reviewer_item prompt ]
-      in
-      Ok
+    Eio.Switch.run (fun sw ->
+      Inference_client.Execution.complete_text
+        inference
+        ~sw
+        ?model
+        ~settings:[]
+        ~messages:
+          [ ( System
+            , "You are a shell-command approval reviewer. Return only the strict JSON \
+               decision requested by the user message. You have no tools and cannot \
+               execute commands." )
+          ; User, prompt
+          ]
+        ()
+      |> Result.map ~f:(fun text ->
         Shell_runtime.Model_reviewer.
-          { text
-          ; model = Option.value model ~default:"ochat-default"
-          ; input_tokens = None
-          ; output_tokens = None
-          }
-    with
-    | exn -> Error (Exn.to_string exn)
+          { text; model = selected_model; input_tokens = None; output_tokens = None })
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference_client.Execution.Completion_error.sexp_of_t error)))
   in
   Some complete
 ;;
@@ -545,7 +533,7 @@ let create_native
       ]
   else (
     let declarations = declarations prompt_elements in
-    let model_completion = model_completion ~ctx ~run_agent in
+    let model_completion = model_completion ~ctx in
     Result.bind
       (Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
        |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ]))

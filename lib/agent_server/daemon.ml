@@ -19,7 +19,7 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
-  ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; inference_policy : Session_factory.inference_policy
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -136,7 +136,23 @@ let default_options =
       }
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
-  ; model_post_stream = None
+  ; inference_policy =
+      { capture_inference_target =
+          (fun ~prompt_revision_id:_ ~config:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; recapture_inference_target =
+          (fun ~current:_ ~prompt_revision_id:_ ~config:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; migrate_inference_target = None
+      ; migrate_model_job_target = None
+      ; approve_inference_target_change =
+          (fun ~current:_ ~proposed:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; resolve_inference_context =
+          (fun _ -> Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; runtime_inference_ports =
+          (fun _ -> Error Inference_runtime.Preparation_error.Target_unavailable)
+      }
   ; qualify_chatml_extensions = true
   ; session_helpers = []
   ; independent_lifetime_policy = None
@@ -849,7 +865,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~job_capacity
       ~tool_dir
       ~home
-      ~model_post_stream:options.model_post_stream
+      ~inference_policy:options.inference_policy
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -904,7 +920,12 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         Session_factory.resume_generated_initial_starts factory)
   in
   let job_scheduler =
-    Job_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~capacity:job_capacity
+    Job_scheduler.start
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~capacity:job_capacity
+      ~model_job_inference:(Session_factory.model_job_inference factory)
   in
   let permission_scheduler =
     Permission_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry

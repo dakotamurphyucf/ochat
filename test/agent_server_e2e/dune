@@ -130,6 +130,8 @@
   ochat.chat_response
   ochat.chat_tui
   ochat.openai
+  ochat.inference_host
+  ochat.inference_runtime
   ochat.agent_transport_http
   ochat.agent_transport_socket
   piaf

@@ -83,3 +83,26 @@ let capture t ~target ~limits =
        of_json (`Object (fields @ [ "target", Request.Target.to_json target ])) ~limits
      | `Array _ | `String _ | `Number _ | `True | `False | `Null -> assert false)
 ;;
+
+let change t ~target ~limits =
+  let open Result.Let_syntax in
+  let%bind () = validate t ~limits in
+  let%bind () = Request.Target.validate target ~limits in
+  match t.json with
+  | `Object fields ->
+    let had_target = List.Assoc.mem fields "target" ~equal:String.equal in
+    let fields =
+      List.map fields ~f:(fun (name, value) ->
+        ( name
+        , if String.equal name "state"
+          then `String "captured"
+          else if String.equal name "target"
+          then Request.Target.to_json target
+          else value ))
+    in
+    let fields =
+      if had_target then fields else fields @ [ "target", Request.Target.to_json target ]
+    in
+    of_json (`Object fields) ~limits
+  | `Array _ | `String _ | `Number _ | `True | `False | `Null -> assert false
+;;

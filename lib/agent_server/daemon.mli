@@ -23,7 +23,7 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
-  ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; inference_policy : Session_factory.inference_policy
   ; qualify_chatml_extensions : bool
     (** Enable the shared extension runtime; true by default. False is an explicit
         embedding compatibility override and suppresses extension discovery.
@@ -52,6 +52,9 @@ type options =
 
 type t
 
+(** The default inference policy permits storage inspection but refuses target
+    capture, target changes and runtime resolution; legacy migration callbacks
+    are absent. Executing composition roots must supply an explicit host policy. *)
 val default_options : options
 
 val start

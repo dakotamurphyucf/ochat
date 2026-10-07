@@ -142,6 +142,10 @@ let command : Command.t =
        Log.emit `Info "mp_refine_run: starting";
        Io.run_main
        @@ fun env ->
+       let host = Inference_composition.create ~env ~default_model:"gpt-5" in
+       let inference =
+         Inference_composition.execution host Chat_response.Config.default
+       in
        let fs = Eio.Stdenv.fs env in
        let task_contents =
          Option.map ~f:(Io.load_doc ~dir:fs) task_file |> Option.value ~default:""
@@ -211,14 +215,16 @@ let command : Command.t =
              (match
                 Prompt_factory_online.create_pack_online
                   ~env
+                  ~inference
                   ~agent_name:"Meta-Prompt Agent"
                   ~goal:task_contents
-                  ~proposer_model:(Some Openai.Responses.Request.Gpt5)
+                  ~proposer_model:(Some "gpt-5")
               with
               | Some txt -> txt
               | None ->
                 Mp_flow.first_flow
                   ~env
+                  ~inference
                   ~task:task_contents
                   ~prompt
                   ~action
@@ -229,6 +235,7 @@ let command : Command.t =
               | Context.General ->
                 Mp_flow.first_flow
                   ~env
+                  ~inference
                   ~task:task_contents
                   ~prompt
                   ~action
@@ -237,6 +244,7 @@ let command : Command.t =
               | Context.Tool ->
                 Mp_flow.tool_flow
                   ~env
+                  ~inference
                   ~task:task_contents
                   ~prompt
                   ~action

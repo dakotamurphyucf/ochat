@@ -101,9 +101,10 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
               { Daemon.default_options with
                 qualify_chatml_extensions = true
               ; independent_lifetime_policy = Some "shell-fixture-v1"
-              ; model_post_stream =
-                  Some
-                    (fun ~sw:_ ~inputs ->
+              ; inference_policy =
+                  Agent_server_test_support.inference_policy
+                    ~default_model:"fixture-model"
+                    ~post_stream:(fun ~sw:_ ~inputs ->
                       Int.incr requests;
                       match List.last inputs with
                       | Some (Openai.Responses.Item.Function_call_output _) ->
@@ -128,6 +129,19 @@ let run (lifetime : Agent_server.Session_factory.generated_lifetime) =
                             ; item_id = "echo-item"
                             ; output_index = 0
                             ; type_ = "response.function_call_arguments.done"
+                            }
+                        ; Output_item_done
+                            { item =
+                                Function_call
+                                  { name = "fixed_echo"
+                                  ; arguments = "{}"
+                                  ; call_id = sprintf "echo-%d" !requests
+                                  ; _type = "function_call"
+                                  ; id = Some "echo-item"
+                                  ; status = Some "completed"
+                                  }
+                            ; output_index = 0
+                            ; type_ = "response.output_item.done"
                             }
                         ]
                         |> Stdlib.List.to_seq)

@@ -44,3 +44,15 @@ val adopt
   -> limits:Document_schema.Limits.t
   -> t
   -> (t, Document_schema.Error.t) result
+
+(** Adjacent generic v1 to v2 conversion. Missing captured selection and model-job
+    bindings become explicitly unresolved; original stored bytes are untouched. *)
+val upgrade
+  :  Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (Document_schema.Document.t, Document_schema.Error.t) Result.t
+
+(** Generic legacy model-job binding used by the delta conversion. *)
+val legacy_model_job_target
+  :  Jsonaf.t
+  -> (Jsonaf.t option, Document_schema.Error.t) Result.t

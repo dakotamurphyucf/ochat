@@ -58,6 +58,7 @@ let replacement_events state delta events =
 let apply ~now state ~delta ~payloads =
   let open Result.Let_syntax in
   let previous = state in
+  let%bind delta = Session_delta.capture_new_model_jobs state delta in
   let%bind state = Session_delta.apply state delta in
   let%bind state, delta =
     Managed_submission_tracking.apply ~previous ~state ~delta ~payloads ~now

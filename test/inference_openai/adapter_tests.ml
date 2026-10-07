@@ -27,6 +27,7 @@ let caps =
   D.Capability.create
     ~baseline:
       [ Text_input, Supported
+      ; Image_input, Supported
       ; Function_tools, Supported
       ; Custom_tools, Supported
       ; Opaque_replay, Supported
@@ -458,4 +459,100 @@ let%expect_test
            [%sexp
              (E.Terminal.outcome (Runtime.Receipt.terminal receipt) : E.Terminal.outcome)]));
   [%expect {| (Failed (Transport Body_limit)) |}]
+;;
+
+let%expect_test "authored document semantic kind cannot relabel a different input shape" =
+  Eio_main.run (fun env ->
+    let profile = profile "http://127.0.0.1:1/v1/responses" in
+    let target = target profile in
+    let calls = ref 0 in
+    let context =
+      context env profile ~target ~auth:(fun ~sw:_ _ ->
+        incr calls;
+        Error D.Auth.Missing)
+    in
+    let semantic =
+      P.Semantic.create
+        (Message
+           { form = Input
+           ; role = User
+           ; phase = Absent
+           ; content =
+               [ Unknown
+                   { kind = "input_file"
+                   ; raw =
+                       `Object
+                         [ "type", `String "input_text"; "text", `String "mismatched" ]
+                   }
+               ]
+           })
+        ~metadata:P.Metadata.empty
+      |> ok
+    in
+    let entry =
+      History_entry.create_with_id
+        ~id:(History_entry.Id.create ~namespace:"input" ~sequence:0 |> ok)
+        (P.authored semantic)
+    in
+    let rejected =
+      Result.is_error
+        (Runtime.Context.prepare
+           context
+           ~preparation_id:"mismatch"
+           (request ~history:[ entry ] target))
+    in
+    printf "rejected=%b auth_calls=%d\n" rejected !calls);
+  [%expect {| rejected=true auth_calls=0 |}]
+;;
+
+let%expect_test "reconstructed images require immutable inline data before authentication"
+  =
+  Eio_main.run (fun env ->
+    let profile = profile "http://127.0.0.1:1/v1/responses" in
+    let target = target profile in
+    let auth_calls = ref 0 in
+    let context =
+      context env profile ~target ~auth:(fun ~sw:_ _ ->
+        incr auth_calls;
+        Error D.Auth.Missing)
+    in
+    List.iter
+      [ "data:image/png;base64,eA=="; "https://remote.example/image.png" ]
+      ~f:(fun uri ->
+        let item =
+          Openai.Responses.Item.t_of_jsonaf
+            (`Object
+                [ "type", `String "message"
+                ; "role", `String "user"
+                ; ( "content"
+                  , `Array
+                      [ `Object
+                          [ "type", `String "input_image"
+                          ; "image_url", `String uri
+                          ; "detail", `String "auto"
+                          ]
+                      ] )
+                ])
+        in
+        let payload = Openai.Responses_history.of_item item |> ok in
+        let entry =
+          History_entry.create_with_id
+            ~id:(History_entry.Id.create ~namespace:"input" ~sequence:0 |> ok)
+            payload
+        in
+        let result =
+          Runtime.Context.prepare
+            context
+            ~preparation_id:"image"
+            (request ~history:[ entry ] target)
+          |> Result.map ~f:(fun _ -> ())
+        in
+        print_s [%sexp (result : (unit, Runtime.Preparation_error.t) Result.t)]);
+    printf "auth_calls=%d\n" !auth_calls);
+  [%expect
+    {|
+    (Ok ())
+    (Error Unsupported_input)
+    auth_calls=0
+    |}]
 ;;

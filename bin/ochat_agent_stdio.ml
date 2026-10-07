@@ -85,6 +85,9 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~author
     in
     let%map embedded =
       Agent_server.Embedded.start
+        ~daemon_options:
+          (Inference_composition.daemon_options
+             (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
         ~sw
         ~env
         ~authoring_package_files
@@ -192,4 +195,7 @@ let command =
          ~authoring_options)
 ;;
 
-let () = Command_unix.run command
+let () =
+  Mirage_crypto_rng_unix.use_default ();
+  Command_unix.run command
+;;

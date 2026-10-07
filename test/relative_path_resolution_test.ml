@@ -1,6 +1,16 @@
 open Core
 module Fetch = Chat_response.Fetch
-module Ctx = Chat_response.Ctx
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"relative-path"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "path lookup unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
 
 let%expect_test "Fetch.get resolves paths relative to ctx.dir first" =
   Eio_main.run
@@ -14,7 +24,7 @@ let%expect_test "Fetch.get resolves paths relative to ctx.dir first" =
   (* File only exists inside [prompt_dir]. *)
   Io.save_doc ~dir:prompt_dir "inner.txt" "INNER";
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir:prompt_dir ~cache ~tool_dir:cwd in
+  let ctx = fixture_ctx ~env ~dir:prompt_dir ~cache ~tool_dir:cwd in
   let content = Fetch.get ~ctx "inner.txt" ~is_local:true in
   print_endline content;
   [%expect {| INNER |}]
@@ -29,7 +39,7 @@ let%expect_test "Fetch.get falls back to the process CWD when lookup in ctx.dir 
   (* File lives in the CWD, not in [prompt_dir]. *)
   Io.save_doc ~dir:cwd "cwd_file.txt" "CWD";
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir:prompt_dir ~tool_dir:cwd ~cache in
+  let ctx = fixture_ctx ~env ~dir:prompt_dir ~tool_dir:cwd ~cache in
   let content = Fetch.get ~ctx "cwd_file.txt" ~is_local:true in
   print_endline content;
   [%expect {| CWD |}]

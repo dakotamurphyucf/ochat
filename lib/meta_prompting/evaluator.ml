@@ -7,12 +7,19 @@ open Core
     judgements in the future via a task-pool (left TODO – the current
     implementation executes sequentially).
 
-    The module deliberately avoids any heavyweight dependencies so
-    that unit tests do not require network access.  Back-ends that
-    need external resources (e.g. OpenAI) should degrade gracefully
-    when the required environment variables are missing. *)
+    Pure/injected judges execute offline. Model judges require selected
+    inference and preserve cancellation and strict host callback failures. *)
 
 type score = float
+
+exception Configuration_required = Inference_support.Configuration_required
+exception Expected_model_failure
+
+module Score = struct
+  type t = score
+
+  let of_string = Inference_support.score
+end
 
 (*********************************************************************
  *  Judge interface and helpers                                      *
@@ -25,7 +32,11 @@ module type Judge = sig
 
   (** Optional [env] supplies Eio capabilities (net, fs …).  Judges that do
       not rely on external IO simply ignore it. *)
-  val evaluate : ?env:Eio_unix.Stdenv.base -> string -> score
+  val evaluate
+    :  ?env:Eio_unix.Stdenv.base
+    -> ?inference:Inference_client.Execution.t
+    -> string
+    -> score
 end
 
 (*--------------------------------------------------------------------
@@ -34,20 +45,6 @@ end
 
 module Guidelines_judge : Judge = struct
   let name = "guidelines"
-
-  (* Simple heuristic: reward prompts that explicitly separate a
-     reasoning section from the final answer/conclusion.  The judge
-     searches for indicative keywords and assigns a fractional score
-     proportional to the number of matched keywords. *)
-
-  (* let keywords = [ "reasoning"; "thought process"; "analysis"; "conclusion"; "answer" ] *)
-
-  (* Memoised API key presence check. *)
-  let api_key_present = Eio.Lazy.from_val (Option.is_some (Sys.getenv "OPENAI_API_KEY"))
-
-  (* ----------------------------------------------------------------- *)
-  (*  Prompt                                                            *)
-  (* ----------------------------------------------------------------- *)
 
   let system_prompt =
     {|
@@ -59,49 +56,22 @@ module Guidelines_judge : Judge = struct
   |}
   ;;
 
-  (* ----------------------------------------------------------------- *)
-  (*  Helper to call the grader API                                     *)
-  (* ----------------------------------------------------------------- *)
-
-  let call_openai ~(env : Eio_unix.Stdenv.base) (candidate : string) : float option =
-    if not (Lazy.force api_key_present)
-    then None
-    else (
-      try
-        let dir = Eio.Stdenv.fs env in
-        let net = Eio.Stdenv.net env in
-        let open Openai.Grader in
-        let sampling_params =
-          Sampling_params.
-            { temperature = Some 1.0
-            ; top_p = None
-            ; seed = None
-            ; reasoning_effort = Some "high"
-            }
-        in
-        let prompt = system_prompt in
-        let reward =
-          run_score_model_or_stub ~prompt ~sampling_params ~candidate ~dir ~net ()
-        in
-        (* Clamp to [0,1] just in case. *)
-        Some (Float.max 0.0 (Float.min 1.0 reward))
-      with
-      | exn ->
-        Log.emit
-          `Debug
-          (Printf.sprintf "Guidelines_judge.call_openai: %s" (Core.Exn.to_string exn));
-        (* Log the error but do not crash the caller. *)
-        (* This is useful in unit tests that expect some judges to fail. *)
-        None)
-  ;;
-
-  let evaluate ?env candidate =
-    match env with
-    | None -> 0.5
-    | Some env ->
-      (match call_openai ~env candidate with
-       | Some s -> s
-       | None -> 0.5)
+  let evaluate ?env:_ ?inference candidate =
+    let inference = Inference_support.require inference in
+    let settings =
+      [ Inference_support.setting "temperature" (`Number "1.0")
+      ; Inference_support.setting "reasoning" (`Object [ "effort", `String "high" ])
+      ]
+    in
+    match
+      Inference_support.complete
+        inference
+        ~settings
+        ~messages:[ System, system_prompt; User, candidate ]
+        ()
+    with
+    | Ok text -> Option.value (Inference_support.score text ~max:1.0) ~default:0.5
+    | Error _ -> 0.5
   ;;
 end
 
@@ -119,6 +89,7 @@ module type Pairwise_judge = sig
     :  incumbent:string
     -> challenger:string
     -> ?env:Eio_unix.Stdenv.base
+    -> ?inference:Inference_client.Execution.t
     -> unit
     -> score
 end
@@ -181,162 +152,65 @@ module Pairwise_arena_judge : Pairwise_judge = struct
     ra', rb'
   ;;
 
-  (* ----------------------------------------------------------------- *)
-  (*  LLM referee                                                      *)
-  (* ----------------------------------------------------------------- *)
-  let api_key = lazy (Sys.getenv "OPENAI_API_KEY")
-
-  (* When offline (no API key) we deterministically declare a tie so
-     that unit tests do not depend on network or secrets. *)
   type result =
     | Incumbent_win
     | Challenger_win
     | Tie
 
-  let parse_llm_response (s : string) : result option =
-    let s = String.strip s |> String.lowercase in
-    if String.is_empty s
-    then None
-    else if String.is_prefix s ~prefix:"a"
-    then Some Incumbent_win
-    else if String.is_prefix s ~prefix:"b"
-    then Some Challenger_win
-    else if String.is_prefix s ~prefix:"tie" || String.is_prefix s ~prefix:"draw"
-    then Some Tie
-    else None
+  let parse_llm_response text =
+    match String.lowercase (String.strip text) with
+    | "a" -> Some Incumbent_win
+    | "b" -> Some Challenger_win
+    | "tie" | "draw" -> Some Tie
+    | _ -> None
   ;;
 
-  let call_openai
-        ~(env : Eio_unix.Stdenv.base)
-        ~(incumbent : string)
-        ~(challenger : string)
-    : result option
-    =
-    match Stdlib.Lazy.force api_key with
-    | None -> None
-    | Some _ ->
-      (try
-         let dir = Eio.Stdenv.fs env in
-         let net = Eio.Stdenv.net env in
-         let open Openai.Responses in
-         let open Input_message in
-         let system_msg : Input_message.t =
-           { role = System
-           ; content =
-               [ Text
-                   { text =
-                       "You are an impartial referee in a head-to-head LLM arena.\n\
-                        Two Prompts (A and B) for the same Task are provided.\n\
-                        Decide which prompt best follows the Task and guidlines in terms \
-                        of\n\
-                        correctness, completeness, depth, style.\n\
-                        Respond with *only* the single character 'A', 'B', or 'Tie'."
-                   ; _type = "input_text"
-                   }
-               ]
-           ; _type = "message"
-           }
-         in
-         let user_msg : Input_message.t =
-           { role = User
-           ; content =
-               [ Text
-                   { text =
-                       Printf.sprintf
-                         "Prompt A:\n%s\n\nPrompt B:\n\n%s\n\nWhich answer is better?"
-                         incumbent
-                         challenger
-                   ; _type = "input_text"
-                   }
-               ]
-           ; _type = "message"
-           }
-         in
-         let inputs : Item.t list =
-           [ Item.Input_message system_msg; Item.Input_message user_msg ]
-         in
-         let model_override () =
-           match Sys.getenv "EVAL_JUDGE_MODEL" with
-           | Some m ->
-             (try Some (Openai.Responses.Request.model_of_str_exn m) with
-              | _ -> None)
-           | None -> None
-         in
-         let model = Option.value (model_override ()) ~default:Request.O3 in
-         let max_output_tokens = 10000 in
-         let ({ Response.output; _ } : Response.t) =
-           Eio.Switch.run (fun sw ->
-             post_response
-               Default
-               ~model
-               ~dir
-               net
-               ~sw
-               ~reasoning:{ effort = Some High; summary = Some Detailed }
-               ~max_output_tokens
-               ~inputs)
-         in
-         let rec first_text = function
-           | [] -> None
-           | Item.Output_message om :: _ ->
-             (match om.Output_message.content with
-              | [] -> None
-              | { text; _ } :: _ -> Some text)
-           | _ :: tl -> first_text tl
-         in
-         first_text output |> Option.bind ~f:parse_llm_response
-       with
-       | exn ->
-         Log.emit
-           `Debug
-           (Printf.sprintf
-              "Pairwise_arena_judge.call_openai: %s"
-              (Core.Exn.to_string exn));
-         raise exn)
-  ;;
-
-  (* ----------------------------------------------------------------- *)
-  (*  Public evaluate                                                  *)
-  (* ----------------------------------------------------------------- *)
-
-  let evaluate ~incumbent ~challenger ?env () : score =
-    (* ------------------------------------------------------------------ *)
-    (*   1. Determine match outcome via LLM (or offline fallback).        *)
-    (* ------------------------------------------------------------------ *)
-    let result : result =
-      match env with
-      | Some env ->
-        (match call_openai ~env ~incumbent ~challenger with
-         | Some r -> r
-         | None -> Tie)
-      | None -> Tie
+  let evaluate ~incumbent ~challenger ?env:_ ?inference () =
+    let inference = Inference_support.require inference in
+    let settings =
+      [ Inference_support.setting
+          "reasoning"
+          (`Object [ "effort", `String "high"; "summary", `String "detailed" ])
+      ; Inference_support.setting "max_output_tokens" (`Number "10000")
+      ]
     in
-    (* ------------------------------------------------------------------ *)
-    (*   2. Fetch current ratings and compute updates.                    *)
-    (* ------------------------------------------------------------------ *)
+    let result =
+      match
+        Inference_support.complete
+          inference
+          ~settings
+          ~messages:
+            [ ( System
+              , "You are an impartial referee in a head-to-head LLM arena.\n\
+                 Two Prompts (A and B) for the same Task are provided.\n\
+                 Decide which prompt best follows the Task and guidlines in terms of\n\
+                 correctness, completeness, depth, style.\n\
+                 Respond with *only* the single character 'A', 'B', or 'Tie'." )
+            ; ( User
+              , Printf.sprintf
+                  "Prompt A:\n%s\n\nPrompt B:\n\n%s\n\nWhich answer is better?"
+                  incumbent
+                  challenger )
+            ]
+          ()
+      with
+      | Ok text -> Option.value (parse_llm_response text) ~default:Tie
+      | Error _ -> Tie
+    in
     let ra = get_rating incumbent in
     let rb = get_rating challenger in
     let sa, sb =
       match result with
-      | Incumbent_win -> 1.0, 0.0
-      | Challenger_win -> 0.0, 1.0
+      | Incumbent_win -> 1., 0.
+      | Challenger_win -> 0., 1.
       | Tie -> 0.5, 0.5
     in
     let ra', rb' = elo_update ~ra ~rb ~sa ~sb in
     set_rating incumbent ra';
     set_rating challenger rb';
-    (* We return the challenger win-probability after the update,
-       which callers can use as a [score] in [0,1].  This is not the
-       new rating itself but rather the logistic win probability based
-       on the fresh ratings, consistent with the usage in Elo-based
-       ranking visualisations. *)
     expected rb' ra'
   ;;
 end
-
-(*********************************************************************
- *  Exposed first-class modules                                      *
- ********************************************************************)
 
 let pairwise_arena_judge : (module Pairwise_judge) = (module Pairwise_arena_judge)
 
@@ -369,6 +243,7 @@ let with_exception_guard
       ~(timeout_s : float)
       (j : judge)
       ?env
+      ?inference
       ?best
       (candidate : string)
   : score option
@@ -389,11 +264,12 @@ let with_exception_guard
   (* ----------------------------------------------------------------- *)
   let wrap () =
     match env, j with
-    | None, Judge (module J) -> J.evaluate candidate
-    | Some env', Judge (module J) -> J.evaluate ~env:env' candidate
-    | None, Pairwise_judge (module J) -> J.evaluate ~incumbent ~challenger:candidate ()
+    | None, Judge (module J) -> J.evaluate ?inference candidate
+    | Some env', Judge (module J) -> J.evaluate ~env:env' ?inference candidate
+    | None, Pairwise_judge (module J) ->
+      J.evaluate ~incumbent ~challenger:candidate ?inference ()
     | Some env', Pairwise_judge (module J) ->
-      J.evaluate ~env:env' ~incumbent ~challenger:candidate ()
+      J.evaluate ~env:env' ~incumbent ~challenger:candidate ?inference ()
   in
   try
     let res =
@@ -407,8 +283,10 @@ let with_exception_guard
     in
     res
   with
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | (Eio.Cancel.Cancelled _ | Configuration_required) as exn -> raise exn
+  | Expected_model_failure -> None
   | exn ->
+    if Option.is_some inference then raise exn;
     Log.emit `Debug (sprintf "%s judge error: %s" name (Core.Exn.to_string exn));
     (* Log the error but do not crash the caller. *)
     (* This is useful in unit tests that expect some judges to fail. *)
@@ -420,7 +298,7 @@ let with_exception_guard
  *  Sequential guard (no timeout, no concurrency)                     *
  *-------------------------------------------------------------------*)
 
-let with_exception_guard_sequential (j : judge) ?env ?best (candidate : string)
+let with_exception_guard_sequential (j : judge) ?env ?inference ?best (candidate : string)
   : score option
   =
   try
@@ -439,16 +317,19 @@ let with_exception_guard_sequential (j : judge) ?env ?best (candidate : string)
     in
     let score =
       match env, j with
-      | None, Judge (module J) -> J.evaluate candidate
-      | Some env', Judge (module J) -> J.evaluate ~env:env' candidate
-      | None, Pairwise_judge (module J) -> J.evaluate ~incumbent ~challenger:candidate ()
+      | None, Judge (module J) -> J.evaluate ?inference candidate
+      | Some env', Judge (module J) -> J.evaluate ~env:env' ?inference candidate
+      | None, Pairwise_judge (module J) ->
+        J.evaluate ~incumbent ~challenger:candidate ?inference ()
       | Some env', Pairwise_judge (module J) ->
-        J.evaluate ~env:env' ~incumbent ~challenger:candidate ()
+        J.evaluate ~env:env' ~incumbent ~challenger:candidate ?inference ()
     in
     Some score
   with
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | (Eio.Cancel.Cancelled _ | Configuration_required) as exn -> raise exn
+  | Expected_model_failure -> None
   | exn ->
+    if Option.is_some inference then raise exn;
     Log.emit
       `Debug
       (sprintf "Evaluator.with_exception_guard_sequential: %s" (Core.Exn.to_string exn));
@@ -469,7 +350,7 @@ let with_exception_guard_sequential (j : judge) ?env ?best (candidate : string)
 
 module Mock_judge : Judge = struct
   let name = "mock"
-  let evaluate ?env:_ _candidate = 0.5
+  let evaluate ?env:_ ?inference:_ _candidate = 0.5
 end
 
 (** {2 Regex-based judge}
@@ -482,7 +363,10 @@ module Answer_regex_judge (P : sig
   end) : Judge = struct
   let name = "answer_regex"
   let re = Re.Pcre.regexp ~flags:[ `DOTALL ] P.regex
-  let evaluate ?env:_ candidate = if Re.Pcre.pmatch ~rex:re candidate then 1.0 else 0.0
+
+  let evaluate ?env:_ ?inference:_ candidate =
+    if Re.Pcre.pmatch ~rex:re candidate then 1.0 else 0.0
+  ;;
 end
 
 (** {2 Log-probability judge}
@@ -494,7 +378,7 @@ end
 module Logprob_judge : Judge = struct
   let name = "length_penalty"
 
-  let evaluate ?env:_ candidate =
+  let evaluate ?env:_ ?inference:_ candidate =
     let len = String.length candidate |> float_of_int in
     (* Map length to (0,1] with a simple exponential decay. *)
     Float.exp (-.len /. 1000.)
@@ -503,166 +387,42 @@ end
 
 (** {2 LLM-powered judge}
 
-    This is a stub that attempts to call the OpenAI chat completion
-    endpoint with an evaluation prompt à la "Score the following answer
-    from 0-10".  When the required API key is absent it returns the
-    fallback score 0.5 so that tests pass offline. *)
+    Selected inference grades under the existing 0–10 prompt; expected
+    completion/parse failures return 0.5. Missing configuration is an error. *)
 
 module Llm_judge : Judge = struct
   let name = "llm_judge"
 
-  (* Memoise environment look-up to avoid repeated syscalls. *)
-  let api_key = lazy (Sys.getenv "OPENAI_API_KEY")
-
-  (* Poor-man’s JSON extraction to keep the dependency footprint low. *)
-  let extract_score (s : string) : float option =
-    (* look for a first float in the string *)
-    let rex = Re.Pcre.regexp "([0-9]+(\\.[0-9]+)?)" in
-    if Re.Pcre.pmatch ~rex s
-    then (
-      let arr = Re.Pcre.extract ~rex s in
-      try Some (Float.of_string arr.(1)) with
-      | _ -> None)
-    else None
-  ;;
-
-  let call_openai ~(env : Eio_unix.Stdenv.base) (candidate : string) : float option =
-    (* Bail early when the API key is missing to keep tests fast and
-       deterministic in CI environments that do not provide secrets.
-       We intentionally inspect the lazily-cached [api_key] once per
-       process only. *)
-    match Stdlib.Lazy.force api_key with
-    | None -> None
-    | Some _ ->
-      (try
-         let dir = Eio.Stdenv.fs env in
-         let net = Eio.Stdenv.net env in
-         let open Openai.Responses in
-         let open Input_message in
-         (* ----------------------------------------------------------------- *)
-         (* Prompt construction                                                *)
-         (* ----------------------------------------------------------------- *)
-         let system_msg : Input_message.t =
-           { role = System
-           ; content =
-               [ Text
-                   { text =
-                       "You are an impartial grader.  Given the \n\
-                        candidate response enclosed below, return a\n\
-                        single floating-point score in the range 0–10\n\
-                        (inclusive) that reflects its overall quality.\n\
-                        Reply with the bare number only – no text, no\n\
-                        punctuation."
-                   ; _type = "input_text"
-                   }
-               ]
-           ; _type = "message"
-           }
-         in
-         let user_msg : Input_message.t =
-           { role = User
-           ; content = [ Text { text = candidate; _type = "input_text" } ]
-           ; _type = "message"
-           }
-         in
-         let inputs : Item.t list =
-           [ Item.Input_message system_msg; Item.Input_message user_msg ]
-         in
-         (* Request parameters – we prefer the inexpensive gpt-4o
-                 by default but allow overriding via the environment
-                 variable [EVAL_JUDGE_MODEL]. *)
-         let model_override () =
-           match Sys.getenv "EVAL_JUDGE_MODEL" with
-           | None -> None
-           | Some m ->
-             (try Some (Openai.Responses.Request.model_of_str_exn m) with
-              | _ -> None)
-         in
-         let model = Option.value (model_override ()) ~default:Request.O3 in
-         (* Keep the answer short – a single token is sufficient but
-                 we allocate 5 to be safe. *)
-         let max_output_tokens = 5 in
-         let ({ Response.output; _ } : Response.t) =
-           Eio.Switch.run (fun sw ->
-             post_response Default ~model ~dir net ~max_output_tokens ~inputs ~sw)
-         in
-         (* Extract the assistant-generated text from the first
-                 [Output_message] element. *)
-         let rec first_text = function
-           | [] -> None
-           | Item.Output_message om :: _ ->
-             (match om.Output_message.content with
-              | [] -> None
-              | { text; _ } :: _ -> Some text)
-           | _ :: tl -> first_text tl
-         in
-         first_text output |> Option.bind ~f:extract_score
-       with
-       | _ -> None)
-  ;;
-
-  let evaluate ?env candidate =
-    match env with
-    | None -> 0.5
-    | Some env ->
-      (match call_openai ~env candidate with
-       | Some s ->
-         let s = Float.max 0.0 (Float.min 10.0 s) in
-         s /. 10.0
-       | None -> 0.5)
+  let evaluate ?env:_ ?inference candidate =
+    let inference = Inference_support.require inference in
+    match
+      Inference_support.complete
+        inference
+        ~settings:[ Inference_support.setting "max_output_tokens" (`Number "5") ]
+        ~messages:
+          [ ( System
+            , "You are an impartial grader.  Given the \n\
+               candidate response enclosed below, return a\n\
+               single floating-point score in the range 0–10\n\
+               (inclusive) that reflects its overall quality.\n\
+               Reply with the bare number only – no text, no\n\
+               punctuation." )
+          ; User, candidate
+          ]
+        ()
+    with
+    | Ok text ->
+      Option.value_map
+        (Inference_support.score text ~max:10.)
+        ~default:0.5
+        ~f:(fun value -> value /. 10.)
+    | Error _ -> 0.5
   ;;
 end
 
-(*--------------------------------------------------------------------
- *  Rubric critic judge                                              *
- *--------------------------------------------------------------------*)
-
-(** {2 Rubric critic judge}
-
-    Scores a single candidate answer against a five-aspect rubric
-    (correctness, completeness, depth, style, safety).  The grader
-    model must respond with a JSON object containing exactly these
-    keys mapped to floating-point scores in the inclusive range
-    [0,10].  The judge parses the JSON, computes the arithmetic mean
-    of the provided sub-scores and normalises to [0,1] by dividing by
-    ten.
-
-    When the OPENAI_API_KEY environment variable is absent or an
-    error occurs, the judge deterministically returns the fallback
-    score 0.5 so that unit tests remain offline-friendly. *)
-
 module Rubric_critic_judge : Judge = struct
-  open Core
-
   let name = "rubric_critic"
-
-  (* Lazily memoised key presence to avoid repeated look-ups. *)
-  let api_key = lazy (Sys.getenv "OPENAI_API_KEY")
   let aspects = [ "correctness"; "completeness"; "depth"; "style"; "safety" ]
-
-  (* ----------------------------------------------------------------- *)
-  (*  Parsing helper                                                    *)
-  (* ----------------------------------------------------------------- *)
-
-  let extract_scores (s : string) : float list option =
-    match Jsonaf.parse s with
-    | Error _ -> None
-    | Ok json ->
-      let open Jsonaf in
-      let open Option.Let_syntax in
-      let rec gather acc = function
-        | [] -> Some (List.rev acc)
-        | k :: tl ->
-          let%bind v_json = member k json in
-          let%bind v = float v_json in
-          gather (v :: acc) tl
-      in
-      gather [] aspects
-  ;;
-
-  (* ----------------------------------------------------------------- *)
-  (*  Prompt construction                                               *)
-  (* ----------------------------------------------------------------- *)
 
   let system_prompt =
     "You are an impartial grader. Given the candidate answer "
@@ -672,87 +432,42 @@ module Rubric_critic_judge : Judge = struct
     ^ "score between 0 and 10 for each. No additional text."
   ;;
 
-  let call_openai ~(env : Eio_unix.Stdenv.base) (candidate : string) : float option =
-    match Stdlib.Lazy.force api_key with
-    | None -> None
-    | Some _ ->
-      (try
-         let dir = Eio.Stdenv.fs env in
-         let net = Eio.Stdenv.net env in
-         let open Openai.Responses in
-         let open Input_message in
-         let system_msg : Input_message.t =
-           { role = System
-           ; content = [ Text { text = system_prompt; _type = "input_text" } ]
-           ; _type = "message"
-           }
-         in
-         let user_msg : Input_message.t =
-           { role = User
-           ; content = [ Text { text = candidate; _type = "input_text" } ]
-           ; _type = "message"
-           }
-         in
-         let inputs : Item.t list =
-           [ Item.Input_message system_msg; Item.Input_message user_msg ]
-         in
-         (* Allow overriding the model used via env var, but default to GPT-4o. *)
-         let model_override () =
-           match Sys.getenv "EVAL_JUDGE_MODEL" with
-           | Some m ->
-             (try Some (Openai.Responses.Request.model_of_str_exn m) with
-              | _ -> None)
-           | None -> None
-         in
-         let model = Option.value (model_override ()) ~default:Request.Gpt4o in
-         let temperature = 0.0 in
-         (* deterministic *)
-         let max_output_tokens = 120 in
-         let ({ Response.output; _ } : Response.t) =
-           Eio.Switch.run (fun sw ->
-             post_response
-               Default
-               ~model
-               ~temperature
-               ~dir
-               net
-               ~max_output_tokens
-               ~inputs
-               ~sw)
-         in
-         let rec first_text = function
-           | [] -> None
-           | Item.Output_message om :: _ ->
-             (match om.Output_message.content with
-              | [] -> None
-              | { text; _ } :: _ -> Some text)
-           | _ :: tl -> first_text tl
-         in
-         match first_text output with
-         | None -> None
-         | Some txt ->
-           (match extract_scores txt with
-            | None -> None
-            | Some subs ->
-              let mean =
-                List.fold subs ~init:0.0 ~f:( +. ) /. Float.of_int (List.length subs)
-              in
-              Some (mean /. 10.0))
-       with
-       | _ -> None)
+  let extract_scores text =
+    if String.length text > 4096
+    then None
+    else (
+      match Jsonaf.parse text with
+      | Ok (`Object fields)
+        when List.equal
+               String.equal
+               (List.sort (List.map fields ~f:fst) ~compare:String.compare)
+               (List.sort aspects ~compare:String.compare) ->
+        Option.all
+          (List.map aspects ~f:(fun name ->
+             match List.Assoc.find fields name ~equal:String.equal with
+             | Some (`Number number) -> Inference_support.score number ~max:10.
+             | Some _ | None -> None))
+      | Ok _ | Error _ -> None)
   ;;
 
-  let evaluate ?env candidate =
-    match env with
-    | None -> 0.5
-    | Some env ->
-      (match call_openai ~env candidate with
-       | Some s -> s
-       | None -> 0.5)
+  let evaluate ?env:_ ?inference candidate =
+    let inference = Inference_support.require inference in
+    match
+      Inference_support.complete
+        inference
+        ~settings:
+          [ Inference_support.setting "temperature" (`Number "0.0")
+          ; Inference_support.setting "max_output_tokens" (`Number "120")
+          ]
+        ~messages:[ System, system_prompt; User, candidate ]
+        ()
+    with
+    | Ok text ->
+      Option.value_map (extract_scores text) ~default:0.5 ~f:(fun values ->
+        List.fold values ~init:0. ~f:( +. ) /. Float.of_int (List.length values) /. 10.)
+    | Error _ -> 0.5
   ;;
 end
-
-(*--------------------------------------------------------------------*)
 
 let rubric_critic_judge : (module Judge) = (module Rubric_critic_judge)
 
@@ -761,82 +476,38 @@ let rubric_critic_judge : (module Judge) = (module Rubric_critic_judge)
  *--------------------------------------------------------------------*)
 
 module Generate_Reward_model_judge (P : sig
-    (** The name of the judge, used for logging and debugging. *)
     val name : string
-
     val system_prompt : string
   end) : Judge = struct
   let name = P.name
 
-  (* Memoised API key presence check. *)
-  let api_key_present = Eio.Lazy.from_val (Option.is_some (Sys.getenv "OPENAI_API_KEY"))
-
-  (* ----------------------------------------------------------------- *)
-  (*  Prompt                                                            *)
-  (* ----------------------------------------------------------------- *)
-
-  let system_prompt = P.system_prompt
-
-  (* ----------------------------------------------------------------- *)
-  (*  Helper to call the grader API                                     *)
-  (* ----------------------------------------------------------------- *)
-
-  let call_openai ~(env : Eio_unix.Stdenv.base) (candidate : string) : float option =
-    if not (Lazy.force api_key_present)
-    then None
-    else (
-      try
-        let dir = Eio.Stdenv.fs env in
-        let net = Eio.Stdenv.net env in
-        let open Openai.Grader in
-        let sampling_params =
-          Sampling_params.
-            { temperature = Some 1.0
-            ; top_p = None
-            ; seed = None
-            ; reasoning_effort = Some "low"
-            }
-        in
-        let reward =
-          run_score_model_or_stub
-            ~prompt:system_prompt
-            ~sampling_params
-            ~candidate
-            ~dir
-            ~net
-            ()
-        in
-        (* Clamp to [0,1] just in case. *)
-        Some (Float.max 0.0 (Float.min 1.0 reward))
-      with
-      | exn ->
-        Log.emit
-          `Debug
-          (Printf.sprintf "Guidelines_judge.call_openai: %s" (Core.Exn.to_string exn));
-        (* Log the error but do not crash the caller. *)
-        (* This is useful in unit tests that expect some judges to fail. *)
-        None)
-  ;;
-
-  let evaluate ?env candidate =
-    match env with
-    | None -> 0.5
-    | Some env ->
-      (match call_openai ~env candidate with
-       | Some s -> s
-       | None -> failwith "Failed to call OpenAI API")
+  let evaluate ?env:_ ?inference candidate =
+    let inference = Inference_support.require inference in
+    match
+      Inference_support.complete
+        inference
+        ~settings:
+          [ Inference_support.setting "temperature" (`Number "1.0")
+          ; Inference_support.setting "reasoning" (`Object [ "effort", `String "low" ])
+          ]
+        ~messages:[ System, P.system_prompt; User, candidate ]
+        ()
+    with
+    | Ok text ->
+      (match Inference_support.score text ~max:1. with
+       | Some score -> score
+       | None -> raise Expected_model_failure)
+    | Error _ -> raise Expected_model_failure
   ;;
 end
 
 (** {2 Reward model judge}
 
-    Leverages OpenAI’s public *grader* endpoint (alpha) to obtain a
-    high-fidelity scalar reward in the range [0,1].  A {e score model}
-    grader is used with a succinct system instruction asking for a
-    single floating-point score only.  If the [OPENAI_API_KEY] variable
-    is missing or any error occurs, the judge deterministically
-    returns the fallback value 0.5 so that unit tests remain
-    offline-friendly. *)
+    Requests a strict finite scalar in [0,1] under the existing rubric
+    through selected inference.
+    This preserves grading intent and range, not statistical equivalence to a
+    dedicated provider grader. Expected failures use the outer drop-judge policy;
+    missing configuration and cancellation propagate. *)
 
 module Reward_model_judge : Judge = Generate_Reward_model_judge (struct
     let name = "reward_model"
@@ -940,14 +611,14 @@ module Self_consistency_judge
       Base.name
   ;;
 
-  let evaluate ?env candidate =
+  let evaluate ?env ?inference candidate =
     (* Run the base judge [k] times.  We do not attempt any explicit
        random-seed handling here – stochasticity must come from the
        underlying judge (e.g. an LLM call with temperature > 0). *)
     let k = Int.max 1 Config.k in
     let run () =
       try
-        let s = Base.evaluate ?env candidate in
+        let s = Base.evaluate ?env ?inference candidate in
         Log.emit
           `Debug
           (Printf.sprintf
@@ -957,8 +628,10 @@ module Self_consistency_judge
         let positive = if Float.(s > 0.5) then 1 else 0 in
         Some (s, positive)
       with
-      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | (Eio.Cancel.Cancelled _ | Configuration_required) as exn -> raise exn
+      | Expected_model_failure -> None
       | exn ->
+        if Option.is_some inference then raise exn;
         Log.emit
           `Debug
           (Printf.sprintf
@@ -1036,8 +709,8 @@ let default = create ()
    [Evaluator.create ~aggregate] instead. *)
 let aggregate (scores : score list) : score = Aggregator.mean scores
 
-let evaluate ?env (t : t) ?best (candidate : string) : score =
-  match Hashtbl.find t.cache candidate with
+let evaluate ?env ?inference (t : t) ?best (candidate : string) : score =
+  match if Option.is_some inference then None else Hashtbl.find t.cache candidate with
   | Some s -> s
   | None ->
     (match env with
@@ -1047,10 +720,10 @@ let evaluate ?env (t : t) ?best (candidate : string) : score =
        let raw_scores =
          t.judges
          |> List.filter_map ~f:(fun j ->
-           with_exception_guard_sequential j ?env ?best candidate)
+           with_exception_guard_sequential j ?env ?inference ?best candidate)
        in
        let agg = t.aggregate raw_scores in
-       Hashtbl.set t.cache ~key:candidate ~data:agg;
+       if Option.is_none inference then Hashtbl.set t.cache ~key:candidate ~data:agg;
        agg
      | Some env ->
        Log.emit `Debug (sprintf "Evaluator.evaluate: %s" candidate);
@@ -1065,11 +738,11 @@ let evaluate ?env (t : t) ?best (candidate : string) : score =
          Eio.Fiber.List.filter_map
            ~max_fibers
            (fun judge ->
-              with_exception_guard ~clock ~timeout_s judge ~env ?best candidate)
+              with_exception_guard ~clock ~timeout_s judge ~env ?inference ?best candidate)
            t.judges
        in
        let agg = t.aggregate raw_scores in
-       Hashtbl.set t.cache ~key:candidate ~data:agg;
+       if Option.is_none inference then Hashtbl.set t.cache ~key:candidate ~data:agg;
        agg)
 ;;
 

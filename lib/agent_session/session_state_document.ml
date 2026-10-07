@@ -179,6 +179,7 @@ let spec_to_jsonaf (t : S.Spec.t) =
     ; ( "prompt_definition_id"
       , (X.option_json P.Id.Prompt_definition.to_json) t.prompt_definition_id )
     ; "prompt_revision_id", P.Id.Prompt_revision.to_json t.prompt_revision_id
+    ; "inference_target", Inference.Selection.to_json t.inference_target
     ; ( "delegation"
       , (X.option_json Agent_store.Delegation_store.reference_to_jsonaf) t.delegation )
     ; "workspace_instance", Workspace_instance.to_jsonaf t.workspace_instance
@@ -189,7 +190,7 @@ let spec_to_jsonaf (t : S.Spec.t) =
     ]
 ;;
 
-let spec_of_jsonaf json =
+let spec_of_jsonaf ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind protocol = X.required fields "protocol" P.Session.Spec.of_json in
@@ -198,6 +199,13 @@ let spec_of_jsonaf json =
   in
   let%bind prompt_revision_id =
     X.required fields "prompt_revision_id" P.Id.Prompt_revision.of_json
+  in
+  let%bind inference_target =
+    X.required fields "inference_target" (fun json ->
+      Inference.Selection.of_json json ~limits
+      |> Result.map_error ~f:(fun error ->
+        P.Error.invalid_request
+          (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))))
   in
   let%bind delegation =
     X.required fields "delegation" (X.nullable delegation_of_jsonaf)
@@ -215,6 +223,7 @@ let spec_of_jsonaf json =
     { protocol
     ; prompt_definition_id
     ; prompt_revision_id
+    ; inference_target
     ; delegation
     ; workspace_instance
     ; permission_profile
@@ -231,6 +240,7 @@ let spec_shape =
     [ "protocol", Shapes.protocol_spec
     ; "prompt_definition_id", X.nullable_shape Document_schema.Shape.value
     ; "prompt_revision_id", Document_schema.Shape.value
+    ; "inference_target", Document_schema.Shape.value
     ; "delegation", X.nullable_shape Agent_store.Delegation_store.reference_shape
     ; "workspace_instance", Workspace_instance.shape
     ; "permission_profile", Document_schema.Shape.value
@@ -476,11 +486,39 @@ let counters_shape =
     ]
 ;;
 
+let initialization_to_jsonaf = function
+  | S.Runtime_initialization.Ready -> `Object [ "state", `String "ready" ]
+  | Pending { fresh_history } ->
+    `Object [ "state", `String "pending"; "fresh_history", X.bool_json fresh_history ]
+;;
+
+let initialization_of_jsonaf json =
+  let open Result.Let_syntax in
+  let%bind fields = X.object_ json in
+  match%bind X.required fields "state" J.string with
+  | "ready" -> Ok S.Runtime_initialization.Ready
+  | "pending" ->
+    let%map fresh_history = X.required fields "fresh_history" J.bool in
+    S.Runtime_initialization.Pending { fresh_history }
+  | _ -> Error (P.Error.invalid_request "unknown runtime initialization state")
+;;
+
+let initialization_shape =
+  D.Shape.tagged_object
+    ~discriminator:"state"
+    [ "ready", X.shape_exn [ "state", D.Shape.value ]
+    ; "pending", X.shape_exn [ "state", D.Shape.value; "fresh_history", D.Shape.value ]
+    ]
+  |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
 let state_to_jsonaf (t : S.t) =
   `Object
     [ "identity", identity_to_jsonaf t.identity
     ; "spec", spec_to_jsonaf t.spec
     ; "lifecycle", lifecycle_to_jsonaf t.lifecycle
+    ; "runtime_initialization", initialization_to_jsonaf t.runtime_initialization
     ; "pending_initial_start", X.bool_json t.pending_initial_start
     ; "stop_epoch", X.int64_json t.stop_epoch
     ; "parent_stop_epoch", (X.option_json X.int64_json) t.parent_stop_epoch
@@ -491,6 +529,7 @@ let state_to_jsonaf (t : S.t) =
     ; "permissions", (X.list_json P.Permission.to_json) t.permissions
     ; "grants", (X.list_json P.Grant.to_json) t.grants
     ; "jobs", (X.list_json P.Job.to_json) t.jobs
+    ; "model_job_targets", X.list_json Model_job_target.to_json t.model_job_targets
     ; "schedules", (X.list_json P.Schedule.Storage.to_json) t.schedules
     ; "invocations", (X.list_json P.Invocation.Storage.to_json) t.invocations
     ; ( "managed_submissions"
@@ -512,12 +551,15 @@ let state_to_jsonaf (t : S.t) =
     ]
 ;;
 
-let state_of_jsonaf json =
+let state_of_jsonaf ~limits json =
   let open Result.Let_syntax in
   let%bind fields = X.object_ json in
   let%bind identity = X.required fields "identity" identity_of_jsonaf in
-  let%bind spec = X.required fields "spec" spec_of_jsonaf in
+  let%bind spec = X.required fields "spec" (spec_of_jsonaf ~limits) in
   let%bind lifecycle = X.required fields "lifecycle" lifecycle_of_jsonaf in
+  let%bind runtime_initialization =
+    X.required fields "runtime_initialization" initialization_of_jsonaf
+  in
   let%bind pending_initial_start = X.required fields "pending_initial_start" J.bool in
   let%bind stop_epoch = X.required fields "stop_epoch" X.nonnegative_int64 in
   let%bind parent_stop_epoch =
@@ -533,6 +575,12 @@ let state_of_jsonaf json =
   let%bind permissions = X.required fields "permissions" (X.list P.Permission.of_json) in
   let%bind grants = X.required fields "grants" (X.list P.Grant.of_json) in
   let%bind jobs = X.required fields "jobs" (X.list P.Job.of_json) in
+  let%bind model_job_targets =
+    X.required
+      fields
+      "model_job_targets"
+      (X.list (fun json -> Model_job_target.of_json json ~limits))
+  in
   let%bind schedules =
     X.required fields "schedules" (X.list P.Schedule.Storage.of_json)
   in
@@ -572,6 +620,7 @@ let state_of_jsonaf json =
     ; identity
     ; spec
     ; lifecycle
+    ; runtime_initialization
     ; pending_initial_start
     ; stop_epoch
     ; parent_stop_epoch
@@ -581,6 +630,7 @@ let state_of_jsonaf json =
     ; permissions
     ; grants
     ; jobs
+    ; model_job_targets
     ; schedules
     ; invocations
     ; managed_submissions
@@ -607,6 +657,7 @@ let state_shape =
     [ "identity", identity_shape
     ; "spec", spec_shape
     ; "lifecycle", lifecycle_shape
+    ; "runtime_initialization", initialization_shape
     ; "pending_initial_start", Document_schema.Shape.value
     ; "stop_epoch", Document_schema.Shape.value
     ; "parent_stop_epoch", X.nullable_shape Document_schema.Shape.value
@@ -616,6 +667,8 @@ let state_shape =
     ; "permissions", X.array_shape_exn ~identity_field:"id" Shapes.permission
     ; "grants", X.array_shape_exn ~identity_field:"id" Shapes.grant
     ; "jobs", X.array_shape_exn ~identity_field:"id" Shapes.job
+    ; ( "model_job_targets"
+      , X.array_shape_exn ~identity_field:"job_id" Model_job_target.shape )
     ; "schedules", X.array_shape_exn ~identity_field:"id" Shapes.schedule
     ; "invocations", X.array_shape_exn ~identity_field:"id" Shapes.invocation
     ; ( "managed_submissions"
@@ -643,17 +696,106 @@ let value = D.Extension_carrier.value
 let with_value = D.Extension_carrier.with_value
 let authored = D.Extension_carrier.of_authored_value
 let shape = state_shape
+let unresolved_json = `Object [ "state", `String "unresolved" ]
+
+let legacy_model_job_target json =
+  let open Result.Let_syntax in
+  match D.Json.field json ~name:"kind" with
+  | Value (`String "model_call") ->
+    let%bind id = Agent_store.Document_fields.required json "id" Result.return in
+    let%map generation =
+      Agent_store.Document_fields.required json "generation" (function
+        | `Number value -> Ok (`String value)
+        | _ ->
+          Error
+            (D.Error.Invalid_field
+               { path = [ "generation" ]
+               ; reason = "legacy job generation must be a number"
+               }))
+    in
+    Some
+      (`Object
+          [ "job_id", id
+          ; "generation", generation
+          ; "source", unresolved_json
+          ; "execution", unresolved_json
+          ])
+  | Absent | Null | Value _ -> Ok None
+;;
+
+let upgrade document ~limits =
+  let open Result.Let_syntax in
+  let%bind step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:1 ~f:(fun payload ->
+      let%bind spec = Agent_store.Document_fields.required payload "spec" Result.return in
+      let%bind spec =
+        match spec with
+        | `Object fields ->
+          Ok
+            (if List.Assoc.mem fields "inference_target" ~equal:String.equal
+             then spec
+             else `Object (fields @ [ "inference_target", unresolved_json ]))
+        | _ ->
+          Error
+            (D.Error.Invalid_field
+               { path = [ "spec" ]; reason = "state spec must be an object" })
+      in
+      let%bind bindings =
+        match D.Json.field payload ~name:"model_job_targets" with
+        | Null -> Ok `Null
+        | Value bindings -> Ok bindings
+        | Absent ->
+          let%bind jobs =
+            Agent_store.Document_fields.required
+              payload
+              "jobs"
+              Agent_store.Document_fields.array
+          in
+          let%map bindings = List.map jobs ~f:legacy_model_job_target |> Result.all in
+          `Array (List.filter_opt bindings)
+      in
+      match payload with
+      | `Object fields ->
+        let fields =
+          List.map fields ~f:(fun (name, value) ->
+            name, if String.equal name "spec" then spec else value)
+        in
+        let fields =
+          if List.Assoc.mem fields "model_job_targets" ~equal:String.equal
+          then fields
+          else fields @ [ "model_job_targets", bindings ]
+        in
+        let fields =
+          if List.Assoc.mem fields "runtime_initialization" ~equal:String.equal
+          then fields
+          else fields @ [ "runtime_initialization", `Object [ "state", `String "ready" ] ]
+        in
+        Ok (`Object fields)
+      | _ ->
+        Error
+          (D.Error.Invalid_field { path = []; reason = "state payload must be an object" }))
+  in
+  let%bind conversion =
+    D.Conversion.create
+      ~limits
+      ~targets:[ "session.state", 2 ]
+      ~max_steps:1
+      ~max_operations:100_000
+      ~steps:[ step ]
+  in
+  D.Conversion.upgrade conversion document
+;;
 
 let codec ~limits =
   match
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:1
+      ~version:2
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))
-      ~decode:(fun json -> X.document_result (state_of_jsonaf json))
+      ~decode:(fun json -> X.document_result (state_of_jsonaf ~limits json))
       ~encode:(fun state -> Ok (state_to_jsonaf state))
   with
   | Ok codec -> codec
@@ -661,7 +803,7 @@ let codec ~limits =
 ;;
 
 let decode ~limits document =
-  let%bind.Result document = X.upgrade document ~limits ~kind:"session.state" in
+  let%bind.Result document = upgrade document ~limits in
   D.Domain_codec.decode (codec ~limits) document
 ;;
 

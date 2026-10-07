@@ -4976,5 +4976,13 @@
     "title": "Neutral inference contracts",
     "reviewNote": "Contributor architecture for pure private inference inputs, captured selections and safe observations. Runtime route migration and accounting integration require their separate implementation and qualification.",
     "provenance": "authored"
+  },
+  {
+    "id": "lib/neutral-inference",
+    "source": "docs-src/lib/neutral-inference.md",
+    "disposition": "repository-only",
+    "title": "Selected inference and host-owned execution",
+    "reviewNote": "Contributor reference for selected runtime and adapter ownership, canonical route migration, captured configuration and initializer recovery. Durable usage ledger/query integration is a separate OCH-59 change.",
+    "provenance": "authored"
   }
 ]

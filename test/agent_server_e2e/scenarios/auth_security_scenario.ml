@@ -589,7 +589,8 @@ let test_scope_denial env environment =
        principal_header
        scopes_header);
   let principal = oauth_principal () in
-  Daemon_host.with_ env fixture ~options:(oauth_options principal) (fun sw daemon ->
+  let options = Daemon_host.with_offline_inference (oauth_options principal) in
+  Daemon_host.with_ env fixture ~options (fun sw daemon ->
     with_client
       ~sw
       env
@@ -794,6 +795,7 @@ let test_scope_projection env environment =
                 | _ -> Error (auth_error Unauthenticated "invalid scoped test token")))
     }
   in
+  let options = Daemon_host.with_offline_inference options in
   Daemon_host.with_ env fixture ~options (fun sw _ ->
     with_client
       ~sw

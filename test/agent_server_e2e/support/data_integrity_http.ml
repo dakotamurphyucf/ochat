@@ -294,22 +294,26 @@ let assert_audit_page page session principal failure =
 
 let audit_before_restart env fixture =
   let saved = ref None in
-  Daemon_host.with_ env fixture ~options:Agent_server.Daemon.default_options (fun sw _ ->
-    let actor, principal =
-      connect ~sw env fixture (Config_fixture.public_token fixture)
-    in
-    let reader, _ = connect ~sw env fixture (Config_fixture.admin_token fixture) in
-    let session, attachment = create actor "data-audit-create" in
-    let failure = exercise_actions actor session attachment in
-    let all = audit reader session.id principal None 20 in
-    assert_audit_page all session.id principal failure;
-    let first = audit reader session.id principal None 1 in
-    require (List.length first.items = 1) "audit page limit was not enforced";
-    let cursor = Option.value_exn first.next_cursor in
-    assert_tamper reader session.id principal cursor;
-    saved := Some (session.id, principal, failure, all, first, cursor);
-    Http_driver.shutdown actor;
-    Http_driver.shutdown reader);
+  Daemon_host.with_
+    env
+    fixture
+    ~options:(Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw _ ->
+       let actor, principal =
+         connect ~sw env fixture (Config_fixture.public_token fixture)
+       in
+       let reader, _ = connect ~sw env fixture (Config_fixture.admin_token fixture) in
+       let session, attachment = create actor "data-audit-create" in
+       let failure = exercise_actions actor session attachment in
+       let all = audit reader session.id principal None 20 in
+       assert_audit_page all session.id principal failure;
+       let first = audit reader session.id principal None 1 in
+       require (List.length first.items = 1) "audit page limit was not enforced";
+       let cursor = Option.value_exn first.next_cursor in
+       assert_tamper reader session.id principal cursor;
+       saved := Some (session.id, principal, failure, all, first, cursor);
+       Http_driver.shutdown actor;
+       Http_driver.shutdown reader);
   Option.value_exn !saved
 ;;
 
@@ -490,22 +494,26 @@ let assert_installed parent path (blob : Agent_protocol.Blob.Metadata.t) =
 
 let test_export env environment =
   let fixture = fixture env environment "data-export" in
-  Daemon_host.with_ env fixture ~options:Agent_server.Daemon.default_options (fun sw _ ->
-    let client, _ = connect ~sw env fixture (Config_fixture.admin_token fixture) in
-    let session, attachment = create client "data-export-create" in
-    let blob = export client session attachment in
-    let parent = export_parent environment in
-    let path = Eio.Path.(parent / "session.json") in
-    Eio.Path.save ~create:(`Exclusive 0o600) path "existing export";
-    let download output =
-      Agent_client.Blob_download.download
-        ~connection:(connection client)
-        ~session_id:session.id
-        ~attachment_id:attachment.id
-        ~blob
-        ~output
-    in
-    Agent_client.Blob_download.install_atomic ~path ~download |> Or_error.ok_exn;
-    assert_installed parent path blob;
-    Http_driver.shutdown client)
+  Daemon_host.with_
+    env
+    fixture
+    ~options:(Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+    (fun sw _ ->
+       let client, _ = connect ~sw env fixture (Config_fixture.admin_token fixture) in
+       let session, attachment = create client "data-export-create" in
+       let blob = export client session attachment in
+       let parent = export_parent environment in
+       let path = Eio.Path.(parent / "session.json") in
+       Eio.Path.save ~create:(`Exclusive 0o600) path "existing export";
+       let download output =
+         Agent_client.Blob_download.download
+           ~connection:(connection client)
+           ~session_id:session.id
+           ~attachment_id:attachment.id
+           ~blob
+           ~output
+       in
+       Agent_client.Blob_download.install_atomic ~path ~download |> Or_error.ok_exn;
+       assert_installed parent path blob;
+       Http_driver.shutdown client)
 ;;

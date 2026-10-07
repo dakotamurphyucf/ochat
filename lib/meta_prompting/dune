@@ -10,6 +10,7 @@
   preprocessor
   aggregator
   context
+  inference_support
   prompting_guides
   mp_flow
   prompts
@@ -17,6 +18,7 @@
   prompt_factory
   prompt_factory_online)
  (wrapped true)
- (libraries core re ochat.openai vector_db bm25 owl ochat.template log)
+ (private_modules inference_support)
+ (libraries core re ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_entry ochat.document_schema jsonaf eio ochat.openai vector_db bm25 owl ochat.template log)
  (preprocess
   (pps ppx_jane)))

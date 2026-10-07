@@ -964,7 +964,13 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
         let initial =
           actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
           |> fun (state : A.Session_state.t) ->
-          { state with jobs = (if Poly.equal basis `New_job then [] else [ queued ]) }
+          { state with
+            jobs = (if Poly.equal basis `New_job then [] else [ queued ])
+          ; model_job_targets =
+              (if Poly.equal basis `New_job
+               then []
+               else [ model_job_binding state queued ])
+          }
         in
         let document =
           A.Session_state_document.encode

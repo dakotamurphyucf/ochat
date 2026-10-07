@@ -98,6 +98,15 @@ val host
   -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
   -> (Shell_runtime.Host.t, diagnostic list) result
 
+(** Inspect configured read-file roots using existing declaration provenance and
+    the same resolver as live construction. Does not initialize scripts, authorize
+    manifests, discover MCP tools or perform model/process effects. Other runtime
+    construction errors may still arise after this limited preflight succeeds. *)
+val validate_tool_paths
+  :  Shell_runtime.Host.t
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> (unit, diagnostic list) result
+
 (** [create ~sw ~ctx ~host ~platform ~prompt_elements ~manifest_authorizer
     ~approval_provider ~run_agent] compiles and authorizes every shell
     declaration before exposing any declared tool. Legacy command tools are

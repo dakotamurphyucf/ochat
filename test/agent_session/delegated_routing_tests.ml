@@ -220,6 +220,29 @@ let%expect_test "host preparation routes canonical calls before owned admission"
                          ; output_index = 0
                          ; type_ = "response.function_call_arguments.done"
                          })
+                  ; Output_item_done
+                      { item =
+                          (if custom
+                           then
+                             Custom_function
+                               { name = "first"
+                               ; input = payload
+                               ; call_id = "provider-call"
+                               ; _type = "custom_tool_call"
+                               ; id = Some "provider-item"
+                               }
+                           else
+                             Function_call
+                               { name = "first"
+                               ; arguments = payload
+                               ; call_id = "provider-call"
+                               ; _type = "function_call"
+                               ; id = Some "provider-item"
+                               ; status = Some "completed"
+                               })
+                      ; output_index = 0
+                      ; type_ = "response.output_item.done"
+                      }
                   ]
             in
             let dispatch_tool ~input ~capabilities =
@@ -293,16 +316,21 @@ let%expect_test "host preparation routes canonical calls before owned admission"
             Hashtbl.set tool_tbl ~key:"legacy" ~data:(fun ~invocation:_ _ ->
               effects := !effects @ [ "legacy", "must not run" ];
               Openai.Responses.Tool_output.Output.Text "legacy result");
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator = None
                 ; permission_profile =
                     permission_policy
@@ -313,10 +341,6 @@ let%expect_test "host preparation routes canonical calls before owned admission"
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload = (fun ~name:_ _ -> "\"redacted\"")

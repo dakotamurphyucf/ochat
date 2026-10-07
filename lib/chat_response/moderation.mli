@@ -50,6 +50,12 @@ module Item : sig
   val of_value : Lang.value -> (t, string) result
   val to_value : t -> Lang.value
   val of_response_item : id:string -> Res.Item.t -> t
+
+  (** Existing local script view derived from neutral semantics. Actual captured
+      envelopes are neither decoded as provider DTOs nor exposed as script values.
+      Missing metadata remains absent; unknown items retain their known kind. *)
+  val of_history_entry : History_entry.t -> t
+
   val to_response_item : t -> (Res.Item.t, string) result
 
   (** Legacy authored script/companion ingress, distinct from canonical neutral

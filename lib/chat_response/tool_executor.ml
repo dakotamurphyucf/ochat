@@ -30,12 +30,26 @@ let invocation observer execution_event ~call_id =
         deliver observer execution_event (Event.Trace { call_id; trace }))
 ;;
 
-let run ~kind ~call_id ~name ~payload ~runner ?on_tool_execution ?on_execution_event () =
+let run
+      ~kind
+      ~call_id
+      ~name
+      ~payload
+      ~runner
+      ?inference_parent
+      ?on_tool_execution
+      ?on_execution_event
+      ()
+  =
   deliver
     on_tool_execution
     on_execution_event
     (Event.Started { call_id; name; kind; payload });
   let invocation = invocation on_tool_execution on_execution_event ~call_id in
+  let invocation =
+    Option.value_map inference_parent ~default:invocation ~f:(fun parent ->
+      Ochat_function.Invocation.with_inference_parent invocation ~parent)
+  in
   let terminal outcome output =
     deliver
       on_tool_execution

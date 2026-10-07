@@ -391,6 +391,75 @@ let%expect_test "owned stream events consume requests at provider and terminal b
               ; budget = { policy.budget with max_self_triggered_turns = 2 }
               }
             in
+            let post_stream =
+              fun ~sw:_ ~inputs:_ ->
+              incr requests;
+              let current = A.state actor |> protocol_ok in
+              List.iter current.moderator_executions ~f:(fun event ->
+                match event.requests with
+                | Some
+                    { request_turn = true
+                    ; request_compaction = false
+                    ; end_session = None
+                    } -> assert (Option.equal E.equal_intent event.intent (Some Applied))
+                | _ -> ());
+              List.iter current.invocations ~f:(fun invocation ->
+                match invocation.observation with
+                | Some
+                    { follow_up =
+                        Some
+                          (Pending_follow_up
+                             { request_turn = true
+                             ; request_compaction = false
+                             ; end_session = None
+                             })
+                    ; _
+                    } ->
+                  failwith
+                    "provider dispatched before observation request acknowledgement"
+                | _ -> ());
+              match mode, !requests with
+              | `Provider_tool, 1 ->
+                let open Openai.Responses.Response_stream in
+                Stdlib.List.to_seq
+                  [ Output_item_added
+                      { item =
+                          Function_call
+                            { name = "read_file"
+                            ; arguments = ""
+                            ; call_id = "owned-call"
+                            ; _type = "function_call"
+                            ; id = Some "owned-item"
+                            ; status = None
+                            }
+                      ; output_index = 0
+                      ; type_ = "response.output_item.added"
+                      }
+                  ; Function_call_arguments_done
+                      { arguments = "{}"
+                      ; item_id = "owned-item"
+                      ; output_index = 0
+                      ; type_ = "response.function_call_arguments.done"
+                      }
+                  ; Output_item_done
+                      { item =
+                          Function_call
+                            { name = "read_file"
+                            ; arguments = "{}"
+                            ; call_id = "owned-call"
+                            ; _type = "function_call"
+                            ; id = Some "owned-item"
+                            ; status = Some "completed"
+                            }
+                      ; output_index = 0
+                      ; type_ = "response.output_item.done"
+                      }
+                  ]
+              | _ -> Stdlib.Seq.empty
+            in
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               Agent_session.Turn_worker.create
                 ~dispatch_tool:(fun ~input ~capabilities ->
@@ -412,12 +481,14 @@ let%expect_test "owned stream events consume requests at provider and terminal b
                     ~now:Agent_protocol.Timestamp.now
                     ())
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl = String.Table.create ()
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator =
                     Some
                       { manager
@@ -435,65 +506,6 @@ let%expect_test "owned stream events consume requests at provider and terminal b
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
-                        incr requests;
-                        let current = A.state actor |> protocol_ok in
-                        List.iter current.moderator_executions ~f:(fun event ->
-                          match event.requests with
-                          | Some
-                              { request_turn = true
-                              ; request_compaction = false
-                              ; end_session = None
-                              } ->
-                            assert (
-                              Option.equal E.equal_intent event.intent (Some Applied))
-                          | _ -> ());
-                        List.iter current.invocations ~f:(fun invocation ->
-                          match invocation.observation with
-                          | Some
-                              { follow_up =
-                                  Some
-                                    (Pending_follow_up
-                                       { request_turn = true
-                                       ; request_compaction = false
-                                       ; end_session = None
-                                       })
-                              ; _
-                              } ->
-                            failwith
-                              "provider dispatched before observation request \
-                               acknowledgement"
-                          | _ -> ());
-                        match mode, !requests with
-                        | `Provider_tool, 1 ->
-                          let open Openai.Responses.Response_stream in
-                          Stdlib.List.to_seq
-                            [ Output_item_added
-                                { item =
-                                    Function_call
-                                      { name = "read_file"
-                                      ; arguments = ""
-                                      ; call_id = "owned-call"
-                                      ; _type = "function_call"
-                                      ; id = Some "owned-item"
-                                      ; status = None
-                                      }
-                                ; output_index = 0
-                                ; type_ = "response.output_item.added"
-                                }
-                            ; Function_call_arguments_done
-                                { arguments = "{}"
-                                ; item_id = "owned-item"
-                                ; output_index = 0
-                                ; type_ = "response.function_call_arguments.done"
-                                }
-                            ]
-                        | _ -> Stdlib.Seq.empty)
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload = (fun ~name:_ value -> value)

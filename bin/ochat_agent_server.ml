@@ -281,6 +281,11 @@ let import_legacy config_path ~legacy_id ~prompt ~workspace =
               let%bind request = legacy_import_request ~legacy_id ~prompt ~workspace in
               let%bind daemon =
                 Agent_server.Daemon.start
+                  ~options:
+                    (Inference_composition.daemon_options
+                       (Inference_composition.create
+                          ~env
+                          ~default_model:"gpt-4.5-preview"))
                   ~sw
                   ~env
                   ~config
@@ -320,6 +325,9 @@ let run_daemon env config =
     let tool_dir = working_directory env in
     let%bind daemon =
       Agent_server.Daemon.start
+        ~options:
+          (Inference_composition.daemon_options
+             (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
         ~sw
         ~env
         ~config

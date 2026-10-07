@@ -309,12 +309,17 @@ let run_stdio ~core ~env : unit =
 ;;
 
 let () =
+  Mirage_crypto_rng_unix.use_default ();
   (* For Phase-1 we ignore CLI flags.  Future milestones will add --http etc. *)
   let core = Mcp_server_core.create () in
   (* For built-in tools we need an [Eio.Path.t] representing the current
      working directory.  We therefore register them inside the main Eio
      fibre where we have access to [env#cwd]. *)
   Eio_main.run (fun env ->
+    let inference_host = Inference_composition.create ~env ~default_model:"gpt-5" in
+    let inference_context =
+      Inference_composition.context inference_host Chat_response.Config.default
+    in
     let dir = Eio.Stdenv.cwd env in
     (* Register demo echo plus built-in functions. *)
     setup_tool_echo core;
@@ -327,7 +332,9 @@ let () =
       let spec : JT.Tool.t =
         { name = Def.name; description = Def.description; input_schema = Def.parameters }
       in
-      let ochat_fn = Functions.meta_refine ~env in
+      let host = Inference_composition.create ~env ~default_model:"gpt-5" in
+      let inference = Inference_composition.execution host Chat_response.Config.default in
+      let ochat_fn = Functions.meta_refine ~env ~inference () in
       let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
         match args with
         | `Object kvs ->
@@ -403,7 +410,15 @@ let () =
              let file_path = Eio.Path.(prompts_dir / fname) in
              match
                Or_error.try_with (fun () ->
-                 Mcp_prompt_agent.of_chatmd_file ~env ~core ~path:file_path)
+                 Mcp_prompt_agent.of_chatmd_file
+                   ~inference_context
+                   ~inference_identity:(Inference_host.identity inference_host)
+                   ~on_inference_attempt:(fun _ -> ())
+                   ~on_inference_completion:(fun _ -> ())
+                   ~env
+                   ~core
+                   ~path:file_path
+                   ())
              with
              | Error err ->
                eprintf

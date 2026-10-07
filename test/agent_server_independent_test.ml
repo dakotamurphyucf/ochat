@@ -2,6 +2,7 @@ open Core
 open Agent_server_test_support
 module P = Agent_protocol
 module Daemon = Agent_server.Daemon
+module D = Agent_store.Delegation_store
 module Registry = Agent_server.Session_registry
 module Factory = Agent_server.Session_factory
 module Owner = Agent_server.Runtime_owner
@@ -139,7 +140,7 @@ let%expect_test "a linked initial start retains its workspace before resource ad
               | Ok (Complete { frame; _ }) -> Agent_store.Frame.payload frame
               | _ -> failwith "invalid delegation frame"
             in
-            if String.is_substring payload ~substring:"(stage Linked)"
+            if D.equal_stage (delegation_stage payload) Linked
             then (
               armed := false;
               raise
@@ -176,8 +177,11 @@ let%expect_test "a linked initial start retains its workspace before resource ad
                 { Daemon.default_options with
                   qualify_chatml_extensions = true
                 ; independent_lifetime_policy = Some "pending-v1"
-                ; model_post_stream =
-                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected provider call")
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                        failwith "unexpected provider call")
                 }
               ()
             |> protocol_ok
@@ -353,6 +357,19 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
                 ; output_index = 0
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name = "read_file"
+                      ; arguments = {|{"root":"data","file":"value.txt"}|}
+                      ; call_id = sprintf "read-%d" !requests
+                      ; _type = "function_call"
+                      ; id = Some "read-item"
+                      ; status = Some "completed"
+                      }
+                ; output_index = 0
+                ; type_ = "response.output_item.done"
+                }
             ]
             |> Stdlib.List.to_seq
         in
@@ -370,7 +387,10 @@ let%expect_test "independent ancestry retains temporary roots across stop and re
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
                   ; independent_lifetime_policy = policy
-                  ; model_post_stream = Some post_stream
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream
                   }
                 ()
               |> protocol_ok

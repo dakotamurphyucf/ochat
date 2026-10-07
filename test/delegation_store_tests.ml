@@ -31,6 +31,7 @@ let admission () =
     ; capability_pins = [ "read_file", digest "registered parent root" ]
     ; lifetime = Owned
     ; created_at = timestamp
+    ; inference_target = None
     }
 ;;
 
@@ -711,4 +712,124 @@ let%expect_test
     ((removed_orphans 1) (retained 1) (callback_exception_propagated true)
      (ledger_usable_after_exception true))
     |}]
+;;
+
+let%expect_test "v6 captures independent target and binds complete original admission" =
+  let module Schema = Document_schema in
+  let module Target = Inference.Request.Target in
+  let schema_ok result =
+    Result.map_error result ~f:(fun error ->
+      Sexp.to_string_hum (Schema.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let limits = Agent_store.Document_fields.limits ~max_bytes:262144 |> schema_ok in
+  let inference_ok result =
+    Result.map_error result ~f:(fun error ->
+      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let target =
+    Target.create
+      ~adapter:"fixture"
+      ~profile:"explicit"
+      ~profile_revision:None
+      ~account:(Some "local")
+      ~endpoint:"fixture://independent"
+      ~model:"original-child"
+      ~settings:[]
+      ~limits
+    |> inference_ok
+  in
+  with_temp_directory "ochat-delegation-target" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = create env sw root in
+      let ledger = S.delegations store in
+      let request_key = key "independent-selection" in
+      let original =
+        reserve ledger request_key { (admission ()) with inference_target = Some target }
+        |> record
+      in
+      let original_reference = D.reference original in
+      let filename =
+        digest (D.Key.sexp_of_t request_key |> Sexp.to_string_mach) ^ ".frame"
+      in
+      let path =
+        Eio.Path.(Eio.Stdenv.fs env / Filename.concat root ("delegations/" ^ filename))
+      in
+      let read_document () =
+        Agent_store.Document_record.decode_file
+          ~limits
+          ~expected_digest:None
+          (Eio.Path.load path)
+        |> Result.map_error ~f:Agent_store.Document_fields.record_error
+        |> store_ok
+        |> Agent_store.Document_record.document
+      in
+      let document = read_document () in
+      [%test_eq: int] 6 (Schema.Document.version document);
+      let replace_member json name update =
+        match json with
+        | `Object fields ->
+          `Object
+            (List.map fields ~f:(fun (key, value) ->
+               key, if String.equal key name then update value else value))
+        | _ -> assert false
+      in
+      let payload =
+        replace_member (Schema.Document.payload document) "admission" (function
+          | `Object fields -> `Object (("future_admission", `Number "1e+00") :: fields)
+          | _ -> assert false)
+      in
+      let document =
+        Schema.Document.inspect
+          ~limits
+          (replace_member (Schema.Document.json document) "payload" (fun _ -> payload))
+        |> schema_ok
+      in
+      let bytes =
+        Agent_store.Document_record.encode document ~limits ~flags:0
+        |> Result.map_error ~f:Agent_store.Document_fields.record_error
+        |> store_ok
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) path bytes;
+      assert (Result.is_error (D.resolve ledger original_reference));
+      assert (Result.is_error (D.advance ledger original Artifact_installed));
+      let captured = D.find ledger request_key |> store_ok |> Option.value_exn in
+      let reference = D.reference captured in
+      assert (
+        not (String.equal original_reference.admission_sha256 reference.admission_sha256));
+      let exact_admission document =
+        match Schema.Json.field (Schema.Document.payload document) ~name:"admission" with
+        | Value value -> Jsonaf.to_string value
+        | Null | Absent -> assert false
+      in
+      let admission_bytes = exact_admission document in
+      let advanced = D.advance ledger captured Artifact_installed |> store_ok in
+      let revoked = D.revoke ledger advanced Parent_stopped |> store_ok in
+      assert (D.Reference.equal reference (D.reference revoked));
+      assert (String.equal admission_bytes (exact_admission (read_document ())));
+      S.close store |> store_ok;
+      let store = reopen env sw root in
+      let ledger = S.delegations store in
+      let restored = D.resolve ledger reference |> store_ok in
+      assert (Target.equal target (Option.value_exn restored.admission.inference_target));
+      let replacement =
+        Target.with_model target ~model:"changed-parent" ~limits |> inference_ok
+      in
+      let replay =
+        reserve
+          ledger
+          request_key
+          { (admission ()) with inference_target = Some replacement }
+        |> record
+      in
+      assert (D.Reference.equal reference (D.reference replay));
+      assert (Target.equal target (Option.value_exn replay.admission.inference_target));
+      assert (String.equal admission_bytes (exact_admission (read_document ())));
+      S.close store |> store_ok));
+  print_endline
+    "v6 target survives parent changes; complete future admission identity and bytes \
+     retained";
+  [%expect
+    {| v6 target survives parent changes; complete future admission identity and bytes retained |}]
 ;;

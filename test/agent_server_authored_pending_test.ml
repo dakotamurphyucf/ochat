@@ -43,6 +43,19 @@ let call_events index id name args =
       ; output_index = index
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string args
+            ; call_id = id
+            ; _type = "function_call"
+            ; id = Some id
+            ; status = Some "completed"
+            }
+      ; output_index = index
+      ; type_ = "response.output_item.done"
+      }
   ]
 ;;
 
@@ -150,7 +163,10 @@ let%expect_test
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream = Some provider
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:provider
                   }
                 ()
               |> protocol_ok

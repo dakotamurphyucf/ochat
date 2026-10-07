@@ -1533,6 +1533,7 @@ type t =
   { version : int
   ; id : string
   ; prompt_file : string
+  ; inference_target : Inference.Selection.t
   ; local_prompt_copy : string option
   ; history : History.t
   ; next_history_sequence : int
@@ -1547,6 +1548,7 @@ type t =
 let create
       ?id
       ~prompt_file
+      ?inference_target
       ?local_prompt_copy
       ?(history = [])
       ?(next_history_sequence = 0)
@@ -1570,6 +1572,12 @@ let create
   { version = current_version
   ; id
   ; prompt_file
+  ; inference_target =
+      Option.value_or_thunk inference_target ~default:(fun () ->
+        Inference.Selection.unresolved ~limits:Document_schema.Limits.default
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+        |> Result.ok_or_failwith)
   ; local_prompt_copy
   ; history
   ; next_history_sequence
@@ -1668,6 +1676,7 @@ module Document = struct
     `Object
       [ "id", `String t.id
       ; "prompt_file", `String t.prompt_file
+      ; "inference_target", Inference.Selection.to_json t.inference_target
       ; "local_prompt_copy", J.encode_option J.encode_string t.local_prompt_copy
       ; "history", J.encode_list history_to_jsonaf t.history
       ; "next_history_sequence", J.encode_int t.next_history_sequence
@@ -1685,6 +1694,12 @@ module Document = struct
       (let%bind fields = J.fields json in
        let%bind id = J.field fields "id" J.string in
        let%bind prompt_file = J.field fields "prompt_file" J.string in
+       let%bind inference_target =
+         J.field fields "inference_target" (fun json ->
+           Inference.Selection.of_json json ~limits:Schema.Limits.default
+           |> Result.map_error ~f:(fun error ->
+             Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+       in
        let%bind local_prompt_copy =
          J.field fields "local_prompt_copy" (J.option J.string)
        in
@@ -1701,6 +1716,7 @@ module Document = struct
          create
            ~id
            ~prompt_file
+           ~inference_target
            ?local_prompt_copy
            ~history
            ~next_history_sequence
@@ -1719,6 +1735,7 @@ module Document = struct
     J.object_
       [ "id", J.value
       ; "prompt_file", J.value
+      ; "inference_target", J.value
       ; "local_prompt_copy", J.nullable J.value
       ; ( "history"
         , J.array ~identity:"id" (J.object_ [ "id", J.value; "payload", J.value ]) )
@@ -1742,10 +1759,21 @@ module Document = struct
   let conversion =
     Schema.Conversion.create
       ~limits
-      ~targets:[ kind, 1 ]
+      ~targets:[ kind, 2 ]
       ~max_steps:1
       ~max_operations:1
-      ~steps:[]
+      ~steps:
+        [ Schema.Conversion.Step.create
+            ~kind
+            ~from_version:1
+            ~operations:
+              [ Default
+                  { path = [ "inference_target" ]
+                  ; value = `Object [ "state", `String "unresolved" ]
+                  }
+              ]
+          |> configuration_exn
+        ]
     |> configuration_exn
   ;;
 
@@ -1753,7 +1781,7 @@ module Document = struct
     Schema.Domain_codec.create
       ~limits
       ~kind
-      ~version:1
+      ~version:2
       ~shape
       ~supported_semantics:[]
       ~decode:decode_value

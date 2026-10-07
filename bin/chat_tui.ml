@@ -310,59 +310,34 @@ let help_output_texts_prompt =
 ;;
 
 let ask_ai input env =
-  let open Openai.Responses in
-  let system_prompt = help_output_texts_prompt in
-  let dir = Eio.Stdenv.fs env in
-  let net = Eio.Stdenv.net env in
-  let open Input_message in
-  let text_item text : content_item = Text { text; _type = "input_text" } in
-  let mk_input role text : Item.t =
-    let role =
-      match role with
-      | "user" -> User
-      | "assistant" -> Assistant
-      | "system" -> System
-      | "developer" -> Developer
-      | _ -> System
-    in
-    let msg : Input_message.t =
-      { role; content = [ text_item text ]; _type = "message" }
-    in
-    Item.Input_message msg
+  let host = Inference_composition.create ~env ~default_model:"gpt-5.2" in
+  let inference = Inference_composition.execution host Chat_response.Config.default in
+  let settings =
+    [ "max_output_tokens", `Number "100000"; "temperature", `Number "0.3" ]
+    |> List.map ~f:(fun (name, value) ->
+      Inference.Request.Setting.create
+        ~name
+        ~value:(Value value)
+        ~provenance:Execution_override
+        ~limits:Transcript.Admission.default)
+    |> Result.all
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
   in
-  let inputs = [ mk_input "system" system_prompt; mk_input "user" input ] in
-  try
-    Eio.Switch.run
-    @@ fun sw ->
-    let response =
-      post_response
-        Default
-        ~max_output_tokens:100000
-        ~temperature:0.3
-        ~model:(Request.Unknown "gpt-5.2")
-        ~dir
-        net
-        ~sw
-        ~inputs
-    in
-    let ({ Response.output; _ } : Response.t) = response in
-    (* Extract assistant text from first Output_message. *)
-    let rec find_text = function
-      | [] -> None
-      | Item.Output_message om :: _ ->
-        (match om.Output_message.content with
-         | { text; _ } :: _ -> Some text
-         | _ -> None)
-      | _ :: tl -> find_text tl
-    in
-    match find_text output with
-    | Some text -> Ok text
-    | None -> Error "error no response"
-  with
-  | exn ->
-    eprintf "Summarizer.summarise: %s\n%!" (Exn.to_string exn);
-    Io.log ~dir ~file:"Summarizer.summarise.error-log.txt" (Exn.to_string exn);
-    Error (Exn.to_string exn)
+  let open Result.Let_syntax in
+  let%bind settings = settings in
+  Eio.Switch.run (fun sw ->
+    Inference_client.Execution.complete_text
+      inference
+      ~sw
+      ~settings
+      ~messages:
+        [ History_entry.Payload.Role.System, help_output_texts_prompt
+        ; History_entry.Payload.Role.User, input
+        ]
+      ()
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_client.Execution.Completion_error.sexp_of_t error)))
 ;;
 
 let default_prompt_file = "./prompts/interactive.md"
@@ -491,7 +466,19 @@ let run_in_env
     then Shell_runtime.Manifest_authorizer.assume_authorized
     else Shell_runtime.Manifest_authorizer.deny
   in
+  let inference_host =
+    Inference_composition.create ~env ~default_model:"gpt-4.5-preview"
+  in
+  let typeahead_host =
+    Inference_host.with_response_limit inference_host ~max_body_bytes:(256 * 1024)
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
   Chat_tui.App.run_chat
+    ~inference_host
+    ~resolve_typeahead:(Inference_host.resolve typeahead_host)
+    ~migrate_inference_target:(Inference_host.capture_config inference_host)
     ~typeahead_config
     ~env
     ~prompt_file
@@ -742,15 +729,24 @@ module Handlers = struct
     let initial_msg_count ~env ~prompt_dir ~prompt_xml =
       try
         let cache = Chat_response.Cache.create ~max_size:16 () in
+        let elements =
+          Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
+        in
+        let host = Inference_composition.create ~env ~default_model:"gpt-4.5-preview" in
+        let inference_context =
+          Inference_composition.context host (Chat_response.Config.of_elements elements)
+        in
         let ctx =
           Chat_response.Ctx.create
+            ~inference_context
+            ~inference_identity:(Inference_host.identity host)
+            ~on_inference_attempt:(fun _ -> ())
+            ~on_inference_completion:(fun _ -> ())
             ~env
             ~dir:prompt_dir
             ~tool_dir:(Eio.Stdenv.cwd env)
             ~cache
-        in
-        let elements =
-          Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
+            ()
         in
         Chat_response.Converter.to_items
           ~ctx
@@ -2100,6 +2096,9 @@ module Embedded_interactive = struct
       List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
     in
     Agent_server.Embedded.start
+      ~daemon_options:
+        (Inference_composition.daemon_options
+           (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
       ~sw
       ~env
       ~authoring_package_files
@@ -2219,11 +2218,6 @@ let run_from_raw (raw : Cli.raw_flags) =
       Cli.normalize_action raw |> Or_error.tag ~tag:"Invalid flags (try --help)"
     in
     let%bind typeahead_config = raw.typeahead_config in
-    let%bind () =
-      Chat_tui.Type_ahead_config.validate_credentials
-        typeahead_config
-        ~api_key:(Sys.getenv "OPENAI_API_KEY")
-    in
     run_action ~typeahead_config action
 ;;
 

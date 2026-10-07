@@ -3,12 +3,14 @@ open! Core
 module Config = struct
   type t =
     { env : Eio_unix.Stdenv.base
+    ; inference_context : Inference_runtime.Context.t
+    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_inference_completion : Inference_client.Completion.t -> unit
+    ; on_inference_observation : Inference.Observation.t -> unit
     ; response_dir : Eio.Fs.dir_ty Eio.Path.t
     ; tools : Openai.Responses.Request.Tool.t list
     ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t
-    ; temperature : float option
-    ; max_output_tokens : int option
-    ; reasoning : Openai.Responses.Request.Reasoning.t option
     ; moderator : Chat_response.In_memory_stream.moderator option
     ; permission_profile : Permission_policy.t
     ; review_permission :
@@ -16,10 +18,6 @@ module Config = struct
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result
     ; history_compaction : bool
     ; parallel_tool_calls : bool
-    ; model : Openai.Responses.Request.model
-    ; prompt_cache_key : string option
-    ; prompt_cache_retention : string option
-    ; post_stream : Chat_response.In_memory_stream.post_stream option
     ; agent_page_classifications :
         (string * Chat_response.Tool_execution_event.agent_page_kind) list
     ; delegated_permission_tools : String.Set.t
@@ -110,7 +108,15 @@ let tool_activity config ~(scope : Transcript.Scope.t) event =
   | Trace { call_id = parent; trace } ->
     let parent = Some A.Key.{ scope = scope.key; call_alias = parent } in
     (match trace with
-     | Ochat_function.Trace.Tool_started { call_id; name; kind; payload } ->
+     | Ochat_function.Trace.Inference_live _ ->
+       Error
+         (Agent_protocol.Error.create
+            Invalid_state
+            ~message:
+              "neutral child transcript must be routed before tool activity projection"
+            ~retryable:false
+            ())
+     | Tool_started { call_id; name; kind; payload } ->
        started ~parent ~call_id ~name ~kind ~payload
      | Tool_progress { call_id; progress } -> progressed ~parent ~call_id progress
      | Tool_finished { call_id; outcome; output } ->
@@ -375,15 +381,17 @@ let run
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
+        ~inference_context:config.inference_context
+        ~inference_identity:config.inference_identity
+        ~on_inference_attempt:config.on_inference_attempt
+        ~on_inference_completion:config.on_inference_completion
+        ~on_inference_observation:config.on_inference_observation
         ~datadir:config.response_dir
         ~allocator:(allocator capabilities)
         ~id_source:capabilities.id_source
         ~history
         ~tools:(Some config.tools)
         ~tool_tbl:config.tool_tbl
-        ?temperature:config.temperature
-        ?max_output_tokens:config.max_output_tokens
-        ?reasoning:config.reasoning
         ?moderator:config.moderator
         ?runtime_policy
         ~before_model_call:(fun () ->
@@ -412,10 +420,6 @@ let run
              ?notification_input:
                (Option.map notification_input ~f:(fun make -> make ~input))
              capabilities)
-        ~model:config.model
-        ?prompt_cache_key:config.prompt_cache_key
-        ?prompt_cache_retention:config.prompt_cache_retention
-        ?post_stream:config.post_stream
         ~sw
         ()
   in

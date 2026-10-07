@@ -479,6 +479,7 @@ let run ?(typeahead_config = Type_ahead_config.default) (ctx : Context.t) =
   let max_input_drain_per_iteration = 4 in
   let typeahead =
     Type_ahead_ui.create
+      ~inference:ctx.shared.services.typeahead_inference
       ~sw:ui_sw
       ~env
       ~config:typeahead_config

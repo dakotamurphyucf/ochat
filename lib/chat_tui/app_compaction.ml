@@ -53,7 +53,19 @@ let start (ctx : Context.t) =
        | Some s ->
          Session_store.save_exn ~env s
          (* Session_store.reset_session ~env ~id:s.id ~keep_history:false () *));
+      let services = ctx.shared.services in
+      let inference =
+        Inference_client.Execution.create
+          ~context:services.inference_context
+          ~identity:services.inference_identity
+          ~relation:Transcript.Scope.Root
+          ~before_dispatch:(fun _ -> ())
+          ~on_attempt:services.on_inference_attempt
+          ~on_observation:services.on_inference_observation
+          ~on_completion:services.on_inference_completion
+      in
       Context_compaction.Compactor.compact_entries
+        ~inference
         ~allocator:runtime.Runtime.history_allocator
         ~env:(Some env)
         ~history:history_snapshot

@@ -1,4 +1,15 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"identity-conversion"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "conversion fixture dispatched")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 module Manager = Chat_response.Moderator_manager
 module Moderation = Chat_response.Moderation
@@ -20,7 +31,7 @@ let stub_run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items = "nested"
 let materialize_prompt ~env ~allocator =
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let source =
     "<developer>policy-a<img \
      src=\"https://example.test/image\"/>policy-b</developer><user>start</user>"
@@ -54,6 +65,12 @@ let function_events () =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Res.Response_stream.Output_item_done
+      { item =
+          Function_call { call with arguments = "function"; status = Some "completed" }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
 ;;
 
@@ -76,6 +93,11 @@ let custom_events () =
       ; item_id = "provider-custom"
       ; output_index = 1
       ; type_ = "response.custom_tool_call_input.done"
+      }
+  ; Res.Response_stream.Output_item_done
+      { item = Custom_function { call with input = "custom" }
+      ; output_index = 1
+      ; type_ = "response.output_item.done"
       }
   ]
 ;;
@@ -125,17 +147,37 @@ let stream_history ~env ~allocator history =
     Queue.of_list [ function_events () @ custom_events (); final_events () ]
   in
   let post_stream ~sw:_ ~inputs:_ = Queue.dequeue_exn responses |> Stdlib.List.to_seq in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"identity-stream"
+      ~default_model:"fixture-model"
+      ~post_stream
+  in
+  let dir = Eio.Stdenv.cwd env in
+  let ctx =
+    Inference_fixture.ctx
+      fixture
+      ~env
+      ~dir
+      ~tool_dir:dir
+      ~cache:(Chat_response.Cache.create ~max_size:1 ())
+      ()
+  in
   let tools = Hashtbl.create (module String) in
   Hashtbl.set tools ~key:"echo" ~data:(fun ~invocation:_ payload ->
     Res.Tool_output.Output.Text payload);
   Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
+    ~inference_context:ctx.inference_context
+    ~inference_identity:ctx.inference_identity
+    ~on_inference_attempt:ctx.on_inference_attempt
+    ~on_inference_completion:ctx.on_inference_completion
+    ~on_inference_observation:ctx.on_inference_observation
     ~env
     ~allocator
     ~history
     ~tools:(Some [])
     ~tool_tbl:tools
     ~parallel_tool_calls:true
-    ~post_stream
     ()
 ;;
 

@@ -8,7 +8,7 @@ type mode =
 
 type t =
   { mode : mode
-  ; model : Openai.Responses.Request.model
+  ; model : string
   ; history_messages : int
   ; debounce_ms : int
   ; max_output_tokens : int
@@ -16,7 +16,7 @@ type t =
 
 let default =
   { mode = Off
-  ; model = Openai.Responses.Request.model_of_str_exn "gpt-5.6-luna"
+  ; model = "gpt-5.6-luna"
   ; history_messages = 0
   ; debounce_ms = 200
   ; max_output_tokens = 200
@@ -44,17 +44,7 @@ let create ~mode ~model ~history_messages ~debounce_ms ~max_output_tokens =
   let%bind () = check_range "--typeahead-max-output-tokens" max_output_tokens 1 512 in
   if String.is_empty (String.strip model)
   then Or_error.error_string "--typeahead-model must not be empty"
-  else (
-    let%map model =
-      Or_error.try_with (fun () -> Openai.Responses.Request.model_of_str_exn model)
-    in
-    { mode; model; history_messages; debounce_ms; max_output_tokens })
-;;
-
-let validate_credentials t ~api_key =
-  if
-    equal_mode t.mode Off
-    || Option.exists api_key ~f:(fun key -> not (String.is_empty (String.strip key)))
-  then Ok ()
-  else Or_error.error_string "Typeahead requires a nonempty local OPENAI_API_KEY"
+  else if not (String.Utf8.is_valid model)
+  then Or_error.error_string "--typeahead-model must be valid UTF-8"
+  else Ok { mode; model; history_messages; debounce_ms; max_output_tokens }
 ;;

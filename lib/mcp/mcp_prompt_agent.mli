@@ -64,13 +64,25 @@ val of_chatmd_file_with_run_agent
         -> string
         -> Prompt.Chat_markdown.content_item list
         -> string)
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?on_inference_observation:(Inference.Observation.t -> unit)
   -> env:Eio_unix.Stdenv.base
   -> core:Mcp_server_core.t
   -> path:Eio.Fs.dir_ty Eio.Path.t
+  -> unit
   -> Mcp_types.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt
 
 val of_chatmd_file
-  :  env:Eio_unix.Stdenv.base
+  :  inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> env:Eio_unix.Stdenv.base
   -> core:Mcp_server_core.t
   -> path:Eio.Fs.dir_ty Eio.Path.t
+  -> unit
   -> Mcp_types.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt

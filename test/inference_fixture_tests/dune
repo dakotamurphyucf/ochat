@@ -1,0 +1,5 @@
+(library
+ (name inference_fixture_tests)
+ (libraries core eio_main inference_fixture ochat.openai ochat.inference ochat.inference_runtime ochat.inference_client ochat.chat_response)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

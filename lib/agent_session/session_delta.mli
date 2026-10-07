@@ -29,6 +29,11 @@ type t =
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t
   | Grant_changed of Agent_protocol.Grant.t
+  | Inference_target_captured of (Inference.Request.Target.t[@sexp.opaque])
+  | Inference_target_changed of (Inference.Request.Target.t[@sexp.opaque])
+  | Model_job_target_captured of Model_job_target.t
+  | Model_job_recipe_target_captured of Model_job_target.t
+  | Model_job_target_restored of Model_job_target.t
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -67,4 +72,24 @@ type t =
   | Reset_generation of int
 [@@deriving sexp]
 
-val apply : Session_state.t -> t -> (Session_state.t, Agent_protocol.Error.t) result
+(** Apply under finite durable bounds; direct native callers default to the
+    shared 64MiB durable profile. Document owners pass their configured limits.
+    Target changes require prior host policy approval; captured job bindings
+    belong in the same atomic Batch as their actual Model_call Job_changed.
+    Restored unresolved bindings carry migration evidence, never authority. *)
+val apply
+  :  ?limits:Document_schema.Limits.t
+  -> Session_state.t
+  -> t
+  -> (Session_state.t, Agent_protocol.Error.t) result
+
+(** Live host admission only: append an immutable source binding next to every
+    genuinely new Model_call Job_changed using the then-selected captured source.
+    The resulting delta must be committed atomically. Existing/restored jobs keep
+    their own selection; unresolved sources reject. Recovery calls [apply] on the
+    exact explicit stored changes and never calls this preparation helper. *)
+val capture_new_model_jobs
+  :  ?limits:Document_schema.Limits.t
+  -> Session_state.t
+  -> t
+  -> (t, Agent_protocol.Error.t) Result.t

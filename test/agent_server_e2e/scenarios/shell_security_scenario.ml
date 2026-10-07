@@ -175,7 +175,12 @@ let options secret =
     in
     Stdlib.List.to_seq events
   in
-  { Agent_server.Daemon.default_options with model_post_stream = Some model_post_stream }
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:model_post_stream
+  }
 ;;
 
 let with_client ~sw env fixture f =
@@ -749,7 +754,12 @@ let live_options env nested =
       Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
       event)
   in
-  { Agent_server.Daemon.default_options with model_post_stream = Some model_post_stream }
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:model_post_stream
+  }
 ;;
 
 let live_prompt () =

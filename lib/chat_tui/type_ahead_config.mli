@@ -10,7 +10,7 @@ type mode =
 
 type t = private
   { mode : mode
-  ; model : Openai.Responses.Request.model
+  ; model : string
   ; history_messages : int
   ; debounce_ms : int
   ; max_output_tokens : int
@@ -26,7 +26,3 @@ val create
   -> debounce_ms:int
   -> max_output_tokens:int
   -> t Or_error.t
-
-(** [validate_credentials t ~api_key] requires a nonblank local key when enabled.
-    Never include credentials in returned errors. *)
-val validate_credentials : t -> api_key:string option -> unit Or_error.t

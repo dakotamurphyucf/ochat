@@ -22,6 +22,11 @@ type t =
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t
   | Grant_changed of Agent_protocol.Grant.t
+  | Inference_target_captured of (Inference.Request.Target.t[@sexp.opaque])
+  | Inference_target_changed of (Inference.Request.Target.t[@sexp.opaque])
+  | Model_job_target_captured of Model_job_target.t
+  | Model_job_recipe_target_captured of Model_job_target.t
+  | Model_job_target_restored of Model_job_target.t
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
@@ -98,8 +103,20 @@ let remember_authoring state batches =
   retained_authoring index
 ;;
 
-let rec apply state = function
-  | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
+let native_limits =
+  Persistence_codec.limits ~max_bytes:(64 * 1024 * 1024)
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+let inference_error error =
+  Agent_protocol.Error.invalid_request
+    (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+;;
+
+let rec apply ?(limits = native_limits) state = function
+  | Batch deltas -> List.fold_result deltas ~init:state ~f:(apply ~limits)
   | Created created -> Session_state.upgrade_schema created
   | Managed_stop_admitted receipt ->
     let open Result.Let_syntax in
@@ -332,6 +349,119 @@ let rec apply state = function
             state.grants
             ~id_of:(fun value -> value.Agent_protocol.Grant.id)
       }
+  | Inference_target_captured target ->
+    let open Result.Let_syntax in
+    let%map inference_target =
+      Inference.Selection.capture state.spec.inference_target ~target ~limits
+      |> Result.map_error ~f:inference_error
+    in
+    { state with spec = { state.spec with inference_target } }
+  | Inference_target_changed target ->
+    let open Result.Let_syntax in
+    let%map inference_target =
+      Inference.Selection.change state.spec.inference_target ~target ~limits
+      |> Result.map_error ~f:inference_error
+    in
+    { state with spec = { state.spec with inference_target } }
+  | Model_job_target_captured binding ->
+    let open Result.Let_syntax in
+    let%bind target =
+      match Inference.Selection.view (Model_job_target.source binding) with
+      | Captured target -> Ok target
+      | Unresolved ->
+        Error (Agent_protocol.Error.invalid_request "new model job capture is unresolved")
+    in
+    let%map binding =
+      match
+        List.find state.model_job_targets ~f:(fun previous ->
+          Agent_protocol.Id.Job.equal
+            (Model_job_target.job_id previous)
+            (Model_job_target.job_id binding))
+      with
+      | None -> Ok binding
+      | Some previous
+        when Int.equal
+               (Model_job_target.generation previous)
+               (Model_job_target.generation binding) ->
+        Model_job_target.capture_source previous ~target ~limits
+      | Some _ ->
+        Error (Agent_protocol.Error.invalid_request "model job target generation changed")
+    in
+    { state with
+      model_job_targets =
+        replace_by
+          Agent_protocol.Id.Job.compare
+          (Model_job_target.job_id binding)
+          binding
+          state.model_job_targets
+          ~id_of:Model_job_target.job_id
+    }
+  | Model_job_recipe_target_captured binding ->
+    let open Result.Let_syntax in
+    let%bind previous =
+      List.find state.model_job_targets ~f:(fun previous ->
+        Agent_protocol.Id.Job.equal
+          (Model_job_target.job_id previous)
+          (Model_job_target.job_id binding))
+      |> Result.of_option
+           ~error:
+             (Agent_protocol.Error.invalid_request
+                "recipe capture has no model job source")
+    in
+    let%bind () =
+      if
+        Int.equal
+          (Model_job_target.generation previous)
+          (Model_job_target.generation binding)
+        && Inference.Selection.equal
+             (Model_job_target.source previous)
+             (Model_job_target.source binding)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request "recipe capture changed model job source")
+    in
+    let%bind target =
+      match Inference.Selection.view (Model_job_target.execution binding) with
+      | Captured target -> Ok target
+      | Unresolved ->
+        Error (Agent_protocol.Error.invalid_request "recipe target capture is unresolved")
+    in
+    let%map binding = Model_job_target.capture_recipe previous ~target ~limits in
+    { state with
+      model_job_targets =
+        replace_by
+          Agent_protocol.Id.Job.compare
+          (Model_job_target.job_id binding)
+          binding
+          state.model_job_targets
+          ~id_of:Model_job_target.job_id
+    }
+  | Model_job_target_restored binding ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match Inference.Selection.view (Model_job_target.source binding) with
+      | Unresolved -> Ok ()
+      | Captured _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "restored model job binding must be unresolved")
+    in
+    (match
+       List.find state.model_job_targets ~f:(fun previous ->
+         Agent_protocol.Id.Job.equal
+           (Model_job_target.job_id previous)
+           (Model_job_target.job_id binding))
+     with
+     | None -> Ok { state with model_job_targets = binding :: state.model_job_targets }
+     | Some previous
+       when Int.equal
+              (Model_job_target.generation previous)
+              (Model_job_target.generation binding) -> Ok state
+     | Some _ ->
+       Error
+         (Agent_protocol.Error.invalid_request
+            "restored model job target generation changed"))
   | Job_changed job ->
     let open Result.Let_syntax in
     let previous =
@@ -887,4 +1017,60 @@ let rec apply state = function
             ; authoring_publication = None
             }
         }
+;;
+
+let capture_new_model_jobs ?(limits = native_limits) state delta =
+  let open Result.Let_syntax in
+  let rec prepare (state : Session_state.t) delta =
+    match delta with
+    | Batch changes ->
+      let%map state, changes =
+        List.fold_result changes ~init:(state, []) ~f:(fun (state, changes) change ->
+          let%map state, change = prepare state change in
+          state, change :: changes)
+      in
+      state, Batch (List.rev changes)
+    | Job_changed job ->
+      let%bind delta =
+        match job.kind with
+        | Model_call
+          when not
+                 (List.exists state.model_job_targets ~f:(fun binding ->
+                    Agent_protocol.Id.Job.equal (Model_job_target.job_id binding) job.id))
+          ->
+          let%bind () =
+            if
+              List.exists state.jobs ~f:(fun previous ->
+                Agent_protocol.Id.Job.equal previous.id job.id)
+            then
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "existing model job has no retained source binding")
+            else Ok ()
+          in
+          let%bind target =
+            match Inference.Selection.view state.spec.inference_target with
+            | Captured target -> Ok target
+            | Unresolved ->
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "model job source requires explicit inference migration")
+          in
+          let%map binding = Model_job_target.create job ~target ~limits in
+          Batch [ delta; Model_job_target_captured binding ]
+        | Model_call
+        | Nested_agent
+        | Scheduled_event
+        | Async_tool
+        | Shell_process
+        | Compaction -> Ok delta
+      in
+      let%map state = apply ~limits state delta in
+      state, delta
+    | delta ->
+      let%map state = apply ~limits state delta in
+      state, delta
+  in
+  let%map _, delta = prepare state delta in
+  delta
 ;;

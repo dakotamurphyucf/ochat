@@ -13,3 +13,5 @@ val on_event : t -> Openai.Responses.Response_stream.t -> unit
 (** These callbacks preserve nested response and tool execution events as
     transient invocation-local activity. *)
 val on_tool_execution : t -> Tool_execution_event.t -> unit
+
+val on_transcript_event : t -> Transcript.Stream.t -> unit

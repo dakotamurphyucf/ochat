@@ -262,6 +262,29 @@ let%test_unit "streamed native and moderator services share pre and post routing
                          ; output_index = index
                          ; type_ = "response.function_call_arguments.done"
                          })
+                  ; Output_item_done
+                      { item =
+                          (if custom
+                           then
+                             Custom_function
+                               { name
+                               ; input = payload
+                               ; call_id
+                               ; _type = "custom_tool_call"
+                               ; id = Some item_id
+                               }
+                           else
+                             Function_call
+                               { name
+                               ; arguments = payload
+                               ; call_id
+                               ; _type = "function_call"
+                               ; id = Some item_id
+                               ; status = Some "completed"
+                               })
+                      ; output_index = index
+                      ; type_ = "response.output_item.done"
+                      }
                   ]
                 in
                 let initial =
@@ -335,16 +358,21 @@ let%test_unit "streamed native and moderator services share pre and post routing
             let tool_tbl = String.Table.create () in
             Hashtbl.set tool_tbl ~key:"read_file" ~data:(fun ~invocation:_ _ ->
               failwith "native adapter fell through");
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator =
                     Some
                       { manager
@@ -365,10 +393,6 @@ let%test_unit "streamed native and moderator services share pre and post routing
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload =
@@ -870,6 +894,29 @@ let%test_unit
                              ; output_index = 0
                              ; type_ = "response.function_call_arguments.done"
                              })
+                      ; Output_item_done
+                          { item =
+                              (if custom
+                               then
+                                 Custom_function
+                                   { name = "counter"
+                                   ; input = original_payload
+                                   ; call_id = "counter-call"
+                                   ; _type = "custom_tool_call"
+                                   ; id = Some "counter-item"
+                                   }
+                               else
+                                 Function_call
+                                   { name = (if redirected then "alias" else "counter")
+                                   ; arguments = original_payload
+                                   ; call_id = "counter-call"
+                                   ; _type = "function_call"
+                                   ; id = Some "counter-item"
+                                   ; status = Some "completed"
+                                   })
+                          ; output_index = 0
+                          ; type_ = "response.output_item.done"
+                          }
                       ]
                 in
                 if not multi
@@ -914,6 +961,18 @@ let%test_unit
                           ; output_index = 1
                           ; type_ = "response.custom_tool_call_input.done"
                           }
+                      ; Output_item_done
+                          { item =
+                              Custom_function
+                                { name = "counter"
+                                ; input = "null"
+                                ; call_id = "later-custom"
+                                ; _type = "custom_tool_call"
+                                ; id = Some "later-custom-item"
+                                }
+                          ; output_index = 1
+                          ; type_ = "response.output_item.done"
+                          }
                       ; Output_item_added
                           { item =
                               Function_call
@@ -932,6 +991,19 @@ let%test_unit
                           ; item_id = "later-native-item"
                           ; output_index = 2
                           ; type_ = "response.function_call_arguments.done"
+                          }
+                      ; Output_item_done
+                          { item =
+                              Function_call
+                                { name = "native"
+                                ; arguments = "null"
+                                ; call_id = "later-native"
+                                ; _type = "function_call"
+                                ; id = Some "later-native-item"
+                                ; status = Some "completed"
+                                }
+                          ; output_index = 2
+                          ; type_ = "response.output_item.done"
                           }
                       ; Output_item_done
                           { item = Output_message message
@@ -973,6 +1045,9 @@ let%test_unit
                   if Poly.equal mode `Disclosure then Error "blocked" else Ok ())
                 ()
             in
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               let tool_tbl = String.Table.create () in
               Hashtbl.set tool_tbl ~key:"native" ~data:(fun ~invocation:_ _ ->
@@ -981,12 +1056,14 @@ let%test_unit
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator =
                     Some
                       { manager
@@ -1004,10 +1081,6 @@ let%test_unit
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload =

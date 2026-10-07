@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 let protocol_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -41,7 +50,14 @@ let with_embedded f =
               ; event_capacity = 128
               }
           in
-          let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+          let embedded =
+            Agent_server.Embedded.start
+              ~daemon_options:(inference_options ())
+              ~sw
+              ~env
+              options
+            |> protocol_ok
+          in
           Exn.protect
             ~f:(fun () -> f sw embedded)
             ~finally:(fun () -> Agent_server.Embedded.close embedded)))

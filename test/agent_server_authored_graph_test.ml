@@ -48,6 +48,19 @@ let function_call serial name arguments =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string arguments
+            ; call_id
+            ; _type = "function_call"
+            ; id = Some call_id
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
   |> Stdlib.List.to_seq
 ;;
@@ -130,7 +143,10 @@ let%expect_test "nested authored bindings survive independent ancestry stop and 
                   { D.default_options with
                     qualify_chatml_extensions = true
                   ; independent_lifetime_policy = Some "authored-graph-v1"
-                  ; model_post_stream = Some provider
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:provider
                   }
                 ()
               |> protocol_ok

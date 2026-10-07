@@ -2393,19 +2393,27 @@ let agent_call_trace_neutral t ~call_id trace =
 ;;
 
 let agent_call_trace t ~call_id trace =
-  let trace =
-    match trace with
-    | Ochat_function.Trace.Tool_started { call_id; name; kind; payload } ->
-      Tool_started { call_id; name; kind; payload }
-    | Tool_progress { call_id; progress } -> Tool_progress { call_id; progress }
-    | Tool_finished { call_id; outcome; output } ->
-      Tool_finished
-        { call_id
-        ; outcome
-        ; output = Option.map output ~f:Chat_response.Tool_execution_event.neutral_output
-        }
-  in
-  agent_call_trace_neutral t ~call_id trace
+  match trace with
+  | Ochat_function.Trace.Inference_live _ ->
+    (* The actual typed transcript channel owns these events. Legacy tool trace
+       presentation neither dumps opaque payloads nor renders them twice. *)
+    false
+  | Tool_started _ | Tool_progress _ | Tool_finished _ ->
+    let trace =
+      match trace with
+      | Ochat_function.Trace.Inference_live _ -> assert false
+      | Tool_started { call_id; name; kind; payload } ->
+        Tool_started { call_id; name; kind; payload }
+      | Tool_progress { call_id; progress } -> Tool_progress { call_id; progress }
+      | Tool_finished { call_id; outcome; output } ->
+        Tool_finished
+          { call_id
+          ; outcome
+          ; output =
+              Option.map output ~f:Chat_response.Tool_execution_event.neutral_output
+          }
+    in
+    agent_call_trace_neutral t ~call_id trace
 ;;
 
 let agent_nested_call_started t ~parent_call_id ~call_id ~name ~kind ~payload =

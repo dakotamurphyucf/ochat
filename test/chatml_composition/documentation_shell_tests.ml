@@ -70,7 +70,12 @@ let%expect_test "public checker separates inspection, checks and approved report
       | _ -> failwith "unexpected checker model request"
     in
     let daemon_options =
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     in
     Host.with_host
       ~durable:false

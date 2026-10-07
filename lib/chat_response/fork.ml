@@ -1,406 +1,23 @@
-open Core
-module Res = Openai.Responses
-module Output = Res.Tool_output.Output
+open! Core
+module Invocation_id = Fork_history.Invocation_id
 
-module Invocation_id = struct
-  type t = string
-
-  let next = Atomic.make 0
-
-  let create () =
-    let sequence = Atomic.fetch_and_add next 1 in
-    Printf.sprintf "fork-invocation-%d" sequence
-  ;;
-
-  let to_string t = t
-end
+let allocator = Fork_history.allocator
+let history_entries = Fork_history.history_entries
 
 type transcript_observer =
   { parent : Transcript.Scope.parent
   ; observe : Transcript.Stream.t -> unit
   }
 
-let create_allocator ~parent_namespace invocation_id =
-  History_entry.Allocator.create
-    ~namespace:(parent_namespace ^ "/" ^ Invocation_id.to_string invocation_id)
-    ~next_sequence:0
-  |> Result.ok_or_failwith
-;;
-
-let allocator = create_allocator
-
-let instruction_template : (string -> string -> string -> string, unit, string) format =
-  {|SYSTEM MESSAGE – Forked Agent
-
-You are an **isolated clone** of the main assistant. Your child history is not merged into the parent history. All new assistant-message text is returned to the parent as tool output, including both RESULT and PERSIST sections. PERSIST is a summary convention, not an extraction boundary. Live progress may also be visible to the user.
-
-Primary task inside the fork
-• Execute:
-  command - `%s`
-  arguments - `%s`
-
-Use available tools within their granted authority, including recursive forks when available. Respect output and token limits.
-
-Return exactly **one** assistant message in this template:
-
-```
-===RESULT===
-<Report actions, outcomes, relevant evidence, validation, and unresolved issues.>
-
-===PERSIST===
-<Concise summary of facts, artefacts, follow-ups, or warnings for the parent. This section does not exclude the rest of your reply from the returned output.>
-```
-
-Best-practice reminders:
-• Include concise explanations and evidence in RESULT.
-• Perform a quick self-check before replying; note unresolved issues in PERSIST.
-• Avoid filler phrases like “let’s think step-by-step”.  Just reason and write.
-
-Call-ID: %s
-|}
-;;
-
-let instruction_item ~arguments ~call_id =
-  let input = Definitions.Fork.input_of_string arguments in
-  let arg_str = String.concat ~sep:" " input.arguments in
-  let instruction_text =
-    Printf.sprintf instruction_template input.command arg_str call_id
-  in
-  Res.Item.Function_call_output
-    { output = Res.Tool_output.Output.Text instruction_text
-    ; call_id
-    ; _type = "function_call_output"
-    ; id = None
-    ; status = None
-    }
-;;
-
-(* -------------------------------------------------------------------- *)
-(*  Helper: build a system/input message instructing the forked agent.   *)
-(* -------------------------------------------------------------------- *)
-
-(* -------------------------------------------------------------------- *)
-(*  Minimal nested streaming driver (avoids dependency on [Driver]).     *)
-(* -------------------------------------------------------------------- *)
-
-let rec run_stream
-          ~(env : Eio_unix.Stdenv.base)
-          ~(allocator : History_entry.Allocator.t)
-          ~(initial_history : History_entry.t list)
-          ~(tools : Res.Request.Tool.t list)
-          ~(tool_tbl : (string, Ochat_function.runner) Base.Hashtbl.t)
-          ~(on_event : Res.Response_stream.t -> unit)
-          ~(on_sourced_event : Sourced_response_event.t -> unit)
-          ~(on_tool_execution : Tool_execution_event.t -> unit)
-          ~transcript_observer
-          ~(on_fn_out : Res.Function_call_output.t -> unit)
-          ~(call_id_parent : string)
-          ~(invocation_id : Invocation_id.t)
-          ~(output_buffer : Buffer.t)
-          ?temperature
-          ?max_output_tokens
-          ?reasoning
-          ()
-  : History_entry.t list
-  =
-  let net = env#net in
-  let cwd = Eio.Stdenv.cwd env in
-  let datadir = Io.ensure_chatmd_dir ~cwd in
-  (* A small cache is sufficient. *)
-  let cache_file = Eio.Path.(datadir / "cache.bin") in
-  let cache = Cache.load ~file:cache_file ~max_size:1_000 () in
-  (* ------------------------------------------------------------------ *)
-  (* Recursive turn function                                             *)
-  (* ------------------------------------------------------------------ *)
-  let next_attempt = ref 0 in
-  let rec turn (hist : History_entry.t list) : History_entry.t list =
-    let transcript_scope, transcript_live =
-      match transcript_observer with
-      | None -> None, ref None
-      | Some observer ->
-        let source =
-          Transcript.Source_id.of_string (Invocation_id.to_string invocation_id)
-          |> Result.ok_or_failwith
-        in
-        let attempt =
-          Transcript.Attempt_id.of_string ("attempt:" ^ Int.to_string !next_attempt)
-          |> Result.ok_or_failwith
-        in
-        Int.incr next_attempt;
-        let scope =
-          Transcript.Scope.create ~source ~attempt ~relation:(Nested observer.parent)
-          |> Result.ok_or_failwith
-        in
-        ( Some scope
-        , ref
-            (Some
-               (Openai.Responses_live.create ~scope ~limits:Transcript.Admission.default))
-        )
-    in
-    let update_transcript update =
-      match transcript_observer, !transcript_live with
-      | None, _ -> ()
-      | Some observer, Some live ->
-        let live, observations = update live |> Result.ok_or_failwith in
-        transcript_live := Some live;
-        List.iter observations ~f:observer.observe
-      | Some _, None -> failwith "child observation outside an actual source"
-    in
-    let child_observer ~call_id =
-      match transcript_observer, transcript_scope with
-      | Some observer, Some scope ->
-        Some
-          { parent =
-              { scope = Transcript.Scope.key scope
-              ; call_entry_id = None
-              ; call_alias = Some call_id
-              }
-          ; observe = observer.observe
-          }
-      | None, _ | Some _, None -> None
-    in
-    (* Tables for tracking function calls and reasoning items. *)
-    let module Tool_call_kind = struct
-      type t =
-        | Function
-        | Custom
-    end
-    in
-    let tool_info : (string, Tool_call_kind.t * string * string) Hashtbl.t =
-      Hashtbl.create (module String)
-    in
-    let reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
-    let new_entries : History_entry.t list ref = ref [] in
-    let add_item item =
-      let entry =
-        Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
-      in
-      new_entries := entry :: !new_entries;
-      update_transcript (fun live -> Openai.Responses_live.finalized live entry)
-    in
-    let run_again = ref false in
-    (* Execute a tool once its arguments have been streamed. *)
-    let handle_function_done ~item_id ~arguments =
-      match Hashtbl.find tool_info item_id with
-      | None | Some (Tool_call_kind.Custom, _, _) ->
-        (* Should not happen, return dummy output *)
-        Tool_call.function_call_output ~call_id:"" ~output:(Output.Text "")
-      | Some (Tool_call_kind.Function, name, call_id) ->
-        let result =
-          Tool_call.run_tool
-            ~kind:Tool_call.Kind.Function
-            ~name
-            ~payload:arguments
-            ~call_id
-            ~tool_tbl
-            ~on_fork:
-              (Some
-                 (fun ~invocation ~call_id ~arguments ->
-                   let trace =
-                     Agent_trace.create
-                       ~emit:(Ochat_function.Invocation.emit invocation)
-                       ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
-                   in
-                   let child_invocation_id = Invocation_id.create () in
-                   let child_allocator =
-                     create_allocator
-                       ~parent_namespace:(History_entry.Allocator.namespace allocator)
-                       child_invocation_id
-                   in
-                   Openai.Responses.Tool_output.Output.Text
-                     (execute_entries
-                        ~env
-                        ~history:hist
-                        ~allocator:child_allocator
-                        ~invocation_id:child_invocation_id
-                        ~call_id
-                        ~arguments
-                        ~tools
-                        ~tool_tbl
-                        ~on_event
-                        ~on_sourced_event
-                        ~on_tool_execution:(Agent_trace.on_tool_execution trace)
-                        ?transcript_observer:(child_observer ~call_id)
-                        ~on_fn_out
-                        ?temperature
-                        ?max_output_tokens
-                        ?reasoning
-                        ())))
-            ~on_tool_execution
-            ()
-        in
-        let fn_call_item : Res.Item.t =
-          Tool_call.call_item
-            ~kind:Tool_call.Kind.Function
-            ~name
-            ~payload:arguments
-            ~call_id
-            ~id:(Some item_id)
-        in
-        let fn_out : Res.Function_call_output.t =
-          Tool_call.function_call_output ~call_id ~output:result
-        in
-        let fn_out_item = Res.Item.Function_call_output fn_out in
-        let fn_call_entry =
-          Openai.Responses_history.create ~allocator fn_call_item |> Result.ok_or_failwith
-        in
-        let fn_out_entry =
-          Openai.Responses_history.create ~allocator fn_out_item |> Result.ok_or_failwith
-        in
-        new_entries := fn_out_entry :: fn_call_entry :: !new_entries;
-        update_transcript (fun live -> Openai.Responses_live.finalized live fn_call_entry);
-        update_transcript (fun live -> Openai.Responses_live.finalized live fn_out_entry);
-        run_again := true;
-        fn_out
-    in
-    let handle_custom_tool_call_done ~item_id ~input =
-      match Hashtbl.find tool_info item_id with
-      | None | Some (Tool_call_kind.Function, _, _) -> ()
-      | Some (Tool_call_kind.Custom, name, call_id) ->
-        let result =
-          Tool_call.run_tool
-            ~kind:Tool_call.Kind.Custom
-            ~name
-            ~payload:input
-            ~call_id
-            ~tool_tbl
-            ~on_fork:None
-            ~on_tool_execution
-            ()
-        in
-        let tool_call_item : Res.Item.t =
-          Tool_call.call_item
-            ~kind:Tool_call.Kind.Custom
-            ~name
-            ~payload:input
-            ~call_id
-            ~id:(Some item_id)
-        in
-        let tool_out : Res.Custom_tool_call_output.t =
-          Tool_call.custom_tool_call_output ~call_id ~output:result
-        in
-        let tool_out_item = Res.Item.Custom_tool_call_output tool_out in
-        let tool_call_entry =
-          Openai.Responses_history.create ~allocator tool_call_item
-          |> Result.ok_or_failwith
-        in
-        let tool_out_entry =
-          Openai.Responses_history.create ~allocator tool_out_item
-          |> Result.ok_or_failwith
-        in
-        new_entries := tool_out_entry :: tool_call_entry :: !new_entries;
-        update_transcript (fun live ->
-          Openai.Responses_live.finalized live tool_call_entry);
-        update_transcript (fun live ->
-          Openai.Responses_live.finalized live tool_out_entry);
-        run_again := true
-    in
-    (* Streaming callback – forwards to caller while building history. *)
-    let stream_cb (ev : Res.Response_stream.t) =
-      update_transcript (fun live ->
-        Openai.Responses_live.observe_legacy live ~entry_id:None ev);
-      (match ev with
-       (* Assistant text progress – accumulate and propagate *)
-       | Res.Response_stream.Output_text_delta { delta; _ } ->
-         Stdlib.Buffer.add_string output_buffer delta;
-         let fn_out : Res.Function_call_output.t =
-           Tool_call.function_call_output
-             ~call_id:call_id_parent
-             ~output:(Output.Text (Stdlib.Buffer.contents output_buffer))
-         in
-         on_fn_out fn_out
-       (* New item announced – track pending function calls *)
-       | Res.Response_stream.Output_item_added { item; _ } ->
-         (match item with
-          | Res.Response_stream.Item.Function_call fc ->
-            let idx = Option.value fc.id ~default:fc.call_id in
-            Hashtbl.set
-              tool_info
-              ~key:idx
-              ~data:(Tool_call_kind.Function, fc.name, fc.call_id)
-          | Res.Response_stream.Item.Custom_function tc ->
-            let idx = Option.value tc.id ~default:tc.call_id in
-            Hashtbl.set
-              tool_info
-              ~key:idx
-              ~data:(Tool_call_kind.Custom, tc.name, tc.call_id)
-          | Res.Response_stream.Item.Reasoning r ->
-            Hashtbl.set reasoning_state ~key:r.id ~data:0
-          | _ -> ())
-       (* Completed item – append to history list *)
-       | Res.Response_stream.Output_item_done { item; _ } ->
-         (match item with
-          | Res.Response_stream.Item.Output_message om ->
-            add_item (Res.Item.Output_message om) (* message appended *)
-          | Res.Response_stream.Item.Reasoning r -> add_item (Res.Item.Reasoning r)
-          | _ -> ())
-       (* Function-call argument streaming finished – run tool *)
-       | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
-         (* PreToolCall *)
-         let fn_out = handle_function_done ~item_id ~arguments in
-         (* PostToolResponse *)
-         (* also propagate result if this was nested call *)
-         on_fn_out fn_out
-       | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
-         (* PreToolCall *)
-         handle_custom_tool_call_done ~item_id ~input
-       (* PostToolResponse *)
-       | _ -> ());
-      (* Forward every raw event upward so the parent UI can, if desired,
-         display fork activity.  The TUI will distinguish forked events by
-         monitoring whether a fork tool call with [call_id_parent] is
-         currently outstanding. *)
-      on_event ev;
-      on_sourced_event
-        (Sourced_response_event.fork
-           ~invocation_id:(Invocation_id.to_string invocation_id)
-           ~parent_call_id:call_id_parent
-           ev)
-    in
-    Eio.Switch.run
-    @@ fun sw ->
-    (* Fire request. *)
-    update_transcript Openai.Responses_live.start;
-    let stream =
-      Res.post_response
-        Res.Stream
-        ~dir:datadir
-        ?temperature
-        ?max_output_tokens
-        ?reasoning
-        ~parallel_tool_calls:true
-        net
-        ~inputs:(Openai.Responses_history.items_exn hist)
-        ~tools
-        ~sw
-        ~model:Res.Request.O3
-    in
-    Seq.iter stream_cb stream;
-    let completion =
-      Option.bind !transcript_live ~f:Openai.Responses_live.completion
-      |> Option.value ~default:Transcript.Stream.Incomplete
-    in
-    update_transcript (fun live -> Openai.Responses_live.finish live ~completion);
-    let next_hist = hist @ List.rev !new_entries in
-    if !run_again then turn next_hist else next_hist
-  in
-  (* turn start *)
-  let full = turn initial_history in
-  (* turn end *)
-  Cache.save ~file:cache_file cache;
-  full
-
-and execute_entries
-      ~env
+let execute_entries
+      ~ctx
       ~allocator
       ~history
-      ~invocation_id
+      ~invocation_id:_
       ~call_id
       ~arguments
       ~tools
       ~tool_tbl
-      ~on_event
-      ?on_sourced_event
       ?on_tool_execution
       ?transcript_observer
       ~on_fn_out
@@ -409,52 +26,51 @@ and execute_entries
       ?reasoning
       ()
   =
-  let instruction =
-    Openai.Responses_history.create ~allocator (instruction_item ~arguments ~call_id)
-    |> Result.ok_or_failwith
+  let clone_history = history_entries ~allocator ~history ~arguments ~call_id in
+  let relation =
+    Option.value_map
+      transcript_observer
+      ~default:ctx.Ctx.inference_relation
+      ~f:(fun observer -> Transcript.Scope.Nested observer.parent)
   in
-  let clone_history = history @ [ instruction ] in
-  let output_buffer = Buffer.create 256 in
-  let full_history =
-    run_stream
-      ~env
+  let all_entries =
+    In_memory_stream.run_completion_stream_in_memory_entries
+      ~env:(Ctx.env ctx)
+      ~inference_context:ctx.inference_context
+      ~inference_identity:ctx.inference_identity
+      ~on_inference_attempt:ctx.on_inference_attempt
+      ~on_inference_completion:ctx.on_inference_completion
+      ~on_inference_observation:ctx.on_inference_observation
+      ~inference_relation:relation
+      ~datadir:(Ctx.dir ctx)
       ~allocator
-      ~initial_history:clone_history
-      ~tools
+      ~history:clone_history
+      ~tools:(Some tools)
       ~tool_tbl
-      ~on_event
-      ~on_sourced_event:(Option.value on_sourced_event ~default:(fun _ -> ()))
-      ~on_tool_execution:(Option.value on_tool_execution ~default:(fun _ -> ()))
-      ~transcript_observer
-      ~on_fn_out
-      ~call_id_parent:call_id
-      ~invocation_id
-      ~output_buffer
+      ?on_tool_execution
+      ?on_transcript_event:
+        (Option.map transcript_observer ~f:(fun observer -> observer.observe))
       ?temperature
       ?max_output_tokens
       ?reasoning
       ()
   in
-  let clone_ids =
-    List.map clone_history ~f:History_entry.id
-    |> Hash_set.of_list (module History_entry.Id)
+  let generated = List.drop all_entries (List.length clone_history) in
+  let text =
+    List.filter_map generated ~f:(fun entry ->
+      match
+        History_entry.Payload.Semantic.view
+          (History_entry.Payload.semantic (History_entry.payload entry))
+      with
+      | Message { role = Assistant; content; _ } ->
+        Some
+          (List.filter_map content ~f:(function
+             | History_entry.Payload.Content.Text { text; _ } -> Some text
+             | Image _ | Refusal _ | Unknown _ -> None)
+           |> String.concat ~sep:" ")
+      | Message _ | Call _ | Result _ | Reasoning _ | Unknown _ -> None)
+    |> String.concat ~sep:"\n"
   in
-  List.filter full_history ~f:(fun entry ->
-    not (Hash_set.mem clone_ids (History_entry.id entry)))
-  |> List.filter_map ~f:(fun entry ->
-    match Openai.Responses_history.item_exn entry with
-    | Res.Item.Output_message message ->
-      Some
-        (List.map message.content ~f:(fun content -> content.text)
-         |> String.concat ~sep:" ")
-    | _ -> None)
-  |> String.concat ~sep:"\n"
-;;
-
-let history_entries ~allocator ~history:entries ~arguments ~call_id =
-  let instruction =
-    Openai.Responses_history.create ~allocator (instruction_item ~arguments ~call_id)
-    |> Result.ok_or_failwith
-  in
-  entries @ [ instruction ]
+  on_fn_out (Tool_call.function_call_output ~call_id ~output:(Text text));
+  text
 ;;

@@ -173,43 +173,20 @@ module For_testing = struct
   let run_with_terminal_event = run_with_terminal_event
 end
 
-let prompt_cache_retention model =
-  match model with
-  | Some
-      ( "gpt-5.4"
-      | "gpt-5.2"
-      | "gp5-5.1-codex-max"
-      | "gpt-5.1"
-      | "gpt-5.1-codex"
-      | "gpt-5.1-codex-mini"
-      | "gpt-5.1-chat-latest"
-      | "gpt-5"
-      | "gpt-5-codex"
-      | "gpt-4.1" ) -> Some "24h"
-  | _ -> None
-;;
-
 let run_driver (ctx : Context.t) ~history ~stream =
-  let cfg = ctx.cfg in
   Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
     ~env:ctx.shared.services.env
+    ~inference_context:ctx.shared.services.inference_context
+    ~inference_identity:ctx.shared.services.inference_identity
+    ~on_inference_attempt:ctx.shared.services.on_inference_attempt
+    ~on_inference_completion:ctx.shared.services.on_inference_completion
+    ~on_inference_observation:ctx.shared.services.on_inference_observation
     ~datadir:ctx.shared.services.datadir
     ~allocator:ctx.allocator
     ~history
     ~tools:(Some ctx.tools)
     ~tool_tbl:ctx.tool_tbl
     ?safe_point_input:ctx.safe_point_input
-    ?temperature:cfg.temperature
-    ?max_output_tokens:cfg.max_tokens
-    ?reasoning:
-      (Option.map cfg.reasoning_effort ~f:(fun effort ->
-         Req.Reasoning.
-           { effort = Some (Req.Reasoning.Effort.of_str_exn effort)
-           ; summary = Some Req.Reasoning.Summary.Detailed
-           }))
-    ?prompt_cache_key:
-      (Option.map ctx.shared.services.session ~f:(fun session -> session.id))
-    ?prompt_cache_retention:(prompt_cache_retention cfg.model)
     ?moderator:ctx.moderator
     ~on_transcript_event:(fun event -> Eio.Stream.add stream (Event (Transcript event)))
     ~on_history_item_appended:(fun entry ->
@@ -219,7 +196,6 @@ let run_driver (ctx : Context.t) ~history ~stream =
     ~on_runtime_request:(fun request ->
       Eio.Stream.add stream (Event (Runtime_request request)))
     ~history_compaction:ctx.history_compaction
-    ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
     ~parallel_tool_calls:ctx.parallel_tool_calls
     ()
 ;;

@@ -114,9 +114,10 @@ let run ?(shutdown = false) ?(stop = true) ~active_parent () =
               ~options:
                 { Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         Int.incr requests;
                         let cleanup, completion =
                           match !requests with

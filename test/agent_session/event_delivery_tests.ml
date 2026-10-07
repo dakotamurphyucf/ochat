@@ -55,6 +55,7 @@ let%expect_test "external event delivery commits receipts before changing the li
           moderator = Some (B.encode_moderator_snapshot (snapshot ()))
         ; schedules = [ first; second; third ]
         ; jobs = [ job ]
+        ; model_job_targets = [ model_job_binding initial job ]
         }
       in
       let backend =

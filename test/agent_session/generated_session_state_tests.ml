@@ -66,6 +66,7 @@ let%expect_test
           ; capability_pins = []
           ; lifetime = Owned
           ; created_at = timestamp
+          ; inference_target = None
           }
       in
       let key =
@@ -139,11 +140,11 @@ let%expect_test
         | _ -> assert false
       in
       let missing =
-        Document_schema.Document.create ~limits ~kind:"session.state" ~version:1 ~payload
+        Document_schema.Document.create ~limits ~kind:"session.state" ~version:2 ~payload
         |> document_ok
       in
       assert (Result.is_error (Documents.decode ~limits missing));
-      List.iter [ 0; 2 ] ~f:(fun version ->
+      List.iter [ 0; 3 ] ~f:(fun version ->
         let json =
           match Document_schema.Document.json pending_document with
           | `Object fields ->
@@ -299,7 +300,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 20) (stage Child_installed)
+    ((checkpoint_schema 21) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

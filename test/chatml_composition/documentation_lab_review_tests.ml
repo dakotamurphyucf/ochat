@@ -128,7 +128,12 @@ let%expect_test
         tool_default = Allow
       }
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env _ host ->
        Exn.protect ~finally:release_review ~f:(fun () ->
          (* These waits cover durable workflow completion, independently of the
@@ -317,7 +322,12 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
     ~sources:Lab.sources
     ~workspace_files:Lab.workspace_files
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env _ host ->
        Exn.protect
          ~finally:(fun () -> ignore (Eio.Promise.try_resolve release_resolver ()))

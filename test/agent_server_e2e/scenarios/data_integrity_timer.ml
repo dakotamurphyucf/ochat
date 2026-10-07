@@ -240,7 +240,10 @@ let run env environment =
   in
   let options =
     { Agent_server.Daemon.default_options with
-      model_post_stream = Some (Permission.model_post_stream (Eio.Path.native_exn marker))
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:(Permission.model_post_stream (Eio.Path.native_exn marker))
     }
   in
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 170. (fun () ->

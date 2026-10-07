@@ -1,8 +1,8 @@
 (library
  (name context_compaction)
  (public_name ochat.context_compaction)
- (modules config relevance_judge summarizer compactor)
- (libraries core eio jsonaf ochat.meta_prompting ochat.openai history_entry
+ (modules config history_view relevance_judge summarizer compactor)
+ (libraries core eio jsonaf ochat.meta_prompting ochat.inference_client ochat.inference ochat.transcript history_entry
   ochat.tikitoken ochat.tiktoken_data)
  (preprocess
   (pps ppx_jane)))
@@ -22,6 +22,7 @@
   expect_test_helpers_core
   context_compaction
   history_entry
+  ochat.openai
   eio
   eio_main)
  (inline_tests)

@@ -225,6 +225,36 @@ let with_temp_directory f =
       ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true root))
 ;;
 
+let inference_selection () =
+  let target =
+    Inference.Request.Target.create
+      ~adapter:"fixture"
+      ~profile:"explicit-fixture"
+      ~profile_revision:None
+      ~account:None
+      ~endpoint:"local-fixture"
+      ~model:"fixture-model"
+      ~settings:[]
+      ~limits:document_limits
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Inference.Selection.captured target ~limits:document_limits
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+(* Bind manually authored Model_call fixtures to their actual selected source. *)
+let model_job_binding (state : Agent_session.Session_state.t) job =
+  match Inference.Selection.view state.spec.inference_target with
+  | Unresolved -> failwith "model job fixture requires a captured source selection"
+  | Captured target ->
+    Agent_session.Model_job_target.create job ~target ~limits:document_limits
+    |> protocol_ok
+;;
+
 let actor_state ~workspace_instance ~liveness ~start_immediately =
   let execution_host, persistence =
     match liveness with
@@ -261,6 +291,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       ; prompt_definition_id = None
       ; delegation = None
       ; prompt_revision_id
+      ; inference_target = inference_selection ()
       ; workspace_instance
       ; permission_profile = "interactive"
       ; permission_profile_digest = "profile-digest"
@@ -459,7 +490,7 @@ let handoff_snapshot count =
     }
 ;;
 
-let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
+let with_handoff_actor ?(reject = fun _ -> false) ?inference ~make_worker f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor_ready, actor_ready_u = Eio.Promise.create () in
@@ -500,6 +531,12 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
             ; state_committed = (fun _ _ -> ())
             }
       in
+      Option.iter inference ~f:(fun inference ->
+        Agent_session.Session_actor.set_runtime_worker
+          actor
+          ~worker:(Some worker)
+          ~inference:(Some inference)
+        |> protocol_ok);
       Eio.Promise.resolve actor_ready_u actor;
       Exn.protect
         ~finally:(fun () -> Agent_session.Session_actor.shutdown actor)

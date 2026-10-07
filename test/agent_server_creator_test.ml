@@ -86,6 +86,19 @@ let%expect_test
                 ; output_index = 0
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name
+                      ; arguments = Jsonaf.to_string arguments
+                      ; call_id = sprintf "create-%d" !calls
+                      ; _type = "function_call"
+                      ; id = Some "create-item"
+                      ; status = Some "completed"
+                      }
+                ; output_index = 0
+                ; type_ = "response.output_item.done"
+                }
             ]
             |> Stdlib.List.to_seq
         in
@@ -103,7 +116,10 @@ let%expect_test
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream = Some provider
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:provider
                   }
                 ()
               |> protocol_ok
@@ -501,7 +517,10 @@ let%expect_test
               ~daemon_options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream = Some provider
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
                 }
               { prompt_file = prompt
               ; workspace = root

@@ -25,11 +25,18 @@ let stream_function_call ~output_index ~item_id ~call_id ~arguments =
       ; output_index
       ; type_ = "response.output_item.added"
       }
-  , Res.Response_stream.Function_call_arguments_done
-      { arguments
-      ; item_id
+  , Res.Response_stream.Output_item_done
+      { item =
+          Function_call
+            { name = "echo"
+            ; arguments
+            ; call_id
+            ; _type = "function_call"
+            ; id = Some item_id
+            ; status = Some "completed"
+            }
       ; output_index
-      ; type_ = "response.function_call_arguments.done"
+      ; type_ = "response.output_item.done"
       } )
 ;;
 

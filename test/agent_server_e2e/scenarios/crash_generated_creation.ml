@@ -169,9 +169,10 @@ let run_child env ~root ~boundary ~recover =
               (if recover && String.equal boundary "grant-changed"
                then "crash-fixture-v2"
                else "crash-fixture-v1")
-        ; model_post_stream =
-            Some
-              (fun ~sw:_ ~inputs:_ ->
+        ; inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream:(fun ~sw:_ ~inputs:_ ->
                 Int.incr requests;
                 Stdlib.Seq.empty)
         }

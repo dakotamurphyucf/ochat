@@ -47,6 +47,7 @@ let fetch_prompt ~ctx ~prompt ~is_local =
     let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx prompt else None in
     Ok (xml, prompt_dir)
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn -> Error (Exn.to_string exn)
 ;;
 
@@ -61,7 +62,7 @@ let capabilities_with_model_executor
       Map.of_alist_exn
         (module String)
         [ ( Model_executor.agent_prompt_v1_name
-          , Model_executor.recipe_agent_prompt_v1 model_executor ~session_id )
+          , Model_executor.recipe_agent_prompt_v1 model_executor ~session_id () )
         ]
   }
 ;;
@@ -514,7 +515,7 @@ let append_generated_items ~append ~save_doc ~show_tool_call items =
     spawn sub-agents without leaving the main conversation context. *)
 
 type agent_observer = Agent_response_loop.observer =
-  { on_event : Res.Response_stream.t -> unit
+  { on_event : Transcript.Stream.t -> unit
   ; on_tool_execution : Tool_execution_event.t -> unit
   }
 
@@ -545,6 +546,41 @@ let extension_entries ~prefix entries =
   else failwith "Response execution did not preserve the initial history prefix"
 ;;
 
+let selected_context (ctx : _ Ctx.t) config =
+  let target =
+    Inference_config.apply_overrides
+      (Inference_runtime.Context.target ctx.inference_context)
+      config
+      ~limits:Transcript.Admission.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let inference_context =
+    Inference_runtime.Context.derive ctx.inference_context ~target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Ctx.with_inference ctx ~inference_context
+;;
+
+let assistant_text entries =
+  List.filter_map entries ~f:(fun entry ->
+    match
+      History_entry.Payload.Semantic.view
+        (History_entry.Payload.semantic (History_entry.payload entry))
+    with
+    | Message { role = Assistant; content; _ } ->
+      Some
+        (List.filter_map content ~f:(function
+           | History_entry.Payload.Content.Text { text; _ } -> Some text
+           | Image _ | Refusal _ | Unknown _ -> None)
+         |> String.concat ~sep:" ")
+    | Message _ | Call _ | Result _ | Reasoning _ | Unknown _ -> None)
+  |> String.concat ~sep:"\n"
+;;
+
 let run_entries
       ~ctx
       ~allocator
@@ -555,12 +591,11 @@ let run_entries
       ?history_compaction
       ?response_dir
       ?observer
-      ?on_sourced_event
       ?source
       ?parent_call_id
       ?post
       ?post_stream
-      ~model
+      ?model
       ~tool_tbl
       history
   =
@@ -576,7 +611,7 @@ let run_entries
       ?history_compaction
       ?response_dir
       ?post
-      ~model
+      ?model
       ~tool_tbl
       history
   | Some observer ->
@@ -589,10 +624,9 @@ let run_entries
       ?reasoning
       ?history_compaction
       ?response_dir
-      ?on_sourced_event
       ?source
       ?parent_call_id
-      ~model
+      ?model
       ~tool_tbl
       ~observer
       ?post_stream
@@ -605,7 +639,6 @@ let rec run_agent
           ?session_id
           ?response_dir
           ?observer
-          ?(on_sourced_event = fun _ -> ())
           ?source
           ?parent_call_id
           ?(shell_manifest_authorizer = Shell_runtime.Manifest_authorizer.deny)
@@ -621,7 +654,18 @@ let rec run_agent
   let dir = Option.value prompt_dir ~default:(Ctx.dir ctx) in
   let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
   let ctx =
-    Ctx.create ~env:(Ctx.env ctx) ~dir ~tool_dir:(Ctx.tool_dir ctx) ~cache:(Ctx.cache ctx)
+    Ctx.create
+      ~env:(Ctx.env ctx)
+      ~dir
+      ~tool_dir:(Ctx.tool_dir ctx)
+      ~cache:(Ctx.cache ctx)
+      ~inference_context:ctx.inference_context
+      ~inference_identity:ctx.inference_identity
+      ~on_inference_attempt:ctx.on_inference_attempt
+      ~on_inference_completion:ctx.on_inference_completion
+      ~on_inference_observation:ctx.on_inference_observation
+      ~inference_relation:ctx.inference_relation
+      ()
   in
   (* 1.  Build the full agent XML by adding any inline user items. *)
   let msg =
@@ -645,17 +689,8 @@ let rec run_agent
   let elements = CM.parse_chat_inputs ~source:prompt_source ~dir prompt_xml in
   (* 3.  Configuration (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
-  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _; id } =
-    cfg
-  in
-  let model =
-    Option.value_map model ~default:Res.Request.Gpt4 ~f:Res.Request.model_of_str_exn
-  in
-  let reasoning =
-    Option.map reasoning_effort ~f:(fun eff ->
-      Res.Request.Reasoning.
-        { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
-  in
+  let ctx = selected_context ctx cfg in
+  let id = cfg.id in
   let runtime_session_id =
     Option.first_some id session_id |> Option.value ~default:"nested-agent"
   in
@@ -784,27 +819,28 @@ let rec run_agent
           ~session_id:m.session_id
           ~manager:m.manager);
       In_memory_stream.run_completion_stream_in_memory_entries
+        ~inference_context:ctx.inference_context
+        ~inference_identity:ctx.inference_identity
+        ~on_inference_attempt:ctx.on_inference_attempt
+        ~on_inference_completion:ctx.on_inference_completion
+        ~on_inference_observation:ctx.on_inference_observation
+        ~inference_relation:ctx.inference_relation
         ~env:(Ctx.env ctx)
         ~datadir:response_dir
         ~allocator
         ~history:init_entries
         ~tools:(Some tools_req)
         ~tool_tbl
-        ?temperature
-        ?max_output_tokens:max_tokens
-        ?reasoning
         ?moderator
-        ?on_event:(Option.map observer ~f:(fun observer -> observer.on_event))
-        ~on_sourced_event
+        ?on_transcript_event:(Option.map observer ~f:(fun observer -> observer.on_event))
         ?source
         ?parent_call_id
         ?on_tool_execution:
           (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
         ~history_compaction
         ~parallel_tool_calls:true
-        ~model
         ()
-      |> Openai.Responses_history.items_exn)
+      |> extension_entries ~prefix:init_entries)
     else (
       let session_id =
         Option.first_some id session_id |> Option.value ~default:"nested-agent"
@@ -823,30 +859,19 @@ let rec run_agent
         run_entries
           ~ctx
           ~allocator
-          ?temperature
-          ?max_output_tokens:max_tokens
           ~tools:tools_req
-          ?reasoning
           ~history_compaction
           ~response_dir
           ?observer
-          ~on_sourced_event
           ?source
           ?parent_call_id
-          ~model
           ~tool_tbl
           init_entries
       in
-      extension_entries ~prefix:init_entries all_entries
-      |> Openai.Responses_history.items_exn)
+      extension_entries ~prefix:init_entries all_entries)
   in
-  (* 6.  Extract assistant messages and concatenate them. *)
-  (if has_script elements then List.drop all_items (List.length init_items) else all_items)
-  |> List.filter_map ~f:(function
-    | Res.Item.Output_message o ->
-      Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
-    | _ -> None)
-  |> String.concat ~sep:"\n"
+  (* Child output is semantic text; retained opaque evidence is never lowered. *)
+  assistant_text all_items
 ;;
 
 (*──────────────────────── 6.  Main driver  ───────────────────────────────*)
@@ -884,250 +909,41 @@ let rec run_agent
           ~output_file:"conversation.chatmd"
           ()
     ]} *)
-let run_completion
-      ~env
-      ?prompt_file
-      ?(parallel_tool_calls = true)
-      ?(meta_refine = false)
-      ~output_file
-      ()
+let rec run_completion
+          ~env
+          ~inference_context
+          ~inference_identity
+          ~on_inference_attempt
+          ~on_inference_completion
+          ?on_inference_observation
+          ?prompt_file
+          ?(parallel_tool_calls = true)
+          ?(meta_refine = false)
+          ~output_file
+          ()
   =
-  if meta_refine then Caml_unix.putenv "OCHAT_META_REFINE" "1";
-  (* [run_completion ~env ?prompt_file ~output_file ()] enters a
-     read-eval-append loop on [output_file].  Each iteration:
+  run_completion_stream
+    ~env
+    ~inference_context
+    ~inference_identity
+    ~on_inference_attempt
+    ~on_inference_completion
+    ?on_inference_observation
+    ?prompt_file
+    ~parallel_tool_calls
+    ~meta_refine
+    ~output_file
+    ()
 
-     1. Parses the XML buffer into ChatMarkdown elements.
-     2. Converts them to OpenAI items via {!Converter}.
-     3. Runs {!Response_loop.run} until no pending function calls.
-     4. Appends the assistant answer (and reasoning) back to
-        [output_file].  *)
-  (* Synchronous execution path does not yet thread the flag further –
-     discard it to avoid a warning until Task 4 refactors the loop. *)
-  let _parallel_tool_calls = parallel_tool_calls in
-  let cwd = Eio.Stdenv.cwd env in
-  (* Directory of the ChatMarkdown buffer on disk.  We use it as the base when
-     resolving relative paths that originate from the prompt itself. *)
-  let output_dir : _ Eio.Path.t =
-    let dirname = Filename.dirname output_file in
-    if Filename.is_relative dirname
-    then Eio.Path.(cwd / dirname)
-    else Eio.Path.(Eio.Stdenv.fs env / dirname)
-  in
-  (* All IO on [output_file] uses [cwd] so that relative paths behave like a
-     regular shell. *)
-  let dir = cwd in
-  (* Ensure the hidden data directory exists and get its path. *)
-  let datadir = Io.ensure_chatmd_dir ~cwd in
-  let cache_file = Eio.Path.(datadir / "cache.bin") in
-  let cache = Cache.load ~file:cache_file ~max_size:1000 () in
-  (* 1 •append initial prompt file if provided *)
-  Option.iter prompt_file ~f:(fun file ->
-    Io.append_doc ~dir output_file (Io.load_doc ~dir file));
-  (* 2 • main loop *)
-  let rec loop () =
-    let xml = Io.load_doc ~dir output_file in
-    (* Parse ChatMarkdown with [output_dir] as the base for resolving      *)
-    (* <import/> or other file-relative constructs inside the prompt.       *)
-    let elements = CM.parse_chat_inputs ~dir:output_dir xml in
-    (* gather config *)
-    let cfg = Config.of_elements elements in
-    let CM.
-          { max_tokens = model_tokens
-          ; model = model_opt
-          ; reasoning_effort
-          ; temperature
-          ; id
-          ; _
-          }
-      =
-      cfg
-    in
-    let reasoning =
-      Option.map reasoning_effort ~f:(fun eff ->
-        { Res.Request.Reasoning.effort =
-            Some (Res.Request.Reasoning.Effort.of_str_exn eff)
-        ; summary = Some Detailed
-        })
-    in
-    let model =
-      Option.value_map model_opt ~default:Res.Request.Gpt4 ~f:Res.Request.model_of_str_exn
-    in
-    (* convert xml → items and fire first request *)
-    let ctx = Ctx.create ~env ~dir:output_dir ~cache ~tool_dir:dir in
-    (* tools / function mapping *)
-    let builtin_fns =
-      [ Functions.webpage_to_markdown
-          ~env:(Ctx.env ctx)
-          ~dir:(Ctx.tool_dir ctx)
-          ~net:(Ctx.net ctx)
-      ; Functions.fork
-      ]
-    in
-    let comp_tools, tool_tbl = Ochat_function.functions builtin_fns in
-    let tools = Tool.convert_tools comp_tools in
-    (* Reuse earlier [ctx] for conversion to items. *)
-    let init_items =
-      Converter.to_items
-        ~ctx
-        ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-          run_agent
-            ~history_compaction:false
-            ?prompt_dir
-            ?session_id
-            ~response_dir:datadir
-            ~ctx
-            prompt
-            items)
-        elements
-    in
-    let append = Io.append_doc ~dir output_file in
-    let save_doc name contents = Io.save_doc ~dir:datadir name contents in
-    if has_script elements
-    then (
-      let session_id = Option.value id ~default:output_file in
-      let runtime_requests = ref [] in
-      let all_items =
-        Eio.Switch.run
-        @@ fun sw ->
-        let exec_context : Model_executor.exec_context =
-          { ctx
-          ; run_agent =
-              (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
-                run_agent
-                  ?history_compaction
-                  ?prompt_dir
-                  ?session_id
-                  ~response_dir:datadir
-                  ~ctx
-                  prompt
-                  items)
-          ; fetch_prompt
-          }
-        in
-        let model_executor = Model_executor.create ~sw ~exec_context () in
-        let capabilities =
-          capabilities_with_model_executor
-            ~model_executor
-            ~session_id
-            Moderation.Capabilities.default
-        in
-        let allocator =
-          History_entry.Allocator.create
-            ~namespace:(session_id ^ "/blocking")
-            ~next_sequence:0
-          |> Result.ok_or_failwith
-        in
-        let init_entries = create_history_entries ~allocator init_items in
-        let moderator =
-          create_moderator_entries
-            ~env
-            ~session_id
-            ~elements
-            ~allocator
-            ~history:init_entries
-            ~available_tools:tools
-            ~capabilities
-            ()
-          |> Result.ok_or_failwith
-        in
-        Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-          Model_executor.register_session
-            model_executor
-            ~session_id:m.session_id
-            ~manager:m.manager);
-        In_memory_stream.run_completion_stream_in_memory_entries
-          ~env
-          ~datadir
-          ~allocator
-          ~history:init_entries
-          ~tools:(Some tools)
-          ~tool_tbl
-          ?temperature
-          ?max_output_tokens:model_tokens
-          ?reasoning
-          ?moderator
-          ~on_runtime_request:(fun request ->
-            runtime_requests := request :: !runtime_requests)
-          ~parallel_tool_calls
-          ~meta_refine
-          ~model
-          ()
-        |> extension_entries ~prefix:init_entries
-        |> Openai.Responses_history.items_exn
-      in
-      append_generated_items ~append ~save_doc ~show_tool_call:true all_items;
-      if not (has_end_session_request !runtime_requests) then append "\n<user>\n\n</user>")
-    else (
-      (* For the response loop we use a context bound to the .chatmd data folder so
-         that any tool-generated artefacts land in that directory. *)
-      let ctx_loop = Ctx.create ~env ~dir:datadir ~cache ~tool_dir:datadir in
-      let allocator =
-        History_entry.Allocator.create
-          ~namespace:(Option.value id ~default:output_file ^ "/blocking")
-          ~next_sequence:0
-        |> Result.ok_or_failwith
-      in
-      let init_entries = create_history_entries ~allocator init_items in
-      let all_entries =
-        run_entries
-          ~ctx:ctx_loop
-          ~allocator
-          ?temperature
-          ?max_output_tokens:model_tokens
-          ~tools
-          ?reasoning
-          ~tool_tbl
-          ~model
-          init_entries
-      in
-      let generated =
-        extension_entries ~prefix:init_entries all_entries
-        |> Openai.Responses_history.items_exn
-      in
-      append_generated_items ~append ~save_doc ~show_tool_call:true generated;
-      append "\n<user>\n\n</user>")
-  in
-  loop ();
-  Cache.save ~file:cache_file cache
-;;
-
-(** [run_completion_stream ~env ?prompt_file ?on_event ~output_file ()]
-    streams assistant deltas and high-level events **as they arrive**.
-
-    Compared to {!run_completion} this variant:
-
-    • Uses the streaming OpenAI API to obtain partial tokens.
-    • Invokes [?on_event] for every chunk, letting callers update a TUI
-      or web UI in real time.  The default callback ignores events so
-      existing scripts remain unchanged.
-    • Executes tool calls as soon as they are fully parsed, then
-      continues streaming the response.
-
-    Side-effects mirror {!run_completion}: partial messages and
-    reasoning summaries are appended to [output_file] immediately so
-    the buffer is crash-resistant.
-
-    Example – live rendering in the terminal:
-    {[
-      let on_event = function
-        | Responses.Response_stream.Output_text_delta d ->
-            Out_channel.output_string stdout d.delta
-        | _ -> ()
-
-      Eio_main.run @@ fun env ->
-        Driver.run_completion_stream
-          ~env
-          ~output_file:"conversation.chatmd"
-          ~on_event
-          ()
-    ]} *)
-let run_completion_stream
+and run_completion_stream
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?(on_inference_observation = fun _ -> ())
       ?prompt_file
-      ?(on_event : Openai.Responses.Response_stream.t -> unit = fun _ -> ())
-      ?(on_history_event : History_stream_event.t -> unit = fun _ -> ())
       ?on_transcript_event
-      ?(on_sourced_event : Sourced_response_event.t -> unit = fun _ -> ())
       ?(on_history_tool_out : History_entry.t -> unit = fun _ -> ())
       ?post_stream
       ?(on_final_history : History_entry.t list -> unit = fun _ -> ())
@@ -1139,6 +955,10 @@ let run_completion_stream
       ~output_file
       ()
   =
+  if Option.is_some post_stream
+  then
+    invalid_arg
+      "provider-shaped post_stream is retired; inject an explicit inference context";
   if meta_refine then Caml_unix.putenv "OCHAT_META_REFINE" "1";
   Eio.Switch.run
   @@ fun sw ->
@@ -1155,18 +975,10 @@ let run_completion_stream
   (* [dir] is used for regular file IO relative to the user’s shell. *)
   let dir = cwd in
   let datadir = Io.ensure_chatmd_dir ~cwd in
-  let net = env#net in
   let cache_file = Eio.Path.(datadir / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:1_000 () in
   let append_doc = Io.append_doc ~dir output_file in
   Option.iter prompt_file ~f:(fun file -> append_doc (Io.load_doc ~dir file));
-  (* Pretty logger: every event – even if we do not act on it *)
-  let log_event _ev =
-    (* print_endline "STREAM EVENT:";
-    print_endline (Jsonaf.to_string_hum (Res.Response_stream.jsonaf_of_t ev)) *)
-    ()
-  in
-  let fn_id = ref 0 in
   (* 1‑A • read current prompt XML and parse *)
   let xml =
     if String.equal output_file "/dev/stdout"
@@ -1184,19 +996,24 @@ let run_completion_stream
   let elements = CM.parse_chat_inputs ~source:output_file ~dir:output_dir xml in
   (* 1‑B • current config (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
-  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id } = cfg in
-  let model =
-    Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
-  in
-  let reasoning =
-    Option.map reasoning_effort ~f:(fun eff ->
-      Res.Request.Reasoning.
-        { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
-  in
+  let show_tool_call, id = cfg.show_tool_call, cfg.id in
   (* Execution context anchored at the prompt directory – ensures that any
      relative paths in <doc src="…">, <import>, or nested agent prompts are
      resolved against the folder that contains [output_file]. *)
-  let ctx = Ctx.create ~env ~dir:output_dir ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
+  let ctx =
+    Ctx.create
+      ~env
+      ~dir:output_dir
+      ~cache
+      ~tool_dir:(Eio.Stdenv.cwd env)
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ~on_inference_observation
+      ()
+  in
+  let ctx = selected_context ctx cfg in
   let runtime_session_id = Option.value id ~default:output_file in
   let host =
     Agent_runtime.host
@@ -1263,10 +1080,16 @@ let run_completion_stream
           items)
       elements
   in
-  if has_script elements
-  then (
-    let save_doc name contents = Io.save_doc ~dir:datadir name contents in
-    let session_id = Option.value id ~default:output_file in
+  let save_doc name contents = Io.save_doc ~dir:datadir name contents in
+  ignore save_doc;
+  ignore show_tool_call;
+  let session_id = Option.value id ~default:output_file in
+  let allocator =
+    History_entry.Allocator.create ~namespace:(session_id ^ "/stream") ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let input_entries = create_history_entries ~allocator inputs in
+  let model_executor =
     let exec_context : Model_executor.exec_context =
       { ctx
       ; run_agent =
@@ -1284,20 +1107,11 @@ let run_completion_stream
       ; fetch_prompt
       }
     in
-    let model_executor = Model_executor.create ~sw ~exec_context () in
-    let capabilities =
-      capabilities_with_model_executor
-        ~model_executor
-        ~session_id
-        Moderation.Capabilities.default
-    in
-    let allocator =
-      History_entry.Allocator.create ~namespace:(session_id ^ "/stream") ~next_sequence:0
-      |> Result.ok_or_failwith
-    in
-    let input_entries = create_history_entries ~allocator inputs in
-    let moderator =
-      let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
+    Model_executor.create ~sw ~exec_context ()
+  in
+  let moderator =
+    if has_script elements
+    then
       create_moderator_entries
         ~env
         ~session_id
@@ -1305,619 +1119,49 @@ let run_completion_stream
         ~allocator
         ~history:input_entries
         ~available_tools:tools
-        ~capabilities
-        ?on_process_run
+        ~capabilities:
+          (capabilities_with_model_executor
+             ~model_executor
+             ~session_id
+             Moderation.Capabilities.default)
+        ?on_process_run:(Agent_runtime.moderator_process_handler agent_runtime)
         ()
       |> Result.ok_or_failwith
-    in
-    Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
-      Model_executor.register_session
-        model_executor
-        ~session_id:m.session_id
-        ~manager:m.manager);
-    let runtime_requests = ref [] in
-    let all_items =
-      In_memory_stream.run_completion_stream_in_memory_entries
-        ~env
-        ~datadir
-        ~allocator
-        ~history:input_entries
-        ~on_event:(fun ev ->
-          log_event ev;
-          on_event ev)
-        ~on_history_event
-        ?on_transcript_event
-        ~on_sourced_event
-        ~on_history_tool_out
-        ~tools:(Some tools)
-        ~tool_tbl
-        ?temperature
-        ?max_output_tokens:max_tokens
-        ?reasoning
-        ?moderator
-        ~on_runtime_request:(fun request ->
-          runtime_requests := request :: !runtime_requests)
-        ~history_compaction
-        ~parallel_tool_calls
-        ~meta_refine
-        ~model
-        ?post_stream
-        ()
-      |> Openai.Responses_history.items_exn
-    in
-    append_generated_items
-      ~append:append_doc
-      ~save_doc
-      ~show_tool_call
-      (List.drop all_items (List.length inputs));
-    if not (has_end_session_request !runtime_requests)
-    then append_doc "\n<user>\n\n</user>")
-  else (
-    let allocator =
-      History_entry.Allocator.create
-        ~namespace:(Option.value id ~default:output_file ^ "/stream")
-        ~next_sequence:0
-      |> Result.ok_or_failwith
-    in
-    let registry = History_stream_event.Registry.create ~allocator in
-    let transcript_source =
-      Transcript.Source_id.of_string
-        (Fork.Invocation_id.create () |> Fork.Invocation_id.to_string)
-      |> Result.ok_or_failwith
-    in
-    let inputs = create_history_entries ~allocator inputs in
-    (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
-    let rec turn inputs =
-      let scope = ref 0 in
-      let transcript_live = ref None in
-      let update_transcript update =
-        Option.iter on_transcript_event ~f:(fun observer ->
-          let current = Option.value_exn !transcript_live in
-          let current, observations = update current |> Result.ok_or_failwith in
-          transcript_live := Some current;
-          List.iter observations ~f:observer)
-      in
-      let begin_attempt () =
-        Option.iter !transcript_live ~f:(fun _ ->
-          update_transcript (fun live ->
-            Openai.Responses_live.finish live ~completion:Failed));
-        scope := History_stream_event.Registry.create_scope registry;
-        Option.iter on_transcript_event ~f:(fun _ ->
-          let attempt =
-            Transcript.Attempt_id.of_string ("attempt:" ^ Int.to_string !scope)
-            |> Result.ok_or_failwith
-          in
-          let neutral_scope =
-            Transcript.Scope.create ~source:transcript_source ~attempt ~relation:Root
-            |> Result.ok_or_failwith
-          in
-          transcript_live
-          := Some
-               (Openai.Responses_live.create
-                  ~scope:neutral_scope
-                  ~limits:Transcript.Admission.default);
-          update_transcript Openai.Responses_live.start)
-      in
-      (* ────────────────── 2.  streaming callback state ─────────────────── *)
-      (* existing tables … *)
-      let new_items : History_entry.t list ref = ref [] in
-      let add_item item =
-        let id =
-          History_stream_event.Registry.find_item registry ~source:None item ~scope:!scope
-          |> Option.value_or_thunk ~default:(fun () ->
-            History_entry.Allocator.allocate allocator |> Result.ok_or_failwith)
-        in
-        let call_relation =
-          Openai.Responses_history.relation_for_item
-            ~history:(inputs @ List.rev !new_items)
-            item
-        in
-        let entry = Openai.Responses_history.create_with_id_exn ~call_relation ~id item in
-        if
-          not
-            (List.exists !new_items ~f:(fun existing ->
-               History_entry.Id.equal (History_entry.id existing) (History_entry.id entry)))
-        then (
-          new_items := entry :: !new_items;
-          update_transcript (fun live -> Openai.Responses_live.finalized live entry));
-        entry
-      in
-      let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
-      and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
-      and function_completions : (string, string) Hashtbl.t =
-        Hashtbl.create (module String)
-      and custom_completions : (string, string) Hashtbl.t = Hashtbl.create (module String)
-      and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
-      let run_again = ref false in
-      let output_text_delta ~id txt =
-        if not (Hashtbl.mem opened_msgs id)
-        then (
-          append_doc (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
-          Hashtbl.set opened_msgs ~key:id ~data:());
-        append_doc (Fetch.tab_on_newline txt)
-      in
-      let close_message id =
-        if Hashtbl.mem opened_msgs id
-        then (
-          append_doc (Printf.sprintf "\n\t|%s\n</assistant>\n" "RAW");
-          (* remove the message from the opened list *)
-          Hashtbl.remove opened_msgs id)
-      in
-      let lt, gt = "<", ">" in
-      (* avoid raw “<tag>” in the output *)
-      let open_reasoning id =
-        append_doc
-          (Printf.sprintf "\n%sreasoning id=\"%s\"%s\n\t%ssummary%s\n\t\t" lt id gt lt gt)
-      in
-      let open_new_summary () =
-        append_doc (Printf.sprintf "\n\t%ssummary%s\n\t\t" lt gt)
-      in
-      let close_summary () = append_doc (Printf.sprintf "\n\t%s/summary%s" lt gt) in
-      let close_reasoning () = append_doc (Printf.sprintf "\n%s/reasoning%s\n" lt gt) in
-      (* -----------------------------------------------------------------
-       Parallel execution of tool calls
-
-       When [parallel_tool_calls] is [true], each tool invocation is
-       scheduled in its own fiber under [sw].  A shared semaphore
-       prevents unbounded concurrency.  The resulting outputs are
-       collected and later appended **in the original call order** so
-       that the ChatMarkdown document remains deterministic.
-       ---------------------------------------------------------------- *)
-      (* Semaphore limiting concurrent invocations.  We create it lazily the
-       first time a tool call is encountered to avoid the (small) cost
-       in turns without any tools. *)
-      let sem = lazy (Eio.Semaphore.make 8) in
-      (* Accumulates promises for running tool calls. *)
-      let pending_calls : driver_pending_call list ref = ref [] in
-      let handle_function_done ~item_id ~arguments =
-        match Hashtbl.find func_info item_id with
-        | None -> () (* should not happen *)
-        | Some (name, call_id)
-          when List.exists !pending_calls ~f:(fun pending ->
-                 String.equal pending.call_id call_id) -> ()
-        | Some (name, call_id) ->
-          (* Allocate a unique sequence number for deterministic ordering *)
-          let seq = !fn_id in
-          Int.incr fn_id;
-          (* ----------------------------------------------------------------- *)
-          (* 1.  Persist the tool_call request into the buffer / disk          *)
-          let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
-          if show_tool_call
-          then
-            append_doc
-              (Printf.sprintf
-                 "\n\
-                  <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-                  \t%s|\n\
-                  \t\t%s\n\
-                  \t|%s\n\
-                  </tool_call>\n"
-                 call_id
-                 name
-                 item_id
-                 "RAW"
-                 (Fetch.tab_on_newline arguments)
-                 "RAW")
-          else (
-            let content =
-              Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
-            in
-            append_doc
-              (Printf.sprintf
-                 "\n\
-                  <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-                  \t%s\n\
-                  </tool_call>\n"
-                 call_id
-                 name
-                 item_id
-                 (Fetch.tab_on_newline content));
-            Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
-          (* 2.  Add the function_call item so the model sees the invocation *)
-          let fn_call_item =
-            Tool_call.call_item
-              ~kind:Tool_call.Kind.Function
-              ~name
-              ~payload:arguments
-              ~call_id
-              ~id:(Some item_id)
-          in
-          let call_entry = add_item fn_call_item in
-          (* 3.  Spawn the actual tool invocation in its own fiber           *)
-          let history_entries_so_far =
-            if history_compaction
-            then
-              (* If history compaction is enabled, we only keep the latest
-               version of each file read by the model. *)
-              Compact_history.collapse_read_file_entries
-                (List.append inputs (List.rev !new_items))
-            else List.append inputs (List.rev !new_items)
-          in
-          let run_tool () =
-            Tool_call.run_tool
-              ~kind:Tool_call.Kind.Function
-              ~name
-              ~payload:arguments
-              ~call_id
-              ~tool_tbl
-              ~on_fork:
-                (Some
-                   (fun ~invocation:_ ~call_id ~arguments ->
-                     let invocation_id = Fork.Invocation_id.create () in
-                     let child_allocator =
-                       Fork.allocator
-                         ~parent_namespace:(History_entry.Allocator.namespace allocator)
-                         invocation_id
-                     in
-                     Res.Tool_output.Output.Text
-                       (Fork.execute_entries
-                          ~env
-                          ~allocator:child_allocator
-                          ~history:history_entries_so_far
-                          ~invocation_id
-                          ~call_id
-                          ~arguments
-                          ~tools
-                          ~tool_tbl
-                          ~on_event
-                          ~on_sourced_event
-                          ?transcript_observer:
-                            (Option.map on_transcript_event ~f:(fun observe ->
-                               let parent_scope =
-                                 Transcript.Scope.create
-                                   ~source:transcript_source
-                                   ~attempt:
-                                     (Transcript.Attempt_id.of_string
-                                        ("attempt:" ^ Int.to_string !scope)
-                                      |> Result.ok_or_failwith)
-                                   ~relation:Root
-                                 |> Result.ok_or_failwith
-                               in
-                               Fork.
-                                 { parent =
-                                     { scope = Transcript.Scope.key parent_scope
-                                     ; call_entry_id = Some (History_entry.id call_entry)
-                                     ; call_alias = Some call_id
-                                     }
-                                 ; observe
-                                 }))
-                          ~on_fn_out:(fun _ -> ())
-                          ?temperature
-                          ?max_output_tokens:max_tokens
-                          ?reasoning
-                          ())))
-              ()
-          in
-          let promise =
-            if not parallel_tool_calls
-            then (
-              (* Sequential fall-back – run immediately in the current fiber *)
-              let result = run_tool () in
-              (* Wrap result into an already-resolved promise so code below is
-               agnostic to the execution mode. *)
-              let pr, resv = Eio.Promise.create () in
-              Eio.Promise.resolve_ok resv result;
-              pr)
-            else
-              (* Parallel mode – fork a new fiber and run under the semaphore *)
-              Eio.Fiber.fork_promise ~sw (fun () ->
-                (* Acquire permit *)
-                let s = Lazy.force sem in
-                Eio.Semaphore.acquire s;
-                Fun.protect
-                  ~finally:(fun () -> Eio.Semaphore.release s)
-                  (fun () -> run_tool ()))
-          in
-          (* 4.  Record the pending call for later collection *)
-          pending_calls := { seq; call_id; kind = `Function; promise } :: !pending_calls;
-          run_again := true
-      in
-      let handle_custom_tool_call_done ~item_id ~input =
-        match Hashtbl.find func_info item_id with
-        | None -> ()
-        | Some (name, call_id)
-          when List.exists !pending_calls ~f:(fun pending ->
-                 String.equal pending.call_id call_id) -> ()
-        | Some (name, call_id) ->
-          let seq = !fn_id in
-          Int.incr fn_id;
-          let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
-          if show_tool_call
-          then
-            append_doc
-              (Printf.sprintf
-                 "\n\
-                  <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
-                  function_name=\"%s\" id=\"%s\">\n\
-                  \t%s|\n\
-                  \t\t%s\n\
-                  \t|%s\n\
-                  </tool_call>\n"
-                 call_id
-                 name
-                 item_id
-                 "RAW"
-                 (Fetch.tab_on_newline input)
-                 "RAW")
-          else (
-            let content =
-              Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
-            in
-            append_doc
-              (Printf.sprintf
-                 "\n\
-                  <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
-                  function_name=\"%s\" id=\"%s\">\n\
-                  \t%s\n\
-                  </tool_call>\n"
-                 call_id
-                 name
-                 item_id
-                 (Fetch.tab_on_newline content));
-            Io.save_doc ~dir:datadir (tool_call_url call_id) input);
-          let call_item : Res.Item.t =
-            Tool_call.call_item
-              ~kind:Tool_call.Kind.Custom
-              ~name
-              ~payload:input
-              ~call_id
-              ~id:(Some item_id)
-          in
-          ignore (add_item call_item : History_entry.t);
-          let run_tool () =
-            Tool_call.run_tool
-              ~kind:Tool_call.Kind.Custom
-              ~name
-              ~payload:input
-              ~call_id
-              ~tool_tbl
-              ~on_fork:None
-              ()
-          in
-          let promise =
-            if not parallel_tool_calls
-            then (
-              let result = run_tool () in
-              let pr, resv = Eio.Promise.create () in
-              Eio.Promise.resolve_ok resv result;
-              pr)
-            else
-              Eio.Fiber.fork_promise ~sw (fun () ->
-                let s = Lazy.force sem in
-                Eio.Semaphore.acquire s;
-                Fun.protect
-                  ~finally:(fun () -> Eio.Semaphore.release s)
-                  (fun () -> run_tool ()))
-          in
-          pending_calls := { seq; call_id; kind = `Custom; promise } :: !pending_calls;
-          run_again := true
-      in
-      let callback (ev : Res.Response_stream.t) =
-        let observed =
-          History_stream_event.observe registry ~scope:!scope ~source:None ev
-        in
-        Option.iter observed ~f:on_history_event;
-        update_transcript (fun live ->
-          Openai.Responses_live.observe_legacy
-            live
-            ~entry_id:(Option.map observed ~f:(fun event -> event.entry_id))
-            ev);
-        (* For debugging purposes we still log every event. *)
-        log_event ev;
-        (* Internal book-keeping for writing the streamed response back into the
-         conversation buffer and executing tool calls. *)
-        (match ev with
-         (* ───────────────────────── assistant text ────────────────────── *)
-         | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
-           output_text_delta ~id:item_id delta
-         | Res.Response_stream.Output_item_done { item; _ } ->
-           (match item with
-            | Res.Response_stream.Item.Output_message om ->
-              ignore (add_item (Output_message om) : History_entry.t);
-              (* close an open message block, if any *)
-              close_message om.id
-            | Res.Response_stream.Item.Reasoning r ->
-              ignore (add_item (Reasoning r) : History_entry.t);
-              (* close an open reasoning block, if any *)
-              (match Hashtbl.find reasoning_state r.id with
-               | Some _ ->
-                 close_summary ();
-                 close_reasoning ();
-                 Hashtbl.remove reasoning_state r.id
-               | None -> ())
-            | _ -> ())
-         (* ─────────────────────── reasoning deltas ────────────────────── *)
-         | Res.Response_stream.Reasoning_summary_text_delta
-             { item_id; delta; summary_index; _ } ->
-           (match Hashtbl.find reasoning_state item_id with
-            | None ->
-              (* first chunk for this reasoning item *)
-              open_reasoning item_id;
-              Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
-            | Some current when current = summary_index ->
-              () (* same summary → continue *)
-            | Some _ ->
-              (* moved to the next summary *)
-              close_summary ();
-              open_new_summary ();
-              Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
-           append_doc (Fetch.tab_on_newline delta)
-         (* ────────────────────── function calls etc. ──────────────────── *)
-         | Res.Response_stream.Output_item_added { item; _ } ->
-           (match item with
-            | Res.Response_stream.Item.Function_call fc ->
-              let idx = Option.value fc.id ~default:fc.call_id in
-              Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id);
-              Hashtbl.find function_completions idx
-              |> Option.iter ~f:(fun arguments ->
-                handle_function_done ~item_id:idx ~arguments)
-            | Res.Response_stream.Item.Custom_function tc ->
-              let idx = Option.value tc.id ~default:tc.call_id in
-              Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id);
-              Hashtbl.find custom_completions idx
-              |> Option.iter ~f:(fun input ->
-                handle_custom_tool_call_done ~item_id:idx ~input)
-            | Res.Response_stream.Item.Reasoning r ->
-              (* first chunk for this reasoning item *)
-              open_reasoning r.id;
-              Hashtbl.set reasoning_state ~key:r.id ~data:0
-            | Res.Response_stream.Item.Output_message m ->
-              let phase_input =
-                match m.phase with
-                | None -> ""
-                | Some p -> Printf.sprintf " phase=\"%s\"" p
-              in
-              append_doc
-                (Printf.sprintf
-                   "\n<assistant id=\"%s\"%s>\n\t%s|\n\t\t"
-                   m.id
-                   phase_input
-                   "RAW");
-              Hashtbl.set opened_msgs ~key:m.id ~data:()
-            | _ -> ())
-         | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
-           (match Hashtbl.find function_completions item_id with
-            | Some existing when not (String.equal existing arguments) ->
-              failwithf "Conflicting completion for streamed tool item %s" item_id ()
-            | Some _ -> ()
-            | None -> Hashtbl.set function_completions ~key:item_id ~data:arguments);
-           handle_function_done ~item_id ~arguments
-         | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
-           (match Hashtbl.find custom_completions item_id with
-            | Some existing when not (String.equal existing input) ->
-              failwithf "Conflicting completion for streamed tool item %s" item_id ()
-            | Some _ -> ()
-            | None -> Hashtbl.set custom_completions ~key:item_id ~data:input);
-           handle_custom_tool_call_done ~item_id ~input
-         | _ -> ());
-        on_event ev
-      in
-      let request_entries =
-        (* If [history_compaction] is enabled, we compact the history so that
-         multiple calls to the same file are replaced with a single call
-         that points to the latest file content. *)
-        if history_compaction
-        then Compact_history.collapse_read_file_entries inputs
-        else inputs
-      in
-      let hist = Openai.Responses_history.items_exn request_entries in
-      (* ────────────────── 3.  fire request in stream mode ──────────────── *)
-      let events =
-        In_memory_stream.For_testing.retry_stream_start
-          ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock env))
-          (fun () ->
-             begin_attempt ();
-             match post_stream with
-             | Some post -> post ~sw ~inputs:hist
-             | None ->
-               Res.post_response
-                 Res.Stream
-                 ?max_output_tokens:max_tokens
-                 ?temperature
-                 ~tools
-                 ~parallel_tool_calls
-                 ?reasoning
-                 ~model
-                 ~dir:datadir
-                 net
-                 ~sw
-                 ~inputs:hist)
-      in
-      Seq.iter callback events;
-      (* ----------------------------------------------------------------- *)
-      (*  Collect results from any pending tool invocations.  We enforce  *)
-      (*  deterministic ordering by iterating over them sorted by [seq].   *)
-      (* ----------------------------------------------------------------- *)
-      let sorted_calls =
-        List.sort !pending_calls ~compare:(fun a b -> Int.compare a.seq b.seq)
-      in
-      List.iter sorted_calls ~f:(fun { seq; call_id; kind; promise } ->
-        let result =
-          match Eio.Promise.await_exn promise with
-          | Openai.Responses.Tool_output.Output.Text t -> t
-          | Content parts ->
-            parts
-            |> List.map ~f:(function
-              | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-              | Input_image { image_url; _ } ->
-                Printf.sprintf "<image src=\"%s\" />" image_url)
-            |> String.concat ~sep:"\n"
-        in
-        let tool_call_result_url id =
-          Printf.sprintf "%i.tool-call-result.%s.json" seq id
-        in
-        let type_attr =
-          match kind with
-          | `Function -> ""
-          | `Custom -> " type=\"custom_tool_call\""
-        in
-        if show_tool_call
-        then
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
-                \t%s|\n\
-                \t\t%s\n\
-                \t|%s\n\
-                </tool_response>\n"
-               type_attr
-               call_id
-               seq
-               "RAW"
-               (Fetch.tab_on_newline result)
-               "RAW")
-        else (
-          let content =
-            Printf.sprintf
-              "<doc src=\"./.chatmd/%s\" local>"
-              (tool_call_result_url call_id)
-          in
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
-                \t%s\n\
-                </tool_response>\n"
-               type_attr
-               call_id
-               seq
-               (Fetch.tab_on_newline content));
-          Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
-        let kind : Tool_call.Kind.t =
-          match kind with
-          | `Function -> Tool_call.Kind.Function
-          | `Custom -> Tool_call.Kind.Custom
-        in
-        let out_item : Res.Item.t =
-          Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
-        in
-        ignore
-          (History_stream_event.Registry.tool_output
-             registry
-             ~scope:!scope
-             ~source:None
-             ~call_id
-           : History_entry.Id.t);
-        let entry = add_item out_item in
-        on_history_tool_out entry);
-      let completion =
-        Option.bind !transcript_live ~f:Openai.Responses_live.completion
-        |> Option.value ~default:Transcript.Stream.Incomplete
-      in
-      update_transcript (fun live -> Openai.Responses_live.finish live ~completion);
-      transcript_live := None;
-      (* make sure any dangling assistant block is closed *)
-      Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
-      (* 4 • If no function call just happened, append empty user message.   *)
-      (* 4 • If a function call just happened, recurse for the next turn.   *)
-      if !run_again
-      then turn (List.append inputs (List.rev !new_items))
-      else (
-        append_doc "\n<user>\n\n</user>";
-        List.append inputs (List.rev !new_items))
-    in
-    let history = turn inputs in
-    on_final_history history);
-  Cache.save ~file:cache_file cache
+    else None
+  in
+  Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
+    Model_executor.register_session
+      model_executor
+      ~session_id:m.session_id
+      ~manager:m.manager);
+  let runtime_requests = ref [] in
+  let all_entries =
+    In_memory_stream.run_completion_stream_in_memory_entries
+      ~env
+      ~inference_context:ctx.inference_context
+      ~inference_identity:ctx.inference_identity
+      ~on_inference_attempt:ctx.on_inference_attempt
+      ~on_inference_completion:ctx.on_inference_completion
+      ~on_inference_observation:ctx.on_inference_observation
+      ~inference_relation:ctx.inference_relation
+      ~datadir
+      ~allocator
+      ~history:input_entries
+      ?on_transcript_event
+      ~on_history_tool_out
+      ~tools:(Some tools)
+      ~tool_tbl
+      ?moderator
+      ~on_runtime_request:(fun request ->
+        runtime_requests := request :: !runtime_requests)
+      ~history_compaction
+      ~parallel_tool_calls
+      ~meta_refine
+      ?post_stream
+      ()
+  in
+  on_final_history all_entries;
+  let generated = extension_entries ~prefix:input_entries all_entries in
+  append_doc (History_chatmd.render generated);
+  if not (has_end_session_request !runtime_requests) then append_doc "\n<user>\n\n</user>"
 ;;

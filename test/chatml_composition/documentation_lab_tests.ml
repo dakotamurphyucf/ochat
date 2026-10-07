@@ -140,7 +140,12 @@ let%expect_test
         tool_default = Allow
       }
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env workspace host ->
        let invoke id name fields =
          queued := [ id, name, `Object fields ];

@@ -260,8 +260,29 @@ let with_reducer
     }
   in
   let cwd = Eio.Stdenv.cwd env in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_app_streaming_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "reducer fixture unexpectedly dispatched inference")
+  in
+  let inference_context =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun _ -> "fixture capture")
+    |> Result.ok_or_failwith
+    |> Inference_fixture.resolve fixture
+    |> Result.map_error ~f:(fun _ -> "fixture context")
+    |> Result.ok_or_failwith
+  in
   let services : Chat_tui.App_context.Services.t =
     { env
+    ; inference_context
+    ; inference_identity = Inference_fixture.identity fixture
+    ; on_inference_attempt = (fun _ -> ())
+    ; on_inference_completion = (fun _ -> ())
+    ; on_inference_observation = (fun _ -> ())
+    ; typeahead_inference = None
     ; ui_sw
     ; cwd
     ; cache = Chat_response.Cache.create ~max_size:1 ()

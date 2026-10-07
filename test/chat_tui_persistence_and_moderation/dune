@@ -1,7 +1,7 @@
 (library
  (name chat_tui_persistence_materialization_test)
  (modules chat_tui_persistence_materialization_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   ochat.io
@@ -19,7 +19,7 @@
 (library
  (name chat_tui_persistence_materialization_identity_test)
  (modules chat_tui_persistence_materialization_identity_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   chat_tui
@@ -37,7 +37,7 @@
 (library
  (name chat_tui_moderation_test)
  (modules chat_tui_moderation_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   notty

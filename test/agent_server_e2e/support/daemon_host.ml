@@ -5,6 +5,16 @@ let protocol_ok = function
   | Error error -> raise_s [%sexp "daemon host failure", (error : Agent_protocol.Error.t)]
 ;;
 
+let with_offline_inference options =
+  { options with
+    Agent_server.Daemon.inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"offline-e2e-fixture"
+        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+          failwith "this E2E fixture must not dispatch model inference")
+  }
+;;
+
 let load_config env fixture =
   let path = Config_fixture.config_path fixture in
   match Agent_server.Config_parser.load ~env ~path with

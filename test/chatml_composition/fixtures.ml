@@ -50,6 +50,19 @@ let call_events calls =
         ; output_index = index
         ; type_ = "response.function_call_arguments.done"
         }
+    ; Output_item_done
+        { item =
+            Function_call
+              { name
+              ; arguments = Jsonaf.to_string arguments
+              ; call_id = id
+              ; _type = "function_call"
+              ; id = Some id
+              ; status = Some "completed"
+              }
+        ; output_index = index
+        ; type_ = "response.output_item.done"
+        }
     ])
   |> Stdlib.List.to_seq
 ;;
@@ -158,7 +171,10 @@ let with_daemon
                   factory_limits
                 ; chatml_runtime_policy = runtime_policy
                 ; authoring_validation_host = validation_host
-                ; model_post_stream = Some post_stream
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream
                 }
               ()
             |> protocol_ok

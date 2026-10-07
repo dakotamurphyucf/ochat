@@ -3,6 +3,9 @@ module CM = Prompt.Chat_markdown
 module Moderation = Moderation
 module Moderator_manager = Moderator_manager
 module Res = Openai.Responses
+
+exception Inference_failed of Inference.Event.Terminal.t
+
 module Output = Res.Tool_output.Output
 
 type post_stream =
@@ -99,6 +102,7 @@ type driver_pending_call_kind =
 
 type driver_pending_call =
   { seq : int
+  ; call_entry : History_entry.t option
   ; call_id : string
   ; kind : driver_pending_call_kind
   ; name : string
@@ -204,13 +208,21 @@ let resume_ui_request (moderator : moderator) ~response =
   Moderator_manager.resume_ui_request moderator.manager ~response
 ;;
 
-type prepared_turn =
-  { inputs : Res.Item.t list
+type 'a prepared_turn =
+  { inputs : 'a list
   ; runtime_requests : Moderation.Runtime_request.t list
   }
 
 type ctx =
   { env : Eio_unix.Stdenv.base
+  ; inference_context : Inference_runtime.Context.t
+  ; fork_depth : int option
+  ; inference_identity : Neutral_turn.Identity.t
+  ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+  ; on_inference_completion : Inference_client.Completion.t -> unit
+  ; on_inference_observation : Inference.Observation.t -> unit
+  ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; sw : Eio.Switch.t
   ; datadir : Eio.Fs.dir_ty Eio.Path.t
   ; tools : Openai.Responses.Request.Tool.t list
@@ -229,7 +241,6 @@ type ctx =
   ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
   ; parallel_tool_calls : bool
-  ; model : Openai.Responses.Request.model
   ; prompt_cache_key : string option
   ; prompt_cache_retention : string option
   ; safe_point_input : Safe_point_input.t option
@@ -245,6 +256,7 @@ type ctx =
   ; id_source : History_entry.Id_source.t
   ; registry : History_stream_event.Registry.t
   ; mutable scope : int
+  ; mutable neutral_items : Transcript.Item.t Map.M(Transcript.Item.Key).t
   ; transcript_source : Transcript.Source_id.t
   ; transcript_relation : Transcript.Scope.relation
   ; mutable transcript_scope : Transcript.Scope.t option
@@ -268,6 +280,15 @@ type ctx =
 
 type args =
   { env : Eio_unix.Stdenv.base
+  ; inference_context : Inference_runtime.Context.t
+  ; fork_depth : int option
+  ; inference_identity : Neutral_turn.Identity.t
+  ; inference_relation : Transcript.Scope.relation
+  ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+  ; on_inference_completion : Inference_client.Completion.t -> unit
+  ; on_inference_observation : Inference.Observation.t -> unit
+  ; before_inference_dispatch : Inference_runtime.Prepared.t -> unit
+  ; resolve_inference_assets : History_entry.t list -> Inference.Request.Asset.t list
   ; datadir : Eio.Fs.dir_ty Eio.Path.t option
   ; history : History_entry.t list
   ; on_event : Openai.Responses.Response_stream.t -> unit
@@ -305,7 +326,6 @@ type args =
   ; parallel_tool_calls : bool
   ; meta_refine : bool
   ; safe_point_input : Safe_point_input.t option
-  ; model : Openai.Responses.Request.model
   ; prompt_cache_key : string option
   ; prompt_cache_retention : string option
   ; injected_post_stream :
@@ -327,9 +347,9 @@ let derive_datadir ~env = function
 let derive_tools_tool_tbl ~tools ~tool_tbl =
   match tools, tool_tbl with
   | Some t, Some tbl -> t, tbl
-  | _ ->
-    let comp_tools, tbl = Ochat_function.functions [] in
-    Tool.convert_tools comp_tools, tbl
+  | Some tools, None -> tools, String.Table.create ()
+  | None, Some table -> [], table
+  | None, None -> [], String.Table.create ()
 ;;
 
 let payload_of_jsonaf ~(kind : Tool_call.Kind.t) (payload : Jsonaf.t) : string =
@@ -706,6 +726,7 @@ let prepare_turn_request_entries
       ~history
   =
   let open Result.Let_syntax in
+  ignore safe_point_input;
   let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind outer =
     run_moderation_event_entries
@@ -736,13 +757,7 @@ let prepare_turn_request_entries
     | Some moderator -> Moderator_manager.effective_entries moderator.manager history
   in
   let inputs =
-    List.map effective ~f:(fun entry ->
-      Openai.Responses_history.item_exn entry.Moderation.Effective_entry.entry)
-  in
-  let inputs =
-    if Option.is_some (Runtime_semantics.should_end_session runtime_requests)
-    then inputs
-    else append_safe_point_input ~safe_point:Turn_start_boundary ~inputs ~safe_point_input
+    List.map effective ~f:(fun entry -> entry.Moderation.Effective_entry.entry)
   in
   Ok ({ inputs; runtime_requests }, effective)
 ;;
@@ -1042,18 +1057,117 @@ let begin_transcript (c : ctx) =
       report_transcript c Openai.Responses_live.start)
 ;;
 
+let publish_neutral_view (c : ctx) view =
+  Option.iter c.on_transcript_event ~f:(fun observer ->
+    Transcript.Stream.create view ~limits:Transcript.Admission.default
+    |> Result.ok_or_failwith
+    |> observer)
+;;
+
+let reserve_neutral_item (c : ctx) (item : Transcript.Item.t) =
+  let key = Transcript.Item.key item in
+  let item =
+    match Map.find c.neutral_items key with
+    | Some existing -> Transcript.Item.refine existing item |> Result.ok_or_failwith
+    | None ->
+      if Option.is_some item.entry_id
+      then failwith "adapter cannot reserve canonical history identity";
+      let id = History_entry.Id_source.allocate c.id_source |> Result.ok_or_failwith in
+      Transcript.Item.create
+        ~scope:item.scope
+        ~id:item.id
+        ~entry_id:(Some id)
+        ~header:item.header
+        ~call_name:item.call_name
+      |> Result.ok_or_failwith
+  in
+  c.neutral_items <- Map.set c.neutral_items ~key ~data:item;
+  item
+;;
+
 let report_finalized_entry (c : ctx) entry =
-  report_transcript c (fun live -> Openai.Responses_live.finalized live entry)
+  match c.transcript_live, c.transcript_scope with
+  | Some _, _ ->
+    report_transcript c (fun live -> Openai.Responses_live.finalized live entry)
+  | None, None -> ()
+  | None, Some scope ->
+    let semantic = History_entry.Payload.semantic (History_entry.payload entry) in
+    let alias =
+      Map.data c.neutral_items
+      |> List.find_map ~f:(fun item ->
+        if
+          Option.exists
+            item.Transcript.Item.entry_id
+            ~f:(History_entry.Id.equal (History_entry.id entry))
+        then Some item.id
+        else None)
+      |> Option.value_or_thunk ~default:(fun () ->
+        Transcript.Item_id.of_string
+          ("host-entry:" ^ History_entry.Id.to_string (History_entry.id entry))
+        |> Result.ok_or_failwith)
+    in
+    let call_name =
+      match History_entry.Payload.Semantic.view semantic with
+      | Call { name; _ } -> Some name
+      | Message _ | Result _ | Reasoning _ | Unknown _ -> None
+    in
+    let item =
+      Transcript.Item.create
+        ~scope
+        ~id:alias
+        ~entry_id:(Some (History_entry.id entry))
+        ~header:(Some (Transcript.Header.of_semantic semantic))
+        ~call_name
+      |> Result.ok_or_failwith
+    in
+    c.neutral_items <- Map.set c.neutral_items ~key:(Transcript.Item.key item) ~data:item;
+    publish_neutral_view c (Item_finalized { item; entry })
+;;
+
+let append_history_entry
+      (c : ctx)
+      ?commit_entry
+      ?prepare_entry
+      ~moderator
+      ~on_runtime_request
+      ~available_tools
+      ~now_ms
+      ~hist
+      (st : stream_state)
+      entry
+  =
+  if
+    List.exists st.new_entries_rev ~f:(fun existing ->
+      History_entry.Id.equal (History_entry.id existing) (History_entry.id entry))
+  then st
+  else (
+    let entry = Option.value_map prepare_entry ~default:entry ~f:(fun f -> f entry) in
+    (Option.value commit_entry ~default:c.on_history_item_appended) entry;
+    report_finalized_entry c entry;
+    let st = add_entry st entry in
+    handle_item_appended_entries
+      ~moderator
+      ~on_runtime_request
+      ~available_tools
+      ~now_ms
+      ~history:(history_with_new_entries ~hist st)
+    |> Result.ok_or_failwith;
+    st)
 ;;
 
 let scoped_tool_observer (c : ctx) =
-  Option.map c.on_scoped_tool_execution ~f:(fun observer ->
-    let scope = Option.value_exn c.transcript_scope in
-    fun event ->
-      match event with
-      | Tool_execution_event.Trace { call_id; _ }
-        when Set.mem c.scoped_trace_bridges call_id -> ()
-      | Started _ | Progress _ | Finished _ | Trace _ -> observer ~scope event)
+  match c.on_transcript_event, c.on_scoped_tool_execution with
+  | None, None -> None
+  | (None | Some _), (None | Some _) ->
+    Some
+      (fun event ->
+        match event with
+        | Tool_execution_event.Trace { trace = Inference_live event; _ } ->
+          Option.iter c.on_transcript_event ~f:(fun observe -> observe event)
+        | Trace { call_id; _ } when Set.mem c.scoped_trace_bridges call_id -> ()
+        | Started _ | Progress _ | Finished _ | Trace _ ->
+          Option.iter c.on_scoped_tool_execution ~f:(fun observe ->
+            observe ~scope:(Option.value_exn c.transcript_scope) event))
 ;;
 
 let append_history_item
@@ -1091,18 +1205,17 @@ let append_history_item
         item
     in
     let entry = Openai.Responses_history.create_with_id_exn ~call_relation ~id item in
-    let entry = Option.value_map prepare_entry ~default:entry ~f:(fun f -> f entry) in
-    (Option.value commit_entry ~default:c.on_history_item_appended) entry;
-    report_finalized_entry c entry;
-    let st = add_entry st entry in
-    handle_item_appended_entries
+    append_history_entry
+      c
+      ?commit_entry
+      ?prepare_entry
       ~moderator
       ~on_runtime_request
       ~available_tools
       ~now_ms
-      ~history:(history_with_new_entries ~hist st)
-    |> Result.ok_or_failwith;
-    st)
+      ~hist
+      st
+      entry)
 ;;
 
 let history_so_far ~history_compaction ~(hist : History_entry.t list) ~(st : stream_state)
@@ -1112,11 +1225,6 @@ let history_so_far ~history_compaction ~(hist : History_entry.t list) ~(st : str
   if history_compaction
   then Compact_history.collapse_read_file_entries combined
   else combined
-;;
-
-let request_items_so_far ~history_compaction ~hist ~st =
-  let entries = history_so_far ~history_compaction ~hist ~st in
-  Openai.Responses_history.items_exn entries
 ;;
 
 exception Openai_stream_idle_timeout of float
@@ -1148,29 +1256,6 @@ let with_stream_idle_timeout ~clock ~seconds stream =
     | Seq.Cons (event, rest) -> Seq.Cons (event, next rest)
   in
   next stream
-;;
-
-let provider_post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
-  Openai.Responses.post_response
-    Openai.Responses.Stream
-    ?max_output_tokens:c.max_output_tokens
-    ?temperature:c.temperature
-    ~tools:c.tools
-    ~parallel_tool_calls:c.parallel_tool_calls
-    ~model:c.model
-    ?reasoning:c.reasoning
-    ?prompt_cache_key:c.prompt_cache_key
-    ?prompt_cache_retention:c.prompt_cache_retention
-    ~dir:c.datadir
-    ~sw
-    c.env#net
-    ~inputs
-;;
-
-let post_stream (c : ctx) ~sw ~inputs =
-  match c.injected_post_stream with
-  | Some post -> post ~sw ~inputs
-  | None -> provider_post_stream c ~sw ~inputs
 ;;
 
 let make_tool_promise
@@ -1292,10 +1377,17 @@ let report_redacted_event c st = function
     report_event c event
 ;;
 
-let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~arguments =
-  let invocation_id = Fork.Invocation_id.create () in
+let make_run_fork_admitted
+      ~turn
+      ~(ctx : ctx)
+      ~history_so_far
+      ~invocation
+      ~call_id
+      ~arguments
+  =
+  let invocation_id = Fork_history.Invocation_id.create () in
   let child_allocator =
-    Fork.allocator
+    Fork_history.allocator
       ~parent_namespace:(History_entry.Allocator.namespace ctx.allocator)
       invocation_id
   in
@@ -1306,36 +1398,26 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
       ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
   in
   let transcript_relation =
-    match ctx.transcript_scope with
+    match Ochat_function.Invocation.inference_parent invocation with
+    | Some parent -> Transcript.Scope.Nested parent
     | None -> Transcript.Scope.Root
-    | Some scope ->
-      let call_entry_id =
-        List.find_map (List.rev history_so_far) ~f:(fun entry ->
-          let semantic = History_entry.Payload.semantic (History_entry.payload entry) in
-          match
-            ( History_entry.Payload.Semantic.view semantic
-            , (History_entry.Payload.Semantic.metadata semantic).call_id )
-          with
-          | Call _, Value alias when String.equal alias call_id ->
-            Some (History_entry.id entry)
-          | _ -> None)
-      in
-      Transcript.Scope.Nested
-        { scope = Transcript.Scope.key scope; call_entry_id; call_alias = Some call_id }
   in
   let child_ctx =
     { ctx with
       allocator = child_allocator
+    ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
     ; id_source = History_entry.Id_source.of_allocator child_allocator
     ; registry = child_registry
     ; transcript_source =
-        Transcript.Source_id.of_string (Fork.Invocation_id.to_string invocation_id)
+        Transcript.Source_id.of_string
+          (Fork_history.Invocation_id.to_string invocation_id)
         |> Result.ok_or_failwith
     ; transcript_relation
     ; transcript_scope = None
     ; transcript_live = None
+    ; neutral_items = Map.empty (module Transcript.Item.Key)
     ; scoped_trace_bridges = Set.empty (module String)
-    ; source = Some (Fork.Invocation_id.to_string invocation_id)
+    ; source = Some (Fork_history.Invocation_id.to_string invocation_id)
     ; parent_call_id = Some call_id
     ; dispatch_tool =
         Option.map ctx.dispatch_tool ~f:(fun dispatch ->
@@ -1343,7 +1425,7 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
           | None -> dispatch
           | Some fork ->
             fork
-              ~source:(Fork.Invocation_id.to_string invocation_id)
+              ~source:(Fork_history.Invocation_id.to_string invocation_id)
               ~parent_call_id:call_id)
     ; moderator = None
     ; before_model_call = (fun () -> ())
@@ -1366,7 +1448,7 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
         if Option.is_some ctx.on_scoped_tool_execution
         then ctx.scoped_trace_bridges <- Set.add ctx.scoped_trace_bridges call_id;
         turn child_ctx
-        @@ Fork.history_entries
+        @@ Fork_history.history_entries
              ~allocator:child_allocator
              ~history:history_so_far
              ~arguments
@@ -1375,14 +1457,29 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
         ctx.scoped_trace_bridges <- Set.remove ctx.scoped_trace_bridges call_id)
   in
   let txt =
-    [ Openai.Responses_history.item_exn (List.last_exn res) ]
-    |> List.filter_map ~f:(function
-      | Res.Item.Output_message o ->
-        Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
-      | _ -> None)
-    |> String.concat ~sep:"\n"
+    match
+      History_entry.Payload.Semantic.view
+        (History_entry.Payload.semantic (History_entry.payload (List.last_exn res)))
+    with
+    | Message { role = Assistant; content; _ } ->
+      List.filter_map content ~f:(function
+        | History_entry.Payload.Content.Text { text; _ } -> Some text
+        | Image _ | Refusal _ | Unknown _ -> None)
+      |> String.concat ~sep:" "
+    | Message _ | Call _ | Result _ | Reasoning _ | Unknown _ -> ""
   in
   Output.Text txt
+;;
+
+let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~arguments =
+  match ctx.fork_depth with
+  | Some depth when depth <> 0 && depth <> 1 ->
+    Output.Text
+      "Error: Called the [fork] tool in a forked process! Remember that if you are \
+       running in a forked process that you must Respond with a message in the required \
+       Format when finished with the task."
+  | None | Some _ ->
+    make_run_fork_admitted ~turn ~ctx ~history_so_far ~invocation ~call_id ~arguments
 ;;
 
 let add_pending
@@ -1390,9 +1487,10 @@ let add_pending
       ~(call_id : string)
       ~(kind : [ `Function | `Custom ])
       ~(name : string)
+      ?call_entry
       promise
   =
-  let pending = { seq = st.next_seq; call_id; kind; name; promise } in
+  let pending = { seq = st.next_seq; call_entry; call_id; kind; name; promise } in
   { st with
     pending_calls_rev = pending :: st.pending_calls_rev
   ; next_seq = st.next_seq + 1
@@ -1402,6 +1500,7 @@ let add_pending
 
 let dispatch_tool
       (c : ctx)
+      ?call
       ~hist
       ~st
       ~kind
@@ -1432,17 +1531,18 @@ let dispatch_tool
   in
   let routed =
     Option.bind c.dispatch_tool ~f:(fun dispatch ->
-      let call_id =
-        History_stream_event.Registry.find_item
-          c.registry
-          ~scope:c.scope
-          ~source:c.source
-          (Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id))
-        |> Option.value_exn
-      in
       let call =
-        List.find_exn st.new_entries_rev ~f:(fun entry ->
-          History_entry.Id.equal (History_entry.id entry) call_id)
+        Option.value_or_thunk call ~default:(fun () ->
+          let id =
+            History_stream_event.Registry.find_item
+              c.registry
+              ~scope:c.scope
+              ~source:c.source
+              (Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id))
+            |> Option.value_exn
+          in
+          List.find_exn st.new_entries_rev ~f:(fun entry ->
+            History_entry.Id.equal (History_entry.id entry) id))
       in
       dispatch.run
         ~run_native:(fun implementation ~payload ->
@@ -1485,7 +1585,7 @@ let dispatch_tool
 
 let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id =
   let reject reason message =
-    ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id)
+    ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
       ; kind
       ; name
       ; payload
@@ -1505,21 +1605,13 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
     let result =
       try
         let moderate =
-          match c.moderator with
-          | Some { event_handlers = Some _; _ } ->
-            moderate_tool_call_entries
-              ~moderator:c.moderator
-              ~available_tools:c.tools
-              ~now_ms:(now_ms c.env)
-              ~history:(history_with_new_entries ~hist st)
-          | _ ->
-            moderate_tool_call
-              ~moderator:c.moderator
-              ~available_tools:c.tools
-              ~now_ms:(now_ms c.env)
-              ~history:(Openai.Responses_history.items_exn hist)
+          moderate_tool_call_entries
+            ~moderator:c.moderator
+            ~available_tools:c.tools
+            ~now_ms:(now_ms c.env)
+            ~history:(history_with_new_entries ~hist st)
         in
-        moderate ~kind ~name ~payload ~call_id ~item_id:(Some item_id)
+        moderate ~kind ~name ~payload ~call_id ~item_id
       with
       | Eio.Cancel.Cancelled _ as exn -> raise exn
       | exn ->
@@ -1541,6 +1633,23 @@ let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id
      | Ok moderated ->
        ( moderated
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
+;;
+
+let rewrite_call_payload payload ~name ~input_bytes =
+  let module P = History_entry.Payload in
+  let semantic = P.semantic payload in
+  match P.Semantic.view semantic with
+  | Call call ->
+    if String.equal call.name name && String.equal call.input_bytes input_bytes
+    then payload
+    else
+      P.Semantic.create
+        (Call { call with name; input_bytes })
+        ~metadata:(P.Semantic.metadata semantic)
+      |> Result.ok_or_failwith
+      |> P.authored
+  | Message _ | Result _ | Reasoning _ | Unknown _ ->
+    failwith "host tool preparation requires a canonical call"
 ;;
 
 let prepare_host_tool_entry
@@ -1603,18 +1712,15 @@ let prepare_host_tool_entry
         ~name:moderated.name
         ~payload:moderated.payload
         ~call_id
-        ~id:(Some item_id)
+        ~id:item_id
     in
     prepared := { moderated with call_item }, rejection;
-    let displayed =
-      Tool_call.call_item
-        ~kind:moderated.kind
-        ~name:moderated.name
-        ~payload:(c.redact_tool_payload ~name:moderated.name moderated.payload)
-        ~call_id
-        ~id:(Some item_id)
-    in
-    Openai.Responses_history.create_with_id_exn ~id:(History_entry.id entry) displayed
+    History_entry.with_payload
+      entry
+      (rewrite_call_payload
+         (History_entry.payload entry)
+         ~name:moderated.name
+         ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload))
 ;;
 
 let commit_tool_call
@@ -1652,370 +1758,265 @@ let commit_tool_call
     c.on_history_item_appended entry)
 ;;
 
-let schedule_function_done
-      ~turn
-      (c : ctx)
-      ~(hist : History_entry.t list)
-      ~(st : stream_state)
-      ~(item_id : string)
-      ~(arguments : string)
-      ~sem
-  =
-  match Map.find st.func_info item_id with
-  | None -> st
-  | Some { kind = `Custom; _ } ->
-    failwithf "Function completion conflicts with custom tool item %s" item_id ()
-  | Some { name = _; call_id; kind = `Function }
-    when List.exists st.pending_calls_rev ~f:(fun pending ->
-           String.equal pending.call_id call_id) -> st
-  | Some { name; call_id; kind = `Function } ->
-    let original_name = name in
-    let original_payload = arguments in
-    let moderated, rejection =
-      prepare_tool_call
-        c
-        ~hist
-        ~st
-        ~kind:Tool_call.Kind.Function
-        ~name
-        ~payload:arguments
-        ~call_id
-        ~item_id
-    in
-    let prepared = ref (moderated, rejection) in
-    let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
-    let history_item =
-      Tool_call.call_item
-        ~kind:moderated.kind
-        ~name:moderated.name
-        ~payload:history_payload
-        ~call_id
-        ~id:(Some item_id)
-    in
-    let st =
-      append_history_item
-        c
-        ~prepare_entry:
-          (prepare_host_tool_entry
-             c
-             ~hist
-             ~st
-             ~original_name
-             ~original_payload
-             ~call_id
-             ~item_id
-             prepared)
-        ~commit_entry:(fun entry ->
-          let moderated, rejection = !prepared in
-          commit_tool_call
-            c
-            ~hist
-            ~st
-            ~kind:Tool_call.Kind.Function
-            ~original_name
-            ~original_payload
-            ~name:moderated.name
-            ~payload:moderated.payload
-            ~rejection
-            entry)
-        ~moderator:
-          (if
-             Option.is_some
-               (Runtime_semantics.should_end_session moderated.runtime_requests)
-           then None
-           else c.moderator)
-        ~on_runtime_request:c.on_runtime_request
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~hist
-        st
-        history_item
-    in
-    let moderated, rejection = !prepared in
-    let name = moderated.name in
-    let arguments = moderated.payload in
-    let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
-    let run_tool () =
-      dispatch_tool
-        c
-        ~hist
-        ~st
-        ~kind:Tool_call.Kind.Function
-        ~original_name
-        ~original_payload
-        ~name
-        ~payload:arguments
-        ~call_id
-        ~item_id
-        ~synthetic_result:moderated.synthetic_result
-        ~rejection
-        ~runtime_requests:moderated.runtime_requests
-        (fun ?runner ~payload () ->
-           Tool_call.run_tool
-             ~kind:Tool_call.Kind.Function
-             ~name
-             ~payload
-             ?runner
-             ~call_id
-             ~tool_tbl:c.tool_tbl
-             ?on_tool_execution:c.on_tool_execution
-             ?on_execution_event:(scoped_tool_observer c)
-             ~on_fork:
-               (Some
-                  (fun ~invocation ~call_id ~arguments ->
-                    make_run_fork
-                      ~turn
-                      ~ctx:c
-                      ~history_so_far:hs
-                      ~invocation
-                      ~call_id
-                      ~arguments))
-             ())
-    in
-    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
-    add_pending st ~call_id ~kind:`Function ~name p
-;;
-
-let schedule_custom_done
-      (c : ctx)
-      ~(hist : History_entry.t list)
-      ~(st : stream_state)
-      ~(item_id : string)
-      ~(input : string)
-      ~sem
-  =
-  match Map.find st.func_info item_id with
-  | None -> st
-  | Some { kind = `Function; _ } ->
-    failwithf "Custom completion conflicts with function tool item %s" item_id ()
-  | Some { name = _; call_id; kind = `Custom }
-    when List.exists st.pending_calls_rev ~f:(fun pending ->
-           String.equal pending.call_id call_id) -> st
-  | Some { name; call_id; kind = `Custom } ->
-    let original_name = name in
-    let original_payload = input in
-    let moderated, rejection =
-      prepare_tool_call
-        c
-        ~hist
-        ~st
-        ~kind:Tool_call.Kind.Custom
-        ~name
-        ~payload:input
-        ~call_id
-        ~item_id
-    in
-    let prepared = ref (moderated, rejection) in
-    let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
-    let history_item =
-      Tool_call.call_item
-        ~kind:moderated.kind
-        ~name:moderated.name
-        ~payload:history_payload
-        ~call_id
-        ~id:(Some item_id)
-    in
-    let st =
-      append_history_item
-        c
-        ~prepare_entry:
-          (prepare_host_tool_entry
-             c
-             ~hist
-             ~st
-             ~original_name
-             ~original_payload
-             ~call_id
-             ~item_id
-             prepared)
-        ~commit_entry:(fun entry ->
-          let moderated, rejection = !prepared in
-          commit_tool_call
-            c
-            ~hist
-            ~st
-            ~kind:Tool_call.Kind.Custom
-            ~original_name
-            ~original_payload
-            ~name:moderated.name
-            ~payload:moderated.payload
-            ~rejection
-            entry)
-        ~moderator:
-          (if
-             Option.is_some
-               (Runtime_semantics.should_end_session moderated.runtime_requests)
-           then None
-           else c.moderator)
-        ~on_runtime_request:c.on_runtime_request
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~hist
-        st
-        history_item
-    in
-    let moderated, rejection = !prepared in
-    let name = moderated.name in
-    let input = moderated.payload in
-    let run_tool () =
-      dispatch_tool
-        c
-        ~hist
-        ~st
-        ~kind:Tool_call.Kind.Custom
-        ~original_name
-        ~original_payload
-        ~name
-        ~payload:input
-        ~call_id
-        ~item_id
-        ~synthetic_result:moderated.synthetic_result
-        ~rejection
-        ~runtime_requests:moderated.runtime_requests
-        (fun ?runner ~payload () ->
-           Tool_call.run_tool
-             ~kind:Tool_call.Kind.Custom
-             ~name
-             ~payload
-             ?runner
-             ~call_id
-             ~tool_tbl:c.tool_tbl
-             ~on_fork:None
-             ?on_tool_execution:c.on_tool_execution
-             ?on_execution_event:(scoped_tool_observer c)
-             ())
-    in
-    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
-    add_pending st ~call_id ~kind:`Custom ~name p
-;;
-
-let add_tool_info st ~item_id info =
-  match Map.find st.func_info item_id with
-  | None -> { st with func_info = Map.set st.func_info ~key:item_id ~data:info }
-  | Some existing
-    when String.equal existing.name info.name
-         && String.equal existing.call_id info.call_id
-         && equal_driver_pending_call_kind existing.kind info.kind -> st
-  | Some _ -> failwithf "Conflicting metadata for streamed tool item %s" item_id ()
-;;
-
-let record_completion st ~item_id completion =
-  match Map.find st.tool_completions item_id, completion with
-  | None, _ ->
-    { st with
-      tool_completions = Map.set st.tool_completions ~key:item_id ~data:completion
-    }
-  | Some (Function_done existing), Function_done completion
-    when String.equal existing completion -> st
-  | Some (Custom_done existing), Custom_done completion
-    when String.equal existing completion -> st
-  | Some _, _ -> failwithf "Conflicting completion for streamed tool item %s" item_id ()
-;;
-
-let handle_done
-      (c : ctx)
-      ~(hist : History_entry.t list)
-      (st : stream_state)
-      (item : Openai.Responses.Response_stream.Item.t)
-  =
-  match item with
-  | Output_message om ->
-    append_history_item
-      c
-      ~moderator:c.moderator
-      ~on_runtime_request:c.on_runtime_request
-      ~available_tools:c.tools
-      ~now_ms:(now_ms c.env)
-      ~hist
-      st
-      (Openai.Responses.Item.Output_message om)
-  | Reasoning r ->
-    append_history_item
-      c
-      ~moderator:c.moderator
-      ~on_runtime_request:c.on_runtime_request
-      ~available_tools:c.tools
-      ~now_ms:(now_ms c.env)
-      ~hist
-      st
-      (Openai.Responses.Item.Reasoning r)
-  | _ -> st
-;;
-
-let fold_stream ~turn (c : ctx) ~(hist : History_entry.t list) ~sem stream =
-  let st0 =
-    { func_info = Map.empty (module String)
-    ; tool_completions = Map.empty (module String)
-    ; new_entries_rev = []
-    ; pending_calls_rev = []
-    ; next_seq = 0
-    ; run_again = false
-    }
+let retry_request ~sleep ~f =
+  let rec loop retries =
+    match f () with
+    | result -> result
+    | (exception Res.Response_stream_parsing_error (_, cause))
+    | (exception Res.Response_parsing_error (_, cause)) ->
+      if retries >= 5
+      then
+        failwithf
+          "OpenAI response parsing failed after 5 retries: %s"
+          (Exn.to_string cause)
+          ()
+      else (
+        let retry = retries + 1 in
+        sleep (Float.of_int retry);
+        loop retry)
   in
-  Seq.fold_left
-    (fun st ev ->
-       report_redacted_event c st ev;
-       match ev with
-       | Openai.Responses.Response_stream.Output_item_added { item; _ } ->
-         (match item with
-          | Function_call fc ->
-            let item_id = Option.value fc.id ~default:fc.call_id in
-            let st =
-              add_tool_info
-                st
-                ~item_id
-                { name = fc.name; call_id = fc.call_id; kind = `Function }
-            in
-            (match Map.find st.tool_completions item_id with
-             | Some (Function_done arguments) ->
-               schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
-             | Some (Custom_done _) ->
-               failwithf
-                 "Function metadata conflicts with custom completion %s"
-                 item_id
-                 ()
-             | None -> st)
-          | Custom_function tc ->
-            let item_id = Option.value tc.id ~default:tc.call_id in
-            let st =
-              add_tool_info
-                st
-                ~item_id
-                { name = tc.name; call_id = tc.call_id; kind = `Custom }
-            in
-            (match Map.find st.tool_completions item_id with
-             | Some (Custom_done input) ->
-               schedule_custom_done c ~hist ~st ~item_id ~input ~sem
-             | Some (Function_done _) ->
-               failwithf
-                 "Custom metadata conflicts with function completion %s"
-                 item_id
-                 ()
-             | None -> st)
-          | _ -> st)
-       | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
-         handle_done c ~hist st item
-       | Function_call_arguments_done { item_id; arguments; _ } ->
-         let st = record_completion st ~item_id (Function_done arguments) in
-         schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
-       | Custom_tool_call_input_done { item_id; input; _ } ->
-         let st = record_completion st ~item_id (Custom_done input) in
-         schedule_custom_done c ~hist ~st ~item_id ~input ~sem
-       | Function_call_arguments_delta _
-       | Custom_tool_call_input_delta _
-       | Reasoning_summary_text_delta _
-       | Output_text_delta _ -> st
-       | _ -> st)
-    st0
-    stream
+  loop 0
 ;;
 
 let retry_stream_start ~sleep create_stream =
-  Response_loop.For_testing.retry_request ~sleep ~f:(fun () ->
+  retry_request ~sleep ~f:(fun () ->
     let stream = create_stream () in
     match stream () with
     | Seq.Nil -> Seq.empty
     | Seq.Cons (event, rest) -> fun () -> Seq.Cons (event, rest))
+;;
+
+let publish_inference_live (c : ctx) ~(st : stream_state) event =
+  let committed item =
+    Option.value_map
+      (Map.find c.neutral_items (Transcript.Item.key item))
+      ~default:false
+      ~f:(fun descriptor ->
+        Option.exists descriptor.entry_id ~f:(fun id ->
+          List.exists st.new_entries_rev ~f:(fun entry ->
+            History_entry.Id.equal id (History_entry.id entry))))
+  in
+  let part descriptor =
+    let item = reserve_neutral_item c descriptor.Transcript.Part.item in
+    Transcript.Part.create
+      ~item
+      ~id:descriptor.id
+      ~index:descriptor.index
+      ~kind:descriptor.kind
+    |> Result.ok_or_failwith
+  in
+  match Transcript.Stream.view event with
+  | Source_started _ as view -> publish_neutral_view c view
+  | Unknown_event _ as view -> publish_neutral_view c view
+  | Item_announced item when not (committed item) ->
+    publish_neutral_view c (Item_announced (reserve_neutral_item c item))
+  | Part_announced descriptor when not (committed descriptor.item) ->
+    publish_neutral_view c (Part_announced (part descriptor))
+  | Changed { target = Content descriptor; change } when not (committed descriptor.item)
+    -> publish_neutral_view c (Changed { target = Content (part descriptor); change })
+  | Changed { target = Call_input _; _ } ->
+    (* Execution receives exact input only from its admitted complete candidate.
+       Presentation receives the final moderated/redacted entry, never fragments
+       that can bypass the configured completion-only redactor. *)
+    ()
+  | Item_announced _ | Part_announced _ | Changed _ -> ()
+  | Item_finalized _ | Source_finished _ ->
+    raise (Inference_runtime.Contract_violation Invalid_candidate)
+;;
+
+let accept_inference_candidate
+      ~turn
+      (c : ctx)
+      ~hist
+      ~(st : stream_state)
+      ~sem
+      ~(item : Transcript.Item.t)
+      ~payload
+      ~local_execution
+  =
+  let module P = History_entry.Payload in
+  let descriptor = reserve_neutral_item c item in
+  let id = Option.value_exn descriptor.entry_id in
+  if
+    List.exists st.new_entries_rev ~f:(fun entry ->
+      History_entry.Id.equal (History_entry.id entry) id)
+  then st
+  else (
+    match local_execution with
+    | Inference.Event.Not_eligible ->
+      let payload =
+        match P.Semantic.view (P.semantic payload) with
+        | Call { name; input_bytes; _ } ->
+          rewrite_call_payload
+            payload
+            ~name
+            ~input_bytes:(c.redact_tool_payload ~name input_bytes)
+        | Message _ | Result _ | Reasoning _ | Unknown _ -> payload
+      in
+      append_history_entry
+        c
+        ~moderator:c.moderator
+        ~on_runtime_request:c.on_runtime_request
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~hist
+        st
+        (History_entry.create_with_id ~id payload)
+    | Tool_candidate ->
+      let semantic = P.semantic payload in
+      let metadata = P.Semantic.metadata semantic in
+      let kind, original_name, original_payload =
+        match P.Semantic.view semantic with
+        | Call { kind; name; input_bytes; _ } ->
+          ( (match kind with
+             | Function -> Tool_call.Kind.Function
+             | Custom -> Custom)
+          , name
+          , input_bytes )
+        | Message _ | Result _ | Reasoning _ | Unknown _ ->
+          raise (Inference_runtime.Contract_violation Invalid_candidate)
+      in
+      let call_id =
+        match metadata.call_id with
+        | Value value when not (String.is_empty value) -> value
+        | Absent | Null | Value _ ->
+          raise (Inference_runtime.Contract_violation Invalid_candidate)
+      in
+      let provider_item_id =
+        match metadata.item_id with
+        | Value value -> Some value
+        | Absent | Null -> None
+      in
+      let moderated, rejection =
+        prepare_tool_call
+          c
+          ~hist
+          ~st
+          ~kind
+          ~name:original_name
+          ~payload:original_payload
+          ~call_id
+          ~item_id:provider_item_id
+      in
+      let prepared = ref (moderated, rejection) in
+      let payload =
+        rewrite_call_payload
+          payload
+          ~name:moderated.name
+          ~input_bytes:(c.redact_tool_payload ~name:moderated.name moderated.payload)
+      in
+      let st =
+        append_history_entry
+          c
+          ~prepare_entry:
+            (prepare_host_tool_entry
+               c
+               ~hist
+               ~st
+               ~original_name
+               ~original_payload
+               ~call_id
+               ~item_id:provider_item_id
+               prepared)
+          ~commit_entry:(fun entry ->
+            let moderated, rejection = !prepared in
+            commit_tool_call
+              c
+              ~hist
+              ~st
+              ~kind
+              ~original_name
+              ~original_payload
+              ~name:moderated.name
+              ~payload:moderated.payload
+              ~rejection
+              entry)
+          ~moderator:
+            (if
+               Option.is_some
+                 (Runtime_semantics.should_end_session moderated.runtime_requests)
+             then None
+             else c.moderator)
+          ~on_runtime_request:c.on_runtime_request
+          ~available_tools:c.tools
+          ~now_ms:(now_ms c.env)
+          ~hist
+          st
+          (History_entry.create_with_id ~id payload)
+      in
+      let call =
+        List.find_exn st.new_entries_rev ~f:(fun entry ->
+          History_entry.Id.equal (History_entry.id entry) id)
+      in
+      let moderated, rejection = !prepared in
+      let history_so_far =
+        history_so_far ~history_compaction:c.history_compaction ~hist ~st
+      in
+      let run_tool () =
+        dispatch_tool
+          c
+          ~call
+          ~hist
+          ~st
+          ~kind
+          ~original_name
+          ~original_payload
+          ~name:moderated.name
+          ~payload:moderated.payload
+          ~call_id
+          ~item_id:(Transcript.Item_id.to_string item.id)
+          ~synthetic_result:moderated.synthetic_result
+          ~rejection
+          ~runtime_requests:moderated.runtime_requests
+          (fun ?runner ~payload () ->
+             let on_fork =
+               match kind with
+               | Function ->
+                 Some
+                   (fun ~invocation ~call_id ~arguments ->
+                     make_run_fork
+                       ~turn
+                       ~ctx:c
+                       ~history_so_far
+                       ~invocation
+                       ~call_id
+                       ~arguments)
+               | Custom -> None
+             in
+             let inference_parent =
+               Option.map c.transcript_scope ~f:(fun scope ->
+                 Transcript.Scope.
+                   { scope = Transcript.Scope.key scope
+                   ; call_entry_id = Some id
+                   ; call_alias = Some call_id
+                   })
+             in
+             Tool_call.run_tool
+               ?inference_parent
+               ~kind
+               ~name:moderated.name
+               ~payload
+               ?runner
+               ~call_id
+               ~tool_tbl:c.tool_tbl
+               ?on_tool_execution:c.on_tool_execution
+               ?on_execution_event:(scoped_tool_observer c)
+               ~on_fork
+               ())
+      in
+      let promise =
+        make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
+      in
+      add_pending
+        st
+        ~call_entry:call
+        ~call_id
+        ~kind:
+          (match kind with
+           | Function -> `Function
+           | Custom -> `Custom)
+        ~name:moderated.name
+        promise)
 ;;
 
 let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
@@ -2026,7 +2027,12 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
   List.foldi
     sorted
     ~init:(st.new_entries_rev, [])
-    ~f:(fun _ (entries_rev, requests_rev) { seq = _; call_id; kind; name; promise } ->
+    ~f:
+      (fun
+        _
+        (entries_rev, requests_rev)
+        { seq = _; call_entry; call_id; kind; name; promise }
+      ->
       let completed = Eio.Promise.await_exn promise in
       let result = completed.Tool_dispatch.output in
       let tool_kind =
@@ -2038,16 +2044,22 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
         Tool_call.output_item ~kind:tool_kind ~call_id ~output:result
       in
       let id =
-        History_stream_event.Registry.tool_output
-          c.registry
-          ~scope:c.scope
-          ~source:c.source
-          ~call_id
+        match call_entry with
+        | Some _ -> History_entry.Id_source.allocate c.id_source |> Result.ok_or_failwith
+        | None ->
+          History_stream_event.Registry.tool_output
+            c.registry
+            ~scope:c.scope
+            ~source:c.source
+            ~call_id
       in
       let call_relation =
-        Openai.Responses_history.relation_for_item
-          ~history:(hist @ List.rev entries_rev)
-          candidate_item
+        match call_entry with
+        | Some entry -> History_entry.Payload.Call_relation.Bound (History_entry.id entry)
+        | None ->
+          Openai.Responses_history.relation_for_item
+            ~history:(hist @ List.rev entries_rev)
+            candidate_item
       in
       let candidate_entry =
         Openai.Responses_history.authored_output
@@ -2087,19 +2099,11 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
         else (
           try
             let handle_result =
-              match c.moderator with
-              | Some { event_handlers = Some _; _ } ->
-                handle_tool_result_entries
-                  ~moderator:c.moderator
-                  ~available_tools:c.tools
-                  ~now_ms:(now_ms c.env)
-                  ~history
-              | _ ->
-                handle_tool_result
-                  ~moderator:c.moderator
-                  ~available_tools:c.tools
-                  ~now_ms:(now_ms c.env)
-                  ~history:(Openai.Responses_history.items_exn history)
+              handle_tool_result_entries
+                ~moderator:c.moderator
+                ~available_tools:c.tools
+                ~now_ms:(now_ms c.env)
+                ~history
             in
             handle_result ~name ~kind:tool_kind ~item:candidate_item
             |> Result.map_error ~f:(fun message ->
@@ -2158,11 +2162,10 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
     if Option.is_some (Runtime_semantics.should_end_session prepared.runtime_requests)
     then hist
     else (
-      let inputs = prepared.inputs in
       (match c.moderator with
        | Some { event_handlers = Some handlers; _ } ->
          handlers.before_model_call () |> Result.ok_or_failwith
-       | _ -> ());
+       | None | Some _ -> ());
       c.before_model_call ();
       let additions =
         match c.prepare_model_input with
@@ -2173,26 +2176,112 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
       (match additions with
        | [] -> ()
        | _ -> History_entry.Id_source.validate c.id_source hist |> Result.ok_or_failwith);
-      let inputs = inputs @ Openai.Responses_history.items_exn additions in
-      log_request c ~inputs;
-      let events =
-        retry_stream_start
-          ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock c.env))
-          (fun () ->
-             c.scope <- History_stream_event.Registry.create_scope c.registry;
-             begin_transcript c;
-             post_stream c ~sw ~inputs
-             |> with_stream_idle_timeout
-                  ~clock:(Eio.Stdenv.clock c.env)
-                  ~seconds:(openai_stream_idle_timeout ()))
+      let inputs = prepared.inputs @ additions in
+      let inputs =
+        match
+          Option.bind c.safe_point_input ~f:(fun input ->
+            input.consume_compatibility_text ())
+        with
+        | None -> inputs
+        | Some text ->
+          let module P = History_entry.Payload in
+          let payload =
+            P.Semantic.create
+              (Message
+                 { form = Input
+                 ; role = User
+                 ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+                 ; phase = Absent
+                 })
+              ~metadata:P.Metadata.empty
+            |> Result.ok_or_failwith
+            |> P.authored
+          in
+          let id =
+            History_entry.Id_source.allocate c.id_source |> Result.ok_or_failwith
+          in
+          inputs @ [ History_entry.create_with_id ~id payload ]
       in
-      let st = fold_stream ~turn:turn_for_fork c ~hist ~sem events in
+      let tools =
+        List.map c.tools ~f:(fun tool ->
+          Openai.Inference_adapter.tool_spec tool ~limits:Transcript.Admission.default
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+          |> Result.ok_or_failwith)
+      in
+      let request =
+        Inference.Request.create
+          ~target:(Inference_runtime.Context.target c.inference_context)
+          ~history:inputs
+          ~tools
+          ~assets:(c.resolve_inference_assets inputs)
+          ~limits:Transcript.Admission.default
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+        |> Result.ok_or_failwith
+      in
+      let st =
+        ref
+          { func_info = Map.empty (module String)
+          ; tool_completions = Map.empty (module String)
+          ; new_entries_rev = []
+          ; pending_calls_rev = []
+          ; next_seq = 0
+          ; run_again = false
+          }
+      in
+      c.neutral_items <- Map.empty (module Transcript.Item.Key);
+      c.transcript_live <- None;
+      let receipt =
+        Neutral_turn.run
+          c.inference_context
+          ~sw
+          ~identity:c.inference_identity
+          ~relation:c.transcript_relation
+          ~request
+          ~before_dispatch:c.before_inference_dispatch
+          ~on_attempt:(fun attempt ->
+            c.on_inference_attempt attempt;
+            c.transcript_scope <- Some (Inference_runtime.Attempt.scope attempt))
+          ~on_event:(fun event ->
+            match Inference.Event.view event with
+            | Live event -> publish_inference_live c ~st:!st event
+            | Candidate_ready { item; payload; local_execution } ->
+              st
+              := accept_inference_candidate
+                   ~turn:turn_for_fork
+                   c
+                   ~hist
+                   ~st:!st
+                   ~sem
+                   ~item
+                   ~payload
+                   ~local_execution
+            | Terminal _ -> ())
+          ~on_observation:c.on_inference_observation
+          ~on_completion:c.on_inference_completion
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Neutral_turn.Error.sexp_of_t error))
+        |> Result.ok_or_failwith
+      in
+      let st = !st in
       let new_entries_rev, tool_requests = await_calls c ~hist st in
       let completion =
-        Option.bind c.transcript_live ~f:Openai.Responses_live.completion
-        |> Option.value ~default:Transcript.Stream.Incomplete
+        match
+          Inference_runtime.Receipt.terminal receipt |> Inference.Event.Terminal.outcome
+        with
+        | Completed | Refused -> Transcript.Stream.Complete
+        | Incomplete _ -> Incomplete
+        | Failed _ -> Failed
       in
-      finish_transcript c completion;
+      Option.iter c.transcript_scope ~f:(fun scope ->
+        publish_neutral_view c (Source_finished { scope; completion }));
+      c.transcript_scope <- None;
+      (match
+         Inference.Event.Terminal.outcome (Inference_runtime.Receipt.terminal receipt)
+       with
+       | Failed _ -> raise (Inference_failed (Inference_runtime.Receipt.terminal receipt))
+       | Completed | Refused | Incomplete _ -> ());
       let hist = List.append hist (List.rev new_entries_rev) in
       if Option.is_some (Runtime_semantics.should_end_session tool_requests)
       then hist
@@ -2261,6 +2350,14 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
   let tools, tool_tbl = derive_tools_tool_tbl ~tools:a.tools ~tool_tbl:a.tool_tbl in
   let c =
     { env = a.env
+    ; inference_context = a.inference_context
+    ; fork_depth = a.fork_depth
+    ; inference_identity = a.inference_identity
+    ; on_inference_attempt = a.on_inference_attempt
+    ; on_inference_completion = a.on_inference_completion
+    ; on_inference_observation = a.on_inference_observation
+    ; before_inference_dispatch = a.before_inference_dispatch
+    ; resolve_inference_assets = a.resolve_inference_assets
     ; sw
     ; datadir
     ; tools
@@ -2275,7 +2372,6 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_runtime_request = a.on_runtime_request
     ; history_compaction = a.history_compaction
     ; parallel_tool_calls = a.parallel_tool_calls
-    ; model = a.model
     ; prompt_cache_key = a.prompt_cache_key
     ; prompt_cache_retention = a.prompt_cache_retention
     ; safe_point_input = a.safe_point_input
@@ -2292,11 +2388,12 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; scope = 0
     ; transcript_source =
         Transcript.Source_id.of_string
-          (Fork.Invocation_id.create () |> Fork.Invocation_id.to_string)
+          (Fork_history.Invocation_id.create () |> Fork_history.Invocation_id.to_string)
         |> Result.ok_or_failwith
-    ; transcript_relation = Transcript.Scope.Root
+    ; transcript_relation = a.inference_relation
     ; transcript_scope = None
     ; transcript_live = None
+    ; neutral_items = Map.empty (module Transcript.Item.Key)
     ; scoped_trace_bridges = Set.empty (module String)
     ; source = a.source
     ; parent_call_id = a.parent_call_id
@@ -2322,13 +2419,18 @@ let run_completion_stream_in_memory_entries_impl ~sw (a : args) : History_entry.
 
 let run_completion_stream_in_memory_entries
       ~env
+      ~inference_context
+      ~inference_identity
+      ~on_inference_attempt
+      ~on_inference_completion
+      ?(inference_relation = Transcript.Scope.Root)
+      ?(on_inference_observation = fun _ -> ())
+      ?(before_inference_dispatch = fun _ -> ())
+      ?(resolve_inference_assets = fun _ -> [])
       ?datadir
       ~allocator
       ?id_source
       ~(history : History_entry.t list)
-      ?(on_event = fun _ -> ())
-      ?(on_sourced_event = fun _ -> ())
-      ?(on_history_event = fun _ -> ())
       ?on_transcript_event
       ?on_scoped_tool_execution
       ?(on_history_item_appended = fun _ -> ())
@@ -2350,10 +2452,11 @@ let run_completion_stream_in_memory_entries
       ?runtime_policy
       ?(on_runtime_request = fun _ -> ())
       ?(history_compaction = false)
+      ?fork_depth
       ?(parallel_tool_calls = true)
       ?(meta_refine = false)
       ?safe_point_input
-      ?(model = Openai.Responses.Request.O3)
+      ?model
       ?prompt_cache_key
       ?prompt_cache_retention
       ?post_stream
@@ -2362,16 +2465,78 @@ let run_completion_stream_in_memory_entries
       ?sw
       ()
   =
+  if Option.is_some post_stream
+  then
+    invalid_arg
+      "provider-shaped post_stream is retired; inject an explicit inference context";
+  let target = Inference_runtime.Context.target inference_context in
+  let limits = Transcript.Admission.default in
+  let target =
+    Option.value_map model ~default:target ~f:(fun model ->
+      Inference.Request.Target.with_model
+        target
+        ~model:(Res.Request.model_to_str model)
+        ~limits
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+      |> Result.ok_or_failwith)
+  in
+  let overrides =
+    [ Option.map temperature ~f:(fun temperature ->
+        let value =
+          Inference_config.number_of_float temperature ~limits
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+          |> Result.ok_or_failwith
+        in
+        "temperature", value)
+    ; Option.map max_output_tokens ~f:(fun tokens ->
+        "max_output_tokens", `Number (Int.to_string tokens))
+    ; Option.map reasoning ~f:(fun reasoning ->
+        "reasoning", Res.Request.Reasoning.jsonaf_of_t reasoning)
+    ; Option.map prompt_cache_key ~f:(fun key -> "prompt_cache_key", `String key)
+    ; Option.map prompt_cache_retention ~f:(fun retention ->
+        "prompt_cache_retention", `String retention)
+    ]
+    |> List.filter_opt
+  in
+  let target =
+    List.fold overrides ~init:target ~f:(fun target (name, value) ->
+      Inference.Request.Target.with_setting
+        target
+        ~name
+        ~value:(Value value)
+        ~provenance:Execution_override
+        ~limits
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+      |> Result.ok_or_failwith)
+  in
+  let inference_context =
+    Inference_runtime.Context.derive inference_context ~target
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
   let id_source =
     Option.value id_source ~default:(History_entry.Id_source.of_allocator allocator)
   in
   let args =
     { env
+    ; inference_context
+    ; fork_depth
+    ; inference_identity
+    ; inference_relation
+    ; on_inference_attempt
+    ; on_inference_completion
+    ; on_inference_observation
+    ; before_inference_dispatch
+    ; resolve_inference_assets
     ; datadir
     ; history
-    ; on_event
-    ; on_sourced_event
-    ; on_history_event
+    ; on_event = ignore
+    ; on_sourced_event = ignore
+    ; on_history_event = ignore
     ; on_transcript_event
     ; on_scoped_tool_execution
     ; on_history_item_appended
@@ -2398,7 +2563,6 @@ let run_completion_stream_in_memory_entries
     ; parallel_tool_calls
     ; meta_refine
     ; safe_point_input
-    ; model
     ; prompt_cache_key
     ; prompt_cache_retention
     ; injected_post_stream = post_stream
@@ -2417,6 +2581,7 @@ let run_completion_stream_in_memory_entries
 ;;
 
 module For_testing = struct
+  let retry_request = retry_request
   let with_stream_idle_timeout = with_stream_idle_timeout
   let retry_stream_start = retry_stream_start
   let notify_each = notify_each
