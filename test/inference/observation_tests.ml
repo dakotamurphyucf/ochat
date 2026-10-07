@@ -514,3 +514,134 @@ let%expect_test "integral floating settings encode valid JSON through safe confi
   print_endline "zero, one and endpoint temperatures/probabilities remain valid JSON";
   [%expect {| zero, one and endpoint temperatures/probabilities remain valid JSON |}]
 ;;
+
+let%test_unit
+    "attempt admission binds all profile bounds and checks permissive native rows"
+  =
+  let profile
+        ?(max_bytes = 64 * 1024)
+        ?(max_depth = 160)
+        ?(max_fields = 1_000_000)
+        ?(max_nodes = 2_000_000)
+        ()
+    =
+    D.Limits.create ~max_bytes ~max_depth ~max_fields ~max_nodes
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let config = configuration [] in
+  let row = record config [ observation (Usage (usage (actual 0L))) ] |> ok in
+  let raw = O.Attempt_record.to_json row in
+  let original = Jsonaf.to_string raw in
+  O.Attempt_record.validate row ~limits:(profile ()) |> ok;
+  O.Attempt_record.validate row ~limits:(profile ~max_depth:161 ()) |> ok;
+  List.iter
+    [ "bytes", profile ~max_bytes:1 ()
+    ; "depth", profile ~max_depth:1 ()
+    ; "fields", profile ~max_fields:1 ()
+    ; "nodes", profile ~max_nodes:1 ()
+    ]
+    ~f:(fun (bound, limits) ->
+      let reject = function
+        | Error (O.Error.Json error) ->
+          assert (D.Error.equal error (Limit_exceeded bound))
+        | Error _ | Ok _ -> failwith "complete requested profile was not applied"
+      in
+      reject (O.Attempt_record.validate row ~limits);
+      reject (O.Attempt_record.of_json raw ~limits));
+  assert (String.equal original (Jsonaf.to_string (O.Attempt_record.to_json row)));
+  let large_scope =
+    scope ~source:(String.make 400 's') ~attempt:(String.make 400 'a') Root
+  in
+  let large_config = configuration ~preparation_id:(String.make 500 'p') [] in
+  let observations =
+    List.init 64 ~f:(fun index ->
+      observation
+        ~scope:large_scope
+        ~id:("configuration-" ^ Int.to_string index)
+        (Configuration large_config))
+  in
+  let permissive =
+    O.Attempt_record.create
+      ~scope:large_scope
+      ~accounting_id:(id "accounting")
+      ~configuration:large_config
+      ~state:Running
+      ~observations
+      ~omitted_diagnostics:0L
+      ~limits:(profile ~max_bytes:(512 * 1024) ())
+    |> ok
+  in
+  assert (O.Attempt_record.encoded_bytes permissive > 64 * 1024);
+  assert (
+    Result.is_error (O.Attempt_record.validate permissive ~limits:O.Admission.attempt));
+  assert (
+    Result.is_error
+      (O.Attempt_record.of_json
+         (O.Attempt_record.to_json permissive)
+         ~limits:O.Admission.attempt))
+;;
+
+let%test_unit
+    "attempt constructor relationships match decoder guards before profile reuse"
+  =
+  let config = configuration [] in
+  let row = record config [] |> ok in
+  let raw = O.Attempt_record.to_json row in
+  let rejects_observations observations =
+    assert (Result.is_error (record config observations));
+    assert (
+      Result.is_error
+        (O.Attempt_record.of_json
+           (replace raw "observations" (`Array (List.map observations ~f:O.to_json)))
+           ~limits:O.Admission.attempt))
+  in
+  let observed = observation (Usage (usage (actual 1L))) in
+  rejects_observations [ observed; observed ];
+  rejects_observations [ observation ~id:"wrong-accounting" (Usage (usage (actual 1L))) ];
+  let foreign = scope ~source:"foreign" Root in
+  rejects_observations [ observation ~scope:foreign (Usage (usage (actual 1L))) ];
+  let foreign_config = configuration ~preparation_id:"another-preparation" [] in
+  rejects_observations [ observation ~id:"configuration" (Configuration foreign_config) ];
+  let context =
+    O.Context_estimate.create
+      ~preparation_id:"another-preparation"
+      ~count:(unknown Not_reported)
+      ~capacity:Unknown
+    |> ok
+  in
+  rejects_observations [ observation ~id:"context" (Context_estimate context) ];
+  let terminal =
+    E.Terminal.create ~scope:foreign ~delivery:Response_started ~outcome:Completed
+    |> Result.ok_or_failwith
+  in
+  assert (Result.is_error (record ~state:(Terminal terminal) config []));
+  assert (
+    Result.is_error
+      (O.Attempt_record.of_json
+         (replace
+            raw
+            "state"
+            (`Object
+                [ "kind", `String "terminal"; "terminal", E.Terminal.to_json terminal ]))
+         ~limits:O.Admission.attempt));
+  let malformed =
+    match raw with
+    | `Object fields -> `Object (fields @ [ "future_private", `String "refused" ])
+    | _ -> assert false
+  in
+  assert (Result.is_error (O.Attempt_record.of_json malformed ~limits:O.Admission.attempt));
+  assert (
+    Result.is_error
+      (O.Attempt_record.of_json
+         (replace raw "schema_version" (`Number "2"))
+         ~limits:O.Admission.attempt));
+  let parent = T.Scope.{ scope = key root; call_entry_id = None; call_alias = Some "" } in
+  assert (
+    Result.is_error
+      (T.Scope.create
+         ~source:(T.Source_id.of_string "child" |> Result.ok_or_failwith)
+         ~attempt:(T.Attempt_id.of_string "child" |> Result.ok_or_failwith)
+         ~relation:(Nested parent)));
+  O.Attempt_record.validate row ~limits:O.Admission.attempt |> ok
+;;

@@ -446,6 +446,148 @@ let%test_unit "durable state refuses a ledger admitted under a looser byte profi
     ())
 ;;
 
+let%test_unit "state original ledger proof survives edits and binds the complete profile" =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let raw_ledger =
+      ledger_json before.inference_ledger
+      |> fun json ->
+      add json "future_root" (`Number "1e+00")
+      |> fun json -> add json "future_nested" (`Object [ "text", `String "\195\169\n" ])
+    in
+    let ledger =
+      L.of_document
+        (D.Document.inspect ~limits:document_limits raw_ledger |> document_ok)
+        ~limits:L.Limits.default
+      |> ledger_ok
+    in
+    let original =
+      state_document { before with inference_ledger = ledger }
+      |> D.Document.json
+      |> fun json ->
+      add json "future_state" (`Number "1e+00")
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    let captured = SD.decode ~limits:document_limits original |> document_ok in
+    let current = SD.value captured in
+    let changed =
+      SD.with_value
+        captured
+        { current with
+          counters =
+            { current.counters with revision = Int64.succ current.counters.revision }
+        }
+    in
+    let profile
+          ?(max_bytes = 16 * 1024 * 1024)
+          ?(max_depth = 128)
+          ?(max_fields = 100_000)
+          ?(max_nodes = 1_000_000)
+          ()
+      =
+      D.Limits.create ~max_bytes ~max_depth ~max_fields ~max_nodes |> document_ok
+    in
+    let encoded = SD.encode changed ~limits:(profile ()) |> document_ok in
+    let expected =
+      D.Document.json original
+      |> fun json ->
+      replace
+        json
+        "payload"
+        (let payload = member json "payload" in
+         let counters = member payload "counters" in
+         replace
+           payload
+           "counters"
+           (replace
+              counters
+              "revision"
+              (`String (Int64.to_string (SD.value changed).counters.revision))))
+      |> Jsonaf.to_string
+    in
+    assert (String.equal (D.Document.to_string encoded) expected);
+    assert (
+      String.equal
+        (D.Document.to_string
+           (SD.encode changed ~limits:(profile ~max_depth:129 ()) |> document_ok))
+        expected);
+    List.iter
+      [ "bytes", profile ~max_bytes:1 ()
+      ; "depth", profile ~max_depth:1 ()
+      ; "fields", profile ~max_fields:1 ()
+      ; "nodes", profile ~max_nodes:1 ()
+      ]
+      ~f:(fun (bound, limits) ->
+        let rejects = function
+          | Error error -> assert (D.Error.equal error (Limit_exceeded bound))
+          | Ok _ -> failwith "original profile bound was bypassed"
+        in
+        rejects (SD.encode changed ~limits);
+        rejects (SD.adopt captured ~limits changed);
+        rejects (SD.adopt (SD.authored before) ~limits changed));
+    let erased =
+      SD.with_value
+        changed
+        { (SD.value changed) with inference_ledger = before.inference_ledger }
+    in
+    assert (Result.is_error (SD.encode erased ~limits:(profile ())));
+    assert (Result.is_error (SD.encode erased ~limits:(profile ~max_depth:129 ())));
+    assert (Result.is_error (SD.adopt (SD.authored before) ~limits:(profile ()) erased));
+    assert (
+      String.equal
+        (D.Document.to_string (SD.encode captured ~limits:document_limits |> document_ok))
+        (D.Document.to_string original)))
+;;
+
+let%test_unit
+    "reflexive ledger admission requires complete bytes rather than JSON equality"
+  =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let ledger =
+      ledger_json before.inference_ledger
+      |> fun json ->
+      add json "future_first" (`Number "1e+00")
+      |> fun json ->
+      add json "future_second" `Null
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+      |> fun document -> L.of_document document ~limits:L.Limits.default |> ledger_ok
+    in
+    L.validate_update ledger ~incoming:ledger |> ledger_ok;
+    let copy =
+      L.of_document (L.to_document ledger |> ledger_ok) ~limits:L.Limits.default
+      |> ledger_ok
+    in
+    L.validate_update ledger ~incoming:copy |> ledger_ok;
+    let reordered =
+      match ledger_json ledger with
+      | `Object fields ->
+        `Object
+          (List.filter fields ~f:(fun (name, _) -> not (String.equal name "future_first"))
+           @ [ "future_first", `Number "1e+00" ])
+      | _ -> failwith "expected ledger envelope"
+    in
+    assert (D.Json.equal reordered (ledger_json ledger));
+    let reordered =
+      D.Document.inspect ~limits:document_limits reordered
+      |> document_ok
+      |> fun document -> L.of_document document ~limits:L.Limits.default |> ledger_ok
+    in
+    assert (not (String.equal (ledger_bytes ledger) (ledger_bytes reordered)));
+    assert (Result.is_error (L.validate_update ledger ~incoming:reordered));
+    let wrong_session =
+      L.create
+        ~session_id:(P.Id.Session.create ())
+        ~generation:before.identity.generation
+        ~before_tracking_unknown:false
+        ~limits:L.Limits.default
+      |> ledger_ok
+    in
+    assert (Result.is_error (L.validate_update ledger ~incoming:wrong_session)))
+;;
+
 let%test_unit "immutable admission binds every profile bound and exact identity" =
   with_actor_workspace (fun _ workspace ->
     let before = state workspace in

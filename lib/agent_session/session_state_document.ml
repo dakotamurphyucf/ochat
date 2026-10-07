@@ -715,11 +715,45 @@ let state_shape =
     ]
 ;;
 
-type t = S.t D.Extension_carrier.t
+module Original = struct
+  type t =
+    { template : D.Document.t
+    ; limits : D.Limits.t
+    ; inference_ledger : Inference_ledger.t
+    }
+end
 
-let value = D.Extension_carrier.value
-let with_value = D.Extension_carrier.with_value
-let authored = D.Extension_carrier.of_authored_value
+type t =
+  { carrier : S.t D.Extension_carrier.t
+  ; original : Original.t option
+  }
+
+let value t = D.Extension_carrier.value t.carrier
+
+let with_value t value =
+  { t with carrier = D.Extension_carrier.with_value t.carrier value }
+;;
+
+let authored value =
+  { carrier = D.Extension_carrier.of_authored_value value; original = None }
+;;
+
+let decoded carrier ~limits =
+  let template =
+    match D.Extension_carrier.template carrier with
+    | Some template -> template
+    | None -> raise_s [%sexp "decoded state document has no original template"]
+  in
+  { carrier
+  ; original =
+      Some
+        { template
+        ; limits
+        ; inference_ledger = (D.Extension_carrier.value carrier).S.inference_ledger
+        }
+  }
+;;
+
 let shape = state_shape
 let unresolved_json = `Object [ "state", `String "unresolved" ]
 
@@ -878,22 +912,27 @@ let codec ~limits =
 
 let decode ~limits document =
   let%bind.Result document = upgrade document ~limits in
-  D.Domain_codec.decode (codec ~limits) document
+  D.Domain_codec.decode (codec ~limits) document |> Result.map ~f:(decoded ~limits)
 ;;
 
 let validate_ledger_carrier (t : t) ~limits =
   let open Result.Let_syntax in
-  match D.Extension_carrier.template t with
+  match t.original with
   | None -> Ok ()
   | Some original ->
-    let%bind () = D.Document.validate original ~limits in
-    let%bind raw =
-      Agent_store.Document_fields.required
-        (D.Document.payload original)
-        "inference_ledger"
-        Result.return
+    let%bind () = D.Document.validate original.template ~limits in
+    let%bind previous =
+      if D.Limits.equal original.limits limits
+      then Ok original.inference_ledger
+      else (
+        let%bind raw =
+          Agent_store.Document_fields.required
+            (D.Document.payload original.template)
+            "inference_ledger"
+            Result.return
+        in
+        ledger_of_jsonaf ~limits raw |> X.document_result)
     in
-    let%bind previous = ledger_of_jsonaf ~limits raw |> X.document_result in
     Inference_ledger.validate_update previous ~incoming:(value t).inference_ledger
     |> Result.map_error ~f:ledger_error
     |> X.document_result
@@ -901,7 +940,7 @@ let validate_ledger_carrier (t : t) ~limits =
 
 let encode t ~limits =
   let%bind.Result () = validate_ledger_carrier t ~limits in
-  D.Domain_codec.encode (codec ~limits) t
+  D.Domain_codec.encode (codec ~limits) t.carrier
 ;;
 
 let adopt previous ~limits incoming =
@@ -915,5 +954,9 @@ let adopt previous ~limits incoming =
     |> Result.map_error ~f:ledger_error
     |> X.document_result
   in
-  D.Domain_codec.adopt (codec ~limits) ~previous ~incoming
+  D.Domain_codec.adopt
+    (codec ~limits)
+    ~previous:previous.carrier
+    ~incoming:incoming.carrier
+  |> Result.map ~f:(decoded ~limits)
 ;;

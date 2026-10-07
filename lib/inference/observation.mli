@@ -443,6 +443,13 @@ module Attempt_record : sig
   val observations : t -> observation list
   val omitted_diagnostics : t -> int64
   val encoded_bytes : t -> int
+
+  (** Reuses immutable constructor domain invariants. An equal complete admission
+      profile reuses the row's proof; any different profile admits its complete
+      canonical JSON again, including all byte/depth/field/node bounds. A row
+      constructed with permissive limits does not bypass a stricter owner bound. *)
+  val validate : t -> limits:Document_schema.Limits.t -> (unit, Error.t) Result.t
+
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Error.t) Result.t
 end

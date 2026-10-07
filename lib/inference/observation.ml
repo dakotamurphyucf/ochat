@@ -1590,6 +1590,7 @@ module Attempt_record = struct
     ; observations : observation list
     ; omitted_diagnostics : int64
     ; encoded_bytes : int
+    ; admitted_limits : D.Limits.t
     }
 
   let scope t = t.scope
@@ -1714,12 +1715,21 @@ module Attempt_record = struct
             ; observations
             ; omitted_diagnostics
             ; encoded_bytes = 0
+            ; admitted_limits = limits
             }
           in
           let* encoded_bytes =
             json_error (D.Json.validate_and_measure ~limits (to_json candidate))
           in
           Ok { candidate with encoded_bytes })
+  ;;
+
+  (* Both constructors publish only after the complete final row is admitted.
+     A different profile must inspect every structural bound, not only bytes. *)
+  let validate t ~limits =
+    if D.Limits.equal t.admitted_limits limits
+    then Ok ()
+    else json_error (D.Json.validate ~limits (to_json t))
   ;;
 
   let state_of_json json ~limits =

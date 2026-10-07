@@ -53,14 +53,28 @@ retirement plans cannot supply reusable evidence. Unknown fields, including
 their number spellings, remain intact. This reuse does not acknowledge a
 durable commit.
 
+The session document also retains the ledger admitted from its original stored
+template. Native state edits preserve that original basis; they cannot replace
+it with the edited ledger. Equal complete profiles reuse this admission, while
+different profiles validate the original document and child again. Continuity
+checks can reuse exactly unchanged ledger documents after checking their
+profiles and identities; byte differences still require full carrier adoption.
+Persistence continues to encode and decode the complete updated session before
+writing it.
+
+Attempt records preserve the domain checks established by their validated
+constructors. Revalidation under the same complete profile reuses that proof;
+a different profile checks the complete encoded record. Raw decoding and
+ledger carrier adoption still run their existing admission checks.
+
 A local synthetic benchmark used 128 retained attempt rows, a 352,463-byte
-ledger, 64 KiB of preserved future data and a single attempt-state update. The
-median of three batches of three calls reduced CPU time for the complete pure
-session transition from 803 ms to 201 ms. Cumulative allocations per
-transition fell from 4.75 GB to 1.28 GB (decimal bytes). These are cumulative
-allocated bytes, including transient objects, rather than resident memory or a
-heap bound. The benchmark excludes provider, transport and persistence
-latency; it is not an end-to-end speedup claim.
+ledger and 64 KiB of preserved future data. For an unrelated state edit followed
+by the owner's complete encode-and-decode sequence, the median of three batches
+of three calls reduced CPU time from 211 ms to 43 ms. Cumulative allocations per
+call fell from 1.38 GB to 276 MB (decimal bytes). These include transient objects
+and do not describe resident memory or a heap bound. The final typed session
+decode remains included; provider, transport, disk writes and runtime scheduling
+are excluded, so this is not an end-to-end latency claim.
 
 ## Runtime ownership and recovery
 

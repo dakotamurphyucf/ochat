@@ -1,8 +1,11 @@
 open! Core
 
 (** Owner-held projection and immutable document preservation context. Updating
-    a state preserves unknown paths; conflicting deletions fail before commit. *)
-type t = Session_state.t Document_schema.Extension_carrier.t
+    a state preserves unknown paths; conflicting deletions fail before commit.
+    A decoded original retains its admitted immutable ledger and complete profile.
+    Updating the native value never replaces this original preservation basis;
+    any different profile re-admits the original child before continuity checks. *)
+type t
 
 val authored : Session_state.t -> t
 val value : t -> Session_state.t

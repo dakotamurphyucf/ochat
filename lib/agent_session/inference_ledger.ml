@@ -586,11 +586,7 @@ let validate_value ~limits v =
            else
              let* () = record_consistent h row.record in
              observation
-               (Result.map
-                  (O.Attempt_record.of_json
-                     (O.Attempt_record.to_json row.record)
-                     ~limits:O.Admission.attempt)
-                  ~f:(fun _ -> ()))))
+               (O.Attempt_record.validate row.record ~limits:O.Admission.attempt)))
     in
     Result.all_unit
       (List.map (Map.to_alist v.turns) ~f:(fun (ordinal, turn) ->
@@ -1681,23 +1677,9 @@ let summary t =
   |> invariant
 ;;
 
-let validate_update previous ~incoming =
+let validate_changed_update previous ~incoming =
   let before = value previous in
   let after = value incoming in
-  let* () =
-    validate
-      previous
-      ~limits:Limits.default
-      ~session_id:before.session_id
-      ~generation:before.generation
-  in
-  let* () =
-    validate
-      incoming
-      ~limits:Limits.default
-      ~session_id:before.session_id
-      ~generation:after.generation
-  in
   let nondecreasing a b = Int64.(b >= a) in
   let* () =
     if
@@ -1841,4 +1823,33 @@ let validate_update previous ~incoming =
       (Jsonaf.to_string (D.Document.json supplied))
   then Ok ()
   else invalid "carrier" "update omits protected previous fields"
+;;
+
+let validate_update previous ~incoming =
+  let before = value previous in
+  let after = value incoming in
+  let* () =
+    validate
+      previous
+      ~limits:Limits.default
+      ~session_id:before.session_id
+      ~generation:before.generation
+  in
+  let* () =
+    validate
+      incoming
+      ~limits:Limits.default
+      ~session_id:before.session_id
+      ~generation:after.generation
+  in
+  (* Physical identity is deliberate immutable admission evidence. Otherwise,
+     require complete byte equality, including member order and number spelling:
+     semantic JSON equality would weaken the strict carrier adoption boundary. *)
+  if
+    phys_equal previous.admitted_document incoming.admitted_document
+    || String.equal
+         (D.Document.to_string previous.admitted_document)
+         (D.Document.to_string incoming.admitted_document)
+  then Ok ()
+  else validate_changed_update previous ~incoming
 ;;
