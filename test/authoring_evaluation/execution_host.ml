@@ -423,45 +423,76 @@ let run
                ; idempotency_key = P.Idempotency_key.of_string "evaluation:execute" |> get
                })
           : P.Public.Result.t);
-       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
-         let rec wait expected_requests ready =
-           let current = snapshot embedded in
-           Option.iter current.failure ~f:(fun error -> raise (Protocol_error error));
-           let is_ready = ready current in
-           match
-             !requests >= expected_requests
-             && Option.is_none current.session.active_operation
-             && is_ready
-           with
-           | true ->
-             (match !requests = expected_requests with
-              | true -> current
-              | false ->
-                raise
-                  (Scenario_failure
-                     "evaluation unexpectedly requested an extra model turn"))
-           | false ->
-             Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-             wait expected_requests ready
-         in
-         let initial = wait expected_requests (fun _ -> true) in
-         match background with
-         | None ->
-           (match List.is_empty initial.jobs with
-            | true -> initial
-            | false -> failwith "synchronous evaluation unexpectedly started jobs")
-         | Some scenario ->
-           scenario.after_ack ~workspace embedded initial;
-           let settled = wait scenario.final_requests scenario.settled in
-           Option.iter embedded.replay_job_delivery ~f:(fun replay ->
-             List.iter settled.jobs ~f:replay);
-           let final = wait scenario.final_requests scenario.settled in
-           require
-             (Jsonaf.exactly_equal
-                (snapshot_to_json settled |> Jsonaf.member_exn "canonical_history")
-                (snapshot_to_json final |> Jsonaf.member_exn "canonical_history"))
-             "completion replay changed published history";
-           final))
+       let latest_status = ref (Sexp.List []) in
+       try
+         Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+           let rec wait expected_requests ready =
+             let current = snapshot embedded in
+             Option.iter current.failure ~f:(fun error -> raise (Protocol_error error));
+             let is_ready = ready current in
+             let active_operation =
+               Option.map current.session.active_operation ~f:(fun operation ->
+                 ( operation.P.Operation.id
+                 , Agent_server_test_support.Failure_diagnostic.operation_status
+                     operation.state ))
+             in
+             latest_status
+             := [%sexp
+                  { revision = (current.revision : int64)
+                  ; observed_state =
+                      (Agent_server_test_support.Failure_diagnostic.observed_status
+                         current.session.observed_state
+                       : string)
+                  ; active_operation : (P.Id.Operation.t * string) option
+                  ; history_entries =
+                      (List.length current.canonical_history.entries : int)
+                  ; deferred_entries = (List.length current.deferred_entries : int)
+                  ; permissions = (List.length current.permissions : int)
+                  ; jobs = (List.length current.jobs : int)
+                  ; active_tool_calls = (List.length current.active_tool_calls : int)
+                  ; provider_requests = (!requests : int)
+                  ; target_requests = (expected_requests : int)
+                  ; last_ready = (is_ready : bool)
+                  }];
+             match
+               !requests >= expected_requests
+               && Option.is_none current.session.active_operation
+               && is_ready
+             with
+             | true ->
+               (match !requests = expected_requests with
+                | true -> current
+                | false ->
+                  raise
+                    (Scenario_failure
+                       "evaluation unexpectedly requested an extra model turn"))
+             | false ->
+               Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+               wait expected_requests ready
+           in
+           let initial = wait expected_requests (fun _ -> true) in
+           match background with
+           | None ->
+             (match List.is_empty initial.jobs with
+              | true -> initial
+              | false -> failwith "synchronous evaluation unexpectedly started jobs")
+           | Some scenario ->
+             scenario.after_ack ~workspace embedded initial;
+             let settled = wait scenario.final_requests scenario.settled in
+             Option.iter embedded.replay_job_delivery ~f:(fun replay ->
+               List.iter settled.jobs ~f:replay);
+             let final = wait scenario.final_requests scenario.settled in
+             require
+               (Jsonaf.exactly_equal
+                  (snapshot_to_json settled |> Jsonaf.member_exn "canonical_history")
+                  (snapshot_to_json final |> Jsonaf.member_exn "canonical_history"))
+               "completion replay changed published history";
+             final)
+       with
+       | Eio.Time.Timeout as exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         Eio.traceln "evaluation polling timeout: %s" (Sexp.to_string_hum !latest_status);
+         Stdlib.Printexc.raise_with_backtrace exn backtrace)
 ;;
 
 let outcome (snapshot : P.Public.Snapshot.Fields.t) call_id =

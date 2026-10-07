@@ -209,7 +209,11 @@ let%expect_test
                   started := Eio.Time.now (Eio.Stdenv.clock env);
                   Queue.clear phases;
                   mark_phase "connect";
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                  (* The first workflow measured 8.0s wall / 7.6s CPU locally;
+                     concurrent Linux CI reached its final stop/inspect/restart at
+                     19.8s. Bound the complete workflow with scheduling headroom;
+                     native operation deadlines remain unchanged. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 40. (fun () ->
                     let client = connection daemon (principal ()) in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)

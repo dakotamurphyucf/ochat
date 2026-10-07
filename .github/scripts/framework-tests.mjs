@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 const tier = process.argv[2];
 // Match the concurrency used for local qualification. Several persistence
@@ -12,23 +13,43 @@ if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
 // aggregate run separately from individual test and runtime execution deadlines.
 const timeoutMs = (tier === "normal" ? 35 : 25) * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
+// Verbose output identifies started actions even while their output is buffered.
+// Write the trace inside the uploaded evidence directory, including on timeout.
+const command = [
+  ...commands[tier],
+  "--display=verbose",
+  `--trace-file=${path.resolve(`.ci-evidence/${tier}-dune-trace.json`)}`,
+];
 const start = Date.now();
 const report = {
   tier,
   revision: execFileSync("git", ["rev-parse", "HEAD"], {
     encoding: "utf8",
   }).trim(),
-  command: ["dune", ...commands[tier]],
+  command: ["dune", ...command],
   timeoutSeconds: timeoutMs / 1000,
   startedAt: new Date(start).toISOString(),
   result: "fail",
 };
 const log = fs.openSync(`.ci-evidence/${tier}.log`, "w");
-const result = spawnSync("dune", commands[tier], {
+const result = spawnSync("dune", command, {
   stdio: ["ignore", log, log],
   timeout: timeoutMs,
 });
 fs.closeSync(log);
+// Retain the build log under the same artifact root rather than relying on a
+// separate upload glob. Missing diagnostics must not hide the primary result.
+const duneLog = path.join(process.env.DUNE_BUILD_DIR ?? "_build", "log");
+try {
+  fs.copyFileSync(duneLog, `.ci-evidence/${tier}-dune.log`);
+  report.duneLog = { source: duneLog, status: "copied" };
+} catch (error) {
+  report.duneLog = {
+    source: duneLog,
+    status: error.code === "ENOENT" ? "missing" : "error",
+    error: error.message,
+  };
+}
 Object.assign(report, {
   result: result.status === 0 && !result.error ? "pass" : "fail",
   exitCode: result.status,

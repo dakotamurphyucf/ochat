@@ -28,6 +28,7 @@
   follow_up_tests
   infrastructure_tests
   invocation_tests
+  invocation_history_validation_tests
   jobs_tests
   job_execution_tests
   job_delivery_tests

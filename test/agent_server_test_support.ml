@@ -1,5 +1,152 @@
 open! Core
 
+(** Bounded failure-only fixture progress. Observations retain compact metadata,
+    never State/history/ledger/payloads. Reporting performs no actor or transport call. *)
+module Failure_diagnostic : sig
+  type t
+
+  val create : now:(unit -> float) -> t
+  val reset : t -> unit
+  val mark : t -> string -> unit
+  val observe : t -> Agent_session.Session_state.t -> unit
+  val report : t -> context:Sexp.t -> unit
+  val operation_status : Agent_protocol.Operation.state -> string
+  val observed_status : Agent_protocol.Session.observed_state -> string
+end = struct
+  module P = Agent_protocol
+
+  type t =
+    { now : unit -> float
+    ; mutable started_wall : float
+    ; mutable started_cpu : float
+    ; mutable phases : (string * float * float) list
+    ; mutable states : (P.Id.Session.t * Sexp.t) list
+    }
+
+  let create ~now =
+    { now
+    ; started_wall = now ()
+    ; started_cpu = Stdlib.Sys.time ()
+    ; phases = []
+    ; states = []
+    }
+  ;;
+
+  let reset t =
+    t.started_wall <- t.now ();
+    t.started_cpu <- Stdlib.Sys.time ();
+    t.phases <- [];
+    t.states <- []
+  ;;
+
+  let elapsed t = t.now () -. t.started_wall, Stdlib.Sys.time () -. t.started_cpu
+
+  let mark t phase =
+    let wall, cpu = elapsed t in
+    t.phases <- List.take ((String.prefix phase 256, wall, cpu) :: t.phases) 16
+  ;;
+
+  let outcome = function
+    | P.Invocation.Complete _ -> "complete"
+    | Pending _ -> "pending"
+    | Fail error -> "fail:" ^ String.prefix error.code 128
+    | Cancelled _ -> "cancelled"
+  ;;
+
+  let invocation_status = function
+    | P.Invocation.Admitted -> "admitted"
+    | Dispatching -> "dispatching"
+    | Resolved result -> "resolved:" ^ outcome result
+    | Published result -> "published:" ^ outcome result
+  ;;
+
+  let operation_status = function
+    | P.Operation.Starting -> "starting"
+    | Running -> "running"
+    | Cancelling -> "cancelling"
+    | Completed -> "completed"
+    | Failed _ -> "failed"
+    | Cancelled -> "cancelled"
+    | Interrupted _ -> "interrupted"
+  ;;
+
+  let observed_status = function
+    | P.Session.Stopped -> "stopped"
+    | Queued_for_slot -> "queued_for_slot"
+    | Starting -> "starting"
+    | Recovering -> "recovering"
+    | Idle -> "idle"
+    | Running_turn _ -> "running_turn"
+    | Compacting _ -> "compacting"
+    | Waiting_for_permission _ -> "waiting_for_permission"
+    | Stopping -> "stopping"
+    | Failed error -> "failed:" ^ Sexp.to_string ([%sexp_of: P.Error.code] error.code)
+  ;;
+
+  let latest entries = List.drop entries (Int.max 0 (List.length entries - 12))
+
+  let observe t (state : Agent_session.Session_state.t) =
+    let observed_wall, observed_cpu = elapsed t in
+    let active =
+      Option.map state.active_operation ~f:(fun operation ->
+        operation.P.Operation.id, operation_status operation.state)
+    in
+    let invocations =
+      latest state.invocations
+      |> List.map ~f:(fun invocation ->
+        ( invocation.P.Invocation.context.id
+        , String.prefix invocation.context.tool_name 128
+        , invocation_status invocation.status ))
+    in
+    let receipts =
+      latest state.managed_submissions
+      |> List.map ~f:(fun submission ->
+        submission.Agent_session.Managed_submission.history_id, submission.status)
+    in
+    let metadata =
+      [%message
+        "cached actor"
+          ~session_id:(state.identity.session_id : P.Id.Session.t)
+          ~generation:(state.identity.generation : int)
+          (observed_wall : float)
+          (observed_cpu : float)
+          ~revision:(state.counters.revision : int64)
+          ~event_sequence:(state.counters.event_sequence : int64)
+          ~desired:(state.lifecycle.desired : P.Session.desired_state)
+          ~observed:(observed_status state.lifecycle.observed : string)
+          (active : (P.Id.Operation.t * string) option)
+          ~deferred_count:(List.length state.conversation.deferred_user_entries : int)
+          ~permission_count:(List.length state.permissions : int)
+          ~invocation_count:(List.length state.invocations : int)
+          (invocations : (P.Id.Invocation.t * string * string) list)
+          ~receipt_count:(List.length state.managed_submissions : int)
+          (receipts : (P.History.Id.t * Agent_session.Managed_submission.status) list)]
+    in
+    t.states
+    <- List.take
+         ((state.identity.session_id, metadata)
+          :: List.filter t.states ~f:(fun (id, _) ->
+            not (P.Id.Session.equal id state.identity.session_id)))
+         16
+  ;;
+
+  let report t ~context =
+    let wall, cpu = elapsed t in
+    let phases = List.rev t.phases in
+    let states = List.map t.states ~f:snd in
+    Eio.traceln
+      "authored timeout diagnostic %s"
+      (Sexp.to_string_hum
+         [%message
+           "fixture timeout"
+             (context : Sexp.t)
+             (wall : float)
+             (cpu : float)
+             (phases : (string * float * float) list)
+             (states : Sexp.t list)])
+  ;;
+end
+
 (** Explicit synthetic selected backend for offline daemon fixtures. The mock
     owns response completion; observations are intentionally not a durable usage
     ledger in these tests. This fixture initializes its RNG before allocating a

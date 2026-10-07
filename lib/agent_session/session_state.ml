@@ -538,12 +538,15 @@ let validate_domain t =
     | None -> Ok ()
     | Some _ -> Error (Agent_protocol.Error.invalid_request "duplicate history identity")
   in
+  let%bind retained_history =
+    Invocation_history.Validated_history.create t.conversation.canonical_history
+  in
   let%bind () =
-    let%bind entries =
-      History_codec.all_of_protocol
-        (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+    let%bind deferred =
+      History_codec.all_of_protocol t.conversation.deferred_user_entries
     in
-    History_entry.validate_relations entries
+    History_entry.validate_relations
+      (Invocation_history.Validated_history.entries retained_history @ deferred)
     |> Result.map_error ~f:Agent_protocol.Error.invalid_request
   in
   let%bind () =
@@ -561,9 +564,7 @@ let validate_domain t =
           invocation
       in
       let%bind () =
-        Invocation_history.validate_retained
-          ~history:t.conversation.canonical_history
-          invocation
+        Invocation_history.Validated_history.validate_retained retained_history invocation
       in
       let context = invocation.context in
       if

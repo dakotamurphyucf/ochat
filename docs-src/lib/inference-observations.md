@@ -82,6 +82,16 @@ and do not describe resident memory or a heap bound. The final typed session
 decode remains included; provider, transport, disk writes and runtime scheduling
 are excluded, so this is not an end-to-end latency claim.
 
+Within each session-state validation, an immutable
+[validated history snapshot](../../lib/agent_session/invocation_history.ml)
+decodes canonical entries once for relation and retained-receipt checks. Its
+constructor owns the association between each raw entry and its decoded value;
+duplicate identities are rejected. Every invocation still checks provenance,
+routing, outcome contents and occurrence order. The snapshot is local to that
+validation call, with no cache across transitions. This removes repeated payload
+decoding when many receipts scan the same retained history; it does not skip
+session-document validation or promise faster complete workflows.
+
 ## Runtime ownership and recovery
 
 The actual resource graph acquires its tracking owner before model-capable

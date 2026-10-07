@@ -113,6 +113,15 @@ let%expect_test
         let child_calls = ref 0 in
         let release, release_u = Eio.Promise.create () in
         let phase = ref "startup" in
+        let diagnostic =
+          Failure_diagnostic.create ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
+        in
+        let invocation_ordinal = ref 0 in
+        let state daemon id =
+          let current = state daemon id in
+          Failure_diagnostic.observe diagnostic current;
+          current
+        in
         let provider ~sw:_ ~inputs =
           let serialized =
             List.map inputs ~f:(fun item -> Res.Item.jsonaf_of_t item |> Jsonaf.to_string)
@@ -175,10 +184,14 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
-                (* Two independent batches deliberately wait out the production 10s
-                 named-tool response deadline. This is an outer fixture guard. *)
+                (* Two batches deliberately wait out the production 10s named-tool
+                   deadline. A full control took 42.9s wall / 21.7s CPU on the first
+                   daemon and 22.1s wall on restart. This outer workflow guard allows
+                   concurrent CI scheduling; production deadlines remain unchanged. *)
+                Failure_diagnostic.reset diagnostic;
+                Failure_diagnostic.mark diagnostic "connect and initialize";
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 90. (fun () ->
                     let connect =
                       Agent_server_wire_fixture.http_connector
                         ~sw
@@ -208,18 +221,37 @@ let%expect_test
                       in
                       f ~disconnect ~reconnect sw daemon !client attach))
                 with
-                | Eio.Time.Timeout -> failwith ("pending fixture timeout: " ^ !phase)))
+                | Eio.Time.Timeout ->
+                  Failure_diagnostic.report
+                    diagnostic
+                    ~context:
+                      [%sexp
+                        (!phase : string)
+                      , (!invocation_ordinal : int)
+                      , (!serial : int)
+                      , (!child_calls : int)];
+                  failwith ("pending fixture timeout: " ^ !phase)))
         in
         let invoke_batch_status daemon attach parent calls =
+          Int.incr invocation_ordinal;
+          let names = List.map calls ~f:fst |> String.concat ~sep:"," in
+          let mark stage =
+            Failure_diagnostic.mark
+              diagnostic
+              (sprintf "batch %d %s: %s" !invocation_ordinal names stage)
+          in
+          mark "read before";
           let before = state daemon parent in
           queued
           := List.map calls ~f:(fun (name, args) ->
                Int.incr serial;
                sprintf "pending-call-%d" !serial, name, args);
+          mark "attach";
           let handle = attach parent in
           Exn.protect
             ~finally:(fun () -> H.close handle)
             ~f:(fun () ->
+              mark "send";
               H.send_message
                 handle
                 { kind = Plain_text
@@ -228,7 +260,9 @@ let%expect_test
                 }
               |> protocol_ok
               |> ignore;
+              mark "wait for inactive parent";
               await (fun () -> Option.is_none (state daemon parent).active_operation);
+              mark "read invocation outcomes";
               let fresh =
                 List.filter (state daemon parent).invocations ~f:(fun invocation ->
                   P.Invocation.equal_origin invocation.context.origin Model
@@ -309,6 +343,7 @@ let%expect_test
           with_daemon (fun ~disconnect ~reconnect sw daemon client attach ->
             let parent, _ = create_session ~start_immediately:true client in
             phase := "concurrent creation";
+            Failure_diagnostic.mark diagnostic "concurrent creation";
             let first =
               Eio.Fiber.fork_promise ~sw (fun () ->
                 invoke_batch
@@ -355,6 +390,7 @@ let%expect_test
               | Some origin -> [%test_eq: string] "researcher" origin.name
               | None -> failwith "lost authored origin");
             phase := "concurrent deferred continuation";
+            Failure_diagnostic.mark diagnostic "concurrent deferred continuation";
             let continued =
               invoke_batch
                 daemon
@@ -384,6 +420,7 @@ let%expect_test
             in
             assert (Jsonaf.exactly_equal generic replay);
             phase := "cancel caller after accepted continuation";
+            Failure_diagnostic.mark diagnostic "cancel caller after accepted continuation";
             let before_cancel = (state daemon left).managed_submissions in
             let cancelled_call =
               Eio.Fiber.fork_promise ~sw (fun () ->
@@ -470,6 +507,7 @@ let%expect_test
                only after the original logical connection has closed. *)
             disconnect ();
             phase := "release and correlate";
+            Failure_diagnostic.mark diagnostic "release and correlate";
             Eio.Promise.resolve release_u ();
             await (fun () ->
               List.for_all [ left; right ] ~f:(fun child ->
