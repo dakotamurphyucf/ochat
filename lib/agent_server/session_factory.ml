@@ -423,9 +423,8 @@ let validate_delegated_target
          (unavailable Invalid_state "child inference target differs from its admission"))
 ;;
 
-let restore_state_source t (state : Agent_session.Session_state.t) =
+let lookup_state_source t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
-  let%bind () = Agent_session.Session_state.validate state in
   match state.spec.protocol.prompt, state.spec.delegation with
   | Generated revision_id, Some reference ->
     let%bind record =
@@ -480,6 +479,12 @@ let restore_state_source t (state : Agent_session.Session_state.t) =
            Prompt_unavailable
            (List.map diagnostics ~f:(fun value -> value.message)
             |> String.concat ~sep:"\n")))
+;;
+
+let restore_state_source t state =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_state.validate state in
+  lookup_state_source t state
 ;;
 
 let restore_state_profile t (state : Agent_session.Session_state.t) =
@@ -3873,12 +3878,15 @@ let preparation_sequence t state =
 
 let prepare_administration t entry ~previous state ~fresh_history =
   let open Result.Let_syntax in
+  let%bind () =
+    Agent_session.Session_state.validate_administration_candidate state ~previous
+  in
   let%bind handle =
     entry.Session_registry.store_handle
     |> Result.of_option
          ~error:(unavailable Invalid_state "session has no administration store")
   in
-  let%bind revision = restore_state_source t state in
+  let%bind revision = lookup_state_source t state in
   let%bind () = check_source_for_execution t state revision in
   let%bind _profile = restore_state_profile t state in
   let%bind () =
