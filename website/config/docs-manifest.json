@@ -4968,5 +4968,13 @@
     "title": "Neutral transcript projections",
     "reviewNote": "Accepted contributor architecture for public transcript disclosure, neutral live projections and protocol ownership. User-facing protocol references remain published separately.",
     "provenance": "authored"
+  },
+  {
+    "id": "neutral-inference-contracts",
+    "source": "docs-src/neutral-inference-contracts.md",
+    "disposition": "repository-only",
+    "title": "Neutral inference contracts",
+    "reviewNote": "Contributor architecture for pure private inference inputs, captured selections and safe observations. Runtime route migration and accounting integration require their separate implementation and qualification.",
+    "provenance": "authored"
   }
 ]

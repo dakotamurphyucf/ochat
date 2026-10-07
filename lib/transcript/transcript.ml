@@ -243,7 +243,7 @@ module Scope = struct
     `Object [ "key", key_json t.key; "parent", parent ]
   ;;
 
-  let of_json json =
+  let decode json =
     let open Result.Let_syntax in
     let%bind key = field json "key" >>= key_of_json in
     let%bind parent = field json "parent" in
@@ -257,6 +257,12 @@ module Scope = struct
         Nested { scope; call_entry_id; call_alias }
     in
     create ~source:key.source ~attempt:key.attempt ~relation
+  ;;
+
+  let of_json json ~limits =
+    let open Result.Let_syntax in
+    let%bind (_ : int) = measure ~limits json in
+    decode json
   ;;
 
   let equal left right =
@@ -344,7 +350,7 @@ module Item = struct
 
   let of_json json =
     let open Result.Let_syntax in
-    let%bind scope = field json "scope" >>= Scope.of_json in
+    let%bind scope = field json "scope" >>= Scope.decode in
     let%bind id = field json "id" >>= string >>= Item_id.of_string in
     let%bind entry_id = optional_field json "entry_id" Scope.id_of_json in
     let%bind header = optional_field json "header" Header.of_json in
@@ -668,7 +674,7 @@ module Stream = struct
     let%bind view =
       match kind with
       | "source_started" ->
-        let%bind scope = field json "scope" >>= Scope.of_json in
+        let%bind scope = field json "scope" >>= Scope.decode in
         let%map origin = field json "origin" >>= Payload.Origin.of_json in
         Source_started { scope; origin }
       | "item_announced" ->
@@ -686,11 +692,11 @@ module Stream = struct
         let%map entry = field json "entry" >>= entry_of_json in
         Item_finalized { item; entry }
       | "source_finished" ->
-        let%bind scope = field json "scope" >>= Scope.of_json in
+        let%bind scope = field json "scope" >>= Scope.decode in
         let%map completion = field json "completion" >>= completion_of_json in
         Source_finished { scope; completion }
       | "unknown_event" ->
-        let%bind scope = field json "scope" >>= Scope.of_json in
+        let%bind scope = field json "scope" >>= Scope.decode in
         let%bind provider_kind = field json "provider_kind" >>= string in
         let%map raw = field json "raw" in
         Unknown_event { scope; provider_kind; raw }

@@ -98,6 +98,15 @@ module Scope : sig
     -> (t, string) Result.t
 
   val key : t -> Key.t
+
+  (** Includes the parent relation and its actual call binding, not just [key]. *)
+  val equal : t -> t -> bool
+
+  val to_json : t -> Jsonaf.t
+
+  (** Admits the complete JSON tree under [limits], including unknown fields,
+      before decoding identities and validating the parent relation. *)
+  val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, string) Result.t
 end
 
 module Item : sig

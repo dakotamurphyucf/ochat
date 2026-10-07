@@ -579,6 +579,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatml/chatml_value_codec.mli` | [contract](../../lib/chatml/chatml_value_codec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/history_chatmd/history_chatmd.mli` | [contract](../../lib/history_chatmd/history_chatmd.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/inference/event.mli` | [contract](../../lib/inference/event.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
+| `lib/inference/inference.mli` | [contract](../../lib/inference/inference.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
+| `lib/inference/observation.mli` | [contract](../../lib/inference/observation.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
+| `lib/inference/request.mli` | [contract](../../lib/inference/request.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
+| `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/openai/responses.mli` | [contract](../../lib/openai/responses.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_codec.mli` | [contract](../../lib/openai/responses_codec.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_driver.mli` | [contract](../../lib/openai/responses_driver.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -980,6 +985,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../meta_prompting/recursive_mp.doc.md) | `docs-src/meta_prompting/recursive_mp.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../meta_prompting/templates.doc.md) | `docs-src/meta_prompting/templates.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../neutral-history-persistence.md) | `docs-src/neutral-history-persistence.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../neutral-inference-contracts.md) | `docs-src/neutral-inference-contracts.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../neutral-transcript-protocol.md) | `docs-src/neutral-transcript-protocol.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../notty_examples_research.md) | `docs-src/notty_examples_research.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../notty_examples_research.md.report.md) | `docs-src/notty_examples_research.md.report.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

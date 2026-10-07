@@ -53,7 +53,8 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "authoring_context" ], "../guide/authoring-context-tool.md"
+    [ [ "inference/" ], "../neutral-inference-contracts.md"
+    ; [ "authoring_context" ], "../guide/authoring-context-tool.md"
     ; [ "authoring_corpus" ], "../guide/authoring-topic-corpus.md"
     ; [ "authoring_sources" ], "../guide/authoring-source-bundle.md"
     ; ( [ "background_request"
@@ -148,6 +149,7 @@ let module_rows env root =
          ; "history_entry"
          ; "history_chatmd/"
          ; "transcript/"
+         ; "inference/"
          ; "session_store"
          ; "source_loader"
          ]

@@ -1,0 +1,5 @@
+(library
+ (name inference)
+ (public_name ochat.inference)
+ (libraries core jsonaf ochat.document_schema ochat.history_entry ochat.transcript)
+ (preprocess (pps ppx_jane)))
