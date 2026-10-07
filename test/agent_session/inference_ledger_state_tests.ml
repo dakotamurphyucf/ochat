@@ -446,6 +446,109 @@ let%test_unit "durable state refuses a ledger admitted under a looser byte profi
     ())
 ;;
 
+let%test_unit "immutable admission binds every profile bound and exact identity" =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let document_profile
+          ?(max_bytes = 4 * 1024 * 1024)
+          ?(max_depth = 256)
+          ?(max_fields = 1_000_000)
+          ?(max_nodes = 2_000_000)
+          ()
+      =
+      D.Limits.create ~max_bytes ~max_depth ~max_fields ~max_nodes |> document_ok
+    in
+    let profile
+          ?(max_attempts = 256)
+          ?(max_turns = 256)
+          ?(max_retained_bytes = 4 * 1024 * 1024)
+          ?(document_limits = document_profile ())
+          ()
+      =
+      L.Limits.create ~max_attempts ~max_turns ~max_retained_bytes ~document_limits
+      |> ledger_ok
+    in
+    let raw =
+      ledger_json before.inference_ledger
+      |> fun json ->
+      add
+        json
+        "future_profile"
+        (`Object
+            [ "spelling", `Number "1e+00"
+            ; "text", `String "\195\169\n"
+            ; "padding", `String (String.make 4096 'x')
+            ])
+    in
+    let original = D.Document.inspect ~limits:document_limits raw |> document_ok in
+    let ledger = L.of_document original ~limits:(profile ()) |> ledger_ok in
+    let first, first_handle, _ = admit before ledger in
+    let second, _, _ = admit before first in
+    let operation () =
+      P.Operation.
+        { id = P.Id.Operation.create ()
+        ; generation = before.identity.generation
+        ; kind = Turn User_submit
+        ; state = Running
+        ; started_at = before.identity.created_at
+        ; updated_at = before.identity.updated_at
+        }
+    in
+    let second, _, _ = L.admit_turn second (operation ()) |> ledger_ok in
+    let second, _, _ = L.admit_turn second (operation ()) |> ledger_ok in
+    let complete = ledger_bytes second in
+    let validate limits =
+      L.validate
+        second
+        ~limits
+        ~session_id:before.identity.session_id
+        ~generation:before.identity.generation
+    in
+    validate (profile ()) |> ledger_ok;
+    assert (
+      Result.is_error
+        (L.validate
+           second
+           ~limits:(profile ())
+           ~session_id:(P.Id.Session.create ())
+           ~generation:before.identity.generation));
+    assert (
+      Result.is_error
+        (L.validate
+           second
+           ~limits:(profile ())
+           ~session_id:before.identity.session_id
+           ~generation:(before.identity.generation + 1)));
+    List.iter
+      [ profile ~max_attempts:1 ()
+      ; profile ~max_turns:1 ()
+      ; profile ~max_retained_bytes:1024 ()
+      ; profile ~document_limits:(document_profile ~max_bytes:128 ()) ()
+      ; profile ~document_limits:(document_profile ~max_depth:2 ()) ()
+      ; profile ~document_limits:(document_profile ~max_fields:1 ()) ()
+      ; profile ~document_limits:(document_profile ~max_nodes:1 ()) ()
+      ]
+      ~f:(fun limits -> assert (Result.is_error (validate limits)));
+    assert (
+      Result.is_error
+        (L.of_document original ~limits:(profile ~max_retained_bytes:1024 ())));
+    let changed = L.set_state second first_handle Running |> ledger_ok in
+    L.validate_update second ~incoming:changed |> ledger_ok;
+    assert (String.equal complete (ledger_bytes second));
+    assert (not (String.equal complete (ledger_bytes changed)));
+    assert (
+      String.is_substring
+        (ledger_bytes changed)
+        ~substring:
+          "\"future_profile\":{\"spelling\":1e+00,\"text\":\"\195\169\\n\",\"padding\":");
+    let first_row =
+      L.find changed ~ordinal:(L.Handle.ordinal first_handle) |> Option.value_exn
+    in
+    match O.Attempt_record.state (L.Row.record first_row) with
+    | Running -> ()
+    | Prepared | Terminal _ | Interrupted _ -> assert false)
+;;
+
 let%test_unit
     "legitimate bounded retirement preserves cumulative coverage and cannot resurrect an \
      ordinal"
@@ -503,6 +606,92 @@ let%test_unit
         (P.Inference_query.Summary.coverage (L.summary next)).retired_attempts
         1L);
     assert (Result.is_error (L.validate_update next ~incoming:ended)))
+;;
+
+let%test_unit "failed retirement planning cannot publish an unadmitted candidate" =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let close ledger handle =
+      L.set_state
+        ledger
+        handle
+        (Interrupted { reason = Host_interrupted; delivery = Definitely_not_submitted })
+      |> ledger_ok
+    in
+    let first, first_handle, _ = admit before before.inference_ledger in
+    let first = close first first_handle in
+    let second, second_handle, _ = admit before first in
+    let second = close second second_handle in
+    let original = ledger_json second in
+    let payload = member original "payload" in
+    let rows =
+      match member payload "rows" with
+      | `Array [ first; second ] ->
+        `Array [ first; add second "future_row" (`Number "1e+00") ]
+      | _ -> failwith "expected two actual retained admissions"
+    in
+    let original =
+      replace original "payload" (replace payload "rows" rows)
+      |> D.Document.inspect ~limits:document_limits
+      |> document_ok
+    in
+    let profile max_retained_bytes =
+      L.Limits.create ~max_attempts:2 ~max_turns:256 ~max_retained_bytes ~document_limits
+      |> ledger_ok
+    in
+    let fits bytes = Result.is_ok (L.of_document original ~limits:(profile bytes)) in
+    let maximum = String.length (D.Document.to_string original) + 4096 in
+    assert (fits maximum);
+    let rec minimum lower upper =
+      if Int.equal lower upper
+      then lower
+      else (
+        let middle = lower + ((upper - lower) / 2) in
+        if fits middle then minimum lower middle else minimum (middle + 1) upper)
+    in
+    let ledger =
+      L.of_document original ~limits:(profile (minimum 1 maximum)) |> ledger_ok
+    in
+    let original_bytes = ledger_bytes ledger in
+    let target =
+      match Inference.Selection.view before.spec.inference_target with
+      | Captured target -> target
+      | Unresolved -> failwith "fixture selection must be explicit"
+    in
+    let configuration =
+      O.Configuration.of_target
+        target
+        ~preparation_id:(String.make 500 'x')
+        ~transport:Http_sse
+        ~capabilities:[]
+        ~limits:O.Admission.observation
+      |> observation_ok
+    in
+    let next, handle, tracking =
+      L.admit
+        ledger
+        ~source:(Transcript.Source_id.of_string "physical-graph" |> Result.ok_or_failwith)
+        ~relation:Root
+        ~operation_id:None
+        ~invocation_id:None
+        ~configuration
+      |> ledger_ok
+    in
+    assert (L.equal_tracking tracking (Untracked Protected_future_data));
+    assert (Int64.equal (L.Handle.ordinal handle) 3L);
+    assert (List.length (L.rows next) = 2);
+    assert (Option.is_some (L.find next ~ordinal:(L.Handle.ordinal first_handle)));
+    assert (Option.is_some (L.find next ~ordinal:(L.Handle.ordinal second_handle)));
+    assert (
+      D.Json.equal
+        (member (member (ledger_json ledger) "payload") "rows")
+        (member (member (ledger_json next) "payload") "rows"));
+    let coverage = P.Inference_query.Summary.coverage (L.summary next) in
+    assert (Int64.equal coverage.retired_attempts 0L);
+    assert (Int64.equal coverage.untracked_attempts 1L);
+    assert (String.equal original_bytes (ledger_bytes ledger));
+    assert (String.is_substring (ledger_bytes next) ~substring:"\"future_row\":1e+00");
+    L.validate_update ledger ~incoming:next |> ledger_ok)
 ;;
 
 let%test_unit

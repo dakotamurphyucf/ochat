@@ -38,7 +38,7 @@ module Error : sig
 end
 
 module Limits : sig
-  type t
+  type t [@@deriving equal]
 
   (** All bounds are positive; depth is at most 256. Fields counts all object
       members, nodes counts all values, bytes includes JSON string encoding. *)

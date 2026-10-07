@@ -58,6 +58,7 @@ module Limits = struct
     ; max_retained_bytes : int
     ; document_limits : D.Limits.t
     }
+  [@@deriving equal]
 
   let create ~max_attempts ~max_turns ~max_retained_bytes ~document_limits =
     if max_attempts <= 0 || max_turns <= 0 || max_retained_bytes <= 0
@@ -173,12 +174,24 @@ type value =
   ; turns : turn Int64.Map.t
   }
 
+(* Planning can temporarily retire rows before an admission succeeds. These
+   carriers have no reusable admission proof and never escape as public [t]. *)
+module Candidate = struct
+  type t =
+    { carrier : value C.t
+    ; limits : Limits.t
+    }
+
+  let value t = C.value t.carrier
+  let with_value t value = { t with carrier = C.with_value t.carrier value }
+end
+
 type t =
-  { carrier : value C.t
-  ; limits : Limits.t
+  { candidate : Candidate.t
+  ; admitted_document : D.Document.t
   }
 
-let value t = C.value t.carrier
+let value t = Candidate.value t.candidate
 let revision t = (value t).revision
 let rows t = Map.data (value t).rows
 let find t ~ordinal = Map.find (value t).rows ordinal
@@ -747,7 +760,11 @@ let codec limits =
   | Error error -> raise_s [%sexp "invalid inference ledger codec", (error : D.Error.t)]
 ;;
 
-let encode t = document (D.Domain_codec.encode (codec t.limits) t.carrier)
+let encode_candidate (t : Candidate.t) =
+  document (D.Domain_codec.encode (codec t.limits) t.carrier)
+;;
+
+let encode t = Ok t.admitted_document
 let to_document = encode
 
 let record_with (r : Row.t) ~state ~observations ~omitted_diagnostics =
@@ -787,8 +804,7 @@ let replace_fields json replacements =
   | _ -> json
 ;;
 
-let check_capacity t =
-  let* doc = encode t in
+let check_capacity (limits : Limits.t) doc =
   let payload = D.Document.payload doc in
   let* reserved_rows =
     match D.Json.field payload ~name:"rows" with
@@ -835,21 +851,31 @@ let check_capacity t =
   in
   let reserved = replace_fields (D.Document.json doc) [ "payload", reserved_payload ] in
   let* bytes =
-    document (D.Json.validate_and_measure ~limits:t.limits.document_limits reserved)
+    document (D.Json.validate_and_measure ~limits:limits.document_limits reserved)
   in
-  if bytes > t.limits.max_retained_bytes
+  if bytes > limits.max_retained_bytes
   then Error (Error.Document (D.Error.Limit_exceeded "inference retained bytes"))
   else Ok ()
 ;;
 
-let publish t v =
-  let* revision = increment (value t).revision in
-  let candidate = { t with carrier = C.with_value t.carrier { v with revision } } in
-  let* () = check_capacity candidate in
-  let* doc = encode candidate in
-  let* carrier = document (D.Domain_codec.decode (codec t.limits) doc) in
-  Ok { candidate with carrier }
+let admit_candidate (candidate : Candidate.t) =
+  let* doc = encode_candidate candidate in
+  let* () = check_capacity candidate.limits doc in
+  let* carrier = document (D.Domain_codec.decode (codec candidate.limits) doc) in
+  let candidate = { candidate with carrier } in
+  (* Cache the final carrier's actual encoding, including normalization and all
+     retained fields. The complete final reserve is part of this immutable proof. *)
+  let* admitted_document = encode_candidate candidate in
+  let* () = check_capacity candidate.limits admitted_document in
+  Ok { candidate; admitted_document }
 ;;
+
+let publish_candidate candidate v =
+  let* revision = increment (Candidate.value candidate).revision in
+  admit_candidate (Candidate.with_value candidate { v with revision })
+;;
+
+let publish t v = publish_candidate t.candidate v
 
 let create ~session_id ~generation ~before_tracking_unknown ~limits =
   if generation < 0
@@ -866,25 +892,23 @@ let create ~session_id ~generation ~before_tracking_unknown ~limits =
            ~untracked_turns:0L
            ~tracking_status:Available)
     in
-    let t =
-      { limits
-      ; carrier =
-          C.of_authored_value
-            { session_id
-            ; generation
-            ; last_ordinal = 0L
-            ; last_turn_ordinal = 0L
-            ; revision = 0L
-            ; coverage
-            ; rows = Int64.Map.empty
-            ; turns = Int64.Map.empty
-            }
-      }
+    let candidate =
+      Candidate.
+        { limits
+        ; carrier =
+            C.of_authored_value
+              { session_id
+              ; generation
+              ; last_ordinal = 0L
+              ; last_turn_ordinal = 0L
+              ; revision = 0L
+              ; coverage
+              ; rows = Int64.Map.empty
+              ; turns = Int64.Map.empty
+              }
+        }
     in
-    let* () = check_capacity t in
-    let* doc = encode t in
-    let* carrier = document (D.Domain_codec.decode (codec limits) doc) in
-    Ok { t with carrier }
+    admit_candidate candidate
 ;;
 
 let of_document doc ~limits =
@@ -899,9 +923,10 @@ let of_document doc ~limits =
   in
   let* doc = document (D.Conversion.upgrade conversion doc) in
   let* carrier = document (D.Domain_codec.decode (codec limits) doc) in
-  let t = { carrier; limits } in
-  let* () = check_capacity t in
-  Ok t
+  let candidate = Candidate.{ carrier; limits } in
+  let* admitted_document = encode_candidate candidate in
+  let* () = check_capacity limits admitted_document in
+  Ok { candidate; admitted_document }
 ;;
 
 let session_id t = (value t).session_id
@@ -919,8 +944,11 @@ let qualify_source t source =
 ;;
 
 let validate t ~limits ~session_id:expected_session_id ~generation:expected_generation =
-  let* doc = encode t in
-  let* admitted = of_document doc ~limits in
+  let* admitted =
+    if Limits.equal t.candidate.limits limits
+    then Ok t
+    else of_document t.admitted_document ~limits
+  in
   if
     P.Id.Session.equal (session_id admitted) expected_session_id
     && Int.equal (generation admitted) expected_generation
@@ -975,8 +1003,8 @@ let public_limit = function
 (* Planning recognizes exactly container-retirement extension conflicts. Other
    document/domain errors propagate. Retrying another eligible row never resets
    a carrier or discards an uninterpreted field. *)
-let retire_attempt t =
-  let v = value t in
+let retire_attempt (t : Candidate.t) =
+  let v = Candidate.value t in
   let rec choose protected = function
     | [] -> Ok (None, protected)
     | (ordinal, row) :: rest ->
@@ -992,8 +1020,8 @@ let retire_attempt t =
             ()
         in
         let next = { v with rows = Map.remove v.rows ordinal; coverage } in
-        let trial = { t with carrier = C.with_value t.carrier next } in
-        (match encode trial with
+        let trial = Candidate.with_value t next in
+        (match encode_candidate trial with
          | Error (Error.Document (D.Error.Extension_conflict _)) -> choose true rest
          | Error error -> Error error
          | Ok _ -> Ok (Some trial, protected))
@@ -1001,8 +1029,8 @@ let retire_attempt t =
   choose false (Map.to_alist v.rows)
 ;;
 
-let retire_turn t =
-  let v = value t in
+let retire_turn (t : Candidate.t) =
+  let v = Candidate.value t in
   let rec choose protected = function
     | [] -> Ok (None, protected)
     | (ordinal, turn) :: rest ->
@@ -1021,7 +1049,7 @@ let retire_turn t =
                 { v with turns = Map.remove v.turns ordinal; coverage }
           }
         in
-        (match encode trial with
+        (match encode_candidate trial with
          | Error (Error.Document (D.Error.Extension_conflict _)) -> choose true rest
          | Error error -> Error error
          | Ok _ -> Ok (Some trial, protected))
@@ -1090,7 +1118,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
   in
   let row = { Row.handle; record } in
   let rec plan current protected =
-    let current_value = value current in
+    let current_value = Candidate.value current in
     let at_count = Map.length current_value.rows >= current.limits.max_attempts in
     let trial =
       if at_count
@@ -1106,7 +1134,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
       match trial with
       | None -> Ok None
       | Some trial ->
-        (match publish current trial with
+        (match publish_candidate current trial with
          | Ok next -> Ok (Some next)
          | Error error when capacity_failure error -> Ok None
          | Error error -> Error error)
@@ -1138,7 +1166,7 @@ let admit t ~source ~relation ~operation_id ~invocation_id ~configuration =
          let tracking = Untracked reason in
          Ok (next, { handle with tracking }, tracking))
   in
-  plan t false
+  plan t.candidate false
 ;;
 
 let check_handle t (h : Handle.t) =
@@ -1365,14 +1393,14 @@ let admit_turn t (operation : P.Operation.t) =
            }
          in
          let rec plan current protected =
-           let cv = value current in
-           let at_count = Map.length cv.turns >= t.limits.max_turns in
+           let cv = Candidate.value current in
+           let at_count = Map.length cv.turns >= t.candidate.limits.max_turns in
            let* admitted =
              if at_count
              then Ok None
              else (
                match
-                 publish
+                 publish_candidate
                    current
                    { cv with
                      last_turn_ordinal = ordinal
@@ -1409,7 +1437,7 @@ let admit_turn t (operation : P.Operation.t) =
                 let tracking = Untracked reason in
                 Ok (next, { handle with tracking }, tracking))
          in
-         plan t false))
+         plan t.candidate false))
 ;;
 
 let find_turn_handle t ~operation_id ~generation =
@@ -1802,8 +1830,8 @@ let validate_update previous ~incoming =
     document
       (D.Domain_codec.adopt
          (codec Limits.default)
-         ~previous:previous.carrier
-         ~incoming:incoming.carrier)
+         ~previous:previous.candidate.carrier
+         ~incoming:incoming.candidate.carrier)
   in
   let* adopted = document (D.Domain_codec.encode (codec Limits.default) adopted) in
   let* supplied = encode incoming in

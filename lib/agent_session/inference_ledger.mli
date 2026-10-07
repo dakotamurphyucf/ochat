@@ -201,9 +201,12 @@ val qualify_source
   -> Transcript.Source_id.t
   -> (Transcript.Source_id.t, Error.t) Result.t
 
-(** Admit the ORIGINAL carrier under the supplied profile and exact identity.
-    Abstract ledgers constructed under looser quotas cannot bypass State's profile.
-    No normalization/reset or new ownership is published by validation. *)
+(** Check the exact identity and complete supplied profile. Immutable ledgers
+    carry admission evidence for their original profile; semantically equal
+    profiles reuse that evidence. Any different profile performs full document,
+    domain and reserved-capacity admission. Abstract ledgers constructed under
+    looser quotas cannot bypass State's profile. No normalization/reset or new
+    ownership is published by validation. *)
 val validate
   :  t
   -> limits:Limits.t
@@ -233,7 +236,10 @@ val revision : t -> int64
     public queries select typed safe fields only. Retirement conflicts must be
     explicitly classified during planning, never catch/authored-reset fallback.
     Parent Session State embeds this immutable child document as an owned value;
-    the child remains responsible for its actual typed ownership/conversion. *)
+    the child remains responsible for its actual typed ownership/conversion.
+    The immutable encoded document is computed only after complete admission of
+    the final carrier and reused by [to_document]. [of_document] always admits
+    its complete supplied original before issuing new evidence. *)
 val to_document : t -> (Document_schema.Document.t, Error.t) Result.t
 
 val of_document : Document_schema.Document.t -> limits:Limits.t -> (t, Error.t) Result.t

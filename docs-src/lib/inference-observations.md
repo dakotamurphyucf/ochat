@@ -44,6 +44,24 @@ Migrated sessions report pre-tracking history as unknown. Resets and rebuilds
 preserve monotone admission ordinals and retained prior-generation evidence;
 they do not reset the ledger to an apparently complete empty history.
 
+Ledger values carry an immutable document admitted under their complete quota
+and structural profile. Repeated validation under an equal profile reuses that
+admission and still checks the exact session and generation. Any different
+profile repeats complete original-document, domain and reserved-capacity
+checks. Every edit admits its final carrier before publication; provisional
+retirement plans cannot supply reusable evidence. Unknown fields, including
+their number spellings, remain intact. This reuse does not acknowledge a
+durable commit.
+
+A local synthetic benchmark used 128 retained attempt rows, a 352,463-byte
+ledger, 64 KiB of preserved future data and a single attempt-state update. The
+median of three batches of three calls reduced CPU time for the complete pure
+session transition from 803 ms to 201 ms. Cumulative allocations per
+transition fell from 4.75 GB to 1.28 GB (decimal bytes). These are cumulative
+allocated bytes, including transient objects, rather than resident memory or a
+heap bound. The benchmark excludes provider, transport and persistence
+latency; it is not an end-to-end speedup claim.
+
 ## Runtime ownership and recovery
 
 The actual resource graph acquires its tracking owner before model-capable

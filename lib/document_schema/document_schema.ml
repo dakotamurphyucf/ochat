@@ -44,6 +44,7 @@ module Limits = struct
     ; max_fields : int
     ; max_nodes : int
     }
+  [@@deriving equal]
 
   let create ~max_bytes ~max_depth ~max_fields ~max_nodes =
     if
