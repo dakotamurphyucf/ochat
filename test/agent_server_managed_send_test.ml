@@ -17,6 +17,39 @@ let state daemon id =
   |> fun (e : R.entry) -> A.state e.actor |> protocol_ok
 ;;
 
+let assert_same_state before after ~context =
+  let module State = Agent_session.Session_state in
+  let before_sexp = State.sexp_of_t before in
+  let after_sexp = State.sexp_of_t after in
+  if not (Sexp.equal before_sexp after_sexp)
+  then (
+    let fields = function
+      | Sexp.List fields ->
+        List.map fields ~f:(function
+          | Sexp.List [ Atom name; value ] -> name, value
+          | _ -> failwith "unexpected state field sexp")
+      | _ -> failwith "unexpected state sexp"
+    in
+    let after_fields = fields after_sexp in
+    let changed =
+      List.filter_map (fields before_sexp) ~f:(fun (name, value) ->
+        match List.Assoc.find after_fields ~equal:String.equal name with
+        | Some next when Sexp.equal value next -> None
+        | Some _ | None -> Some name)
+    in
+    raise_s
+      [%sexp
+        "child state changed"
+      , (context : string)
+      , (changed : string list)
+      , (before.counters : State.Counters.t)
+      , (after.counters : State.Counters.t)
+      , (before.identity.updated_at : P.Timestamp.t)
+      , (after.identity.updated_at : P.Timestamp.t)
+      , (before.lifecycle : State.Lifecycle.t)
+      , (after.lifecycle : State.Lifecycle.t)])
+;;
+
 let function_call name arguments =
   let open Res.Response_stream in
   [ Output_item_added
@@ -375,9 +408,10 @@ let%expect_test
               "agent_send"
               (message parent.id "self" "hello")
             |> denied "agent.management.denied";
-            [%test_eq: Sexp.t]
-              (Agent_session.Session_state.sexp_of_t initial)
-              (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+            assert_same_state
+              initial
+              (state daemon child_id)
+              ~context:"invalid and foreign requests";
             let gate, release = Eio.Promise.create () in
             child_gate := Some gate;
             let receipt =
@@ -442,9 +476,10 @@ let%expect_test
                   Jsonaf.exactly_equal
                     (field (field timed_out "receipt") "terminal")
                     `False);
-                [%test_eq: Sexp.t]
-                  (Agent_session.Session_state.sexp_of_t before_wait)
-                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                assert_same_state
+                  before_wait
+                  (state daemon child_id)
+                  ~context:"wait timeout";
                 Eio.Fiber.fork ~sw (fun () ->
                   wait_dispatched daemon parent.id;
                   let handle = attach sw client parent.id in
@@ -466,9 +501,10 @@ let%expect_test
                  | status ->
                    raise_s
                      [%sexp "wait cancellation failed", (status : P.Invocation.status)]);
-                [%test_eq: Sexp.t]
-                  (Agent_session.Session_state.sexp_of_t before_wait)
-                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                assert_same_state
+                  before_wait
+                  (state daemon child_id)
+                  ~context:"wait cancellation";
                 let replay =
                   invoke
                     sw
@@ -489,9 +525,10 @@ let%expect_test
                   "agent_send"
                   (message child_id "first" "Changed.")
                 |> denied "agent.send.conflict";
-                [%test_eq: Sexp.t]
-                  (Agent_session.Session_state.sexp_of_t before_conflict)
-                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                assert_same_state
+                  before_conflict
+                  (state daemon child_id)
+                  ~context:"conflicting message retry";
                 let deferred =
                   invoke
                     sw
@@ -513,9 +550,10 @@ let%expect_test
                   "agent_send"
                   (message child_id "capacity" "Do not admit a third message.")
                 |> denied "agent.send.invalid_state";
-                [%test_eq: Sexp.t]
-                  (Agent_session.Session_state.sexp_of_t at_capacity)
-                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                assert_same_state
+                  at_capacity
+                  (state daemon child_id)
+                  ~context:"submission capacity";
                 let terminal, release_terminal = Eio.Promise.create () in
                 terminal_gate := Some terminal;
                 Eio.Fiber.fork ~sw (fun () ->
@@ -770,9 +808,10 @@ let%expect_test
                   (message child_id "third" "Do not restart.")
                 |> denied "agent.send.invalid_state";
                 [%test_eq: int] calls_before !child_calls;
-                [%test_eq: Sexp.t]
-                  (Agent_session.Session_state.sexp_of_t stopped)
-                  (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+                assert_same_state
+                  stopped
+                  (state daemon child_id)
+                  ~context:"stopped message retry";
                 ( parent.id
                 , child_id
                 , text receipt "receipt_id"
@@ -855,34 +894,7 @@ let%expect_test
           [%test_eq: string] receipt_id (text replay "receipt_id");
           [%test_eq: string] "completed" (text replay "status");
           let after = state daemon child_id in
-          let before_sexp = Agent_session.Session_state.sexp_of_t before in
-          let after_sexp = Agent_session.Session_state.sexp_of_t after in
-          if not (Sexp.equal before_sexp after_sexp)
-          then (
-            let fields = function
-              | Sexp.List fields ->
-                List.map fields ~f:(function
-                  | Sexp.List [ Atom name; value ] -> name, value
-                  | _ -> failwith "unexpected state field sexp")
-              | _ -> failwith "unexpected state sexp"
-            in
-            let after_fields = fields after_sexp in
-            let changed =
-              List.filter_map (fields before_sexp) ~f:(fun (name, value) ->
-                match List.Assoc.find after_fields ~equal:String.equal name with
-                | Some next when Sexp.equal value next -> None
-                | Some _ | None -> Some name)
-            in
-            raise_s
-              [%sexp
-                "restart reads changed child state"
-              , (changed : string list)
-              , (before.counters : Agent_session.Session_state.Counters.t)
-              , (after.counters : Agent_session.Session_state.Counters.t)
-              , (before.identity.updated_at : P.Timestamp.t)
-              , (after.identity.updated_at : P.Timestamp.t)
-              , (before.lifecycle : Agent_session.Session_state.Lifecycle.t)
-              , (after.lifecycle : Agent_session.Session_state.Lifecycle.t)]);
+          assert_same_state before after ~context:"restart receipt and read replay";
           [%test_eq: int] 2 (List.length before.managed_submissions);
           let read_all cursor =
             invoke
@@ -925,9 +937,10 @@ let%expect_test
             "agent_stop"
             (stop_request child_id "native-stop" "cancel")
           |> denied "agent.stop.conflict";
-          [%test_eq: Sexp.t]
-            (Agent_session.Session_state.sexp_of_t resumed)
-            (Agent_session.Session_state.sexp_of_t (state daemon child_id));
+          assert_same_state
+            resumed
+            (state daemon child_id)
+            ~context:"superseded stop retry";
           H.send_message
             handle
             { kind = Plain_text; text = "Generate an unread response."; attachments = [] }
@@ -999,9 +1012,10 @@ let%expect_test
                 ; "timeout_ms", `Number "30000"
                 ])
           |> denied "agent.management.denied";
-          [%test_eq: Sexp.t]
-            (Agent_session.Session_state.sexp_of_t quiet)
-            (Agent_session.Session_state.sexp_of_t (state daemon child_id)));
+          assert_same_state
+            quiet
+            (state daemon child_id)
+            ~context:"quiet authority revocation");
         print_endline
           "waits distinguish output from terminal receipts; timeout/cancellation \
            preserve children; quiet revocation denies disclosure";
