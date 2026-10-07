@@ -2191,6 +2191,35 @@ let finish_failed_graph tracking =
     | _ -> ())
 ;;
 
+let with_auxiliary_graph tracking f =
+  match f () with
+  | Error _ as failure ->
+    finish_failed_graph tracking;
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    finish_failed_graph tracking;
+    Exn.raise_with_original_backtrace exn backtrace
+  | Ok value ->
+    Eio.Cancel.protect (fun () ->
+      let capture callback =
+        try Ok (callback ()) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      (* The compactor's request scopes have joined before returning. Both
+         tracking steps are attempted while its actor and writer remain live. *)
+      let sealed = capture (fun () -> Graph_tracking.seal tracking) in
+      let finished = capture (fun () -> Graph_tracking.finish tracking) in
+      let unwrap = function
+        | Ok result -> result
+        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+      in
+      let open Result.Let_syntax in
+      let%bind () = unwrap sealed in
+      let%map () = unwrap finished in
+      value)
+;;
+
 let tracked_runtime tracking (runtime : Agent_session.Runtime_builder.t) =
   let closed = Atomic.make false in
   let finished, finished_u = Eio.Promise.create () in
@@ -4259,36 +4288,43 @@ let install_compaction_inference t actor owner =
               | Some _ | None ->
                 Error (unavailable Conflict "compaction inference admission changed")
             in
-            let%bind inference =
-              match installed with
-              | Some inference -> Ok inference
-              | None ->
-                let%bind context =
-                  t.inference_policy.resolve_inference_context target
-                  |> Result.map_error ~f:(fun error ->
-                    unavailable
-                      Configuration_invalid
-                      (Sexp.to_string_hum
-                         (Inference_runtime.Preparation_error.sexp_of_t error)))
-                in
-                let%map ports = runtime_inference_ports t (ref (Some actor)) in
-                Inference_client.Execution.create
-                  ~context
-                  ~identity:ports.identity
-                  ~relation:Root
-                  ~before_dispatch:(fun _ -> ())
-                  ~on_attempt:ports.on_attempt
-                  ~on_completion:ports.on_completion
-                  ~on_observation:ports.on_observation
+            let check_target context =
+              if
+                Inference.Request.Target.equal
+                  (Inference_runtime.Context.target context)
+                  target
+              then Ok ()
+              else
+                Error
+                  (unavailable Conflict "selected compaction inference target changed")
             in
-            if
-              Inference.Request.Target.equal
-                (Inference_runtime.Context.target
-                   (Inference_client.Execution.context inference))
-                target
-            then f inference
-            else
-              Error (unavailable Conflict "selected compaction inference target changed")))
+            match installed with
+            | Some inference ->
+              let%bind () = check_target (Inference_client.Execution.context inference) in
+              f inference
+            | None ->
+              let%bind context =
+                t.inference_policy.resolve_inference_context target
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
+                    Configuration_invalid
+                    (Sexp.to_string_hum
+                       (Inference_runtime.Preparation_error.sexp_of_t error)))
+              in
+              let%bind () = check_target context in
+              let%bind tracking = create_graph_tracking t (ref (Some actor)) in
+              with_auxiliary_graph tracking (fun () ->
+                let inference =
+                  Inference_client.Execution.create
+                    ~context
+                    ~identity:(Graph_tracking.identity tracking)
+                    ~relation:Root
+                    ~before_dispatch:(fun _ -> ())
+                    ~on_attempt:(Graph_tracking.on_attempt tracking)
+                    ~on_completion:(Graph_tracking.on_completion tracking)
+                    ~on_observation:(Graph_tracking.on_observation tracking)
+                in
+                f inference)))
     }
   in
   A.set_compaction_inference actor (Some port)

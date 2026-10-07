@@ -731,11 +731,11 @@ let%expect_test "administration initialization fences committed stopped cleanup"
                              Owner.unload_and_wait owner))
                    | Ready, _ | Pending _, Some _ -> ());
              let commit () =
-               A.commit_administration
+               A.commit_reconciled_administration
                  actor
                  ~command_audit:None
                  ~attachment_id:writer.id
-                 ~expected_revision:before.counters.revision
+                 ~expected:before
                  ~kind:Rebuild
                  candidate
                |> Result.map ~f:(fun _ -> ())

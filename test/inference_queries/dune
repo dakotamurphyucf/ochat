@@ -2,6 +2,7 @@
  (name inference_query_server_tests)
  (libraries core jsonaf base64 eio eio_main mirage-crypto-rng.unix expect_test_helpers_core
   ochat.agent_server ochat.agent_store ochat.agent_session ochat.agent_protocol
+  ochat.agent_client ochat.inference_runtime ochat.inference ochat.openai
   ochat.document_schema ochat.transcript inference_ledger_tests agent_session_test agent_server_test_support)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

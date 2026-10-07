@@ -32,13 +32,14 @@ let require = function
 ;;
 
 let create actor ~source ~upstream =
-  Result.map (A.open_inference_owner actor ~source) ~f:(fun owner ->
-    { actor
-    ; owner
-    ; upstream
-    ; routing = Map.empty (module Transcript.Scope.Key)
-    ; finished = false
-    })
+  Eio.Cancel.protect (fun () ->
+    Result.map (A.open_inference_owner actor ~source) ~f:(fun owner ->
+      { actor
+      ; owner
+      ; upstream
+      ; routing = Map.empty (module Transcript.Scope.Key)
+      ; finished = false
+      }))
 ;;
 
 let route t scope =

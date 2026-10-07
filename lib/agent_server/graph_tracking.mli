@@ -23,6 +23,9 @@ type t
 
 (** Acquire before graph constructors/initializers. The actor qualifies this
     actual graph source with its session identity; one graph reuses one binding.
+    Owner acknowledgement and binding construction are cancellation-protected.
+    A cancelled caller can receive the binding, install its cleanup without
+    yielding, and then observe the original cancellation at its next effect.
     All optional operation/invocation associations remain absent unless actual
     per-execution ownership is supplied by a future explicit port. *)
 val create

@@ -47,7 +47,9 @@ they do not reset the ledger to an apparently complete empty history.
 ## Runtime ownership and recovery
 
 The actual resource graph acquires its tracking owner before model-capable
-initialization. Admission allocates and durably acknowledges an attempt identity
+initialization. Owner acknowledgement is cancellation-protected so a caller can
+install cleanup before observing pending cancellation. Admission allocates and
+durably acknowledges an attempt identity
 before dispatch. Strict tracking callbacks run independently of display callbacks.
 The identity bracket removes temporary routing entries on every exit, including
 preparation-start failure and callback exceptions.
@@ -64,6 +66,13 @@ stopped session may still have a legitimately retained graph; stopping alone doe
 not revoke that graph's accounting owner. Recovery classifies an acknowledged
 but unstarted attempt as definitely not submitted. A running attempt remains
 possibly submitted unless stronger durable evidence exists.
+
+Compaction of an unloaded session creates a short-lived accounting graph inside
+its cancellable auxiliary lease, without initializing the agent runtime. Loaded
+sessions reuse their actual retained graph. In either case, model attempts are
+acknowledged before dispatch; auxiliary graph cleanup follows the joined request
+scopes. Compaction advances the conversation's compaction counter, not session
+identity generation, and does not count as a completed conversational turn.
 
 ## Client reads
 

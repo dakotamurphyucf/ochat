@@ -140,6 +140,35 @@ let usage handle revision tokens =
 
 exception Upstream_failed
 
+let%expect_test "cancelled graph acquisition returns acknowledged cleanup ownership" =
+  with_tracking_actor (fun _ actor _ commits ->
+    let source = source "cancelled-graph-acquisition" in
+    let acquired = ref false in
+    let upstream = upstream (fun ~scope:_ ~accounting_id:_ -> assert false) in
+    let cancelled =
+      try
+        Eio.Cancel.sub (fun context ->
+          Eio.Cancel.cancel context Exit;
+          let graph = G.create actor ~source ~upstream |> protocol_ok in
+          acquired := true;
+          Exn.protect ~f:Eio.Fiber.check ~finally:(fun () ->
+            Eio.Cancel.protect (fun () ->
+              G.seal graph |> protocol_ok;
+              G.finish graph |> protocol_ok)));
+        false
+      with
+      | Eio.Cancel.Cancelled Exit -> true
+    in
+    assert (!acquired && cancelled);
+    let replacement = G.create actor ~source ~upstream |> protocol_ok in
+    G.seal replacement |> protocol_ok;
+    G.finish replacement |> protocol_ok;
+    assert (List.is_empty (rows actor) && !commits = 0);
+    print_endline
+      "ACK returned before cancellation; source released without attempt charge");
+  [%expect {| ACK returned before cancellation; source released without attempt charge |}]
+;;
+
 let%expect_test
     "graph allocation cleans routing and unsubmitted Prepared on strict failure"
   =
