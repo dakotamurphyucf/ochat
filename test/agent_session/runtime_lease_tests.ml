@@ -710,7 +710,7 @@ let%expect_test "administration initialization fences committed stopped cleanup"
              then Eio.Promise.resolve finish ())
            ~f:(fun () ->
              let candidate =
-               Agent_session.Administration.rebuild
+               Agent_session.Administration.plan_rebuild
                  before
                  (Agent_protocol.Id.Prompt_revision.create ())
                |> protocol_ok

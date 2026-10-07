@@ -1550,7 +1550,7 @@ let handle_session_reset t context command_audit request =
            ; workspace_instance
            }
        in
-       let%bind candidate = Agent_session.Administration.reset expected options in
+       let%bind candidate = Agent_session.Administration.plan_reset expected options in
        let%bind () =
          Agent_session.Session_state.validate_administration_candidate
            candidate
@@ -1677,7 +1677,7 @@ let handle_session_rebuild t context command_audit request =
              (current_prompt_revision t state)
              ~f:Agent_session.Prompt_revision.id
        in
-       let%bind candidate = Agent_session.Administration.rebuild state target in
+       let%bind candidate = Agent_session.Administration.plan_rebuild state target in
        let%map session =
          commit_prepared
            t

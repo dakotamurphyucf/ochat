@@ -207,6 +207,10 @@ let%expect_test
             ref
               { parent_state with
                 identity = { parent_state.identity with session_id = third_session_id }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:third_session_id
+                    ~generation:parent_state.identity.generation
               ; spec =
                   { parent_state.spec with
                     permission_profile = profile.id

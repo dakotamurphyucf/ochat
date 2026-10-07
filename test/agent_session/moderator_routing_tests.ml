@@ -1122,7 +1122,7 @@ let%test_unit
                     ~attachment_id:writer.id
                     entry));
              let after = Agent_session.Session_actor.state actor |> protocol_ok in
-             assert (Poly.equal state after));
+             assert_same_session_snapshot state after);
            let expected_invocations = if multi then 2 else 1 in
            if List.length state.invocations <> expected_invocations
            then

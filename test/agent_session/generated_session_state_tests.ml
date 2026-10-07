@@ -101,6 +101,10 @@ let%expect_test
       let state =
         { original with
           identity = { original.identity with session_id = second_session_id }
+        ; inference_ledger =
+            fresh_inference_ledger
+              ~session_id:second_session_id
+              ~generation:original.identity.generation
         ; spec =
             { original.spec with
               prompt_revision_id = artifact.revision_id
@@ -144,7 +148,7 @@ let%expect_test
         |> document_ok
       in
       assert (Result.is_error (Documents.decode ~limits missing));
-      List.iter [ 0; 3 ] ~f:(fun version ->
+      List.iter [ 0; 4 ] ~f:(fun version ->
         let json =
           match Document_schema.Document.json pending_document with
           | `Object fields ->
@@ -300,7 +304,7 @@ let%expect_test
       Store.close store |> store_ok));
   [%expect
     {|
-    ((checkpoint_schema 21) (stage Child_installed)
+    ((checkpoint_schema 22) (stage Child_installed)
      (retained_revocation (Parent_stopped))
      (rejected_inconsistent_checkpoints 6))
     |}]

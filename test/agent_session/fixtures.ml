@@ -133,7 +133,24 @@ let command_audit ~principal_id ~session_id request_digest =
 let assert_same_session_snapshot expected actual =
   [%test_eq: Sexp.t]
     (Agent_session.Session_state.sexp_of_t expected)
-    (Agent_session.Session_state.sexp_of_t actual)
+    (Agent_session.Session_state.sexp_of_t actual);
+  let ledger_json state =
+    Agent_session.Inference_ledger.to_document
+      state.Agent_session.Session_state.inference_ledger
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Agent_session.Inference_ledger.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+    |> Document_schema.Document.json
+  in
+  let expected_json = ledger_json expected in
+  let actual_json = ledger_json actual in
+  if not (Jsonaf.exactly_equal expected_json actual_json)
+  then
+    raise_s
+      [%sexp
+        "session snapshots differ in inference ledger"
+      , (expected_json : Jsonaf.t)
+      , (actual_json : Jsonaf.t)]
 ;;
 
 let workspace_id =
@@ -243,6 +260,18 @@ let inference_selection () =
   Inference.Selection.captured target ~limits:document_limits
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+(* A newly authored session owns an independent empty tracking window. *)
+let fresh_inference_ledger ~session_id ~generation =
+  Agent_session.Inference_ledger.create
+    ~session_id
+    ~generation
+    ~before_tracking_unknown:false
+    ~limits:Agent_session.Inference_ledger.Limits.default
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Agent_session.Inference_ledger.Error.sexp_of_t error))
   |> Result.ok_or_failwith
 ;;
 

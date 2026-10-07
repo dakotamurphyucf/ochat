@@ -84,6 +84,10 @@ let%expect_test
             let child =
               { parent with
                 identity = { parent.identity with session_id = child_session_id }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:child_session_id
+                    ~generation:parent.identity.generation
               ; spec =
                   { parent.spec with
                     prompt_revision_id = revision_id
@@ -313,6 +317,10 @@ let%expect_test "descendants revalidate private ancestry and its exact live narr
           let middle =
             { root with
               identity = { root.identity with session_id = middle_id }
+            ; inference_ledger =
+                fresh_inference_ledger
+                  ~session_id:middle_id
+                  ~generation:root.identity.generation
             ; spec =
                 { root.spec with
                   prompt_revision_id = middle_revision

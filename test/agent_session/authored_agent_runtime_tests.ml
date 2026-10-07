@@ -172,6 +172,10 @@ let on_event ctx state event = match event with
           let parent =
             { parent with
               identity = { parent.identity with session_id = third_session_id }
+            ; inference_ledger =
+                fresh_inference_ledger
+                  ~session_id:third_session_id
+                  ~generation:parent.identity.generation
             ; spec =
                 { parent.spec with
                   prompt_revision_id = R.id parent_revision

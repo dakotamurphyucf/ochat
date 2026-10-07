@@ -374,7 +374,9 @@ let%expect_test
         ; workspace_instance = None
         }
     in
-    let candidate = Agent_session.Administration.reset expected options |> protocol_ok in
+    let candidate =
+      Agent_session.Administration.plan_reset expected options |> protocol_ok
+    in
     A.validate_administration_basis actor ~attachment_id:attachment.id ~expected
     |> protocol_ok;
     A.seal_inference_owner actor ~owner |> protocol_ok;
@@ -414,7 +416,7 @@ let%expect_test
     let attachment, _ = A.attach actor ~mode:Read_write ~subscribe:false |> protocol_ok in
     let expected = A.state actor |> protocol_ok in
     let candidate =
-      Agent_session.Administration.reset
+      Agent_session.Administration.plan_reset
         expected
         { keep_history = true
         ; keep_tasks = true

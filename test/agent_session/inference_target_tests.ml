@@ -103,7 +103,7 @@ let%test_unit
      | Unresolved -> ()
      | Captured _ -> assert false);
     let stored = capture admitted.delta in
-    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 2);
+    assert (Int.equal (D.Document.version (A.Session_delta_document.document stored)) 3);
     let replayed =
       A.Session_delta.apply before (A.Session_delta_document.value stored) |> protocol_ok
     in
@@ -274,7 +274,7 @@ let%test_unit
     in
     let payload = replace payload "runtime_initialization" initialization in
     let raw =
-      D.Document.create ~limits:document_limits ~kind:"session.state" ~version:2 ~payload
+      D.Document.create ~limits:document_limits ~kind:"session.state" ~version:3 ~payload
       |> document_ok
     in
     let original = D.Document.to_string raw in

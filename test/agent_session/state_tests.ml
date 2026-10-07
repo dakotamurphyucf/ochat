@@ -401,7 +401,16 @@ let%expect_test
     assert (Result.is_error (S.upgrade_schema { restored with schema_version = 4 }));
     let migrated = restore_state initial |> store_ok in
     let older =
-      { recovered with identity = { recovered.identity with generation = 1 } }
+      { recovered with
+        identity = { recovered.identity with generation = 1 }
+      ; inference_ledger =
+          Agent_session.Inference_ledger.with_generation
+            recovered.inference_ledger
+            ~generation:1
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Agent_session.Inference_ledger.Error.sexp_of_t error))
+          |> Result.ok_or_failwith
+      }
     in
     let retired =
       List.fold_result
@@ -423,7 +432,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 21)
+    ((schema 22)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -725,7 +734,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 21) (records 0))
+    ((version 22) (records 0))
     true
     true
     true
@@ -901,6 +910,11 @@ let%expect_test "named compaction archives admit typed state and preserve captur
               session_id =
                 Agent_protocol.Id.Session.of_string "ses_other_archive" |> protocol_ok
             }
+        ; inference_ledger =
+            fresh_inference_ledger
+              ~session_id:
+                (Agent_protocol.Id.Session.of_string "ses_other_archive" |> protocol_ok)
+              ~generation:archived.identity.generation
         }
       in
       let wrong_owner_document =
@@ -1025,7 +1039,7 @@ let%expect_test "named compaction archives admit typed state and preserve captur
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 21) (records 0)) |}]
+  [%expect {| ((version 22) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -1228,7 +1242,7 @@ let%expect_test "named invocation snapshots preserve pending publication" =
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 21) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 22) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;

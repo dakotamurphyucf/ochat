@@ -259,25 +259,45 @@ let%test_unit
   =
   with_actor_workspace (fun _ workspace ->
     let before = state workspace in
+    let retained =
+      ledger_json before.inference_ledger
+      |> fun json ->
+      add json "future_administration" (`Number "1e+00")
+      |> fun json ->
+      D.Document.inspect ~limits:document_limits json
+      |> document_ok
+      |> fun document -> L.of_document document ~limits:L.Limits.default |> ledger_ok
+    in
+    let before = { before with inference_ledger = retained } in
     let active, handle, _ = admit before before.inference_ledger in
     let before = { before with inference_ledger = active } in
     A.Session_state.validate before |> protocol_ok;
-    let candidate =
-      A.Administration.reset
-        before
+    let options =
+      A.Administration.
         { keep_history = true
         ; keep_tasks = true
         ; keep_grants = true
         ; keep_labels = true
         ; workspace_instance = None
         }
-      |> protocol_ok
     in
+    let revision = P.Id.Prompt_revision.create () in
+    assert (Result.is_error (A.Administration.reset before options));
+    assert (Result.is_error (A.Administration.rebuild before revision));
+    let candidate = A.Administration.plan_reset before options |> protocol_ok in
     assert (String.equal (ledger_bytes active) (ledger_bytes candidate.inference_ledger));
     A.Session_state.validate_administration_candidate candidate ~previous:before
     |> protocol_ok;
     assert (Result.is_error (A.Session_state.validate candidate));
     assert (Result.is_error (SD.encode (SD.authored candidate) ~limits:document_limits));
+    let rebuild_candidate =
+      A.Administration.plan_rebuild before revision |> protocol_ok
+    in
+    assert (
+      String.equal (ledger_bytes active) (ledger_bytes rebuild_candidate.inference_ledger));
+    A.Session_state.validate_administration_candidate rebuild_candidate ~previous:before
+    |> protocol_ok;
+    assert (Result.is_error (A.Session_state.validate rebuild_candidate));
     assert (Result.is_error (A.Session_delta.apply before (Reset_generation 1)));
     let closed =
       L.set_state
@@ -287,6 +307,37 @@ let%test_unit
       |> ledger_ok
     in
     let current = { before with inference_ledger = closed } in
+    let advanced = L.with_generation closed ~generation:1 |> ledger_ok in
+    List.iter
+      [ A.Administration.reset current options |> protocol_ok
+      ; A.Administration.rebuild current revision |> protocol_ok
+      ]
+      ~f:(fun replacement ->
+        A.Session_state.validate replacement |> protocol_ok;
+        ignore (SD.encode (SD.authored replacement) ~limits:document_limits |> document_ok);
+        assert (
+          String.equal (ledger_bytes advanced) (ledger_bytes replacement.inference_ledger));
+        assert (
+          Int64.equal
+            (L.revision replacement.inference_ledger)
+            (Int64.succ (L.revision closed)));
+        assert (
+          Sexp.equal
+            (A.Session_state.Counters.sexp_of_t current.counters)
+            (A.Session_state.Counters.sexp_of_t replacement.counters));
+        let row =
+          L.find replacement.inference_ledger ~ordinal:(L.Handle.ordinal handle)
+          |> Option.value_exn
+        in
+        assert (L.Handle.equal handle (L.Row.handle row));
+        assert (
+          String.is_substring
+            (ledger_bytes replacement.inference_ledger)
+            ~substring:"\"future_administration\":1e+00"));
+    assert (
+      String.equal
+        (ledger_bytes closed)
+        (ledger_bytes (A.Administration.upgrade current revision).inference_ledger));
     let reset = A.Session_delta.apply current (Reset_generation 1) |> protocol_ok in
     A.Session_state.validate reset |> protocol_ok;
     assert (List.length (L.rows reset.inference_ledger) = 1);

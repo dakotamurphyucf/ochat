@@ -123,13 +123,32 @@ let%test_unit
               ]
             | _ -> [ call ]
           in
+          let generation =
+            match mode with
+            | `Old_generation -> 1
+            | `Admitted
+            | `Dispatching
+            | `Resolved
+            | `Cancelled
+            | `Existing
+            | `Published
+            | `Removed
+            | `Bad_output
+            | `Reused_id
+            | `Collision -> 0
+          in
           let state =
             { initial with
               invocations = [ invocation ]
-            ; identity =
-                { initial.identity with
-                  generation = (if Poly.equal mode `Old_generation then 1 else 0)
-                }
+            ; identity = { initial.identity with generation }
+            ; inference_ledger =
+                Agent_session.Inference_ledger.with_generation
+                  initial.inference_ledger
+                  ~generation
+                |> Result.map_error ~f:(fun error ->
+                  Sexp.to_string_hum
+                    (Agent_session.Inference_ledger.Error.sexp_of_t error))
+                |> Result.ok_or_failwith
             ; conversation =
                 { initial.conversation with
                   canonical_history = history
@@ -726,7 +745,7 @@ let%test_unit "worker cancellation publishes an interrupted handler result exact
            List.count events ~f:(fun event ->
              Agent_protocol.Event.Durable.equal_kind event.kind Operation_cancelled)
            = 1);
-         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
 ;;
 
 let%test_unit "worker failure repairs a transient publication failure without replay" =
@@ -772,7 +791,7 @@ let%test_unit "worker failure repairs a transient publication failure without re
          List.count events ~f:(fun event ->
            Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
          = 1);
-       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;
 
 let%test_unit
@@ -894,7 +913,9 @@ let%test_unit
              assert (
                List.length state.conversation.canonical_history = if model then 3 else 1);
              assert (List.length state.invocations = 1);
-             assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+             assert_same_session_snapshot
+               state
+               (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit
@@ -997,7 +1018,7 @@ let%test_unit "independent ordinary invocations run concurrently outside the act
        let state = await_idle actor in
        assert (List.length state.invocations = 2);
        assert (List.length state.conversation.canonical_history = 1);
-       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;
 
 let%test_unit "native nested invocation persists without reentering a borrowed moderator" =
@@ -1079,7 +1100,7 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
                | Resolved (Fail _) -> parent_fails
                | _ -> false));
          assert (List.length state.conversation.canonical_history = 1);
-         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
 ;;
 
 let%test_unit
@@ -1205,7 +1226,7 @@ let%test_unit
             | _ -> assert false);
            assert (
              List.length state.conversation.canonical_history = if model then 3 else 1);
-           assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit

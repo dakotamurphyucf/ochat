@@ -74,6 +74,12 @@ acknowledged before dispatch; auxiliary graph cleanup follows the joined request
 scopes. Compaction advances the conversation's compaction counter, not session
 identity generation, and does not count as a completed conversational turn.
 
+Pure `Administration.reset` and `rebuild` return validated replacements and reject
+active inference evidence. Their `plan_reset` and `plan_rebuild` counterparts
+preserve the original ledger for preparation before runtime retirement. Those
+planning candidates cannot be persisted directly: the trusted actor commit uses
+the current ledger after owned work has joined, then advances its generation.
+
 ## Client reads
 
 `session.inference_summary` returns retained totals and coverage.

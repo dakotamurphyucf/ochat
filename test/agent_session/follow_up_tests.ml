@@ -220,7 +220,17 @@ let%expect_test
             let initial =
               match mode with
               | `Obsolete ->
-                { initial with identity = { initial.identity with generation = 1 } }
+                { initial with
+                  identity = { initial.identity with generation = 1 }
+                ; inference_ledger =
+                    Agent_session.Inference_ledger.with_generation
+                      initial.inference_ledger
+                      ~generation:1
+                    |> Result.map_error ~f:(fun error ->
+                      Sexp.to_string_hum
+                        (Agent_session.Inference_ledger.Error.sexp_of_t error))
+                    |> Result.ok_or_failwith
+                }
               | `Cancel | `Failure | `Interrupted ->
                 let other =
                   child

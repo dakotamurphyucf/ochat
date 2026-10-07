@@ -1,7 +1,8 @@
 open! Core
 
-(** Pure administrative candidate construction. Candidates do not mutate actors,
-    reserve identifiers, or write archives. Commit through [Session_actor]. *)
+(** Pure administration does not mutate actors, reserve identifiers, write
+    archives, or interrupt inference. Admitted replacements and planning-only
+    candidates have distinct contracts below. *)
 
 type reset_options =
   { keep_history : bool
@@ -11,15 +12,35 @@ type reset_options =
   ; workspace_instance : Workspace_instance.t option
   }
 
+(** Returns a validated replacement with its retained inference ledger advanced
+    to the new generation. Active inference attempts or turns reject the reset;
+    no retained evidence is cleared or fabricated. *)
 val reset
   :  Session_state.t
   -> reset_options
   -> (Session_state.t, Agent_protocol.Error.t) result
 
-(** [rebuild state revision] starts a fresh stopped generation, retaining tasks,
+(** [rebuild state revision] returns a validated fresh stopped generation, retaining tasks,
     key-value data, labels, workspace and allocator monotonicity. The runtime
-    preparer supplies fresh initial history and initialized moderator state. *)
+    preparer supplies fresh initial history and initialized moderator state.
+    Active inference attempts or turns reject the rebuild. *)
 val rebuild
+  :  Session_state.t
+  -> Agent_protocol.Id.Prompt_revision.t
+  -> (Session_state.t, Agent_protocol.Error.t) result
+
+(** Planning-only counterparts of [reset] and [rebuild]. They retain the exact
+    original inference ledger, including active rows and its original generation.
+    Validate with [Session_state.validate_administration_candidate]; they are not
+    admitted state documents and must not be persisted directly. Commit only
+    through [Session_actor.commit_reconciled_administration] after the actual
+    runtime owner has retired and durably reconciled inference. *)
+val plan_reset
+  :  Session_state.t
+  -> reset_options
+  -> (Session_state.t, Agent_protocol.Error.t) result
+
+val plan_rebuild
   :  Session_state.t
   -> Agent_protocol.Id.Prompt_revision.t
   -> (Session_state.t, Agent_protocol.Error.t) result

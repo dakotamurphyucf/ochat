@@ -282,12 +282,18 @@ let%expect_test
          { original with
            identity = { original.identity with session_id = second_session_id }
          ; lifecycle = { desired = Running; observed = Idle }
+         ; inference_ledger =
+             fresh_inference_ledger
+               ~session_id:second_session_id
+               ~generation:original.identity.generation
          }
        in
+       State.validate parent_state |> protocol_ok;
        let parent, _ = actor ~env ~sw ~state:parent_state ~reject_save:(fun _ -> false) in
        let entered, enter = Eio.Promise.create () in
        let cleaning, clean = Eio.Promise.create () in
        let release, release_cleanup = Eio.Promise.create () in
+       let release_ledger_on_failure = ref None in
        let never, _ = Eio.Promise.create () in
        let cleaned = ref false in
        let parent_closes = ref 0 in
@@ -306,8 +312,14 @@ let%expect_test
        in
        Exn.protect
          ~finally:(fun () ->
-           Owner.close_and_wait parent_runtime;
-           A.shutdown parent)
+           Eio.Cancel.protect (fun () ->
+             (* Assertion/cancellation cleanup must release controlled barriers
+                before joining the cancellation-protected child finalizer. *)
+             if Option.is_none (Eio.Promise.peek release)
+             then Eio.Promise.resolve release_cleanup ();
+             Option.iter !release_ledger_on_failure ~f:(fun release -> release ());
+             Owner.close_and_wait parent_runtime;
+             A.shutdown parent))
          ~f:(fun () ->
            let worker =
              Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
@@ -369,6 +381,11 @@ let%expect_test
            Eio.Promise.await leased;
            let ledger_locked, lock_ready = Eio.Promise.create () in
            let release_ledger, release_ledger_u = Eio.Promise.create () in
+           release_ledger_on_failure
+           := Some
+                (fun () ->
+                  if Option.is_none (Eio.Promise.peek release_ledger)
+                  then Eio.Promise.resolve release_ledger_u ());
            let held_ledger =
              Eio.Fiber.fork_promise ~sw (fun () ->
                D.with_records ledger ~max_records:8 ~max_bytes:1048576 ~f:(fun _ ->

@@ -238,6 +238,11 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                        | 0 -> session_id
                        | _ -> second_session_id)
                   }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:
+                      (if Int.equal index 0 then session_id else second_session_id)
+                    ~generation:initial.identity.generation
               ; lifecycle = { desired = Running; observed = Idle }
               ; moderator =
                   Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
@@ -274,12 +279,16 @@ let%expect_test "two session event owners reject a wait cycle and release both b
             in
             actor, snapshot)
         in
+        let held = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+        let proceed = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+        let finished = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
         Exn.protect
-          ~finally:(fun () -> Array.iter actors ~f:(fun (actor, _) -> A.shutdown actor))
+          ~finally:(fun () ->
+            Array.iter proceed ~f:(fun (promise, resolver) ->
+              if Option.is_none (Eio.Promise.peek promise)
+              then Eio.Promise.resolve resolver ());
+            Array.iter actors ~f:(fun (actor, _) -> A.shutdown actor))
           ~f:(fun () ->
-            let held = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
-            let proceed = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
-            let finished = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
             Array.iteri actors ~f:(fun index (actor, snapshot) ->
               Eio.Fiber.fork ~sw (fun () ->
                 let result = ref "missing" in
