@@ -105,6 +105,19 @@ not revoke that graph's accounting owner. Recovery classifies an acknowledged
 but unstarted attempt as definitely not submitted. A running attempt remains
 possibly submitted unless stronger durable evidence exists.
 
+Runtime retirement cancels foreground work and waits for its terminal checkpoint
+before detaching the worker. The actor stays available to cancellation finalizers;
+the runtime owner waits outside its mutex so background cleanup can release its
+leases. A worker cancelled before its readiness acknowledgement cannot dispatch
+provider or compaction work. Terminal persistence failures prevent retirement
+from being reported as successful.
+
+Daemon shutdown preserves the saved running intent and queued user messages.
+Its process-local admission barrier prevents deferred input, notifications or
+automatic follow-up from starting another turn during cleanup. Ordinary runtime
+unload releases that barrier after successful detachment, allowing a later start
+or auxiliary compaction without reopening a permanently closed owner.
+
 Compaction of an unloaded session creates a short-lived accounting graph inside
 its cancellable auxiliary lease, without initializing the agent runtime. Loaded
 sessions reuse their actual retained graph. In either case, model attempts are

@@ -535,6 +535,90 @@ let%expect_test "read-only sends do not consume history IDs" =
   [%expect {| ((rejected true) (consecutive true)) |}]
 ;;
 
+let%expect_test "embedded close joins active root inference with a deferred user message" =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+      no_op_turn_prompt;
+    Eio.Switch.run (fun sw ->
+      let provider_entered, enter_provider = Eio.Promise.create () in
+      let provider_finished, finish_provider = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let provider_calls = ref 0 in
+      let daemon_options =
+        { Agent_server.Daemon.default_options with
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                incr provider_calls;
+                Exn.protect
+                  ~f:(fun () ->
+                    ignore (Eio.Promise.try_resolve enter_provider ());
+                    Eio.Promise.await never;
+                    Stdlib.Seq.empty)
+                  ~finally:(fun () -> ignore (Eio.Promise.try_resolve finish_provider ())))
+        }
+      in
+      let options =
+        Agent_server.Embedded.
+          { prompt_file
+          ; workspace
+          ; tool_dir = workspace
+          ; home = root
+          ; data_root = None
+          ; start_immediately = true
+          ; permission_profile = Agent_server.Embedded.default_permission_profile
+          ; attachment_mode = Read_write
+          ; event_capacity = 128
+          }
+      in
+      let embedded =
+        Agent_server.Embedded.start ~daemon_options ~sw ~env options |> protocol_ok
+      in
+      let send text key =
+        let session_id = Agent_server.Embedded.session_id embedded in
+        let attachment_id = (Agent_server.Embedded.attachment embedded).id in
+        let idempotency_key =
+          Agent_protocol.Idempotency_key.of_string key |> protocol_ok
+        in
+        let content =
+          Agent_protocol.Session.Message_content.
+            { kind = Plain_text; text; attachments = [] }
+        in
+        match
+          Agent_client.Connection.request_without_history
+            (Agent_server.Embedded.connection embedded)
+            (Session_send_message { session_id; attachment_id; idempotency_key; content })
+          |> protocol_ok
+        with
+        | Agent_protocol.Method_result.Session_send_message sent -> sent
+        | _ -> failwith "unexpected send response"
+      in
+      ignore
+        (send "first" "close-root:first" : Agent_protocol.Method_result.Send_message.t);
+      Eio.Promise.await provider_entered;
+      let second = send "second" "close-root:second" in
+      let deferred =
+        Agent_protocol.Method_result.Send_message.equal_disposition
+          second.disposition
+          Deferred
+      in
+      if not deferred then failwith "second message must remain deferred during inference";
+      (* The provider gate is never released. Closing must cancel its execution
+         and join its finalizer before retiring the actor and durable writer. *)
+      Agent_server.Embedded.close embedded;
+      print_s
+        [%sexp
+          { deferred : bool
+          ; provider_finished =
+              (Option.is_some (Eio.Promise.peek provider_finished) : bool)
+          ; provider_calls = (!provider_calls : int)
+          }]));
+  [%expect {| ((deferred true) (provider_finished true) (provider_calls 1)) |}]
+;;
+
 let%expect_test "mutating command idempotency replays and rejects conflicts" =
   with_fixture (fun env root workspace prompt_file ->
     Eio.Switch.run (fun sw ->

@@ -47,6 +47,33 @@ type reset_options = Administration.reset_options =
 
 type t
 
+module Runtime_retirement : sig
+  (** A process-local foreground cleanup join. The actor remains available to
+      inference and worker finalizers until the terminal checkpoint finishes. *)
+  type t
+
+  val is_finished : t -> bool
+
+  (** Await outside the actor mailbox and runtime owner mutex. Terminal commit
+      errors are returned; unexpected failures retain their original backtrace. *)
+  val await : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Exclude new user, deferred, automatic, start and compaction admission and cancel the
+    active foreground operation, including a worker that has not acknowledged
+    readiness yet. Returns immediately with a join completed after its actual
+    worker scope and terminal checkpoint. Concurrent requests share the join.
+    Does not change durable desired state or discard deferred messages. Successful
+    [closing=true] permanently excludes admission, including across an ordinary
+    unload already in progress. For reusable retirement, successful detachment or
+    worker installation reopens admission after the retiring operation has joined.
+    Safe points return no additional deferred/notification input after retirement
+    begins. Background lifetimes must be cancelled/joined separately by the owner. *)
+val retire_runtime_worker
+  :  t
+  -> closing:bool
+  -> (Runtime_retirement.t, Agent_protocol.Error.t) result
+
 module Compaction_inference : sig
   (** Trusted process-local selected auxiliary lifetime. Operation and complete
       selection are captured by durable compaction admission. The callback runs

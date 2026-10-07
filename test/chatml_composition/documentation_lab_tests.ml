@@ -150,7 +150,10 @@ let%expect_test
        let invoke id name fields =
          queued := [ id, name, `Object fields ];
          Workflow.send host id "Perform the requested lab operation.";
-         Workflow.finish_call env host id;
+         (* Observe the complete turn: retiring its persisted history can take more
+            than five CPU seconds after the earlier lab operations. Tool and shell
+            execution deadlines remain independently enforced. *)
+         Workflow.finish_call ~timeout:15. env host id;
          Host.initial_outcome (Host.snapshot host) id
        in
        let begin_checks id phase =

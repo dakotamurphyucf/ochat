@@ -1,5 +1,27 @@
 open! Core
 
+module Runtime_retirement = struct
+  type outcome =
+    ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
+
+  type t = outcome Eio.Promise.t
+
+  let is_finished t = Option.is_some (Eio.Promise.peek t)
+
+  let await t =
+    match Eio.Promise.await t with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  ;;
+end
+
+type runtime_retirement =
+  { finished : Runtime_retirement.t
+  ; finish : Runtime_retirement.outcome Eio.Promise.u
+  ; mutable pending_operation : Agent_protocol.Id.Operation.t option
+  ; mutable closing : bool
+  }
+
 module Inference_owner = struct
   type phase =
     | Open
@@ -397,6 +419,7 @@ type _ request =
   | Set_runtime_worker :
       Operation_worker.t option * Inference_client.Execution.t option
       -> unit request
+  | Retire_runtime_worker : bool -> Runtime_retirement.t request
   | Set_compaction_inference : Compaction_inference.t option -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
   | Set_automatic_turn_pauses :
@@ -741,6 +764,7 @@ type t =
   ; schedule_permission_timeouts : bool
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
   ; mutable active_cancel : (unit -> unit) option
+  ; mutable runtime_retirement : runtime_retirement option
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
@@ -1749,7 +1773,15 @@ let commit_extensions_internal t generation expected_revision changes =
 ;;
 
 let set_operation_worker t worker =
-  if moderator_is_borrowed t
+  if
+    Option.exists t.runtime_retirement ~f:(fun retirement ->
+      match Eio.Promise.peek retirement.finished with
+      | Some (Ok (Ok ())) ->
+        Option.is_some worker
+        && (retirement.closing || Option.is_some t.state.active_operation)
+      | Some (Ok (Error _) | Error _) | None -> true)
+  then Error (error Conflict "cannot replace a retiring runtime")
+  else if moderator_is_borrowed t
   then Error (error Conflict "cannot replace a borrowed moderator runtime")
   else (
     match worker, t.state.active_operation, t.idle_moderator_borrowed with
@@ -1758,7 +1790,57 @@ let set_operation_worker t worker =
     | None, None, false | Some _, _, _ ->
       t.operation_worker <- worker;
       t.inference_execution <- None;
+      (match worker with
+       | Some _ -> t.runtime_retirement <- None
+       | None ->
+         (match t.runtime_retirement with
+          | Some retirement when not retirement.closing -> t.runtime_retirement <- None
+          | Some _ | None -> ()));
       Ok ())
+;;
+
+let runtime_admission_open t = Option.is_none t.runtime_retirement
+
+let require_runtime_admission t =
+  if runtime_admission_open t
+  then Ok ()
+  else Error (error Conflict "session runtime is retiring")
+;;
+
+let retire_runtime_worker t ~closing =
+  match t.runtime_retirement with
+  | Some retirement ->
+    retirement.closing <- retirement.closing || closing;
+    Ok retirement.finished
+  | None ->
+    let finished, finish = Eio.Promise.create () in
+    let pending_operation =
+      Option.map t.state.active_operation ~f:(fun operation -> operation.id)
+    in
+    t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
+    Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    if Option.is_none pending_operation then Eio.Promise.resolve finish (Ok (Ok ()));
+    Ok finished
+;;
+
+let finish_runtime_retirement t operation_id result =
+  Option.iter t.runtime_retirement ~f:(fun retirement ->
+    match retirement.pending_operation with
+    | Some pending when Agent_protocol.Id.Operation.equal pending operation_id ->
+      retirement.pending_operation <- None;
+      Eio.Promise.resolve retirement.finish result
+    | Some _ | None -> ())
+;;
+
+let with_runtime_terminal t operation_id f =
+  match f () with
+  | result ->
+    finish_runtime_retirement t operation_id (Ok result);
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    finish_runtime_retirement t operation_id (Error (exn, backtrace));
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let set_runtime_worker t worker inference =
@@ -1823,7 +1905,9 @@ let lifecycle t ~desired ~observed =
 ;;
 
 let start_internal ?expected_parent_stop_epoch t =
-  if
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if
     match t.state.runtime_initialization with
     | Pending _ -> true
     | Ready -> false
@@ -1845,7 +1929,9 @@ let start_internal ?expected_parent_stop_epoch t =
 ;;
 
 let queue_start_internal t =
-  if t.idle_moderator_borrowed
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if t.idle_moderator_borrowed
   then Error (error Conflict "cannot restart while the idle moderator is borrowed")
   else (
     match t.state.lifecycle.desired, t.state.lifecycle.observed with
@@ -1855,7 +1941,9 @@ let queue_start_internal t =
 ;;
 
 let activate_queued_start t =
-  if
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if
     match t.state.runtime_initialization with
     | Pending _ -> true
     | Ready -> false
@@ -2629,6 +2717,8 @@ let upgrade_prompt_internal t attachment_id expected_revision target_revision =
 ;;
 
 let adopt_deferred t =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let entries = t.state.conversation.deferred_user_entries in
   if List.is_empty entries
   then Ok (Session_state.summary t.state)
@@ -3022,7 +3112,8 @@ let has_pending_permission t =
 ;;
 
 let idle_actor_available t =
-  (not t.idle_moderator_borrowed)
+  runtime_admission_open t
+  && (not t.idle_moderator_borrowed)
   && Option.is_none t.moderator_borrow
   && Option.is_none t.state.active_operation
   && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
@@ -5131,15 +5222,18 @@ let commit_worker_moderator t operation_id moderator =
 ;;
 
 let consume_deferred t operation_id =
-  let open Result.Let_syntax in
-  let%bind _ = current_operation t operation_id in
-  match t.state.lifecycle.desired with
-  | Stopped -> Ok []
-  | Running ->
-    let entries = t.state.conversation.deferred_user_entries in
-    let%bind decoded = History_codec.all_of_protocol entries in
-    let%map _ = adopt_deferred t in
-    decoded
+  if not (runtime_admission_open t)
+  then Ok []
+  else
+    let open Result.Let_syntax in
+    let%bind _ = current_operation t operation_id in
+    match t.state.lifecycle.desired with
+    | Stopped -> Ok []
+    | Running ->
+      let entries = t.state.conversation.deferred_user_entries in
+      let%bind decoded = History_codec.all_of_protocol entries in
+      let%map _ = adopt_deferred t in
+      decoded
 ;;
 
 let admit_standalone_delivery_internal t plan =
@@ -5365,61 +5459,64 @@ let consume_notifications_internal
       operation_id
       plan
   =
-  let open Result.Let_syntax in
-  let%bind _ = running_operation ~allow_stopping:true t operation_id in
-  match t.state.lifecycle.desired with
-  | Stopped ->
-    (* An admitted provider may finish during graceful stop. Its final safe point
+  if not (runtime_admission_open t)
+  then Ok Chat_response.In_memory_stream.Safe_point_input.empty
+  else
+    let open Result.Let_syntax in
+    let%bind _ = running_operation ~allow_stopping:true t operation_id in
+    match t.state.lifecycle.desired with
+    | Stopped ->
+      (* An admitted provider may finish during graceful stop. Its final safe point
        must not fail, consume retained deliveries, or request another turn. *)
-    Ok Chat_response.In_memory_stream.Safe_point_input.empty
-  | Running ->
-    let%bind () =
-      match
-        List.exists t.invocation_executions ~f:(fun execution ->
-          match execution.owner with
-          | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
-          | _ -> false)
-      with
-      | true ->
-        Error
-          (error Conflict "notification insertion waits for the foreground tool batch")
-      | false -> Ok ()
-    in
-    let%bind () = validate_notification_plan t plan in
-    let%bind deltas, entries, committed = notification_changes t plan in
-    let deltas =
-      deltas
-      @ List.map discarded_wakes ~f:(fun value ->
-        Session_delta.Delivery_wake_changed value)
-    in
-    let%bind decoded = History_codec.all_of_protocol entries in
-    let%map () =
-      match deltas with
-      | [] -> Ok ()
-      | _ ->
-        transition
-          t
-          ~delta:(Session_delta.Batch deltas)
-          ~payloads:(notification_payloads entries)
-        |> Result.map ~f:ignore
-    in
-    let existing =
-      match t.notification_inputs with
-      | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
-      | _ -> []
-    in
-    let ids =
-      List.map (committed @ wakes) ~f:(fun value ->
-        value.Agent_protocol.Delivery.context.id)
-    in
-    t.notification_inputs <- Some (operation_id, ids @ existing);
-    let wake =
-      List.exists (committed @ wakes) ~f:(fun value ->
-        Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
-    in
-    Chat_response.In_memory_stream.Safe_point_input.notification_entries
-      ~request_turn:wake
-      decoded
+      Ok Chat_response.In_memory_stream.Safe_point_input.empty
+    | Running ->
+      let%bind () =
+        match
+          List.exists t.invocation_executions ~f:(fun execution ->
+            match execution.owner with
+            | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+            | _ -> false)
+        with
+        | true ->
+          Error
+            (error Conflict "notification insertion waits for the foreground tool batch")
+        | false -> Ok ()
+      in
+      let%bind () = validate_notification_plan t plan in
+      let%bind deltas, entries, committed = notification_changes t plan in
+      let deltas =
+        deltas
+        @ List.map discarded_wakes ~f:(fun value ->
+          Session_delta.Delivery_wake_changed value)
+      in
+      let%bind decoded = History_codec.all_of_protocol entries in
+      let%map () =
+        match deltas with
+        | [] -> Ok ()
+        | _ ->
+          transition
+            t
+            ~delta:(Session_delta.Batch deltas)
+            ~payloads:(notification_payloads entries)
+          |> Result.map ~f:ignore
+      in
+      let existing =
+        match t.notification_inputs with
+        | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
+        | _ -> []
+      in
+      let ids =
+        List.map (committed @ wakes) ~f:(fun value ->
+          value.Agent_protocol.Delivery.context.id)
+      in
+      t.notification_inputs <- Some (operation_id, ids @ existing);
+      let wake =
+        List.exists (committed @ wakes) ~f:(fun value ->
+          Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
+      in
+      Chat_response.In_memory_stream.Safe_point_input.notification_entries
+        ~request_turn:wake
+        decoded
 ;;
 
 let notification_wake_deltas t operation_id ~accept =
@@ -5459,27 +5556,32 @@ let worker_ready t operation_id cancel =
     Ok ()
   | Some operation ->
     t.active_cancel <- Some cancel;
-    (match operation.state with
-     | Agent_protocol.Operation.Cancelling ->
-       cancel ();
-       Ok ()
-     | Starting ->
-       let operation = operation_state t operation Running in
-       let open Result.Let_syntax in
-       let%map _ =
-         transition
-           t
-           ~delta:(Session_delta.Active_operation_changed (Some operation))
-           ~payloads:
-             [ Agent_protocol.Event.Durable.Payload.Session_updated
-                 (summary_with_operation t operation)
-             ]
-       in
-       ()
-     | Running -> Ok ()
-     | Completed | Failed _ | Cancelled | Interrupted _ ->
-       cancel ();
-       Ok ())
+    if not (runtime_admission_open t)
+    then (
+      cancel ();
+      Ok ())
+    else (
+      match operation.state with
+      | Agent_protocol.Operation.Cancelling ->
+        cancel ();
+        Ok ()
+      | Starting ->
+        let operation = operation_state t operation Running in
+        let open Result.Let_syntax in
+        let%map _ =
+          transition
+            t
+            ~delta:(Session_delta.Active_operation_changed (Some operation))
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Session_updated
+                  (summary_with_operation t operation)
+              ]
+        in
+        ()
+      | Running -> Ok ()
+      | Completed | Failed _ | Cancelled | Interrupted _ ->
+        cancel ();
+        Ok ())
 ;;
 
 let terminal_lifecycle t =
@@ -5882,7 +5984,9 @@ let run_compaction t operation selection port installed allocator history =
       let cancel () = Eio.Switch.fail operation_switch Compaction_cancel_requested in
       match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
       | Error failure -> Compaction_failed failure
-      | Ok () -> compute_compaction t operation selection port installed allocator history)
+      | Ok () ->
+        Eio.Switch.check operation_switch;
+        compute_compaction t operation selection port installed allocator history)
   with
   | Compaction_cancel_requested -> Compaction_cancelled "operation cancelled"
   | Eio.Cancel.Cancelled reason -> Compaction_cancelled (Exn.to_string reason)
@@ -5978,6 +6082,7 @@ let retain_reconciliation_failure t failure =
 
 let start_compaction ?operation ?(extra_deltas : Session_delta.t list = []) t =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let first_sequence = t.state.conversation.next_history_sequence in
   if Int64.equal first_sequence Int64.max_value
@@ -6301,7 +6406,7 @@ let worker_terminal t operation_id outcome =
         let%bind () = retain_reconciliation_failure t failure in
         Error failure
     in
-    if outcome_requests_compaction outcome
+    if runtime_admission_open t && outcome_requests_compaction outcome
     then Result.map (start_compaction t) ~f:(fun _ -> ())
     else Ok ()
 ;;
@@ -7074,7 +7179,12 @@ let run_worker_operation worker input capabilities cancelled =
     Eio.Fiber.first
       (fun () ->
          Eio.Switch.run (fun sw ->
-           `Finished (Operation_worker.run worker ~sw ~input capabilities)))
+           (* The readiness acknowledgement may have cancelled a Starting
+              operation. Do not dispatch its synchronous prefix before the
+              competing cancellation fiber has a chance to run. *)
+           match Eio.Promise.peek cancelled with
+           | Some () -> `Cancelled
+           | None -> `Finished (Operation_worker.run worker ~sw ~input capabilities)))
       (fun () ->
          Eio.Promise.await cancelled;
          `Cancelled)
@@ -7162,6 +7272,7 @@ let create_turn_operation t reason =
 
 let submit_idle_message ?(extra_deltas = []) t entry =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t User_submit in
   let lifecycle = lifecycle_for_operation t operation.id in
@@ -7198,7 +7309,9 @@ let submit_deferred_message ?(extra_deltas = []) t entry =
 ;;
 
 let submit_authorized_message ?(extra_deltas = []) t entry =
-  if t.state.halted
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if t.state.halted
   then Error (error Invalid_state "session is halted")
   else if Option.is_some t.state.failure
   then Error (error Invalid_state "session has failed")
@@ -9106,6 +9219,7 @@ let start_idle_turn_unchecked
       ~adopt_deferred
   =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let lifecycle = lifecycle_for_operation t operation.id in
@@ -9470,8 +9584,10 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
       match Chat_response.Runtime_semantics.should_end_session drain.runtime_requests with
       | Some reason -> stop_from_idle_moderator t drain reason
       | None
-        when Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
-        -> complete_running_idle_moderator t drain
+        when runtime_admission_open t
+             && Agent_protocol.Session.equal_desired_state
+                  t.state.lifecycle.desired
+                  Running -> complete_running_idle_moderator t drain
       | None -> checkpoint_idle_moderator t drain
     in
     t.idle_moderator_borrowed <- false;
@@ -10130,6 +10246,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
+  | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
   | Set_compaction_inference port ->
     t.compaction_inference <- port;
     Ok ()
@@ -10309,9 +10426,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Invocation_granted (tool_name, identity_digest) ->
     Ok (invocation_granted t ~tool_name ~identity_digest)
   | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-  | Worker_terminal (operation_id, outcome) -> worker_terminal t operation_id outcome
+  | Worker_terminal (operation_id, outcome) ->
+    with_runtime_terminal t operation_id (fun () ->
+      worker_terminal t operation_id outcome)
   | Compaction_terminal (operation_id, outcome) ->
-    compaction_terminal t operation_id outcome
+    with_runtime_terminal t operation_id (fun () ->
+      compaction_terminal t operation_id outcome)
   | Cancel_operation (attachment_id, operation_id) ->
     cancel_operation_internal t attachment_id operation_id
   | Open_permission (permission, timeout_seconds, fallback) ->
@@ -10533,6 +10653,7 @@ let create_with_owner_lease_duration
     ; schedule_permission_timeouts
     ; owner_timer_cancel = None
     ; active_cancel = None
+    ; runtime_retirement = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
@@ -10610,6 +10731,10 @@ let set_operation_worker t worker =
 
 let set_runtime_worker t ~worker ~inference =
   call t ~priority:Priority (Set_runtime_worker (worker, inference))
+;;
+
+let retire_runtime_worker t ~closing =
+  call t ~priority:Priority (Retire_runtime_worker closing)
 ;;
 
 let set_compaction_inference t port =
