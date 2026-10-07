@@ -254,6 +254,11 @@ module Configuration : sig
   val withheld_settings : t -> int
   val capabilities : t -> (feature * support) list
   val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+
+  (** Complete original JSON admission precedes closed safe decoding; no unknown
+      private fields or provider strings survive into this projection. *)
+  val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Error.t) Result.t
 end
 
 module Diagnostic : sig

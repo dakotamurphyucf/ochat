@@ -1021,7 +1021,7 @@ module Configuration = struct
         ~limits)
   ;;
 
-  let of_json json ~limits =
+  let decode json ~limits =
     let* fields =
       Decode.fields
         json
@@ -1091,6 +1091,11 @@ module Configuration = struct
       ; capabilities
       }
       ~limits
+  ;;
+
+  let of_json json ~limits =
+    let* () = json_error (D.Json.validate ~limits json) in
+    decode json ~limits
   ;;
 end
 
@@ -1426,7 +1431,7 @@ let of_json json ~limits =
       | "context_estimate" ->
         Result.map (Context_estimate.of_json raw) ~f:(fun value -> Context_estimate value)
       | "configuration" ->
-        Result.map (Configuration.of_json raw ~limits) ~f:(fun value ->
+        Result.map (Configuration.decode raw ~limits) ~f:(fun value ->
           Configuration value)
       | "diagnostic" ->
         Result.map (Diagnostic.of_json raw) ~f:(fun value -> Diagnostic value)
@@ -1766,7 +1771,7 @@ module Attempt_record = struct
           Observation_id.of_string id)
       in
       let* configuration =
-        Decode.get fields "configuration" (fun json -> Configuration.of_json json ~limits)
+        Decode.get fields "configuration" (fun json -> Configuration.decode json ~limits)
       in
       let* state = Decode.get fields "state" (fun json -> state_of_json json ~limits) in
       let* raw_observations = Decode.get fields "observations" Decode.array in

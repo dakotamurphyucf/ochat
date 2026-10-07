@@ -260,6 +260,19 @@ let%expect_test "configuration exposes closed safe values and captures actual pr
   assert (O.Configuration.equal_transport (O.Configuration.transport config) In_process);
   assert (
     O.equal observed (O.of_json (O.to_json observed) ~limits:O.Admission.observation |> ok));
+  let safe_json = O.Configuration.to_json config in
+  assert (
+    O.Configuration.equal
+      config
+      (O.Configuration.of_json safe_json ~limits:O.Admission.observation |> ok));
+  let safe_bytes =
+    D.Json.validate_and_measure ~limits:O.Admission.observation safe_json
+    |> Result.map_error ~f:(fun error -> Sexp.to_string_hum (D.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  assert (Result.is_ok (O.Configuration.of_json safe_json ~limits:(bounded safe_bytes)));
+  assert (
+    Result.is_error (O.Configuration.of_json safe_json ~limits:(bounded (safe_bytes - 1))));
   let find name =
     List.find_exn (O.Configuration.settings config) ~f:(fun setting ->
       O.Configuration.Name.equal name setting.name)
