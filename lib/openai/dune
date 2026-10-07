@@ -11,11 +11,14 @@
   responses_request
   responses_sse
   responses_codec
+  inference_adapter
+  inference_input
+  inference_output
   responses_driver
   responses_json
   grader)
- (private_modules responses_json)
- (libraries
+ (private_modules responses_json inference_input inference_output)
+ (libraries ochat.document_schema ochat.inference ochat.inference_runtime
   ochat.history_entry
   ochat.transcript
   io

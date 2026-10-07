@@ -205,6 +205,15 @@ module Profile = struct
   let id t = t.id
   let account t = t.account
   let endpoint t = t.endpoint
+  let capability t ~model ~feature = Capability.resolve t.capabilities ~model ~feature
+
+  let effective_settings t settings =
+    if
+      List.exists settings ~f:(fun setting ->
+        Setting.equal_provenance (Setting.provenance setting) Profile_default)
+    then fail "execution settings cannot supply profile defaults"
+    else Setting.merge (t.defaults @ settings)
+  ;;
 end
 
 module Prepared = struct
@@ -275,7 +284,14 @@ module Prepared = struct
          let%bind.Or_error () =
            if
              supplied "namespace"
-             || supplied "caller"
+             || (match member item "caller" with
+                 | None | Some `Null -> false
+                 | Some caller ->
+                   not
+                     (Option.equal
+                        String.equal
+                        (string_member caller "type")
+                        (Some "direct")))
              || Option.exists (member item "async") ~f:(function
                | `True -> true
                | _ -> false)
@@ -314,16 +330,14 @@ module Prepared = struct
            | Some _ | None -> fail "unsupported tool"))
   ;;
 
-  let create profile ~model ~history ~tools ~settings =
+  let of_captured_settings profile ~model ~history ~tools ~settings =
     let%bind.Or_error () = require profile ~model Text_input in
     let%bind.Or_error () =
-      if
-        List.exists settings ~f:(fun s ->
-          Setting.equal_provenance (Setting.provenance s) Profile_default)
-      then fail "execution settings cannot supply profile defaults"
+      if List.contains_dup (List.map settings ~f:Setting.name) ~compare:String.compare
+      then fail "duplicate captured setting"
       else Ok ()
     in
-    let%bind.Or_error settings = Setting.merge (profile.Profile.defaults @ settings) in
+    let%bind.Or_error settings = Setting.merge settings in
     let%bind.Or_error () =
       Or_error.all_unit
         (List.map settings ~f:(fun s -> require profile ~model (Setting (Setting.name s))))
@@ -381,10 +395,20 @@ module Prepared = struct
                    ])) )
         ]
     in
+    let%bind.Or_error () =
+      Document_schema.Json.validate ~limits:Document_schema.Limits.default identity
+      |> Result.map_error ~f:(fun _ ->
+        Error.of_string "prepared request byte/structure limit")
+    in
     let fingerprint =
       Digestif.SHA256.(digest_string (Jsonaf.to_string identity) |> to_hex)
     in
     Ok { profile; model; request; settings; fingerprint }
+  ;;
+
+  let create profile ~model ~history ~tools ~settings =
+    let%bind.Or_error settings = Profile.effective_settings profile settings in
+    of_captured_settings profile ~model ~history ~tools ~settings
   ;;
 
   let profile t = t.profile
@@ -800,6 +824,17 @@ let create
       ; max_framing_bytes
       ; max_frame_bytes
       })
+;;
+
+let with_response_limit t ~max_body_bytes =
+  if max_body_bytes <= 0
+  then fail "positive response byte limit required"
+  else
+    Ok
+      { t with
+        max_body_bytes = Int.min t.max_body_bytes max_body_bytes
+      ; max_frame_bytes = Int.min t.max_frame_bytes max_body_bytes
+      }
 ;;
 
 let io f =

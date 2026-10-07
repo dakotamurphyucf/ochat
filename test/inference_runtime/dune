@@ -1,0 +1,5 @@
+(library
+ (name inference_runtime_tests)
+ (libraries core jsonaf eio eio_main expect_test_helpers_core ochat.inference_runtime ochat.inference_client)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -74,6 +74,12 @@ module Profile : sig
   val id : t -> string
   val account : t -> string option
   val endpoint : t -> string
+
+  (** Pure capture of effective precedence before durable selection. No auth or
+      I/O. Execution layers may not masquerade as profile defaults. *)
+  val effective_settings : t -> Setting.t list -> Setting.t list Or_error.t
+
+  val capability : t -> model:string -> feature:Capability.feature -> Capability.support
 end
 
 module Prepared : sig
@@ -89,6 +95,17 @@ module Prepared : sig
       Origin compatibility of opaque captures remains the host's responsibility.
       Final admission follows preparation; changing inputs requires reprepare. *)
   val create
+    :  Profile.t
+    -> model:string
+    -> history:Jsonaf.t list
+    -> tools:Responses_codec.Request.Tool.t list
+    -> settings:Setting.t list
+    -> t Or_error.t
+
+  (** Lower an already captured effective selection without consulting current
+      profile defaults. Names must be unique; provenance is retained. Absent
+      values remain omitted. This is the durable neutral adapter entry point. *)
+  val of_captured_settings
     :  Profile.t
     -> model:string
     -> history:Jsonaf.t list
@@ -179,6 +196,11 @@ val create
   -> ?timeout_seconds:float
   -> unit
   -> t Or_error.t
+
+(** Tighten aggregate response and SSE frame byte bounds without changing network,
+    TLS, authentication, deadline or request limits. Positive values only; a larger
+    supplied value cannot enlarge either existing bound. Pure immutable copy. *)
+val with_response_limit : t -> max_body_bytes:int -> t Or_error.t
 
 (** Auth Error emits no events. Every normal Ok return delivers exactly one
     matching Terminal. Nonterminal validated codec updates arrive incrementally;
