@@ -1320,74 +1320,119 @@ let%expect_test "reset and pinned rebuild require exact stopped revisions" =
           options
         |> protocol_ok
       in
-      let connection = Agent_server.Embedded.connect embedded in
-      let session_id = Agent_server.Embedded.session_id embedded in
-      Agent_client.Session_handle.initialize
-        connection
-        ~implementation_name:"admin-test"
-        ~implementation_version:"dev"
-      |> protocol_ok
-      |> ignore;
-      let sessions = Agent_client.Admin.list_sessions connection |> protocol_ok in
-      let handle =
-        Agent_client.Session_handle.attach
-          ~sw
-          ~clock:(Eio.Stdenv.clock env)
-          ~connection
-          ~session_id
-          ~mode:Read_write
-          ~subscribe:false
-          ()
-        |> protocol_ok
+      let phase = ref "connect" in
+      let last_error = ref None in
+      let checked result =
+        (match result with
+         | Ok _ -> ()
+         | Error (error : Agent_protocol.Error.t) ->
+           last_error
+           := Some (error.code, String.prefix error.message 512, error.retryable));
+        protocol_ok result
       in
-      let current =
-        Agent_client.Session_handle.projection handle
-        |> Agent_client.Projection.snapshot
-        |> Agent_protocol.Public.Snapshot.fields
-      in
-      let reset expected =
-        Agent_client.Session_handle.reset
-          handle
-          ~expected_revision:expected
-          ~keep_history:false
-          ~keep_tasks:false
-          ~keep_cache:false
-          ~keep_workspace:true
-          ~keep_grants:false
-          ~keep_labels:true
-      in
-      let stale_rejected = Result.is_error (reset Int64.(current.revision - 1L)) in
-      let reset_session = reset current.revision |> protocol_ok in
-      let rebuilt =
-        Agent_client.Session_handle.rebuild
-          handle
-          ~expected_revision:reset_session.revision
-          ~prompt_choice:Pinned
-        |> protocol_ok
-      in
-      let started =
-        Agent_client.Session_handle.start handle ~queue_if_limited:true |> protocol_ok
-      in
-      let stopped = Agent_client.Session_handle.stop handle ~mode:Cancel |> protocol_ok in
-      Agent_client.Session_handle.detach handle |> protocol_ok;
-      Agent_client.Connection.close connection;
-      Agent_server.Embedded.close embedded;
-      print_s
-        [%sexp
-          { listed = (List.length sessions : int)
-          ; stale_rejected : bool
-          ; reset_generation = (reset_session.generation : int)
-          ; reset_stopped = (observed_stopped reset_session.observed_state : bool)
-          ; rebuild_advanced_revision =
-              (Int64.(rebuilt.revision > reset_session.revision) : bool)
-          ; rebuild_stopped = (observed_stopped rebuilt.observed_state : bool)
-          ; start_requested =
-              (Agent_protocol.Session.equal_desired_state started.desired_state Running
-               : bool)
-          ; stop_requested =
-              (Agent_protocol.Session.equal_desired_state stopped.desired_state Stopped
-               : bool)
-          }]));
+      Exn.protect
+        ~finally:(fun () -> Agent_server.Embedded.close embedded)
+        ~f:(fun () ->
+          try
+            phase := "connect";
+            let connection = Agent_server.Embedded.connect embedded in
+            let session_id = Agent_server.Embedded.session_id embedded in
+            phase := "initialize";
+            Agent_client.Session_handle.initialize
+              connection
+              ~implementation_name:"admin-test"
+              ~implementation_version:"dev"
+            |> checked
+            |> ignore;
+            phase := "list sessions";
+            let sessions = Agent_client.Admin.list_sessions connection |> checked in
+            phase := "attach";
+            let handle =
+              Agent_client.Session_handle.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection
+                ~session_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> checked
+            in
+            phase := "projection";
+            let current =
+              Agent_client.Session_handle.projection handle
+              |> Agent_client.Projection.snapshot
+              |> Agent_protocol.Public.Snapshot.fields
+            in
+            let reset expected =
+              Agent_client.Session_handle.reset
+                handle
+                ~expected_revision:expected
+                ~keep_history:false
+                ~keep_tasks:false
+                ~keep_cache:false
+                ~keep_workspace:true
+                ~keep_grants:false
+                ~keep_labels:true
+            in
+            phase := "stale reset rejection";
+            let stale_rejected = Result.is_error (reset Int64.(current.revision - 1L)) in
+            phase := "reset";
+            let reset_session = reset current.revision |> checked in
+            phase := "rebuild";
+            let rebuilt =
+              Agent_client.Session_handle.rebuild
+                handle
+                ~expected_revision:reset_session.revision
+                ~prompt_choice:Pinned
+              |> checked
+            in
+            phase := "start";
+            let started =
+              Agent_client.Session_handle.start handle ~queue_if_limited:true |> checked
+            in
+            phase := "stop";
+            let stopped =
+              Agent_client.Session_handle.stop handle ~mode:Cancel |> checked
+            in
+            phase := "detach";
+            Agent_client.Session_handle.detach handle |> checked;
+            phase := "close connection";
+            Agent_client.Connection.close connection;
+            phase := "assert result";
+            print_s
+              [%sexp
+                { listed = (List.length sessions : int)
+                ; stale_rejected : bool
+                ; reset_generation = (reset_session.generation : int)
+                ; reset_stopped = (observed_stopped reset_session.observed_state : bool)
+                ; rebuild_advanced_revision =
+                    (Int64.(rebuilt.revision > reset_session.revision) : bool)
+                ; rebuild_stopped = (observed_stopped rebuilt.observed_state : bool)
+                ; start_requested =
+                    (Agent_protocol.Session.equal_desired_state
+                       started.desired_state
+                       Running
+                     : bool)
+                ; stop_requested =
+                    (Agent_protocol.Session.equal_desired_state
+                       stopped.desired_state
+                       Stopped
+                     : bool)
+                }]
+          with
+          | exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            (* Record the original failing phase before orderly shutdown can join
+               protected actor/runtime cleanup. Never dump error data or history. *)
+            Eio.traceln
+              "%s"
+              (Sexp.to_string_hum
+                 [%sexp
+                   "embedded administration fixture failed"
+                 , (!phase : string)
+                 , (!last_error : (Agent_protocol.Error.code * string * bool) option)]);
+            Exn.raise_with_original_backtrace exn backtrace)));
   [%expect
     {|
     ((listed 1) (stale_rejected true) (reset_generation 1) (reset_stopped true)

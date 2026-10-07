@@ -1771,6 +1771,117 @@ let test_read_methods env environment =
     (local_stdio_observation env environment fixture)
 ;;
 
+let inference_read_observation connection ~key_prefix =
+  let module Q = Agent_protocol.Inference_query in
+  ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+  let created, _replayed = create_session connection ~key:(key_prefix ^ "-create") in
+  let session_id = created.session.id in
+  let before = history_snapshot connection session_id in
+  let summary =
+    match request connection (Session_inference_summary { session_id }) with
+    | Session_inference_summary summary -> summary
+    | _ -> fail "session.inference_summary returned the wrong result variant"
+  in
+  let query =
+    Q.Request.create
+      ~session_id
+      ~page:(Agent_protocol.Page.Request.create ~limit:1 () |> protocol_ok)
+      ~include_configuration:false
+      ~include_diagnostics:false
+    |> protocol_ok
+  in
+  let response =
+    match request connection (Session_inference_observations query) with
+    | Session_inference_observations response -> response
+    | _ -> fail "session.inference_observations returned the wrong result variant"
+  in
+  let require_summary actual =
+    if not (Jsonaf.exactly_equal (Q.Summary.to_json summary) (Q.Summary.to_json actual))
+    then fail "inference read summaries disagree"
+  in
+  require_summary (Q.Response.summary response);
+  (match before.session.inference_summary with
+   | History_entry.Payload.Presence.Value actual -> require_summary actual
+   | Absent | Null -> fail "fresh tracked session omitted its inference summary");
+  let attempts = Q.Response.attempts response in
+  if not (List.is_empty attempts.items && Option.is_none attempts.next_cursor)
+  then fail "fresh stopped session returned inference rows or a continuation";
+  let require_zero values =
+    if not (List.for_all values ~f:(Int64.equal 0L))
+    then fail "fresh stopped session reported prior inference accounting"
+  in
+  require_zero [ Q.Summary.retained_attempts summary ];
+  let turns = Q.Summary.turns summary in
+  require_zero
+    [ turns.pending; turns.completed; turns.failed; turns.cancelled; turns.interrupted ];
+  let coverage = Q.Summary.coverage summary in
+  if
+    coverage.before_tracking_unknown
+    || not (Q.Coverage.equal_tracking_status coverage.tracking_status Available)
+  then fail "fresh session reported unknown or limited accounting coverage";
+  require_zero
+    [ coverage.retired_attempts
+    ; coverage.untracked_attempts
+    ; coverage.retired_turns
+    ; coverage.untracked_turns
+    ];
+  (* Empty sums have zero contributions, not an Actual-zero usage observation.
+     Component-specific missing/null reasons remain independent accounting. *)
+  let require_empty_metric (metric : Q.Metric.t) =
+    if
+      (not (Q.Metric.equal_sum metric.actual (Tokens 0L)))
+      || (not (Q.Metric.equal_sum metric.estimated (Tokens 0L)))
+      || metric.mixed_estimators
+    then fail "fresh session reported inference token contributions";
+    require_zero
+      [ metric.actual_attempts
+      ; metric.estimated_attempts
+      ; metric.unknown.not_reported
+      ; metric.unknown.explicit_null
+      ; metric.unknown.interrupted
+      ; metric.unknown.not_submitted
+      ; metric.unknown.before_tracking
+      ]
+  in
+  let components = Q.Summary.components summary in
+  List.iter
+    [ components.input
+    ; components.output
+    ; components.reported_total
+    ; components.cached_input
+    ; components.cache_write_input
+    ; components.reasoning_output
+    ]
+    ~f:require_empty_metric;
+  let after = history_snapshot connection session_id in
+  if
+    not
+      (Jsonaf.exactly_equal
+         (Support.Public_view.snapshot_to_json before)
+         (Support.Public_view.snapshot_to_json after))
+  then fail "inference reads activated or changed the stopped session";
+  Q.Summary.to_json summary |> Jsonaf.to_string
+;;
+
+let test_inference_reads env environment =
+  let fixture = fixture env environment "conformance-inference" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = inference_read_observation unix ~key_prefix:"unix" in
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (connection, key_prefix) ->
+               let actual = inference_read_observation connection ~key_prefix in
+               if not (String.equal baseline actual)
+               then fail "cross-transport inference read summaries differ"))))
+;;
+
 let test_session_lifecycle env environment =
   let fixture = fixture env environment "conformance-lifecycle" in
   Eio.Switch.run (fun sw ->
@@ -1938,6 +2049,7 @@ let test_history_deletion env environment =
 let cases =
   [ "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
+  ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
   ; "conformance.jobs-schedules", test_jobs_schedules
   ; "conformance.blob-read", test_blob_read
@@ -1961,6 +2073,8 @@ let method_coverage =
   ; "session.create", "conformance.session-lifecycle"
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
+  ; "session.inference_summary", "conformance.inference-reads"
+  ; "session.inference_observations", "conformance.inference-reads"
   ; "session.attach", "conformance.session-lifecycle"
   ; "session.detach", "conformance.session-lifecycle"
   ; "session.renew_owner", "conformance.error-codes"
