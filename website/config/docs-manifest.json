@@ -5000,5 +5000,21 @@
     "title": "Private provider credential storage",
     "reviewNote": "Contributor contract for private-file provider secret storage, native directory ownership, publication uncertainty and stable cross-process locks. No operator login workflow or live provider qualification is claimed.",
     "provenance": "authored"
+  },
+  {
+    "id": "lib/credential_registry",
+    "source": "docs-src/lib/credential_registry.doc.md",
+    "disposition": "repository-only",
+    "title": "Shared host credential lifecycle",
+    "reviewNote": "Contributor contract for explicitly owned host credential authority, epoch and revision fencing, rotating intent uncertainty, local disable, owned cleanup and optional qualified ports. Synthetic macOS qualification only; no login workflow or live provider route is claimed.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/credential_registry_model",
+    "source": "docs-src/lib/credential_registry_model.doc.md",
+    "disposition": "repository-only",
+    "title": "Credential registry metadata model",
+    "reviewNote": "Contributor reference for bounded universal metadata, prospective revision reservations, validated grant presence/provenance and pure lifecycle transitions.",
+    "provenance": "authored"
   }
 ]
