@@ -128,7 +128,10 @@ let%expect_test
         let queued = ref None in
         let child_calls = ref 0 in
         let child_inputs = Queue.create () in
-        let answer = String.concat (List.init 2500 ~f:(fun _ -> "📚\"\\\n")) in
+        (* Keep the UTF-8/escaping payload larger than a page without turning
+           every parent tool call into a growing-history stress workload. *)
+        let answer = String.concat (List.init 600 ~f:(fun _ -> "📚\"\\\n")) in
+        assert (String.length answer > 4096);
         let child_gate = ref None in
         let terminal_gate = ref None in
         let phase = ref "startup" in
@@ -773,13 +776,16 @@ let%expect_test
                       Buffer.add_string output fragment);
                   let next = field page "next_cursor" in
                   match Jsonaf.exactly_equal (field page "caught_up") `True with
-                  | true -> next
+                  | true -> next, count + 1
                   | false ->
                     Option.iter cursor ~f:(fun previous ->
                       assert (not (Jsonaf.exactly_equal previous next)));
                     read_pages (Some next) (count + 1)
                 in
-                let output_cursor = read_pages (Some pending_output_cursor) 0 in
+                let output_cursor, page_count =
+                  read_pages (Some pending_output_cursor) 0
+                in
+                assert (page_count > 1);
                 let record = Jsonaf.of_string (Buffer.contents output) in
                 let payload = field (field record "history") "payload" in
                 let payload =
