@@ -141,6 +141,12 @@ let capabilities driver_profile selected_model =
     feature, support)
 ;;
 
+module Auth_source = struct
+  type t =
+    | Static of D.Auth.resolver
+    | Capture of (target:R.Target.t -> (D.Auth.resolver, E.t) Result.t)
+end
+
 let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~limits =
   let bind target =
     if
@@ -172,6 +178,11 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
           ~capabilities:(capabilities profile (R.Target.model (R.target request)))
           ~limits:O.Admission.observation
         |> invalid
+      in
+      let%bind auth =
+        match auth with
+        | Auth_source.Static resolver -> Ok resolver
+        | Capture capture -> capture ~target:(R.target request)
       in
       Inference_runtime.Plan.create
         ~request

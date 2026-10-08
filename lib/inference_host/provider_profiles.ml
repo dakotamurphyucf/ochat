@@ -301,24 +301,34 @@ let resolve t ~principal target =
   in
   let%bind () = available t entry in
   let configuration_epoch = entry.revision_epoch in
-  let auth ~sw _profile =
-    let check_admission () =
-      if
-        entry.removed
-        || entry.disabled
-        || (not (matches entry target))
-        || not (authorized t ~principal entry)
-      then Error D.Auth.Denied
-      else if entry.revision_epoch <> configuration_epoch
-      then Error D.Auth.Profile_changed
-      else (
-        match available t entry with
-        | Ok () -> Ok ()
-        | Error Error.Reauthorization_required -> Error D.Auth.Reauthorization_required
-        | Error _ -> Error D.Auth.Missing)
-    in
+  let check_admission () =
+    if
+      entry.removed
+      || entry.disabled
+      || (not (matches entry target))
+      || not (authorized t ~principal entry)
+    then Error D.Auth.Denied
+    else if entry.revision_epoch <> configuration_epoch
+    then Error D.Auth.Profile_changed
+    else (
+      match available t entry with
+      | Ok () -> Ok ()
+      | Error Error.Reauthorization_required -> Error D.Auth.Reauthorization_required
+      | Error _ -> Error D.Auth.Missing)
+  in
+  let capture_auth ~target:_ =
     let open Result.Let_syntax in
-    let%bind () = check_admission () in
+    let%bind () =
+      if entry.removed || entry.disabled
+      then Error Inference_runtime.Preparation_error.Target_unavailable
+      else
+        check_admission ()
+        |> Result.map_error ~f:(function
+          | D.Auth.Denied -> Inference_runtime.Preparation_error.Target_denied
+          | Reauthorization_required -> Reauthorization_required
+          | Profile_changed -> Target_mismatch
+          | Missing | Invalid_credential | Timed_out -> Target_unavailable)
+    in
     let captured = identity entry in
     let check_current () =
       let%bind () = check_admission () in
@@ -326,13 +336,16 @@ let resolve t ~principal target =
       then Ok ()
       else Error D.Auth.Denied
     in
-    let%bind lease = t.credentials ~sw captured in
-    let%bind () = check_current () in
-    D.Auth.with_identity
-      lease
-      ~owner:captured.owner
-      ~generation:captured.generation
-      ~check_current
+    Ok
+      (fun ~sw _profile ->
+        let%bind () = check_current () in
+        let%bind lease = t.credentials ~sw captured in
+        let%bind () = check_current () in
+        D.Auth.with_identity
+          lease
+          ~owner:captured.owner
+          ~generation:captured.generation
+          ~check_current)
   in
   (* Revision is captured-default provenance. Compatibility was checked above;
      preparation uses today's capabilities but never today's setting defaults. *)
@@ -342,7 +355,7 @@ let resolve t ~principal target =
       t.driver
       ~profile:entry.configuration.profile
       ~profile_revision:(R.Target.profile_revision target)
-      ~auth
+      ~auth:(A.Auth_source.Capture capture_auth)
       ~limits:t.limits
     |> Result.map_error ~f:(fun error -> Error.Preparation error)
   in

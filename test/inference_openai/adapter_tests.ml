@@ -64,7 +64,12 @@ let request ?(history = []) target =
 let driver env = D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> ok
 
 let context ?(runtime_limits = Runtime.Limits.default) env profile ~target ~auth =
-  A.create (driver env) ~profile ~profile_revision:None ~auth ~limits:runtime_limits
+  A.create
+    (driver env)
+    ~profile
+    ~profile_revision:None
+    ~auth:(A.Auth_source.Static auth)
+    ~limits:runtime_limits
   |> ok
   |> Runtime.Context.create ~target
   |> ok
@@ -447,7 +452,7 @@ let%expect_test
              driver
              ~profile
              ~profile_revision:None
-             ~auth
+             ~auth:(A.Auth_source.Static auth)
              ~limits:Runtime.Limits.default
            |> ok
            |> Runtime.Context.create ~target

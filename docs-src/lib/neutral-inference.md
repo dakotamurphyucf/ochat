@@ -289,3 +289,13 @@ bindings, preserved future binding metadata, revoked authorization before lookup
 stale capability cancellation and revalidation, owner/generation rotation during
 lookup, redacted disabled status, and incompatible account edits. Existing neutral
 inference and OpenAI adapter tests cover the shared codecs and dispatch contracts.
+
+Dynamic provider plans capture the current authorization owner and generation
+at preparation, after pure request validation and without credential access.
+Each plan holds its own resolver. Logout or replacement invalidates previously
+prepared plans before lookup; a new plan on the same unchanged graph context
+may capture the new generation. Silent refresh within that generation remains
+permitted. Dispatch freshly authorizes and composes host and source lease guards;
+preparation alone does not grant dispatch authority. Static explicit hosts use
+`Inference_adapter.Auth_source.Static`; dynamic hosts use `Capture` without a
+static fallback.
