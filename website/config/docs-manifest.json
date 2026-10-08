@@ -4992,5 +4992,13 @@
     "title": "Retained inference observations",
     "reviewNote": "Contributor reference for bounded durable attempt and host-turn accounting, graph ownership, uncertainty, schema conversion and authorized read-only queries.",
     "provenance": "authored"
+  },
+  {
+    "id": "lib/provider_secret_store",
+    "source": "docs-src/lib/provider_secret_store.doc.md",
+    "disposition": "repository-only",
+    "title": "Private provider credential storage",
+    "reviewNote": "Contributor contract for private-file provider secret storage, native directory ownership, publication uncertainty and stable cross-process locks. No operator login workflow or live provider qualification is claimed.",
+    "provenance": "authored"
   }
 ]
