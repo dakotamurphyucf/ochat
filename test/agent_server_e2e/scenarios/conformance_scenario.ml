@@ -622,6 +622,19 @@ let require_equal unix http =
       , { unix : read_observation; http : read_observation }]
 ;;
 
+let command_receipt connection command =
+  match
+    request
+      connection
+      (Command_receipt
+         { method_name = Agent_protocol.Command.method_name command
+         ; original_params = Agent_protocol.Command.params command
+         })
+  with
+  | Command_receipt receipt -> receipt
+  | _ -> fail "command.receipt returned the wrong result variant"
+;;
+
 let create_session connection ~key =
   let create_request =
     Agent_protocol.Session.Create_request.
@@ -636,7 +649,15 @@ let create_session connection ~key =
     | Session_create created -> created
     | _ -> fail "session.create returned the wrong result variant"
   in
-  create (), create ()
+  (match command_receipt connection (Session_create create_request) with
+   | Missing -> ()
+   | _ -> fail "unsubmitted create receipt must remain unresolved/missing");
+  let created = create () in
+  (match command_receipt connection (Session_create create_request) with
+   | Committed (Created_session session_id)
+     when Agent_protocol.Id.Session.equal session_id created.session.id -> ()
+   | _ -> fail "create receipt must disclose only the committed session identity");
+  created, create ()
 ;;
 
 let start_session connection session attachment ~key =
@@ -679,7 +700,12 @@ let attach_replay connection session_id ~key =
       }
   in
   match request_public connection (Session_attach attach_request) with
-  | Session_attach ({ replay = Events _; _ } as attached) -> attached
+  | Session_attach ({ replay = Events _; _ } as attached) ->
+    (match command_receipt connection (Session_attach attach_request) with
+     | Committed (Attached_session recovered)
+       when Agent_protocol.Id.Session.equal recovered session_id -> ()
+     | _ -> fail "attach receipt must require fresh authorized reattachment");
+    attached
   | Session_attach { replay = Current; _ } -> fail "session replay returned current"
   | Session_attach { replay = Snapshot _; _ } -> fail "session replay returned snapshot"
   | _ -> fail "session.attach returned the wrong result variant"
@@ -2061,7 +2087,8 @@ let cases =
 ;;
 
 let method_coverage =
-  [ "protocol.initialize", "conformance.read-methods"
+  [ "command.receipt", "conformance.session-lifecycle"
+  ; "protocol.initialize", "conformance.read-methods"
   ; "protocol.ping", "conformance.read-methods"
   ; "server.info", "conformance.read-methods"
   ; "server.health", "conformance.read-methods"
