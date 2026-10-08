@@ -5024,5 +5024,21 @@
     "title": "Credential registry metadata model",
     "reviewNote": "Contributor reference for bounded universal metadata, prospective revision reservations, validated grant presence/provenance and pure lifecycle transitions.",
     "provenance": "authored"
+  },
+  {
+    "id": "lib/operator_authorization",
+    "source": "docs-src/lib/operator_authorization.doc.md",
+    "disposition": "repository-only",
+    "title": "Provider operator authorization",
+    "reviewNote": "Contributor contract for opaque authenticated actor proofs, exact original credential lifetime, explicit trusted-local policy and final nonyielding publication guards.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/provider_operator",
+    "source": "docs-src/lib/provider_operator.doc.md",
+    "disposition": "repository-only",
+    "title": "Host-owned provider operator service",
+    "reviewNote": "Contributor reference for shared runtime composition, explicit setup and protected local enrollment, owner-bound private login challenges, authorization, durable operation reconciliation and CLI recovery. Offline route tests do not claim live provider qualification.",
+    "provenance": "authored"
   }
 ]
