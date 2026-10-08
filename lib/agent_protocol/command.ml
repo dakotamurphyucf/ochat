@@ -28,6 +28,7 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
@@ -81,6 +82,7 @@ let method_name = function
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
   | Session_start _ -> "session.start"
+  | Session_update_metadata _ -> "session.update_metadata"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
@@ -136,6 +138,7 @@ let params = function
   | Session_detach request -> Session.Detach_request.to_json request
   | Session_renew_owner request -> Session.Renew_owner_request.to_json request
   | Session_start request -> Session.Start_request.to_json request
+  | Session_update_metadata request -> Session_metadata.Request.to_json request
   | Session_stop request -> Session.Stop_request.to_json request
   | Session_cancel_operation request -> Session.Cancel_operation_request.to_json request
   | Session_send_message request -> Session.Send_message_request.to_json request
@@ -219,6 +222,8 @@ let decoders =
   ; ( "session.renew_owner"
     , map Session.Renew_owner_request.of_json (fun x -> Session_renew_owner x) )
   ; "session.start", map Session.Start_request.of_json (fun x -> Session_start x)
+  ; ( "session.update_metadata"
+    , map Session_metadata.Request.of_json (fun x -> Session_update_metadata x) )
   ; "session.stop", map Session.Stop_request.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session.Cancel_operation_request.of_json (fun x -> Session_cancel_operation x) )

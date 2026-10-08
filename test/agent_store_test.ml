@@ -690,7 +690,12 @@ let crash_recovery_invalid env root case =
     crash_recovery_save
       env
       metadata_path
-      (Sexp.to_string_mach (Agent_store.Session_store.Metadata.sexp_of_t changed))
+      (Agent_store.Session_metadata_document.to_document
+         (Document_schema.Extension_carrier.of_authored_value changed)
+       |> Result.map_error ~f:(fun error ->
+         Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+       |> Result.ok_or_failwith
+       |> Document_schema.Document.to_string)
   | "layout" ->
     Eio.Path.rmdir (crash_recovery_path env (Filename.concat directory "journal"))
   | "metadata" -> crash_recovery_save env metadata_path "(broken"
@@ -710,7 +715,7 @@ let crash_recovery_check_invalid case =
       Eio.Path.unlink (crash_recovery_path env index_path);
       for _ = 1 to 2 do
         (match crash_recovery_open ~sw env root with
-         | Error (Corrupt _) -> ()
+         | Error (Corrupt _ | Document _) -> ()
          | Ok store ->
            Agent_store.Session_store.close store |> store_ok;
            failwith "invalid rebuild was accepted"
@@ -742,7 +747,7 @@ let%expect_test "existing corrupt session index stays corrupt instead of invokin
       let index_path = crash_recovery_index_path root in
       crash_recovery_save env index_path "(complete-corrupt-index";
       (match crash_recovery_open ~sw env root with
-       | Error (Corrupt _) -> ()
+       | Error (Corrupt _ | Document _) -> ()
        | Ok store ->
          Agent_store.Session_store.close store |> store_ok;
          failwith "corrupt index accepted"
@@ -1918,30 +1923,36 @@ let%expect_test "malformed migration schemas return typed errors and release the
       in
       Agent_store.Session_store.close store |> store_ok;
       let path = Eio.Path.(Eio.Stdenv.fs env / root / "schema.sexp") in
-      List.iter [ "("; ""; "not-a-record"; "((version invalid))" ] ~f:(fun malformed ->
-        Eio.Path.save ~create:(`Or_truncate 0o600) path malformed;
-        List.iter
-          Agent_store.Migration.[ Validate_only; Dry_run; Apply ]
-          ~f:(fun mode ->
-            let result =
-              Agent_store.Migration.run
-                ~env
-                ~sw
-                ~root
-                ~server_id
-                ~process_start_identity:None
-                ~lock_nonce:"inspect-corrupt-test"
-                ~mode
-            in
-            (match result with
-             | Error (Corrupt _) -> ()
-             | _ -> failwith "expected typed corruption");
-            assert (String.equal (Eio.Path.load path) malformed)));
+      List.iter
+        [ "{"
+        ; ""
+        ; {|{"format":"ochat.document","schema_version":0,"kind":"store.schema","payload":{}}|}
+        ; {|{"format":"ochat.document","schema_version":1,"kind":"store.schema","payload":{"created_at":null}}|}
+        ]
+        ~f:(fun malformed ->
+          Eio.Path.save ~create:(`Or_truncate 0o600) path malformed;
+          List.iter
+            Agent_store.Migration.[ Validate_only; Dry_run; Apply ]
+            ~f:(fun mode ->
+              let result =
+                Agent_store.Migration.run
+                  ~env
+                  ~sw
+                  ~root
+                  ~server_id
+                  ~process_start_identity:None
+                  ~lock_nonce:"inspect-corrupt-test"
+                  ~mode
+              in
+              (match result with
+               | Error (Document _) -> ()
+               | _ -> failwith "expected typed document admission error");
+              assert (String.equal (Eio.Path.load path) malformed)));
       print_endline "12 typed corruption results; schema unchanged; lock reacquired"));
   [%expect {| 12 typed corruption results; schema unchanged; lock reacquired |}]
 ;;
 
-let%expect_test "migration dry-run reports an older schema without applying it" =
+let%expect_test "migration dry-run reports a newer named schema without applying it" =
   with_temp_directory "ochat-agent-migration-plan" (fun env temporary ->
     let root = Filename.concat temporary "data" in
     Eio.Switch.run (fun switch ->
@@ -1961,7 +1972,23 @@ let%expect_test "migration dry-run reports an older schema without applying it" 
       Eio.Path.save
         ~create:(`Or_truncate 0o600)
         Eio.Path.(Eio.Stdenv.fs env / schema_path)
-        (String.substr_replace_first schema ~pattern:"(version 1)" ~with_:"(version 0)");
+        (let document =
+           Document_schema.Document.decode
+             ~limits:Agent_store.Store_schema_document.limits
+             schema
+           |> document_ok
+         in
+         match Document_schema.Document.json document with
+         | `Object fields ->
+           Jsonaf.to_string
+             (`Object
+                 (List.Assoc.add
+                    fields
+                    ~equal:String.equal
+                    "schema_version"
+                    (`Number "2")))
+         | _ -> assert false);
+      let future_schema = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / schema_path) in
       let plan =
         Agent_store.Migration.run
           ~env
@@ -1984,6 +2011,10 @@ let%expect_test "migration dry-run reports an older schema without applying it" 
           ~mode:Apply
         |> Result.is_error
       in
+      assert (
+        String.equal
+          future_schema
+          (Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / schema_path)));
       print_s
         [%sexp
           { source_version = (plan.source_version : int)
@@ -1992,7 +2023,7 @@ let%expect_test "migration dry-run reports an older schema without applying it" 
           }]));
   [%expect
     {|
-    ((source_version 0) (status Migration_required) (apply_rejected true))
+    ((source_version 2) (status Schema_too_new) (apply_rejected true))
     |}]
 ;;
 
@@ -2033,4 +2064,545 @@ let%expect_test "directory capability atomic publication survives anchor rename"
       | Error _ | Ok () -> failwith "NUL basename must fail validation before IO");
     print_endline "publication stays in opened directory; parent traversal rejected");
   [%expect {| publication stays in opened directory; parent traversal rejected |}]
+;;
+
+let%expect_test
+    "metadata publication failure retains intent and restart reconciles authority"
+  =
+  with_temp_directory "ochat-metadata-projection-failure" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let archived_id =
+        Agent_protocol.Id.Session.of_string "ses_archived_projection" |> protocol_ok
+      in
+      crash_recovery_add store ~sw archived_id 3L;
+      Agent_store.Session_store.archive_session store archived_id |> store_ok;
+      let handle =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"projection-update"
+          session_id
+        |> store_ok
+      in
+      let index_path = crash_recovery_index_path root in
+      let previous_index = Eio.Path.load (crash_recovery_path env index_path) in
+      let changed = metadata 9L in
+      let requested =
+        Agent_store.Session_index.Entry.
+          { session = changed.session
+          ; runnable_job_count = 1
+          ; deliverable_job_count = 1
+          ; earliest_schedule_due = Some changed.session.updated_at
+          ; owner_grace_deadline = None
+          ; pending_initial_start = false
+          ; archived = false
+          }
+      in
+      Agent_store.Session_store.prepare_canonical_projection
+        store
+        handle
+        ~metadata:changed
+        ~entry:requested
+      |> store_ok;
+      Eio.Path.unlink (crash_recovery_path env index_path);
+      Eio.Path.mkdir ~perm:0o700 (crash_recovery_path env index_path);
+      let failed =
+        Agent_store.Session_store.write_metadata ~entry:requested store handle changed
+      in
+      print_s
+        [%sexp
+          (Result.is_error failed : bool)
+        , ((Agent_store.Session_store.Handle.metadata_checked handle |> store_ok).session
+             .revision
+           : int64)];
+      print_s
+        [%sexp
+          (Result.is_error (Agent_store.Session_store.list_sessions_checked store) : bool)
+        , (Result.is_error (Agent_store.Session_store.complete_index_recovery store)
+           : bool)];
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok;
+      Eio.Path.rmdir (crash_recovery_path env index_path);
+      crash_recovery_save env index_path previous_index;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      let entries =
+        Agent_store.Session_store.list_sessions_checked reopened |> store_ok
+      in
+      let active =
+        List.find_exn entries ~f:(fun entry ->
+          Agent_protocol.Id.Session.equal
+            entry.Agent_store.Session_index.Entry.session.id
+            session_id)
+      in
+      let archived =
+        List.find_exn entries ~f:(fun entry ->
+          Agent_protocol.Id.Session.equal
+            entry.Agent_store.Session_index.Entry.session.id
+            archived_id)
+      in
+      print_s
+        [%sexp
+          (active.session.revision : int64)
+        , (archived.archived : bool)
+        , (active.pending_initial_start : bool)
+        , (Agent_store.Session_store.index_was_rebuilt reopened : bool)];
+      Agent_store.Session_store.complete_index_recovery reopened |> store_ok;
+      Agent_store.Session_store.close reopened |> store_ok));
+  [%expect
+    {|(true 9)
+(true true)
+(9 true false true)|}]
+;;
+
+let%expect_test "original metadata identity and archive semantics fail before mutation" =
+  with_temp_directory "ochat-side-document-original-identity" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let directory =
+        Agent_store.Data_root.session_path
+          (Agent_store.Session_store.data_root store)
+          session_id
+      in
+      let path = Filename.concat directory "metadata.sexp" in
+      let original = Eio.Path.load (crash_recovery_path env path) in
+      let document =
+        Document_schema.Document.decode
+          ~limits:Agent_store.Session_metadata_document.limits
+          original
+        |> document_ok
+      in
+      let replace json name value =
+        match json with
+        | `Object fields -> `Object (List.Assoc.add fields ~equal:String.equal name value)
+        | _ -> failwith "fixture object"
+      in
+      let payload = Document_schema.Document.payload document in
+      let session =
+        match Document_schema.Json.field payload ~name:"session" with
+        | Value value -> value
+        | _ -> assert false
+      in
+      let session =
+        replace
+          (replace session "id" (`String "ses_wrong_original_identity"))
+          "revision"
+          (`String "-1")
+      in
+      let raw =
+        Document_schema.Document.json document
+        |> fun json ->
+        replace json "payload" (replace payload "session" session) |> Jsonaf.to_string
+      in
+      crash_recovery_save env path raw;
+      let rejected =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"bad-original-id"
+          session_id
+      in
+      let identity_first =
+        match rejected with
+        | Error (Corrupt message) ->
+          String.equal message "session directory and stored metadata identity differ"
+        | Error _ -> false
+        | Ok _ -> failwith "accepted mismatched original identity"
+      in
+      print_s
+        [%sexp
+          (identity_first : bool)
+        , (String.equal raw (Eio.Path.load (crash_recovery_path env path)) : bool)];
+      crash_recovery_save env path original;
+      let handle =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"archive-admission"
+          session_id
+        |> store_ok
+      in
+      let marker = Filename.concat directory "ARCHIVED" in
+      let wrong_id =
+        {|{"format":"ochat.document","schema_version":1,"kind":"store.session_archive","payload":{"session_id":"ses_wrong_archive_identity"}}|}
+      in
+      crash_recovery_save env marker wrong_id;
+      print_s
+        [%sexp
+          (Result.is_error (Agent_store.Session_store.is_archived store handle) : bool)];
+      let unknown =
+        {|{"format":"ochat.document","schema_version":1,"kind":"store.session_archive","required_semantics":["future_archive_authority"],"payload":{"session_id":"ses_agent_store_test"}}|}
+      in
+      crash_recovery_save env marker unknown;
+      let index_path = crash_recovery_index_path root in
+      let before = Eio.Path.load (crash_recovery_path env index_path) in
+      print_s
+        [%sexp
+          (Result.is_error (Agent_store.Session_store.archive_session store session_id)
+           : bool)
+        , (String.equal unknown (Eio.Path.load (crash_recovery_path env marker)) : bool)
+        , (String.equal before (Eio.Path.load (crash_recovery_path env index_path))
+           : bool)];
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok));
+  [%expect
+    {|(true true)
+true
+(true true true)|}]
+;;
+
+let%expect_test
+    "full metadata projection validates summary and publishes scheduling hints together"
+  =
+  with_temp_directory "ochat-metadata-full-projection" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"full-projection"
+          session_id
+        |> store_ok
+      in
+      let changed = metadata 9L in
+      let entry =
+        Agent_store.Session_index.Entry.
+          { session = changed.session
+          ; runnable_job_count = 1
+          ; deliverable_job_count = 2
+          ; earliest_schedule_due = Some changed.session.updated_at
+          ; owner_grace_deadline = None
+          ; pending_initial_start = false
+          ; archived = false
+          }
+      in
+      let invalid = { entry with session = { entry.session with revision = 10L } } in
+      assert (
+        Result.is_error
+          (Agent_store.Session_store.write_metadata ~entry:invalid store handle changed));
+      assert (
+        Int64.equal
+          (Agent_store.Session_store.Handle.metadata_checked handle |> store_ok).session
+            .revision
+          7L);
+      Agent_store.Session_store.prepare_canonical_projection
+        store
+        handle
+        ~metadata:changed
+        ~entry
+      |> store_ok;
+      assert (
+        Result.is_error
+          (Agent_store.Session_store.write_metadata
+             ~entry:{ entry with runnable_job_count = 2 }
+             store
+             handle
+             changed));
+      assert (
+        Int64.equal
+          (Agent_store.Session_store.Handle.metadata_checked handle |> store_ok).session
+            .revision
+          7L);
+      Agent_store.Session_store.write_metadata ~entry store handle changed |> store_ok;
+      let observed =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index store)
+          session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (Int64.equal observed.session.revision 9L);
+      assert (observed.runnable_job_count = 1 && observed.deliverable_job_count = 2);
+      assert (
+        Option.equal
+          Agent_protocol.Timestamp.equal
+          observed.earliest_schedule_due
+          entry.earliest_schedule_due);
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok;
+      print_endline
+        "mismatch has no effects; zero-to-runnable full hints published with metadata"));
+  [%expect
+    {|mismatch has no effects; zero-to-runnable full hints published with metadata|}]
+;;
+
+let%expect_test
+    "canonical journal gap retains intent and forces eager replay over stale zero hints"
+  =
+  with_temp_directory "ochat-canonical-projection-gap" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"canonical-gap"
+          session_id
+        |> store_ok
+      in
+      let changed = metadata 9L in
+      let entry =
+        Agent_store.Session_index.Entry.
+          { session = changed.session
+          ; runnable_job_count = 1
+          ; deliverable_job_count = 0
+          ; earliest_schedule_due = Some changed.session.updated_at
+          ; owner_grace_deadline = None
+          ; pending_initial_start = false
+          ; archived = false
+          }
+      in
+      Agent_store.Session_store.prepare_canonical_projection
+        store
+        handle
+        ~metadata:changed
+        ~entry
+      |> store_ok;
+      let journal =
+        Agent_store.Journal.create
+          ~env
+          ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+          ~max_payload_length:16384
+          ~max_segment_bytes:1048576L
+          ~max_segment_frames:100
+        |> store_ok
+      in
+      let writer =
+        Agent_store.Commit_writer.create
+          ~sw
+          ~journal
+          ~session_id
+          ~next_transaction_sequence:1L
+          ~previous_transaction_hash:None
+          ~queue_capacity:8
+        |> store_ok
+      in
+      let selected =
+        transaction
+          ~sequence:1L
+          ~previous_hash:None
+          ~revision:9L
+          ~delta:"runnable-job-created"
+      in
+      Agent_store.Commit_writer.commit writer ~durability:Flush selected
+      |> store_ok
+      |> ignore;
+      Agent_store.Commit_writer.close writer;
+      Agent_store.Session_store.complete_index_recovery store |> store_ok;
+      let stale =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index store)
+          session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (stale.runnable_job_count = 0 && Int64.equal stale.session.revision 7L);
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      assert (Agent_store.Session_store.index_was_rebuilt reopened);
+      let handle =
+        Agent_store.Session_store.open_session
+          reopened
+          ~sw
+          ~actor_lock_nonce:"canonical-gap-replay"
+          session_id
+        |> store_ok
+      in
+      let journal =
+        Agent_store.Journal.open_existing
+          ~env
+          ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+          ~max_payload_length:16384
+          ~max_segment_bytes:1048576L
+          ~max_segment_frames:100
+        |> store_ok
+      in
+      let scan = Agent_store.Journal.scan journal |> store_ok in
+      assert (List.length scan.entries = 1);
+      Agent_store.Session_store.write_metadata ~entry reopened handle changed |> store_ok;
+      let replayed =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index reopened)
+          session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (replayed.runnable_job_count = 1 && Int64.equal replayed.session.revision 9L);
+      Agent_store.Session_store.close_session reopened handle |> store_ok;
+      Agent_store.Session_store.complete_index_recovery reopened |> store_ok;
+      Agent_store.Session_store.close reopened |> store_ok;
+      print_endline
+        "acknowledged journal survives metadata gap; stale index cannot suppress eager \
+         replay; full hints restored"));
+  [%expect
+    {|acknowledged journal survives metadata gap; stale index cannot suppress eager replay; full hints restored|}]
+;;
+
+let%expect_test
+    "valid old index after failed paired publication cannot claim authoritative \
+     availability"
+  =
+  with_temp_directory "ochat-valid-stale-index" (fun raw_env root ->
+    let armed = ref None in
+    let env =
+      Job_store_fixtures.fault_env raw_env armed ~matches_rename:(fun path ->
+        String.is_suffix path ~suffix:"sessions.snapshot")
+    in
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      crash_recovery_add store ~sw session_id 7L;
+      let handle =
+        Agent_store.Session_store.open_session
+          store
+          ~sw
+          ~actor_lock_nonce:"valid-stale-index"
+          session_id
+        |> store_ok
+      in
+      let changed = metadata 9L in
+      let entry =
+        Agent_store.Session_index.Entry.
+          { session = changed.session
+          ; runnable_job_count = 1
+          ; deliverable_job_count = 0
+          ; earliest_schedule_due = None
+          ; owner_grace_deadline = None
+          ; pending_initial_start = false
+          ; archived = false
+          }
+      in
+      Agent_store.Session_store.prepare_canonical_projection
+        store
+        handle
+        ~metadata:changed
+        ~entry
+      |> store_ok;
+      armed := Some false;
+      assert (
+        Result.is_error
+          (Agent_store.Session_store.write_metadata ~entry store handle changed));
+      assert (
+        Int64.equal
+          (Agent_store.Session_store.Handle.metadata_checked handle |> store_ok).session
+            .revision
+          9L);
+      let old =
+        Agent_store.Session_index.open_or_create
+          ~env
+          ~path:(crash_recovery_index_path root)
+        |> store_ok
+      in
+      let old =
+        Agent_store.Session_index.find_checked old session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (Int64.equal old.session.revision 7L && old.runnable_job_count = 0);
+      assert (Result.is_error (Agent_store.Session_store.list_sessions_checked store));
+      assert (Result.is_error (Agent_store.Session_store.complete_index_recovery store));
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      assert (Agent_store.Session_store.index_was_rebuilt reopened);
+      let actual =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index reopened)
+          session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (Int64.equal actual.session.revision 9L);
+      Agent_store.Session_store.close reopened |> store_ok;
+      print_endline
+        "new metadata + valid old index is unavailable live; retained intent repairs on \
+         reopen"));
+  [%expect
+    {|new metadata + valid old index is unavailable live; retained intent repairs on reopen|}]
+;;
+
+let%expect_test
+    "private initialized journal publishes full hints in the directory installation \
+     bracket"
+  =
+  with_temp_directory "ochat-staged-full-projection" (fun env root ->
+    Eio.Switch.run (fun sw ->
+      let store = crash_recovery_create ~sw env root in
+      let selected = metadata 9L in
+      let entry =
+        Agent_store.Session_index.Entry.
+          { session = selected.session
+          ; runnable_job_count = 1
+          ; deliverable_job_count = 2
+          ; earliest_schedule_due = Some selected.session.updated_at
+          ; owner_grace_deadline = None
+          ; pending_initial_start = false
+          ; archived = false
+          }
+      in
+      let handle =
+        Agent_store.Session_store.create_session_initialized
+          store
+          ~sw
+          ~transaction_id:(Agent_protocol.Id.Transaction.create ())
+          ~actor_lock_nonce:"staged-projection"
+          ~initialize:(fun ~staging_directory ->
+            let journal =
+              Agent_store.Journal.create
+                ~env
+                ~directory:(Filename.concat staging_directory "journal")
+                ~max_payload_length:16384
+                ~max_segment_bytes:1048576L
+                ~max_segment_frames:100
+              |> store_ok
+            in
+            let writer =
+              Agent_store.Commit_writer.create
+                ~sw
+                ~journal
+                ~session_id
+                ~next_transaction_sequence:1L
+                ~previous_transaction_hash:None
+                ~queue_capacity:8
+              |> store_ok
+            in
+            Exn.protect
+              ~finally:(fun () -> Agent_store.Commit_writer.close writer)
+              ~f:(fun () ->
+                Agent_store.Commit_writer.commit
+                  writer
+                  ~durability:Flush
+                  (transaction
+                     ~sequence:1L
+                     ~previous_hash:None
+                     ~revision:9L
+                     ~delta:"staged-runnable")
+                |> store_ok
+                |> ignore);
+            Agent_store.Session_store.Initial_projection.create ~metadata:selected ~entry)
+        |> store_ok
+      in
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok;
+      let reopened = crash_recovery_open ~sw env root |> store_ok in
+      assert (not (Agent_store.Session_store.index_was_rebuilt reopened));
+      let actual =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index reopened)
+          session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (Agent_store.Session_index.Entry.equal actual entry);
+      Agent_store.Session_store.close reopened |> store_ok;
+      print_endline
+        "staged canonical journal installs with exact full hints; clean restart remains \
+         indexed"));
+  [%expect
+    {|staged canonical journal installs with exact full hints; clean restart remains indexed|}]
 ;;

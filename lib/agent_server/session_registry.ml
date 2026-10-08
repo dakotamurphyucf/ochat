@@ -118,13 +118,20 @@ let load t session_id =
               ~message:"session loader is unavailable"
               ~retryable:true
               ())
-       | Some indexed, Some loader ->
+       | Some indexed, Some loader when not indexed.archived ->
          Result.map (loader indexed) ~f:(fun entry ->
            Atomic.set
              t.sessions
              (Map.set (Atomic.get t.sessions) ~key:session_id ~data:entry);
            t.indexed <- Map.remove t.indexed session_id;
-           entry)))
+           entry)
+       | Some _, Some _ ->
+         Error
+           (Agent_protocol.Error.create
+              Invalid_state
+              ~message:"archived session requires restoration before execution"
+              ~retryable:false
+              ())))
 ;;
 
 let read_state t ~authorize session_id =
@@ -181,8 +188,10 @@ let stats t =
 let load_all t =
   let session_ids =
     Eio.Mutex.use_ro t.mutex (fun () ->
-      Map.keys t.indexed @ Map.keys (Atomic.get t.sessions)
-      |> List.dedup_and_sort ~compare:Poly.compare)
+      (Map.to_alist t.indexed
+       |> List.filter_map ~f:(fun (id, entry) -> Option.some_if (not entry.archived) id))
+      @ Map.keys (Atomic.get t.sessions)
+      |> List.dedup_and_sort ~compare:Agent_protocol.Id.Session.compare)
   in
   Result.all (List.map session_ids ~f:(load t))
 ;;
@@ -195,6 +204,39 @@ let remove t session_id =
     entry)
 ;;
 
+let catalog t ~now ~indexed_entries =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    let open Result.Let_syntax in
+    let loaded_entries = Atomic.get t.sessions in
+    let%map loaded =
+      Map.fold loaded_entries ~init:(Ok []) ~f:(fun ~key ~data entries ->
+        let%bind entries = entries in
+        let%map state = Agent_session.Session_actor.state data.actor in
+        ( key
+        , Agent_protocol.Session_catalog.
+            { session = Agent_session.Session_state.summary state
+            ; active_owner_principal_id =
+                Session_catalog_policy.active_owner ~now state.attachments
+            ; archived = false
+            } )
+        :: entries)
+    in
+    let indexed =
+      indexed_entries
+      |> List.filter_map ~f:(fun (data : Agent_store.Session_index.Entry.t) ->
+        if Map.mem loaded_entries data.session.id
+        then None
+        else
+          Some
+            Agent_protocol.Session_catalog.
+              { session = data.session
+              ; active_owner_principal_id = None
+              ; archived = data.archived
+              })
+    in
+    List.map loaded ~f:snd @ indexed)
+;;
+
 let summaries t =
   Eio.Mutex.use_ro t.mutex (fun () ->
     let loaded =
@@ -204,7 +246,9 @@ let summaries t =
         |> Option.map ~f:Agent_session.Session_state.summary)
     in
     Map.fold t.indexed ~init:loaded ~f:(fun ~key ~data summaries ->
-      Map.set summaries ~key ~data:data.Agent_store.Session_index.Entry.session)
+      if data.archived || Map.mem summaries key
+      then summaries
+      else Map.set summaries ~key ~data:data.Agent_store.Session_index.Entry.session)
     |> Map.data)
 ;;
 

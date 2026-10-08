@@ -311,6 +311,7 @@ let session_summary () : Session.t =
   ; workspace_instance = Some (Id.Workspace_instance.create_with generator)
   ; active_operation = None
   ; revision = 4L
+  ; metadata_revision = 0L
   ; latest_event_sequence = 9L
   ; inference_summary = History_entry.Payload.Presence.Absent
   }
@@ -650,6 +651,7 @@ let architecture_methods =
   ; "session.detach"
   ; "session.renew_owner"
   ; "session.start"
+  ; "session.update_metadata"
   ; "session.stop"
   ; "session.cancel_operation"
   ; "session.send_message"
@@ -688,7 +690,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 50) (requests true) (results true)) |}]
+  [%expect {| ((method_count 51) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -1104,4 +1106,78 @@ let%expect_test
     "login receipts contain references only; status and validated identifiers roundtrip";
   [%expect
     {| login receipts contain references only; status and validated identifiers roundtrip |}]
+;;
+
+let%expect_test "metadata patches validate ambiguity and preserve named operations" =
+  let module M = Session_metadata in
+  let status = function
+    | Ok _ -> "ok"
+    | Error (e : Error.t) -> Error.code_to_string e.code
+  in
+  print_endline
+    (status
+       (M.Patch.create ~name:Keep ~set_labels:[ "tag", "new" ] ~remove_labels:[ "tag" ]));
+  print_endline
+    (status
+       (M.Patch.of_json
+          (`Object [ "set_labels", `Object [ "tag", `String "a"; "tag", `String "b" ] ])));
+  print_endline (status (M.Patch.create ~name:(Set "") ~set_labels:[] ~remove_labels:[]));
+  let previous =
+    M.Values.create ~display_name:(Some "before") ~labels:[ "keep", "yes"; "drop", "yes" ]
+    |> ok_or_fail
+  in
+  let patch =
+    M.Patch.create
+      ~name:(Set "after")
+      ~set_labels:[ "new", "yes" ]
+      ~remove_labels:[ "drop" ]
+    |> ok_or_fail
+  in
+  print_s [%sexp (M.Patch.apply patch previous : (M.Values.t, Error.t) Result.t)];
+  [%expect
+    {|
+    invalid_request
+    invalid_request
+    invalid_request
+    (Ok ((display_name (after)) (labels ((keep yes) (new yes))))) |}]
+;;
+
+let%expect_test "catalog legacy absence never implies creator ownership" =
+  let session = session_summary () in
+  let entry = Session_catalog.of_json (Session.to_json session) |> ok_or_fail in
+  print_s
+    [%sexp
+      { archived = (entry.archived : bool)
+      ; active_owner = (entry.active_owner_principal_id : Id.Principal.t option)
+      ; metadata_revision = (entry.session.metadata_revision : int64)
+      }];
+  [%expect {| ((archived false) (active_owner ()) (metadata_revision 0)) |}]
+;;
+
+let%expect_test "catalog independent wire fixtures roundtrip absent and present owners" =
+  let session = session_summary () in
+  List.iter [ None; session.creator ] ~f:(fun owner ->
+    let wire =
+      match Session.to_json session with
+      | `Object fields ->
+        `Object
+          (fields
+           @ [ "archived", `True ]
+           @ Option.value_map owner ~default:[] ~f:(fun id ->
+             [ "active_owner_principal_id", Id.Principal.to_json id ]))
+      | _ -> failwith "session object"
+    in
+    let decoded = Session_catalog.of_json wire |> ok_or_fail in
+    let replayed =
+      Session_catalog.of_json (Session_catalog.to_json decoded) |> ok_or_fail
+    in
+    print_s
+      [%sexp
+        (replayed.archived
+         && Option.equal Id.Principal.equal owner replayed.active_owner_principal_id
+         : bool)]);
+  [%expect
+    {|
+    true
+    true |}]
 ;;

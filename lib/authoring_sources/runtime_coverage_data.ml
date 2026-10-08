@@ -200,9 +200,9 @@ let moderator_features =
 
 let implementation_sources =
   [ ( "lib/agent_session/administration.ml"
-    , "3fb84e5f623d5d722f8b8da4de3c89bf8a248a62468c2a68fa31b0490f2cd897" )
+    , "ebd1b3fadf89f2a5b452c5c2dc0c021105d5bd4a64df62cf54cc33930a57f12d" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "584086f9618d423647e177904d9b5e9e4a55e67f2424dc6b546dddab91231b68" )
+    , "f322b4313449b60f46dfac4b72a301ff92c9df97cdbe1a529be6d12eb6ffb3e5" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "397da960e3f1182a210676373156ab5d26ea5e2b69015602a98e0be3617afb16" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"
@@ -254,7 +254,7 @@ let implementation_sources =
   ; ( "lib/agent_session/script_subscription_service.ml"
     , "3c9e62b0f11666b6e5916b21c5b3ee1c8a2a3184ec9ffc4066927dee3457f44e" )
   ; ( "lib/agent_session/session_actor.ml"
-    , "a09b50e821c0dc9709cb39e4a24d5a73e82f06feabcf1aca6e249eec9b5cfda4" )
+    , "954c71774e6aa4ea7fcb62d1e80d7337601d2b3b42ea4437f437ebb9cb9d09bd" )
   ; ( "lib/agent_session/staged_jobs.ml"
     , "7731a0fc9f021188e3856041fe493f3044556bc7a15364815c47299fe968603b" )
   ; ( "lib/agent_session/staged_notifications.ml"

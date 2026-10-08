@@ -99,6 +99,7 @@ let session_summary revision =
     ; workspace_instance = None
     ; active_operation = None
     ; revision
+    ; metadata_revision = 0L
     ; latest_event_sequence = revision
     ; inference_summary = History_entry.Payload.Presence.Absent
     }

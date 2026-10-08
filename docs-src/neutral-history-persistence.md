@@ -310,9 +310,86 @@ transactions and deltas, durable replay events, command audit receipts, the
 idempotency cache, moderator state, and compaction archives. Retention readers
 that inspect those records use the same document boundaries.
 
-The broader M3 storage work still owns the separate session index and store
-metadata, prompt artifact records, delegation ledger, job-result intent records,
-blob manifests/retention state, audit log and lock/migration bookkeeping. Adding
+The broader M3 storage work still owns prompt artifact records, delegation
+ledger, job-result intent records, blob manifests/retention state, audit log and
+migration bookkeeping. The session index, store metadata and lifecycle markers
+are covered by the M3 baseline described below. Adding
 named codecs for references embedded in a session does not migrate those
 independent on-disk owners. They retain their existing validation and lifecycle
 contracts until their own migrations are implemented.
+
+## M3 store metadata and catalog projections
+
+The M3 store baseline replaces root `schema.sexp`, session `metadata.sexp`,
+`indexes/sessions.snapshot`, `ARCHIVED` and
+`indexes/sessions.recovery-required` payloads with named documents, retaining
+these filenames and their existing atomic file replacement adapters. The kinds
+are `store.schema`, `store.session_metadata`, `store.session_index`,
+`store.session_archive` and `store.session_index_recovery`, each version 1.
+There are no sexp or binary fallback readers for these beta records. Raw host
+server IDs, locks and secrets remain outside this session-document boundary.
+Operator migration inspection uses the same `store.schema` admission boundary.
+It validates current payloads and reports admitted positive future versions
+without interpreting or rewriting their payloads; malformed documents and
+unsupported required semantics fail before any schema mutation.
+
+Session metadata owns immutable prompt/workspace references and its validated
+session summary. The index owns a rebuildable projection and scheduling hints;
+its session identities are unique, and its entries retain nested unknown fields
+by session identity across edits and reordering. Counts and wide session revision
+counters use nonnegative decimal strings. Protocol optional fields retain their
+absence policy; inference summary additionally retains explicit null. Archive
+marker presence remains authoritative across index loss. Unknown required
+semantics reject ordinary reads and rebuilds before replacement.
+
+Generic metadata documents also admit supported transient embedded sessions on
+temporary disk backing; rebuilding a persistent daemon root still rejects transient
+layouts. Operator metadata retention reads the same codec and visits full unknown
+JSON fields and decoded strings under its existing shared budget.
+
+Canonical journal commits prepare a typed session projection capability after
+pure admission and before first archive/journal effects. It owns the latest full
+summary and scheduling hints across serial commits. Only matching metadata AND
+index publication retires it; stale hints cannot clear a newer target. Tokens for
+different sessions complete independently. Last successful token clears only its
+new recovery requirement; inherited startup requirements survive. Startup completion
+serializes with new commits and defers clearing active tokens without failing
+otherwise successful hydration. Thus a crash after journal acknowledgement before
+metadata/index publication forces eager replay even when the old index remains valid.
+Private staging journals are unreachable until marked, synced atomic session layout
+installation, so their persistence constructor has no live-root precommit callback.
+Their initializer returns a validated Initial_projection carrying metadata and the
+complete entry from the same canonical state. Directory installation publishes
+those exact full hints in its recovery bracket; journal-bearing initializers cannot
+silently select zero hints. Ordinary create_session explicitly selects defaults.
+
+Metadata/index publication is serialized by the host's projection-update owner.
+Both complete documents and extension carriers are validated before an intent
+marker or authoritative metadata is published. The recovery marker now covers
+both missing-index eager hydration and interrupted projection publication.
+Metadata that committed before an index failure remains authoritative: the
+Handle is refreshed from validated persisted bytes, never presented as rolled
+back. An uncertain index replacement likewise refreshes its observed state.
+Failed refresh makes checked reads and further mutations unavailable until
+reopen. Production startup, retention, workspace authority and automatic start
+consumers use these checked reads; the compatibility pure accessors expose only
+the last validated observation.
+
+A fresh successful paired publication may clear only its own recovery marker.
+A preexisting eager-recovery requirement survives ordinary updates. A failed
+live publication prevents that owner's recovery-completion call from erasing a
+newer intent. Reopen reconciles stale or missing projections from validated
+metadata and archive markers, preserving archived flags, and keeps the eager
+hydration requirement until the existing startup owner completes recovery.
+Reading/converting these records never launches work; operator-only hosts retain
+their existing execution gate. Scheduling hints from a rebuilt index are unknown
+until actor/journal hydration, with no invented pending initial start.
+
+| Record | Writer and ordinary reader | Independent recovery/retention | Boundary |
+| --- | --- | --- | --- |
+| Root schema | `Session_store` / `Store_schema_document` | Store open before index work | Named document |
+| Session metadata | `Session_store` / `Session_metadata_document` | Index rebuild and session open share decoder | Named document and private Handle carrier |
+| Session index | `Session_index` / `Session_index_document` | Checked startup/maintenance/workspace reads | Named document and keyed entry carrier |
+| Archive marker | `Session_store` / `Session_archive_document` | Index rebuild/archive reconciliation | Named identity document; file presence owns archived state |
+| Projection recovery marker | `Session_projection_update` / `Session_index_recovery_document` | Store reopen/eager hydration | Named document; serialized recovery ownership |
+| Host server ID, actor/daemon locks, secrets | Existing host owners | Existing validation | Intentionally outside session JSON |

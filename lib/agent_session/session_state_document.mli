@@ -48,7 +48,8 @@ val adopt
   -> t
   -> (t, Document_schema.Error.t) result
 
-(** Adjacent generic v1/v2 to v3 conversion. Missing captured selection and job
+(** Adjacent generic v1/v2/v3 to v4 conversion. Missing metadata revision
+    defaults to zero. Missing captured selection and job
     bindings become Unresolved; missing ledger becomes empty with UNKNOWN prior
     tracking coverage. An existing same-name ledger must admit under the durable
     profile and exact identity, or conversion rejects without replacing it.

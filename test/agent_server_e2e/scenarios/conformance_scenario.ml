@@ -746,13 +746,20 @@ let list_contains_session connection session_id =
       ; prompt_id = None
       ; workspace_id = None
       ; owner_principal_id = None
+      ; creator_principal_id = None
+      ; active_owner_principal_id = None
+      ; sort = Agent_protocol.Session_catalog_query.Sort.default
+      ; archive = Active
       ; labels = []
       }
   in
   match request connection (Session_list list_request) with
   | Session_list page ->
     List.exists page.items ~f:(fun session ->
-      Agent_protocol.Id.Session.compare session.Agent_protocol.Session.id session_id = 0)
+      Agent_protocol.Id.Session.compare
+        session.Agent_protocol.Session_catalog.session.id
+        session_id
+      = 0)
   | _ -> fail "session.list returned the wrong result variant"
 ;;
 
@@ -1951,6 +1958,157 @@ let test_session_lifecycle env environment =
              (lifecycle_observation stdio_http ~key_prefix:"stdio-http"))))
 ;;
 
+type metadata_observation =
+  { metadata_revision_delta : int64
+  ; display_name : string option
+  ; labels : (string * string) list
+  ; retry_replays_original : bool
+  ; receipt_matches : bool
+  ; visible_in_snapshot : bool
+  ; stale_revision_error : Agent_protocol.Error.code
+  ; read_only_error : Agent_protocol.Error.code
+  }
+[@@deriving equal, sexp]
+
+let metadata_observation connection ~key_prefix =
+  ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+  let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
+  let attachment = (Option.value_exn created.attachment).attachment in
+  let patch =
+    Agent_protocol.Session_metadata.Patch.create
+      ~name:(Set "Conformance metadata")
+      ~set_labels:[ "conformance", "metadata" ]
+      ~remove_labels:[]
+    |> protocol_ok
+  in
+  let update_request =
+    Agent_protocol.Session_metadata.Request.
+      { session_id = created.session.id
+      ; attachment_id = attachment.id
+      ; expected_metadata_revision = created.session.metadata_revision
+      ; patch
+      ; idempotency_key = idempotency_key (key_prefix ^ ":metadata")
+      }
+  in
+  let update request_ =
+    match request connection (Session_update_metadata request_) with
+    | Session_update_metadata result -> result
+    | _ -> fail "session.update_metadata returned the wrong result variant"
+  in
+  let updated = update update_request in
+  let retry = update update_request in
+  let stale_revision_error =
+    request_error
+      connection
+      (Session_update_metadata
+         { update_request with
+           idempotency_key = idempotency_key (key_prefix ^ ":metadata-stale")
+         })
+  in
+  let reader =
+    attach_replay connection created.session.id ~key:(key_prefix ^ ":reader")
+  in
+  let read_only_error =
+    request_error
+      connection
+      (Session_update_metadata
+         { update_request with
+           attachment_id = reader.attachment.id
+         ; expected_metadata_revision = updated.session.metadata_revision
+         ; idempotency_key = idempotency_key (key_prefix ^ ":metadata-read-only")
+         })
+  in
+  let visible_in_snapshot =
+    match
+      request_public
+        connection
+        (Session_get { session_id = created.session.id; history = None })
+    with
+    | Session_get snapshot ->
+      let session = (Agent_protocol.Public.Snapshot.fields snapshot).session in
+      Int64.equal session.metadata_revision updated.session.metadata_revision
+      && Option.equal
+           String.equal
+           session.spec.display_name
+           updated.session.spec.display_name
+      && List.equal
+           [%equal: string * string]
+           session.spec.labels
+           updated.session.spec.labels
+    | _ -> fail "metadata snapshot returned the wrong result variant"
+  in
+  let receipt_matches =
+    match command_receipt connection (Session_update_metadata update_request) with
+    | Committed (Session_mutation { session_id; mutation }) ->
+      Agent_protocol.Id.Session.equal session_id created.session.id
+      && Int64.equal mutation.revision updated.mutation.revision
+      && Int64.equal mutation.latest_event_sequence updated.mutation.latest_event_sequence
+    | _ -> false
+  in
+  { metadata_revision_delta =
+      Int64.(updated.session.metadata_revision - created.session.metadata_revision)
+  ; display_name = updated.session.spec.display_name
+  ; labels = updated.session.spec.labels
+  ; retry_replays_original =
+      Int64.equal retry.session.metadata_revision updated.session.metadata_revision
+      && Int64.equal retry.mutation.revision updated.mutation.revision
+      && Int64.equal
+           retry.mutation.latest_event_sequence
+           updated.mutation.latest_event_sequence
+  ; receipt_matches
+  ; visible_in_snapshot
+  ; stale_revision_error = stale_revision_error.code
+  ; read_only_error = read_only_error.code
+  }
+;;
+
+let test_session_metadata env environment =
+  let fixture = fixture env environment "conformance-metadata" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = metadata_observation unix ~key_prefix:"unix" in
+           if
+             not
+               (Int64.equal baseline.metadata_revision_delta 1L
+                && Option.equal
+                     String.equal
+                     baseline.display_name
+                     (Some "Conformance metadata")
+                && List.equal
+                     [%equal: string * string]
+                     baseline.labels
+                     [ "conformance", "metadata"; "suite", "conformance" ]
+                && baseline.retry_replays_original
+                && baseline.receipt_matches
+                && baseline.visible_in_snapshot
+                && Agent_protocol.Error.equal_code baseline.stale_revision_error Conflict
+                && Agent_protocol.Error.equal_code
+                     baseline.read_only_error
+                     Permission_denied)
+           then
+             raise_s
+               [%sexp
+                 "metadata conformance invariants failed"
+               , (baseline : metadata_observation)];
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = metadata_observation client ~key_prefix in
+               if not (equal_metadata_observation baseline actual)
+               then
+                 raise_s
+                   [%sexp
+                     "cross-transport metadata semantics differ"
+                   , (baseline : metadata_observation)
+                   , (actual : metadata_observation)]))))
+;;
+
 let test_permissions_grants env environment =
   let fixture = fixture env environment "conformance-security" in
   Eio.Switch.run (fun sw ->
@@ -2205,6 +2363,7 @@ let cases =
   [ "conformance.provider-installed", test_provider_installed
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
+  ; "conformance.session-metadata", test_session_metadata
   ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
   ; "conformance.jobs-schedules", test_jobs_schedules
@@ -2238,6 +2397,7 @@ let method_coverage =
   ; "session.create", "conformance.session-lifecycle"
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
+  ; "session.update_metadata", "conformance.session-metadata"
   ; "session.inference_summary", "conformance.inference-reads"
   ; "session.inference_observations", "conformance.inference-reads"
   ; "session.attach", "conformance.session-lifecycle"

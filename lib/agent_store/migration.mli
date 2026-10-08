@@ -30,7 +30,8 @@ val inspect
 
 (** [run] inspects the schema and counts session directories while holding the
     daemon lock. It does not validate individual session journals or artifacts.
-    Validation and dry-run modes return a plan for every schema status.
+    Validation and dry-run modes return a plan for admitted positive named-document
+    schema versions. Malformed documents and unsupported beta formats fail admission.
     Applying an unsupported older or newer schema fails without mutation. *)
 val run
   :  env:Eio_unix.Stdenv.base

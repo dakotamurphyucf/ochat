@@ -28,6 +28,7 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t

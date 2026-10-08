@@ -978,9 +978,9 @@ let compose
       ~durability:(durability config.server)
       ~limits:factory_limits
   in
-  let indexed_sessions =
-    Agent_store.Session_store.list_sessions store
-    |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
+  let%bind indexed_sessions =
+    Agent_store.Session_store.list_sessions_checked store
+    |> Result.map_error ~f:protocol_of_store
   in
   Session_registry.index_all registry indexed_sessions;
   let execute = equal_startup_mode options.startup_mode Execute in
@@ -993,8 +993,12 @@ let compose
     else (
       let%bind _ = Session_factory.recover_sessions factory in
       let%bind () = Session_factory.reconcile_generated_creations factory in
+      let%bind entries =
+        Agent_store.Session_store.list_sessions_checked store
+        |> Result.map_error ~f:protocol_of_store
+      in
       let pinned_revisions =
-        List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
+        List.filter_map entries ~f:(fun entry ->
           entry.Agent_store.Session_index.Entry.session.prompt_revision)
       in
       ignore
@@ -1157,6 +1161,7 @@ let compose
       | Session_detach _
       | Session_renew_owner _
       | Session_start _
+      | Session_update_metadata _
       | Session_stop _
       | Session_cancel_operation _
       | Session_send_message _

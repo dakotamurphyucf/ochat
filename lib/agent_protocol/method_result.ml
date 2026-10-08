@@ -322,7 +322,7 @@ type t =
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
-  | Session_list of Session.t Page.t
+  | Session_list of Session_catalog.t Page.t
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t
@@ -330,6 +330,7 @@ type t =
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
   | Session_start of Session_mutation.t
+  | Session_update_metadata of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
@@ -383,6 +384,7 @@ let method_name = function
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
   | Session_start _ -> "session.start"
+  | Session_update_metadata _ -> "session.update_metadata"
   | Session_stop _ -> "session.stop"
   | Session_cancel_operation _ -> "session.cancel_operation"
   | Session_send_message _ -> "session.send_message"
@@ -430,7 +432,7 @@ let to_json = function
   | Workspace_get value -> Workspace.to_json value
   | Blob_read value -> Blob.Chunk.to_json value
   | Session_create value -> Create.to_json value
-  | Session_list value -> Page.to_json Session.to_json value
+  | Session_list value -> Page.to_json Session_catalog.to_json value
   | Session_get value -> Snapshot.to_json value
   | Session_inference_summary value -> Inference_query.Summary.to_json value
   | Session_inference_observations value -> Inference_query.Response.to_json value
@@ -441,6 +443,7 @@ let to_json = function
       (("owner_lease", Session.Owner_lease.to_json lease)
        :: Mutation_result.to_fields mutation)
   | Session_start value
+  | Session_update_metadata value
   | Session_stop value
   | Session_cancel_operation value
   | Session_compact value
@@ -511,7 +514,7 @@ let decoders =
   ; "workspace.get", map Workspace.of_json (fun x -> Workspace_get x)
   ; "blob.read", map Blob.Chunk.of_json (fun x -> Blob_read x)
   ; "session.create", map Create.of_json (fun x -> Session_create x)
-  ; "session.list", map (Page.of_json Session.of_json) (fun x -> Session_list x)
+  ; "session.list", map (Page.of_json Session_catalog.of_json) (fun x -> Session_list x)
   ; "session.get", map Snapshot.of_json (fun x -> Session_get x)
   ; ( "session.inference_summary"
     , map Inference_query.Summary.of_json (fun x -> Session_inference_summary x) )
@@ -523,6 +526,8 @@ let decoders =
   ; "session.detach", map Mutation_result.of_json (fun x -> Session_detach x)
   ; "session.renew_owner", renew_owner_of_json
   ; "session.start", map Session_mutation.of_json (fun x -> Session_start x)
+  ; ( "session.update_metadata"
+    , map Session_mutation.of_json (fun x -> Session_update_metadata x) )
   ; "session.stop", map Session_mutation.of_json (fun x -> Session_stop x)
   ; ( "session.cancel_operation"
     , map Session_mutation.of_json (fun x -> Session_cancel_operation x) )

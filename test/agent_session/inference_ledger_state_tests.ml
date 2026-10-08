@@ -109,7 +109,7 @@ let%test_unit
       assert (List.is_empty (L.rows current.inference_ledger));
       assert (Int.equal (L.generation current.inference_ledger) before.identity.generation);
       let encoded = SD.encode decoded ~limits:document_limits |> document_ok in
-      assert (Int.equal (D.Document.version encoded) 3);
+      assert (Int.equal (D.Document.version encoded) 4);
       assert (String.equal original (D.Document.to_string raw));
       let delta =
         D.Document.create
@@ -882,6 +882,7 @@ let%test_unit
         ~f:(fun () ->
           let persistence =
             Persistence.create
+              ~before_commit:None
               ~retention_preflight:None
               ~writer
               ~durability:Flush
@@ -966,7 +967,7 @@ let%test_unit
               !current
             |> store_ok
           in
-          assert (Int.equal (D.Document.version installed.snapshot.payload) 3);
+          assert (Int.equal (D.Document.version installed.snapshot.payload) 4);
           let opened =
             Store.Snapshot.load_current
               ~env

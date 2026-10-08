@@ -1,24 +1,30 @@
 (** High-level ownership of the daemon data root and durable session paths. *)
 
-module Metadata : sig
-  type t =
-    { schema_version : int
-    ; session : Agent_protocol.Session.t
-    ; prompt_artifact : string
-    ; workspace_identity : string
-    ; data_schema_version : int
-    }
-  [@@deriving sexp]
+module Metadata = Session_metadata
 
-  (** [data_schema_version] belongs to the session-state codec, independently
-      of the store/metadata schema. The store requires a positive value;
-      eager session hydration validates compatibility using that codec. *)
+module Initial_projection : sig
+  (** Validated coherent metadata and complete scheduling projection selected by
+      the initializer from the same state. No implicit zero hints for journals. *)
+  type t
+
+  val create
+    :  metadata:Metadata.t
+    -> entry:Session_index.Entry.t
+    -> (t, Store_error.t) result
+
+  val metadata : t -> Metadata.t
+  val entry : t -> Session_index.Entry.t
 end
 
 module Handle : sig
   type t
 
+  (** Last validated observation. Use [metadata_checked] for current authority. *)
   val metadata : t -> Metadata.t
+
+  (** Reject when an uncertain write could not be refreshed from disk. *)
+  val metadata_checked : t -> (Metadata.t, Store_error.t) result
+
   val session_id : t -> Agent_protocol.Id.Session.t
   val directory : t -> string
   val snapshot_directory : t -> string
@@ -101,13 +107,15 @@ val create_session
 
 (** [create_session_initialized] creates the private staging layout first and
     lets [initialize] derive metadata from paths inside that layout before the
-    directory is atomically installed. *)
+    directory is atomically installed. Its full validated scheduling projection
+    is published in that same recoverable bracket after sessions-parent sync.
+    Private staged journals remain unreachable until this installation. *)
 val create_session_initialized
   :  t
   -> sw:Eio.Switch.t
   -> transaction_id:Agent_protocol.Id.Transaction.t
   -> actor_lock_nonce:string
-  -> initialize:(staging_directory:string -> (Metadata.t, Store_error.t) result)
+  -> initialize:(staging_directory:string -> (Initial_projection.t, Store_error.t) result)
   -> (Handle.t, Store_error.t) result
 
 (** [open_session] validates metadata identity and acquires the actor lock. *)
@@ -118,7 +126,29 @@ val open_session
   -> Agent_protocol.Id.Session.t
   -> (Handle.t, Store_error.t) result
 
-val write_metadata : t -> Handle.t -> Metadata.t -> (unit, Store_error.t) result
+(** Prevalidate the full metadata/index carriers under the existing index locks
+    without authoritative effects, then durably mark the
+    existing projection owner before authoritative archive/journal I/O. Handle's
+    serial actor owns one token across commits; newer targets advance it. A failed
+    or uncertain authority acknowledgement retains recovery. Only matching full
+    metadata/index publication retires it; stale summaries/hints cannot do so. *)
+val prepare_canonical_projection
+  :  t
+  -> Handle.t
+  -> metadata:Metadata.t
+  -> entry:Session_index.Entry.t
+  -> (unit, Store_error.t) result
+
+(** Publish metadata and the supplied full scheduling projection under one
+    recoverable intent. Summary must match metadata; existing archive authority
+    survives. Without [entry], previously validated scheduling hints are retained. *)
+val write_metadata
+  :  ?entry:Session_index.Entry.t
+  -> t
+  -> Handle.t
+  -> Metadata.t
+  -> (unit, Store_error.t) result
+
 val close_session : t -> Handle.t -> (unit, Store_error.t) result
 
 (** Read the durable identity-bearing archive marker of an opened session,
@@ -145,4 +175,8 @@ val prune_response_artifacts
   -> older_than:Agent_protocol.Timestamp.t
   -> (int, Store_error.t) result
 
+(** Last validated projection observation. Authoritative recovery, retention
+    and lifecycle consumers use [list_sessions_checked]. *)
 val list_sessions : t -> Session_index.Entry.t list
+
+val list_sessions_checked : t -> (Session_index.Entry.t list, Store_error.t) result

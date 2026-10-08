@@ -12,6 +12,15 @@
   journal_segment
   journal
   snapshot
+  session_record_document
+  session_metadata
+  session_metadata_document
+  session_index_entry
+  session_index_document
+  store_schema_document
+  session_archive_document
+  session_index_recovery_document
+  session_projection_update
   session_index
   delegation_store
   session_store

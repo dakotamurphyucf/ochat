@@ -27,6 +27,7 @@ valid actor-owned writable attachment before preparing mutations.
 | Detach | Remove this attachment; detached session execution continues. |
 | Send message | Commit input and report started/deferred disposition; not a completion promise. |
 | Cancel operation | Target a specific active operation; do not reuse a stale operation ID. |
+| Rename / label | Revision-aware organization metadata patch through `session.update_metadata`; execution state is preserved. |
 | Stop | Stop session work using graceful/cancel mode, preserving durable session data. |
 | Compact | Replace current canonical history with retained instructions/reminders and a new summary, then rebuild the effective projection. |
 | Delete history | Revision-checked removal of one canonical occurrence and its matching tool pair, while idle/stopped; distinct from deleting a session. |

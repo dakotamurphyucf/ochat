@@ -20,6 +20,7 @@
   authored_resources
   result_retention
   session_registry
+  session_catalog_policy
   delegation_lifecycle
   connection_context
   authorization

@@ -96,3 +96,11 @@ val unload_inactive : t -> index_entries:Agent_store.Session_index.Entry.t list 
     Once begun, cancellation cannot skip actor/writer closure after runtime
     cleanup; protected cleanup can exceed the host's grace deadline. *)
 val shutdown : t -> unit
+
+(** Nonactivating catalog snapshot. Indexed unloaded sessions have no current owner;
+    archived records remain discoverable but cannot be loaded for execution. *)
+val catalog
+  :  t
+  -> now:Agent_protocol.Timestamp.t
+  -> indexed_entries:Agent_store.Session_index.Entry.t list
+  -> (Agent_protocol.Session_catalog.t list, Agent_protocol.Error.t) result

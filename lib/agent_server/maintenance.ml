@@ -74,42 +74,39 @@ let collect_results ~env ~session_store registry stats =
   match registry with
   | None -> Ok stats
   | Some registry ->
+    let open Result.Let_syntax in
+    let%bind entries = Agent_store.Session_store.list_sessions_checked session_store in
     let stats, failure =
-      List.fold
-        (Agent_store.Session_store.list_sessions session_store)
-        ~init:(stats, None)
-        ~f:(fun (stats, failure) entry ->
-          match
-            entry.Agent_store.Session_index.Entry.archived
-            || not (has_preparations ~env session_store entry.session.id)
-          with
-          | true -> stats, failure
-          | false ->
-            let result =
-              Result.bind
-                (Session_registry.load registry entry.session.id)
-                ~f:(fun entry -> entry.collect_results ())
-            in
-            (match result with
-             | Error error ->
-               ( stats
-               , Some
-                   (Option.value
-                      failure
-                      ~default:(Agent_store.Store_error.Corrupt error.message)) )
-             | Ok None ->
-               ( { stats with
-                   deferred_result_collections = stats.deferred_result_collections + 1
-                 }
-               , failure )
-             | Ok (Some collected) ->
-               ( { stats with
-                   discarded_job_results =
-                     stats.discarded_job_results + collected.discarded
-                 ; retired_job_preparations =
-                     stats.retired_job_preparations + collected.retired
-                 }
-               , failure )))
+      List.fold entries ~init:(stats, None) ~f:(fun (stats, failure) entry ->
+        match
+          entry.Agent_store.Session_index.Entry.archived
+          || not (has_preparations ~env session_store entry.session.id)
+        with
+        | true -> stats, failure
+        | false ->
+          let result =
+            Result.bind (Session_registry.load registry entry.session.id) ~f:(fun entry ->
+              entry.collect_results ())
+          in
+          (match result with
+           | Error error ->
+             ( stats
+             , Some
+                 (Option.value
+                    failure
+                    ~default:(Agent_store.Store_error.Corrupt error.message)) )
+           | Ok None ->
+             ( { stats with
+                 deferred_result_collections = stats.deferred_result_collections + 1
+               }
+             , failure )
+           | Ok (Some collected) ->
+             ( { stats with
+                 discarded_job_results = stats.discarded_job_results + collected.discarded
+               ; retired_job_preparations =
+                   stats.retired_job_preparations + collected.retired
+               }
+             , failure )))
     in
     (match failure with
      | None -> Ok stats
@@ -229,11 +226,10 @@ let rec loop
     in
     record_result t now result;
     Result.iter_error result ~f:on_error;
-    ignore
-      (Session_registry.unload_inactive
-         registry
-         ~index_entries:(Agent_store.Session_store.list_sessions session_store)
-       : int);
+    (match Agent_store.Session_store.list_sessions_checked session_store with
+     | Error error -> on_error error
+     | Ok entries ->
+       ignore (Session_registry.unload_inactive registry ~index_entries:entries : int));
     loop
       t
       env

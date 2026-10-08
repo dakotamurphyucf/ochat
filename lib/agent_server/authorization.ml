@@ -26,6 +26,7 @@ let required_scope = function
   | Session_detach _
   | Session_renew_owner _
   | Session_export _ -> Some View_session_transcript
+  | Session_update_metadata _
   | Session_start _
   | Session_send_message _
   | Session_compact _

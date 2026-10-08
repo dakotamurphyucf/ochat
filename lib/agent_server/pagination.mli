@@ -1,5 +1,7 @@
 (** Authenticated, principal/query/data-bound cursors. Collection changes or host
-    restart invalidate old cursors explicitly. No cursor retains server memory.
+    restart invalidate old cursors explicitly. Session paging preserves requested
+    order; a signed changed data binding returns Conflict/refresh_required while
+    authority/query/restart mismatches are invalid/expired. No cursor retains server memory.
     Partial history windows advertise structural incompleteness and navigation
     cursors; they must not be used as model input without completing the window. *)
 type t

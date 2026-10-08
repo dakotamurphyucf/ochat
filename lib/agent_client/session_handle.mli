@@ -156,3 +156,11 @@ val delete
 
 val detach : t -> (unit, Agent_protocol.Error.t) result
 val close : t -> unit
+
+(** Revision-aware organization edit using the handle's retained command identity.
+    Streaming execution does not advance this metadata revision. *)
+val update_metadata
+  :  t
+  -> expected_metadata_revision:int64
+  -> patch:Agent_protocol.Session_metadata.Patch.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result

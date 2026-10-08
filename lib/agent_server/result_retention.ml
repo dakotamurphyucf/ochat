@@ -76,30 +76,42 @@ let auxiliary_roots ~reader ~handle ~candidates ~max_file_bytes =
     Scan.feed scanner text
   in
   let inspect path =
-    let%bind contents = Reader.read reader ~path ~max_bytes:max_file_bytes in
+    let max_bytes =
+      if String.equal path "metadata.sexp"
+      then
+        Int.min
+          max_file_bytes
+          (Document_schema.Limits.max_bytes Store.Session_metadata_document.limits)
+      else max_file_bytes
+    in
+    let%bind contents = Reader.read reader ~path ~max_bytes in
     feed contents;
     match Filename.basename path with
     | "metadata.sexp" when String.equal path "metadata.sexp" ->
-      let%bind metadata =
-        Result.try_with (fun () ->
-          Store.Session_store.Metadata.t_of_sexp (Sexp.of_string contents))
-        |> Result.map_error ~f:(fun _ ->
-          Store.Store_error.Corrupt "invalid retained session metadata")
+      let%bind document =
+        Document_schema.Document.decode
+          ~limits:Store.Session_metadata_document.limits
+          contents
+        |> Store.Document_fields.store
       in
-      let%bind _ =
-        Agent_protocol.Session.of_json (Agent_protocol.Session.to_json metadata.session)
-        |> protocol
+      let%bind stored_id =
+        Store.Session_metadata_document.stored_session_id document
+        |> Store.Document_fields.store
       in
-      (match
-         Agent_protocol.Id.Session.equal
-           metadata.session.id
-           (Store.Session_store.Handle.session_id handle)
-       with
-       | false ->
-         Error (Store.Store_error.Corrupt "retained metadata belongs to another session")
-       | true ->
-         feed (Store.Session_store.Metadata.sexp_of_t metadata |> Sexp.to_string_mach);
-         Ok ())
+      let%bind () =
+        if
+          Agent_protocol.Id.Session.equal
+            stored_id
+            (Store.Session_store.Handle.session_id handle)
+        then Ok ()
+        else
+          Error (Store.Store_error.Corrupt "retained metadata belongs to another session")
+      in
+      let%map _ =
+        Store.Session_metadata_document.of_document document
+        |> Store.Document_fields.store
+      in
+      Store.Document_fields.iter_strings (Document_schema.Document.json document) ~f:feed
     | "cache.bin" ->
       let%bind texts =
         Chat_response.Cache.retained_text contents
