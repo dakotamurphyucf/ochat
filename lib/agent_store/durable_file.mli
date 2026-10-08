@@ -19,6 +19,16 @@ val replace
   -> string
   -> (unit, Store_error.t) result
 
+(** Atomic replacement relative to a caller-owned, opened directory capability.
+    [basename] must be one child name. The caller retains the directory and its
+    ownership lock throughout this operation; no absolute path is reopened. *)
+val replace_in
+  :  directory:_ Eio.Path.t
+  -> durability:durability
+  -> basename:string
+  -> string
+  -> (unit, Store_error.t) result
+
 (** [load ~env ~path] reads the complete file through Eio and reports a typed
     [Missing] error when the path does not exist. *)
 val load : env:Eio_unix.Stdenv.base -> path:string -> (string, Store_error.t) result

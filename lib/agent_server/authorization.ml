@@ -2,6 +2,7 @@ open Core
 
 let required_scope = function
   | Agent_protocol.Command.Protocol_initialize _
+  | Command_receipt _
   | Protocol_ping _
   | Server_info
   | Server_health _ -> None

@@ -8,8 +8,14 @@ type status =
   | Failed of Agent_protocol.Error.t
 [@@deriving sexp]
 
+type startup_mode =
+  | Execute
+  | Operator_only
+[@@deriving equal, sexp]
+
 type options =
-  { implementation_name : string
+  { startup_mode : startup_mode
+  ; implementation_name : string
   ; implementation_version : string
   ; features : string list
   ; extension_host : Agent_protocol.Extension_capabilities.host
@@ -66,7 +72,8 @@ type health_services =
   }
 
 let default_options =
-  { implementation_name = "ochat-agent-server"
+  { startup_mode = Execute
+  ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
   ; features =
@@ -298,22 +305,37 @@ let open_store ~sw ~env config ~process_start_identity =
   let lock_nonce =
     Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
   in
-  if Eio.Path.is_file schema
-  then
+  match Eio.Path.kind ~follow:false schema with
+  | `Regular_file ->
     Agent_store.Session_store.open_existing
       ~env
       ~sw
       ~root
       ~process_start_identity
       ~lock_nonce
-  else
-    Agent_store.Session_store.create
-      ~env
-      ~sw
-      ~root
-      ~server_id:(Agent_protocol.Id.Server.create ())
-      ~process_start_identity
-      ~lock_nonce
+  | `Not_found ->
+    let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
+    let admissible =
+      match Eio.Path.kind ~follow:false root_path with
+      | `Not_found -> true
+      | `Directory -> List.is_empty (Eio.Path.read_dir root_path)
+      | _ -> false
+    in
+    if not admissible
+    then
+      Error
+        (Agent_store.Store_error.Corrupt
+           "unrecognized existing host root; preserve bytes and use explicit supported \
+            conversion")
+    else
+      Agent_store.Session_store.create
+        ~env
+        ~sw
+        ~root
+        ~server_id:(Agent_protocol.Id.Server.create ())
+        ~process_start_identity
+        ~lock_nonce
+  | _ -> Error (Agent_store.Store_error.Corrupt "host root schema is not a regular file")
 ;;
 
 let build_catalog ~env store config reviewer_resolver policy_evaluator_resolver =
@@ -642,6 +664,7 @@ let config_build_diagnostic config error =
 ;;
 
 let config_watcher
+      ~enabled
       ~sw
       ~env
       ~config
@@ -712,7 +735,8 @@ let config_watcher
       ~initial:config
       ~hooks:{ prepare; commit; audit }
   in
-  Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
+  if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
+  if not enabled then Config_watcher.close watcher;
   watcher
 ;;
 
@@ -880,40 +904,46 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
   in
   Session_registry.index_all registry indexed_sessions;
-  Session_registry.install_loader registry (Session_factory.recover_session factory);
+  let execute = equal_startup_mode options.startup_mode Execute in
+  if execute
+  then Session_registry.install_loader registry (Session_factory.recover_session factory);
   Session_registry.install_reader registry (Session_factory.read_session factory);
-  let%bind _ = Session_factory.recover_sessions factory in
-  let%bind () = Session_factory.reconcile_generated_creations factory in
-  let pinned_revisions =
-    List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
-      entry.Agent_store.Session_index.Entry.session.prompt_revision)
-  in
-  ignore
-    (Agent_store.Delegation_store.with_artifact_retention
-       (Agent_store.Session_store.delegations store)
-       ~max_records:factory_limits.delegation_recovery_max_count
-       ~max_bytes:factory_limits.delegation_recovery_max_bytes
-       ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
-       ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
-       ~f:(fun generated_revisions ->
-         Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-           prompts
-           ~additional:(generated_revisions @ pinned_revisions))
-     : (int, Agent_store.Store_error.t) result);
-  let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
-  let startup_time = timestamp env in
   let%bind () =
-    Job_scheduler.reconcile_recovered
-      ~registry
-      ~max_count:factory_limits.job_result_recovery_max_count
-      ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
-  in
-  let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
-  let%bind () =
-    Session_factory.complete_index_recovery factory (Session_registry.entries registry)
+    if not execute
+    then Ok ()
+    else (
+      let%bind _ = Session_factory.recover_sessions factory in
+      let%bind () = Session_factory.reconcile_generated_creations factory in
+      let pinned_revisions =
+        List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
+          entry.Agent_store.Session_index.Entry.session.prompt_revision)
+      in
+      ignore
+        (Agent_store.Delegation_store.with_artifact_retention
+           (Agent_store.Session_store.delegations store)
+           ~max_records:factory_limits.delegation_recovery_max_count
+           ~max_bytes:factory_limits.delegation_recovery_max_bytes
+           ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
+           ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
+           ~f:(fun generated_revisions ->
+             Agent_session.Prompt_catalog.prune_unreferenced_artifacts
+               prompts
+               ~additional:(generated_revisions @ pinned_revisions))
+         : (int, Agent_store.Store_error.t) result);
+      let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
+      let startup_time = timestamp env in
+      let%bind () =
+        Job_scheduler.reconcile_recovered
+          ~registry
+          ~max_count:factory_limits.job_result_recovery_max_count
+          ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
+      in
+      let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
+      Session_factory.complete_index_recovery factory (Session_registry.entries registry))
   in
   let start_scheduler =
-    Start_scheduler.start
+    Start_scheduler.start_controlled
+      ~enabled:execute
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
@@ -922,7 +952,8 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         Session_factory.resume_generated_initial_starts factory)
   in
   let job_scheduler =
-    Job_scheduler.start
+    Job_scheduler.start_controlled
+      ~enabled:execute
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
@@ -930,13 +961,22 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~model_job_inference:(Session_factory.model_job_inference factory)
   in
   let permission_scheduler =
-    Permission_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
+    Permission_scheduler.start_controlled
+      ~enabled:execute
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
   in
   let schedule_scheduler =
-    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.mono_clock env) ~registry
+    Schedule_scheduler.start_controlled
+      ~enabled:execute
+      ~sw
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~registry
   in
   let maintenance =
-    Maintenance.start
+    Maintenance.start_controlled
+      ~enabled:execute
       ~env
       ~sw
       ~clock:(Eio.Stdenv.clock env)
@@ -953,6 +993,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   let status_ref = ref Ready in
   let config_watcher =
     config_watcher
+      ~enabled:execute
       ~sw
       ~env
       ~config
@@ -1005,7 +1046,63 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
   in
-  let dispatcher = Dispatcher.create handler in
+  let admit command =
+    if execute
+    then Ok ()
+    else (
+      match command with
+      | Agent_protocol.Command.Protocol_initialize _
+      | Protocol_ping _
+      | Server_info
+      | Server_health _
+      | Prompt_list _
+      | Prompt_get _
+      | Workspace_list _
+      | Workspace_get _
+      | Session_list _
+      | Session_inference_summary _
+      | Session_inference_observations _
+      | Command_receipt _ -> Ok ()
+      | Session_create _
+      | Session_get _
+      | Session_attach _
+      | Session_detach _
+      | Session_renew_owner _
+      | Session_start _
+      | Session_stop _
+      | Session_cancel_operation _
+      | Session_send_message _
+      | Session_compact _
+      | Session_delete_history _
+      | Session_export _
+      | Session_reset _
+      | Session_rebuild _
+      | Session_upgrade_prompt _
+      | Session_delete _
+      | Blob_read _
+      | Permission_list _
+      | Permission_respond _
+      | Grant_list _
+      | Grant_revoke _
+      | Audit_read _
+      | Job_list _
+      | Job_get _
+      | Job_cancel _
+      | Schedule_list _
+      | Schedule_get _
+      | Schedule_create _
+      | Schedule_cancel _
+      | Ingress_submit _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:
+               "operator-only host does not admit session execution or activating \
+                operations"
+             ~retryable:false
+             ()))
+  in
+  let dispatcher = Dispatcher.create ~admit handler in
   Ok
     { env
     ; store
@@ -1039,9 +1136,23 @@ let start
       ~home
       ~process_start_identity
       ?(options = default_options)
+      ?(before_activation = fun _ -> Ok ())
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
+  let options =
+    match options.startup_mode with
+    | Execute -> options
+    | Operator_only ->
+      { options with
+        qualify_chatml_extensions = false
+      ; features =
+          [ "sessions.catalog.readonly"
+          ; "commands.receipts.readonly"
+          ; "host.operator_only"
+          ]
+      }
+  in
   let open Result.Let_syntax in
   let%bind () =
     match options.qualify_chatml_extensions with
@@ -1056,6 +1167,7 @@ let start
   in
   close_store_on_error store
   @@
+  let%bind () = before_activation store in
   let%bind built, prompts =
     build_catalog
       ~env

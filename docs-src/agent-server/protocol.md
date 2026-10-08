@@ -47,6 +47,7 @@ actor state and authorization, not merely passing JSON validation.
 | Method | Request type | Minimum method scope | Result / behavior |
 |---|---|---|---|
 | `protocol.initialize` | `Initialize.Request` | Authentication only | Negotiate protocol; must precede other methods. |
+| `command.receipt` | `Command_receipt.Request` | Original request authorization plus current session visibility | Read-only bounded committed summary or unresolved/unavailable status; never retries execution. |
 | `protocol.ping` | `Ping.Request` | Authentication only | Ping response; not proof of a model completing work. |
 | `server.info` | Empty object | Authentication only | Implementation/version/features/transports/limits and unsafe-development-auth indicator. |
 | `server.health` | `Health.Request` | Authentication only; details scoped | Current health projection. |
@@ -253,3 +254,36 @@ complete them before using them as model context.
 All types and generated inventories are refreshed with `@agent-docs-check`;
 see [testing](testing.md). The [wire implementations](../../lib/agent_protocol/command.ml)
 remain authoritative for exact encoding and validation.
+
+## Reconcile an uncertain command
+
+`command.receipt` is a read-only lookup of an original generic idempotent request.
+Supply its original method and bounded original parameter object. The server
+decodes the original command, rechecks its current requested-mode permissions,
+computes the original canonical digest and looks up the current authenticated
+principal's receipt. It never executes the original command. Current session
+visibility is checked before any stored outcome is disclosed, including the
+session created by a lost create reply.
+
+Outcomes are `missing`, `pending`, `failed`, `committed` or `unavailable`.
+Missing/expired receipts do not establish noncommit. Unavailable discloses no
+deleted session identity when current visibility cannot be proved. Committed
+results contain narrow nonsecret effect references, not a replay of the original
+history/result. Create returns the session identity. Attach returns its session
+identity with `reattach_required`, never an old lease or reclaim token.
+
+Client connections retain original uncertain intents before submission, with
+64-intent and 16 MiB aggregate bounds. Capacity exhaustion rejects before effects;
+unknown intents are never silently evicted. An equivalent fresh-key request is
+blocked until reconciliation or explicit operator abandonment, while independent
+requests remain possible. Reconnect transfers intents only after confirming the
+same server and principal. Malformed successful transport responses remain
+uncertain even if their decoder reports invalid input; authenticated server
+errors retain their separate meaning. No exactly-once guarantee is implied.
+
+Host-qualified references pair the persisted server ID with a session ID.
+Client-owned named connection profiles persist nonsecret endpoint descriptions,
+optional server pins and daemon credential-file references in versioned documents.
+They contain no provider credentials or authority. Profile connection initializes
+and checks its server pin before sensitive operations. Provider profile selection
+is a separate host service.

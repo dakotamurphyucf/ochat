@@ -1718,16 +1718,13 @@ end
 module Daemon_connection = struct
   let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-  let endpoint ~env ~connect ~bearer_token_file =
-    let open Result.Let_syntax in
-    let%bind bearer_token =
-      match bearer_token_file with
-      | None -> Ok None
-      | Some path ->
-        Agent_transport_client.Endpoint.load_bearer_token ~env ~path
-        |> Result.map ~f:Option.some
-    in
-    Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token connect
+  let endpoint ~env:_ ~connect ~bearer_token_file =
+    Agent_transport_client.Connection_profile.create
+      ~home:(Sys.getenv "HOME")
+      ~name:"command-line"
+      ~endpoint:connect
+      ~expected_server:None
+      ~daemon_credential_file:bearer_token_file
   ;;
 
   let with_connection ~env ~connect ~bearer_token_file f =
@@ -1738,7 +1735,7 @@ module Daemon_connection = struct
     Eio.Switch.run
     @@ fun sw ->
     let%bind connection =
-      Agent_transport_client.Endpoint.connect
+      Agent_transport_client.Connection_profile.connect
         endpoint
         ~sw
         ~env
@@ -1824,7 +1821,7 @@ module Daemon_interactive = struct
       ~bearer_token_file
       (fun sw endpoint connection ->
          let reconnect () =
-           Agent_transport_client.Endpoint.connect
+           Agent_transport_client.Connection_profile.connect
              endpoint
              ~sw
              ~env

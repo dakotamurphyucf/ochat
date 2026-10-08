@@ -1,0 +1,200 @@
+open! Core
+
+module Request = struct
+  type t =
+    { method_name : string
+    ; original_params : Jsonaf.t
+    }
+  [@@deriving sexp]
+
+  let validate_original_params params =
+    Json_codec.validate_limits ~max_depth:256 ~max_bytes:(16 * 1024 * 1024) params
+  ;;
+
+  let to_json t = `Object [ "method", `String t.method_name; "params", t.original_params ]
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let%bind method_name = Json_codec.required_as fields "method" Json_codec.string in
+    let%bind () =
+      if String.length method_name <= 256
+      then Ok ()
+      else Error (Protocol_error.invalid_request "receipt method name exceeds its limit")
+    in
+    let%bind original_params = Json_codec.required fields "params" in
+    let%map () = validate_original_params original_params in
+    { method_name; original_params }
+  ;;
+end
+
+type committed =
+  | Created_session of Id.Session.t
+  | Attached_session of Id.Session.t
+  | Session_mutation of
+      { session_id : Id.Session.t
+      ; mutation : Mutation_result.t
+      }
+  | Sent_message of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; operation_id : Id.Operation.t option
+      ; mutation : Mutation_result.t
+      }
+  | Deleted_session of Id.Session.t
+  | Permission_response of Id.Permission.t * Mutation_result.t
+  | Revoked_grant of Id.Grant.t * Mutation_result.t
+  | Cancelled_job of Id.Job.t * Mutation_result.t
+  | Schedule_mutation of Id.Schedule.t * Mutation_result.t
+[@@deriving sexp]
+
+type t =
+  | Missing
+  | Unavailable
+  | Pending of
+      { accepted_sequence : int64 option
+      ; expires_at : Timestamp.t option
+      }
+  | Failed of Protocol_error.t
+  | Committed of committed
+[@@deriving sexp]
+
+let optional_nullable fields name decode =
+  match Json_codec.optional fields name with
+  | None | Some `Null -> Ok None
+  | Some json -> Result.map (decode json) ~f:Option.some
+;;
+
+let mutation_fields mutation = [ "mutation", Mutation_result.to_json mutation ]
+
+let committed_to_json = function
+  | Created_session id ->
+    `Object [ "kind", `String "created_session"; "session_id", Id.Session.to_json id ]
+  | Attached_session id ->
+    `Object
+      [ "kind", `String "attached_session"
+      ; "session_id", Id.Session.to_json id
+      ; "recovery", `String "reattach_required"
+      ]
+  | Deleted_session id ->
+    `Object [ "kind", `String "deleted_session"; "session_id", Id.Session.to_json id ]
+  | Session_mutation { session_id; mutation } ->
+    `Object
+      ([ "kind", `String "session_mutation"; "session_id", Id.Session.to_json session_id ]
+       @ mutation_fields mutation)
+  | Sent_message { session_id; history_id; operation_id; mutation } ->
+    `Object
+      ([ "kind", `String "sent_message"
+       ; "session_id", Id.Session.to_json session_id
+       ; "history_id", History.Id.to_json history_id
+       ; ( "operation_id"
+         , Option.value_map operation_id ~default:`Null ~f:Id.Operation.to_json )
+       ]
+       @ mutation_fields mutation)
+  | Permission_response (id, mutation) ->
+    `Object
+      ([ "kind", `String "permission_response"
+       ; "permission_id", Id.Permission.to_json id
+       ]
+       @ mutation_fields mutation)
+  | Revoked_grant (id, mutation) ->
+    `Object
+      ([ "kind", `String "revoked_grant"; "grant_id", Id.Grant.to_json id ]
+       @ mutation_fields mutation)
+  | Cancelled_job (id, mutation) ->
+    `Object
+      ([ "kind", `String "cancelled_job"; "job_id", Id.Job.to_json id ]
+       @ mutation_fields mutation)
+  | Schedule_mutation (id, mutation) ->
+    `Object
+      ([ "kind", `String "schedule_mutation"; "schedule_id", Id.Schedule.to_json id ]
+       @ mutation_fields mutation)
+;;
+
+let committed_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind kind = Json_codec.required_as fields "kind" Json_codec.string in
+  let session () = Json_codec.required_as fields "session_id" Id.Session.of_json in
+  let mutation () = Json_codec.required_as fields "mutation" Mutation_result.of_json in
+  match kind with
+  | "created_session" -> session () |> Result.map ~f:(fun id -> Created_session id)
+  | "attached_session" ->
+    let%bind recovery = Json_codec.required_as fields "recovery" Json_codec.string in
+    if not (String.equal recovery "reattach_required")
+    then Error (Protocol_error.invalid_request "invalid attachment receipt recovery")
+    else session () |> Result.map ~f:(fun id -> Attached_session id)
+  | "deleted_session" -> session () |> Result.map ~f:(fun id -> Deleted_session id)
+  | "session_mutation" ->
+    let%bind session_id = session () in
+    let%map mutation = mutation () in
+    Session_mutation { session_id; mutation }
+  | "sent_message" ->
+    let%bind session_id = session () in
+    let%bind history_id = Json_codec.required_as fields "history_id" History.Id.of_json in
+    let%bind operation_id =
+      optional_nullable fields "operation_id" Id.Operation.of_json
+    in
+    let%map mutation = mutation () in
+    Sent_message { session_id; history_id; operation_id; mutation }
+  | "permission_response" ->
+    let%bind id = Json_codec.required_as fields "permission_id" Id.Permission.of_json in
+    let%map mutation = mutation () in
+    Permission_response (id, mutation)
+  | "revoked_grant" ->
+    let%bind id = Json_codec.required_as fields "grant_id" Id.Grant.of_json in
+    let%map mutation = mutation () in
+    Revoked_grant (id, mutation)
+  | "cancelled_job" ->
+    let%bind id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+    let%map mutation = mutation () in
+    Cancelled_job (id, mutation)
+  | "schedule_mutation" ->
+    let%bind id = Json_codec.required_as fields "schedule_id" Id.Schedule.of_json in
+    let%map mutation = mutation () in
+    Schedule_mutation (id, mutation)
+  | _ -> Error (Protocol_error.invalid_request "unknown committed receipt kind")
+;;
+
+let to_json = function
+  | Missing -> `Object [ "status", `String "missing" ]
+  | Unavailable -> `Object [ "status", `String "unavailable" ]
+  | Pending { accepted_sequence; expires_at } ->
+    `Object
+      [ "status", `String "pending"
+      ; ( "accepted_sequence"
+        , Option.value_map accepted_sequence ~default:`Null ~f:(fun value ->
+            `Number (Int64.to_string value)) )
+      ; "expires_at", Option.value_map expires_at ~default:`Null ~f:Timestamp.to_json
+      ]
+  | Failed error ->
+    `Object [ "status", `String "failed"; "error", Protocol_error.to_json error ]
+  | Committed summary ->
+    `Object [ "status", `String "committed"; "summary", committed_to_json summary ]
+;;
+
+let of_json json =
+  let open Result.Let_syntax in
+  let%bind () = Json_codec.validate_limits ~max_depth:64 ~max_bytes:65536 json in
+  let%bind fields = Json_codec.fields json in
+  let%bind status = Json_codec.required_as fields "status" Json_codec.string in
+  match status with
+  | "missing" -> Ok Missing
+  | "unavailable" -> Ok Unavailable
+  | "pending" ->
+    let%bind accepted_sequence =
+      optional_nullable
+        fields
+        "accepted_sequence"
+        (Json_codec.bounded_int64 ~min:0L ~max:Int64.max_value)
+    in
+    let%map expires_at = optional_nullable fields "expires_at" Timestamp.of_json in
+    Pending { accepted_sequence; expires_at }
+  | "failed" ->
+    Json_codec.required_as fields "error" Protocol_error.of_json
+    |> Result.map ~f:(fun error -> Failed error)
+  | "committed" ->
+    Json_codec.required_as fields "summary" committed_of_json
+    |> Result.map ~f:(fun summary -> Committed summary)
+  | _ -> Error (Protocol_error.invalid_request "unknown command receipt status")
+;;

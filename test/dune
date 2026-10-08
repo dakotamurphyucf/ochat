@@ -835,6 +835,7 @@
   eio_main
   mirage-crypto-rng.unix
   ochat.agent_protocol
+  ochat.document_schema
   ochat.agent_transport_client)
  (inline_tests)
  (preprocess

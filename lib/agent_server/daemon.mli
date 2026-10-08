@@ -12,8 +12,14 @@ type status =
   | Failed of Agent_protocol.Error.t
 [@@deriving sexp]
 
+type startup_mode =
+  | Execute
+  | Operator_only
+[@@deriving equal, sexp]
+
 type options =
-  { implementation_name : string
+  { startup_mode : startup_mode
+  ; implementation_name : string
   ; implementation_version : string
   ; features : string list
   ; extension_host : Agent_protocol.Extension_capabilities.host
@@ -65,6 +71,10 @@ val start
   -> home:string
   -> process_start_identity:string option
   -> ?options:options
+  -> ?before_activation:
+       (Agent_store.Session_store.t -> (unit, Agent_protocol.Error.t) result)
+       (** Trusted composition hook after exclusive root ownership and before
+           catalog/runtime construction. Failure closes the owned store. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 

@@ -2,6 +2,7 @@ open Core
 
 type t =
   | Protocol_initialize of Initialize.Request.t
+  | Command_receipt of Command_receipt.Request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t
@@ -46,6 +47,7 @@ type t =
 
 let method_name = function
   | Protocol_initialize _ -> "protocol.initialize"
+  | Command_receipt _ -> "command.receipt"
   | Protocol_ping _ -> "protocol.ping"
   | Server_info -> "server.info"
   | Server_health _ -> "server.health"
@@ -90,6 +92,7 @@ let method_name = function
 
 let params = function
   | Protocol_initialize request -> Initialize.Request.to_json request
+  | Command_receipt request -> Command_receipt.Request.to_json request
   | Protocol_ping request -> Ping.Request.to_json request
   | Server_info -> `Object []
   | Server_health request -> Health.Request.to_json request
@@ -151,6 +154,7 @@ let map decode wrap params = Result.map (decode params) ~f:wrap
 
 let decoders =
   [ "protocol.initialize", map Initialize.Request.of_json (fun x -> Protocol_initialize x)
+  ; "command.receipt", map Command_receipt.Request.of_json (fun x -> Command_receipt x)
   ; "protocol.ping", map Ping.Request.of_json (fun x -> Protocol_ping x)
   ; "server.info", decode_server_info
   ; "server.health", map Health.Request.of_json (fun x -> Server_health x)

@@ -28,7 +28,7 @@ let interrupted message =
 ;;
 
 let invalid_response message =
-  Agent_protocol.Error.create Invalid_request ~message ~retryable:false ()
+  Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
 ;;
 
 let base_headers t =
@@ -97,7 +97,11 @@ let response_result command request_id envelope =
     Result.bind response.outcome ~f:(fun json ->
       Agent_protocol.Public.Result.of_json
         ~method_:(Agent_protocol.Command.method_name command)
-        json)
+        json
+      |> Result.map_error ~f:(fun failure ->
+        interrupted
+          ("HTTP success response could not be validated: "
+           ^ failure.Agent_protocol.Error.message)))
   | Response _ -> Error (invalid_response "HTTP response identifier does not match")
   | Notification _ | Request _ ->
     Error (invalid_response "HTTP RPC returned a non-response envelope")
@@ -223,12 +227,16 @@ let request_locked t command =
       else (
         if newly_connected then start_event_reader t;
         let%bind json = parse_json body in
-        let%bind envelope = Agent_protocol.Envelope.of_json json in
+        let%bind envelope =
+          Agent_protocol.Envelope.of_json json
+          |> Result.map_error ~f:(fun failure ->
+            interrupted failure.Agent_protocol.Error.message)
+        in
         response_result command request_id envelope))
 ;;
 
 let request t command =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> request_locked t command)
+  Eio.Mutex.use_rw ~protect:false t.mutex (fun () -> request_locked t command)
 ;;
 
 let next_notification t = Agent_session.Mailbox.pop t.notifications
@@ -244,15 +252,22 @@ let close_locked t =
         if not t.failed
         then
           Option.iter t.connection_id ~f:(fun _ ->
-            match
-              P.Client.delete t.rpc_client ~headers:(connection_headers t) t.close_path
-            with
-            | Ok response ->
-              ignore (P.Body.drain response.body : (unit, P.Error.t) result)
-            | Error _ -> ())))
+            ignore
+              (Eio.Time.with_timeout (Eio.Stdenv.clock t.env) 1. (fun () ->
+                 match
+                   P.Client.delete
+                     t.rpc_client
+                     ~headers:(connection_headers t)
+                     t.close_path
+                 with
+                 | Ok response ->
+                   ignore (P.Body.drain response.body : (unit, P.Error.t) result);
+                   Ok ()
+                 | Error _ -> Ok ())
+               : (unit, [ `Timeout ]) result))))
 ;;
 
-let close t = Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> close_locked t)
+let close t = Eio.Cancel.protect (fun () -> close_locked t)
 
 let normalize_prefix uri =
   let path = Uri.path uri |> String.rstrip ~drop:(Char.equal '/') in

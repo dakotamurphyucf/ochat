@@ -304,6 +304,7 @@ end
 
 type t =
   | Protocol_initialize of Initialize.Response.t
+  | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
   | Server_info of Server_info.t
   | Server_health of Health.Response.t
@@ -348,6 +349,7 @@ type t =
 
 let method_name = function
   | Protocol_initialize _ -> "protocol.initialize"
+  | Command_receipt _ -> "command.receipt"
   | Protocol_ping _ -> "protocol.ping"
   | Server_info _ -> "server.info"
   | Server_health _ -> "server.health"
@@ -392,6 +394,7 @@ let method_name = function
 
 let to_json = function
   | Protocol_initialize value -> Initialize.Response.to_json value
+  | Command_receipt value -> Command_receipt.to_json value
   | Protocol_ping value -> Ping.Response.to_json value
   | Server_info value -> Server_info.to_json value
   | Server_health value -> Health.Response.to_json value
@@ -452,6 +455,7 @@ let map decode wrap json = Result.map (decode json) ~f:wrap
 let decoders =
   [ ( "protocol.initialize"
     , map Initialize.Response.of_json (fun x -> Protocol_initialize x) )
+  ; "command.receipt", map Command_receipt.of_json (fun x -> Command_receipt x)
   ; "protocol.ping", map Ping.Response.of_json (fun x -> Protocol_ping x)
   ; "server.info", map Server_info.of_json (fun x -> Server_info x)
   ; "server.health", map Health.Response.of_json (fun x -> Server_health x)

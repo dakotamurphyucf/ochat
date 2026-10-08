@@ -1,13 +1,15 @@
 (library
  (name agent_transport_client)
  (public_name ochat.agent_transport_client)
- (modules endpoint)
+ (modules endpoint connection_profile)
  (libraries
   core
   eio
   eio.unix
   uri
   ochat.agent_protocol
+  ochat.document_schema
+  ochat.agent_store
   ochat.agent_client
   ochat.agent_transport_http
   ochat.agent_transport_socket)

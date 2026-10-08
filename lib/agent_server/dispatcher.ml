@@ -2,15 +2,21 @@ open Core
 
 type t =
   { handler : Command_handler.t
+  ; admit : Agent_protocol.Command.t -> (unit, Agent_protocol.Error.t) result
   ; inference_response_policy : Inference_query_budget.Policy.t
   }
 
-let create ?(inference_response_policy = Inference_query_budget.Policy.default) handler =
-  { handler; inference_response_policy }
+let create
+      ?(admit = fun _ -> Ok ())
+      ?(inference_response_policy = Inference_query_budget.Policy.default)
+      handler
+  =
+  { handler; admit; inference_response_policy }
 ;;
 
 let dispatch_command t ~context command =
   let open Result.Let_syntax in
+  let%bind () = t.admit command in
   let%bind inference_budget =
     Inference_query_budget.for_embedded ~max_result_bytes:(16 * 1024 * 1024)
   in
@@ -29,6 +35,7 @@ let request t context (request : Agent_protocol.Envelope.request) =
   let outcome =
     let open Result.Let_syntax in
     let%bind command = decode request.method_ request.params in
+    let%bind () = t.admit command in
     if query
     then (
       let%bind inference_budget =

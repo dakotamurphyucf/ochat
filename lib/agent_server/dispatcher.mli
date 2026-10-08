@@ -5,7 +5,8 @@ type t
 (** Explicit per-envelope response policy for inference queries only. Default
     16 MiB; unrelated responses and HTTP batch aggregate behavior are unchanged. *)
 val create
-  :  ?inference_response_policy:Inference_query_budget.Policy.t
+  :  ?admit:(Agent_protocol.Command.t -> (unit, Agent_protocol.Error.t) result)
+  -> ?inference_response_policy:Inference_query_budget.Policy.t
   -> Command_handler.t
   -> t
 

@@ -17,9 +17,16 @@ val reconcile_recovered
 (** Each pass also sweeps subscription deadlines through the actor, independently
     of any earlier callback holding this entry's runtime. Interrupted runtime
     delivery retries an uncommitted claim; it does not turn shutdown into a
-    terminal schedule failure or undo a committed/cancelled schedule. *)
-val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
+    terminal schedule failure or undo a committed/cancelled schedule.
+    Internal composition: false constructs a stopped service and starts no fiber. *)
+val start_controlled
+  :  enabled:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.Mono.t
+  -> registry:Session_registry.t
+  -> t
 
+val start : sw:Eio.Switch.t -> clock:_ Eio.Time.Mono.t -> registry:Session_registry.t -> t
 val close : t -> unit
 
 (** After [close], wait for already-dispatched deliveries and moderator callbacks.

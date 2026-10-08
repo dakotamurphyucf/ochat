@@ -12,17 +12,21 @@ type options =
   ; event_capacity : int
   }
 
-type t =
+type host =
   { daemon : Daemon.t
   ; connection : Agent_client.Connection.t
-  ; session_id : Agent_protocol.Id.Session.t
-  ; attachment : Agent_protocol.Session.Attachment.t
   ; principal : Agent_protocol.Principal.t
   ; event_capacity : int
   ; max_attachments : int
   ; temporary_root : string option
   ; env : Eio_unix.Stdenv.base
   ; mutable closed : bool
+  }
+
+type t =
+  { host : host
+  ; session_id : Agent_protocol.Id.Session.t
+  ; attachment : Agent_protocol.Session.Attachment.t
   }
 
 let default_permission_profile =
@@ -182,9 +186,9 @@ let all_scopes =
     ]
 ;;
 
-let principal () =
+let principal id =
   Agent_protocol.Principal.create
-    ~id:(Agent_protocol.Id.Principal.create ())
+    ~id
     ~authentication_kind:"embedded.local"
     ~scopes:all_scopes
     ~attributes:[]
@@ -304,11 +308,141 @@ let cleanup_root env = function
   | Some path -> Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / path)
 ;;
 
-let close_partial env temporary_root daemon connection =
-  Option.iter connection ~f:Agent_client.Connection.close;
-  Option.iter daemon ~f:(fun daemon ->
-    ignore (Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result));
-  cleanup_root env temporary_root
+let open_owned_host
+      ~sw
+      ~env
+      ~daemon_options
+      ~config
+      ~tool_dir
+      ~home
+      ~event_capacity
+      ~temporary_root
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_store.Local_operator.validate_root ~env ~path:config.Config.server.data_dir
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let operator_id = ref None in
+  let before_activation store =
+    let%map id =
+      match temporary_root with
+      | Some _ -> Ok (Agent_protocol.Id.Principal.create ())
+      | None ->
+        Agent_store.Local_operator.load_or_create ~env store
+        |> Result.map_error ~f:protocol_of_store
+    in
+    operator_id := Some id
+  in
+  let%bind daemon =
+    Daemon.start
+      ~sw
+      ~env
+      ~options:daemon_options
+      ~config
+      ~tool_dir
+      ~home
+      ~before_activation
+      ~process_start_identity:None
+      ()
+  in
+  let finish () =
+    let%bind id =
+      Result.of_option
+        !operator_id
+        ~error:
+          (Agent_protocol.Error.invalid_request
+             "local operator identity was not admitted")
+    in
+    let%bind principal = principal id in
+    let max_attachments =
+      daemon_options.Daemon.protocol_limits.max_attachments_per_connection
+    in
+    let connection = make_connection daemon principal event_capacity ~max_attachments in
+    match initialize connection with
+    | Error failure ->
+      Agent_client.Connection.close connection;
+      Error failure
+    | Ok () ->
+      Ok
+        { daemon
+        ; connection
+        ; principal
+        ; event_capacity
+        ; max_attachments
+        ; temporary_root
+        ; env
+        ; closed = false
+        }
+  in
+  match finish () with
+  | Ok _ as result -> result
+  | Error failure ->
+    ignore (Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result);
+    cleanup_root env temporary_root;
+    Error failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Eio.Cancel.protect (fun () ->
+      ignore (Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result);
+      cleanup_root env temporary_root);
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let open_host
+      ~sw
+      ~env
+      ?(daemon_options = Daemon.default_options)
+      ~startup_mode
+      ~config
+      ~tool_dir
+      ~home
+      ~event_capacity
+      ()
+  =
+  Mirage_crypto_rng_unix.use_default ();
+  open_owned_host
+    ~sw
+    ~env
+    ~daemon_options:
+      { daemon_options with startup_mode; extension_host = Embedded_durable }
+    ~config
+    ~tool_dir
+    ~home
+    ~event_capacity
+    ~temporary_root:None
+;;
+
+let close_host host =
+  Eio.Cancel.protect (fun () ->
+    if not host.closed
+    then (
+      host.closed <- true;
+      Agent_client.Connection.close host.connection;
+      ignore (Daemon.shutdown host.daemon : (unit, Agent_protocol.Error.t) result);
+      cleanup_root host.env host.temporary_root))
+;;
+
+let host_connection host = host.connection
+let host_principal host = host.principal
+let host_dispatcher host = Daemon.dispatcher host.daemon
+
+let connect_host host =
+  if host.closed
+  then
+    Error
+      (Agent_protocol.Error.create
+         Interrupted
+         ~message:"embedded host is closed"
+         ~retryable:false
+         ())
+  else
+    Ok
+      (make_connection
+         host.daemon
+         host.principal
+         host.event_capacity
+         ~max_attachments:host.max_attachments)
 ;;
 
 let start
@@ -330,13 +464,14 @@ let start
   let config =
     { config with server = { config.server with authoring_packages; authoring_budget } }
   in
-  let daemon_result =
-    Daemon.start
+  let host_result =
+    open_owned_host
       ~sw
       ~env
-      ~options:
+      ~daemon_options:
         { daemon_options with
-          extension_host =
+          startup_mode = Execute
+        ; extension_host =
             (if Option.is_some options.data_root
              then Embedded_durable
              else Embedded_transient)
@@ -344,66 +479,35 @@ let start
       ~config
       ~tool_dir:options.tool_dir
       ~home:options.home
-      ~process_start_identity:None
-      ()
+      ~event_capacity:options.event_capacity
+      ~temporary_root
   in
-  match daemon_result with
-  | Error _ as failure ->
+  match host_result with
+  | Error failure ->
     cleanup_root env temporary_root;
-    failure
-  | Ok daemon ->
-    (match principal () with
-     | Error _ as failure ->
-       close_partial env temporary_root (Some daemon) None;
-       failure
-     | Ok principal ->
-       let max_attachments =
-         daemon_options.protocol_limits.max_attachments_per_connection
-       in
-       let connection =
-         make_connection daemon principal options.event_capacity ~max_attachments
-       in
-       (match initialize connection >>= fun () -> create_session connection options with
-        | Error _ as failure ->
-          close_partial env temporary_root (Some daemon) (Some connection);
-          failure
-        | Ok session_id ->
-          (match attach connection options session_id with
-           | Error _ as failure ->
-             close_partial env temporary_root (Some daemon) (Some connection);
-             failure
-           | Ok attachment ->
-             Ok
-               { daemon
-               ; connection
-               ; session_id
-               ; attachment
-               ; principal
-               ; event_capacity = options.event_capacity
-               ; max_attachments
-               ; temporary_root
-               ; env
-               ; closed = false
-               })))
+    Error failure
+  | Ok host ->
+    let retained = ref false in
+    Exn.protect
+      ~finally:(fun () -> if not !retained then close_host host)
+      ~f:(fun () ->
+        let%bind session_id = create_session host.connection options in
+        let%map attachment = attach host.connection options session_id in
+        retained := true;
+        { host; session_id; attachment })
 ;;
 
-let connection t = t.connection
+let connection t = host_connection t.host
 let session_id t = t.session_id
 let attachment t = t.attachment
-let dispatcher t = Daemon.dispatcher t.daemon
-let principal t = t.principal
+let dispatcher t = host_dispatcher t.host
+let principal t = host_principal t.host
 
 let connect t =
-  make_connection t.daemon t.principal t.event_capacity ~max_attachments:t.max_attachments
+  match connect_host t.host with
+  | Ok connection -> connection
+  | Error failure -> failwith failure.Agent_protocol.Error.message
 ;;
 
-let close_connection t = Daemon.close_connection t.daemon
-
-let close t =
-  if not t.closed
-  then (
-    t.closed <- true;
-    Agent_client.Connection.close t.connection;
-    ignore (Daemon.shutdown t.daemon : (unit, Agent_protocol.Error.t) result);
-    cleanup_root t.env t.temporary_root)
-;;
+let close_connection t = Daemon.close_connection t.host.daemon
+let close t = close_host t.host

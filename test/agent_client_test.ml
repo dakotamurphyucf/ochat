@@ -1215,3 +1215,195 @@ let%expect_test "alternating activity updates preserve first-seen channel positi
   [%expect
     {| first-seen order survives append/replace; exact text, completeness and duplicate preserved |}]
 ;;
+
+let%expect_test
+    "notification lease excludes admission and joins cancelled drain before reuse"
+  =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let notifications = Eio.Stream.create 1 in
+      let reading, reading_resolver = Eio.Promise.create () in
+      let finished, finished_resolver = Eio.Promise.create () in
+      let connection =
+        Agent_client.Transport.create
+          ~request:(fun _ -> Error (P.Error.invalid_request "unexpected request"))
+          ~next_notification:(fun () ->
+            ignore (Eio.Promise.try_resolve reading_resolver ());
+            Eio.Stream.take notifications)
+          ~close:Fn.id
+        |> Agent_client.Connection.create
+      in
+      let lease = protocol_ok (Agent_client.Connection.claim_notifications connection) in
+      assert (Result.is_error (Agent_client.Connection.claim_notifications connection));
+      assert (Option.is_none (Agent_client.Connection.next_notification connection));
+      Eio.Fiber.fork ~sw (fun () ->
+        assert (
+          Option.is_none
+            (protocol_ok (Agent_client.Connection.next_owned_notification lease)));
+        Eio.Promise.resolve finished_resolver ());
+      Eio.Promise.await reading;
+      Agent_client.Connection.release_notifications lease;
+      assert (Result.is_error (Agent_client.Connection.claim_notifications connection));
+      Eio.Promise.await finished;
+      let replacement =
+        protocol_ok (Agent_client.Connection.claim_notifications connection)
+      in
+      Agent_client.Connection.release_notifications replacement;
+      Agent_client.Connection.close connection;
+      print_endline "exclusive consumer; cancelled read joined; replacement admitted"));
+  [%expect {| exclusive consumer; cancelled read joined; replacement admitted |}]
+;;
+
+let%expect_test
+    "uncertain admissions retain bounded intents without blocking different payloads"
+  =
+  Eio_main.run (fun _ ->
+    let admitted = ref 0 in
+    let connection =
+      Agent_client.Transport.create
+        ~request:(fun _ ->
+          incr admitted;
+          Error
+            (P.Error.create Interrupted ~message:"fixture lost reply" ~retryable:true ()))
+        ~next_notification:(fun () -> None)
+        ~close:Fn.id
+      |> Agent_client.Connection.create
+    in
+    let command index =
+      P.Command.Session_start
+        { session_id =
+            P.Id.Session.of_string ("ses_quota_" ^ Int.to_string index) |> protocol_ok
+        ; attachment_id = P.Id.Attachment.of_string "att_quota" |> protocol_ok
+        ; queue_if_limited = false
+        ; idempotency_key =
+            P.Idempotency_key.of_string ("quota_" ^ Int.to_string index) |> protocol_ok
+        }
+    in
+    for index = 0 to 63 do
+      assert (Result.is_error (Agent_client.Connection.request connection (command index)))
+    done;
+    assert (Int.equal !admitted 64);
+    assert (Result.is_error (Agent_client.Connection.request connection (command 64)));
+    assert (Int.equal !admitted 64);
+    assert (
+      Int.equal (List.length (Agent_client.Connection.pending_commands connection)) 64);
+    assert (Result.is_error (Agent_client.Connection.request connection (command 0)));
+    assert (Int.equal !admitted 64);
+    Agent_client.Connection.close connection;
+    assert (
+      Result.is_error
+        (Agent_client.Connection.adopt_pending
+           connection
+           (Agent_client.Connection.pending_commands connection)));
+    print_endline
+      "different payloads admitted; 64 retained; capacity rejects before effects; closed \
+       adoption denied");
+  [%expect
+    {| different payloads admitted; 64 retained; capacity rejects before effects; closed adoption denied |}]
+;;
+
+let%expect_test "notification ownership cleanup is independent of a blocked request" =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let started, started_resolver = Eio.Promise.create () in
+      let closed, closed_resolver = Eio.Promise.create () in
+      let finished, finished_resolver = Eio.Promise.create () in
+      let connection =
+        Agent_client.Transport.create
+          ~request:(fun _ ->
+            Eio.Promise.resolve started_resolver ();
+            Eio.Promise.await closed;
+            Error
+              (P.Error.create Interrupted ~message:"fixture closed" ~retryable:true ()))
+          ~next_notification:(fun () -> None)
+          ~close:(fun () -> ignore (Eio.Promise.try_resolve closed_resolver ()))
+        |> Agent_client.Connection.create
+      in
+      let lease = protocol_ok (Agent_client.Connection.claim_notifications connection) in
+      Eio.Fiber.fork ~sw (fun () ->
+        ignore (Agent_client.Connection.request connection P.Command.Server_info);
+        Eio.Promise.resolve finished_resolver ());
+      Eio.Promise.await started;
+      Agent_client.Connection.release_notifications lease;
+      let replacement =
+        protocol_ok (Agent_client.Connection.claim_notifications connection)
+      in
+      Agent_client.Connection.release_notifications replacement;
+      Agent_client.Connection.close connection;
+      Eio.Promise.await finished;
+      print_endline "lease cleanup and transport close do not wait for request mutex"));
+  [%expect {| lease cleanup and transport close do not wait for request mutex |}]
+;;
+
+let%expect_test
+    "cancelling a handle switch releases its connection notification ownership"
+  =
+  Mirage_crypto_rng_unix.use_default ();
+  Eio_main.run (fun env ->
+    let reading, reading_resolver = Eio.Promise.create () in
+    let notifications = Eio.Stream.create 1 in
+    let attachment_id = P.Id.Attachment.of_string "att_nested_cancel" |> protocol_ok in
+    let request = function
+      | P.Command.Session_attach _ ->
+        Ok
+          (Public.Result.Session_attach
+             Public.Result.Attach.
+               { attachment =
+                   P.Session.Attachment.
+                     { id = attachment_id
+                     ; session_id
+                     ; mode = Read_only
+                     ; owner_lease = None
+                     }
+               ; replay = Snapshot snapshot
+               ; latest_event_sequence = 0L
+               ; reclaim_token = None
+               })
+      | Session_detach _ ->
+        Public.Result.Non_history.of_internal
+          (Session_detach P.Mutation_result.{ revision = 0L; latest_event_sequence = 0L })
+        |> Result.map ~f:(fun result -> Public.Result.Non_history result)
+      | _ -> Error (P.Error.invalid_request "unexpected fixture request")
+    in
+    let connection =
+      Agent_client.Transport.create
+        ~request
+        ~next_notification:(fun () ->
+          ignore (Eio.Promise.try_resolve reading_resolver ());
+          Eio.Stream.take notifications)
+        ~close:Fn.id
+      |> Agent_client.Connection.create
+    in
+    (try
+       Eio.Switch.run (fun sw ->
+         ignore
+           (Agent_client.Session_handle.attach
+              ~sw
+              ~clock:env#clock
+              ~connection
+              ~session_id
+              ~mode:Read_only
+              ()
+            |> protocol_ok);
+         Eio.Promise.await reading;
+         failwith "cancel nested handle switch")
+     with
+     | Failure message when String.equal message "cancel nested handle switch" -> ());
+    Eio.Switch.run (fun sw ->
+      let replacement =
+        Agent_client.Session_handle.attach
+          ~sw
+          ~clock:env#clock
+          ~connection
+          ~session_id
+          ~mode:Read_only
+          ~subscribe:false
+          ()
+        |> protocol_ok
+      in
+      Agent_client.Session_handle.close replacement);
+    Agent_client.Connection.close connection;
+    print_endline
+      "cancelled blocked reader; replacement handle admitted without old close");
+  [%expect {| cancelled blocked reader; replacement handle admitted without old close |}]
+;;

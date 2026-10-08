@@ -9,6 +9,8 @@
   timestamp
   json_codec
   idempotency_key
+  session_ref
+  command_receipt
   initialize
   ping
   health

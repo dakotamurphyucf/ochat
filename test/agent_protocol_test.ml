@@ -623,7 +623,8 @@ let%expect_test "permission codecs preserve legacy owners and reject ambiguous o
 ;;
 
 let architecture_methods =
-  [ "protocol.initialize"
+  [ "command.receipt"
+  ; "protocol.initialize"
   ; "protocol.ping"
   ; "server.info"
   ; "server.health"
@@ -679,7 +680,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 41) (requests true) (results true)) |}]
+  [%expect {| ((method_count 42) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -911,4 +912,74 @@ let%expect_test "typed inline attachments validate their declared length" =
   in
   print_result (Blob.Input.of_json invalid) ~ok:(fun _ -> "accepted");
   [%expect {| invalid_request |}]
+;;
+
+let%expect_test
+    "command receipt create and attach disclose identity without stale attachment"
+  =
+  let module R = Agent_protocol.Command_receipt in
+  let session_id =
+    Agent_protocol.Id.Session.of_string "ses_00000000000000000000000000000001"
+    |> ok_or_fail
+  in
+  let check receipt =
+    let json = R.to_json receipt in
+    assert (Result.is_ok (R.of_json json));
+    let text = Jsonaf.to_string json in
+    assert (not (String.is_substring text ~substring:"reclaim"));
+    assert (not (String.is_substring text ~substring:"owner_lease"));
+    print_endline text
+  in
+  check (Committed (Created_session session_id));
+  check (Committed (Attached_session session_id));
+  [%expect
+    {|
+    {"status":"committed","summary":{"kind":"created_session","session_id":"ses_00000000000000000000000000000001"}}
+    {"status":"committed","summary":{"kind":"attached_session","session_id":"ses_00000000000000000000000000000001","recovery":"reattach_required"}}
+    |}]
+;;
+
+let%expect_test "receipt wrapper preserves admitted original parameter depth" =
+  let rec nested depth =
+    if Int.equal depth 0 then `Null else `Array [ nested (depth - 1) ]
+  in
+  let params = nested 128 in
+  assert (
+    Result.is_ok
+      (Agent_protocol.Json_codec.validate_limits
+         ~max_depth:256
+         ~max_bytes:(16 * 1024 * 1024)
+         params));
+  let request : Agent_protocol.Command_receipt.Request.t =
+    { method_name = "session.create"; original_params = params }
+  in
+  let decoded =
+    Agent_protocol.Command_receipt.Request.of_json
+      (Agent_protocol.Command_receipt.Request.to_json request)
+    |> ok_or_fail
+  in
+  assert (Jsonaf.exactly_equal params decoded.original_params);
+  print_endline "deep admitted parameters survive receipt wrapper";
+  [%expect {| deep admitted parameters survive receipt wrapper |}]
+;;
+
+let%expect_test "receipt nullable fields roundtrip without optional values" =
+  let module R = Agent_protocol.Command_receipt in
+  let receipts =
+    [ R.Pending { accepted_sequence = None; expires_at = None }
+    ; R.Committed
+        (Sent_message
+           { session_id = Id.Session.of_string "ses_receipt_nullable" |> ok_or_fail
+           ; history_id = History.Id.of_string "4:test:7" |> ok_or_fail
+           ; operation_id = None
+           ; mutation = { revision = 1L; latest_event_sequence = 2L }
+           })
+    ]
+  in
+  List.iter receipts ~f:(fun receipt ->
+    let encoded = R.to_json receipt in
+    let decoded = R.of_json encoded |> ok_or_fail in
+    assert (Jsonaf.exactly_equal encoded (R.to_json decoded)));
+  print_endline "pending and sent-message null fields roundtrip";
+  [%expect {| pending and sent-message null fields roundtrip |}]
 ;;

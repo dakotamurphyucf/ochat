@@ -68,7 +68,11 @@ let handle_response t response =
   Option.iter (take_pending t response.Agent_protocol.Envelope.id) ~f:(fun pending ->
     let result =
       Result.bind response.outcome ~f:(fun json ->
-        Agent_protocol.Public.Result.of_json ~method_:pending.method_ json)
+        Agent_protocol.Public.Result.of_json ~method_:pending.method_ json
+        |> Result.map_error ~f:(fun failure ->
+          interrupted
+            ("socket success response could not be validated: "
+             ^ failure.Agent_protocol.Error.message)))
     in
     Eio.Promise.resolve pending.resolver result)
 ;;
@@ -85,7 +89,10 @@ let parse_line line =
   Result.try_with (fun () -> Jsonaf.of_string line)
   |> Result.map_error ~f:(fun exn ->
     interrupted ("invalid server JSON: " ^ Exn.to_string exn))
-  |> Result.bind ~f:Agent_protocol.Envelope.of_json
+  |> Result.bind ~f:(fun json ->
+    Agent_protocol.Envelope.of_json json
+    |> Result.map_error ~f:(fun failure ->
+      interrupted failure.Agent_protocol.Error.message))
 ;;
 
 let reader t ~max_line_length =
@@ -139,9 +146,13 @@ let request t command =
       ~params:(Agent_protocol.Command.params command)
       ()
   in
-  match Result.try_with (fun () -> write_request t envelope) with
-  | Ok () -> Eio.Promise.await response
-  | Error exn ->
+  match write_request t envelope with
+  | () -> Eio.Promise.await response
+  | exception (Eio.Cancel.Cancelled _ as exn) ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    remove_pending t id;
+    Exn.raise_with_original_backtrace exn backtrace
+  | exception exn ->
     remove_pending t id;
     Error (interrupted ("socket write failed: " ^ Exn.to_string exn))
 ;;

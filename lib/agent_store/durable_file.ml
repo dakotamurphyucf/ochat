@@ -44,10 +44,7 @@ let sync_directory_exn path =
         Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
 ;;
 
-let replace_eio ~env ~durability ~path contents =
-  let temporary = temporary_path path in
-  let temporary_eio = eio_path env temporary in
-  let destination = eio_path env path in
+let replace_paths ~durability ~path ~temporary_eio ~destination ~directory contents =
   let owned = ref false in
   Fun.protect
     (fun () ->
@@ -57,8 +54,7 @@ let replace_eio ~env ~durability ~path contents =
          owned := false;
          (match durability with
           | Flush_file -> ()
-          | Flush_file_and_directory ->
-            sync_directory_exn (eio_path env (Filename.dirname path)));
+          | Flush_file_and_directory -> sync_directory_exn directory);
          Ok ()
        with
        | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
@@ -69,6 +65,33 @@ let replace_eio ~env ~durability ~path contents =
         Eio.Cancel.protect (fun () ->
           try Eio.Path.unlink temporary_eio with
           | Eio.Io _ | Core_unix.Unix_error _ -> ()))
+;;
+
+let replace_eio ~env ~durability ~path contents =
+  replace_paths
+    ~durability
+    ~path
+    ~temporary_eio:(eio_path env (temporary_path path))
+    ~destination:(eio_path env path)
+    ~directory:(eio_path env (Filename.dirname path))
+    contents
+;;
+
+let replace_in ~directory ~durability ~basename contents =
+  if
+    String.is_empty basename
+    || (not (String.equal (Filename.basename basename) basename))
+    || String.equal basename "."
+    || String.equal basename ".."
+  then Error (Store_error.Corrupt "atomic replacement requires a child basename")
+  else
+    replace_paths
+      ~durability
+      ~path:basename
+      ~temporary_eio:Eio.Path.(directory / temporary_path basename)
+      ~destination:Eio.Path.(directory / basename)
+      ~directory
+      contents
 ;;
 
 let validate_path path =

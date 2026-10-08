@@ -31,6 +31,8 @@ type t =
   ; on_update : (Projection.t -> unit) option
   ; on_status : (status -> unit) option
   ; on_error : (Agent_protocol.Error.t -> unit) option
+  ; host_id : Agent_protocol.Id.Server.t
+  ; principal_id : Agent_protocol.Id.Principal.t
   ; mutable connection : Connection.t
   ; mutable handle : Session_handle.t option
   ; mutable reclaim_token : string option
@@ -69,6 +71,12 @@ let install_projection t projection =
 ;;
 
 let report_error t failure = callback t.on_error failure
+
+let initialized_identity connection =
+  Result.of_option
+    (Connection.initialization connection)
+    ~error:(interrupted "connection has no validated host identity")
+;;
 
 let initialize connection =
   Session_handle.initialize
@@ -122,6 +130,27 @@ let attach_callbacks t =
 let reconnect_once t connection ~force_snapshot =
   let open Result.Let_syntax in
   let%bind () = initialize connection in
+  let%bind () =
+    match Connection.initialization connection with
+    | Some initialized
+      when Agent_protocol.Id.Server.equal initialized.server_id t.host_id
+           && Agent_protocol.Id.Principal.equal initialized.principal.id t.principal_id ->
+      Ok ()
+    | Some _ | None ->
+      Error
+        (Agent_protocol.Error.create
+           Permission_denied
+           ~message:
+             "reconnected host or authenticated principal does not match the original \
+              connection"
+           ~retryable:false
+           ())
+  in
+  let pending = Connection.pending_commands t.connection in
+  let%bind () = Connection.adopt_pending connection pending in
+  (* Keep the validated candidate as the intent owner even if attach loses its
+     response. The next candidate must inherit that admission before retrying. *)
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.connection <- connection);
   let projection = Eio.Mutex.use_ro t.mutex (fun () -> t.projection) in
   let after_sequence =
     if force_snapshot
@@ -171,10 +200,11 @@ let connect t =
   match t.reconnect with
   | None -> Error (interrupted "this client has no reconnect transport")
   | Some reconnect ->
-    Result.try_with reconnect
-    |> Result.map_error ~f:(fun exn ->
-      interrupted ("reconnect failed: " ^ Exn.to_string exn))
-    |> Result.join
+    (try reconnect () with
+     | Eio.Cancel.Cancelled _ as exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       Stdlib.Printexc.raise_with_backtrace exn backtrace
+     | exn -> Error (interrupted ("reconnect failed: " ^ Exn.to_string exn)))
 ;;
 
 let rec reconnect_until t attempt ~force_snapshot =
@@ -222,16 +252,15 @@ let rec monitor t handle =
         Agent_protocol.Error.equal_code failure.code Snapshot_required)
     in
     clear_current_handle t handle;
-    Exn.protect
-      ~finally:(fun () -> Connection.close t.connection)
-      ~f:(fun () -> Session_handle.close handle);
+    Connection.close t.connection;
+    Session_handle.close handle;
     set_status t Disconnected;
     (match reconnect_until t 1 ~force_snapshot with
      | Ok (connection, handle) ->
        if Eio.Mutex.use_ro t.mutex (fun () -> t.closed)
        then (
-         Session_handle.close handle;
-         Connection.close connection)
+         Connection.close connection;
+         Session_handle.close handle)
        else (
          install_handle t connection handle;
          monitor t handle)
@@ -272,6 +301,7 @@ let make
   let open Result.Let_syntax in
   let%bind () = validate_policy policy in
   let%bind () = initialize connection in
+  let%bind identity = initialized_identity connection in
   let owner = ref None in
   let handle_update projection =
     Option.iter !owner ~f:(fun t -> install_projection t projection)
@@ -294,6 +324,8 @@ let make
     ; on_update
     ; on_status
     ; on_error
+    ; host_id = identity.server_id
+    ; principal_id = identity.principal.id
     ; connection
     ; handle = Some handle
     ; reclaim_token = Session_handle.reclaim_token handle
@@ -362,6 +394,7 @@ let create
   let open Result.Let_syntax in
   let%bind () = validate_policy policy in
   let%bind () = initialize connection in
+  let%bind identity = initialized_identity connection in
   let owner = ref None in
   let handle_update projection =
     Option.iter !owner ~f:(fun t -> install_projection t projection)
@@ -396,6 +429,8 @@ let create
     ; on_update
     ; on_status
     ; on_error
+    ; host_id = identity.server_id
+    ; principal_id = identity.principal.id
     ; connection
     ; handle = Some handle
     ; reclaim_token = Session_handle.reclaim_token handle
@@ -409,6 +444,10 @@ let create
   callback on_update projection;
   Eio.Fiber.fork ~sw (fun () -> monitor t handle);
   Ok t
+;;
+
+let session_ref t =
+  Agent_protocol.Session_ref.create ~server_id:t.host_id ~session_id:t.session_id
 ;;
 
 let session_id t = t.session_id
@@ -475,4 +514,12 @@ let detach t =
   result
 ;;
 
-let close t = ignore (detach t : (unit, Agent_protocol.Error.t) result)
+let close t =
+  mark_closed t;
+  Connection.close t.connection;
+  Option.iter t.handle ~f:Session_handle.close;
+  set_status t Disconnected
+;;
+
+let pending_commands t = Connection.pending_commands t.connection
+let reconcile t pending = Connection.reconcile t.connection pending

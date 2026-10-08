@@ -2,6 +2,7 @@
 
 type t =
   | Protocol_initialize of Initialize.Request.t
+  | Command_receipt of Command_receipt.Request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t

@@ -15,6 +15,7 @@
   session_index
   delegation_store
   session_store
+  local_operator
   blob_store
   blob_reference_scan
   blob_retention
@@ -31,6 +32,7 @@
  (libraries ochat.inference
   core
   core_unix
+  cstruct
   bin_prot
   digestif
   ochat.document_schema

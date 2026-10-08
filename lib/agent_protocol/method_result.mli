@@ -102,6 +102,7 @@ end
 
 type t =
   | Protocol_initialize of Initialize.Response.t
+  | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
   | Server_info of Server_info.t
   | Server_health of Health.Response.t

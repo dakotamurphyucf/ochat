@@ -48,6 +48,7 @@ module Non_history = struct
     | Schedule_get _
     | Schedule_create _
     | Schedule_cancel _
+    | Command_receipt _
     | Ingress_submit _ -> Ok value
   ;;
 

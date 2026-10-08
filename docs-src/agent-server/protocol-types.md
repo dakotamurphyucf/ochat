@@ -455,6 +455,7 @@ end
 
 type t =
   | Protocol_initialize of Initialize.Request.t
+  | Command_receipt of Command_receipt.Request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t
@@ -508,6 +509,66 @@ val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) res
 
 (** [supported_methods] contains every method accepted by the closed dispatcher. *)
 val supported_methods : string list
+```
+
+## command_receipt
+
+[JSON codec](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
+
+```ocaml
+(** Read-only reconciliation of an original bounded request. The authenticated
+    principal is implicit. Original params prove mode/authority and digest;
+    lookup never admits, retries or replays the command. *)
+module Request : sig
+  type t =
+    { method_name : string
+    ; original_params : Jsonaf.t
+    }
+  [@@deriving sexp]
+
+  (** Shared admission/receipt bounds apply to original parameters; the small
+      receipt envelope does not consume their byte or nesting allowance. *)
+  val validate_original_params : Jsonaf.t -> (unit, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+(** Narrow result references, never a replay of a full original result.
+    Create/attach recovery must use a fresh authorized attachment. *)
+type committed =
+  | Created_session of Id.Session.t
+  | Attached_session of Id.Session.t
+  | Session_mutation of
+      { session_id : Id.Session.t
+      ; mutation : Mutation_result.t
+      }
+  | Sent_message of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; operation_id : Id.Operation.t option
+      ; mutation : Mutation_result.t
+      }
+  | Deleted_session of Id.Session.t
+  | Permission_response of Id.Permission.t * Mutation_result.t
+  | Revoked_grant of Id.Grant.t * Mutation_result.t
+  | Cancelled_job of Id.Job.t * Mutation_result.t
+  | Schedule_mutation of Id.Schedule.t * Mutation_result.t
+[@@deriving sexp]
+
+type t =
+  | Missing
+  | Unavailable
+  | Pending of
+      { accepted_sequence : int64 option
+      ; expires_at : Timestamp.t option
+      }
+  | Failed of Error.t
+  | Committed of committed
+[@@deriving sexp]
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## completion
@@ -2507,6 +2568,7 @@ end
 
 type t =
   | Protocol_initialize of Initialize.Response.t
+  | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
   | Server_info of Server_info.t
   | Server_health of Health.Response.t
@@ -4073,6 +4135,21 @@ module Delete_request : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## session_ref
+
+[JSON codec](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
+
+```ocaml
+(** Persistent host-qualified identity; carries no connection or execution grant. *)
+type t [@@deriving compare, equal, sexp_of]
+
+val create : server_id:Id.Server.t -> session_id:Id.Session.t -> t
+val server_id : t -> Id.Server.t
+val session_id : t -> Id.Session.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## snapshot
