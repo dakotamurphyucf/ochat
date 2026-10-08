@@ -208,9 +208,19 @@ let%expect_test "fresh generation, lookup race and disabled status are host owne
       in
       host_ref := Some host;
       add host (profile "one" "r1");
-      let prepared = prepare host (capture host "one") in
+      let target = capture host "one" in
+      let context = H.resolve host ~principal:"user" target |> ok in
+      let prepare () =
+        RT.Context.prepare
+          context
+          ~preparation_id:"prepared"
+          (R.create ~target ~history:[] ~tools:[] ~assets:[] ~limits |> ok)
+        |> ok
+      in
+      let prepared = prepare () in
       H.reauthorize host ~profile:"one" ~owner:"renewed-owner" ~generation:1L |> ok;
       run sw prepared;
+      run sw (prepare ());
       H.disable host ~profile:"one" |> ok;
       print_s
         [%sexp
@@ -222,6 +232,7 @@ let%expect_test "fresh generation, lookup race and disabled status are host owne
            : (unit, H.Error.t) Result.t)]));
   [%expect
     {|
+    (Definitely_not_submitted (Failed (Authentication Denied)))
     ((profile one) (account (account)) (method_ api_key)
      (credential_reference one) (owner renewed-owner) (generation 1))
     (Definitely_not_submitted (Failed (Authentication Denied)))
@@ -535,5 +546,107 @@ let%expect_test "resolver retains recovery categories" =
     (Error Target_mismatch)
     (Error Target_unavailable)
     (Error Target_unavailable)
+    |}]
+;;
+
+let%expect_test "disable and reenroll cancel old plan; same context prepares new epoch" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let socket =
+        Eio.Net.listen
+          ~sw
+          ~reuse_addr:true
+          ~backlog:4
+          (Eio.Stdenv.net env)
+          (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+      in
+      let port =
+        match Eio.Net.listening_addr socket with
+        | `Tcp (_, port) -> port
+        | _ -> assert false
+      in
+      let endpoint = sprintf "http://127.0.0.1:%d/v1/responses" port in
+      let connections = ref 0 in
+      let bearer_bytes = ref 0 in
+      Eio.Fiber.fork_daemon ~sw (fun () ->
+        while true do
+          let flow, _ = Eio.Net.accept ~sw socket in
+          incr connections;
+          let reader = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+          ignore (Eio.Buf_read.line reader : string);
+          let rec headers length =
+            let line = Eio.Buf_read.line reader in
+            if String.is_empty line
+            then length
+            else (
+              match String.lsplit2 line ~on:':' with
+              | Some (key, value) when String.Caseless.equal key "content-length" ->
+                headers (Int.of_string (String.strip value))
+              | Some (key, value) when String.Caseless.equal key "authorization" ->
+                bearer_bytes := !bearer_bytes + String.length (String.strip value);
+                headers length
+              | _ -> headers length)
+          in
+          ignore (Eio.Buf_read.take (headers 0) reader : string);
+          let body =
+            "data: \
+             {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":{\"object\":\"response\",\"id\":\"r\",\"status\":\"completed\",\"output\":[]}}\n\n"
+          in
+          Eio.Flow.copy_string
+            (sprintf
+               "HTTP/1.1 200 OK\r\n\
+                Content-Type: text/event-stream\r\n\
+                Content-Length: %d\r\n\
+                Connection: close\r\n\
+                \r\n\
+                %s"
+               (String.length body)
+               body)
+            flow;
+          Eio.Flow.close flow
+        done);
+      let lookups = ref 0 in
+      let host =
+        registry env ~authorize:allow ~credentials:(fun ~sw:_ identity ->
+          incr lookups;
+          assert (Int64.equal (H.Credential_identity.generation identity) 1L);
+          D.Auth.bearer "reenrolled-key")
+      in
+      add host (profile ~endpoint "one" "r1");
+      let target = capture host "one" in
+      let context = H.resolve host ~principal:"user" target |> ok in
+      let prepare () =
+        RT.Context.prepare
+          context
+          ~preparation_id:"prepared"
+          (R.create ~target ~history:[] ~tools:[] ~assets:[] ~limits |> ok)
+        |> ok
+      in
+      let old_plan = prepare () in
+      H.disable host ~profile:"one" |> ok;
+      print_s
+        [%sexp
+          (Result.map
+             (RT.Context.prepare
+                context
+                ~preparation_id:"disabled"
+                (R.create ~target ~history:[] ~tools:[] ~assets:[] ~limits |> ok))
+             ~f:(fun _ -> ())
+           : (unit, RT.Preparation_error.t) Result.t)];
+      H.reauthorize host ~profile:"one" ~owner:"runtime-host" ~generation:1L |> ok;
+      let new_plan = prepare () in
+      run sw old_plan;
+      print_s [%sexp (!lookups : int), (!connections : int), (!bearer_bytes : int)];
+      run sw new_plan;
+      run sw old_plan;
+      print_s [%sexp (!lookups : int), (!connections : int), (!bearer_bytes > 0 : bool)]));
+  [%expect
+    {|
+    (Error Target_unavailable)
+    (Definitely_not_submitted (Failed (Authentication Denied)))
+    (0 0 0)
+    (Response_started Completed)
+    (Definitely_not_submitted (Failed (Authentication Denied)))
+    (1 1 true)
     |}]
 ;;

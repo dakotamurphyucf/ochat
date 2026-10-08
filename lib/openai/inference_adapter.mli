@@ -19,6 +19,22 @@ val tool_spec
   -> limits:Document_schema.Limits.t
   -> (Inference.Request.Tool_spec.t, Inference_runtime.Preparation_error.t) Result.t
 
+module Auth_source : sig
+  type t =
+    | Static of Responses_driver.Auth.resolver
+    | Capture of
+        (target:Inference.Request.Target.t
+         -> ( Responses_driver.Auth.resolver
+              , Inference_runtime.Preparation_error.t )
+              Result.t)
+
+  (** Capture is trusted non-yielding policy preflight, called once per plan after
+      pure request/configuration validation. It must not retrieve credentials,
+      perform network I/O or initiate login. Each plan retains its returned
+      resolver independently. An error rejects preparation without fallback.
+      Dispatch still freshly authorizes and obtains a guarded attempt lease. *)
+end
+
 (** Fixed legacy composition accepts only absent auth binding by default. Dynamic
     hosts supply the exact admitted binding. Revision is capture provenance and
     must be supplied from the capture only after host compatibility admission. *)
@@ -27,6 +43,6 @@ val create
   -> Responses_driver.t
   -> profile:Responses_driver.Profile.t
   -> profile_revision:string option
-  -> auth:Responses_driver.Auth.resolver
+  -> auth:Auth_source.t
   -> limits:Inference_runtime.Limits.t
   -> (Inference_runtime.Adapter.t, Inference_runtime.Preparation_error.t) Result.t

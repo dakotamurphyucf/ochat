@@ -123,8 +123,12 @@ val capture
 
 (** Missing/null historical binding is unavailable, never inferred. Captured revision
     and settings survive current-default edits. Compatibility is checked explicitly;
-    preparation revalidates current capabilities. Every dispatch rechecks principal
-    authorization and resolves fresh auth for the captured identity. *)
+    preparation revalidates current capabilities and captures the current auth
+    owner/generation independently for each plan, without credential access.
+    Reauthorization permits a new plan on the same unchanged context, but old plans
+    reject changed owner/generation before lookup. Silent refresh within the same
+    generation remains permitted. Every dispatch rechecks principal authorization
+    and resolves fresh auth for that plan's exact captured identity. *)
 val resolve
   :  t
   -> principal:string
