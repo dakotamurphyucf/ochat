@@ -27,8 +27,8 @@ let stored_digest t = t.stored_digest
 let document t = t.document
 let flags t = t.flags
 
-let check_digest bytes = function
-  | None -> Ok ()
+let checked_digest bytes = function
+  | None -> Ok (digest bytes)
   | Some expected ->
     if
       String.length expected <> 64
@@ -39,23 +39,19 @@ let check_digest bytes = function
     else (
       let actual = digest bytes in
       if String.equal expected actual
-      then Ok ()
+      then Ok actual
       else Error (Error.Digest_mismatch { expected; actual }))
 ;;
 
 let of_frame frame ~limits ~expected_digest =
   let open Result.Let_syntax in
   let stored_bytes = Frame.payload frame in
-  let%bind () = check_digest stored_bytes expected_digest in
+  let%bind stored_digest = checked_digest stored_bytes expected_digest in
   let%map document =
     Document_schema.Document.decode ~limits stored_bytes
     |> Result.map_error ~f:(fun error -> Error.Document error)
   in
-  { stored_bytes
-  ; stored_digest = digest stored_bytes
-  ; document
-  ; flags = Frame.flags frame
-  }
+  { stored_bytes; stored_digest; document; flags = Frame.flags frame }
 ;;
 
 let of_document document ~limits =
