@@ -73,6 +73,7 @@ val self_check : unit -> unit
     OAuth interaction uses a private terminal or explicit bounded local browser
     launch; browser launch never prints its private URI. Result
     artifacts contain allowlisted metadata and never challenge/token/history.
+    Login diagnostics retain only existing closed OAuth stage/code; no raw errors.
 
     Feature plans require Feature phase, a fresh isolated root and one attempt.
     JSON-schema/image/reasoning use the actual no-tool Session/Host path. Document and function-call API probes use one actual auxiliary Execution.run
@@ -80,7 +81,11 @@ val self_check : unit -> unit
     commit a session turn or execute a tool. Other authentication routes return
     finite Incomplete with zero dispatch. Document qualifies inline API file input,
     not frontend/session attachments. Existing phases reject feature
-    plans; no effects are repeated on a reused root. *)
+    plans; no effects are repeated on a reused root. Explicit resume_enrolled is
+    restricted to a pre-session OAuth Journey with an unchanged existing plan,
+    empty authoritative session store and exact owned original committed enrollment.
+    It skips only initial acquisition; a distinct stable cancellation probe still
+    runs, preserving the earlier failed receipt. *)
 val run
   :  env:Eio_unix.Stdenv.base
   -> plan:Plan.t
@@ -89,4 +94,5 @@ val run
   -> key_input:Key_input.t option
   -> hold_until_expiry:bool
   -> browser_presentation:Browser_presentation.t
+  -> resume_enrolled:bool
   -> Evidence.t

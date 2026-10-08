@@ -105,7 +105,16 @@ let expectation =
   |> model
 ;;
 
-let start ?wall_clock env sw oauth current operation transport =
+let start
+      ?wall_clock
+      ?(expectation = expectation)
+      env
+      sw
+      oauth
+      current
+      operation
+      transport
+  =
   let wall_clock = Option.value wall_clock ~default:(Eio.Stdenv.clock env) in
   A.Acquisition.start
     oauth
@@ -554,4 +563,121 @@ let%expect_test "revoked operator cannot commit after a blocked exchange" =
     C.close current);
   [%expect
     {| denied:true previous-active-preserved:true candidate-cleared:true exchanges:2 |}]
+;;
+
+let%expect_test
+    "acquisition identity keeps requirements separate from granted scope extras"
+  =
+  List.iter
+    [ []; [ "openid" ]; [ "openid"; "missing-required" ] ]
+    ~f:(fun required_scopes ->
+      with_registry (fun env sw directory _secrets _new_operation current ->
+        let expectation =
+          M.Expectation.oauth_acquisition
+            ~host
+            ~provider:"openai"
+            ~billing:"subscription"
+            ~issuer:(O.Policy.issuer Flow_test.policy)
+            ~client_registration:(O.Policy.client_registration Flow_test.policy)
+            ~resource:(O.Policy.resource Flow_test.policy)
+            ~account:None
+            ~required_scopes
+          |> model
+        in
+        let transport =
+          O.For_testing.scripted_transport
+            ~clock:(Eio.Stdenv.mono_clock env)
+            (fun endpoint ~body:_ ~on_possible_submission ->
+               match endpoint with
+               | User_code -> Ok (200, Flow_test.challenge)
+               | Device_poll -> Ok (200, Flow_test.grant)
+               | Token ->
+                 on_possible_submission ();
+                 Ok (200, Flow_test.tokens env ()))
+        in
+        let oauth =
+          A.create ~transport ~policy:Flow_test.policy ~wall_clock:(Eio.Stdenv.clock env)
+        in
+        let acquisition, _ =
+          start ~expectation env sw oauth current (id "scope_requirements") transport
+        in
+        let result =
+          A.Acquisition.complete acquisition ~authorize_commit:(fun () -> true)
+        in
+        let active = C.Host_snapshot.identity (snapshot current) in
+        match required_scopes with
+        | [] | [ "openid" ] ->
+          assert (Result.is_ok result);
+          let identity = Option.value_exn active in
+          (match M.Identity.method_ identity with
+           | Oauth actual ->
+             assert (List.equal String.equal actual.required_scopes required_scopes)
+           | Api_key _ -> assert false);
+          assert (M.Expectation.accepts expectation identity);
+          let bytes =
+            S.Directory.read_bounded
+              directory
+              (S.Name.create "provider-registry.json" |> storage)
+              ~max_bytes:(1024 * 1024)
+            |> storage
+          in
+          let document =
+            Document_schema.Document.decode
+              ~limits:Document_schema.Limits.default
+              (Bytes.to_string bytes)
+            |> Result.map_error ~f:(fun _ -> "invalid persisted fixture document")
+            |> Result.ok_or_failwith
+          in
+          let persisted = M.of_document document |> model in
+          let active =
+            M.find persisted ~binding |> model |> M.Snapshot.active |> Option.value_exn
+          in
+          let grant = M.Active.grant active |> Option.value_exn in
+          let granted =
+            List.sort
+              [ "openid"; "profile"; "email"; "offline_access" ]
+              ~compare:String.compare
+          in
+          assert (List.equal String.equal (M.Grant.effective grant).scopes granted);
+          assert (
+            match M.Grant.scopes grant with
+            | Value scopes ->
+              List.equal String.equal (List.sort scopes ~compare:String.compare) granted
+            | Absent | Null -> false);
+          assert (
+            Option.equal
+              (List.equal String.equal)
+              (M.Expectation.oauth_required_scopes (M.Expectation.exact identity))
+              (Some required_scopes));
+          List.iter
+            [ "other-account", "synthetic-subject"; "synthetic-account", "other-subject" ]
+            ~f:(fun (account, verified_subject) ->
+              let foreign =
+                M.Identity.oauth
+                  ~host
+                  ~provider:"openai"
+                  ~billing:"subscription"
+                  ~issuer:(O.Policy.issuer Flow_test.policy)
+                  ~client_registration:(O.Policy.client_registration Flow_test.policy)
+                  ~resource:(O.Policy.resource Flow_test.policy)
+                  ~account
+                  ~verified_subject
+                  ~required_scopes
+                |> model
+              in
+              assert (not (M.Expectation.accepts (M.Expectation.exact foreign) identity)));
+          print_endline "configured requirements retained; grant extras accepted"
+        | _ ->
+          assert (
+            match result with
+            | Error A.Error.Invalid_binding -> true
+            | _ -> false);
+          assert (Option.is_none active);
+          print_endline "missing requirement rejected without active publication"));
+  [%expect
+    {|
+    configured requirements retained; grant extras accepted
+    configured requirements retained; grant extras accepted
+    missing requirement rejected without active publication
+    |}]
 ;;

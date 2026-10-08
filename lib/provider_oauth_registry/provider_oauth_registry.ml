@@ -339,6 +339,11 @@ module Acquisition = struct
         let%bind verified =
           O.Login.await t.login |> Result.map_error ~f:(fun error -> Error.OAuth error)
         in
+        let%bind required_scopes =
+          match M.Expectation.oauth_required_scopes t.expectation with
+          | Some scopes -> Ok scopes
+          | None -> Error Error.Invalid_binding
+        in
         let%bind identity =
           M.Identity.oauth
             ~host:t.host
@@ -349,7 +354,7 @@ module Acquisition = struct
             ~resource:(O.Policy.resource t.adapter.policy)
             ~account:(O.Verified.account verified)
             ~verified_subject:(O.Verified.subject verified)
-            ~required_scopes:(O.Verified.scopes verified)
+            ~required_scopes
           |> Result.map_error ~f:(fun error -> Error.Registry (C.Error.Model error))
         in
         let%bind () =

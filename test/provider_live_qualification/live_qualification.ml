@@ -418,6 +418,53 @@ module Failure = struct
   ;;
 end
 
+let oauth_failure_json error =
+  let stage =
+    match Provider_oauth.Error.stage error with
+    | Configure -> "configure"
+    | Listen -> "listen"
+    | Callback -> "callback"
+    | Device_challenge -> "device_challenge"
+    | Device_poll -> "device_poll"
+    | Exchange -> "exchange"
+    | Identity -> "identity"
+  in
+  let code =
+    match Provider_oauth.Error.code error with
+    | Invalid_configuration -> "invalid_configuration"
+    | Unsupported_route -> "unsupported_route"
+    | Closed -> "closed"
+    | Timed_out -> "timed_out"
+    | Invalid_callback -> "invalid_callback"
+    | State_mismatch -> "state_mismatch"
+    | Authorization_denied -> "authorization_denied"
+    | Protocol_error -> "protocol_error"
+    | Response_too_large -> "response_too_large"
+    | Transport_unavailable -> "transport_unavailable"
+    | Identity_mismatch -> "identity_mismatch"
+    | Identity_unverifiable -> "identity_unverifiable"
+    | Submission_uncertain -> "submission_uncertain"
+  in
+  let identity_failure =
+    Option.value_map
+      (Provider_oauth.Error.identity_failure error)
+      ~default:`Null
+      ~f:(fun cause ->
+        `String
+          (match cause with
+           | Invalid_token -> "invalid_token"
+           | Issuer -> "issuer"
+           | Audience -> "audience"
+           | Account -> "account"
+           | Subject -> "subject"
+           | Nonce -> "nonce"
+           | Expiry -> "expiry"
+           | Scopes -> "scopes"))
+  in
+  `Object
+    [ "stage", `String stage; "code", `String code; "identity_failure", identity_failure ]
+;;
+
 module Evidence = struct
   type status =
     | Incomplete
@@ -444,6 +491,7 @@ module Evidence = struct
     ; renewal_ws_continuity_proven : bool
     ; cancelled_owner_flow_proven : bool
     ; failure : Failure.t option
+    ; oauth_failure : Provider_oauth.Error.t option
     ; protocol_violation : O.Diagnostic.Protocol_violation.t option
     ; reason : string
     ; feature_evidence : Feature_case.Evidence.t option
@@ -496,6 +544,8 @@ module Evidence = struct
         , if t.renewal_ws_continuity_proven then `True else `False )
       ; ( "cancelled_owner_flow_proven"
         , if t.cancelled_owner_flow_proven then `True else `False )
+      ; ( "oauth_failure"
+        , Option.value_map t.oauth_failure ~default:`Null ~f:oauth_failure_json )
       ; "observed_failure", Option.value_map t.failure ~default:`Null ~f:Failure.to_json
       ; ( "feature"
         , Option.value_map t.plan.feature ~default:`Null ~f:(fun case ->
@@ -679,6 +729,117 @@ let continuity_self_check () =
   assert (assistant_repeated_marker ~before:[] [ assistant ]);
   assert (not (assistant_repeated_marker ~before:[ assistant ] [ assistant ]));
   assert (not (assistant_repeated_marker ~before:[] [ user ]))
+;;
+
+let resume_selection_valid ~auth ~phase =
+  (Plan.equal_auth auth Browser || Plan.equal_auth auth Device)
+  && Plan.equal_phase phase Journey
+;;
+
+let resume_session_admissible ~checkpoint ~stored_sessions ~registered_sessions =
+  (not checkpoint) && stored_sessions = 0 && registered_sessions = 0
+;;
+
+let resume_registration_matches
+      ~owner
+      ~record_owner
+      ~phase
+      ~operation_result
+      ~original_operation
+      ~active_revision
+  =
+  P.Id.Principal.equal owner record_owner
+  && DTO.Flow_result.equal_phase phase Completed
+  && (match operation_result with
+      | M.Operation.Committed -> true
+      | Pending | Rejected | Unavailable -> false)
+  && Option.equal M.Id.equal active_revision (Some original_operation)
+;;
+
+let resume_self_check () =
+  assert (resume_selection_valid ~auth:Browser ~phase:Journey);
+  assert (resume_selection_valid ~auth:Device ~phase:Journey);
+  assert (not (resume_selection_valid ~auth:Api ~phase:Journey));
+  assert (not (resume_selection_valid ~auth:Browser ~phase:Feature));
+  assert (
+    resume_session_admissible ~checkpoint:false ~stored_sessions:0 ~registered_sessions:0);
+  assert (
+    not
+      (resume_session_admissible
+         ~checkpoint:true
+         ~stored_sessions:0
+         ~registered_sessions:0));
+  assert (
+    not
+      (resume_session_admissible
+         ~checkpoint:false
+         ~stored_sessions:1
+         ~registered_sessions:0));
+  assert (
+    not
+      (resume_session_admissible
+         ~checkpoint:false
+         ~stored_sessions:0
+         ~registered_sessions:1));
+  let owner =
+    P.Id.Principal.of_string "pri_resume_owner"
+    |> checked_named ~stage:"offline_resume_owner"
+  in
+  let foreign =
+    P.Id.Principal.of_string "pri_resume_foreign"
+    |> checked_named ~stage:"offline_resume_foreign"
+  in
+  let operation = id "offline-original-enrollment" in
+  let accepts ~record_owner ~phase ~operation_result ~active_revision =
+    resume_registration_matches
+      ~owner
+      ~record_owner
+      ~phase
+      ~operation_result
+      ~original_operation:operation
+      ~active_revision
+  in
+  assert (
+    accepts
+      ~record_owner:owner
+      ~phase:Completed
+      ~operation_result:Committed
+      ~active_revision:(Some operation));
+  assert (
+    not
+      (accepts
+         ~record_owner:foreign
+         ~phase:Completed
+         ~operation_result:Committed
+         ~active_revision:(Some operation)));
+  List.iter
+    [ DTO.Flow_result.Pending; Failed DTO.Error.Network; Cancelled; Interrupted; Expired ]
+    ~f:(fun phase ->
+      assert (
+        not
+          (accepts
+             ~record_owner:owner
+             ~phase
+             ~operation_result:Committed
+             ~active_revision:(Some operation))));
+  List.iter [ M.Operation.Pending; Rejected; Unavailable ] ~f:(fun operation_result ->
+    assert (
+      not
+        (accepts
+           ~record_owner:owner
+           ~phase:Completed
+           ~operation_result
+           ~active_revision:(Some operation))));
+  List.iter
+    [ None; Some (id "offline-replacement") ]
+    ~f:(fun active_revision ->
+      assert (
+        not
+          (accepts
+             ~record_owner:owner
+             ~phase:Completed
+             ~operation_result:Committed
+             ~active_revision)))
 ;;
 
 let feature_self_check () =
@@ -879,6 +1040,7 @@ let self_check () =
   assert (not (browser_selection_valid ~auth:Browser ~phase:Renew Launch_local));
   budget_self_check ();
   continuity_self_check ();
+  resume_self_check ();
   feature_self_check ();
   assert (Result.is_ok (Key_input.environment "OPENAI_KEY"));
   assert (Result.is_error (Key_input.environment "OPENAI_KEY\000"));
@@ -925,6 +1087,7 @@ let self_check () =
     ; renewal_ws_continuity_proven = false
     ; cancelled_owner_flow_proven = false
     ; failure = None
+    ; oauth_failure = None
     ; protocol_violation = None
     ; feature_evidence = None
     ; feature_failure = None
@@ -1015,6 +1178,9 @@ type host =
   ; transport_proven : bool ref
   ; budget_denial : string option ref
   ; failure : Failure.t option ref
+  ; oauth_failure : Provider_oauth.Error.t option ref
+  ; expectation : M.Expectation.t
+  ; login : Provider_oauth.Login.t option ref
   ; protocol_violation : O.Diagnostic.Protocol_violation.t option ref
   ; close : unit -> unit
   }
@@ -1029,6 +1195,7 @@ let open_host
       ~transport_proven
       ~budget_denial
       ~failure
+      ~oauth_failure
       ~protocol_violation
   =
   let driver =
@@ -1144,6 +1311,7 @@ let open_host
     |> checked_named ~stage:"boundary_0777"
   in
   let runtime = ref None in
+  let login = ref None in
   let get_runtime () = Option.value_exn !runtime in
   let observe_preparation result =
     Result.map_error result ~f:(fun error ->
@@ -1225,25 +1393,31 @@ let open_host
                 ~lease:(Provider_oauth_registry.lease oauth)
                 ~renewal:(Provider_oauth_registry.renewal oauth)))
         ~start_login:(fun ~sw ~template:_ ~mode ->
-          match mode with
-          | DTO.Login_mode.Browser ->
-            Provider_oauth.Login.start_browser
-              ~transport
-              ~policy
-              ~sw
-              ~net:(Eio.Stdenv.net env)
-              ~secure_random:(Eio.Stdenv.secure_random env)
-              ~clock:(Eio.Stdenv.mono_clock env)
-              ~wall_clock:(Eio.Stdenv.clock env)
-              ~maximum_wait:plan.maximum_phase
-          | Device ->
-            Provider_oauth.Login.start_device
-              ~transport
-              ~policy
-              ~sw
-              ~clock:(Eio.Stdenv.mono_clock env)
-              ~wall_clock:(Eio.Stdenv.clock env)
-              ~maximum_wait:plan.maximum_phase)
+          let result =
+            match mode with
+            | DTO.Login_mode.Browser ->
+              Provider_oauth.Login.start_browser
+                ~transport
+                ~policy
+                ~sw
+                ~net:(Eio.Stdenv.net env)
+                ~secure_random:(Eio.Stdenv.secure_random env)
+                ~clock:(Eio.Stdenv.mono_clock env)
+                ~wall_clock:(Eio.Stdenv.clock env)
+                ~maximum_wait:plan.maximum_phase
+            | Device ->
+              Provider_oauth.Login.start_device
+                ~transport
+                ~policy
+                ~sw
+                ~clock:(Eio.Stdenv.mono_clock env)
+                ~wall_clock:(Eio.Stdenv.clock env)
+                ~maximum_wait:plan.maximum_phase
+          in
+          (match result with
+           | Ok (value, _) -> if Option.is_none !login then login := Some value
+           | Error error -> oauth_failure := Some error);
+          result)
         ~inference_principal:(P.Id.Principal.to_string principal.id)
         ~authorize_bridge:(fun ~principal:who ~profile:_ ~operation:_ ->
           String.equal who (P.Id.Principal.to_string principal.id))
@@ -1333,6 +1507,9 @@ let open_host
   ; transport_proven
   ; budget_denial
   ; failure
+  ; oauth_failure
+  ; expectation
+  ; login
   ; protocol_violation
   ; daemon
   ; runtime
@@ -1381,7 +1558,7 @@ let require_ok condition reason =
   if not condition then raise (Qualification_failure reason)
 ;;
 
-let current_identity directory =
+let current_registry_model directory =
   Eio.Switch.run (fun sw ->
     let lease =
       S.Lock.acquire directory (metadata_name "provider-registry-M.lock") ~sw ~mode:Shared
@@ -1406,8 +1583,12 @@ let current_identity directory =
         let model =
           M.of_document document |> checked_named ~stage:"metadata_model_decode"
         in
-        M.find model ~binding:(id "live-route")
-        |> checked_named ~stage:"metadata_binding_lookup"))
+        model))
+;;
+
+let current_identity directory =
+  M.find (current_registry_model directory) ~binding:(id "live-route")
+  |> checked_named ~stage:"metadata_binding_lookup"
 ;;
 
 let source_revision snapshot =
@@ -1438,6 +1619,92 @@ let launch_browser env uri =
   | Eio.Time.Timeout -> raise (Qualification_failure "browser_launch_timeout")
 ;;
 
+let flow_reference_equal (a : DTO.Flow_ref.t) (b : DTO.Flow_ref.t) =
+  P.Id.Server.equal a.server_id b.server_id
+  && DTO.Profile_id.equal a.profile b.profile
+  && DTO.Flow_id.equal a.flow_id b.flow_id
+  && P.Timestamp.equal a.expires_at b.expires_at
+;;
+
+let reconcile_enrolled host credential_directory mode =
+  let original =
+    P.Command.Provider_login_begin
+      { profile = profile_id; mode; idempotency_key = key "live-oauth-enrollment" }
+  in
+  let flow =
+    match
+      Runtime.receipt host.runtime ~actor original
+      |> checked_operator ~stage:"resume_original_receipt"
+    with
+    | P.Command_receipt.Committed (Provider_login flow) -> flow
+    | Missing | Unavailable | Pending _ | Failed _ | Committed _ ->
+      raise (Qualification_failure "resume_original_enrollment_unproven")
+  in
+  require_ok
+    (P.Id.Server.equal
+       flow.server_id
+       (Agent_store.Session_store.server_id (D.store host.daemon))
+     && DTO.Profile_id.equal flow.profile profile_id)
+    "resume_flow_host_mismatch";
+  let model = current_registry_model credential_directory in
+  let owners =
+    Provider_operator.Owner_records.create
+      credential_directory
+      ~incarnation:(M.incarnation model)
+      ~maximum_records:128
+    |> checked_named ~stage:"resume_owner_store"
+  in
+  let record =
+    Provider_operator.Owner_records.find owners flow
+    |> checked_named ~stage:"resume_owner_record"
+  in
+  let binding = Provider_operator.Owner_records.Record.binding record in
+  require_ok
+    (flow_reference_equal (Provider_operator.Owner_records.Record.result record).flow flow
+     && M.Id.equal binding (id "live-route")
+     && P.Idempotency_key.equal
+          (Provider_operator.Owner_records.Record.key record)
+          (key "live-oauth-enrollment")
+     && DTO.Login_mode.equal (Provider_operator.Owner_records.Record.mode record) mode)
+    "resume_owner_parameters_mismatch";
+  let operation = Provider_operator.Owner_records.Record.operation record in
+  let operation_proof =
+    M.operation model ~binding ~operation
+    |> checked_named ~stage:"resume_registry_operation"
+  in
+  let snapshot =
+    M.find model ~binding |> checked_named ~stage:"resume_registry_binding"
+  in
+  let active =
+    match M.Snapshot.active snapshot with
+    | Some active -> active
+    | None -> raise (Qualification_failure "resume_active_registration_missing")
+  in
+  let candidate_pending =
+    M.candidate_pending model ~binding |> checked_named ~stage:"resume_candidate_state"
+  in
+  let active_revision =
+    match M.Active.source active with
+    | Protected_revision revision -> Some revision
+    | Environment_reference _ -> None
+  in
+  require_ok
+    (resume_registration_matches
+       ~owner:(Actor.principal actor).id
+       ~record_owner:(Provider_operator.Owner_records.Record.owner record)
+       ~phase:(Provider_operator.Owner_records.Record.result record).phase
+       ~operation_result:(M.Operation.result operation_proof)
+       ~original_operation:operation
+       ~active_revision
+     && (not candidate_pending)
+     && Option.is_none (M.Snapshot.disabled snapshot)
+     && (match M.Snapshot.refresh snapshot with
+         | Idle -> true
+         | Possibly_sent _ | Renewal_uncertain _ -> false)
+     && M.Expectation.accepts host.expectation (M.Active.identity active))
+    "resume_original_active_registration_unproven"
+;;
+
 let authorize
       env
       ~sw
@@ -1447,6 +1714,8 @@ let authorize
       key_input
       ~browser_presentation
       ~cancelled_owner_flow_proven
+      ~resume_enrolled
+      ~credential_directory
   =
   ignore
     (Runtime.dispatch
@@ -1473,79 +1742,92 @@ let authorize
     let mode =
       if Plan.equal_auth plan.auth Browser then DTO.Login_mode.Browser else Device
     in
-    let flow =
-      match
-        Runtime.dispatch
-          host.runtime
-          ~actor
-          (P.Command.Provider_login_begin
-             { profile = profile_id; mode; idempotency_key = key "live-oauth-enrollment" })
-        |> checked_named ~stage:"boundary_1081"
-      with
-      | P.Method_result.Provider_login_begin flow -> flow
-      | _ -> raise (Qualification_failure "login_result_invalid")
-    in
-    let challenge =
-      match
-        Runtime.dispatch host.runtime ~actor (P.Command.Provider_login_challenge { flow })
-        |> checked_named ~stage:"boundary_1089"
-      with
-      | P.Method_result.Provider_login_challenge c -> c
-      | _ -> raise (Qualification_failure "challenge_unavailable")
-    in
-    (match browser_presentation with
-     | Browser_presentation.Launch_local ->
-       (match
-          DTO.Private_challenge.with_browser_uri challenge ~f:(fun uri ->
-            launch_browser env uri)
+    if resume_enrolled
+    then reconcile_enrolled host credential_directory mode
+    else (
+      let flow =
+        match
+          Runtime.dispatch
+            host.runtime
+            ~actor
+            (P.Command.Provider_login_begin
+               { profile = profile_id
+               ; mode
+               ; idempotency_key = key "live-oauth-enrollment"
+               })
+          |> checked_named ~stage:"boundary_1081"
         with
-        | Some () -> ()
-        | None -> raise (Qualification_failure "browser_challenge_invalid"))
-     | Private_terminal ->
-       (* The terminal descriptor is separate from stdout/stderr/artifact capture. *)
-       Eio.Path.with_open_out
-         ~create:`Never
-         Eio.Path.(Eio.Stdenv.fs env / "/dev/tty")
-         (fun sink ->
-            let browser =
-              DTO.Private_challenge.with_browser_uri challenge ~f:(fun uri ->
-                Eio.Flow.copy_string
-                  ("Authorize this qualification at " ^ Uri.to_string uri ^ "\n")
-                  sink)
-            in
-            let device =
-              DTO.Private_challenge.with_device_prompt
-                challenge
-                ~f:(fun ~verification_uri ~user_code ->
+        | P.Method_result.Provider_login_begin flow -> flow
+        | _ -> raise (Qualification_failure "login_result_invalid")
+      in
+      let challenge =
+        match
+          Runtime.dispatch
+            host.runtime
+            ~actor
+            (P.Command.Provider_login_challenge { flow })
+          |> checked_named ~stage:"boundary_1089"
+        with
+        | P.Method_result.Provider_login_challenge c -> c
+        | _ -> raise (Qualification_failure "challenge_unavailable")
+      in
+      (match browser_presentation with
+       | Browser_presentation.Launch_local ->
+         (match
+            DTO.Private_challenge.with_browser_uri challenge ~f:(fun uri ->
+              launch_browser env uri)
+          with
+          | Some () -> ()
+          | None -> raise (Qualification_failure "browser_challenge_invalid"))
+       | Private_terminal ->
+         (* The terminal descriptor is separate from stdout/stderr/artifact capture. *)
+         Eio.Path.with_open_out
+           ~create:`Never
+           Eio.Path.(Eio.Stdenv.fs env / "/dev/tty")
+           (fun sink ->
+              let browser =
+                DTO.Private_challenge.with_browser_uri challenge ~f:(fun uri ->
                   Eio.Flow.copy_string
-                    ("Authorize at "
-                     ^ Uri.to_string verification_uri
-                     ^ " using code "
-                     ^ user_code
-                     ^ "\n")
+                    ("Authorize this qualification at " ^ Uri.to_string uri ^ "\n")
                     sink)
-            in
-            if Option.is_none browser && Option.is_none device
-            then raise (Qualification_failure "challenge_invalid")));
-    wait env (fun () ->
-      match
-        Runtime.dispatch
-          host.runtime
-          ~actor
-          (P.Command.Provider_status { profile = Some profile_id })
-        |> checked_named ~stage:"boundary_1125"
-      with
-      | P.Method_result.Provider_status status ->
-        let flow =
-          List.find status.flows ~f:(fun f ->
-            DTO.Flow_id.equal f.flow.flow_id flow.flow_id)
-          |> Option.value_exn
-        in
-        (match flow.phase with
-         | Pending -> false
-         | Completed -> true
-         | _ -> raise (Qualification_failure "login_not_completed"))
-      | _ -> raise (Qualification_failure "status_invalid")));
+              in
+              let device =
+                DTO.Private_challenge.with_device_prompt
+                  challenge
+                  ~f:(fun ~verification_uri ~user_code ->
+                    Eio.Flow.copy_string
+                      ("Authorize at "
+                       ^ Uri.to_string verification_uri
+                       ^ " using code "
+                       ^ user_code
+                       ^ "\n")
+                      sink)
+              in
+              if Option.is_none browser && Option.is_none device
+              then raise (Qualification_failure "challenge_invalid")));
+      wait env (fun () ->
+        match
+          Runtime.dispatch
+            host.runtime
+            ~actor
+            (P.Command.Provider_status { profile = Some profile_id })
+          |> checked_named ~stage:"boundary_1125"
+        with
+        | P.Method_result.Provider_status status ->
+          let flow =
+            List.find status.flows ~f:(fun f ->
+              DTO.Flow_id.equal f.flow.flow_id flow.flow_id)
+            |> Option.value_exn
+          in
+          (match flow.phase with
+           | Pending -> false
+           | Completed -> true
+           | _ ->
+             Option.iter !(host.login) ~f:(fun value ->
+               Option.iter (Provider_oauth.Login.error value) ~f:(fun error ->
+                 host.oauth_failure := Some error));
+             raise (Qualification_failure "login_not_completed"))
+        | _ -> raise (Qualification_failure "status_invalid"))));
   if not (Plan.equal_auth plan.auth Api)
   then (
     let mode =
@@ -1562,7 +1844,11 @@ let authorize
           (P.Command.Provider_login_begin
              { profile = profile_id
              ; mode
-             ; idempotency_key = key "live-cancel-enrollment"
+             ; idempotency_key =
+                 key
+                   (if resume_enrolled
+                    then "live-resume-cancel-enrollment"
+                    else "live-cancel-enrollment")
              })
         |> checked_named ~stage:"boundary_1156"
       with
@@ -1582,7 +1868,13 @@ let authorize
          host.runtime
          ~actor
          (P.Command.Provider_login_cancel
-            { flow; idempotency_key = key "live-cancel-owned-flow" })
+            { flow
+            ; idempotency_key =
+                key
+                  (if resume_enrolled
+                   then "live-resume-cancel-owned-flow"
+                   else "live-cancel-owned-flow")
+            })
        |> checked_named ~stage:"boundary_1175"
        : P.Method_result.t);
     match
@@ -2117,6 +2409,7 @@ let run
       ~key_input
       ~hold_until_expiry
       ~browser_presentation
+      ~resume_enrolled
   =
   let attempts = ref 0
   and turns = ref 0
@@ -2133,12 +2426,16 @@ let run
   and budget_denial = ref None
   and cancelled_owner_flow_proven = ref false
   and failure = ref None
+  and oauth_failure = ref None
   and protocol_violation = ref None
   and feature_evidence = ref None
   and feature_failure = ref None in
   let status = ref Evidence.Incomplete
   and reason = ref "not_attempted" in
   let execute () =
+    require_ok
+      ((not resume_enrolled) || resume_selection_valid ~auth:plan.auth ~phase)
+      "resume_selection_invalid";
     require_ok
       (browser_selection_valid ~auth:plan.auth ~phase browser_presentation)
       "browser_launch_selection_invalid";
@@ -2168,7 +2465,14 @@ let run
         ~f:(fun () ->
           let plan_name = metadata_name "plan.json" in
           let plan_bytes = Bytes.of_string (Jsonaf.to_string (Plan.document plan)) in
-          (match S.Directory.create_immutable metadata plan_name plan_bytes with
+          (if resume_enrolled
+           then (
+             let original =
+               S.Directory.read_bounded metadata plan_name ~max_bytes:16384
+               |> checked_named ~stage:"resume_existing_plan"
+             in
+             require_ok (Bytes.equal original plan_bytes) "plan_mismatch");
+           match S.Directory.create_immutable metadata plan_name plan_bytes with
            | Ok () -> ()
            | Error error when S.Error.equal_code (S.Error.code error) Exists ->
              let old =
@@ -2225,6 +2529,7 @@ let run
                   ~transport_proven
                   ~budget_denial
                   ~failure
+                  ~oauth_failure
                   ~protocol_violation
               in
               Exn.protect ~finally:host.close ~f:(fun () -> f host_sw host))
@@ -2250,7 +2555,9 @@ let run
                     host
                     key_input
                     ~browser_presentation
-                    ~cancelled_owner_flow_proven;
+                    ~cancelled_owner_flow_proven
+                    ~resume_enrolled
+                    ~credential_directory;
                   let input =
                     Feature_case.input case |> checked_named ~stage:"feature_fixture"
                   in
@@ -2362,7 +2669,9 @@ let run
                   host
                   key_input
                   ~browser_presentation
-                  ~cancelled_owner_flow_proven;
+                  ~cancelled_owner_flow_proven
+                  ~resume_enrolled
+                  ~credential_directory;
                 let input =
                   Feature_case.input case |> checked_named ~stage:"feature_fixture"
                 in
@@ -2493,6 +2802,18 @@ let run
           then (
             require_ok (Option.is_none previous) "journey_already_admitted";
             with_host (fun host_sw host ->
+              if resume_enrolled
+              then
+                require_ok
+                  (resume_session_admissible
+                     ~checkpoint:(Option.is_some previous)
+                     ~stored_sessions:
+                       (List.length
+                          (Agent_store.Session_store.list_sessions (D.store host.daemon)))
+                     ~registered_sessions:
+                       (List.length
+                          (Agent_server.Session_registry.entries (D.registry host.daemon))))
+                  "resume_prior_session_unproven";
               authorize
                 env
                 ~sw:host_sw
@@ -2501,7 +2822,9 @@ let run
                 host
                 key_input
                 ~browser_presentation
-                ~cancelled_owner_flow_proven;
+                ~cancelled_owner_flow_proven
+                ~resume_enrolled
+                ~credential_directory;
               let before = current_identity credential_directory in
               let handle = create_session env ~sw:host_sw host in
               let session_id = Agent_client.Session_handle.session_id handle in
@@ -2818,6 +3141,7 @@ let run
   ; renewal_ws_continuity_proven = !renewal_ws_continuity_proven
   ; cancelled_owner_flow_proven = !cancelled_owner_flow_proven
   ; failure = !failure
+  ; oauth_failure = !oauth_failure
   ; protocol_violation = !protocol_violation
   ; feature_evidence = !feature_evidence
   ; feature_failure = !feature_failure

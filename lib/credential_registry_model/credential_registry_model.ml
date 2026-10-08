@@ -218,6 +218,14 @@ module Expectation = struct
     | Acquisition expectation -> expectation.host
   ;;
 
+  let oauth_required_scopes = function
+    | Acquisition expected -> Some expected.required_scopes
+    | Exact identity ->
+      (match Identity.method_ identity with
+       | Oauth { required_scopes; _ } -> Some required_scopes
+       | Api_key _ -> None)
+  ;;
+
   let accepts t (identity : Identity.t) =
     match t, identity.method_ with
     | Exact expected, _ -> Identity.equal expected identity

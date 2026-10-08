@@ -13,7 +13,11 @@ the generated nonce. Unrelated callbacks do not consume the pending login. Devic
 polling uses the provider's custom endpoints and treats 403/404 as pending only at
 the polling endpoint. Both flows have finite monotonic deadlines and owned workers
 that cancellation and close join. Authorization-code exchanges are not retried
-after possible submission.
+after possible submission. The callback returns fixed text directing the user
+to OChat for the final status; receiving a callback does not itself prove that
+login or credential publication succeeded. The listener permits immediate
+restart after a completed callback while refusing another active listener on
+the same fixed loopback port.
 
 ## Identity provenance
 
@@ -52,14 +56,17 @@ remain required; header construction does not replace host authorization. No
 arbitrary header interface or insecure TLS override is provided.
 
 Errors retain finite classifications without server bodies, token bytes or private
-callback parameters. Transport headers and bodies are bounded before decoding.
+callback parameters. Identity failures identify only the rejected check, such as
+issuer, audience or nonce. `Login.error` reads a completed typed failure without
+consuming the login result; absence is not evidence of successful login.
+Transport headers and bodies are bounded before decoding.
 Ambiguous code/refresh exchange results do not authorize automatic replay. The
 registry adapter preserves the registry durable rotating intent. The registry owns
 publication, refresh serialization, logout and late-result rejection.
 
 ## Qualification limits
 
-All 18 synthetic protocol, flow and native registry adapter cases pass under the
+All 21 synthetic protocol, flow and native registry adapter cases pass under the
 strict unrestricted macOS runner, including an actual owned loopback callback.
 They cover state rejection, pending polling, cancellation, whole-flow expiry,
 bounded HTTP framing, identity validation, refresh omission and continuity,
@@ -68,9 +75,11 @@ during an exchange. The Responses driver suites also pass, including the two
 new direct-route/header cases across HTTP and WebSocket policies. Repository
 `@check` and offline documentation validation pass.
 
-No live provider authentication or account eligibility was exercised. The fixed
-registration, real browser/device workflows, refresh and direct HTTP/WS route
-acceptance still require provider qualification. Synthetic exchanges do not claim
+Live browser login, credential registration, restart with saved credentials and
+cancellation of a subsequent login passed on 2026-10-08. The first direct Codex
+SSE inference request returned HTTP 400; it does not qualify inference support.
+Complete browser/device workflows, refresh and direct HTTP/WS route acceptance
+still require provider qualification. Synthetic exchanges do not claim
 that OpenAI permits this registration for every host or account.
 
 ## Registry adapter ownership
@@ -79,8 +88,12 @@ The separate `provider_oauth_registry` adapter begins the original durable
 candidate before interactive work. Its owner switch closes and joins login work,
 then cancels only that original pending candidate. Completing login constructs an
 exact registry identity, grant and protected material before committing the
-candidate. Immediately before commit, a required trusted nonyielding callback
-checks current operator ownership and scopes. Revocation returns typed `Denied`
+candidate. The identity keeps the operator expectation's configured required
+scopes; the grant separately retains every verified granted scope and its original
+presence and provenance. Extra grants do not redefine identity requirements.
+Missing requirements still reject publication, and exact expectations retain
+account and subject equality. Immediately before commit, a required trusted
+nonyielding callback checks current operator ownership and scopes. Revocation returns typed `Denied`
 without activation; close cancels the original candidate and preserves the active
 credential. A commit whose publication may have happened remains uncertain for
 explicit reconciliation; it does not retry the exchange or create a new operation.
@@ -96,7 +109,7 @@ revision guards survive the additional profile guards composed by the host bridg
 
 The adapter native-registry regression sources cover restart and refresh,
 cancellation and concurrent completion/close, original-candidate cleanup, foreign
-identity pairing, and lost publication acknowledgment. All 18 focused OAuth
+identity pairing, and lost publication acknowledgment. All 21 focused OAuth
 protocol, flow and native-registry expect cases passed strict comparison in the
 composed host build. These checks use controlled external exchanges; real
-provider registration, expiry and renewal remain live qualification requirements.
+device registration, expiry and renewal remain live qualification requirements.

@@ -29,7 +29,22 @@ module Error : sig
     | Submission_uncertain
   [@@deriving equal, sexp_of]
 
+  type identity_failure =
+    | Invalid_token
+    | Issuer
+    | Audience
+    | Account
+    | Subject
+    | Nonce
+    | Expiry
+    | Scopes
+  [@@deriving equal, sexp_of]
+
   type t
+
+  (** Optional closed failed identity check; absent for non-identity failures.
+      Contains no claim/token values and grants no authentication authority. *)
+  val identity_failure : t -> identity_failure option
 
   val stage : t -> stage
   val code : t -> code
@@ -137,6 +152,10 @@ module Login : sig
   (** Caller switch owns one worker; inner switch owns listener/accepted sockets.
       close cancels+joins worker. Whole monotonic bound includes listener setup,
       pending requests, exchange and validation. Positive maximum<=900seconds.
+      Browser listener uses SO_REUSEADDR for immediate restart after a completed
+      callback, with SO_REUSEPORT disabled: an active listener at the same pinned
+      endpoint rejects, without alternative-port fallback. Owned listener closes
+      before worker completion is published.
       Browser listener binds literal127.0.0.1 and selected allowed port BEFORE
       exposing URI; browser opener belongs operator frontend. Randomness borrowed.
       ID-token nonce must match requested browser nonce. *)
@@ -161,6 +180,13 @@ module Login : sig
     -> (t * Challenge.t, Error.t) result
 
   val phase : t -> phase
+
+  (** Nonblocking, non-consuming read of a completed typed failure. [None] means
+      pending, success, or an unexpected exception; it is not success evidence.
+      Never returns verified material or changes [await]/[close] ownership.
+      Unexpected exceptions remain for existing [await]/[close] propagation. *)
+  val error : t -> Error.t option
+
   val await : t -> (Verified.t, Error.t) result
 
   (** Cancels and joins the owned worker on every call. An unexpected worker

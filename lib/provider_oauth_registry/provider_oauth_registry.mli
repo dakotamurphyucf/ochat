@@ -56,7 +56,10 @@ module Acquisition : sig
       False returns [Denied] without activation and retires the original candidate;
       [close] remains safe. Filesystem publication already admitted may finish
       after authorization expiry. Cancellation
-      preserves original exception/backtrace; protected cleanup never resubmits. *)
+      preserves original exception/backtrace; protected cleanup never resubmits.
+      Identity retains the expectation's exact configured required scopes;
+      the verified provider grant independently covers them and retains all
+      granted scopes/presence/provenance. Extra grants never redefine identity. *)
   val complete : t -> authorize_commit:(unit -> bool) -> (unit, Error.t) result
 
   val close : t -> (unit, Error.t) result

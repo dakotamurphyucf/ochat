@@ -106,6 +106,11 @@ module Expectation : sig
     -> required_scopes:string list
     -> (t, Error.t) result
 
+  (** Configured OAuth requirements, not the scopes granted by the provider.
+      Exact OAuth expectations retain the original identity requirements; API-key
+      expectations return [None]. Grant construction separately proves coverage. *)
+  val oauth_required_scopes : t -> string list option
+
   val accepts : t -> Identity.t -> bool
 end
 

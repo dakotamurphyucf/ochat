@@ -154,6 +154,7 @@ let jwt fields =
 
 let tokens
       env
+      ?(issuer = "https://auth.openai.com")
       ?(id_audience = "app_EMoamEEZ73f0CkXaXp7hrann")
       ?(account = "synthetic-account")
       ?(access_account = "synthetic-account")
@@ -167,7 +168,7 @@ let tokens
   in
   let number n = `Number (Int64.to_string n) in
   let fields account audience =
-    [ "iss", `String "https://auth.openai.com"
+    [ "iss", `String issuer
     ; "sub", `String "synthetic-subject"
     ; "aud", `String audience
     ; "iat", number now
@@ -228,8 +229,8 @@ let%expect_test
   [%expect
     {|
     ready
-    ((stage Identity) (code Identity_mismatch))
-    ((stage Identity) (code Identity_mismatch))
+    ((stage Identity) (code Identity_mismatch) (identity_failure Audience))
+    ((stage Identity) (code Identity_mismatch) (identity_failure Account))
   |}]
 ;;
 
@@ -252,7 +253,7 @@ let%expect_test
                on_possible_submission ();
                Ok (200, tokens env ?nonce:!nonce ()))
       in
-      let login, challenge =
+      let start_browser () =
         O.Login.start_browser
           ~transport
           ~policy
@@ -262,8 +263,15 @@ let%expect_test
           ~clock:(Eio.Stdenv.mono_clock env)
           ~wall_clock:(Eio.Stdenv.clock env)
           ~maximum_wait:(Time_ns.Span.of_sec 10.)
-        |> ok
       in
+      let login, challenge = start_browser () |> ok in
+      (match start_browser () with
+       | Error error ->
+         assert (O.Error.equal_code (O.Error.code error) Transport_unavailable);
+         (match O.Error.stage error with
+          | Listen -> ()
+          | _ -> assert false)
+       | Ok _ -> assert false);
       let uri = O.Challenge.with_browser_uri challenge ~f:Fn.id |> ok in
       nonce := Uri.get_query_param uri "nonce";
       let state = Uri.get_query_param uri "state" |> Option.value_exn in
@@ -284,11 +292,47 @@ let%expect_test
                   ^ " HTTP/1.1\r\nHost: 127.0.0.1:1455\r\nConnection: close\r\n\r\n")
                  flow;
                let reader = Eio.Buf_read.of_flow flow ~max_size:1024 in
-               print_endline (Eio.Buf_read.line reader)))
+               print_endline (Eio.Buf_read.line reader);
+               assert (
+                 String.equal
+                   (Eio.Buf_read.line reader)
+                   "Content-Type: text/plain; charset=utf-8");
+               let length =
+                 Eio.Buf_read.line reader
+                 |> String.chop_prefix_exn ~prefix:"Content-Length: "
+                 |> Int.of_string
+               in
+               assert (String.equal (Eio.Buf_read.line reader) "Cache-Control: no-store");
+               assert (String.equal (Eio.Buf_read.line reader) "Connection: close");
+               assert (String.is_empty (Eio.Buf_read.line reader));
+               let body = Eio.Buf_read.take length reader in
+               let expected =
+                 if String.equal state "wrong-state"
+                 then
+                   "OChat could not accept this sign-in response. Return to OChat to \
+                    check the login status or try again.\n"
+                 else
+                   "OChat received the sign-in response. Return to OChat to check the \
+                    final login status.\n"
+               in
+               assert (Int.equal length (String.length expected));
+               assert (String.equal body expected);
+               assert (not (String.is_substring body ~substring:state));
+               assert (not (String.is_substring body ~substring:"synthetic-code"));
+               assert (not (String.is_substring body ~substring:"login complete"));
+               print_string body))
       in
       send "wrong-state";
       send state;
+      assert (Option.is_none (O.Login.error login));
       let verified = O.Login.await login |> ok in
+      assert (Option.is_none (O.Login.error login));
+      let restarted, _ = start_browser () |> ok in
+      O.Login.close restarted;
+      assert (
+        Option.value_map (O.Login.error restarted) ~default:false ~f:(fun error ->
+          O.Error.equal_code (O.Error.code error) Closed));
+      assert (!exchanges = 1);
       print_endline (O.Verified.account verified);
       print_s [%sexp (!exchanges : int)];
       print_result
@@ -304,7 +348,9 @@ let%expect_test
   [%expect
     {|
     HTTP/1.1 400 Bad Request
+    OChat could not accept this sign-in response. Return to OChat to check the login status or try again.
     HTTP/1.1 200 OK
+    OChat received the sign-in response. Return to OChat to check the final login status.
     synthetic-account
     1
     ((stage Configure) (code Unsupported_route))
@@ -483,4 +529,107 @@ let%expect_test "refresh omits ID token but never erases null or accepts account
     possibly consumed
     possibly consumed
   |}]
+;;
+
+let%expect_test "login failure diagnostic is non-consuming before and after await" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let entered, entered_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let transport =
+        O.For_testing.scripted_transport
+          ~clock:(Eio.Stdenv.mono_clock env)
+          (fun endpoint ~body:_ ~on_possible_submission ->
+             match endpoint with
+             | User_code -> Ok (200, challenge)
+             | Device_poll ->
+               Eio.Promise.resolve entered_u ();
+               Eio.Promise.await release;
+               Ok (200, grant)
+             | Token ->
+               on_possible_submission ();
+               Error Connection)
+      in
+      let login, _ =
+        O.Login.start_device
+          ~transport
+          ~policy
+          ~sw
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~wall_clock:(Eio.Stdenv.clock env)
+          ~maximum_wait:(Time_ns.Span.of_sec 5.)
+        |> ok
+      in
+      Eio.Promise.await entered;
+      assert (Option.is_none (O.Login.error login));
+      Eio.Promise.resolve release_u ();
+      let rec await_error () =
+        match O.Login.error login with
+        | Some error -> error
+        | None ->
+          Eio.Fiber.yield ();
+          await_error ()
+      in
+      let original = await_error () in
+      assert (O.Error.equal_code (O.Error.code original) Submission_uncertain);
+      print_result (O.Login.await login);
+      print_result (O.Login.await login);
+      assert (
+        Option.value_map (O.Login.error login) ~default:false ~f:(fun error ->
+          O.Error.equal_code (O.Error.code error) Submission_uncertain));
+      O.Login.close login;
+      assert (Option.is_some (O.Login.error login));
+      print_endline "diagnostic retained without consuming"));
+  [%expect
+    {|
+    ((stage Exchange) (code Submission_uncertain))
+    ((stage Exchange) (code Closed))
+    diagnostic retained without consuming
+    |}]
+;;
+
+let%expect_test "login diagnostic preserves exact issuer rejection without claim values" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let transport =
+        O.For_testing.scripted_transport
+          ~clock:(Eio.Stdenv.mono_clock env)
+          (fun endpoint ~body:_ ~on_possible_submission ->
+             match endpoint with
+             | User_code -> Ok (200, challenge)
+             | Device_poll -> Ok (200, grant)
+             | Token ->
+               on_possible_submission ();
+               Ok (200, tokens env ~issuer:"https://synthetic-wrong.invalid" ()))
+      in
+      let login, _ =
+        O.Login.start_device
+          ~transport
+          ~policy
+          ~sw
+          ~clock:(Eio.Stdenv.mono_clock env)
+          ~wall_clock:(Eio.Stdenv.clock env)
+          ~maximum_wait:(Time_ns.Span.of_sec 5.)
+        |> ok
+      in
+      let error =
+        match O.Login.await login with
+        | Ok _ -> assert false
+        | Error error -> error
+      in
+      assert (O.Error.equal_code (O.Error.code error) Identity_mismatch);
+      assert (
+        Option.value_map
+          (O.Error.identity_failure error)
+          ~default:false
+          ~f:(O.Error.equal_identity_failure Issuer));
+      assert (
+        Option.value_map (O.Login.error login) ~default:false ~f:(fun retained ->
+          Option.equal
+            O.Error.equal_identity_failure
+            (O.Error.identity_failure retained)
+            (O.Error.identity_failure error)));
+      print_result (Error error);
+      O.Login.close login));
+  [%expect {| ((stage Identity) (code Identity_mismatch) (identity_failure Issuer)) |}]
 ;;

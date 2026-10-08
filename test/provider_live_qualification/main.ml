@@ -71,6 +71,13 @@ let command =
          "max-attempts"
          (optional int)
          ~doc:"N persistent actual-attempt ceiling, at most 16"
+     and resume_enrolled =
+       flag
+         "resume-enrolled"
+         no_arg
+         ~doc:
+           " explicitly reconcile original completed OAuth enrollment before the first \
+            journey session"
      and open_browser =
        flag
          "open-browser"
@@ -205,6 +212,7 @@ let command =
                ~root
                ~key_input
                ~hold_until_expiry
+               ~resume_enrolled
                ~browser_presentation:
                  (if open_browser
                   then Q.Browser_presentation.Launch_local

@@ -29,15 +29,28 @@ module Error = struct
     | Submission_uncertain
   [@@deriving equal, sexp_of]
 
+  type identity_failure =
+    | Invalid_token
+    | Issuer
+    | Audience
+    | Account
+    | Subject
+    | Nonce
+    | Expiry
+    | Scopes
+  [@@deriving equal, sexp_of]
+
   type t =
     { stage : stage
     ; code : code
+    ; identity_failure : identity_failure option [@sexp.option]
     }
   [@@deriving sexp_of]
 
   let stage t = t.stage
   let code t = t.code
-  let make stage code = { stage; code }
+  let identity_failure t = t.identity_failure
+  let make ?identity_failure stage code = { stage; code; identity_failure }
 end
 
 let issuer = "https://auth.openai.com"
@@ -189,10 +202,25 @@ let exchange
         ~requested_scopes
         ~access_scope_claim:policy.Policy.access_scope_claim
         ~prior:None
-      |> Result.map_error ~f:(function
-        | Oauth_identity.Error.Account | Subject | Issuer | Audience | Nonce ->
-          Error.make Identity Identity_mismatch
-        | Invalid_token | Expiry | Scopes -> Error.make Identity Identity_unverifiable)
+      |> Result.map_error ~f:(fun failure ->
+        let identity_failure : Error.identity_failure =
+          match failure with
+          | Oauth_identity.Error.Invalid_token -> Invalid_token
+          | Issuer -> Issuer
+          | Audience -> Audience
+          | Account -> Account
+          | Subject -> Subject
+          | Nonce -> Nonce
+          | Expiry -> Expiry
+          | Scopes -> Scopes
+        in
+        let code =
+          match failure with
+          | Oauth_identity.Error.Account | Subject | Issuer | Audience | Nonce ->
+            Error.Identity_mismatch
+          | Invalid_token | Expiry | Scopes -> Error.Identity_unverifiable
+        in
+        Error.make ~identity_failure Identity code)
     in
     let secret value =
       Provider_secret_store.Secret.of_bytes (Bytes.of_string value)
@@ -252,6 +280,12 @@ module Login = struct
     }
 
   let phase t = t.phase
+
+  let error t =
+    match Eio.Promise.peek t.done_ with
+    | Some (Finished (Error error)) -> Some error
+    | None | Some (Finished (Ok _)) | Some (Raised _) -> None
+  ;;
 
   let completion = function
     | Finished result -> result
@@ -414,7 +448,8 @@ module Login = struct
           Ok
             (Eio.Net.listen
                ~sw:owned_sw
-               ~reuse_addr:false
+               ~reuse_addr:true
+               ~reuse_port:false
                ~backlog:4
                net
                (`Tcp (Eio.Net.Ipaddr.V4.loopback, port)))
@@ -468,19 +503,35 @@ module Login = struct
               | Ok _ -> true
               | Error _ -> false
             in
-            (* Fixed response; never reflect code/state/provider text into HTML. *)
+            (* Callback receipt precedes token exchange. Fixed text never reflects
+               code/state/provider text or claims that login is complete. *)
+            let status, body =
+              if accepted
+              then
+                ( "200 OK"
+                , "OChat received the sign-in response. Return to OChat to check the \
+                   final login status.\n" )
+              else
+                ( "400 Bad Request"
+                , "OChat could not accept this sign-in response. Return to OChat to \
+                   check the login status or try again.\n" )
+            in
+            let response =
+              sprintf
+                "HTTP/1.1 %s\r\n\
+                 Content-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: %d\r\n\
+                 Cache-Control: no-store\r\n\
+                 Connection: close\r\n\
+                 \r\n\
+                 %s"
+                status
+                (String.length body)
+                body
+            in
             (try
                Eio.Time.Timeout.run_exn (Eio.Time.Timeout.seconds clock 2.) (fun () ->
-                 Eio.Flow.copy_string
-                   (if accepted
-                    then
-                      "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                    else
-                      "HTTP/1.1 400 Bad Request\r\n\
-                       Content-Length: 0\r\n\
-                       Connection: close\r\n\
-                       \r\n")
-                   flow)
+                 Eio.Flow.copy_string response flow)
              with
              | Eio.Io _ | Eio.Time.Timeout -> ());
             result)
