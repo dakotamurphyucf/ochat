@@ -96,6 +96,7 @@ revision guards survive the additional profile guards composed by the host bridg
 
 The adapter native-registry regression sources cover restart and refresh,
 cancellation and concurrent completion/close, original-candidate cleanup, foreign
-identity pairing, and lost publication acknowledgment. These sources compile against the committed registry interface and their
-focused native runs reached all expected semantic outcomes. Final strict
-comparison after the whitespace correction remains pending.
+identity pairing, and lost publication acknowledgment. All 18 focused OAuth
+protocol, flow and native-registry expect cases passed strict comparison in the
+composed host build. These checks use controlled external exchanges; real
+provider registration, expiry and renewal remain live qualification requirements.

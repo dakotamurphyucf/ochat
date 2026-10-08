@@ -55,6 +55,18 @@ change does not itself authorize replay of another model's opaque captures. Ther
 is no silent lossy fallback when replay is incompatible. Reconstructed legacy DTO data stays
 explicitly reconstructed; loading it does not establish actual wire provenance.
 
+For streamed OpenAI reasoning, the completed `response.output_item.done` capture
+is authoritative for replay, as prescribed by the
+[streaming API reference](https://developers.openai.com/api/reference/resources/responses/streaming-events).
+The terminal envelope may contain a different nonempty `encrypted_content`
+string. The adapter permits that replacement only for an already finalized
+reasoning item, requiring every other raw field to match exactly. It preserves
+the original candidate through persistence and replay, and keeps the actual
+terminal envelope intact in the wire result. Repeated item-completion events,
+tool arguments, identity changes and absent/null changes still require exact
+consistency. Receipt coverage describes the validated output positions and order;
+it does not assert that each candidate was recaptured from the terminal envelope.
+
 Root configuration is captured once, including explicit host defaults. A child
 inherits omitted settings; explicit child overrides produce a separate target
 without changing its parent's captured selection. Replay does not re-read current
@@ -160,6 +172,14 @@ Configuration observations expose a closed safe vocabulary, omit private endpoin
 and instruction values, and retain effective provenance. Provider completion,
 host interruption and delivery uncertainty remain distinct.
 
+HTTP/SSE protocol failures retain a bounded diagnostic on the same attempt. Its
+closed vocabulary identifies stream parsing, end-of-input or terminal validation,
+and distinguishes framing, decoding and tracker violations. Item conflicts can
+identify the event class, the failed consistency check and known fields that
+differed. Diagnostics omit field values, provider IDs, unknown field names and
+raw response data. They use the existing diagnostic visibility and retention
+limits; they do not authorize execution or retry an uncertain request.
+
 Focused qualification uses a non-OpenAI-shaped synthetic adapter for neutral
 execution, and loopback HTTP/SSE fixtures for the real OpenAI adapter. Tests cover
 strict callbacks, cancellation, candidate reconciliation, exact raw replay,
@@ -222,10 +242,11 @@ and current declared capabilities/defaults. The binding records an adapter metho
 label and host credential reference. `api_key` and `oauth_subscription` are separate
 billing modes. The latter denotes the selected direct Codex subscription lifecycle,
 not arbitrary OAuth against the public Responses API. Credential references must
-identify the full host issuer/client registration/audience/account tuple. Future
-login integrations install that binding explicitly. Actual OAuth acquisition and
-route-specific dispatch headers await OCH-66 qualification; this registry does not
-claim a working subscription request flow. Credentials never fall back
+identify the full host issuer/client registration/audience/account tuple. The
+host-owned operator service installs that binding through the direct Codex OAuth
+lifecycle. Acquisition, renewal and route-specific dispatch headers have offline
+integration coverage; live registration, account eligibility and endpoint support
+remain separate qualification requirements. Credentials never fall back
 across accounts, subscription/API-key modes or endpoints. Provider references and
 credentials are unrelated to daemon access tokens and MCP OAuth credentials.
 
@@ -295,9 +316,10 @@ inference and OpenAI adapter tests cover the shared codecs and dispatch contract
 The host explicitly selects `Http_sse`, `Prefer_websocket`, or
 `Require_websocket` on an inference context. SSE remains the default. A declared
 WebSocket capability is required; capability declarations do not prove live
-provider qualification. The public Responses API with API keys is the initial
-route. Subscription OAuth acquisition and route-specific headers belong to
-OCH-66.
+provider qualification. Public API-key and direct Codex subscription profiles
+have separate authorization and route-specific headers. Their actual model and
+transport eligibility must be qualified independently; offline header tests do
+not establish live WebSocket support.
 
 A runtime graph owns a neutral `Inference_runtime.Session`, and the adapter
 creates a private bound preparation closure on that context. No host-wide

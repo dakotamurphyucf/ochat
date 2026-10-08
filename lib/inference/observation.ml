@@ -1243,6 +1243,261 @@ module Transport_selection = struct
 end
 
 module Diagnostic = struct
+  module Protocol_violation = struct
+    type stage =
+      | Feed
+      | Eof
+      | Terminal
+    [@@deriving equal, sexp_of]
+
+    type decode =
+      | Missing
+      | Wrong_type
+      | Invalid
+      | Duplicate
+      | Limit
+    [@@deriving equal, sexp_of]
+
+    type tracker =
+      | Origin_mismatch
+      | Sequence_conflict
+      | Sequence_regression
+      | Item_conflict
+      | Part_conflict
+      | Response_conflict
+      | Event_after_terminal
+      | Terminal_mismatch
+      | Truncated
+    [@@deriving equal, sexp_of]
+
+    module Item_conflict = struct
+      type event =
+        | Response
+        | Item_added
+        | Item_done
+        | Part_added
+        | Part_done
+        | Delta
+        | Text_done
+        | Annotation_added
+        | Terminal
+        | Error
+        | Unknown
+      [@@deriving equal, sexp_of]
+
+      type cause =
+        | Identity_changed
+        | Identity_reused
+        | Duplicate_added
+        | Added_after_final
+        | Descriptor_changed
+        | Final_snapshot_changed
+      [@@deriving equal, sexp_of]
+
+      type field =
+        | Id
+        | Type
+        | Name
+        | Call_id
+        | Namespace
+        | Async
+        | Caller
+        | Phase
+        | Status
+        | Content
+        | Summary
+        | Encrypted_content
+        | Arguments
+        | Input
+        | Role
+        | Other
+      [@@deriving compare, equal, sexp_of]
+
+      type t =
+        { event : event
+        ; cause : cause
+        ; fields : field list
+        }
+      [@@deriving equal, sexp_of]
+
+      let events =
+        [ "response", Response
+        ; "item_added", Item_added
+        ; "item_done", Item_done
+        ; "part_added", Part_added
+        ; "part_done", Part_done
+        ; "delta", Delta
+        ; "text_done", Text_done
+        ; "annotation_added", Annotation_added
+        ; "terminal", Terminal
+        ; "error", Error
+        ; "unknown", Unknown
+        ]
+      ;;
+
+      let causes =
+        [ "identity_changed", Identity_changed
+        ; "identity_reused", Identity_reused
+        ; "duplicate_added", Duplicate_added
+        ; "added_after_final", Added_after_final
+        ; "descriptor_changed", Descriptor_changed
+        ; "final_snapshot_changed", Final_snapshot_changed
+        ]
+      ;;
+
+      let names =
+        [ "id", Id
+        ; "type", Type
+        ; "name", Name
+        ; "call_id", Call_id
+        ; "namespace", Namespace
+        ; "async", Async
+        ; "caller", Caller
+        ; "phase", Phase
+        ; "status", Status
+        ; "content", Content
+        ; "summary", Summary
+        ; "encrypted_content", Encrypted_content
+        ; "arguments", Arguments
+        ; "input", Input
+        ; "role", Role
+        ; "other", Other
+        ]
+      ;;
+
+      let create ~event ~cause ~fields =
+        if List.length fields > 16 || List.contains_dup fields ~compare:compare_field
+        then invalid "fields" "bounded unique field classifications required"
+        else Ok { event; cause; fields = List.sort fields ~compare:compare_field }
+      ;;
+
+      let event t = t.event
+      let cause t = t.cause
+      let fields t = t.fields
+
+      let tag names equal value =
+        string
+          (fst (List.find_exn names ~f:(fun (_, candidate) -> equal candidate value)))
+      ;;
+
+      let to_json t =
+        obj
+          [ "event", tag events equal_event t.event
+          ; "cause", tag causes equal_cause t.cause
+          ; "fields", `Array (List.map t.fields ~f:(tag names equal_field))
+          ]
+      ;;
+
+      let of_json json =
+        let* fields = Decode.fields json [ "event"; "cause"; "fields" ] in
+        let* () =
+          if List.contains_dup (List.map fields ~f:fst) ~compare:String.compare
+          then invalid "item_conflict" "duplicate field"
+          else Ok ()
+        in
+        let* event = Decode.get fields "event" (fun json -> Decode.tag json events) in
+        let* cause = Decode.get fields "cause" (fun json -> Decode.tag json causes) in
+        let* raw = Decode.get fields "fields" Decode.array in
+        let* () =
+          if List.length raw > 16 then invalid "fields" "field bound exceeded" else Ok ()
+        in
+        let* fields = Result.all (List.map raw ~f:(fun json -> Decode.tag json names)) in
+        create ~event ~cause ~fields
+      ;;
+    end
+
+    type kind =
+      | Framing
+      | Decode of decode
+      | Tracker of tracker
+      | Item_conflict of Item_conflict.t
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { stage : stage
+      ; kind : kind
+      }
+    [@@deriving equal, sexp_of]
+
+    let stages = [ "feed", Feed; "eof", Eof; "terminal", Terminal ]
+
+    let decodes =
+      [ "missing", Missing
+      ; "wrong_type", Wrong_type
+      ; "invalid", Invalid
+      ; "duplicate", Duplicate
+      ; "limit", Limit
+      ]
+    ;;
+
+    let trackers : (string * tracker) list =
+      [ "origin_mismatch", Origin_mismatch
+      ; "sequence_conflict", Sequence_conflict
+      ; "sequence_regression", Sequence_regression
+      ; "item_conflict", Item_conflict
+      ; "part_conflict", Part_conflict
+      ; "response_conflict", Response_conflict
+      ; "event_after_terminal", Event_after_terminal
+      ; "terminal_mismatch", Terminal_mismatch
+      ; "truncated", Truncated
+      ]
+    ;;
+
+    let tag names equal value =
+      string (fst (List.find_exn names ~f:(fun (_, candidate) -> equal candidate value)))
+    ;;
+
+    let to_json t =
+      let kind, detail =
+        match t.kind with
+        | Framing -> "framing", `Null
+        | Decode value -> "decode", tag decodes equal_decode value
+        | Tracker value -> "tracker", tag trackers equal_tracker value
+        | Item_conflict value -> "item_conflict", Item_conflict.to_json value
+      in
+      obj
+        [ "stage", tag stages equal_stage t.stage; "kind", string kind; "detail", detail ]
+    ;;
+
+    let of_json json =
+      let* fields = Decode.fields json [ "stage"; "kind"; "detail" ] in
+      let* () =
+        if List.contains_dup (List.map fields ~f:fst) ~compare:String.compare
+        then invalid "protocol_violation" "duplicate field"
+        else Ok ()
+      in
+      let* stage = Decode.get fields "stage" (fun json -> Decode.tag json stages) in
+      let* name = Decode.get fields "kind" Decode.text in
+      let* kind =
+        match name with
+        | "framing" ->
+          let* detail =
+            Decode.get fields "detail" (fun value ->
+              match value with
+              | `Null -> Ok ()
+              | _ -> invalid "detail" "expected null")
+          in
+          ignore detail;
+          Ok Framing
+        | "decode" ->
+          let* detail =
+            Decode.get fields "detail" (fun json -> Decode.tag json decodes)
+          in
+          Ok (Decode detail)
+        | "item_conflict" ->
+          let* detail = Decode.get fields "detail" Item_conflict.of_json in
+          Ok (Item_conflict detail)
+        | "tracker" ->
+          let* detail =
+            Decode.get fields "detail" (fun json -> Decode.tag json trackers)
+          in
+          Ok (Tracker detail)
+        | _ -> invalid "kind" "unknown protocol violation"
+      in
+      Ok { stage; kind }
+    ;;
+  end
+
   type phase =
     | Preparation
     | Authentication
@@ -1270,6 +1525,7 @@ module Diagnostic = struct
     | Timeout
     | Http_status of int
     | Malformed_protocol
+    | Protocol_violation of Protocol_violation.t
     | Unsupported_input
     | Provider_failure
     | Local_result_invalid
@@ -1323,7 +1579,7 @@ module Diagnostic = struct
     | Connection -> "Inference connection failed."
     | Timeout -> "Inference deadline elapsed."
     | Http_status _ -> "Inference HTTP request failed."
-    | Malformed_protocol -> "Inference response was malformed."
+    | Malformed_protocol | Protocol_violation _ -> "Inference response was malformed."
     | Unsupported_input -> "Inference input is unsupported."
     | Provider_failure -> "Inference provider reported a failure."
     | Local_result_invalid -> "Inference completed but the local result was invalid."
@@ -1406,6 +1662,11 @@ module Diagnostic = struct
     | Connection -> obj [ "kind", string "connection" ]
     | Timeout -> obj [ "kind", string "timeout" ]
     | Malformed_protocol -> obj [ "kind", string "malformed_protocol" ]
+    | Protocol_violation detail ->
+      obj
+        [ "kind", string "protocol_violation"
+        ; "detail", Protocol_violation.to_json detail
+        ]
     | Unsupported_input -> obj [ "kind", string "unsupported_input" ]
     | Provider_failure -> obj [ "kind", string "provider_failure" ]
     | Local_result_invalid -> obj [ "kind", string "local_result_invalid" ]
@@ -1413,9 +1674,13 @@ module Diagnostic = struct
   ;;
 
   let reason_of_json json =
-    let* fields = Decode.fields json [ "kind"; "reason"; "status"; "limit" ] in
+    let* fields = Decode.fields json [ "kind"; "reason"; "status"; "limit"; "detail" ] in
     let* kind = Decode.get fields "kind" Decode.text in
     match kind with
+    | "protocol_violation" ->
+      let* fields = Decode.fields json [ "kind"; "detail" ] in
+      let* detail = Decode.get fields "detail" Protocol_violation.of_json in
+      Ok (Protocol_violation detail)
     | "authentication" ->
       let* fields = Decode.fields json [ "kind"; "reason" ] in
       let* reason =

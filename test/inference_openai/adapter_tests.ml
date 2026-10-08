@@ -733,3 +733,263 @@ let%expect_test
   [%expect
     {| unsupported authored/reconstructed tools refused; image capability admitted but actual asset still required |}]
 ;;
+
+let%expect_test
+    "actual adapter protocol diagnostic is scoped persisted and precedes failure"
+  =
+  Eio_main.run (fun env ->
+    let module L = Agent_session.Inference_ledger in
+    let created =
+      frame
+        (`Object
+            [ "type", `String "response.created"
+            ; "sequence_number", `Number "0"
+            ; ( "response"
+              , `Object
+                  [ "id", `String "response"
+                  ; "object", `String "response"
+                  ; "status", `String "in_progress"
+                  ; "output", `Array []
+                  ] )
+            ])
+    in
+    let malformed =
+      terminal ~status:"failed" [ message ]
+      |> fun value ->
+      String.substr_replace_all
+        value
+        ~pattern:"\"status\":\"failed\""
+        ~with_:"\"status\":\"completed\""
+    in
+    let reasoning value =
+      `Object
+        [ "type", `String "reasoning"
+        ; "id", `String "PRIVATE_REASONING_ID"
+        ; "summary", `Array []
+        ; "encrypted_content", `String value
+        ]
+    in
+    let done_ =
+      frame
+        (`Object
+            [ "type", `String "response.output_item.done"
+            ; "sequence_number", `Number "1"
+            ; "output_index", `Number "0"
+            ; "item", reasoning "PRIVATE_EARLY_CIPHERTEXT"
+            ])
+    in
+    let snapshot_mismatch =
+      created
+      ^ done_
+      ^ terminal
+          [ (match reasoning "PRIVATE_FINAL_CIPHERTEXT" with
+             | `Object fields ->
+               `Object
+                 (List.map fields ~f:(fun (name, old) ->
+                    ( name
+                    , if String.equal name "summary"
+                      then
+                        `Array
+                          [ `Object
+                              [ "type", `String "summary_text"
+                              ; "text", `String "PRIVATE_CHANGED_SUMMARY"
+                              ]
+                          ]
+                      else old )))
+             | _ -> assert false)
+          ]
+    in
+    List.iter
+      [ created ^ malformed; snapshot_mismatch ]
+      ~f:(fun body ->
+        with_server
+          env
+          (fun _ -> body)
+          (fun sw endpoint ->
+             let profile = profile endpoint in
+             let target = target profile in
+             let prepared =
+               prepare (context env profile ~target ~auth) (request target)
+             in
+             let ledger =
+               L.create
+                 ~session_id:
+                   (Agent_protocol.Id.Session.of_string "ses_adapter_protocol" |> ok)
+                 ~generation:0
+                 ~before_tracking_unknown:false
+                 ~limits:L.Limits.default
+               |> ok
+             in
+             let ledger, handle, _ =
+               L.admit
+                 ledger
+                 ~source:(Transcript.Source_id.of_string "actual-adapter" |> ok)
+                 ~relation:Root
+                 ~operation_id:None
+                 ~invocation_id:None
+                 ~configuration:(Runtime.Prepared.configuration prepared)
+               |> ok
+             in
+             let ledger = ref ledger in
+             let order = ref [] in
+             let attempt =
+               Runtime.Prepared.start
+                 prepared
+                 ~scope:(L.Handle.scope handle)
+                 ~accounting_id:(L.Handle.accounting_id handle)
+               |> ok
+             in
+             let receipt =
+               Runtime.Attempt.run
+                 attempt
+                 ~sw
+                 ~on_event:(fun event ->
+                   match E.view event with
+                   | Terminal _ -> order := "terminal" :: !order
+                   | _ -> ())
+                 ~on_observation:(fun observation ->
+                   (match O.payload observation with
+                    | Diagnostic _ -> order := "diagnostic" :: !order
+                    | _ -> ());
+                   ledger := fst (L.observe !ledger handle observation |> ok))
+               |> ok
+             in
+             ledger
+             := L.set_state !ledger handle (Terminal (Runtime.Receipt.terminal receipt))
+                |> ok;
+             let document = L.to_document !ledger |> ok in
+             let restored = L.of_document document ~limits:L.Limits.default |> ok in
+             let diagnostics =
+               O.Attempt_record.observations
+                 (L.Row.record (List.hd_exn (L.rows restored)))
+               |> List.filter_map ~f:(fun observation ->
+                 match O.payload observation with
+                 | Diagnostic diagnostic -> Some diagnostic
+                 | _ -> None)
+             in
+             assert (List.length diagnostics = 1);
+             let diagnostic = List.hd_exn diagnostics in
+             print_s
+               [%sexp
+                 (O.Diagnostic.reason diagnostic : O.Diagnostic.reason)
+               , (O.Diagnostic.delivery diagnostic : E.Terminal.delivery option)];
+             print_s [%sexp (List.rev !order : string list)];
+             print_s
+               [%sexp
+                 (E.Terminal.outcome (Runtime.Receipt.terminal receipt)
+                  : E.Terminal.outcome)];
+             let wire =
+               O.Diagnostic.Protocol_violation.to_json
+                 (match O.Diagnostic.reason diagnostic with
+                  | Protocol_violation value -> value
+                  | _ -> assert false)
+               |> Jsonaf.to_string
+             in
+             assert (not (String.is_substring wire ~substring:"PRIVATE")))));
+  [%expect
+    {|
+((Protocol_violation ((stage Feed) (kind (Tracker Terminal_mismatch))))
+ (Response_started))
+(diagnostic terminal)
+(Failed (Transport Protocol))
+((Protocol_violation
+  ((stage Feed)
+   (kind
+    (Item_conflict
+     ((event Terminal) (cause Final_snapshot_changed)
+      (fields (Summary Encrypted_content)))))))
+ (Response_started))
+(diagnostic terminal)
+(Failed (Transport Protocol))
+|}]
+;;
+
+let%expect_test
+    "terminal reasoning representation drift preserves actual primary candidate \
+     canonical restore and replay"
+  =
+  Eio_main.run (fun env ->
+    let reasoning encrypted =
+      `Object
+        [ "type", `String "reasoning"
+        ; "id", `String "reasoning"
+        ; "summary", `Array []
+        ; "encrypted_content", `String encrypted
+        ]
+    in
+    let primary = reasoning "PRIMARY_DONE_OPAQUE" in
+    let terminal_snapshot = reasoning "TERMINAL_SNAPSHOT_OPAQUE" in
+    let done_ =
+      frame
+        (`Object
+            [ "type", `String "response.output_item.done"
+            ; "sequence_number", `Number "1"
+            ; "output_index", `Number "0"
+            ; "item", primary
+            ])
+    in
+    let requests = ref [] in
+    with_server
+      env
+      (fun body ->
+         requests := body :: !requests;
+         if List.length !requests = 1
+         then done_ ^ terminal [ terminal_snapshot ]
+         else terminal [])
+      (fun sw endpoint ->
+         let profile = profile endpoint in
+         let target = target profile in
+         let context = context env profile ~target ~auth in
+         let prepared = prepare context (request target) in
+         let early = ref [] in
+         let attempt = Runtime.Prepared.start prepared ~scope ~accounting_id |> ok in
+         let receipt =
+           Runtime.Attempt.run attempt ~sw ~on_observation:ignore ~on_event:(fun event ->
+             match E.view event with
+             | Candidate_ready { payload; _ } -> early := payload :: !early
+             | Live _ | Terminal _ -> ())
+           |> ok
+         in
+         assert (
+           E.Terminal.equal_outcome
+             (E.Terminal.outcome (Runtime.Receipt.terminal receipt))
+             Completed);
+         assert (List.length !early = 1);
+         let payload = List.hd_exn (payloads receipt) in
+         assert (Document_schema.Json.equal primary (raw payload));
+         assert (Document_schema.Json.equal (raw (List.hd_exn !early)) (raw payload));
+         assert (
+           Runtime.Receipt.equal_output_coverage
+             (Runtime.Receipt.output_coverage receipt)
+             Response_output);
+         let entry =
+           History_entry.create_with_id
+             ~id:(History_entry.Id.create ~namespace:"restore" ~sequence:0 |> ok)
+             payload
+         in
+         let canonical =
+           Agent_session.History_codec.to_canonical entry
+           |> Agent_protocol.History.entry_to_json
+           |> Jsonaf.to_string
+           |> Jsonaf.of_string
+           |> Agent_protocol.History.entry_of_json
+           |> ok
+         in
+         let restored = Agent_session.History_codec.of_canonical canonical |> ok in
+         assert (Document_schema.Json.equal primary (raw (History_entry.payload restored)));
+         ignore (prepare context (request ~history:[ restored ] target) |> run ~sw);
+         let subsequent = List.hd_exn !requests in
+         let decoded = Openai.Responses_request.of_jsonaf subsequent |> Or_error.ok_exn in
+         let roundtrip = Openai.Responses_request.to_jsonaf decoded in
+         let input =
+           match Document_schema.Json.field roundtrip ~name:"input" with
+           | Value value -> value
+           | _ -> assert false
+         in
+         assert (Document_schema.Json.equal input (`Array [ primary ]));
+         print_endline
+           "exact item.done candidate and canonical bytes restored; next actual request \
+            replays primary ciphertext"));
+  [%expect
+    {| exact item.done candidate and canonical bytes restored; next actual request replays primary ciphertext |}]
+;;

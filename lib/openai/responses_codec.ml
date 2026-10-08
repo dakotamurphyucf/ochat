@@ -13,6 +13,35 @@ type failure =
       ; error : Wire.Tracker.error
       }
 
+let protocol_violation ~stage failure =
+  let module P = Inference.Observation.Diagnostic.Protocol_violation in
+  let kind =
+    match failure with
+    | Framing _ -> P.Framing
+    | Decode { error; raw = _ } ->
+      P.Decode
+        (match error.reason with
+         | Missing_field -> Missing
+         | Wrong_type _ -> Wrong_type
+         | Invalid_value _ -> Invalid
+         | Duplicate_field _ -> Duplicate
+         | Limit_exceeded -> Limit)
+    | Protocol { error; event = _ } ->
+      P.Tracker
+        (match error with
+         | Origin_mismatch -> Origin_mismatch
+         | Sequence_conflict _ -> Sequence_conflict
+         | Sequence_regression _ -> Sequence_regression
+         | Item_conflict _ -> Item_conflict
+         | Part_conflict _ -> Part_conflict
+         | Response_conflict -> Response_conflict
+         | Event_after_terminal -> Event_after_terminal
+         | Terminal_mismatch -> Terminal_mismatch
+         | Truncated -> Truncated)
+  in
+  { P.stage; kind }
+;;
+
 let decode_response raw ~origin =
   Result.map_error (Wire.Response.decode raw ~origin) ~f:(fun error ->
     Decode { raw; error })
@@ -24,6 +53,8 @@ module Stream = struct
     ; framing : Responses_sse.t
     ; mutable tracker : Wire.Tracker.t
     ; mutable failure : failure option
+    ; mutable item_conflict :
+        Inference.Observation.Diagnostic.Protocol_violation.Item_conflict.t option
     ; mutable ended : bool
     }
 
@@ -39,8 +70,18 @@ module Stream = struct
       ; framing
       ; tracker = Wire.Tracker.create origin
       ; failure = None
+      ; item_conflict = None
       ; ended = false
       })
+  ;;
+
+  let protocol_violation t ~stage failure =
+    match failure, t.item_conflict with
+    | Protocol { error = Wire.Tracker.Item_conflict _; _ }, Some detail ->
+      { Inference.Observation.Diagnostic.Protocol_violation.stage
+      ; kind = Item_conflict detail
+      }
+    | _ -> protocol_violation ~stage failure
   ;;
 
   let terminal t =
@@ -74,6 +115,11 @@ module Stream = struct
             in
             let%map transition =
               Result.map_error (Wire.Tracker.add t.tracker event) ~f:(fun error ->
+                (match error with
+                 | Wire.Tracker.Item_conflict output_index ->
+                   t.item_conflict
+                   <- Wire.Tracker.item_conflict_detail t.tracker event ~output_index
+                 | _ -> ());
                 Protocol { event = Some event; error })
             in
             t.tracker <- transition.tracker;

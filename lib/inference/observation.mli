@@ -304,6 +304,108 @@ module Transport_selection : sig
 end
 
 module Diagnostic : sig
+  module Protocol_violation : sig
+    type stage =
+      | Feed
+      | Eof
+      | Terminal
+    [@@deriving equal, sexp_of]
+
+    type decode =
+      | Missing
+      | Wrong_type
+      | Invalid
+      | Duplicate
+      | Limit
+    [@@deriving equal, sexp_of]
+
+    type tracker =
+      | Origin_mismatch
+      | Sequence_conflict
+      | Sequence_regression
+      | Item_conflict
+      | Part_conflict
+      | Response_conflict
+      | Event_after_terminal
+      | Terminal_mismatch
+      | Truncated
+    [@@deriving equal, sexp_of]
+
+    module Item_conflict : sig
+      type event =
+        | Response
+        | Item_added
+        | Item_done
+        | Part_added
+        | Part_done
+        | Delta
+        | Text_done
+        | Annotation_added
+        | Terminal
+        | Error
+        | Unknown
+      [@@deriving equal, sexp_of]
+
+      type cause =
+        | Identity_changed
+        | Identity_reused
+        | Duplicate_added
+        | Added_after_final
+        | Descriptor_changed
+        | Final_snapshot_changed
+      [@@deriving equal, sexp_of]
+
+      type field =
+        | Id
+        | Type
+        | Name
+        | Call_id
+        | Namespace
+        | Async
+        | Caller
+        | Phase
+        | Status
+        | Content
+        | Summary
+        | Encrypted_content
+        | Arguments
+        | Input
+        | Role
+        | Other
+      [@@deriving compare, equal, sexp_of]
+
+      type t [@@deriving equal, sexp_of]
+
+      val create
+        :  event:event
+        -> cause:cause
+        -> fields:field list
+        -> (t, Error.t) Result.t
+
+      val event : t -> event
+      val cause : t -> cause
+      val fields : t -> field list
+      val to_json : t -> Jsonaf.t
+      val of_json : Jsonaf.t -> (t, Error.t) Result.t
+    end
+
+    type kind =
+      | Framing
+      | Decode of decode
+      | Tracker of tracker
+      | Item_conflict of Item_conflict.t
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { stage : stage
+      ; kind : kind
+      }
+    [@@deriving equal, sexp_of]
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) Result.t
+  end
+
   type phase =
     | Preparation
     | Authentication
@@ -331,6 +433,7 @@ module Diagnostic : sig
     | Timeout
     | Http_status of int
     | Malformed_protocol
+    | Protocol_violation of Protocol_violation.t
     | Unsupported_input
     | Provider_failure
     | Local_result_invalid

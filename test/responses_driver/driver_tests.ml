@@ -178,7 +178,7 @@ let run_print d prepared =
         incr terminals;
         emitted := Some outcome;
         show_terminal outcome
-      | Update _ | Finalized _ -> ())
+      | Update _ | Diagnostic _ | Finalized _ -> ())
     |> unwrap
   in
   printf
@@ -386,7 +386,7 @@ let%expect_test
                then (
                  print_endline "first-event-before-server-finishes";
                  Eio.Promise.resolve signal_first ())
-             | Finalized _ -> ()
+             | Diagnostic _ | Finalized _ -> ()
              | Terminal result ->
                terminal_value := Some result;
                show_terminal result)
@@ -476,6 +476,7 @@ let%expect_test
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
                    | Terminal outcome -> show_terminal outcome
+                   | Diagnostic _ -> ()
                    | Update _ | Finalized _ -> failwith "unexpected nonterminal")
                |> unwrap
              in
@@ -554,7 +555,7 @@ let%expect_test
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
                    | Update _ -> incr updates
-                   | Finalized _ -> ()
+                   | Diagnostic _ | Finalized _ -> ()
                    | Terminal terminal -> show_terminal terminal)
                |> unwrap
              in
@@ -594,6 +595,7 @@ let%expect_test
                     ~prepared:(prepare (profile endpoint))
                     ~on_event:(function
                       | Terminal _ -> incr terminals
+                      | Diagnostic _ -> ()
                       | Update _ | Finalized _ -> raise raised)
                   : (D.Terminal.t, D.Auth.error) Result.t);
                false
@@ -874,6 +876,7 @@ let%expect_test
               ~on_event:(function
                 | Finalized items -> finalized := !finalized + List.length items
                 | Terminal _ -> incr terminals
+                | Diagnostic _ -> ()
                 | Update _ -> failwith "unexpected update")
             |> unwrap
             : D.Terminal.t);
@@ -908,6 +911,7 @@ let%expect_test "external cancellation propagates during auth and after first pu
                             Eio.Fiber.await_cancel ()))
                         ~on_event:(function
                           | Terminal _ -> incr terminals
+                          | Diagnostic _ -> ()
                           | Update _ | Finalized _ ->
                             incr events;
                             Eio.Promise.resolve signal_started ();
@@ -1103,7 +1107,7 @@ let%expect_test "fake-clock timeout closes attempt socket after publication with
             | Update _ ->
               incr events;
               if blocked_callback then Eio.Fiber.await_cancel ()
-            | Finalized _ -> ()
+            | Diagnostic _ | Finalized _ -> ()
             | Terminal terminal ->
               incr terminals;
               emitted := Some terminal;
@@ -1158,7 +1162,7 @@ let%expect_test "terminal consumer exception propagates after attempt cleanup" =
                     | Terminal _ ->
                       incr entered;
                       raise raised
-                    | Update _ | Finalized _ -> ())
+                    | Update _ | Diagnostic _ | Finalized _ -> ())
                 : (D.Terminal.t, D.Auth.error) Result.t);
              false
            with
@@ -1344,4 +1348,64 @@ let%expect_test
     (Response_started Invalid_http)
     terminals:1 matching:true
     |}]
+;;
+
+let%expect_test
+    "per-attempt protocol diagnostics precede terminal without changing delivery"
+  =
+  Eio_main.run (fun env ->
+    let finalized =
+      frame
+        {|{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"item_private","call_id":"call_private","name":"lookup","arguments":"PRIVATE FINALIZED BODY","status":"completed"}}|}
+    in
+    List.iter
+      [ ""; created; created ^ finalized ]
+      ~f:(fun prefix ->
+        let body = prefix ^ terminal ~status:"failed" () in
+        (* Failed terminal with Completed status violates semantic terminal agreement. *)
+        let body =
+          String.substr_replace_all
+            body
+            ~pattern:"\"status\":\"failed\""
+            ~with_:"\"status\":\"completed\""
+        in
+        with_server
+          env
+          (fun flow _ -> write flow body)
+          (fun _ endpoint ->
+             let order = ref [] in
+             D.run
+               (driver env)
+               ~auth
+               ~prepared:(prepare (profile endpoint))
+               ~on_event:(function
+                 | Diagnostic { violation; delivery } ->
+                   order := "diagnostic" :: !order;
+                   print_s
+                     [%sexp
+                       (violation : Inference.Observation.Diagnostic.Protocol_violation.t)
+                     , (delivery : D.Terminal.delivery)]
+                 | Terminal outcome ->
+                   order := "terminal" :: !order;
+                   show_terminal outcome
+                 | Update update ->
+                   if not (List.is_empty update.newly_finalized)
+                   then print_endline "finalized-prefix-retained"
+                 | Finalized _ -> ())
+             |> unwrap
+             |> ignore;
+             print_s [%sexp (List.rev !order : string list)])));
+  [%expect
+    {|
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Possibly_submitted)
+(Possibly_submitted Protocol)
+(diagnostic terminal)
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Response_started)
+(Response_started Protocol)
+(diagnostic terminal)
+finalized-prefix-retained
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Response_started)
+(Response_started Protocol)
+(diagnostic terminal)
+|}]
 ;;

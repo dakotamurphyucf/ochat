@@ -189,3 +189,66 @@ let%expect_test "stdio gateway forwards typed requests and closes on EOF" =
     ()
     |}]
 ;;
+
+let%expect_test "cancelled blocked stdio reader joins without protocol error" =
+  with_embedded (fun sw embedded ->
+    let entered, entered_u = Eio.Promise.create () in
+    let reader_joined = ref false in
+    let module Source = struct
+      type t = unit
+
+      let read_methods = []
+
+      let single_read () _ =
+        Eio.Promise.resolve entered_u ();
+        Exn.protect
+          ~f:(fun () -> Eio.Fiber.await_cancel ())
+          ~finally:(fun () -> reader_joined := true)
+      ;;
+    end
+    in
+    let input = Eio.Resource.T ((), Eio.Flow.Pi.source (module Source)) in
+    let errors = ref 0
+    and close_count = ref 0 in
+    let output = Buffer.create 128 in
+    let cancelled =
+      Eio.Fiber.first
+        (fun () ->
+           Agent_transport_stdio.Server.run
+             ~sw
+             ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
+             ~close_connection:(fun context ->
+               incr close_count;
+               Agent_server.Embedded.close_connection embedded context)
+             ~principal:(Agent_server.Embedded.principal embedded)
+             ~connection_id:"stdio-cancellation"
+             ~input
+             ~output:(Eio.Flow.buffer_sink output)
+             ~max_line_length:4096
+             ~outgoing_capacity:4
+             ~max_attachments:64
+             ~on_error:(fun _ ->
+               incr errors;
+               failwith "unexpected protocol callback");
+           false)
+        (fun () ->
+           Eio.Promise.await entered;
+           true)
+    in
+    assert cancelled;
+    assert !reader_joined;
+    assert (!close_count = 1 && !errors = 0);
+    assert (String.is_empty (Buffer.contents output));
+    print_s
+      [%sexp
+        { reader_joined = (!reader_joined : bool)
+        ; close_count = (!close_count : int)
+        ; protocol_callbacks = (!errors : int)
+        ; output_empty = (String.is_empty (Buffer.contents output) : bool)
+        }]);
+  [%expect
+    {|
+    ((reader_joined true) (close_count 1) (protocol_callbacks 0)
+     (output_empty true))
+    |}]
+;;

@@ -66,6 +66,12 @@ module Limits : sig
 end
 
 module Receipt : sig
+  (** [Response_output] covers the validated terminal output positions and order.
+      Authoritative completed stream-item candidates can supply those positions:
+      provider adapters may preserve exact item.done replay bytes after their
+      provider-specific tracker validates a terminal envelope. Coverage does not
+      claim candidate captures equal the raw terminal envelope. Generic candidate
+      equality, eligibility and ownership remain exact. *)
   type output_coverage =
     | Response_output
     | Observed_prefix

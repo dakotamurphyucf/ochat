@@ -345,6 +345,17 @@ module Shape = struct
       ]
   ;;
 
+  let protocol_violation =
+    tag
+      "kind"
+      [ "framing", fields [ "stage"; "kind"; "detail" ]
+      ; "decode", fields [ "stage"; "kind"; "detail" ]
+      ; "tracker", fields [ "stage"; "kind"; "detail" ]
+      ; ( "item_conflict"
+        , o [ "stage", v; "kind", v; "detail", fields [ "event"; "cause"; "fields" ] ] )
+      ]
+  ;;
+
   let diagnostic_reason =
     tag
       "kind"
@@ -361,6 +372,7 @@ module Shape = struct
        @ [ "authentication", fields [ "kind"; "reason" ]
          ; "http_status", fields [ "kind"; "status" ]
          ; "limit", fields [ "kind"; "limit" ]
+         ; "protocol_violation", o [ "kind", v; "detail", protocol_violation ]
          ])
   ;;
 

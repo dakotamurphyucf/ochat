@@ -29,6 +29,7 @@ val baseline : route -> (Driver.Capability.feature * Driver.Capability.support) 
     override remain Unknown for WS. There are no account IDs, credential probes,
     model-prefix rules, candidate declarations or arbitrary JSON in the catalog.
     Credential/account admission remains the registry/bridge's independent job.
-    Initially no Supported WS model rows exist; live qualification publishes them
-    with dated evidence in versioned documentation. *)
+    Public_api gpt-6-luna is qualified for WS as of 2026-10-08, at that
+    route's exact endpoint only. Direct_codex remains Unknown. Dated evidence and
+    qualification limits are recorded in the provider operator documentation. *)
 val capabilities : route -> endpoint:string -> Driver.Capability.t Or_error.t

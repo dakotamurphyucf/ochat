@@ -57,6 +57,39 @@ let%expect_test
     |}]
 ;;
 
+let%expect_test "WebSocket qualification is exact model route and endpoint" =
+  let support route endpoint model =
+    P.capabilities route ~endpoint
+    |> Or_error.ok_exn
+    |> fun capabilities -> D.Capability.resolve capabilities ~model ~feature:Websocket
+  in
+  List.iter
+    [ P.Public_api, P.endpoint Public_api, "gpt-6-luna"
+    ; Public_api, P.endpoint Public_api, "gpt-6-luna-preview"
+    ; Public_api, P.endpoint Public_api, "gpt-6-luna-extra"
+    ; Public_api, P.endpoint Public_api, "GPT-6-LUNA"
+    ; Public_api, P.endpoint Public_api, "gpt-6"
+    ; Public_api, "https://api.openai.com/v1/responses/", "gpt-6-luna"
+    ; Public_api, "https://unqualified.example/v1/responses", "gpt-6-luna"
+    ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna"
+    ; Direct_codex, P.endpoint Public_api, "gpt-6-luna"
+    ]
+    ~f:(fun (route, endpoint, model) ->
+      print_s [%sexp (support route endpoint model : D.Capability.support)]);
+  [%expect
+    {|
+    Supported
+    Unknown
+    Unknown
+    Unknown
+    Unknown
+    Unknown
+    Unknown
+    Unknown
+    Unknown
+    |}]
+;;
+
 let%expect_test
     "shipping required WebSocket refuses before credential acquisition or network"
   =
@@ -68,50 +101,56 @@ let%expect_test
         ()
       |> Or_error.ok_exn
     in
-    List.iter [ P.Public_api; Direct_codex ] ~f:(fun route ->
-      let profile =
-        D.Profile.create
-          ~id:"qualified-route-unqualified-model"
-          ~account:None
-          ~endpoint:(P.endpoint route)
-          ~capabilities:
-            (P.capabilities route ~endpoint:(P.endpoint route) |> Or_error.ok_exn)
-          ~defaults:[]
-        |> Or_error.ok_exn
-      in
-      let prepared =
-        D.Prepared.create
-          profile
-          ~model:"ochat-test-unlisted-alpha"
-          ~history:[]
-          ~tools:[]
-          ~settings:[]
-        |> Or_error.ok_exn
-      in
-      let acquired = ref 0 in
-      let events = ref 0 in
-      let selected = ref 0 in
-      let result =
-        D.run_with_transport
-          driver
-          ~session:None
-          ~policy:Require_websocket
-          ~auth:(fun ~sw:_ _ ->
-            incr acquired;
-            D.Auth.bearer "synthetic-only")
-          ~prepared
-          ~on_selected:(fun _ _ -> incr selected)
-          ~on_event:(fun _ -> incr events)
-      in
-      (match result with
-       | Ok
-           (D.Terminal.Failed
-              { delivery = Definitely_not_submitted; reason = Unsupported_transport }) ->
-         ()
-       | Error _ | Ok _ -> failwith "unqualified WebSocket admission");
-      printf "credentials:%d selected:%d terminal-events:%d\n" !acquired !selected !events));
+    List.iter
+      [ P.Public_api, P.endpoint Public_api, "ochat-test-unlisted-alpha"
+      ; Direct_codex, P.endpoint Direct_codex, "ochat-test-unlisted-alpha"
+      ; Public_api, "https://api.openai.com/v1/responses/", "gpt-6-luna"
+      ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna"
+      ]
+      ~f:(fun (route, endpoint, model) ->
+        let profile =
+          D.Profile.create
+            ~id:"qualified-route-unqualified-model"
+            ~account:None
+            ~endpoint
+            ~capabilities:(P.capabilities route ~endpoint |> Or_error.ok_exn)
+            ~defaults:[]
+          |> Or_error.ok_exn
+        in
+        let prepared =
+          D.Prepared.create profile ~model ~history:[] ~tools:[] ~settings:[]
+          |> Or_error.ok_exn
+        in
+        let acquired = ref 0 in
+        let events = ref 0 in
+        let selected = ref 0 in
+        let result =
+          D.run_with_transport
+            driver
+            ~session:None
+            ~policy:Require_websocket
+            ~auth:(fun ~sw:_ _ ->
+              incr acquired;
+              D.Auth.bearer "synthetic-only")
+            ~prepared
+            ~on_selected:(fun _ _ -> incr selected)
+            ~on_event:(fun _ -> incr events)
+        in
+        (match result with
+         | Ok
+             (D.Terminal.Failed
+                { delivery = Definitely_not_submitted; reason = Unsupported_transport })
+           -> ()
+         | Error _ | Ok _ -> failwith "unqualified WebSocket admission");
+        printf
+          "credentials:%d selected:%d terminal-events:%d\n"
+          !acquired
+          !selected
+          !events));
   [%expect
     {|
+    credentials:0 selected:0 terminal-events:1
+    credentials:0 selected:0 terminal-events:1
     credentials:0 selected:0 terminal-events:1
     credentials:0 selected:0 terminal-events:1
     |}]
@@ -158,7 +197,7 @@ let%expect_test
       (match D.Prepared.settings prepared with
        | [ preserved ] ->
          assert (
-           Jsonaf.equal
+           Jsonaf.exactly_equal
              (match D.Setting.value preserved with
               | Value value -> value
               | _ -> assert false)

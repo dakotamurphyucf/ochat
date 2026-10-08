@@ -217,7 +217,7 @@ let update t event =
 
 let event t event ~on_event =
   match event with
-  | D.Event.Terminal _ -> ()
+  | D.Event.Terminal _ | Diagnostic _ -> ()
   | Finalized items ->
     List.iter (start t) ~f:on_event;
     List.iter items ~f:(fun (index, item) ->
@@ -383,7 +383,12 @@ let finish t result =
         | Incomplete _ | Failed _ | Nonterminal _ -> false
       in
       ( List.mapi (W.Response.output response) ~f:(fun index wire ->
-          finalized t index wire ~allow_local)
+          (* Tracker has validated the terminal array against finalized stream
+             slots. Keep the exact authoritative item.done candidate, including
+             opaque replay bytes, instead of rebuilding it from the envelope. *)
+          match Map.find t.slots index with
+          | Some { candidate = Some candidate; _ } -> candidate
+          | None | Some { candidate = None; _ } -> finalized t index wire ~allow_local)
       , Runtime.Receipt.Response_output
       , W.Response.usage response )
   in

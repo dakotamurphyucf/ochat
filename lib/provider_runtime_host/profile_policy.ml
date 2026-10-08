@@ -75,10 +75,11 @@ let baseline route =
   (D.Capability.Websocket, D.Capability.Unknown) :: features
 ;;
 
-(* This catalog is deliberately empty until exact route/model live qualification.
-   Candidate declarations belong only to the trusted qualification harness. *)
+(* Exact Public API SSE/WS qualification on 2026-10-08, Darwin arm64.
+   See the dated provider operator evidence; this is not account admission. *)
 let qualified_models = function
-  | Public_api | Direct_codex -> []
+  | Public_api -> [ "gpt-6-luna", [ D.Capability.Websocket, D.Capability.Supported ] ]
+  | Direct_codex -> []
 ;;
 
 let capabilities route ~endpoint:selected_endpoint =

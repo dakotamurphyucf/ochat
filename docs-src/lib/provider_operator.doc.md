@@ -113,15 +113,66 @@ prove account access or replace exact identity, epoch and revision checks. Direc
 Codex retains its explicit unsupported temperature, top-p and max-output-token
 settings; the application never removes a selected setting to obtain success.
 
-The shipping WebSocket model catalog is initially empty. Unlisted models and
-endpoint overrides have unknown WebSocket support, even when they resemble a
-first-party model or hostname. Required WebSocket refuses before credential
-acquisition or connection. Preferred WebSocket uses the driver's observable SSE
-fallback while support is unknown. The qualification harness may reuse the SSE
-baseline with a separately trusted provisional exact-model declaration; that
-declaration is not a shipping support claim. Live selected route/model evidence
-is required before adding supported rows. No live WebSocket qualification is
-claimed by these source changes.
+The shipping WebSocket catalog supports exactly `gpt-6-luna` on the public API
+route at `https://api.openai.com/v1/responses`. Unlisted models, model prefixes,
+endpoint overrides (including a trailing slash) and direct Codex retain unknown
+WebSocket support. This declaration does not establish account eligibility.
+Required WebSocket refuses unknown support before credential acquisition or
+connection. Preferred WebSocket records an observable SSE fallback for unknown
+support; uncertain delivery never authorizes resubmission.
+
+## Live qualification recorded 2026-10-08
+
+The actual public API route and `gpt-6-luna` passed the following bounded probes
+on Darwin arm64, separately with SSE and required WebSocket. Each accepted
+inference recorded its actual selected transport without fallback. The runner
+used the real runtime host, credential registry and durable admission ledger.
+Only allowlisted manifests are published as completion evidence. Private
+snapshots remain local; credentials, challenges and provider captures are not
+publication artifacts.
+
+| Probe, on each transport | Accepted requests | Evidence and limit |
+| --- | ---: | --- |
+| Journey | 4 | Three completed host turns, one native `apply_patch` effect, restore, history continuity, exact captured identity/configuration |
+| Strict JSON schema | 1 | Exact captured fixed closed schema and parsed output |
+| Inline image | 1 | Fixed red PNG; answer identifies its color without an answer in the prompt |
+| Reasoning | 1 | Captured `effort=low`, `summary=auto` and correct arithmetic answer; not every reasoning metadata field |
+| Inline PDF | 1 | Actual auxiliary `Execution.run` plus graph tracking; fixed PDF marker, zero host turns and native effects; not frontend attachments |
+| Function call | 1 | Actual auxiliary API wire call, exact named strict function and fixed arguments; zero host turns and native effects, no function execution |
+| Logout | 0 new inference requests | Disabled binding/drain proven on both journey roots; manifests retain four prior attempts and the prior effect, and do not themselves prove transport/configuration |
+
+The local allowlisted manifest names are `gpt6luna-api-sse-journey07.json`,
+`gpt6luna-api-ws-journey01.json`, and the corresponding `json01`, `img01`,
+`reason01`, `doc01`, `fn01` and `logout01` manifests for each transport.
+These are dated observations rather than latency or universal capability claims.
+They do not qualify temperature, top-p, cache controls, every media variant,
+model-pair replay or direct Codex. Subscription OAuth sign-in expired before
+inference qualification; no OAuth inference or renewal success is claimed here.
+
+The standalone harness requires explicit live opt-in and either a protected
+API-key file (`-key-file`) or an explicitly named local environment input
+(`-key-env`); neither silently falls back to another source. Build it with the
+repository's isolated toolchain, then use fresh short absolute roots for each
+transport and feature. Short roots avoid macOS Unix socket path limits. Replace
+the key-file placeholder locally; never place a key value in argv or evidence.
+The observed API runs selected `-max-output-tokens 1024`. These commands make
+paid provider requests and are not normal tests. Normal `runtest` executes only
+the offline `-self-check` path, without host setup, credential or environment
+input reads, provider requests, or browser launch:
+
+```sh
+opam exec --switch=default -- dune exec --root . --build-dir _build-qualification --cache=disabled -j2 test/provider_live_qualification/main.exe -- -self-check
+qualification_root=$(mktemp -d /tmp/oq-sse-XXXXXXXX)
+opam exec --switch=default -- dune exec --root . --build-dir _build-qualification --cache=disabled -j2 test/provider_live_qualification/main.exe -- -live -auth api -model gpt-6-luna -account-alias api-qualification -transport sse -phase journey -max-attempts 4 -phase-seconds 300 -max-output-tokens 1024 -root "$qualification_root" -key-file /absolute/protected/api-key -output "$qualification_root/evidence.json"
+```
+
+Repeat the journey with `-transport require-websocket` and a fresh root. For each
+isolated feature, use `-phase feature -feature json-schema|image|reasoning|document|function-call`
+(select one value), `-max-attempts 1` and a new root/output path. To qualify
+logout, reuse the corresponding journey's exact model, transport, root and
+persistent budget and `-max-output-tokens 1024` with `-phase logout`. Reusing a completed feature or journey
+root never authorizes replay. The harness enforces no native tool approvals for
+feature phases; the journey approves only its exact synthetic patch.
 
 Process host policy governs newly prepared work, including work from restored
 targets. It is not a newly persisted session setting. An already prepared

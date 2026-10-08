@@ -11,6 +11,8 @@ type reference = private
   ; implementation_revision : string
   ; fingerprint : string
   ; input_schema : Jsonaf.t
+    (** Execution JSON schema: custom tools accept strings. Their original
+          provider format/grammar remains in [descriptor] and both fingerprints. *)
   }
 
 type error =

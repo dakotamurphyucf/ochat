@@ -645,3 +645,68 @@ let%test_unit
          ~relation:(Nested parent)));
   O.Attempt_record.validate row ~limits:O.Admission.attempt |> ok
 ;;
+
+let%expect_test
+    "protocol diagnostics retain only closed detail and legacy schema stays strict"
+  =
+  let module V = O.Diagnostic.Protocol_violation in
+  let detail = { V.stage = Feed; kind = Tracker Terminal_mismatch } in
+  let diagnostic =
+    O.Diagnostic.create
+      ~phase:Stream
+      ~reason:(Protocol_violation detail)
+      ~delivery:(Some Response_started)
+      ~elapsed_ms:None
+    |> ok
+  in
+  let value = observation (Diagnostic diagnostic) in
+  let wire = O.to_json value in
+  assert (O.equal value (O.of_json wire ~limits:O.Admission.diagnostic |> ok));
+  print_endline (Jsonaf.to_string (V.to_json detail));
+  assert (
+    Result.is_error
+      (V.of_json
+         (`Object
+             [ "stage", `String "feed"
+             ; "kind", `String "tracker"
+             ; "detail", `String "terminal_mismatch"
+             ; "raw", `String "PRIVATE"
+             ])));
+  assert (
+    Result.is_error
+      (V.of_json
+         (`Object
+             [ "stage", `String "feed"
+             ; "stage", `String "eof"
+             ; "kind", `String "framing"
+             ; "detail", `Null
+             ])));
+  let reason_extra =
+    `Object [ "kind", `String "malformed_protocol"; "detail", V.to_json detail ]
+  in
+  let changed =
+    match wire with
+    | `Object fields ->
+      `Object
+        (List.map fields ~f:(fun (key, payload) ->
+           if String.equal key "payload"
+           then
+             ( key
+             , match payload with
+               | `Object inner ->
+                 `Object
+                   (List.map inner ~f:(fun (name, old) ->
+                      name, if String.equal name "reason" then reason_extra else old))
+               | _ -> assert false )
+           else key, payload))
+    | _ -> assert false
+  in
+  (* Construct the legacy malformed reason with forbidden detail via actual payload key. *)
+  assert (Result.is_error (O.of_json changed ~limits:O.Admission.diagnostic));
+  print_endline "bounded closed detail roundtrips; unknown and duplicate fields reject";
+  [%expect
+    {|
+{"stage":"feed","kind":"tracker","detail":"terminal_mismatch"}
+bounded closed detail roundtrips; unknown and duplicate fields reject
+|}]
+;;

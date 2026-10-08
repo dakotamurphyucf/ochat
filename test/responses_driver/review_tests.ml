@@ -23,6 +23,7 @@ let%expect_test "callback and cleanup failures retain their original exceptions"
                     ~auth
                     ~prepared:(Fixture.prepare (Fixture.profile endpoint))
                     ~on_event:(function
+                      | Diagnostic _ -> ()
                       | Update _ | Finalized _ -> raise callback_error
                       | Terminal _ -> incr terminals)
                   : (D.Terminal.t, D.Auth.error) Result.t);

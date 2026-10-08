@@ -17,7 +17,10 @@ val create
     including opaque caller validation. All raw item captures are retained. *)
 val event : t -> Responses_driver.Event.t -> on_event:(Inference.Event.t -> unit) -> unit
 
-(** Final response arrays retain actual order; failures without a response retain
+(** Validated final response arrays retain actual order. Existing exact item.done
+    candidates remain authoritative rather than being regenerated from terminal
+    envelopes; terminal-only slots retain normal projection and eligibility.
+    Failures without a response retain
     validated finalized prefix. Does not publish the final usage or terminal. *)
 val finish
   :  t

@@ -1,7 +1,11 @@
 open! Core
 
 (** Full-duplex NDJSON server over caller-owned input and output flows. Stdout
-    remains protocol-only; diagnostics belong in the supplied error sink. *)
+    remains protocol-only; diagnostics belong in the supplied error sink.
+    Cancellation propagates unchanged with its original backtrace and never calls
+    [on_error]. Connection/outgoing cleanup joins before returning or raising;
+    the caller retains ownership of both flows. Malformed input/framing and other
+    input failures retain the existing [on_error] reporting contract. *)
 
 val run
   :  sw:Eio.Switch.t

@@ -634,6 +634,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/provider_operator/profile_admin.mli` | [contract](../../lib/provider_operator/profile_admin.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
 | `lib/provider_operator/provider_operator.mli` | [contract](../../lib/provider_operator/provider_operator.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
 | `lib/provider_runtime/provider_runtime.mli` | [contract](../../lib/provider_runtime/provider_runtime.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_runtime_host/profile_policy.mli` | [contract](../../lib/provider_runtime_host/profile_policy.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
 | `lib/provider_runtime_host/provider_runtime_host.mli` | [contract](../../lib/provider_runtime_host/provider_runtime_host.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
 | `lib/provider_secret_store/provider_secret_store.mli` | [contract](../../lib/provider_secret_store/provider_secret_store.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

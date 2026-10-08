@@ -264,6 +264,42 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
                 (match event with
                  | D.Event.Update _ | Finalized _ | Terminal (Provider _) ->
                    note_delivery Response_started
+                 | Diagnostic { violation; delivery } ->
+                   let diagnostic =
+                     O.Diagnostic.create
+                       ~phase:Stream
+                       ~reason:(Protocol_violation violation)
+                       ~delivery:
+                         (Some
+                            (match delivery with
+                             | D.Terminal.Definitely_not_submitted ->
+                               Inference.Event.Terminal.Definitely_not_submitted
+                             | Possibly_submitted -> Possibly_submitted
+                             | Response_started -> Response_started))
+                       ~elapsed_ms:None
+                   in
+                   (match diagnostic with
+                    | Error _ -> ()
+                    | Ok diagnostic ->
+                      let id =
+                        "protocol:"
+                        ^ (Digestif.SHA256.digest_string
+                             (O.Observation_id.to_string accounting_id)
+                           |> Digestif.SHA256.to_hex)
+                      in
+                      (match O.Observation_id.of_string id with
+                       | Error _ -> ()
+                       | Ok id ->
+                         (match
+                            O.create
+                              ~scope
+                              ~id
+                              ~revision:0L
+                              ~payload:(Diagnostic diagnostic)
+                              ~limits:O.Admission.diagnostic
+                          with
+                          | Error _ -> ()
+                          | Ok observation -> on_observation observation)))
                  | Terminal (Failed _) -> ());
                 Inference_output.event projector event ~on_event)
           in

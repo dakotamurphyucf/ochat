@@ -580,6 +580,10 @@ module Event = struct
     | Update of Codec.Stream.update
     | Finalized of (int * Wire.Item.t) list
     | Terminal of Terminal.t
+    | Diagnostic of
+        { violation : Inference.Observation.Diagnostic.Protocol_violation.t
+        ; delivery : Terminal.delivery
+        }
 end
 
 exception Transport_failure of Terminal.failure
@@ -1063,6 +1067,19 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
   let parser =
     Codec.Stream.create ~max_frame_bytes:t.max_frame_bytes origin |> Or_error.ok_exn
   in
+  let protocol_failure stage error =
+    let delivery =
+      if !published
+      then Terminal.Response_started
+      else if !submitted
+      then Possibly_submitted
+      else Definitely_not_submitted
+    in
+    on_event
+      (Event.Diagnostic
+         { violation = Codec.Stream.protocol_violation parser ~stage error; delivery });
+    transport_failure Protocol
+  in
   let rec loop () =
     let line =
       io (fun () ->
@@ -1073,10 +1090,10 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
     | None ->
       (match Codec.Stream.finish parser with
        | Ok outcome -> Terminal.Provider outcome
-       | Error _ -> transport_failure Protocol)
+       | Error error -> protocol_failure Eof error)
     | Some line ->
       (match Codec.Stream.feed_line parser line with
-       | Error _ -> transport_failure Protocol
+       | Error error -> protocol_failure Feed error
        | Ok None -> loop ()
        | Ok (Some update) ->
          if Wire.Tracker.equal_disposition update.disposition Duplicate
@@ -1090,7 +1107,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
                on_event (Event.Finalized update.newly_finalized));
              (match Codec.Stream.finish parser with
               | Ok outcome -> Terminal.Provider outcome
-              | Error _ -> transport_failure Protocol)
+              | Error error -> protocol_failure Terminal error)
            | Response _
            | Item_added _
            | Item_done _

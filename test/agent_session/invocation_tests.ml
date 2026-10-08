@@ -1395,3 +1395,138 @@ let%test_unit "stream invocation admits captured calls without legacy projection
     assert (
       String.equal before (P.to_json (History_entry.payload call) |> Jsonaf.to_string)))
 ;;
+
+let%test_unit "real apply_patch grammar is separate from native execution schema" =
+  List.iter [ false; true ] ~f:(fun invalid ->
+    let authorized = ref 0 in
+    let directory = ref None in
+    with_handoff_actor
+      ~make_worker:(fun env actor_ready ->
+        let dir =
+          Eio.Path.(
+            Eio.Stdenv.fs env
+            / Filename.concat
+                (Sys.getenv "TMPDIR" |> Option.value ~default:"/tmp")
+                ("ochat-patch-"
+                 ^ Agent_protocol.Id.Transaction.to_string
+                     (Agent_protocol.Id.Transaction.create ())))
+        in
+        Eio.Path.mkdir ~perm:0o700 dir;
+        directory := Some dir;
+        let implementation = Functions.apply_patch ~dir in
+        let module C = Chat_response.Tool_capability in
+        let registry =
+          C.create
+            ~owner:"fixture"
+            ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "patch resources")
+            [ Chatmd_shell_spec.Source_ref.digest "patch v1", implementation ]
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        let binding =
+          C.find registry ~name:"apply_patch"
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        assert (
+          Jsonaf.exactly_equal
+            (C.descriptor binding).function_.parameters
+            Definitions.Apply_patch.parameters);
+        let changed =
+          { implementation with
+            info =
+              { implementation.info with
+                function_ =
+                  { implementation.info.function_ with
+                    parameters =
+                      `Object
+                        [ "type", `String "grammar"
+                        ; "syntax", `String "lark"
+                        ; "definition", `String "start: \"different\""
+                        ]
+                  }
+              }
+          }
+        in
+        let changed_registry =
+          C.create
+            ~owner:"fixture"
+            ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "patch resources")
+            [ Chatmd_shell_spec.Source_ref.digest "patch v1", changed ]
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        let changed_binding =
+          C.find changed_registry ~name:"apply_patch"
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        assert (
+          not
+            (String.equal
+               (C.permission_fingerprint binding)
+               (C.permission_fingerprint changed_binding)));
+        assert (String.equal (C.reference binding).name "apply_patch");
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let target =
+            "patch-"
+            ^ Agent_protocol.Id.Invocation.to_string
+                (Agent_protocol.Id.Invocation.create ())
+            ^ ".txt"
+          in
+          let patch =
+            "*** Begin Patch\n*** Add File: " ^ target ^ "\n+fixture\n*** End Patch"
+          in
+          let reference, invocation =
+            native_context
+              ~input:(if invalid then `Object [] else `String patch)
+              registry
+              (invocation_fixture ())
+          in
+          let invocation =
+            Agent_protocol.Invocation.create
+              { invocation.context with tool_name = "apply_patch" }
+            |> protocol_ok
+          in
+          let resolved =
+            Agent_session.Native_tool_invocation.run
+              ~is_halted:(fun () -> false)
+              ~capabilities:caps
+              ~registry:(fun () -> registry)
+              ~reference
+              ~invocation
+              ~authorize:(fun dispatched _ ->
+                Int.incr authorized;
+                assert (Jsonaf.exactly_equal dispatched.context.input (`String patch));
+                Ok ())
+              ~prepare_output:(function
+                | Text text -> Ok (`String text)
+                | _ -> assert false)
+            |> protocol_ok
+          in
+          (match resolved.status with
+           | Resolved (Fail failure) when invalid ->
+             assert (String.equal failure.code "invocation.invalid_input");
+             assert (!authorized = 0);
+             assert (
+               match Eio.Path.kind ~follow:false Eio.Path.(dir / target) with
+               | `Not_found -> true
+               | _ -> false)
+           | Resolved (Complete _) when not invalid ->
+             assert (!authorized = 1);
+             assert (String.equal (Eio.Path.load Eio.Path.(dir / target)) "fixture\n");
+             Eio.Path.unlink Eio.Path.(dir / target)
+           | _ -> assert false);
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          Completed
+            { final_history = input.history
+            ; moderator_snapshot = state.moderator
+            ; runtime_requests = []
+            }))
+      (fun _env actor _writer _backend ->
+         Exn.protect
+           ~f:(fun () -> ignore (await_idle actor))
+           ~finally:(fun () ->
+             Eio.Path.rmtree ~missing_ok:true (Option.value_exn !directory))))
+;;

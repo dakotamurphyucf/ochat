@@ -65,6 +65,9 @@ let reader ~dispatcher ~context ~input ~max_line_length ~outgoing ~on_error =
        | Error failure -> report_parse_failure outgoing on_error line failure);
       loop ()
     | exception End_of_file -> ()
+    | exception (Eio.Cancel.Cancelled _ as exn) ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Exn.raise_with_original_backtrace exn backtrace
     | exception exn -> on_error (invalid ("stdio input failed: " ^ Exn.to_string exn))
   in
   loop ()

@@ -1256,3 +1256,47 @@ let%test_unit
         (List.map (L.rows advanced) ~f:L.Row.handle));
     assert (Int64.equal (L.revision advanced) (Int64.succ (L.revision ledger))))
 ;;
+
+let%expect_test
+    "protocol diagnostic survives actual ledger persistence without raw payload"
+  =
+  with_actor_workspace (fun _ workspace ->
+    let before = state workspace in
+    let ledger, handle, _ = admit before before.inference_ledger in
+    let module V = O.Diagnostic.Protocol_violation in
+    let diagnostic =
+      O.Diagnostic.create
+        ~phase:Stream
+        ~reason:(Protocol_violation { V.stage = Feed; kind = Tracker Terminal_mismatch })
+        ~delivery:(Some Response_started)
+        ~elapsed_ms:None
+      |> observation_ok
+    in
+    let observed =
+      O.create
+        ~scope:(L.Handle.scope handle)
+        ~id:(O.Observation_id.of_string "protocol-proof" |> observation_ok)
+        ~revision:0L
+        ~payload:(Diagnostic diagnostic)
+        ~limits:O.Admission.diagnostic
+      |> observation_ok
+    in
+    let ledger, _ = L.observe ledger handle observed |> ledger_ok in
+    let ledger =
+      L.to_document ledger
+      |> ledger_ok
+      |> fun doc -> L.of_document doc ~limits:L.Limits.default |> ledger_ok
+    in
+    let rows = L.rows ledger in
+    let retained =
+      O.Attempt_record.observations (L.Row.record (List.hd_exn rows))
+      |> List.filter ~f:(fun observation ->
+        match O.payload observation with
+        | Diagnostic _ -> true
+        | _ -> false)
+    in
+    assert (List.length retained = 1);
+    assert (O.equal observed (List.hd_exn retained));
+    print_endline "exact scoped diagnostic retained once across ledger codec");
+  [%expect {| exact scoped diagnostic retained once across ledger codec |}]
+;;
