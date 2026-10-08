@@ -710,3 +710,41 @@ let%expect_test
 bounded closed detail roundtrips; unknown and duplicate fields reject
 |}]
 ;;
+
+let%test_unit "HTTP rejection diagnostic roundtrip is closed and rejects duplicate detail"
+  =
+  let module H = O.Diagnostic.Http_rejection in
+  let rejection =
+    H.create ~status:400 ~reason:Missing_required_parameter ~parameter:(Some Instructions)
+    |> ok
+  in
+  let diagnostic =
+    O.Diagnostic.create
+      ~phase:Dispatch
+      ~reason:(Http_rejection rejection)
+      ~delivery:(Some Possibly_submitted)
+      ~elapsed_ms:None
+    |> ok
+  in
+  let original = observation (Diagnostic diagnostic) in
+  let wire = O.to_json original in
+  assert (O.equal original (O.of_json wire ~limits:O.Admission.observation |> ok));
+  assert (
+    Result.is_error
+      (H.of_json
+         (`Object
+             [ "status", `Number "400"
+             ; "reason", `String "unclassified"
+             ; "parameter", `Null
+             ; "parameter", `String "instructions"
+             ])));
+  assert (
+    Result.is_error
+      (H.of_json
+         (`Object
+             [ "status", `Number "400"
+             ; "reason", `String "SECRET_CANARY"
+             ; "parameter", `Null
+             ])));
+  assert (not (String.is_substring (Jsonaf.to_string wire) ~substring:"SECRET_CANARY"))
+;;

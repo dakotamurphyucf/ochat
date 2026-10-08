@@ -235,6 +235,10 @@ module Event : sig
     | Update of Responses_codec.Stream.update
     | Finalized of (int * Responses_codec.Wire.Item.t) list
     | Terminal of Terminal.t
+    | Http_rejection of
+        { rejection : Inference.Observation.Diagnostic.Http_rejection.t
+        ; delivery : Terminal.delivery
+        }
     | Diagnostic of
         { violation : Inference.Observation.Diagnostic.Protocol_violation.t
         ; delivery : Terminal.delivery

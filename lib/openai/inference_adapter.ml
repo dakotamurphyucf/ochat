@@ -264,11 +264,25 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
                 (match event with
                  | D.Event.Update _ | Finalized _ | Terminal (Provider _) ->
                    note_delivery Response_started
-                 | Diagnostic { violation; delivery } ->
+                 | (Diagnostic _ | Http_rejection _) as event ->
+                   let reason, delivery, phase, prefix =
+                     match event with
+                     | Diagnostic { violation; delivery } ->
+                       ( O.Diagnostic.Protocol_violation violation
+                       , delivery
+                       , O.Diagnostic.Stream
+                       , "protocol:" )
+                     | Http_rejection { rejection; delivery } ->
+                       ( O.Diagnostic.Http_rejection rejection
+                       , delivery
+                       , O.Diagnostic.Dispatch
+                       , "http:" )
+                     | _ -> assert false
+                   in
                    let diagnostic =
                      O.Diagnostic.create
-                       ~phase:Stream
-                       ~reason:(Protocol_violation violation)
+                       ~phase
+                       ~reason
                        ~delivery:
                          (Some
                             (match delivery with
@@ -282,7 +296,7 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
                     | Error _ -> ()
                     | Ok diagnostic ->
                       let id =
-                        "protocol:"
+                        prefix
                         ^ (Digestif.SHA256.digest_string
                              (O.Observation_id.to_string accounting_id)
                            |> Digestif.SHA256.to_hex)

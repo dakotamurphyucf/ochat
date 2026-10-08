@@ -126,8 +126,15 @@ propagates
 through cleanup. Neither path manufactures a normal terminal.
 
 Failures carry bounded typed diagnostics without request, credential, response,
-endpoint or exception text. Provider/raw captures delivered to the host are
-private conversation evidence; consumers must not automatically log them.
+endpoint or exception text. For an HTTP rejection, the SSE driver reads at most
+16 KiB of framed error content within a separate one-second diagnostic deadline,
+also bounded by the overall request deadline. It retains only the status and
+closed reason/parameter classifications. Unknown fields, arbitrary messages and
+parameter names are never retained. Unrecognized or unreadable content yields an
+unclassified diagnostic while preserving the original HTTP failure and delivery
+state. This diagnostic does not authorize a retry. Provider/raw captures delivered
+to the host are private conversation evidence; consumers must not automatically
+log them.
 
 ## Offline completion evidence
 

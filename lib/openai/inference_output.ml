@@ -217,7 +217,7 @@ let update t event =
 
 let event t event ~on_event =
   match event with
-  | D.Event.Terminal _ | Diagnostic _ -> ()
+  | D.Event.Terminal _ | Diagnostic _ | Http_rejection _ -> ()
   | Finalized items ->
     List.iter (start t) ~f:on_event;
     List.iter items ~f:(fun (index, item) ->

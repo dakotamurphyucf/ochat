@@ -146,8 +146,10 @@ The local allowlisted manifest names are `gpt6luna-api-sse-journey07.json`,
 `reason01`, `doc01`, `fn01` and `logout01` manifests for each transport.
 These are dated observations rather than latency or universal capability claims.
 They do not qualify temperature, top-p, cache controls, every media variant,
-model-pair replay or direct Codex. Subscription OAuth sign-in expired before
-inference qualification; no OAuth inference or renewal success is claimed here.
+model-pair replay or direct Codex. Subscription OAuth browser login, saved
+credential registration, host restart and subsequent login cancellation passed.
+The first direct Codex SSE request returned HTTP 400; no OAuth inference or
+renewal success is claimed here.
 
 The standalone harness requires explicit live opt-in and either a protected
 API-key file (`-key-file`) or an explicitly named local environment input

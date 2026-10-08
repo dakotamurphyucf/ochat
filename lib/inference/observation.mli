@@ -304,6 +304,44 @@ module Transport_selection : sig
 end
 
 module Diagnostic : sig
+  module Http_rejection : sig
+    (** Closed display evidence only; no body/message/code/parameter string survives. *)
+    type reason =
+      | Missing_required_parameter
+      | Unsupported_parameter
+      | Invalid_parameter
+      | Unclassified
+    [@@deriving equal, sexp_of]
+
+    type parameter =
+      | Instructions
+      | Store
+      | Model
+      | Input
+      | Tools
+      | Stream
+      | Text
+      | Reasoning
+      | Truncation
+      | Other
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create
+      :  status:int
+      -> reason:reason
+      -> parameter:parameter option
+      -> (t, Error.t) result
+
+    val status : t -> int
+    val reason : t -> reason
+    val parameter : t -> parameter option
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
   module Protocol_violation : sig
     type stage =
       | Feed
@@ -432,6 +470,7 @@ module Diagnostic : sig
     | Connection
     | Timeout
     | Http_status of int
+    | Http_rejection of Http_rejection.t
     | Malformed_protocol
     | Protocol_violation of Protocol_violation.t
     | Unsupported_input

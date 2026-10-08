@@ -580,6 +580,10 @@ module Event = struct
     | Update of Codec.Stream.update
     | Finalized of (int * Wire.Item.t) list
     | Terminal of Terminal.t
+    | Http_rejection of
+        { rejection : Inference.Observation.Diagnostic.Http_rejection.t
+        ; delivery : Terminal.delivery
+        }
     | Diagnostic of
         { violation : Inference.Observation.Diagnostic.Protocol_violation.t
         ; delivery : Terminal.delivery
@@ -967,7 +971,157 @@ let io f =
 
 exception Auth_invalidated of Auth.error
 
-let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected =
+module Http_rejection = struct
+  module H = Inference.Observation.Diagnostic.Http_rejection
+
+  let admitted = function
+    | Ok value -> value
+    | Error _ -> assert false
+  ;;
+
+  let unknown status = H.create ~status ~reason:Unclassified ~parameter:None |> admitted
+
+  let fields = function
+    | `Object fields
+      when not
+             (List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b))
+      -> Some fields
+    | _ -> None
+  ;;
+
+  let field values key = List.Assoc.find values key ~equal:String.equal
+
+  let parameter = function
+    | "instructions" -> H.Instructions
+    | "store" -> Store
+    | "model" -> Model
+    | "input" -> Input
+    | "tools" -> Tools
+    | "stream" -> Stream
+    | "text" -> Text
+    | "reasoning" -> Reasoning
+    | "truncation" -> Truncation
+    | _ -> Other
+  ;;
+
+  (* Only complete fixed literals enter diagnostics; no provider text is retained. *)
+  let literal status = function
+    | Some (`String message) ->
+      let make reason parameter =
+        H.create ~status ~reason ~parameter:(Some parameter) |> admitted
+      in
+      if String.equal message "Instructions are required"
+      then make Missing_required_parameter Instructions
+      else (
+        let names =
+          [ "instructions"
+          ; "store"
+          ; "model"
+          ; "input"
+          ; "tools"
+          ; "stream"
+          ; "text"
+          ; "reasoning"
+          ; "truncation"
+          ]
+        in
+        match
+          List.find names ~f:(fun name ->
+            String.equal message ("Unsupported parameter: " ^ name)
+            || String.equal message ("Unsupported parameter: '" ^ name ^ "'."))
+        with
+        | Some name -> make Unsupported_parameter (parameter name)
+        | None -> unknown status)
+    | _ -> unknown status
+  ;;
+
+  let classify status body =
+    let parsed =
+      Document_schema.Json.decode ~limits:Inference.Observation.Admission.diagnostic body
+      |> Result.ok
+    in
+    match parsed with
+    | Some (`String _ as value) -> literal status (Some value)
+    | _ ->
+      (match Option.bind parsed ~f:fields with
+       | None -> unknown status
+       | Some outer ->
+         let make reason parameter = H.create ~status ~reason ~parameter |> admitted in
+         (match field outer "error" with
+          | Some (`String _ as value) -> literal status (Some value)
+          | Some error ->
+            (match fields error with
+             | None -> unknown status
+             | Some error ->
+               let reason =
+                 match field error "code" with
+                 | Some (`String "missing_required_parameter") ->
+                   H.Missing_required_parameter
+                 | Some (`String "unsupported_parameter") -> Unsupported_parameter
+                 | Some (`String "invalid_parameter") -> Invalid_parameter
+                 | _ -> Unclassified
+               in
+               if H.equal_reason reason Unclassified
+               then literal status (field error "message")
+               else
+                 make
+                   reason
+                   (match field error "param" with
+                    | Some (`String p) -> Some (parameter p)
+                    | _ -> None))
+          | None -> literal status (field outer "detail")))
+  ;;
+
+  let read t reader headers status =
+    let read () =
+      let body =
+        try
+          if
+            List.exists headers ~f:(fun (key, value) ->
+              String.equal key "content-encoding"
+              && not (String.Caseless.equal value "identity"))
+          then None
+          else
+            io (fun () ->
+              let max_body_bytes = min 16384 t.max_body_bytes in
+              let state = Http_response.body_framing headers ~max_bytes:max_body_bytes in
+              let entity =
+                Http_response.create
+                  ~reader
+                  ~state
+                  ~max_body_bytes
+                  ~max_header_bytes:t.max_header_bytes
+                  ~max_framing_bytes:t.max_framing_bytes
+              in
+              let buffered =
+                Eio.Buf_read.of_flow
+                  (Http_response.flow entity)
+                  ~max_size:(max_body_bytes + 1)
+              in
+              Some (Eio.Buf_read.take_all buffered))
+        with
+        | Transport_failure _ -> None
+      in
+      Option.value_map body ~default:(unknown status) ~f:(classify status)
+    in
+    Eio.Fiber.first read (fun () ->
+      t.sleep 1.;
+      unknown status)
+  ;;
+end
+
+let dispatch
+      t
+      ~sw
+      ~lease
+      ~prepared
+      ~on_event
+      ~published
+      ~submitted
+      ~on_selected
+      ~rejection_status
+      ~rejection_emitted
+  =
   let profile = Prepared.profile prepared in
   let additional_headers =
     match
@@ -1024,7 +1178,13 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
   let status, headers =
     io (fun () -> Http_response.headers reader ~max_bytes:t.max_header_bytes)
   in
-  if status <> 200 then transport_failure (Http_status status);
+  if status <> 200
+  then (
+    rejection_status := Some status;
+    let rejection = Http_rejection.read t reader headers status in
+    rejection_emitted := true;
+    on_event (Event.Http_rejection { rejection; delivery = Possibly_submitted });
+    transport_failure (Http_status status));
   if
     List.exists headers ~f:(fun (key, value) ->
       String.equal key "content-encoding" && not (String.Caseless.equal value "identity"))
@@ -1128,6 +1288,8 @@ let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
   let authenticated = ref false in
   let submitted = ref false in
   let published = ref false in
+  let rejection_status = ref None in
+  let rejection_emitted = ref false in
   let failed reason =
     Terminal.Failed
       { delivery =
@@ -1157,11 +1319,15 @@ let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
                    ~on_event
                    ~published
                    ~submitted
-                   ~on_selected)))
+                   ~on_selected
+                   ~rejection_status
+                   ~rejection_emitted)))
       with
       | Ok result -> result
       | Error `Timeout ->
-        if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
+        (match !rejection_status with
+         | Some status -> Ok (failed (Http_status status))
+         | None -> if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out)
     with
     | Auth_invalidated error -> Error error
     | Transport_failure reason -> Ok (failed reason)
@@ -1169,6 +1335,13 @@ let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
   match result with
   | Error _ -> result
   | Ok outcome ->
+    Option.iter !rejection_status ~f:(fun status ->
+      if not !rejection_emitted
+      then (
+        rejection_emitted := true;
+        on_event
+          (Event.Http_rejection
+             { rejection = Http_rejection.unknown status; delivery = Possibly_submitted })));
     on_event (Event.Terminal outcome);
     Ok outcome
 ;;

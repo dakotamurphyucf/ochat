@@ -1243,6 +1243,100 @@ module Transport_selection = struct
 end
 
 module Diagnostic = struct
+  module Http_rejection = struct
+    type reason =
+      | Missing_required_parameter
+      | Unsupported_parameter
+      | Invalid_parameter
+      | Unclassified
+    [@@deriving equal, sexp_of]
+
+    type parameter =
+      | Instructions
+      | Store
+      | Model
+      | Input
+      | Tools
+      | Stream
+      | Text
+      | Reasoning
+      | Truncation
+      | Other
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { status : int
+      ; reason : reason
+      ; parameter : parameter option
+      }
+    [@@deriving equal, sexp_of]
+
+    let create ~status ~reason ~parameter =
+      if status < 100 || status > 599 || status = 200
+      then invalid "http_status" "not rejection status"
+      else Ok { status; reason; parameter }
+    ;;
+
+    let status t = t.status
+    let reason t = t.reason
+    let parameter t = t.parameter
+
+    let reasons =
+      [ "missing_required_parameter", Missing_required_parameter
+      ; "unsupported_parameter", Unsupported_parameter
+      ; "invalid_parameter", Invalid_parameter
+      ; "unclassified", Unclassified
+      ]
+    ;;
+
+    let parameters =
+      [ "instructions", Instructions
+      ; "store", Store
+      ; "model", Model
+      ; "input", Input
+      ; "tools", Tools
+      ; "stream", Stream
+      ; "text", Text
+      ; "reasoning", Reasoning
+      ; "truncation", Truncation
+      ; "other", Other
+      ]
+    ;;
+
+    let name values value ~equal =
+      fst (List.find_exn values ~f:(fun (_, v) -> equal v value))
+    ;;
+
+    let to_json t =
+      obj
+        [ "status", integer t.status
+        ; "reason", string (name reasons t.reason ~equal:equal_reason)
+        ; ( "parameter"
+          , Option.value_map t.parameter ~default:`Null ~f:(fun p ->
+              string (name parameters p ~equal:equal_parameter)) )
+        ]
+    ;;
+
+    let of_json json =
+      let* fields = Decode.fields json [ "status"; "reason"; "parameter" ] in
+      let* () =
+        if List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        then invalid "http_rejection" "duplicate field"
+        else Ok ()
+      in
+      let* status = Decode.get fields "status" Decode.int in
+      let* reason = Decode.get fields "reason" (fun json -> Decode.tag json reasons) in
+      let* parameter =
+        Decode.get fields "parameter" (function
+          | `Null -> Ok None
+          | json ->
+            let* p = Decode.tag json parameters in
+            Ok (Some p))
+      in
+      create ~status ~reason ~parameter
+    ;;
+  end
+
   module Protocol_violation = struct
     type stage =
       | Feed
@@ -1524,6 +1618,7 @@ module Diagnostic = struct
     | Connection
     | Timeout
     | Http_status of int
+    | Http_rejection of Http_rejection.t
     | Malformed_protocol
     | Protocol_violation of Protocol_violation.t
     | Unsupported_input
@@ -1578,7 +1673,7 @@ module Diagnostic = struct
     | Authentication Timed_out -> "Inference authentication timed out."
     | Connection -> "Inference connection failed."
     | Timeout -> "Inference deadline elapsed."
-    | Http_status _ -> "Inference HTTP request failed."
+    | Http_status _ | Http_rejection _ -> "Inference HTTP request failed."
     | Malformed_protocol | Protocol_violation _ -> "Inference response was malformed."
     | Unsupported_input -> "Inference input is unsupported."
     | Provider_failure -> "Inference provider reported a failure."
@@ -1650,6 +1745,8 @@ module Diagnostic = struct
                | Timed_out -> "timed_out") )
         ]
     | Http_status status -> obj [ "kind", string "http_status"; "status", integer status ]
+    | Http_rejection detail ->
+      obj [ "kind", string "http_rejection"; "detail", Http_rejection.to_json detail ]
     | Limit limit ->
       obj
         [ "kind", string "limit"
@@ -1677,6 +1774,15 @@ module Diagnostic = struct
     let* fields = Decode.fields json [ "kind"; "reason"; "status"; "limit"; "detail" ] in
     let* kind = Decode.get fields "kind" Decode.text in
     match kind with
+    | "http_rejection" ->
+      let* fields = Decode.fields json [ "kind"; "detail" ] in
+      let* () =
+        if List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        then invalid "http_rejection" "duplicate field"
+        else Ok ()
+      in
+      let* detail = Decode.get fields "detail" Http_rejection.of_json in
+      Ok (Http_rejection detail)
     | "protocol_violation" ->
       let* fields = Decode.fields json [ "kind"; "detail" ] in
       let* detail = Decode.get fields "detail" Protocol_violation.of_json in
