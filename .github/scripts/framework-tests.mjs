@@ -9,9 +9,10 @@ const commands = {
   e2e: ["build", "--force", "-j", "2", "@agent-e2e-pr"],
 };
 if (!Object.hasOwn(commands, tier)) throw new Error("Expected normal or e2e");
-// The complete normal suite takes about 31 minutes with two workers. Bound the
-// aggregate run separately from individual test and runtime execution deadlines.
-const timeoutMs = (tier === "normal" ? 35 : 25) * 60 * 1000;
+// Linux qualification measured 55 summed minutes of tests and 15 of build work
+// on two workers before the old 35-minute aggregate limit stopped later tests.
+// Allow the whole suite to finish; individual test/runtime deadlines still apply.
+const timeoutMs = (tier === "normal" ? 45 : 25) * 60 * 1000;
 fs.mkdirSync(".ci-evidence", { recursive: true });
 // Verbose output identifies started actions even while their output is buffered.
 // Write the trace inside the uploaded evidence directory, including on timeout.
