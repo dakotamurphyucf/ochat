@@ -167,6 +167,15 @@ module Auth : sig
       exactly the captured identity; it may silently renew but never start login. *)
   val bearer : string -> (lease, error) Result.t
 
+  (** Trusted host-only direct subscription lease. Adds fixed ChatGPT account
+      and OChat identification headers on BOTH HTTP and WS handshakes. Dispatch
+      rejects any endpoint except the fixed Codex Responses route before connect,
+      and requires the captured profile account to equal this lease account.
+      Account bytes are header-safe and participate in WS reuse compatibility;
+      caller still composes captured profile and163 ownership/currentness guards.
+      No arbitrary headers or alternate endpoint/billing fallback. *)
+  val direct_codex : string -> account:string -> (lease, error) Result.t
+
   type resolver = sw:Eio.Switch.t -> Profile.t -> (lease, error) Result.t
 end
 
@@ -278,3 +287,17 @@ val run_with_transport
         -> unit)
   -> on_event:(Event.t -> unit)
   -> (Terminal.t, Auth.error) Result.t
+
+(** Redacted projection of the SAME header builder used by HTTP and WS. Never
+    exposes bearer/account bytes, and does not bypass endpoint/account admission
+    or TLS verification. Synthetic assertions do not qualify the remote route. *)
+module For_testing : sig
+  type header_summary =
+    { account : bool
+    ; originator : bool
+    ; user_agent : bool
+    }
+  [@@deriving sexp_of]
+
+  val header_summary : Auth.lease -> Profile.t -> (header_summary, Auth.error) Result.t
+end

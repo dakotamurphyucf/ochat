@@ -5002,6 +5002,14 @@
     "provenance": "authored"
   },
   {
+    "id": "lib/provider_oauth",
+    "source": "docs-src/lib/provider_oauth.doc.md",
+    "disposition": "repository-only",
+    "title": "Direct provider OAuth foundation",
+    "reviewNote": "Contributor contract for fixed endpoint browser/device flows, protected continuity, exact registry adapters and owner cancellation. Synthetic qualification does not claim live provider registration or direct route eligibility.",
+    "provenance": "authored"
+  },
+  {
     "id": "lib/credential_registry",
     "source": "docs-src/lib/credential_registry.doc.md",
     "disposition": "repository-only",

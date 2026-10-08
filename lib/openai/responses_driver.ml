@@ -436,8 +436,14 @@ module Auth = struct
     | Timed_out
   [@@deriving equal, sexp_of]
 
+  type header_policy =
+    | Bearer_only
+    | Direct_codex of string
+  [@@deriving equal]
+
   type lease =
     { secret : string
+    ; header_policy : header_policy
     ; identity : identity option
     ; credential_revision : string option
     ; check_current : unit -> (unit, error) Result.t
@@ -452,10 +458,37 @@ module Auth = struct
     else
       Ok
         { secret
+        ; header_policy = Bearer_only
         ; identity = None
         ; credential_revision = None
         ; check_current = (fun () -> Ok ())
         }
+  ;;
+
+  let direct_codex secret ~account =
+    let open Result.Let_syntax in
+    let%bind lease = bearer secret in
+    if
+      String.is_empty account
+      || String.length account > 512
+      || String.exists account ~f:(fun c -> Char.to_int c <= 32 || Char.to_int c >= 127)
+    then Error Invalid_credential
+    else Ok { lease with header_policy = Direct_codex account }
+  ;;
+
+  let additional_headers t ~endpoint ~profile_account =
+    match t.header_policy with
+    | Bearer_only -> Ok ""
+    | Direct_codex account ->
+      if
+        (not (String.equal endpoint "https://chatgpt.com/backend-api/codex/responses"))
+        || not (Option.equal String.equal profile_account (Some account))
+      then Error Invalid_credential
+      else
+        Ok
+          ("ChatGPT-Account-ID: "
+           ^ account
+           ^ "\r\noriginator: ochat\r\nUser-Agent: ochat\r\n")
   ;;
 
   let with_identity t ~owner ~generation ~check_current =
@@ -912,6 +945,16 @@ exception Auth_invalidated of Auth.error
 
 let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected =
   let profile = Prepared.profile prepared in
+  let additional_headers =
+    match
+      Auth.additional_headers
+        lease
+        ~endpoint:profile.Profile.endpoint
+        ~profile_account:profile.Profile.account
+    with
+    | Ok headers -> headers
+    | Error error -> raise (Auth_invalidated error)
+  in
   let body = Jsonaf.to_string (Request.jsonaf_of_t (Prepared.request prepared)) in
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   let uri = profile.Profile.uri in
@@ -933,7 +976,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
       "POST %s HTTP/1.1\r\n\
        Host: %s\r\n\
        Authorization: Bearer %s\r\n\
-       Content-Type: application/json\r\n\
+       %sContent-Type: application/json\r\n\
        Accept: text/event-stream\r\n\
        Content-Length: %d\r\n\
        Connection: close\r\n\
@@ -941,6 +984,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected
       (Uri.path uri)
       authority
       lease.Auth.secret
+      additional_headers
       (String.length body)
   in
   submitted := true;
@@ -1108,6 +1152,7 @@ module Websocket_session = struct
     ; account : string option
     ; identity : Auth.identity option
     ; credential_revision : string option
+    ; header_policy : Auth.header_policy
     ; release : unit -> unit
     ; mutable cache : cache option
     ; mutable last_used : float
@@ -1227,6 +1272,16 @@ let owned_websocket_flow t ~sw uri =
 
 let websocket_connect t session lease prepared =
   let profile = Prepared.profile prepared in
+  let additional_headers =
+    match
+      Auth.additional_headers
+        lease
+        ~endpoint:profile.Profile.endpoint
+        ~profile_account:profile.Profile.account
+    with
+    | Ok headers -> headers
+    | Error error -> raise (Auth_invalidated error)
+  in
   let flow, channel_sw, stop, release =
     owned_websocket_flow t ~sw:session.Websocket_session.sw profile.uri
   in
@@ -1245,7 +1300,7 @@ let websocket_connect t session lease prepared =
         "GET %s HTTP/1.1\r\n\
          Host: %s\r\n\
          Authorization: Bearer %s\r\n\
-         Upgrade: websocket\r\n\
+         %sUpgrade: websocket\r\n\
          Connection: Upgrade\r\n\
          Sec-WebSocket-Key: %s\r\n\
          Sec-WebSocket-Version: 13\r\n\
@@ -1253,6 +1308,7 @@ let websocket_connect t session lease prepared =
         (Uri.path profile.uri)
         authority
         lease.Auth.secret
+        additional_headers
         nonce
     in
     io (fun () -> Eio.Flow.copy_string header flow);
@@ -1293,6 +1349,7 @@ let websocket_connect t session lease prepared =
       ; account = profile.account
       ; identity = Auth.identity lease
       ; credential_revision = Auth.credential_revision lease
+      ; header_policy = lease.Auth.header_policy
       ; release
       ; cache = None
       ; last_used = t.now ()
@@ -1329,6 +1386,7 @@ let compatible_channel channel lease prepared =
   && String.equal channel.endpoint profile.endpoint
   && String.equal channel.profile profile.id
   && Option.equal String.equal channel.account profile.account
+  && Auth.equal_header_policy channel.header_policy lease.Auth.header_policy
   && (match channel.credential_revision, Auth.credential_revision lease with
       | Some a, Some b -> String.equal a b
       | None, _ | _, None -> false)
@@ -1642,3 +1700,25 @@ let run_with_transport
           on_event (Event.Terminal terminal);
           Ok terminal))
 ;;
+
+module For_testing = struct
+  type header_summary =
+    { account : bool
+    ; originator : bool
+    ; user_agent : bool
+    }
+  [@@deriving sexp_of]
+
+  let header_summary lease profile =
+    Result.map
+      (Auth.additional_headers
+         lease
+         ~endpoint:profile.Profile.endpoint
+         ~profile_account:profile.Profile.account)
+      ~f:(fun headers ->
+        { account = String.is_substring headers ~substring:"ChatGPT-Account-ID: "
+        ; originator = String.is_substring headers ~substring:"originator: ochat\r\n"
+        ; user_agent = String.is_substring headers ~substring:"User-Agent: ochat\r\n"
+        })
+  ;;
+end

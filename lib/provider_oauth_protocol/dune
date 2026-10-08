@@ -1,0 +1,5 @@
+(library
+ (name provider_oauth_protocol)
+ (public_name ochat.provider_oauth_protocol)
+ (libraries core uri jsonaf digestif base64)
+ (preprocess (pps ppx_jane)))
