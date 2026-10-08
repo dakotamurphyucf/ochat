@@ -238,7 +238,9 @@ let try_open configuration ~sw ~env ~default_model =
       ~transport_policy:configuration.transport_policy
       ~limits:Inference_runtime.Limits.default
     |> Result.map_error ~f:(function
-      | S.Error.Lifecycle (C.Error.Model M.Error.Missing_registry) -> Error.Setup_required
+      | S.Error.Lifecycle (C.Error.Model M.Error.Missing_registry)
+      | S.Error.Lifecycle (C.Error.Storage Private_storage.Error.Missing) ->
+        Error.Setup_required
       | error -> Provider error)
   in
   let bridge = S.Opened.bridge opened in
