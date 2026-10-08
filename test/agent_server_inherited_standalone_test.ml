@@ -109,6 +109,12 @@ let on_event ctx state event = match event with
         let configuration =
           config ~profile root root (Filename.concat root "parent.chatmd")
         in
+        (* Workspace tool data is separate from the private session-store root. *)
+        let configuration =
+          { configuration with
+            server = { configuration.server with data_dir = Filename.concat root "store" }
+          }
+        in
         let requested_tool = ref "read_report" in
         let pending_call = ref false in
         let requests = ref 0 in

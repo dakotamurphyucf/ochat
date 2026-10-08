@@ -1397,7 +1397,6 @@ let%expect_test
           ~connection
           ~session_id
           ~mode:Read_only
-          ~subscribe:false
           ()
         |> protocol_ok
       in
@@ -1406,4 +1405,73 @@ let%expect_test
     print_endline
       "cancelled blocked reader; replacement handle admitted without old close");
   [%expect {| cancelled blocked reader; replacement handle admitted without old close |}]
+;;
+
+let%expect_test "unsubscribed handles coexist without taking notification ownership" =
+  Mirage_crypto_rng_unix.use_default ();
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let reads = ref 0 in
+      let attachments = ref 0 in
+      let never, _ = Eio.Promise.create () in
+      let request = function
+        | P.Command.Session_attach _ ->
+          incr attachments;
+          let id =
+            P.Id.Attachment.of_string (sprintf "att_passive_%d" !attachments)
+            |> protocol_ok
+          in
+          Ok
+            (Public.Result.Session_attach
+               Public.Result.Attach.
+                 { attachment =
+                     P.Session.Attachment.
+                       { id; session_id; mode = Read_only; owner_lease = None }
+                 ; replay = Snapshot snapshot
+                 ; latest_event_sequence = 0L
+                 ; reclaim_token = None
+                 })
+        | Session_detach _ ->
+          Public.Result.Non_history.of_internal
+            (Session_detach
+               P.Mutation_result.{ revision = 0L; latest_event_sequence = 0L })
+          |> Result.map ~f:(fun result -> Public.Result.Non_history result)
+        | _ -> Error (P.Error.invalid_request "unexpected fixture request")
+      in
+      let connection =
+        Agent_client.Transport.create
+          ~request
+          ~next_notification:(fun () ->
+            incr reads;
+            Eio.Promise.await never)
+          ~close:Fn.id
+        |> Agent_client.Connection.create
+      in
+      let attach subscribe =
+        Agent_client.Session_handle.attach
+          ~sw
+          ~clock:env#clock
+          ~connection
+          ~session_id
+          ~mode:Read_only
+          ~subscribe
+          ()
+      in
+      let first = attach false |> protocol_ok in
+      let second = attach false |> protocol_ok in
+      [%test_eq: int] 0 !reads;
+      let subscribed = attach true |> protocol_ok in
+      let third = attach false |> protocol_ok in
+      assert (Result.is_error (attach true));
+      [%test_eq: int] 4 !attachments;
+      List.iter [ first; second; third ] ~f:Agent_client.Session_handle.close;
+      assert (Result.is_error (Agent_client.Connection.claim_notifications connection));
+      Agent_client.Session_handle.close subscribed;
+      Agent_client.Session_handle.await_closed subscribed;
+      Agent_client.Connection.close connection;
+      print_endline
+        "passive handles share connection; exactly one subscribed owner; passive close \
+         retains owner"));
+  [%expect
+    {| passive handles share connection; exactly one subscribed owner; passive close retains owner |}]
 ;;

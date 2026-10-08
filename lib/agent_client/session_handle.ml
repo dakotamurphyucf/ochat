@@ -4,7 +4,7 @@ type t =
   { sleep : float -> unit
   ; now : unit -> Time_ns.t
   ; connection : Connection.t
-  ; notification_lease : Connection.notification_lease
+  ; notification_lease : Connection.notification_lease option
   ; session_id : Agent_protocol.Id.Session.t
   ; mutex : Eio.Mutex.t
   ; on_update : (Projection.t -> unit) option
@@ -111,7 +111,7 @@ let mark_closed t =
     if not t.closed
     then (
       t.closed <- true;
-      Connection.release_notifications t.notification_lease;
+      Option.iter t.notification_lease ~f:Connection.release_notifications;
       Eio.Promise.resolve t.closed_resolver ()))
 ;;
 
@@ -165,25 +165,25 @@ let apply_notification t = function
   | Notification _ | Request _ | Response _ -> ()
 ;;
 
-let next_notification t =
+let next_notification t lease =
   Eio.Fiber.first
-    (fun () -> Connection.next_owned_notification t.notification_lease)
+    (fun () -> Connection.next_owned_notification lease)
     (fun () ->
        Eio.Promise.await t.closed_signal;
        Ok None)
 ;;
 
-let rec read_notifications t =
+let rec read_notifications t lease =
   if not (Eio.Mutex.use_ro t.mutex (fun () -> t.closed))
   then (
-    match next_notification t with
+    match next_notification t lease with
     | Error failure -> install_projection t (Error failure)
     | Ok None ->
       install_projection t (Error (interrupted "session notification stream closed"));
       mark_closed t
     | Ok (Some envelope) ->
       apply_notification t envelope;
-      read_notifications t)
+      read_notifications t lease)
 ;;
 
 let renew_delay t lease =
@@ -242,7 +242,6 @@ let make_handle
       ~reclaim_token
       ~replay
       ~latest_event_sequence
-      ~subscribe
       ?previous_projection
       ?on_update
       ?on_error
@@ -285,7 +284,8 @@ let make_handle
           }
         in
         Eio.Switch.on_release sw (fun () -> mark_closed t);
-        if subscribe then Eio.Fiber.fork ~sw (fun () -> read_notifications t);
+        Option.iter notification_lease ~f:(fun lease ->
+          Eio.Fiber.fork ~sw (fun () -> read_notifications t lease));
         Option.iter attachment.owner_lease ~f:(fun lease ->
           Eio.Fiber.fork ~sw (fun () -> renew_owner t lease));
         Ok t))
@@ -331,7 +331,6 @@ let attach_with_lease
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
       ~latest_event_sequence:response.latest_event_sequence
-      ~subscribe
       ?previous_projection
       ?on_update
       ?on_error
@@ -361,7 +360,7 @@ let create_with_lease
   | Error _ as failure -> failure
   | Ok (Session_create { session; attachment = Some response; _ }) ->
     make_handle
-      ~notification_lease
+      ~notification_lease:(Some notification_lease)
       ~sw
       ~clock
       ~connection
@@ -370,7 +369,6 @@ let create_with_lease
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
       ~latest_event_sequence:response.latest_event_sequence
-      ~subscribe:true
       ?on_update
       ?on_error
       ()
@@ -398,7 +396,7 @@ let attach
       ~connection
       ~session_id
       ~mode
-      ?subscribe
+      ?(subscribe = true)
       ?after_sequence
       ?reclaim_token
       ?previous_projection
@@ -406,7 +404,7 @@ let attach
       ?on_error
       ()
   =
-  with_notification_lease connection (fun notification_lease ->
+  let attach notification_lease =
     attach_with_lease
       ~notification_lease
       ~sw
@@ -414,13 +412,17 @@ let attach
       ~connection
       ~session_id
       ~mode
-      ?subscribe
+      ~subscribe
       ?after_sequence
       ?reclaim_token
       ?previous_projection
       ?on_update
       ?on_error
-      ())
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> attach (Some lease))
+  else attach None
 ;;
 
 let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =

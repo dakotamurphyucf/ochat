@@ -1,8 +1,10 @@
 open! Core
 
 (** A synchronized attached-session client used by terminal and automation
-    front-ends. One handle owns notification reduction and owner renewal for
-    its connection. *)
+    front-ends. At most one subscribed handle owns notification reduction per
+    connection. Unsubscribed handles may coexist, including with that reader;
+    they do not consume events or update their projection from notifications.
+    Each handle owns renewal of its own attachment lease. *)
 
 type t
 

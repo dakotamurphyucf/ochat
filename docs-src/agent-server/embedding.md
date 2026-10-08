@@ -168,8 +168,12 @@ work running after the embedding process exits. `connect_host` returns a typed
 error after host closure; the older `connect` convenience API requires an open
 host.
 
-A live session handle claims the connection's exclusive notification lease before
-sending create or attach. A second handle must use another connection. Switch
+A subscribed session handle claims the connection's exclusive notification lease
+before sending create or attach. A second subscribed handle must use another
+connection. Handles attached with `subscribe=false` may share the connection;
+they perform requests and renew their own attachment leases without consuming
+notifications or updating projections from events. Closing an unsubscribed handle
+does not release the subscribed handle's notification ownership. Switch
 release, cancellation and close release the lease; an outstanding notification
 read is cancelled and joined before replacement ownership is admitted. Notification
 ownership has a separate mutex from synchronous request serialization.
