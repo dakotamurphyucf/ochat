@@ -11,6 +11,7 @@ module Error : sig
     | Create
     | Replace
     | Delete
+    | Confirm_absent
   [@@deriving sexp_of]
 
   type code =
@@ -82,6 +83,13 @@ module Directory : sig
   (** Exact validated private file; logical removal, not forensic erasure. *)
   val delete : t -> Name.t -> (unit, Error.t) result
 
+  (** Caller owns lifecycle coordination. Validates the retained directory and
+      nofollow-checks the exact child: any existing entry returns Exists without
+      following/deleting it. Only absence plus successful fsync of this same
+      directory confirms durable absence. Errors have publication=None; this
+      operation never locks, recreates or unlinks a child. *)
+  val confirm_absent : t -> Name.t -> (unit, Error.t) result
+
   (** Join active operations and reject new ones. Idempotent. Existing lock
       leases own separate descriptors and are released by their own switch. *)
   val close : t -> unit
@@ -93,6 +101,9 @@ module Directory : sig
 
     (** Real native publication with one injected finite fault, no mocked IO. *)
     val create_with_fault : t -> Name.t -> bytes -> fault:fault -> (unit, Error.t) result
+
+    (** Real absent-child check with a finite directory-sync failure seam. *)
+    val confirm_absent_with_sync_failure : t -> Name.t -> (unit, Error.t) result
 
     (** Runs the hook after joined native creation, before cancellation check.
         Used to exercise ownership cleanup without a timing-dependent sleep. *)

@@ -438,3 +438,86 @@ let%expect_test "empty ACL admission and platform-specific Darwin extended ACL r
     print_endline "empty ACL admission passed; extended ACL checks are Darwin-specific");
   [%expect {| empty ACL admission passed; extended ACL checks are Darwin-specific |}]
 ;;
+
+let%expect_test
+    "durable absence confirmation rejects existing entries and retains sync uncertainty"
+  =
+  with_directory (fun _ _ anchor directory ->
+    Storage.Directory.confirm_absent directory (name "absent") |> ok;
+    (match
+       Storage.Directory.For_testing.confirm_absent_with_sync_failure
+         directory
+         (name "absent")
+     with
+     | Error error ->
+       assert (Storage.Error.equal_code (Storage.Error.code error) Unavailable);
+       assert (Option.is_none (Storage.Error.publication error))
+     | Ok () -> failwith "sync failure became durable absence");
+    Storage.Directory.create_immutable
+      directory
+      (name "present")
+      (Bytes.of_string "synthetic-retained")
+    |> ok;
+    let reject_existing filename =
+      match Storage.Directory.confirm_absent directory (name filename) with
+      | Error error ->
+        assert (Storage.Error.equal_code (Storage.Error.code error) Exists);
+        assert (Option.is_none (Storage.Error.publication error))
+      | Ok () -> failwith "existing entry reported absent"
+    in
+    reject_existing "present";
+    Eio_unix.run_in_systhread (fun () ->
+      Core_unix.symlink
+        ~target:"absent"
+        ~link_name:
+          (Filename.concat (Eio.Path.native_exn Eio.Path.(anchor / "private")) "symlink"));
+    reject_existing "symlink";
+    assert (
+      Bytes.equal
+        (Storage.Directory.read_bounded directory (name "present") ~max_bytes:32 |> ok)
+        (Bytes.of_string "synthetic-retained"));
+    print_endline
+      "missing+sync confirmed; failed sync uncertain; file and dangling symlink untouched");
+  [%expect
+    {| missing+sync confirmed; failed sync uncertain; file and dangling symlink untouched |}]
+;;
+
+let%expect_test
+    "backend absence confirmation uses its own namespace and borrowed directory lifetime"
+  =
+  with_directory (fun _ sw _ directory ->
+    let module B = Provider_secret_store in
+    let ok = function
+      | Ok v -> v
+      | Error e -> raise_s (B.Error.sexp_of_t e)
+    in
+    let backend =
+      B.open_private_files ~sw ~directory ~namespace:(B.Namespace.create "absence" |> ok)
+      |> ok
+    in
+    let revision = B.Revision.create "owned_revision" |> ok in
+    B.confirm_absent backend ~revision |> ok;
+    B.create
+      backend
+      ~revision
+      (B.Secret.of_bytes (Bytes.of_string "synthetic-owned-material") |> ok)
+    |> ok;
+    (match B.confirm_absent backend ~revision with
+     | Error error ->
+       assert (B.Error.equal_code (B.Error.code error) Exists);
+       assert (Option.is_none (B.Error.publication error))
+     | Ok () -> failwith "present backend revision reported absent");
+    B.delete backend ~revision |> ok;
+    B.confirm_absent backend ~revision |> ok;
+    Storage.Directory.close directory;
+    (match B.confirm_absent backend ~revision with
+     | Error error ->
+       assert (B.Error.equal_code (B.Error.code error) Closed);
+       assert (Option.is_none (B.Error.publication error))
+     | Ok () -> failwith "closed borrowed directory admitted confirmation");
+    print_endline
+      "backend confirms its exact revision; existing and closed resources fail without \
+       publication claim");
+  [%expect
+    {| backend confirms its exact revision; existing and closed resources fail without publication claim |}]
+;;

@@ -1250,3 +1250,10 @@
 (alias
  (name runtest)
  (deps (alias runtest-generated-admission)))
+
+(library
+ (name credential_registry_model_test)
+ (modules credential_registry_model_test)
+ (libraries core jsonaf ochat.credential_registry_model ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -8,6 +8,7 @@ module Error : sig
     | Create
     | Read
     | Delete
+    | Confirm_absent
     | Close
   [@@deriving sexp_of]
 
@@ -84,6 +85,12 @@ val read : t -> revision:Revision.t -> (Secret.t, Error.t) result
 
 (** Logical unlink only, not physical/forensic erasure. *)
 val delete : t -> revision:Revision.t -> (unit, Error.t) result
+
+(** Confirms absence in this backend's own retained directory after syncing it.
+    Any existing entry returns Exists, including symlinks, without following or
+    deleting it. Caller owns lifecycle locking. No recreation or physical erasure
+    is implied; errors have publication=None and must not become cleanup proof. *)
+val confirm_absent : t -> revision:Revision.t -> (unit, Error.t) result
 
 (** Joins outstanding backend operations. Borrows Directory: close never closes
     it; caller must keep Directory alive until backend close. Earlier Directory
