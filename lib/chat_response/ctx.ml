@@ -133,7 +133,10 @@ let with_inference_attempt_guard t ~before_attempt =
 ;;
 
 let with_inference_parent t ~parent =
-  { t with inference_relation = Transcript.Scope.Nested parent }
+  { t with
+    inference_relation = Transcript.Scope.Nested parent
+  ; inference_context = Inference_runtime.Context.detach t.inference_context
+  }
 ;;
 
 let inference_execution t =

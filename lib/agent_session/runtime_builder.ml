@@ -1132,6 +1132,14 @@ let build_with_services
       ~job_services
   =
   let open Result.Let_syntax in
+  let inference_session = Inference_runtime.Session.create ~sw in
+  let%bind inference_context =
+    Inference_runtime.Context.with_session
+      (Inference_runtime.Context.detach inference_context)
+      inference_session
+    |> Result.map_error ~f:(fun error ->
+      failure (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
   let%bind () =
     match source with
     | Authored _ -> Ok ()
@@ -1945,7 +1953,10 @@ let build_with_services
              Error
                (failure "generated moderators must use inherited tools for model work"))
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
-    ; close = (fun () -> close_runtime cache storage_paths session_id moderator)
+    ; close =
+        (fun () ->
+          Inference_runtime.Session.close inference_session;
+          close_runtime cache storage_paths session_id moderator)
     }
   in
   Ok runtime

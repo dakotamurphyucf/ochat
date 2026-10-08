@@ -33,6 +33,9 @@ module Terminal : sig
     | Body_limit
     | Framing_limit
     | Protocol
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
   [@@deriving equal, sexp_of]
 

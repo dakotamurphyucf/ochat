@@ -70,9 +70,11 @@ type t
     one Eio domain; native threads must deliver changes through that owner.
     Credential lookup may refresh the exact binding but must never initiate login,
     fall back modes/accounts, forward client secrets or return diagnostic secrets.
-    Currentness is rechecked after lookup and before header publication. *)
+    Explicit immutable transport policy defaults to SSE; resolved contexts capture
+    it. CLI/operator selection is owned by OCH-67. Currentness is rechecked after lookup and before header publication. *)
 val create
-  :  Openai.Responses_driver.t
+  :  ?transport_policy:Inference.Observation.Transport_policy.t
+  -> Openai.Responses_driver.t
   -> authorize:
        (principal:string
         -> profile:string

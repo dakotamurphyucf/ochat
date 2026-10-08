@@ -1404,6 +1404,7 @@ let make_run_fork_admitted
   let child_ctx =
     { ctx with
       allocator = child_allocator
+    ; inference_context = Inference_runtime.Context.detach ctx.inference_context
     ; fork_depth = Option.map ctx.fork_depth ~f:(fun depth -> depth + 1)
     ; id_source = History_entry.Id_source.of_allocator child_allocator
     ; registry = child_registry
@@ -2514,7 +2515,11 @@ let run_completion_stream_in_memory_entries
       |> Result.ok_or_failwith)
   in
   let inference_context =
-    Inference_runtime.Context.derive inference_context ~target
+    (if Option.value fork_depth ~default:0 = 0 && Option.is_none parent_call_id
+     then Inference_runtime.Context.derive_in_session
+     else Inference_runtime.Context.derive)
+      inference_context
+      ~target
     |> Result.map_error ~f:(fun error ->
       Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
     |> Result.ok_or_failwith

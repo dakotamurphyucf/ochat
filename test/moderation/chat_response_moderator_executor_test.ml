@@ -32,6 +32,7 @@ let fixture_ctx ~env ~dir ~tool_dir ~cache =
       ~bind:(fun _ -> Ok ())
       ~prepare:(fun ~preparation_id:_ _ ->
         failwith "injected run_agent fixture dispatched inference")
+      ()
     |> require
     |> Inference_runtime.Context.create ~target
     |> require
