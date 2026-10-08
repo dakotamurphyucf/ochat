@@ -154,6 +154,14 @@ module Context_estimate : sig
   val equal : t -> t -> bool
 end
 
+module Transport_policy : sig
+  type t =
+    | Http_sse
+    | Prefer_websocket
+    | Require_websocket
+  [@@deriving equal, sexp_of]
+end
+
 module Configuration : sig
   module Name : sig
     type t =
@@ -236,7 +244,8 @@ module Configuration : sig
       Reading this value requires Diagnostics AND existing session visibility;
       that runtime authority cannot be granted by constructing this pure value. *)
   val of_target
-    :  Request.Target.t
+    :  ?transport_policy:Transport_policy.t
+    -> Request.Target.t
     -> preparation_id:string
     -> transport:transport
     -> capabilities:(feature * support) list
@@ -249,7 +258,11 @@ module Configuration : sig
   val account : t -> string option
   val model : t -> string
   val preparation_id : t -> string
+
+  (** Initial nomination, never evidence of actual dispatch after fallback. *)
   val transport : t -> transport
+
+  val transport_policy : t -> Transport_policy.t option
   val settings : t -> setting list
   val withheld_settings : t -> int
   val capabilities : t -> (feature * support) list
@@ -259,6 +272,35 @@ module Configuration : sig
   (** Complete original JSON admission precedes closed safe decoding; no unknown
       private fields or provider strings survive into this projection. *)
   val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Error.t) Result.t
+end
+
+module Transport_selection : sig
+  type transport =
+    | Http_sse
+    | Websocket
+  [@@deriving equal, sexp_of]
+
+  type fallback_reason =
+    | Unsupported
+    | Session_busy
+    | Connection
+    | Upgrade
+  [@@deriving equal, sexp_of]
+
+  type t
+
+  val create
+    :  accounting_id:Observation_id.t
+    -> requested:Transport_policy.t
+    -> selected:transport
+    -> fallback:fallback_reason option
+    -> (t, Error.t) Result.t
+
+  val accounting_id : t -> Observation_id.t
+  val requested : t -> Transport_policy.t
+  val selected : t -> transport
+  val fallback : t -> fallback_reason option
+  val equal : t -> t -> bool
 end
 
 module Diagnostic : sig
@@ -331,6 +373,7 @@ type payload =
   | Usage of Usage.t
   | Context_estimate of Context_estimate.t
   | Configuration of Configuration.t
+  | Transport_selection of Transport_selection.t
   | Diagnostic of Diagnostic.t
 
 type t

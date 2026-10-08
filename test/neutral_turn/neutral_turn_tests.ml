@@ -102,6 +102,7 @@ let context run =
         ~configuration
         ~fingerprint:"fixture"
         ~run:(run request))
+    ()
   |> ok
   |> Runtime.Context.create ~target
   |> ok

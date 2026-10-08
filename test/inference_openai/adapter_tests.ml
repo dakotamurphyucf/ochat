@@ -357,7 +357,8 @@ let%expect_test "provider usage preserves actual zero, explicit null and missing
                | Actual n -> printf "actual:%Ld\n" n
                | Unknown reason -> print_s [%sexp (reason : O.Count.unknown_reason)]
                | Estimated _ -> assert false)
-         | Context_estimate _ | Configuration _ | Diagnostic _ -> assert false));
+         | Context_estimate _ | Configuration _ | Transport_selection _ | Diagnostic _ ->
+           assert false));
   [%expect
     {|
     actual:0

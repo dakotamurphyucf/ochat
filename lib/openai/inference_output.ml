@@ -245,6 +245,9 @@ let failure : D.Terminal.failure -> E.Terminal.transport_failure = function
   | Body_limit -> Body_limit
   | Framing_limit -> Framing_limit
   | Protocol -> Protocol
+  | Unsupported_transport -> Unsupported_transport
+  | Session_closed -> Session_closed
+  | Session_busy -> Session_busy
   | Connection -> Connection
   | Timeout -> Timeout
 ;;

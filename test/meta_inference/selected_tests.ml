@@ -130,6 +130,7 @@ let execution ~target ~answer ~on_observation =
               ~output_coverage:Response_output
               ~limits:Runtime.Limits.default
             |> ok))
+      ()
     |> ok
     |> Runtime.Context.create ~target
     |> ok
@@ -180,7 +181,8 @@ let%expect_test
         ~on_observation:(fun observation ->
           match O.payload observation with
           | Usage _ -> usages := O.scope observation :: !usages
-          | Context_estimate _ | Configuration _ | Diagnostic _ -> ())
+          | Context_estimate _ | Configuration _ | Transport_selection _ | Diagnostic _ ->
+            ())
     in
     let module J = (val M.Evaluator.prompt_reward_model_judge : M.Evaluator.Judge) in
     let evaluator = M.Evaluator.create ~judges:[ Judge (module J) ] () in

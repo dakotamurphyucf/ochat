@@ -310,6 +310,7 @@ let create ~namespace ~default_model ~post_stream =
           ~configuration
           ~fingerprint:preparation_id
           ~run:(run_stream post_stream request))
+      ()
     |> ok
   in
   { default_model; adapter; identity }
