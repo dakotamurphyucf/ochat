@@ -59,6 +59,7 @@ let child_environment fixture =
 ;;
 
 let spawn_stdio ~sw env fixture arguments =
+  Support.Provider_fixture.provision ~env fixture;
   Stdio_process.spawn
     ~sw
     ~env
@@ -68,6 +69,7 @@ let spawn_stdio ~sw env fixture arguments =
 ;;
 
 let run_stdio_cli ~sw env fixture arguments =
+  Support.Provider_fixture.provision ~env fixture;
   Process_manager.spawn
     ~sw
     ~env
