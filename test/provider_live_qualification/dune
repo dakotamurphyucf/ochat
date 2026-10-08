@@ -1,6 +1,6 @@
 (executable
  (name main)
- (modules feature_case live_qualification main)
+ (modules expiry_clock feature_case live_qualification main)
  (libraries core core_unix.command_unix uri jsonaf eio eio.unix eio_main cstruct mirage-crypto-rng.unix inference_composition ochat.provider_runtime_host ochat.provider_runtime ochat.provider_operator ochat.operator_authorization ochat.provider_oauth ochat.provider_oauth_registry ochat.provider_secret_store ochat.private_storage ochat.credential_registry ochat.credential_registry_model ochat.inference_host ochat.inference_runtime ochat.inference_client ochat.inference ochat.openai ochat.agent_server ochat.agent_session ochat.agent_store ochat.agent_client ochat.agent_transport_socket ochat.agent_protocol ochat.transcript ochat.document_schema)
  (preprocess (pps ppx_jane)))
 

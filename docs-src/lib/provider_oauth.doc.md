@@ -75,12 +75,15 @@ during an exchange. The Responses driver suites also pass, including the two
 new direct-route/header cases across HTTP and WebSocket policies. Repository
 `@check` and offline documentation validation pass.
 
-Live browser login, credential registration, restart with saved credentials and
-cancellation of a subsequent login passed on 2026-10-08. The first direct Codex
-SSE inference request returned HTTP 400; it does not qualify inference support.
-Complete browser/device workflows, refresh and direct HTTP/WS route acceptance
-still require provider qualification. Synthetic exchanges do not claim
-that OpenAI permits this registration for every host or account.
+Live browser and device-code enrollment passed on 2026-10-08 with saved
+runtime-host credentials and cancellation of a subsequent owned login. With
+`gpt-6-luna`, both direct HTTP streaming and required WebSocket passed complete
+local-history/tool/restart journeys. Both also passed actual provider refresh
+and logout with restored-host denial. Refresh used a controlled host expiry
+trigger while OAuth validation and network deadlines stayed on real clocks;
+it does not claim naturally elapsed credential expiry. See the dated provider
+operator evidence for request counts and exact limits. These observations do
+not establish registration eligibility for every host or account.
 
 ## Registry adapter ownership
 
@@ -111,5 +114,6 @@ The adapter native-registry regression sources cover restart and refresh,
 cancellation and concurrent completion/close, original-candidate cleanup, foreign
 identity pairing, and lost publication acknowledgment. All 21 focused OAuth
 protocol, flow and native-registry expect cases passed strict comparison in the
-composed host build. These checks use controlled external exchanges; real
-device registration, expiry and renewal remain live qualification requirements.
+composed host build. These regression checks use controlled external exchanges;
+the separate live journeys above substantiate actual enrollment, provider
+refresh, inference and logout.

@@ -79,6 +79,14 @@ The environment command requires the runtime host's declared `OPENAI_API_KEY`
 source. To use the subscription route, run `ochat provider login -key account-login -mode device` or choose `-mode browser`; the command displays the private challenge
 and waits for terminal status. It does not automatically open a browser.
 
+Device login displays a verification URL and a one-time code. Open that URL in
+a browser on any machine and enter the code there; the runtime host polls for
+the result and stores its own credentials. It needs neither a local browser nor
+a loopback callback, and does not ask you to paste an access token into OChat.
+This is the selected headless login workflow. Browser mode instead requires the
+browser to reach the runtime host’s loopback callback. Live device qualification
+is recorded below; platform-specific issues can be addressed when reported.
+
 `select` requires the current selection revision from status. `logout` disables
 the selected binding and drains admitted requests. `cancel` takes the original
 profile, flow identifier and expiry shown by login/status. Consult each command's
@@ -115,8 +123,9 @@ settings; the application never removes a selected setting to obtain success.
 
 The shipping WebSocket catalog supports exactly `gpt-6-luna` on the public API
 route at `https://api.openai.com/v1/responses`. Unlisted models, model prefixes,
-endpoint overrides (including a trailing slash) and direct Codex retain unknown
-WebSocket support. This declaration does not establish account eligibility.
+endpoint overrides (including a trailing slash) retain unknown WebSocket support.
+The exact direct Codex endpoint and `gpt-6-luna` also have qualified WebSocket
+support from the device-login journey recorded below. This declaration does not establish account eligibility.
 Required WebSocket refuses unknown support before credential acquisition or
 connection. Preferred WebSocket records an observable SSE fallback for unknown
 support; uncertain delivery never authorizes resubmission.
@@ -145,11 +154,35 @@ The local allowlisted manifest names are `gpt6luna-api-sse-journey07.json`,
 `gpt6luna-api-ws-journey01.json`, and the corresponding `json01`, `img01`,
 `reason01`, `doc01`, `fn01` and `logout01` manifests for each transport.
 These are dated observations rather than latency or universal capability claims.
-They do not qualify temperature, top-p, cache controls, every media variant,
-model-pair replay or direct Codex. Subscription OAuth browser login, saved
-credential registration, host restart and subsequent login cancellation passed.
-The first direct Codex SSE request returned HTTP 400; no OAuth inference or
-renewal success is claimed here.
+They do not qualify temperature, top-p, cache controls, every media variant or
+cross-model replay. The selected live model remains `gpt-6-luna`; unqualified
+model transitions retain their existing preflight rejection policy.
+
+Direct Codex qualification used browser enrollment for SSE and device-code
+enrollment for required WebSocket. Both saved credentials on the runtime host;
+device verification needed no loopback callback or pasted token.
+
+| Direct Codex check, on each transport | New inference requests | Evidence and limit |
+| --- | ---: | --- |
+| Full journey | 4 | Three completed turns, one real native `apply_patch` effect, restart, exact local-history continuation and captured identity/configuration |
+| Renewal | 2 | Warm request, actual refresh exchange, unchanged account identity/auth epoch, new credential revision, continued inference and no repeated tool effect |
+| Logout | 0 | Persisted disable, old-target rejection and restored-host denial; prior tool effect remains exactly one |
+
+Renewal used an explicit **controlled host expiry clock** because the newly
+issued credentials remain valid for ten days. The ordinary registry admission
+path triggered the real provider refresh exchange. OAuth token validation,
+network operations and deadlines used real clocks; the host clock returned to
+real time before validating the replacement grant. This proves expiry-triggered
+renewal and WebSocket continuity under controlled timing, not ten days of elapsed
+wall time. No credential, grant or session data was rewritten to simulate expiry.
+The override exists only in the explicitly invoked qualification harness.
+
+The local manifests are `gpt6luna-codex-sse-enrolled-journey02.json`,
+`gpt6luna-codex-device-ws-journey01.json`, the corresponding `renew03` (SSE) and
+`renew02` (WebSocket), and `logout01` for each transport. The SSE root retains
+six earlier diagnostic admissions, so its final cumulative count is twelve;
+the WebSocket root's final count is six. Every original attempt remains in its
+own durable ledger. No uncertain attempt was automatically replayed.
 
 The standalone harness requires explicit live opt-in and either a protected
 API-key file (`-key-file`) or an explicitly named local environment input
@@ -175,6 +208,12 @@ logout, reuse the corresponding journey's exact model, transport, root and
 persistent budget and `-max-output-tokens 1024` with `-phase logout`. Reusing a completed feature or journey
 root never authorizes replay. The harness enforces no native tool approvals for
 feature phases; the journey approves only its exact synthetic patch.
+
+All credential-backed provider runs are local, explicitly opted-in qualification.
+GitHub CI invokes `dune runtest` and `@agent-e2e-pr`; the provider qualification
+`runtest` alias runs only `-self-check`, without credentials, OAuth enrollment or
+provider requests. Existing real-model evaluation commands also remain outside
+those CI aliases.
 
 Process host policy governs newly prepared work, including work from restored
 targets. It is not a newly persisted session setting. An already prepared

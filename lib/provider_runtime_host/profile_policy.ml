@@ -29,6 +29,20 @@ let endpoint = function
   | Direct_codex -> "https://chatgpt.com/backend-api/codex/responses"
 ;;
 
+let apply_endpoint_policy profile ~route =
+  Driver.Profile.with_truncation_emission
+    profile
+    (match route with
+     | Public_api -> Openai.Responses_request.Truncation_emission.Explicit_disabled
+     | Direct_codex -> Omit)
+  |> fun profile ->
+  Driver.Profile.with_response_content_type_policy
+    profile
+    (match route with
+     | Public_api -> Driver.Profile.Response_content_type_policy.Require_event_stream
+     | Direct_codex -> Allow_absent_event_stream)
+;;
+
 let baseline route =
   let features =
     match route with
@@ -75,11 +89,13 @@ let baseline route =
   (D.Capability.Websocket, D.Capability.Unknown) :: features
 ;;
 
-(* Exact Public API SSE/WS qualification on 2026-10-08, Darwin arm64.
-   See the dated provider operator evidence; this is not account admission. *)
+(* Exact Public API SSE/WS and Direct Codex device-login WS journeys qualified
+   on 2026-10-08, Darwin arm64. Direct evidence is four attempts, three completed
+   turns, one local tool effect and restored history; this does not qualify every
+   feature/account or warm-channel renewal. See dated provider operator evidence. *)
 let qualified_models = function
   | Public_api -> [ "gpt-6-luna", [ D.Capability.Websocket, D.Capability.Supported ] ]
-  | Direct_codex -> []
+  | Direct_codex -> [ "gpt-6-luna", [ D.Capability.Websocket, D.Capability.Supported ] ]
 ;;
 
 let capabilities route ~endpoint:selected_endpoint =

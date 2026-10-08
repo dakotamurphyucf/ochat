@@ -72,6 +72,9 @@ let%expect_test "WebSocket qualification is exact model route and endpoint" =
     ; Public_api, "https://api.openai.com/v1/responses/", "gpt-6-luna"
     ; Public_api, "https://unqualified.example/v1/responses", "gpt-6-luna"
     ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna"
+    ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna-preview"
+    ; Direct_codex, P.endpoint Direct_codex, "GPT-6-LUNA"
+    ; Direct_codex, P.endpoint Direct_codex ^ "/", "gpt-6-luna"
     ; Direct_codex, P.endpoint Public_api, "gpt-6-luna"
     ]
     ~f:(fun (route, endpoint, model) ->
@@ -83,6 +86,9 @@ let%expect_test "WebSocket qualification is exact model route and endpoint" =
     Unknown
     Unknown
     Unknown
+    Unknown
+    Unknown
+    Supported
     Unknown
     Unknown
     Unknown
@@ -105,7 +111,7 @@ let%expect_test
       [ P.Public_api, P.endpoint Public_api, "ochat-test-unlisted-alpha"
       ; Direct_codex, P.endpoint Direct_codex, "ochat-test-unlisted-alpha"
       ; Public_api, "https://api.openai.com/v1/responses/", "gpt-6-luna"
-      ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna"
+      ; Direct_codex, P.endpoint Direct_codex, "gpt-6-luna-preview"
       ]
       ~f:(fun (route, endpoint, model) ->
         let profile =
@@ -208,5 +214,71 @@ let%expect_test
     {|
     API: selected control preserved
     direct: selected control refused
+    |}]
+;;
+
+let%expect_test
+    "request encoding follows selected route without changing profile identity"
+  =
+  List.iter [ P.Public_api; Direct_codex ] ~f:(fun route ->
+    let capabilities =
+      P.capabilities route ~endpoint:(P.endpoint route) |> Or_error.ok_exn
+    in
+    let default =
+      D.Setting.create
+        ~name:"instructions"
+        ~value:(Value (`String "fixed policy default"))
+        ~provenance:Profile_default
+      |> Or_error.ok_exn
+    in
+    let profile =
+      D.Profile.create
+        ~id:"encoding-policy"
+        ~account:(Some "nonsecret-account")
+        ~endpoint:(P.endpoint route)
+        ~capabilities
+        ~defaults:[ default ]
+      |> Or_error.ok_exn
+    in
+    let selected = P.apply_endpoint_policy profile ~route in
+    assert (String.equal (D.Profile.id profile) (D.Profile.id selected));
+    assert (
+      Option.equal String.equal (D.Profile.account profile) (D.Profile.account selected));
+    assert (String.equal (D.Profile.endpoint profile) (D.Profile.endpoint selected));
+    let before = D.Profile.effective_settings profile [] |> Or_error.ok_exn in
+    let after = D.Profile.effective_settings selected [] |> Or_error.ok_exn in
+    List.iter [ before; after ] ~f:(function
+      | [ setting ] ->
+        assert (String.equal (D.Setting.name setting) "instructions");
+        assert (D.Setting.equal_provenance (D.Setting.provenance setting) Profile_default);
+        (match D.Setting.value setting with
+         | Value (`String value) -> assert (String.equal value "fixed policy default")
+         | _ -> assert false)
+      | _ -> assert false);
+    assert (
+      D.Capability.equal_support
+        (D.Profile.capability profile ~model:"gpt-6-luna" ~feature:Text_input)
+        (D.Profile.capability selected ~model:"gpt-6-luna" ~feature:Text_input));
+    let emission =
+      match D.Profile.truncation_emission selected with
+      | Openai.Responses_request.Truncation_emission.Explicit_disabled ->
+        "explicit-disabled"
+      | Omit -> "omitted"
+    in
+    let response_policy =
+      match D.Profile.response_content_type_policy selected with
+      | D.Profile.Response_content_type_policy.Require_event_stream ->
+        "require-event-stream"
+      | Allow_absent_event_stream -> "allow-absent-event-stream"
+    in
+    printf
+      "%s: %s, %s\n"
+      (Sexp.to_string (P.sexp_of_route route))
+      emission
+      response_policy);
+  [%expect
+    {|
+    Public_api: explicit-disabled, require-event-stream
+    Direct_codex: omitted, allow-absent-event-stream
     |}]
 ;;

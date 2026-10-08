@@ -264,7 +264,7 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
                 (match event with
                  | D.Event.Update _ | Finalized _ | Terminal (Provider _) ->
                    note_delivery Response_started
-                 | (Diagnostic _ | Http_rejection _) as event ->
+                 | (Diagnostic _ | Http_rejection _ | Response_content_type _) as event ->
                    let reason, delivery, phase, prefix =
                      match event with
                      | Diagnostic { violation; delivery } ->
@@ -272,6 +272,11 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
                        , delivery
                        , O.Diagnostic.Stream
                        , "protocol:" )
+                     | Response_content_type { detail; delivery } ->
+                       ( O.Diagnostic.Response_content_type detail
+                       , delivery
+                       , O.Diagnostic.Dispatch
+                       , "content-type:" )
                      | Http_rejection { rejection; delivery } ->
                        ( O.Diagnostic.Http_rejection rejection
                        , delivery

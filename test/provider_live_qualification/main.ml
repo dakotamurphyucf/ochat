@@ -46,7 +46,9 @@ let command =
        flag
          "phase"
          (optional_with_default "journey" string)
-         ~doc:"journey|renew|logout|feature resumable qualification phase"
+         ~doc:
+           "journey|enrolled-journey|renew|logout|feature|rejection-probe explicit \
+            qualification phase"
      and feature =
        flag
          "feature"
@@ -71,6 +73,25 @@ let command =
          "max-attempts"
          (optional int)
          ~doc:"N persistent actual-attempt ceiling, at most 16"
+     and probe_id =
+       flag
+         "probe-id"
+         (optional string)
+         ~doc:
+           "ID fresh lowercase probe admission identifier; required only for \
+            rejection-probe"
+     and resume_enrolled_journey =
+       flag
+         "resume-enrolled-journey"
+         no_arg
+         ~doc:
+           " explicitly reuse the exact admitted enrolled journey only before any \
+            inference/effect"
+     and enrolled_session =
+       flag
+         "enrolled-session"
+         no_arg
+         ~doc:" explicitly select the enrolled-journey checkpoint for renew/logout"
      and resume_enrolled =
        flag
          "resume-enrolled"
@@ -85,6 +106,13 @@ let command =
          ~doc:
            " explicitly launch the fixed macOS browser opener for browser login only; \
             never print its private URI"
+     and advance_expiry =
+       flag
+         "advance-expiry"
+         no_arg
+         ~doc:
+           " explicit controlled host expiry for renew only; real OAuth \
+            validation/network clocks retained; exclusive with hold-until-expiry"
      and hold_until_expiry =
        flag
          "hold-until-expiry"
@@ -142,8 +170,10 @@ let command =
          let phase =
            match phase with
            | "journey" -> Q.Plan.Journey
+           | "enrolled-journey" -> Enrolled_journey
            | "renew" -> Renew
            | "logout" -> Logout
+           | "rejection-probe" -> Rejection_probe
            | "feature" -> Feature
            | _ -> failwith "invalid phase"
          in
@@ -212,7 +242,11 @@ let command =
                ~root
                ~key_input
                ~hold_until_expiry
+               ~advance_expiry
                ~resume_enrolled
+               ~probe_id
+               ~enrolled_session
+               ~resume_enrolled_journey
                ~browser_presentation:
                  (if open_browser
                   then Q.Browser_presentation.Launch_local

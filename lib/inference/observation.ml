@@ -1337,6 +1337,81 @@ module Diagnostic = struct
     ;;
   end
 
+  module Response_content_type = struct
+    type shape =
+      | Absent
+      | Single
+      | Duplicate_same
+      | Duplicate_conflicting
+    [@@deriving equal, sexp_of]
+
+    type media =
+      | Event_stream
+      | Json
+      | Html
+      | Other
+    [@@deriving equal, sexp_of]
+
+    type t =
+      { shape : shape
+      ; media : media list
+      }
+    [@@deriving equal, sexp_of]
+
+    let create ~shape ~media =
+      if
+        List.length media > 4
+        || List.existsi media ~f:(fun i value ->
+          List.exists (List.take media i) ~f:(equal_media value))
+        || (not (Bool.equal (equal_shape shape Absent) (List.is_empty media)))
+        || ((equal_shape shape Single || equal_shape shape Duplicate_same)
+            && List.length media <> 1)
+      then invalid "response_content_type" "inconsistent bounded header summary"
+      else Ok { shape; media }
+    ;;
+
+    let shape t = t.shape
+    let media t = t.media
+
+    let shapes =
+      [ "absent", Absent
+      ; "single", Single
+      ; "duplicate_same", Duplicate_same
+      ; "duplicate_conflicting", Duplicate_conflicting
+      ]
+    ;;
+
+    let media_names =
+      [ "event_stream", Event_stream; "json", Json; "html", Html; "other", Other ]
+    ;;
+
+    let name values value ~equal =
+      fst (List.find_exn values ~f:(fun (_, v) -> equal v value))
+    ;;
+
+    let to_json t =
+      obj
+        [ "shape", string (name shapes t.shape ~equal:equal_shape)
+        ; "media", list (fun m -> string (name media_names m ~equal:equal_media)) t.media
+        ]
+    ;;
+
+    let of_json json =
+      let* fields = Decode.fields json [ "shape"; "media" ] in
+      let* () =
+        if List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        then invalid "response_content_type" "duplicate field"
+        else Ok ()
+      in
+      let* shape = Decode.get fields "shape" (fun json -> Decode.tag json shapes) in
+      let* raw = Decode.get fields "media" Decode.array in
+      let* media =
+        Result.all (List.map raw ~f:(fun json -> Decode.tag json media_names))
+      in
+      create ~shape ~media
+    ;;
+  end
+
   module Protocol_violation = struct
     type stage =
       | Feed
@@ -1619,6 +1694,7 @@ module Diagnostic = struct
     | Timeout
     | Http_status of int
     | Http_rejection of Http_rejection.t
+    | Response_content_type of Response_content_type.t
     | Malformed_protocol
     | Protocol_violation of Protocol_violation.t
     | Unsupported_input
@@ -1673,6 +1749,7 @@ module Diagnostic = struct
     | Authentication Timed_out -> "Inference authentication timed out."
     | Connection -> "Inference connection failed."
     | Timeout -> "Inference deadline elapsed."
+    | Response_content_type _ -> "Inference response content type was rejected."
     | Http_status _ | Http_rejection _ -> "Inference HTTP request failed."
     | Malformed_protocol | Protocol_violation _ -> "Inference response was malformed."
     | Unsupported_input -> "Inference input is unsupported."
@@ -1745,6 +1822,11 @@ module Diagnostic = struct
                | Timed_out -> "timed_out") )
         ]
     | Http_status status -> obj [ "kind", string "http_status"; "status", integer status ]
+    | Response_content_type detail ->
+      obj
+        [ "kind", string "response_content_type"
+        ; "detail", Response_content_type.to_json detail
+        ]
     | Http_rejection detail ->
       obj [ "kind", string "http_rejection"; "detail", Http_rejection.to_json detail ]
     | Limit limit ->
@@ -1774,6 +1856,15 @@ module Diagnostic = struct
     let* fields = Decode.fields json [ "kind"; "reason"; "status"; "limit"; "detail" ] in
     let* kind = Decode.get fields "kind" Decode.text in
     match kind with
+    | "response_content_type" ->
+      let* fields = Decode.fields json [ "kind"; "detail" ] in
+      let* () =
+        if List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b)
+        then invalid "response_content_type" "duplicate field"
+        else Ok ()
+      in
+      let* detail = Decode.get fields "detail" Response_content_type.of_json in
+      Ok (Response_content_type detail)
     | "http_rejection" ->
       let* fields = Decode.fields json [ "kind"; "detail" ] in
       let* () =

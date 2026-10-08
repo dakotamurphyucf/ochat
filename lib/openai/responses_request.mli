@@ -10,6 +10,13 @@
     Duplicate object keys, invalid JSON numbers and excessive nesting reject. *)
 open! Core
 
+module Truncation_emission : sig
+  type t =
+    | Explicit_disabled
+    | Omit
+  [@@deriving equal, sexp_of]
+end
+
 module Field : sig
   type 'a t =
     | Absent
@@ -158,7 +165,9 @@ end
 
 type t
 
-(** [create] always emits store=false, truncation=disabled and the requested stream Boolean, and sends
+(** [create] always emits store=false and the requested stream Boolean. Truncation is
+    explicitly disabled by default; trusted endpoint policy may omit that field,
+    never emit automatic truncation or null. It sends
     the complete supplied input list; no previous_response_id/conversation path.
     Optional arguments are presence-valued: omitted defaults to Absent. Null is
     accepted only for documented nullable fields, not required input/model,
@@ -172,6 +181,7 @@ val create
   :  model:string
   -> input:Jsonaf.t list
   -> stream:bool
+  -> ?truncation_emission:Truncation_emission.t
   -> ?instructions:string Field.t
   -> ?max_output_tokens:int Field.t
   -> ?parallel_tool_calls:bool Field.t

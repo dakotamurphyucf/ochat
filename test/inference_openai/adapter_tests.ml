@@ -104,7 +104,7 @@ let read_request flow =
   Eio.Buf_read.take length reader |> Jsonaf.of_string
 ;;
 
-let with_server ?(status = 200) env handler f =
+let with_server ?(status = 200) ?(content_type = "text/event-stream") env handler f =
   Eio.Switch.run (fun sw ->
     let socket =
       Eio.Net.listen
@@ -126,12 +126,13 @@ let with_server ?(status = 200) env handler f =
         Eio.Flow.copy_string
           (sprintf
              "HTTP/1.1 %d Test\r\n\
-              Content-Type: text/event-stream\r\n\
+              Content-Type: %s\r\n\
               Content-Length: %d\r\n\
               Connection: close\r\n\
               \r\n\
               %s"
              status
+             content_type
              (String.length body)
              body)
           flow;
@@ -997,93 +998,111 @@ let%expect_test
 
 let%test_unit "actual HTTP rejection diagnostic survives ledger roundtrip without body" =
   Eio_main.run (fun env ->
-    with_server
-      ~status:400
-      env
-      (fun _ -> {|{"detail":"Instructions are required","private":"SECRET_CANARY"}|})
-      (fun sw endpoint ->
-         let module L = Agent_session.Inference_ledger in
-         let profile = profile endpoint in
-         let target = target profile in
-         let prepared = prepare (context env profile ~target ~auth) (request target) in
-         let ledger =
-           L.create
-             ~session_id:(Agent_protocol.Id.Session.of_string "ses_http_diagnostic" |> ok)
-             ~generation:0
-             ~before_tracking_unknown:false
-             ~limits:L.Limits.default
-           |> ok
-         in
-         let ledger, handle, _ =
-           L.admit
-             ledger
-             ~source:(Transcript.Source_id.of_string "actual-adapter" |> ok)
-             ~relation:Root
-             ~operation_id:None
-             ~invocation_id:None
-             ~configuration:(Runtime.Prepared.configuration prepared)
-           |> ok
-         in
-         let ledger = ref ledger
-         and order = ref [] in
-         let attempt =
-           Runtime.Prepared.start
-             prepared
-             ~scope:(L.Handle.scope handle)
-             ~accounting_id:(L.Handle.accounting_id handle)
-           |> ok
-         in
-         let receipt =
-           Runtime.Attempt.run
-             attempt
-             ~sw
-             ~on_event:(fun event ->
-               match E.view event with
-               | Terminal _ -> order := "terminal" :: !order
-               | _ -> ())
-             ~on_observation:(fun observation ->
-               (match O.payload observation with
-                | Diagnostic _ -> order := "diagnostic" :: !order
-                | _ -> ());
-               ledger := fst (L.observe !ledger handle observation |> ok))
-           |> ok
-         in
-         ledger
-         := L.set_state !ledger handle (Terminal (Runtime.Receipt.terminal receipt)) |> ok;
-         let restored =
-           L.of_document (L.to_document !ledger |> ok) ~limits:L.Limits.default |> ok
-         in
-         let observations =
-           O.Attempt_record.observations (L.Row.record (List.hd_exn (L.rows restored)))
-         in
-         let diagnostics =
-           List.filter_map observations ~f:(fun o ->
-             match O.payload o with
-             | Diagnostic d -> Some d
-             | _ -> None)
-         in
-         assert (List.equal String.equal (List.rev !order) [ "diagnostic"; "terminal" ]);
-         match diagnostics with
-         | [ diagnostic ] ->
-           (match O.Diagnostic.reason diagnostic with
-            | Http_rejection rejection ->
-              assert (
-                O.Diagnostic.Http_rejection.equal_reason
-                  (O.Diagnostic.Http_rejection.reason rejection)
-                  Missing_required_parameter);
-              assert (O.Diagnostic.equal_phase (O.Diagnostic.phase diagnostic) Dispatch)
-            | _ -> assert false);
-           assert (
-             not
-               (String.is_substring
-                  (Jsonaf.to_string
-                     (O.Attempt_record.to_json
-                        (L.Row.record (List.hd_exn (L.rows restored)))))
-                  ~substring:"SECRET_CANARY"));
-           assert (
-             Option.equal
-               E.Terminal.equal_delivery
-               (O.Diagnostic.delivery diagnostic)
-               (Some Possibly_submitted))
-         | _ -> assert false))
+    List.iter [ false; true ] ~f:(fun content_type_failure ->
+      with_server
+        ~status:(if content_type_failure then 200 else 400)
+        ~content_type:
+          (if content_type_failure
+           then "application/json; SECRET_CANARY"
+           else "text/event-stream")
+        env
+        (fun _ -> {|{"detail":"Instructions are required","private":"SECRET_CANARY"}|})
+        (fun sw endpoint ->
+           let module L = Agent_session.Inference_ledger in
+           let profile = profile endpoint in
+           let target = target profile in
+           let prepared = prepare (context env profile ~target ~auth) (request target) in
+           let ledger =
+             L.create
+               ~session_id:
+                 (Agent_protocol.Id.Session.of_string "ses_http_diagnostic" |> ok)
+               ~generation:0
+               ~before_tracking_unknown:false
+               ~limits:L.Limits.default
+             |> ok
+           in
+           let ledger, handle, _ =
+             L.admit
+               ledger
+               ~source:(Transcript.Source_id.of_string "actual-adapter" |> ok)
+               ~relation:Root
+               ~operation_id:None
+               ~invocation_id:None
+               ~configuration:(Runtime.Prepared.configuration prepared)
+             |> ok
+           in
+           let ledger = ref ledger
+           and order = ref [] in
+           let attempt =
+             Runtime.Prepared.start
+               prepared
+               ~scope:(L.Handle.scope handle)
+               ~accounting_id:(L.Handle.accounting_id handle)
+             |> ok
+           in
+           let receipt =
+             Runtime.Attempt.run
+               attempt
+               ~sw
+               ~on_event:(fun event ->
+                 match E.view event with
+                 | Terminal _ -> order := "terminal" :: !order
+                 | _ -> ())
+               ~on_observation:(fun observation ->
+                 (match O.payload observation with
+                  | Diagnostic _ -> order := "diagnostic" :: !order
+                  | _ -> ());
+                 ledger := fst (L.observe !ledger handle observation |> ok))
+             |> ok
+           in
+           ledger
+           := L.set_state !ledger handle (Terminal (Runtime.Receipt.terminal receipt))
+              |> ok;
+           let restored =
+             L.of_document (L.to_document !ledger |> ok) ~limits:L.Limits.default |> ok
+           in
+           let observations =
+             O.Attempt_record.observations (L.Row.record (List.hd_exn (L.rows restored)))
+           in
+           let diagnostics =
+             List.filter_map observations ~f:(fun o ->
+               match O.payload o with
+               | Diagnostic d -> Some d
+               | _ -> None)
+           in
+           assert (List.equal String.equal (List.rev !order) [ "diagnostic"; "terminal" ]);
+           match diagnostics with
+           | [ diagnostic ] ->
+             (match O.Diagnostic.reason diagnostic with
+              | Response_content_type detail when content_type_failure ->
+                assert (
+                  O.Diagnostic.Response_content_type.equal_shape
+                    (O.Diagnostic.Response_content_type.shape detail)
+                    Single);
+                assert (
+                  List.equal
+                    O.Diagnostic.Response_content_type.equal_media
+                    (O.Diagnostic.Response_content_type.media detail)
+                    [ Json ]);
+                assert (O.Diagnostic.equal_phase (O.Diagnostic.phase diagnostic) Dispatch)
+              | Http_rejection rejection when not content_type_failure ->
+                assert (
+                  O.Diagnostic.Http_rejection.equal_reason
+                    (O.Diagnostic.Http_rejection.reason rejection)
+                    Missing_required_parameter);
+                assert (O.Diagnostic.equal_phase (O.Diagnostic.phase diagnostic) Dispatch)
+              | _ -> assert false);
+             assert (
+               not
+                 (String.is_substring
+                    (Jsonaf.to_string
+                       (O.Attempt_record.to_json
+                          (L.Row.record (List.hd_exn (L.rows restored)))))
+                    ~substring:"SECRET_CANARY"));
+             assert (
+               Option.equal
+                 E.Terminal.equal_delivery
+                 (O.Diagnostic.delivery diagnostic)
+                 (Some Possibly_submitted))
+           | _ -> assert false)))
 ;;

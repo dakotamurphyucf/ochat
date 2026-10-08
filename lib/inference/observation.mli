@@ -342,6 +342,33 @@ module Diagnostic : sig
     val of_json : Jsonaf.t -> (t, Error.t) result
   end
 
+  (** Closed summary of rejected response Content-Type headers. No header values
+      or unknown media names are retained. Media is unique and bounded to four. *)
+  module Response_content_type : sig
+    type shape =
+      | Absent
+      | Single
+      | Duplicate_same
+      | Duplicate_conflicting
+    [@@deriving equal, sexp_of]
+
+    type media =
+      | Event_stream
+      | Json
+      | Html
+      | Other
+    [@@deriving equal, sexp_of]
+
+    type t
+
+    val create : shape:shape -> media:media list -> (t, Error.t) result
+    val shape : t -> shape
+    val media : t -> media list
+    val equal : t -> t -> bool
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, Error.t) result
+  end
+
   module Protocol_violation : sig
     type stage =
       | Feed
@@ -471,6 +498,7 @@ module Diagnostic : sig
     | Timeout
     | Http_status of int
     | Http_rejection of Http_rejection.t
+    | Response_content_type of Response_content_type.t
     | Malformed_protocol
     | Protocol_violation of Protocol_violation.t
     | Unsupported_input

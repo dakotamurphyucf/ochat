@@ -51,8 +51,11 @@ files use base64 bytes or base64 data URIs. Remote URLs and provider-only file I
 cannot represent the immutable effective asset and reject. Captured assets are
 inside the request JSON; no file path or mutable asset resolver is consulted at
 dispatch. The request always carries complete `input`, `store=false`,
-`truncation=disabled`, `stream=true`, and the selected tools. It never uses a
-provider conversation or `previous_response_id`.
+`stream=true`, and the selected tools. Public API profiles also emit
+`truncation=disabled`; the Direct Codex profile omits that unsupported field.
+This is an explicit typed profile policy applied before fingerprinting, shared
+by HTTP and WebSocket preparation. It never emits automatic truncation or uses
+a provider conversation or `previous_response_id`.
 
 The SHA-256 fingerprint includes profile/account/endpoint identity, the exact
 encoded request and effective setting provenance. Final guidance and asset/tool
@@ -102,6 +105,13 @@ lengths, invalid chunks and premature entity EOF produce typed failures. This
 selected one-request HTTP/1.1 client does not negotiate interim responses,
 redirects, compression or connection reuse. It avoids the legacy `Io.Net` null
 TLS authenticator and Cohttp's plaintext protocol debug logging/unbounded reader.
+
+Profiles require one `text/event-stream` Content-Type by default. The direct
+Codex route permits an absent header, matching its observed endpoint behavior;
+it still requires bounded HTTP/SSE framing and a valid response terminal. Empty,
+JSON or HTML bodies cannot become successful completions. Explicitly incorrect
+or duplicate Content-Type headers remain rejected on both routes. Rejections
+retain only finite header-shape and media classifications, never raw values.
 
 Validated nonterminal `Event.Update` values arrive incrementally; exact duplicate
 codec events are suppressed. Terminal-only newly finalized items arrive in

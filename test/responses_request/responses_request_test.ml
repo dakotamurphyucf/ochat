@@ -664,3 +664,38 @@ let%expect_test
     nesting budget: rejected
     |}]
 ;;
+
+let%expect_test "trusted truncation omission preserves complete local input" =
+  let inspect mode =
+    let request =
+      Request.create
+        ~truncation_emission:mode
+        ~model:"future-model"
+        ~input:[ message ]
+        ~stream:true
+        ()
+      |> get
+      |> Request.to_jsonaf
+    in
+    match request with
+    | `Object fields ->
+      let field name = List.Assoc.find_exn fields name ~equal:String.equal in
+      assert (Jsonaf.exactly_equal (field "input") (`Array [ message ]));
+      assert (Jsonaf.exactly_equal (field "store") `False);
+      printf
+        "truncation-present:%b input-complete:true store-false:true\n"
+        (List.Assoc.mem fields "truncation" ~equal:String.equal)
+    | _ -> assert false
+  in
+  inspect Explicit_disabled;
+  inspect Omit;
+  admission "auto" (base [ "truncation", `String "auto" ]);
+  admission "null" (base [ "truncation", `Null ]);
+  [%expect
+    {|
+  truncation-present:true input-complete:true store-false:true
+  truncation-present:false input-complete:true store-false:true
+  auto: rejected
+  null: rejected
+  |}]
+;;

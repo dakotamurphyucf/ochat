@@ -133,6 +133,11 @@ let create
       ~defaults:[]
     |> checked
   in
+  let api_profile =
+    Provider_runtime_host.Profile_policy.apply_endpoint_policy
+      api_profile
+      ~route:Public_api
+  in
   let%bind api_mapping =
     B.Mapping.create api_profile ~revision:"host-config-v1" ~binding:api_binding ~identity
     |> checked
@@ -180,6 +185,11 @@ let create
       ~defaults:[]
     |> Result.map_error ~f:(fun _ -> B.Error.Invalid_mapping)
     |> Result.bind ~f:(fun profile ->
+      let profile =
+        Provider_runtime_host.Profile_policy.apply_endpoint_policy
+          profile
+          ~route:Direct_codex
+      in
       B.Mapping.create
         profile
         ~revision:"direct-codex-config-v1"

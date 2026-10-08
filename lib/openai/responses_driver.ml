@@ -162,6 +162,13 @@ module Setting = struct
 end
 
 module Profile = struct
+  module Response_content_type_policy = struct
+    type t =
+      | Require_event_stream
+      | Allow_absent_event_stream
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
     { id : string
     ; account : string option
@@ -169,6 +176,8 @@ module Profile = struct
     ; uri : Uri.t
     ; capabilities : Capability.t
     ; defaults : Setting.t list
+    ; response_content_type_policy : Response_content_type_policy.t
+    ; truncation_emission : Request.Truncation_emission.t
     ; replay_policy : Responses_replay.t
     }
 
@@ -208,10 +217,19 @@ module Profile = struct
       ; uri
       ; capabilities
       ; defaults
+      ; response_content_type_policy = Response_content_type_policy.Require_event_stream
+      ; truncation_emission = Request.Truncation_emission.Explicit_disabled
       ; replay_policy = Responses_replay.exact_origin_only
       })
   ;;
 
+  let with_response_content_type_policy t response_content_type_policy =
+    { t with response_content_type_policy }
+  ;;
+
+  let response_content_type_policy t = t.response_content_type_policy
+  let with_truncation_emission t truncation_emission = { t with truncation_emission }
+  let truncation_emission t = t.truncation_emission
   let with_replay_policy t replay_policy = { t with replay_policy }
   let replay_policy t = t.replay_policy
   let id t = t.id
@@ -368,6 +386,7 @@ module Prepared = struct
     let%bind.Or_error () = tools_features profile ~model tools in
     let%bind.Or_error base =
       Request.create
+        ~truncation_emission:(Profile.truncation_emission profile)
         ~model
         ~input:history
         ~stream:true
@@ -580,6 +599,10 @@ module Event = struct
     | Update of Codec.Stream.update
     | Finalized of (int * Wire.Item.t) list
     | Terminal of Terminal.t
+    | Response_content_type of
+        { detail : Inference.Observation.Diagnostic.Response_content_type.t
+        ; delivery : Terminal.delivery
+        }
     | Http_rejection of
         { rejection : Inference.Observation.Diagnostic.Http_rejection.t
         ; delivery : Terminal.delivery
@@ -1035,11 +1058,15 @@ module Http_rejection = struct
     | _ -> unknown status
   ;;
 
+  let body_limits =
+    Transcript.Admission.limits ~max_bytes:16_384
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  ;;
+
   let classify status body =
-    let parsed =
-      Document_schema.Json.decode ~limits:Inference.Observation.Admission.diagnostic body
-      |> Result.ok
-    in
+    let parsed = Document_schema.Json.decode ~limits:body_limits body |> Result.ok in
     match parsed with
     | Some (`String _ as value) -> literal status (Some value)
     | _ ->
@@ -1194,11 +1221,48 @@ let dispatch
       if String.equal key "content-type" then Some value else None)
   in
   (match content_types with
+   | []
+     when Profile.Response_content_type_policy.equal
+            (Profile.response_content_type_policy profile)
+            Allow_absent_event_stream -> ()
    | [ value ]
      when String.Caseless.equal
             (String.strip (String.take_while value ~f:(fun c -> not (Char.equal c ';'))))
             "text/event-stream" -> ()
-   | _ -> transport_failure Invalid_content_type);
+   | _ ->
+     let module C = Inference.Observation.Diagnostic.Response_content_type in
+     let shape =
+       match content_types with
+       | [] -> C.Absent
+       | [ _ ] -> Single
+       | first :: rest ->
+         if List.for_all rest ~f:(String.Caseless.equal first)
+         then Duplicate_same
+         else Duplicate_conflicting
+     in
+     let media =
+       List.fold content_types ~init:[] ~f:(fun acc value ->
+         let normalized =
+           String.strip (String.take_while value ~f:(fun c -> not (Char.equal c ';')))
+         in
+         let media =
+           if String.Caseless.equal normalized "text/event-stream"
+           then C.Event_stream
+           else if String.Caseless.equal normalized "application/json"
+           then Json
+           else if String.Caseless.equal normalized "text/html"
+           then Html
+           else Other
+         in
+         if List.mem acc media ~equal:C.equal_media then acc else acc @ [ media ])
+     in
+     let detail =
+       match C.create ~shape ~media with
+       | Ok value -> value
+       | Error _ -> assert false
+     in
+     on_event (Event.Response_content_type { detail; delivery = Possibly_submitted });
+     transport_failure Invalid_content_type);
   let state = Http_response.body_framing headers ~max_bytes:t.max_body_bytes in
   let entity =
     Http_response.create

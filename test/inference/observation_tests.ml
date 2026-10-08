@@ -748,3 +748,23 @@ let%test_unit "HTTP rejection diagnostic roundtrip is closed and rejects duplica
              ])));
   assert (not (String.is_substring (Jsonaf.to_string wire) ~substring:"SECRET_CANARY"))
 ;;
+
+let%test_unit "response content type summary has closed bounded decode invariants" =
+  let module C = Inference.Observation.Diagnostic.Response_content_type in
+  let detail =
+    C.create ~shape:Duplicate_conflicting ~media:[ Json; Other ]
+    |> Result.ok
+    |> Option.value_exn
+  in
+  assert (C.equal detail (C.of_json (C.to_json detail) |> Result.ok |> Option.value_exn));
+  assert (Result.is_error (C.create ~shape:Absent ~media:[ Json ]));
+  assert (Result.is_error (C.create ~shape:Single ~media:[ Json; Html ]));
+  assert (Result.is_error (C.create ~shape:Duplicate_conflicting ~media:[ Json; Json ]));
+  assert (
+    Result.is_error
+      (C.of_json (Jsonaf.of_string {|{"shape":"single","media":["SECRET_CANARY"]}|})));
+  assert (
+    Result.is_error
+      (C.of_json
+         (Jsonaf.of_string {|{"shape":"single","shape":"absent","media":["json"]}|})))
+;;

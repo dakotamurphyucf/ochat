@@ -371,6 +371,8 @@ module Shape = struct
          ~f:(fun name -> name, fields [ "kind" ])
        @ [ "authentication", fields [ "kind"; "reason" ]
          ; "http_status", fields [ "kind"; "status" ]
+         ; ( "response_content_type"
+           , o [ "kind", v; "detail", o [ "shape", v; "media", a v ] ] )
          ; ( "http_rejection"
            , o [ "kind", v; "detail", fields [ "status"; "reason"; "parameter" ] ] )
          ; "limit", fields [ "kind"; "limit" ]

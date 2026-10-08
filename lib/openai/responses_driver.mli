@@ -58,6 +58,13 @@ module Setting : sig
 end
 
 module Profile : sig
+  module Response_content_type_policy : sig
+    type t =
+      | Require_event_stream
+      | Allow_absent_event_stream
+    [@@deriving equal, sexp_of]
+  end
+
   type t
 
   (** Endpoint is an absolute HTTPS Responses URL with a DNS hostname and canonical URI spelling, without userinfo, query or
@@ -71,6 +78,20 @@ module Profile : sig
     -> capabilities:Capability.t
     -> defaults:Setting.t list
     -> t Or_error.t
+
+  (** Trusted endpoint compatibility only. Default requires one event-stream
+      Content-Type. Allow_absent_event_stream accepts only an absent header and
+      still requires bounded HTTP/SSE framing and a valid response terminal;
+      wrong explicit values and duplicate headers remain rejected. *)
+  val with_response_content_type_policy : t -> Response_content_type_policy.t -> t
+
+  val response_content_type_policy : t -> Response_content_type_policy.t
+
+  (** Trusted endpoint encoding, captured before request fingerprints. Omission
+      preserves full input and store=false; it never enables automatic truncation. *)
+  val with_truncation_emission : t -> Responses_request.Truncation_emission.t -> t
+
+  val truncation_emission : t -> Responses_request.Truncation_emission.t
 
   (** Trusted host qualification only; captured prompt settings cannot declare
       cross-model replay support. Other profile identity/capabilities unchanged. *)
@@ -235,6 +256,10 @@ module Event : sig
     | Update of Responses_codec.Stream.update
     | Finalized of (int * Responses_codec.Wire.Item.t) list
     | Terminal of Terminal.t
+    | Response_content_type of
+        { detail : Inference.Observation.Diagnostic.Response_content_type.t
+        ; delivery : Terminal.delivery
+        }
     | Http_rejection of
         { rejection : Inference.Observation.Diagnostic.Http_rejection.t
         ; delivery : Terminal.delivery

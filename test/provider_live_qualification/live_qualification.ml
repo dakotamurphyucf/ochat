@@ -130,9 +130,11 @@ module Plan = struct
 
   type phase =
     | Journey
+    | Enrolled_journey
     | Renew
     | Logout
     | Feature
+    | Rejection_probe
   [@@deriving equal]
 
   type t =
@@ -489,9 +491,13 @@ module Evidence = struct
     ; renewal_expires_at_ms : int64 option
     ; renewal_not_before_ms : int64 option
     ; renewal_ws_continuity_proven : bool
+    ; advance_expiry : bool
+    ; controlled_expiry_reset_proven : bool
     ; cancelled_owner_flow_proven : bool
     ; failure : Failure.t option
     ; oauth_failure : Provider_oauth.Error.t option
+    ; response_content_type : O.Diagnostic.Response_content_type.t option
+    ; http_rejection : O.Diagnostic.Http_rejection.t option
     ; protocol_violation : O.Diagnostic.Protocol_violation.t option
     ; reason : string
     ; feature_evidence : Feature_case.Evidence.t option
@@ -512,11 +518,26 @@ module Evidence = struct
       ; "auth", `String (Plan.auth_name t.plan.auth)
       ; "model", `String t.plan.model
       ; "transport", `String (Plan.transport_name t.plan.transport)
+      ; ( "response_content_type"
+        , Option.value_map
+            t.response_content_type
+            ~default:`Null
+            ~f:O.Diagnostic.Response_content_type.to_json )
+      ; ( "http_rejection"
+        , Option.value_map
+            t.http_rejection
+            ~default:`Null
+            ~f:O.Diagnostic.Http_rejection.to_json )
       ; ( "protocol_violation"
         , Option.value_map
             t.protocol_violation
             ~default:`Null
             ~f:O.Diagnostic.Protocol_violation.to_json )
+      ; ( "expiry_clock"
+        , `String
+            (if t.advance_expiry then "controlled_host_expiry" else "live_wall_clock") )
+      ; ( "controlled_expiry_reset_proven"
+        , if t.controlled_expiry_reset_proven then `True else `False )
       ; "actual_attempts", `Number (Int.to_string t.attempts)
       ; "completed_turns", `Number (Int.to_string t.turns)
       ; "tool_effects", `Number (Int.to_string t.tool_effects)
@@ -528,9 +549,11 @@ module Evidence = struct
         , `String
             (match t.phase with
              | Journey -> "journey"
+             | Enrolled_journey -> "enrolled_journey"
              | Renew -> "renew"
              | Logout -> "logout"
-             | Feature -> "feature") )
+             | Feature -> "feature"
+             | Rejection_probe -> "rejection_probe") )
       ; "recorded_at_utc_ms", `Number (Int64.to_string t.recorded_at_ms)
       ; ("configuration_proven", if t.configuration_proven then `True else `False)
       ; ("actual_transport_proven", if t.transport_proven then `True else `False)
@@ -590,6 +613,68 @@ let budget_check ~maximum ledger ~accounting_id =
     then raise (Qualification_failure "attempt_budget_exhausted")
 ;;
 
+let enrolled_budget_available ~preceding ~maximum =
+  preceding >= 1 && preceding <= maximum && maximum - preceding >= 4
+;;
+
+let valid_probe_id id =
+  String.length id > 0
+  && String.length id <= 32
+  && String.for_all id ~f:(function
+    | 'a' .. 'z' | '0' .. '9' | '_' | '-' -> true
+    | _ -> false)
+;;
+
+let same_probe_identity left right =
+  let module T = Inference.Request.Target in
+  String.equal (T.adapter left) (T.adapter right)
+  && String.equal (T.profile left) (T.profile right)
+  && String.equal (T.endpoint left) (T.endpoint right)
+  && String.equal (T.model left) (T.model right)
+  && Option.equal String.equal (T.account left) (T.account right)
+  && Inference.Request.Presence.equal
+       Inference.Request.Auth_binding.equal
+       (T.auth_binding left)
+       (T.auth_binding right)
+;;
+
+let probe_terminal_state = function
+  | O.Attempt_record.Terminal _ -> true
+  | Prepared | Running | Interrupted _ -> false
+;;
+
+let idle_resume_ledger_admissible ledger =
+  let coverage = P.Inference_query.Summary.coverage (Ledger.summary ledger) in
+  List.is_empty (Ledger.rows ledger)
+  && (not coverage.before_tracking_unknown)
+  && Int64.equal coverage.untracked_attempts 0L
+  && Int64.equal coverage.retired_attempts 0L
+;;
+
+let probe_session_admissible state =
+  let coverage =
+    P.Inference_query.Summary.coverage
+      (Ledger.summary state.Agent_session.Session_state.inference_ledger)
+  in
+  Option.is_none state.active_operation
+  && List.is_empty state.invocations
+  && List.is_empty state.permissions
+  && (not coverage.before_tracking_unknown)
+  && Int64.equal coverage.untracked_attempts 0L
+  && Int64.equal coverage.retired_attempts 0L
+  && List.length (Ledger.rows state.inference_ledger) <= 1
+  && List.for_all (Ledger.rows state.inference_ledger) ~f:(fun row ->
+    probe_terminal_state (O.Attempt_record.state (Ledger.Row.record row)))
+;;
+
+let known_rejection_state = function
+  | O.Attempt_record.Terminal terminal ->
+    Inference.Event.Terminal.equal_outcome
+      (Inference.Event.Terminal.outcome terminal)
+      (Failed (Transport (Http_status 400)))
+  | Prepared | Running | Interrupted _ -> false
+;;
+
 let budget_self_check () =
   let module O = Inference.Observation in
   let target =
@@ -646,7 +731,47 @@ let budget_self_check () =
       ~configuration
     |> checked_named ~stage:"boundary_0497"
   in
+  assert (idle_resume_ledger_admissible (create false));
+  assert (not (idle_resume_ledger_admissible (create true)));
   let first, handle, _ = admit (create false) in
+  assert (not (idle_resume_ledger_admissible first));
+  let terminal (outcome : Inference.Event.Terminal.outcome) =
+    Inference.Event.Terminal.create
+      ~scope:(Ledger.Handle.scope handle)
+      ~delivery:
+        (match outcome with
+         | Completed | Refused | Incomplete _ | Failed (Provider _) -> Response_started
+         | Failed (Authentication _) -> Definitely_not_submitted
+         | Failed (Transport _) -> Possibly_submitted)
+      ~outcome
+    |> checked_named ~stage:"offline_probe_terminal"
+  in
+  assert (enrolled_budget_available ~preceding:6 ~maximum:12);
+  assert (not (enrolled_budget_available ~preceding:9 ~maximum:12));
+  assert (not (enrolled_budget_available ~preceding:0 ~maximum:12));
+  assert (not (enrolled_budget_available ~preceding:13 ~maximum:12));
+  List.iter [ "probe02"; "fresh-id_2" ] ~f:(fun id -> assert (valid_probe_id id));
+  List.iter
+    [ ""; "../probe"; "Upper"; String.make 33 'a' ]
+    ~f:(fun id -> assert (not (valid_probe_id id)));
+  assert (probe_terminal_state (Terminal (terminal Completed)));
+  List.iter
+    [ O.Attempt_record.Prepared
+    ; Running
+    ; Interrupted { reason = Host_interrupted; delivery = Possibly_submitted }
+    ]
+    ~f:(fun state -> assert (not (probe_terminal_state state)));
+  assert (
+    known_rejection_state (Terminal (terminal (Failed (Transport (Http_status 400))))));
+  List.iter
+    [ Inference.Event.Terminal.Completed; Refused; Failed (Transport (Http_status 401)) ]
+    ~f:(fun outcome -> assert (not (known_rejection_state (Terminal (terminal outcome)))));
+  List.iter
+    [ O.Attempt_record.Prepared
+    ; Running
+    ; Interrupted { reason = Host_interrupted; delivery = Possibly_submitted }
+    ]
+    ~f:(fun state -> assert (not (known_rejection_state state)));
   let first =
     Ledger.to_document first
     |> checked_named ~stage:"boundary_0502"
@@ -731,6 +856,20 @@ let continuity_self_check () =
   assert (not (assistant_repeated_marker ~before:[] [ user ]))
 ;;
 
+let permission_resolved state ~has_resolution =
+  match state with
+  | P.Permission.Pending -> false
+  | Approved | Denied | Expired | Cancelled -> has_resolution
+;;
+
+let controlled_expiry_selection_valid ~phase ~advance_expiry ~hold_until_expiry =
+  (not advance_expiry) || (Plan.equal_phase phase Renew && not hold_until_expiry)
+;;
+
+let resume_enrolled_journey_selection_valid ~phase ~requested ~checkpoint =
+  (not requested) || (Plan.equal_phase phase Enrolled_journey && checkpoint)
+;;
+
 let resume_selection_valid ~auth ~phase =
   (Plan.equal_auth auth Browser || Plan.equal_auth auth Device)
   && Plan.equal_phase phase Journey
@@ -757,6 +896,28 @@ let resume_registration_matches
 ;;
 
 let resume_self_check () =
+  assert (
+    resume_enrolled_journey_selection_valid
+      ~phase:Enrolled_journey
+      ~requested:true
+      ~checkpoint:true);
+  assert (
+    not
+      (resume_enrolled_journey_selection_valid
+         ~phase:Enrolled_journey
+         ~requested:true
+         ~checkpoint:false));
+  assert (
+    not
+      (resume_enrolled_journey_selection_valid
+         ~phase:Journey
+         ~requested:true
+         ~checkpoint:true));
+  assert (
+    resume_enrolled_journey_selection_valid
+      ~phase:Journey
+      ~requested:false
+      ~checkpoint:false);
   assert (resume_selection_valid ~auth:Browser ~phase:Journey);
   assert (resume_selection_valid ~auth:Device ~phase:Journey);
   assert (not (resume_selection_valid ~auth:Api ~phase:Journey));
@@ -842,6 +1003,35 @@ let resume_self_check () =
              ~active_revision)))
 ;;
 
+let probe_request ~target ~history_id =
+  let payload =
+    History_entry.Payload.Semantic.create
+      (Message
+         { form = Input
+         ; role = User
+         ; phase = Absent
+         ; content =
+             [ Text
+                 { text =
+                     "Reply with exactly QUALIFICATION-PROBE-READY. Do not call tools."
+                 ; annotations = []
+                 ; logprobs = Absent
+                 }
+             ]
+         })
+      ~metadata:History_entry.Payload.Metadata.empty
+    |> checked_named ~stage:"probe_input"
+    |> History_entry.Payload.authored
+  in
+  Inference.Request.create
+    ~target
+    ~history:[ History_entry.create_with_id ~id:history_id payload ]
+    ~tools:[]
+    ~assets:[]
+    ~limits:Document_schema.Limits.default
+  |> checked_named ~stage:"probe_request"
+;;
+
 let feature_self_check () =
   List.iter
     (List.filter Feature_case.Case.all ~f:(fun case ->
@@ -862,6 +1052,17 @@ let feature_self_check () =
           ~limits:Transcript.Admission.default
         |> checked_named ~stage:"offline_feature_target"
       in
+      let probe =
+        probe_request
+          ~target
+          ~history_id:
+            (History_entry.Id.create ~namespace:"offline-private-probe" ~sequence:0
+             |> checked_named ~stage:"offline_probe_id")
+      in
+      assert (List.is_empty (Inference.Request.tools probe));
+      assert (List.is_empty (Inference.Request.assets probe));
+      assert (Inference.Request.Target.equal target (Inference.Request.target probe));
+      assert (List.length (Inference.Request.history probe) = 1);
       let configuration =
         O.Configuration.of_target
           target
@@ -1038,6 +1239,29 @@ let self_check () =
   assert (not (browser_selection_valid ~auth:Api ~phase:Journey Launch_local));
   assert (not (browser_selection_valid ~auth:Device ~phase:Feature Launch_local));
   assert (not (browser_selection_valid ~auth:Browser ~phase:Renew Launch_local));
+  Expiry_clock.self_check ();
+  assert (not (permission_resolved Pending ~has_resolution:false));
+  assert (not (permission_resolved Pending ~has_resolution:true));
+  List.iter [ P.Permission.Approved; Denied; Expired; Cancelled ] ~f:(fun state ->
+    assert (permission_resolved state ~has_resolution:true);
+    assert (not (permission_resolved state ~has_resolution:false)));
+  assert (
+    controlled_expiry_selection_valid
+      ~phase:Renew
+      ~advance_expiry:true
+      ~hold_until_expiry:false);
+  assert (
+    not
+      (controlled_expiry_selection_valid
+         ~phase:Renew
+         ~advance_expiry:true
+         ~hold_until_expiry:true));
+  assert (
+    not
+      (controlled_expiry_selection_valid
+         ~phase:Journey
+         ~advance_expiry:true
+         ~hold_until_expiry:false));
   budget_self_check ();
   continuity_self_check ();
   resume_self_check ();
@@ -1085,9 +1309,13 @@ let self_check () =
     ; renewal_expires_at_ms = None
     ; renewal_not_before_ms = None
     ; renewal_ws_continuity_proven = false
+    ; advance_expiry = false
+    ; controlled_expiry_reset_proven = false
     ; cancelled_owner_flow_proven = false
     ; failure = None
     ; oauth_failure = None
+    ; response_content_type = None
+    ; http_rejection = None
     ; protocol_violation = None
     ; feature_evidence = None
     ; feature_failure = None
@@ -1181,6 +1409,8 @@ type host =
   ; oauth_failure : Provider_oauth.Error.t option ref
   ; expectation : M.Expectation.t
   ; login : Provider_oauth.Login.t option ref
+  ; response_content_type : O.Diagnostic.Response_content_type.t option ref
+  ; http_rejection : O.Diagnostic.Http_rejection.t option ref
   ; protocol_violation : O.Diagnostic.Protocol_violation.t option ref
   ; close : unit -> unit
   }
@@ -1197,6 +1427,11 @@ let open_host
       ~failure
       ~oauth_failure
       ~protocol_violation
+      ~response_content_type
+      ~http_rejection
+      ~probe_owner
+      ~owned_attempt_limit
+      ~expiry_clock
   =
   let driver =
     Driver.create
@@ -1221,7 +1456,10 @@ let open_host
     |> checked_named ~stage:"boundary_0691"
   in
   let oauth =
-    Provider_oauth_registry.create ~transport ~policy ~wall_clock:(Eio.Stdenv.clock env)
+    Provider_oauth_registry.create
+      ~transport
+      ~policy
+      ~wall_clock:(Expiry_clock.oauth_validation_clock expiry_clock)
   in
   let features =
     [ Driver.Capability.Text_input; Function_tools; Custom_tools; Opaque_replay ]
@@ -1268,6 +1506,7 @@ let open_host
       ~defaults:plan.settings
     |> Result.map_error ~f:(fun _ -> B.Error.Invalid_mapping)
     |> Result.bind ~f:(fun profile ->
+      let profile = Profile_policy.apply_endpoint_policy profile ~route in
       B.Mapping.create profile ~revision:"live-plan-v1" ~binding ~identity)
   in
   let expectation, initial_mappings, authentication =
@@ -1352,8 +1591,24 @@ let open_host
     ; on_admitted =
         (fun ~scope:_ ~accounting_id ->
           let state = A.state session_actor |> checked_named ~stage:"boundary_0823" in
-          counters := List.length (Ledger.rows state.inference_ledger);
           try
+            let preceding =
+              match probe_owner with
+              | None -> 0
+              | Some owner ->
+                (match !owner with
+                 | Some (session_id, preceding)
+                   when P.Id.Session.equal session_id state.identity.session_id ->
+                   budget_check
+                     ~maximum:owned_attempt_limit
+                     state.inference_ledger
+                     ~accounting_id;
+                   preceding
+                 | Some _ | None -> raise (Qualification_failure "probe_unowned_attempt"))
+            in
+            counters := preceding + List.length (Ledger.rows state.inference_ledger);
+            if !counters > plan.max_attempts
+            then raise (Qualification_failure "attempt_budget_exhausted");
             budget_check ~maximum:plan.max_attempts state.inference_ledger ~accounting_id
           with
           | Qualification_failure code as exn ->
@@ -1369,11 +1624,28 @@ let open_host
       runtime_inference_ports = (fun session_actor -> Ok (upstream session_actor))
     }
   in
+  let host_env : Eio_unix.Stdenv.base =
+    object
+      method stdin = env#stdin
+      method stdout = env#stdout
+      method stderr = env#stderr
+      method net = env#net
+      method domain_mgr = env#domain_mgr
+      method process_mgr = env#process_mgr
+      method clock = Expiry_clock.host_clock expiry_clock
+      method mono_clock = env#mono_clock
+      method fs = env#fs
+      method cwd = env#cwd
+      method secure_random = env#secure_random
+      method debug = env#debug
+      method backend_id = env#backend_id
+    end
+  in
   let factory ~sw ~server_id =
     let value =
       Provider_runtime_host.create
         ~sw
-        ~env
+        ~env:host_env
         ~server_id
         ~anchor:Eio.Path.(Eio.Stdenv.fs env / root)
         ~components:[ metadata_name "credentials" ]
@@ -1511,6 +1783,8 @@ let open_host
   ; expectation
   ; login
   ; protocol_violation
+  ; response_content_type
+  ; http_rejection
   ; daemon
   ; runtime
   ; connection
@@ -2183,6 +2457,8 @@ let await_turn env host handle prior =
           | Diagnostic diagnostic ->
             (match O.Diagnostic.reason diagnostic with
              | Protocol_violation detail -> host.protocol_violation := Some detail
+             | Response_content_type detail -> host.response_content_type := Some detail
+             | Http_rejection detail -> host.http_rejection := Some detail
              | _ -> ())
           | _ -> ());
       match Inference.Observation.Attempt_record.state (Ledger.Row.record row) with
@@ -2259,7 +2535,7 @@ let one_effect state =
 
 (* Auxiliary probes borrow the actual session's actor and durable admission ports.
    They do not start a foreground worker or commit an assistant turn. *)
-let run_auxiliary_feature ~sw host session_id input =
+let run_auxiliary_request ~sw host session_id ~request =
   let entry : Agent_server.Session_registry.entry =
     Agent_server.Session_registry.find (D.registry host.daemon) session_id
     |> Option.value_exn
@@ -2290,14 +2566,7 @@ let run_auxiliary_feature ~sw host session_id input =
       ~sequence:0
     |> checked_named ~stage:"auxiliary_input_identity"
   in
-  let request =
-    Feature_case.Input.request
-      input
-      ~target
-      ~history_id
-      ~limits:Document_schema.Limits.default
-    |> checked_named ~stage:"auxiliary_request"
-  in
+  let request = request ~target ~history_id in
   let tracking =
     Agent_server.Graph_tracking.create
       entry.actor
@@ -2355,11 +2624,6 @@ let run_auxiliary_feature ~sw host session_id input =
       | [ row ] -> Ledger.Row.record row
       | [] | _ :: _ -> raise (Qualification_failure "feature_attempt_count")
     in
-    require_ok
-      (Inference_runtime.Receipt.equal_output_coverage
-         (Inference_runtime.Receipt.output_coverage receipt)
-         Response_output)
-      "auxiliary_output_coverage";
     let terminal = Inference_runtime.Receipt.terminal receipt in
     (match O.Attempt_record.state record with
      | Terminal recorded ->
@@ -2388,6 +2652,28 @@ let run_auxiliary_feature ~sw host session_id input =
          (O.Attempt_record.accounting_id record)
        && Option.is_none (O.Transport_selection.fallback selection))
       "feature_transport_binding";
+    List.iter (O.Attempt_record.observations record) ~f:(fun observation ->
+      match O.payload observation with
+      | Diagnostic diagnostic ->
+        (match O.Diagnostic.reason diagnostic with
+         | Protocol_violation detail -> host.protocol_violation := Some detail
+         | Response_content_type detail -> host.response_content_type := Some detail
+         | Http_rejection detail -> host.http_rejection := Some detail
+         | _ -> ())
+      | _ -> ());
+    (match Inference.Event.Terminal.outcome terminal with
+     | Completed -> ()
+     | outcome ->
+       host.failure
+       := Some
+            (Failure.Terminal
+               { outcome; delivery = Inference.Event.Terminal.delivery terminal });
+       raise (Qualification_failure "auxiliary_terminal_failure"));
+    require_ok
+      (Inference_runtime.Receipt.equal_output_coverage
+         (Inference_runtime.Receipt.output_coverage receipt)
+         Response_output)
+      "auxiliary_output_coverage";
     target, receipt, record, selection
   in
   match execute () with
@@ -2401,15 +2687,39 @@ let run_auxiliary_feature ~sw host session_id input =
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let run_auxiliary_feature ~sw host session_id input =
+  run_auxiliary_request ~sw host session_id ~request:(fun ~target ~history_id ->
+    Feature_case.Input.request
+      input
+      ~target
+      ~history_id
+      ~limits:Document_schema.Limits.default
+    |> checked_named ~stage:"auxiliary_request")
+;;
+
+let rejected_session_proof state =
+  Option.is_none state.Agent_session.Session_state.active_operation
+  && List.is_empty state.invocations
+  && List.is_empty state.permissions
+  &&
+  match Ledger.rows state.inference_ledger with
+  | [ row ] -> known_rejection_state (O.Attempt_record.state (Ledger.Row.record row))
+  | [] | _ :: _ -> false
+;;
+
 let run
       ~env
       ~(plan : Plan.t)
-      ~phase
+      ~(phase : Plan.phase)
       ~root
       ~key_input
       ~hold_until_expiry
+      ~advance_expiry
       ~browser_presentation
       ~resume_enrolled
+      ~probe_id
+      ~enrolled_session
+      ~resume_enrolled_journey
   =
   let attempts = ref 0
   and turns = ref 0
@@ -2423,16 +2733,54 @@ let run
   and renewal_expires_at_ms = ref None
   and renewal_not_before_ms = ref None
   and renewal_ws_continuity_proven = ref false
+  and controlled_expiry_reset_proven = ref false
   and budget_denial = ref None
   and cancelled_owner_flow_proven = ref false
   and failure = ref None
   and oauth_failure = ref None
   and protocol_violation = ref None
+  and response_content_type = ref None
+  and http_rejection = ref None
   and feature_evidence = ref None
   and feature_failure = ref None in
+  let expiry_clock = Expiry_clock.create (Eio.Stdenv.clock env) in
+  require_ok
+    (controlled_expiry_selection_valid ~phase ~advance_expiry ~hold_until_expiry)
+    "advance_expiry_selection_invalid";
   let status = ref Evidence.Incomplete
   and reason = ref "not_attempted" in
+  require_ok
+    (match phase, probe_id with
+     | Rejection_probe, Some id -> valid_probe_id id
+     | Rejection_probe, None -> false
+     | (Journey | Enrolled_journey | Renew | Logout | Feature), None -> true
+     | _, Some _ -> false)
+    "probe_id_selection_invalid";
+  require_ok
+    ((not enrolled_session)
+     || Plan.equal_phase phase Renew
+     || Plan.equal_phase phase Logout)
+    "enrolled_session_selection_invalid";
+  require_ok
+    ((not resume_enrolled_journey) || Plan.equal_phase phase Enrolled_journey)
+    "enrolled_journey_resume_selection_invalid";
+  let enrolled = Plan.equal_phase phase Enrolled_journey || enrolled_session in
+  let owned_attempt_limit =
+    if Plan.equal_phase phase Rejection_probe
+    then 1
+    else if Plan.equal_phase phase Enrolled_journey
+    then 4
+    else plan.max_attempts
+  in
+  let probe_owner =
+    if Plan.equal_phase phase Rejection_probe || enrolled then Some (ref None) else None
+  in
   let execute () =
+    require_ok
+      ((not (Plan.equal_phase phase Rejection_probe))
+       || ((Plan.equal_auth plan.auth Browser || Plan.equal_auth plan.auth Device)
+           && not hold_until_expiry))
+      "probe_selection_invalid";
     require_ok
       ((not resume_enrolled) || resume_selection_valid ~auth:plan.auth ~phase)
       "resume_selection_invalid";
@@ -2465,7 +2813,7 @@ let run
         ~f:(fun () ->
           let plan_name = metadata_name "plan.json" in
           let plan_bytes = Bytes.of_string (Jsonaf.to_string (Plan.document plan)) in
-          (if resume_enrolled
+          (if resume_enrolled || Plan.equal_phase phase Rejection_probe || enrolled
            then (
              let original =
                S.Directory.read_bounded metadata plan_name ~max_bytes:16384
@@ -2499,7 +2847,16 @@ let run
             ~create:(`Or_truncate 0o600)
             (path env root "journey.chatmd")
             prompt;
-          let checkpoint = metadata_name "session.json" in
+          let original_checkpoint = metadata_name "session.json" in
+          let checkpoint =
+            if enrolled
+            then metadata_name "enrolled-journey-v1-session.json"
+            else original_checkpoint
+          in
+          let history_checkpoint =
+            metadata_name
+              (if enrolled then "enrolled-journey-v1-history.json" else "history.json")
+          in
           let previous =
             match S.Directory.read_bounded metadata checkpoint ~max_bytes:1024 with
             | Ok bytes ->
@@ -2531,6 +2888,11 @@ let run
                   ~failure
                   ~oauth_failure
                   ~protocol_violation
+                  ~response_content_type
+                  ~http_rejection
+                  ~probe_owner
+                  ~owned_attempt_limit
+                  ~expiry_clock
               in
               Exn.protect ~finally:host.close ~f:(fun () -> f host_sw host))
           in
@@ -2798,9 +3160,183 @@ let run
                 require_ok (!attempts = 1 && !tool_effects = 0) "feature_budget_mismatch";
                 status := Live_pass;
                 reason := "feature_completed"))
-          else if Plan.equal_phase phase Journey
+          else if Plan.equal_phase phase Rejection_probe
           then (
-            require_ok (Option.is_none previous) "journey_already_admitted";
+            let original_session =
+              match previous with
+              | Some id -> id
+              | None -> raise (Qualification_failure "probe_original_session_missing")
+            in
+            let id = Option.value_exn probe_id in
+            let intent_name = metadata_name ("probe-" ^ id ^ "-intent.json") in
+            let admission = metadata_name ("probe-" ^ id ^ "-session.json") in
+            (match
+               S.Directory.read_bounded metadata intent_name ~max_bytes:(64 * 1024)
+             with
+             | Error error when S.Error.equal_code (S.Error.code error) Missing -> ()
+             | Ok _ -> raise (Qualification_failure "probe_already_admitted")
+             | Error _ -> raise (Qualification_failure "probe_admission_uncertain"));
+            (match S.Directory.read_bounded metadata admission ~max_bytes:1024 with
+             | Error error when S.Error.equal_code (S.Error.code error) Missing -> ()
+             | Ok _ -> raise (Qualification_failure "probe_already_admitted")
+             | Error _ -> raise (Qualification_failure "probe_admission_uncertain"));
+            with_host (fun host_sw host ->
+              let old_handle = attach env ~sw:host_sw host original_session in
+              Exn.protect
+                ~finally:(fun () -> Agent_client.Session_handle.close old_handle)
+                ~f:(fun () ->
+                  let old = session_state host original_session in
+                  require_ok
+                    (rejected_session_proof old)
+                    "probe_original_rejection_unproven";
+                  let original_target =
+                    match Inference.Selection.view old.spec.inference_target with
+                    | Captured target -> target
+                    | Unresolved ->
+                      raise (Qualification_failure "probe_original_target_missing")
+                  in
+                  let preceding =
+                    List.fold
+                      (Agent_store.Session_store.list_sessions (D.store host.daemon))
+                      ~init:0
+                      ~f:(fun total (entry : Agent_store.Session_index.Entry.t) ->
+                        let session_id = entry.session.id in
+                        let handle = attach env ~sw:host_sw host session_id in
+                        Exn.protect
+                          ~finally:(fun () -> Agent_client.Session_handle.close handle)
+                          ~f:(fun () ->
+                            let state = session_state host session_id in
+                            require_ok
+                              (probe_session_admissible state)
+                              "probe_prior_session_unsettled";
+                            let target =
+                              match
+                                Inference.Selection.view state.spec.inference_target
+                              with
+                              | Captured target -> target
+                              | Unresolved ->
+                                raise (Qualification_failure "probe_prior_target_missing")
+                            in
+                            require_ok
+                              (same_probe_identity original_target target)
+                              "probe_prior_identity_changed";
+                            total + List.length (Ledger.rows state.inference_ledger)))
+                  in
+                  require_ok (preceding < plan.max_attempts) "attempt_budget_exhausted";
+                  let intent =
+                    `Object
+                      [ "version", `Number "1"
+                      ; "probe_id", `String id
+                      ; "plan", Plan.document plan
+                      ; "original_session", P.Id.Session.to_json original_session
+                      ; ( "original_accounting_id"
+                        , `String
+                            (O.Observation_id.to_string
+                               (O.Attempt_record.accounting_id
+                                  (Ledger.Row.record
+                                     (List.hd_exn (Ledger.rows old.inference_ledger))))) )
+                      ; "maximum_new_attempts", `Number "1"
+                      ; "request", `String "fixed-no-tool-control-v1"
+                      ]
+                  in
+                  S.Directory.create_immutable
+                    metadata
+                    intent_name
+                    (Bytes.of_string (Jsonaf.to_string intent))
+                  |> checked_named ~stage:"probe_intent";
+                  let handle = create_session env ~sw:host_sw host in
+                  Exn.protect
+                    ~finally:(fun () -> Agent_client.Session_handle.close handle)
+                    ~f:(fun () ->
+                      let session_id = Agent_client.Session_handle.session_id handle in
+                      let captured = session_state host session_id in
+                      let target =
+                        match Inference.Selection.view captured.spec.inference_target with
+                        | Captured target -> target
+                        | Unresolved ->
+                          raise (Qualification_failure "probe_target_missing")
+                      in
+                      require_ok
+                        (same_probe_identity original_target target)
+                        "probe_selected_target_changed";
+                      S.Directory.create_immutable
+                        metadata
+                        admission
+                        (Bytes.of_string
+                           (Jsonaf.to_string (P.Id.Session.to_json session_id)))
+                      |> checked_named ~stage:"probe_admission";
+                      let owner = Option.value_exn probe_owner in
+                      owner := Some (session_id, preceding);
+                      status := Live_attempted;
+                      let _, receipt, record, _ =
+                        run_auxiliary_request
+                          ~sw:host_sw
+                          host
+                          session_id
+                          ~request:probe_request
+                      in
+                      let configuration = O.Attempt_record.configuration record in
+                      let expected_configuration =
+                        O.Configuration.of_target
+                          ?transport_policy:
+                            (O.Configuration.transport_policy configuration)
+                          target
+                          ~preparation_id:(O.Configuration.preparation_id configuration)
+                          ~transport:(O.Configuration.transport configuration)
+                          ~capabilities:(O.Configuration.capabilities configuration)
+                          ~limits:Document_schema.Limits.default
+                        |> checked_named ~stage:"probe_configuration"
+                      in
+                      require_ok
+                        (O.Configuration.equal configuration expected_configuration)
+                        "probe_configuration_mismatch";
+                      assert_dispatch_configuration host record;
+                      let text = Inference_client.Text.of_receipt receipt in
+                      require_ok
+                        (List.is_empty (Inference_client.Text.refusals text)
+                         && String.equal
+                              (String.strip
+                                 (String.concat (Inference_client.Text.messages text)))
+                              "QUALIFICATION-PROBE-READY")
+                        "probe_output_unproven";
+                      require_ok
+                        (List.for_all
+                           (Inference_runtime.Receipt.output receipt)
+                           ~f:(fun event ->
+                             match Inference.Event.view event with
+                             | Candidate_ready { payload; _ } ->
+                               (match
+                                  History_entry.Payload.Semantic.view
+                                    (History_entry.Payload.semantic payload)
+                                with
+                                | Call _ | Unknown _ -> false
+                                | Message _ | Result _ | Reasoning _ -> true)
+                             | Live _ | Terminal _ -> true))
+                        "probe_tool_candidate_refused";
+                      require_ok
+                        (!attempts = preceding + 1 && !turns = 0 && !tool_effects = 0)
+                        "probe_budget_mismatch";
+                      require_ok
+                        (List.equal
+                           P.History.equal_entry
+                           old.conversation.canonical_history
+                           (session_state host original_session).conversation
+                             .canonical_history)
+                        "probe_original_history_changed";
+                      status := Live_pass;
+                      reason := "rejection_probe_control_completed"))))
+          else if
+            Plan.equal_phase phase Journey || Plan.equal_phase phase Enrolled_journey
+          then (
+            require_ok
+              (resume_enrolled_journey_selection_valid
+                 ~phase
+                 ~requested:resume_enrolled_journey
+                 ~checkpoint:(Option.is_some previous))
+              "enrolled_journey_resume_selection_invalid";
+            require_ok
+              (resume_enrolled_journey || Option.is_none previous)
+              "journey_already_admitted";
             with_host (fun host_sw host ->
               if resume_enrolled
               then
@@ -2814,26 +3350,188 @@ let run
                        (List.length
                           (Agent_server.Session_registry.entries (D.registry host.daemon))))
                   "resume_prior_session_unproven";
-              authorize
-                env
-                ~sw:host_sw
-                root
-                plan
-                host
-                key_input
-                ~browser_presentation
-                ~cancelled_owner_flow_proven
-                ~resume_enrolled
-                ~credential_directory;
+              let preceding =
+                if not enrolled
+                then 0
+                else (
+                  require_ok
+                    ((Plan.equal_auth plan.auth Browser
+                      || Plan.equal_auth plan.auth Device)
+                     && not hold_until_expiry)
+                    "enrolled_journey_selection_invalid";
+                  ensure_effect_absent env root;
+                  let original_session =
+                    S.Directory.read_bounded metadata original_checkpoint ~max_bytes:1024
+                    |> checked_named ~stage:"enrolled_original_checkpoint"
+                    |> Bytes.to_string
+                    |> Jsonaf.of_string
+                    |> P.Id.Session.of_json
+                    |> checked_named ~stage:"enrolled_original_session"
+                  in
+                  let total = ref 0 in
+                  let to_stop = ref [] in
+                  let original_proven = ref false in
+                  let identity = ref None in
+                  List.iter
+                    (Agent_store.Session_store.list_sessions (D.store host.daemon))
+                    ~f:(fun (entry : Agent_store.Session_index.Entry.t) ->
+                      let id = entry.session.id in
+                      let handle = attach env ~sw:host_sw host id in
+                      Exn.protect
+                        ~finally:(fun () -> Agent_client.Session_handle.close handle)
+                        ~f:(fun () ->
+                          let state = session_state host id in
+                          require_ok
+                            (probe_session_admissible state)
+                            "enrolled_prior_session_unsettled";
+                          if
+                            resume_enrolled_journey
+                            && Option.value_map
+                                 previous
+                                 ~default:false
+                                 ~f:(P.Id.Session.equal id)
+                          then
+                            require_ok
+                              (idle_resume_ledger_admissible state.inference_ledger)
+                              "enrolled_resume_already_dispatched";
+                          if P.Id.Session.equal id original_session
+                          then original_proven := rejected_session_proof state;
+                          let target =
+                            match
+                              Inference.Selection.view state.spec.inference_target
+                            with
+                            | Captured target -> target
+                            | Unresolved ->
+                              raise
+                                (Qualification_failure "enrolled_prior_target_missing")
+                          in
+                          (match !identity with
+                           | None -> identity := Some target
+                           | Some old ->
+                             require_ok
+                               (same_probe_identity old target)
+                               "enrolled_prior_identity_changed");
+                          total
+                          := !total + List.length (Ledger.rows state.inference_ledger);
+                          to_stop := (id, state) :: !to_stop));
+                  require_ok !original_proven "enrolled_original_rejection_unproven";
+                  require_ok
+                    (enrolled_budget_available
+                       ~preceding:!total
+                       ~maximum:plan.max_attempts)
+                    "attempt_budget_exhausted";
+                  let target =
+                    Inference_host.Backend.capture
+                      (Runtime.backend host.runtime)
+                      ~current:None
+                      ~model:plan.model
+                      ~settings:[]
+                    |> checked_named ~stage:"enrolled_current_capture"
+                  in
+                  require_ok
+                    (Option.value_map !identity ~default:false ~f:(fun prior ->
+                       same_probe_identity prior target))
+                    "enrolled_selected_identity_changed";
+                  let intent_name = metadata_name "enrolled-journey-v1-intent.json" in
+                  let intent_bytes =
+                    Bytes.of_string
+                      (Jsonaf.to_string
+                         (`Object
+                             [ "version", `Number "1"
+                             ; "plan", Plan.document plan
+                             ; "original_session", P.Id.Session.to_json original_session
+                             ; "maximum_new_attempts", `Number "4"
+                             ]))
+                  in
+                  if resume_enrolled_journey
+                  then (
+                    let original =
+                      S.Directory.read_bounded metadata intent_name ~max_bytes:16384
+                      |> checked_named ~stage:"enrolled_resume_intent"
+                    in
+                    require_ok
+                      (Bytes.equal original intent_bytes)
+                      "enrolled_resume_intent_mismatch")
+                  else
+                    S.Directory.create_immutable metadata intent_name intent_bytes
+                    |> checked_named ~stage:"enrolled_journey_intent";
+                  attempts := !total;
+                  List.iter !to_stop ~f:(fun (id, state) ->
+                    let handle = attach env ~sw:host_sw host id in
+                    Exn.protect
+                      ~finally:(fun () -> Agent_client.Session_handle.close handle)
+                      ~f:(fun () ->
+                        stop_for_restore env host handle;
+                        let stopped = session_state host id in
+                        require_ok
+                          (List.equal
+                             P.History.equal_entry
+                             state.Agent_session.Session_state.conversation
+                               .canonical_history
+                             stopped.conversation.canonical_history
+                           && List.equal
+                                (fun a b ->
+                                   Jsonaf.exactly_equal
+                                     (O.Attempt_record.to_json (Ledger.Row.record a))
+                                     (O.Attempt_record.to_json (Ledger.Row.record b)))
+                                (Ledger.rows state.inference_ledger)
+                                (Ledger.rows stopped.inference_ledger))
+                          "enrolled_prior_stop_changed_evidence"));
+                  !total)
+              in
+              if not enrolled
+              then
+                authorize
+                  env
+                  ~sw:host_sw
+                  root
+                  plan
+                  host
+                  key_input
+                  ~browser_presentation
+                  ~cancelled_owner_flow_proven
+                  ~resume_enrolled
+                  ~credential_directory;
               let before = current_identity credential_directory in
-              let handle = create_session env ~sw:host_sw host in
+              let handle =
+                if resume_enrolled_journey
+                then attach env ~sw:host_sw host (Option.value_exn previous)
+                else create_session env ~sw:host_sw host
+              in
               let session_id = Agent_client.Session_handle.session_id handle in
               selected := Some session_id;
-              S.Directory.create_immutable
-                metadata
-                checkpoint
-                (Bytes.of_string (Jsonaf.to_string (P.Id.Session.to_json session_id)))
-              |> checked_named ~stage:"boundary_1657";
+              if not resume_enrolled_journey
+              then
+                S.Directory.create_immutable
+                  metadata
+                  checkpoint
+                  (Bytes.of_string (Jsonaf.to_string (P.Id.Session.to_json session_id)))
+                |> checked_named ~stage:"boundary_1657";
+              if enrolled
+              then (
+                let actual = session_state host session_id in
+                if resume_enrolled_journey
+                then
+                  require_ok
+                    (probe_session_admissible actual
+                     && idle_resume_ledger_admissible actual.inference_ledger)
+                    "enrolled_resume_actual_session_unsettled";
+                let current =
+                  Inference_host.Backend.capture
+                    (Runtime.backend host.runtime)
+                    ~current:None
+                    ~model:plan.model
+                    ~settings:[]
+                  |> checked_named ~stage:"enrolled_session_current_capture"
+                in
+                (match Inference.Selection.view actual.spec.inference_target with
+                 | Captured target ->
+                   require_ok
+                     (same_probe_identity current target)
+                     "enrolled_session_identity_changed"
+                 | Unresolved ->
+                   raise (Qualification_failure "enrolled_session_target_missing"));
+                Option.value_exn probe_owner := Some (session_id, preceding));
               ignore
                 (Agent_client.Session_handle.start handle ~queue_if_limited:false
                  |> checked_protocol ~stage:"session_start"
@@ -2875,7 +3573,7 @@ let run
               (* Private checkpoint only; no transcript goes into evidence. *)
               S.Directory.create_immutable
                 metadata
-                (metadata_name "history.json")
+                history_checkpoint
                 (Bytes.of_string
                    (Jsonaf.to_string
                       (`Array (List.map old_history ~f:P.History.entry_to_json))))
@@ -2886,7 +3584,7 @@ let run
               let stored =
                 S.Directory.read_bounded
                   metadata
-                  (metadata_name "history.json")
+                  history_checkpoint
                   ~max_bytes:(1024 * 1024)
                 |> checked_named ~stage:"boundary_1712"
                 |> Bytes.to_string
@@ -2933,16 +3631,87 @@ let run
               stop_for_restore env host handle;
               Agent_client.Session_handle.close handle);
             status := Live_pass;
-            reason := "journey_completed")
+            reason
+            := if enrolled then "enrolled_journey_completed" else "journey_completed")
           else (
             let session_id = Option.value_exn previous in
             let before = current_identity credential_directory in
             let logged_out_target = ref None in
             with_host (fun host_sw host ->
               let handle = attach env ~sw:host_sw host session_id in
+              let preceding =
+                if not enrolled
+                then 0
+                else (
+                  let current_state = session_state host session_id in
+                  let target =
+                    match
+                      Inference.Selection.view current_state.spec.inference_target
+                    with
+                    | Captured target -> target
+                    | Unresolved ->
+                      raise (Qualification_failure "enrolled_session_target_missing")
+                  in
+                  let coverage =
+                    P.Inference_query.Summary.coverage
+                      (Ledger.summary current_state.inference_ledger)
+                  in
+                  let preceding =
+                    List.fold
+                      (Agent_store.Session_store.list_sessions (D.store host.daemon))
+                      ~init:0
+                      ~f:(fun total (entry : Agent_store.Session_index.Entry.t) ->
+                        let id = entry.session.id in
+                        if P.Id.Session.equal id session_id
+                        then total
+                        else (
+                          let prior_handle = attach env ~sw:host_sw host id in
+                          Exn.protect
+                            ~finally:(fun () ->
+                              Agent_client.Session_handle.close prior_handle)
+                            ~f:(fun () ->
+                              let prior = session_state host id in
+                              require_ok
+                                (probe_session_admissible prior)
+                                "enrolled_prior_session_unsettled";
+                              (match
+                                 Inference.Selection.view prior.spec.inference_target
+                               with
+                               | Captured old ->
+                                 require_ok
+                                   (same_probe_identity target old)
+                                   "enrolled_prior_identity_changed"
+                               | Unresolved ->
+                                 raise
+                                   (Qualification_failure "enrolled_prior_target_missing"));
+                              total + List.length (Ledger.rows prior.inference_ledger))))
+                  in
+                  attempts
+                  := preceding + List.length (Ledger.rows current_state.inference_ledger);
+                  require_ok
+                    ((not coverage.before_tracking_unknown)
+                     && Int64.equal coverage.untracked_attempts 0L
+                     && Int64.equal coverage.retired_attempts 0L
+                     && Option.is_none current_state.active_operation
+                     && List.for_all current_state.permissions ~f:(fun permission ->
+                       permission_resolved
+                         permission.P.Permission.state
+                         ~has_resolution:(Option.is_some permission.resolution))
+                     && one_effect current_state = 1
+                     && List.for_all
+                          (Ledger.rows current_state.inference_ledger)
+                          ~f:(fun row ->
+                            probe_terminal_state
+                              (O.Attempt_record.state (Ledger.Row.record row))))
+                    "enrolled_journey_unsettled";
+                  Option.value_exn probe_owner := Some (session_id, preceding);
+                  preceding)
+              in
               attempts
-              := List.length
-                   (Ledger.rows (session_state host session_id).inference_ledger);
+              := preceding
+                 + List.length
+                     (Ledger.rows (session_state host session_id).inference_ledger);
+              require_ok (!attempts <= plan.max_attempts) "attempt_budget_exhausted";
               if Plan.equal_phase phase Logout
               then (
                 let target =
@@ -2985,6 +3754,7 @@ let run
                 let now_ms () =
                   Int64.of_float (Eio.Time.now (Eio.Stdenv.clock env) *. 1000.)
                 in
+                let expiry_to_advance = ref None in
                 let prepared =
                   match (M.Grant.effective grant).expiry with
                   | Unknown ->
@@ -2993,7 +3763,36 @@ let run
                   | Known { at_ms; _ } ->
                     renewal_expires_at_ms := Some at_ms;
                     let now = now_ms () in
-                    if hold_until_expiry
+                    if advance_expiry
+                    then (
+                      require_ok Int64.(now < at_ms) "controlled_expiry_not_future";
+                      require_ok
+                        (!attempts + 2 <= plan.max_attempts)
+                        "attempt_budget_exhausted";
+                      ignore
+                        (Agent_client.Session_handle.start handle ~queue_if_limited:false
+                         |> checked_named ~stage:"controlled_expiry_warm_start"
+                         : P.Session.t);
+                      send
+                        env
+                        host
+                        handle
+                        "Acknowledge this synthetic pre-expiry channel check briefly, \
+                         without tools.";
+                      incr turns;
+                      let warm = current_identity credential_directory in
+                      require_ok
+                        (Option.equal
+                           M.Id.equal
+                           (source_revision before)
+                           (source_revision warm)
+                         && M.Epoch.equal
+                              (M.Snapshot.epoch before)
+                              (M.Snapshot.epoch warm))
+                        "controlled_expiry_warm_credential_changed";
+                      expiry_to_advance := Some at_ms;
+                      true)
+                    else if hold_until_expiry
                     then (
                       let available_ms =
                         Int64.of_float (Time_ns.Span.to_sec plan.maximum_phase *. 1000.)
@@ -3048,11 +3847,36 @@ let run
                     (Agent_client.Session_handle.start handle ~queue_if_limited:false
                      |> checked_named ~stage:"boundary_1870"
                      : P.Session.t);
-                  send
-                    env
-                    host
-                    handle
-                    "Continue the synthetic restored conversation briefly, without tools.";
+                  (match !expiry_to_advance with
+                   | None ->
+                     send
+                       env
+                       host
+                       handle
+                       "Continue the synthetic restored conversation briefly, without \
+                        tools."
+                   | Some at_ms ->
+                     Expiry_clock.advance_to_expiry expiry_clock ~expires_at_ms:at_ms
+                     |> checked_named ~stage:"controlled_expiry_arm";
+                     Exn.protect
+                       ~finally:(fun () -> Expiry_clock.restore expiry_clock)
+                       ~f:(fun () ->
+                         send
+                           env
+                           host
+                           handle
+                           "Continue the synthetic restored conversation briefly, \
+                            without tools."));
+                  if advance_expiry
+                  then (
+                    controlled_expiry_reset_proven
+                    := Expiry_clock.oauth_reset_count expiry_clock = 1
+                       && Expiry_clock.equal_state
+                            (Expiry_clock.state expiry_clock)
+                            Restored_by_oauth;
+                    require_ok
+                      !controlled_expiry_reset_proven
+                      "controlled_expiry_oauth_reset_unproven");
                   incr turns;
                   let after = current_identity credential_directory in
                   identity_preserved
@@ -3062,14 +3886,31 @@ let run
                        (Option.map (M.Snapshot.active after) ~f:M.Active.identity);
                   renewal
                   := !identity_preserved
+                     && M.Epoch.equal (M.Snapshot.epoch before) (M.Snapshot.epoch after)
                      && not
                           (Option.equal
                              M.Id.equal
                              (source_revision before)
                              (source_revision after));
                   require_ok !renewal "renewal_not_proven";
+                  if advance_expiry
+                  then (
+                    let refreshed =
+                      M.Snapshot.active after
+                      |> Option.value_exn
+                      |> M.Active.grant
+                      |> Option.value_exn
+                    in
+                    match (M.Grant.effective refreshed).expiry with
+                    | Known { at_ms; _ } ->
+                      require_ok
+                        Int64.(at_ms > now_ms ())
+                        "controlled_expiry_refreshed_grant_invalid"
+                    | Unknown ->
+                      raise
+                        (Qualification_failure "controlled_expiry_refreshed_grant_unknown"));
                   renewal_ws_continuity_proven
-                  := hold_until_expiry
+                  := (hold_until_expiry || advance_expiry)
                      && Plan.equal_transport plan.transport Require_websocket;
                   tool_effects := one_effect (session_state host session_id);
                   require_ok (!tool_effects = 1) "tool_replayed";
@@ -3139,9 +3980,13 @@ let run
   ; renewal_expires_at_ms = !renewal_expires_at_ms
   ; renewal_not_before_ms = !renewal_not_before_ms
   ; renewal_ws_continuity_proven = !renewal_ws_continuity_proven
+  ; advance_expiry
+  ; controlled_expiry_reset_proven = !controlled_expiry_reset_proven
   ; cancelled_owner_flow_proven = !cancelled_owner_flow_proven
   ; failure = !failure
   ; oauth_failure = !oauth_failure
+  ; response_content_type = !response_content_type
+  ; http_rejection = !http_rejection
   ; protocol_violation = !protocol_violation
   ; feature_evidence = !feature_evidence
   ; feature_failure = !feature_failure
