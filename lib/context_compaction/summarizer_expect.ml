@@ -32,7 +32,6 @@ let%expect_test "summariser uses an explicitly injected offline request" =
   let summary =
     Context_compaction.Summarizer.For_testing.summarise_with
       ~relevant_items
-      ~sleep:ignore
       ~request:(fun entries ->
         Ok (Context_compaction.Summarizer.render_transcript entries))
   in
@@ -87,77 +86,43 @@ let text_of_item item =
   | Message _ | Call _ | Result _ | Reasoning _ | Unknown _ -> ""
 ;;
 
-let%expect_test "three attempts precede linear chunking" =
-  let calls = ref 0 in
-  let delays = ref [] in
-  let chunk_requests = ref [] in
-  let request items =
-    incr calls;
-    if !calls <= 3
-    then Error parsing_error
-    else (
-      chunk_requests
-      := (items |> List.map ~f:text_of_item |> String.concat ~sep:"|") :: !chunk_requests;
-      Ok (sprintf "result-%d" (!calls - 3)))
-  in
-  let relevant_items =
-    [ make_input_msg Openai.Responses.Input_message.Developer [ "shared" ]
-    ; make_user_msg (String.make 40 'a')
-    ; make_user_msg (String.make 40 'b')
-    ; make_user_msg (String.make 40 'c')
-    ]
-  in
-  let result =
-    Context_compaction.Summarizer.For_testing.summarise_with
-      ~sleep:(fun delay -> delays := delay :: !delays)
-      ~request
-      ~relevant_items
-  in
-  printf
-    "calls=%d delays=%s\n"
-    !calls
-    (List.rev !delays |> [%sexp_of: float list] |> Sexp.to_string);
-  List.rev !chunk_requests
-  |> List.iteri ~f:(fun index request -> printf "request-%d=%s\n" (index + 1) request);
-  print_endline (Result.ok_exn result);
+let%expect_test "protocol failure returns after one request without replay or bisection" =
+  List.iter [ 1; 3 ] ~f:(fun message_count ->
+    let calls = ref 0 in
+    let relevant_items =
+      make_input_msg Openai.Responses.Input_message.Developer [ "shared" ]
+      :: List.init message_count ~f:(fun i -> make_user_msg (Int.to_string i))
+    in
+    let result =
+      Context_compaction.Summarizer.For_testing.summarise_with
+        ~request:(fun items ->
+          incr calls;
+          print_s [%sexp (List.map items ~f:text_of_item : string list)];
+          if !calls = 1 then Error parsing_error else Ok "replayed")
+        ~relevant_items
+    in
+    let outcome =
+      match result with
+      | Error
+          (Context_compaction.Summarizer.Failed (Outcome (Failed (Transport Protocol))))
+        -> "protocol failure"
+      | Error exn -> Exn.to_string_mach exn
+      | Ok text -> text
+    in
+    printf "calls=%d outcome=%s\n" !calls outcome);
   [%expect
     {|
-    calls=5 delays=(1 2)
-    request-1=shared|aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
-    request-2=shared|<previous-compaction-result>
-    result-1
-    </previous-compaction-result>|cccccccccccccccccccccccccccccccccccccccc
-    <compaction-part index="1">
-    result-1
-    </compaction-part>
-    <compaction-part index="2">
-    result-2
-    </compaction-part>|}]
-;;
-
-let%expect_test "protocol failure retries stop on successful summary" =
-  let calls = ref 0 in
-  let request _ =
-    incr calls;
-    match !calls with
-    | 1 | 2 -> Error parsing_error
-    | _ -> Ok "ok"
-  in
-  let result =
-    Context_compaction.Summarizer.For_testing.summarise_with
-      ~sleep:ignore
-      ~request
-      ~relevant_items:[ make_user_msg "message" ]
-  in
-  printf "calls=%d result=%s\n" !calls (Result.ok_exn result);
-  [%expect {|calls=3 result=ok|}]
+    (shared 0)
+    calls=1 outcome=protocol failure
+    (shared 0 1 2)
+    calls=1 outcome=protocol failure
+    |}]
 ;;
 
 let%expect_test "authentication failures are not retried" =
   let calls = ref 0 in
   let result =
     Context_compaction.Summarizer.For_testing.summarise_with
-      ~sleep:ignore
       ~request:(fun _ ->
         incr calls;
         Error (Outcome (Failed (Authentication Missing))))
@@ -175,32 +140,6 @@ let%expect_test "authentication failures are not retried" =
   [%expect {|calls=1 error=missing authentication|}]
 ;;
 
-let%expect_test "failed chunk exposes no partial summary" =
-  let calls = ref 0 in
-  let delays = ref [] in
-  let result =
-    Context_compaction.Summarizer.For_testing.summarise_with
-      ~sleep:(fun delay -> delays := delay :: !delays)
-      ~request:(fun _ ->
-        incr calls;
-        Error parsing_error)
-      ~relevant_items:[ make_user_msg "first"; make_user_msg "second" ]
-  in
-  let outcome =
-    match result with
-    | Ok summary -> "unexpected summary: " ^ summary
-    | Error (Context_compaction.Summarizer.Failed (Outcome (Failed (Transport Protocol))))
-      -> "invalid response"
-    | Error exn -> Exn.to_string_mach exn
-  in
-  printf
-    "calls=%d delays=%s outcome=%s\n"
-    !calls
-    (List.rev !delays |> [%sexp_of: float list] |> Sexp.to_string)
-    outcome;
-  [%expect {|calls=6 delays=(1 2 1 2) outcome=invalid response|}]
-;;
-
 exception Observer_failed
 
 let%expect_test "strict callback failures propagate without retry or partial summary" =
@@ -209,7 +148,6 @@ let%expect_test "strict callback failures propagate without retry or partial sum
     try
       ignore
         (Context_compaction.Summarizer.For_testing.summarise_with
-           ~sleep:ignore
            ~request:(fun _ ->
              incr calls;
              raise Observer_failed)

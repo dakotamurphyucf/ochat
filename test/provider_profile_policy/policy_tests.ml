@@ -282,3 +282,86 @@ let%expect_test
     Direct_codex: omitted, allow-absent-event-stream
     |}]
 ;;
+
+let%expect_test
+    "compaction inherits shipping profile settings and preserves explicit controls"
+  =
+  Eio_main.run (fun env ->
+    List.iter
+      [ P.Direct_codex, None; Public_api, Some 2048; Direct_codex, Some 2048 ]
+      ~f:(fun (route, max_tokens) ->
+        let auth_calls = ref 0 in
+        let profile =
+          D.Profile.create
+            ~id:"compaction-policy"
+            ~account:None
+            ~endpoint:(P.endpoint route)
+            ~capabilities:
+              (P.capabilities route ~endpoint:(P.endpoint route) |> Or_error.ok_exn)
+            ~defaults:[]
+          |> Or_error.ok_exn
+          |> P.apply_endpoint_policy ~route
+        in
+        let driver =
+          D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) ()
+          |> Or_error.ok_exn
+        in
+        let host =
+          Inference_host.create
+            driver
+            ~profile
+            ~profile_revision:None
+            ~auth:(fun ~sw:_ _ ->
+              incr auth_calls;
+              Error D.Auth.Missing)
+            ~default_model:"gpt-6-luna"
+            ~namespace:"compaction-policy"
+            ~limits:Inference_runtime.Limits.default
+          |> Result.map_error ~f:(fun _ -> "host")
+          |> Result.ok_or_failwith
+        in
+        let target =
+          Inference_host.capture_config
+            host
+            { Chat_response.Config.default with max_tokens }
+          |> Result.map_error ~f:(fun _ -> "capture")
+          |> Result.ok_or_failwith
+        in
+        let context =
+          Inference_host.resolve host target
+          |> Result.map_error ~f:(fun _ -> "resolve")
+          |> Result.ok_or_failwith
+        in
+        let inference =
+          Inference_client.Execution.create
+            ~context
+            ~identity:(Inference_host.identity host)
+            ~relation:Root
+            ~before_dispatch:ignore
+            ~on_attempt:ignore
+            ~on_completion:ignore
+            ~on_observation:ignore
+        in
+        let result =
+          Context_compaction.Summarizer.summarise ~inference ~relevant_items:[] ~env:None
+        in
+        let outcome =
+          match result with
+          | Error (Context_compaction.Summarizer.Failed error) ->
+            Sexp.to_string (Inference_client.Execution.Completion_error.sexp_of_t error)
+          | Error exn -> Exn.to_string_mach exn
+          | Ok _ -> "unexpected summary"
+        in
+        printf
+          "%s control:%s auth:%d %s\n"
+          (Sexp.to_string (P.sexp_of_route route))
+          (Option.value_map max_tokens ~default:"absent" ~f:Int.to_string)
+          !auth_calls
+          outcome));
+  [%expect
+    {|
+    Direct_codex control:absent auth:1 (Outcome(Failed(Authentication Missing)))
+    Public_api control:2048 auth:1 (Outcome(Failed(Authentication Missing)))
+    Direct_codex control:2048 auth:0 (Dispatch(Preparation Unsupported_input))
+  |}]
+;;

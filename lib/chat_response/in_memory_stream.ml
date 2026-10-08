@@ -2515,9 +2515,11 @@ let run_completion_stream_in_memory_entries
       |> Result.ok_or_failwith)
   in
   let inference_context =
-    (if Option.value fork_depth ~default:0 = 0 && Option.is_none parent_call_id
-     then Inference_runtime.Context.derive_in_session
-     else Inference_runtime.Context.derive)
+    (match inference_relation with
+     | Transcript.Scope.Root
+       when Option.value fork_depth ~default:0 = 0 && Option.is_none parent_call_id ->
+       Inference_runtime.Context.derive_in_session
+     | Root | Nested _ -> Inference_runtime.Context.derive)
       inference_context
       ~target
     |> Result.map_error ~f:(fun error ->

@@ -1,5 +1,6 @@
 (library
  (name provider_profile_policy_tests)
- (libraries core eio eio.mock ochat.provider_runtime_host ochat.openai ochat.inference)
+ (libraries core eio eio_main eio.mock ochat.provider_runtime_host ochat.openai ochat.inference
+  ochat.inference_host ochat.inference_client ochat.context_compaction)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

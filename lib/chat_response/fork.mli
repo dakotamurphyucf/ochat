@@ -47,6 +47,9 @@ type transcript_observer =
     No [===RESULT===] or [===PERSIST===] extraction occurs. Only the returned
     text becomes the completed parent tool output; child history is not merged.
 
+    Inference is detached from the parent's session transport resource, even
+    when no transcript observer is supplied.
+
     The call blocks its fiber and inherits the caller's Eio cancellation
     context. Cancellation stops local nested work; it does not guarantee that
     a remote provider stops generation or billing. Errors and cancellation

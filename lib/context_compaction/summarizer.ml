@@ -126,92 +126,20 @@ exception Failed of Completion_error.t
 let render_transcript = History_view.render
 let grouped_items = History_view.grouped
 
-let retryable = function
-  | Completion_error.Outcome (Failed (Transport Protocol)) -> true
-  | Dispatch _ | Outcome _ | No_text -> false
+let summarise_with ~request ~relevant_items =
+  (* The text completion error carries no delivery proof. A protocol failure may
+     follow a partial response, so neither retry nor bisection can safely resend
+     this request automatically. *)
+  request relevant_items |> Result.map_error ~f:(fun failure -> Failed failure)
 ;;
 
-let retry_request ~sleep ~request =
-  let rec loop attempt =
-    match request () with
-    | Error failure when retryable failure && attempt < 3 ->
-      sleep (Float.of_int attempt);
-      loop (attempt + 1)
-    | result -> result
-  in
-  loop 1
-;;
-
-let rolling_entry entries text =
-  let namespaces =
-    List.map entries ~f:(fun entry -> History_entry.Id.namespace (History_entry.id entry))
-    |> String.Set.of_list
-  in
-  let rec unused candidate =
-    if Set.mem namespaces candidate then unused (candidate ^ ":") else candidate
-  in
-  let id =
-    History_entry.Id.create ~namespace:(unused "compaction-rolling") ~sequence:0
-    |> Result.ok_or_failwith
-  in
-  History_entry.create_with_id
-    ~id
-    (History_view.message
-       ~role:User
-       (sprintf "<previous-compaction-result>\n%s\n</previous-compaction-result>" text))
-;;
-
-let label_results results =
-  List.mapi results ~f:(fun index result ->
-    sprintf "<compaction-part index=\"%d\">\n%s\n</compaction-part>" (index + 1) result)
-  |> String.concat ~sep:"\n"
-;;
-
-let summarise_with ~sleep ~request ~relevant_items =
-  let run items = retry_request ~sleep ~request:(fun () -> request items) in
-  let result =
-    match run relevant_items with
-    | Error failure when retryable failure ->
-      let shared, compactable =
-        List.partition_tf relevant_items ~f:History_view.is_shared
-      in
-      let groups = grouped_items compactable in
-      (match List.length groups with
-       | 0 | 1 -> Error failure
-       | count ->
-         let first, second = List.split_n groups ((count + 1) / 2) in
-         let open Result.Let_syntax in
-         let%bind first_result = run (shared @ List.concat first) in
-         let%map second_result =
-           run
-             (shared @ [ rolling_entry relevant_items first_result ] @ List.concat second)
-         in
-         label_results [ first_result; second_result ])
-    | result -> result
-  in
-  Result.map_error result ~f:(fun failure -> Failed failure)
-;;
-
-let summarise ~inference ~relevant_items ~env =
-  let sleep =
-    Option.value_map env ~default:ignore ~f:(fun env ->
-      Eio.Time.sleep (Eio.Stdenv.clock env))
-  in
-  let setting =
-    Inference.Request.Setting.create
-      ~name:"max_output_tokens"
-      ~value:(Value (`Number "100000"))
-      ~provenance:Execution_override
-      ~limits:Transcript.Admission.default
-    |> Result.map_error ~f:(fun _ -> "invalid fixed compaction setting")
-    |> Result.ok_or_failwith
-  in
-  summarise_with ~sleep ~relevant_items ~request:(fun items ->
+let summarise ~inference ~relevant_items ~env:_ =
+  summarise_with ~relevant_items ~request:(fun items ->
     Eio.Switch.run (fun sw ->
       Inference_client.Execution.complete_text
         inference
         ~sw
-        ~settings:[ setting ]
+        ~settings:[]
         ~messages:
           [ Developer, prompt
           ; User, sprintf "<conversation>%s</conversation>" (render_transcript items)

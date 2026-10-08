@@ -21,6 +21,9 @@ and invokes the required attempt acknowledgement before running the attempt.
 Each attempt is single use. Authentication resolves only at dispatch under the
 caller's Eio cancellation scope. Credential ownership remains with that host.
 There is no automatic retry or provider fallback after uncertain submission.
+Compaction inherits the captured target settings, dispatches one summarization
+request, and returns typed failures without
+retry or bisection; a protocol failure may follow a partially received response.
 
 The required completion callback reports the attempt's safe terminal or actual
 interruption independently of rendering callbacks. It never receives raw provider
@@ -130,8 +133,9 @@ Use `Execution.run` for intentionally structured completions.
 Compaction reads canonical semantic history directly. Retained entries preserve
 their complete payloads and IDs; an actual edited result or newly produced reminder
 is Authored. Bound host occurrences keep parallel calls/results together even
-when a provider reuses a call alias. Summary protocol failures retain the existing
-three-attempt/one-bisection policy. Expected failures return errors; strict
+when a provider reuses a call alias. Summarization dispatches exactly one request;
+protocol failures return errors without replay or bisection. Expected failures
+return errors; strict
 observation callbacks and cancellation propagate without partial summary success.
 Offline tests use explicit injected requests, never missing-key fallbacks.
 

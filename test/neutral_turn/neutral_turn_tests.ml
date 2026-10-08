@@ -82,27 +82,31 @@ let receipt scope accounting_id output =
   |> ok
 ;;
 
-let context run =
+let context ?(on_prepare = ignore) ?on_session_prepare run =
+  let prepare ~on_prepare ~preparation_id request =
+    on_prepare request;
+    let configuration =
+      O.Configuration.of_target
+        (R.target request)
+        ~preparation_id
+        ~transport:In_process
+        ~capabilities:[]
+        ~limits:O.Admission.observation
+      |> ok
+    in
+    Runtime.Plan.create ~request ~configuration ~fingerprint:"fixture" ~run:(run request)
+  in
+  let open_session =
+    Option.map on_session_prepare ~f:(fun on_prepare _owner ~policy:_ ->
+      Ok (prepare ~on_prepare))
+  in
   Runtime.Adapter.create
     ~preflight_history:(fun ~target:_ _ -> Ok ())
     ~id:"synthetic"
     ~limits:Runtime.Limits.default
     ~bind:(fun _ -> Ok ())
-    ~prepare:(fun ~preparation_id request ->
-      let configuration =
-        O.Configuration.of_target
-          (R.target request)
-          ~preparation_id
-          ~transport:In_process
-          ~capabilities:[]
-          ~limits:O.Admission.observation
-        |> ok
-      in
-      Runtime.Plan.create
-        ~request
-        ~configuration
-        ~fingerprint:"fixture"
-        ~run:(run request))
+    ~prepare:(prepare ~on_prepare)
+    ?open_session
     ()
   |> ok
   |> Runtime.Context.create ~target
@@ -759,4 +763,104 @@ let%expect_test
      dispatches";
   [%expect
     {| revoked derived and recipe attempts stop before upstream/transport; live control dispatches |}]
+;;
+
+let%expect_test
+    "nested and exported fork calls detach while root keeps its session binding"
+  =
+  Mirage_crypto_rng_unix.use_default ();
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let prepared_bindings = ref [] in
+      let context =
+        context
+          ~on_prepare:(fun _ -> prepared_bindings := "detached" :: !prepared_bindings)
+          ~on_session_prepare:(fun _ ->
+            prepared_bindings := "attached" :: !prepared_bindings)
+          (fun _
+            ~sw:_
+            ~scope
+            ~accounting_id
+            ~note_delivery:_
+            ~on_event:_
+            ~on_observation:_ ->
+             receipt
+               scope
+               accounting_id
+               [ candidate scope "answer" (message "done") Not_eligible ])
+        |> fun context ->
+        Runtime.Context.with_session context (Runtime.Session.create ~sw) |> ok
+      in
+      let parent =
+        Transcript.Scope.
+          { scope =
+              { source = Transcript.Source_id.of_string "parent" |> ok
+              ; attempt = Transcript.Attempt_id.of_string "0" |> ok
+              }
+          ; call_entry_id = None
+          ; call_alias = Some "fork-call"
+          }
+      in
+      let suffix = Agent_protocol.Id.Transaction.(create () |> to_string) in
+      let directory =
+        Eio.Path.(Eio.Stdenv.fs env / "/tmp" / ("ochat-binding-" ^ suffix))
+      in
+      Eio.Path.mkdir ~perm:0o700 directory;
+      Exn.protect
+        ~finally:(fun () -> Eio.Path.rmtree directory)
+        ~f:(fun () ->
+          let identity = identity () in
+          let turn relation namespace =
+            C.In_memory_stream.run_completion_stream_in_memory_entries
+              ~env
+              ~inference_context:context
+              ~inference_identity:identity
+              ~on_inference_attempt:ignore
+              ~on_inference_completion:ignore
+              ~inference_relation:relation
+              ~datadir:directory
+              ~allocator:(History_entry.Allocator.create ~namespace ~next_sequence:0 |> ok)
+              ~history:[]
+              ~tools:(Some [])
+              ~parallel_tool_calls:false
+              ()
+            |> ignore
+          in
+          turn Root "first-root";
+          turn (Nested parent) "nested";
+          let ctx =
+            C.Ctx.create
+              ~inference_context:context
+              ~inference_identity:identity
+              ~on_inference_attempt:ignore
+              ~on_inference_completion:ignore
+              ~env
+              ~dir:directory
+              ~tool_dir:directory
+              ~cache:(C.Cache.create ~max_size:1 ())
+              ()
+          in
+          List.iter [ false; true ] ~f:(fun observed ->
+            let invocation_id = C.Fork.Invocation_id.create () in
+            let transcript_observer =
+              if observed then Some C.Fork.{ parent; observe = ignore } else None
+            in
+            let result =
+              C.Fork.execute_entries
+                ~ctx
+                ~allocator:(C.Fork.allocator ~parent_namespace:"root" invocation_id)
+                ~history:[]
+                ~invocation_id
+                ~call_id:"fork-call"
+                ~arguments:{|{"command":"inspect","arguments":[]}|}
+                ~tools:[]
+                ~tool_tbl:(String.Table.create ())
+                ?transcript_observer
+                ~on_fn_out:ignore
+                ()
+            in
+            [%test_eq: string] result "done");
+          turn Root "last-root";
+          print_s [%sexp (List.rev !prepared_bindings : string list)])));
+  [%expect {| (attached detached detached detached attached) |}]
 ;;

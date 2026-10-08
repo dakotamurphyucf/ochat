@@ -36,7 +36,7 @@ let execute_entries
   let all_entries =
     In_memory_stream.run_completion_stream_in_memory_entries
       ~env:(Ctx.env ctx)
-      ~inference_context:ctx.inference_context
+      ~inference_context:(Inference_runtime.Context.detach ctx.inference_context)
       ~inference_identity:ctx.inference_identity
       ~on_inference_attempt:ctx.on_inference_attempt
       ~on_inference_completion:ctx.on_inference_completion

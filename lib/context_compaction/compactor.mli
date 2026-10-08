@@ -4,7 +4,7 @@ open! Core
     execution. Original policy/reminder entries keep complete payloads and IDs;
     exactly one Authored user reminder is allocated after summarization and the
     local token budget check succeed. No provider DTO conversion or ambient
-    model/credential selection. [env] only supplies configuration and retry clock.
+    model/credential selection. [env] only supplies configuration; no automatic retry occurs.
     Token estimates use semantic presentation plus per-item overhead, not exact
     provider/image accounting. Cancellation and strict callback errors propagate. *)
 val compact_entries
