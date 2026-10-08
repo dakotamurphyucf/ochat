@@ -380,8 +380,9 @@ without allocating an attempt or resolving credentials. Authored and reconstruct
 items reuse the provider's feature checks; local asset references remain unresolved
 at this stage, with media capability checks still required. The provider reuses this
 check during final preparation, including an independent raw/semantic integrity
-check. Session administration invokes preflight before changing the selected
-model or replacing the runtime. A refusal preserves the current session. Only an
+check. Context resolution may read host registry metadata and yield; the history
+preflight itself is pure and does not resolve credentials. Session administration
+invokes preflight before changing the selected model or replacing the runtime. A refusal preserves the current session. Only an
 explicit history reset checks the replacement empty history; a model change never
 silently resets or drops conversation data. Full request settings, tools and asset
 resolution remain preparation responsibilities.
