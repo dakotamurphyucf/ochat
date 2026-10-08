@@ -136,6 +136,15 @@ let run_child env root =
   assert (
     Option.exists (Sys.getenv "API_URL") ~f:(String.is_prefix ~prefix:"http://127.0.0.1:"));
   [%test_eq: string option] (Some "generated-local-fixture") (Sys.getenv "OPENAI_API_KEY");
+  Stdlib.Printexc.register_printer (function
+    | Agent_server.Graph_tracking.Rejected error ->
+      Some
+        (Sexp.to_string
+           [%sexp
+             "synthetic graph tracking rejection"
+           , (P.Error.code_to_string error.code : string)
+           , (String.prefix error.message 2048 : string)])
+    | _ -> None);
   let prompt_file = Filename.concat root "parent.chatmd" in
   F.write
     env
@@ -174,6 +183,13 @@ let run_child env root =
                 f sw daemon client))))
   in
   let send sw client entry =
+    let previous_attempts =
+      Agent_session.Inference_ledger.rows (state entry).inference_ledger
+      |> List.map ~f:(fun row ->
+        Agent_session.Inference_ledger.Row.handle row
+        |> Agent_session.Inference_ledger.Handle.ordinal)
+      |> Int64.Set.of_list
+    in
     let handle =
       H.attach
         ~sw
@@ -185,19 +201,90 @@ let run_child env root =
         ()
       |> protocol_ok
     in
-    H.send_message
-      handle
-      { kind = Plain_text; text = "Return a response"; attachments = [] }
-    |> protocol_ok
-    |> ignore;
-    let rec idle () =
-      match (state entry).active_operation with
-      | None -> state entry
-      | Some _ ->
-        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-        idle ()
+    let before_send = state entry in
+    let submission =
+      H.send_message
+        handle
+        { kind = Plain_text; text = "Return a response"; attachments = [] }
+      |> protocol_ok
     in
-    let current = idle () in
+    let check_synthetic_operation_failure current =
+      (* This isolated subprocess admits only the asserted synthetic credential
+         and loopback endpoint. The bounded private diagnostic is test-only. *)
+      match
+        Agent_client.Connection.request
+          client
+          (Session_attach
+             { session_id = current.Agent_session.Session_state.identity.session_id
+             ; requested_mode = Read_only
+             ; subscribe = false
+             ; after_sequence = Some before_send.counters.event_sequence
+             ; reclaim_token = None
+             ; idempotency_key =
+                 F.key
+                   ("generated-failure:"
+                    ^ P.Id.Session.to_string current.identity.session_id)
+             })
+        |> protocol_ok
+      with
+      | P.Public.Result.Session_attach { replay = Events events; _ } ->
+        List.iter events ~f:(fun event ->
+          match Support.Public_view.shared_payload_opt event with
+          | Some (Operation_failed { id; state = Failed error; _ })
+            when Option.exists submission.operation_id ~f:(P.Id.Operation.equal id) ->
+            raise_s
+              [%sexp
+                "synthetic generated provider operation failed"
+              , (P.Error.code_to_string error.code : string)
+              , (String.prefix error.message 2048 : string)]
+          | _ -> ())
+      | _ -> ()
+    in
+    let rec completed () =
+      let current = state entry in
+      let fresh =
+        Agent_session.Inference_ledger.rows current.inference_ledger
+        |> List.filter ~f:(fun row ->
+          not
+            (Set.mem
+               previous_attempts
+               (Agent_session.Inference_ledger.Row.handle row
+                |> Agent_session.Inference_ledger.Handle.ordinal)))
+      in
+      let provider_completed, pending =
+        List.fold fresh ~init:(false, false) ~f:(fun (completed, pending) row ->
+          match
+            Agent_session.Inference_ledger.Row.record row
+            |> Inference.Observation.Attempt_record.state
+          with
+          | Terminal terminal ->
+            (match Inference.Event.Terminal.outcome terminal with
+             | Completed -> true, pending
+             | Refused | Incomplete _ | Failed _ ->
+               raise_s
+                 [%sexp
+                   "generated provider inference failed"
+                 , (terminal : Inference.Event.Terminal.t)])
+          | Interrupted _ -> failwith "generated provider inference interrupted"
+          | Prepared | Running -> completed, true)
+      in
+      (* Submission may be Deferred while a moderator callback owns the graph.
+         Idle without an actual completed inference is not completion evidence. *)
+      match
+        ( provider_completed && not pending
+        , current.active_operation
+        , current.conversation.deferred_user_entries )
+      with
+      | true, None, [] -> current
+      | false, None, [] ->
+        check_synthetic_operation_failure current;
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        completed ()
+      | _ ->
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        completed ()
+    in
+    let current = Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. completed in
     assert (Option.is_none current.failure);
     assert (not current.halted);
     assert (List.is_empty current.invocations);
@@ -320,6 +407,7 @@ let test env environment =
            raise_s
              [%sexp
                "generated provider child failed"
+             , (List.length !requests : int)
              , (result : Support.Process_manager.result)]);
         let parent =
           ( "gpt-4.1"
