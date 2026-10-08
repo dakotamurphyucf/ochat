@@ -310,23 +310,23 @@ let help_output_texts_prompt =
 ;;
 
 let ask_ai input env =
-  let host = Inference_composition.create ~env ~default_model:"gpt-5.2" in
-  let inference = Inference_composition.execution host Chat_response.Config.default in
-  let settings =
-    [ "max_output_tokens", `Number "100000"; "temperature", `Number "0.3" ]
-    |> List.map ~f:(fun (name, value) ->
-      Inference.Request.Setting.create
-        ~name
-        ~value:(Value value)
-        ~provenance:Execution_override
-        ~limits:Transcript.Admission.default)
-    |> Result.all
-    |> Result.map_error ~f:(fun error ->
-      Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
-  in
-  let open Result.Let_syntax in
-  let%bind settings = settings in
   Eio.Switch.run (fun sw ->
+    let host = Inference_composition.create ~sw ~env ~default_model:"gpt-5.2" in
+    let inference = Inference_composition.execution host Chat_response.Config.default in
+    let settings =
+      [ "max_output_tokens", `Number "100000"; "temperature", `Number "0.3" ]
+      |> List.map ~f:(fun (name, value) ->
+        Inference.Request.Setting.create
+          ~name
+          ~value:(Value value)
+          ~provenance:Execution_override
+          ~limits:Transcript.Admission.default)
+      |> Result.all
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+    in
+    let open Result.Let_syntax in
+    let%bind settings = settings in
     Inference_client.Execution.complete_text
       inference
       ~sw
@@ -460,32 +460,33 @@ let run_in_env
       ~authorize_shell_manifest
       ()
   =
-  let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
-  let shell_manifest_authorizer =
-    if authorize_shell_manifest
-    then Shell_runtime.Manifest_authorizer.assume_authorized
-    else Shell_runtime.Manifest_authorizer.deny
-  in
-  let inference_host =
-    Inference_composition.create ~env ~default_model:"gpt-4.5-preview"
-  in
-  let typeahead_host =
-    Inference_composition.bounded_host inference_host ~max_body_bytes:(256 * 1024)
-  in
-  Chat_tui.App.run_chat
-    ~inference_host
-    ~resolve_typeahead:(Inference_host.resolve typeahead_host)
-    ~migrate_inference_target:(Inference_host.capture_config inference_host)
-    ~typeahead_config
-    ~env
-    ~prompt_file
-    ~session
-    ?export_file
-    ~persist_mode
-    ~parallel_tool_calls
-    ~textmate_grammar_files
-    ~shell_manifest_authorizer
-    ()
+  Eio.Switch.run (fun sw ->
+    let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
+    let shell_manifest_authorizer =
+      if authorize_shell_manifest
+      then Shell_runtime.Manifest_authorizer.assume_authorized
+      else Shell_runtime.Manifest_authorizer.deny
+    in
+    let inference_host =
+      Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+    in
+    let typeahead_host =
+      Inference_composition.bounded_host inference_host ~max_body_bytes:(256 * 1024)
+    in
+    Chat_tui.App.run_chat
+      ~inference_host
+      ~resolve_typeahead:(Inference_host.resolve typeahead_host)
+      ~migrate_inference_target:(Inference_host.capture_config inference_host)
+      ~typeahead_config
+      ~env
+      ~prompt_file
+      ~session
+      ?export_file
+      ~persist_mode
+      ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~shell_manifest_authorizer
+      ())
 ;;
 
 (** [run ?session_id ?new_session ?export_file ?persist_mode
@@ -724,45 +725,48 @@ module Handlers = struct
     ;;
 
     let initial_msg_count ~env ~prompt_dir ~prompt_xml =
-      try
-        let cache = Chat_response.Cache.create ~max_size:16 () in
-        let elements =
-          Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
-        in
-        let host = Inference_composition.create ~env ~default_model:"gpt-4.5-preview" in
-        let inference_context =
-          Inference_composition.context host (Chat_response.Config.of_elements elements)
-        in
-        let ctx =
-          Chat_response.Ctx.create
-            ~inference_context
-            ~inference_identity:(Inference_host.identity host)
-            ~on_inference_attempt:(fun _ -> ())
-            ~on_inference_completion:(fun _ -> ())
-            ~env
-            ~dir:prompt_dir
-            ~tool_dir:(Eio.Stdenv.cwd env)
-            ~cache
-            ()
-        in
-        Chat_response.Converter.to_items
-          ~ctx
-          ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-            Chat_response.Driver.run_agent
-              ~history_compaction:false
-              ?prompt_dir
-              ?session_id
-              ~ctx
-              prompt
-              items)
-          elements
-        |> List.length
-      with
-      | exn ->
-        eprintf
-          "Warning: failed to compute prompt-derived history prefix for export: %s\n"
-          (Exn.to_string exn);
-        0
+      Eio.Switch.run (fun sw ->
+        try
+          let cache = Chat_response.Cache.create ~max_size:16 () in
+          let elements =
+            Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
+          in
+          let host =
+            Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+          in
+          let inference_context =
+            Inference_composition.context host (Chat_response.Config.of_elements elements)
+          in
+          let ctx =
+            Chat_response.Ctx.create
+              ~inference_context
+              ~inference_identity:(Inference_host.identity host)
+              ~on_inference_attempt:(fun _ -> ())
+              ~on_inference_completion:(fun _ -> ())
+              ~env
+              ~dir:prompt_dir
+              ~tool_dir:(Eio.Stdenv.cwd env)
+              ~cache
+              ()
+          in
+          Chat_response.Converter.to_items
+            ~ctx
+            ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+              Chat_response.Driver.run_agent
+                ~history_compaction:false
+                ?prompt_dir
+                ?session_id
+                ~ctx
+                prompt
+                items)
+            elements
+          |> List.length
+        with
+        | exn ->
+          eprintf
+            "Warning: failed to compute prompt-derived history prefix for export: %s\n"
+            (Exn.to_string exn);
+          0)
     ;;
 
     let persist_full_history
@@ -1718,16 +1722,13 @@ end
 module Daemon_connection = struct
   let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-  let endpoint ~env ~connect ~bearer_token_file =
-    let open Result.Let_syntax in
-    let%bind bearer_token =
-      match bearer_token_file with
-      | None -> Ok None
-      | Some path ->
-        Agent_transport_client.Endpoint.load_bearer_token ~env ~path
-        |> Result.map ~f:Option.some
-    in
-    Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token connect
+  let endpoint ~env:_ ~connect ~bearer_token_file =
+    Agent_transport_client.Connection_profile.create
+      ~home:(Sys.getenv "HOME")
+      ~name:"command-line"
+      ~endpoint:connect
+      ~expected_server:None
+      ~daemon_credential_file:bearer_token_file
   ;;
 
   let with_connection ~env ~connect ~bearer_token_file f =
@@ -1738,7 +1739,7 @@ module Daemon_connection = struct
     Eio.Switch.run
     @@ fun sw ->
     let%bind connection =
-      Agent_transport_client.Endpoint.connect
+      Agent_transport_client.Connection_profile.connect
         endpoint
         ~sw
         ~env
@@ -1751,20 +1752,23 @@ module Daemon_connection = struct
   ;;
 end
 
-let private_typeahead_execution (config : Chat_tui.Type_ahead_config.t) ~env ~host =
+let private_typeahead_execution (config : Chat_tui.Type_ahead_config.t) ~sw ~env ~host =
   match config.mode with
   | Off -> None
   | Manual | Auto ->
     let host =
       match host with
-      | Some host -> host
-      | None -> Inference_composition.create ~env ~default_model:config.model
+      | Some host -> Ok host
+      | None ->
+        Inference_composition.try_create_default ~sw ~env ~default_model:config.model
     in
-    Some
-      (Inference_composition.bounded_execution
-         host
-         ~max_body_bytes:(256 * 1024)
-         Chat_response.Config.default)
+    (match host with
+     | Error _ -> None
+     | Ok host ->
+       Inference_host.with_response_limit host ~max_body_bytes:(256 * 1024)
+       |> Result.bind ~f:(fun host ->
+         Inference_composition.try_execution host Chat_response.Config.default)
+       |> Result.ok)
 ;;
 
 module Daemon_interactive = struct
@@ -1824,7 +1828,7 @@ module Daemon_interactive = struct
       ~bearer_token_file
       (fun sw endpoint connection ->
          let reconnect () =
-           Agent_transport_client.Endpoint.connect
+           Agent_transport_client.Connection_profile.connect
              endpoint
              ~sw
              ~env
@@ -1833,7 +1837,7 @@ module Daemon_interactive = struct
          let open Or_error.Let_syntax in
          let%map client = select_client ~sw ~env ~connection ~reconnect ~mode target in
          let typeahead_inference =
-           private_typeahead_execution typeahead_config ~env ~host:None
+           private_typeahead_execution typeahead_config ~sw ~env ~host:None
          in
          Chat_tui.App.run_agent_session
            ?typeahead_inference
@@ -2113,7 +2117,7 @@ module Embedded_interactive = struct
       List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
     in
     let inference_host =
-      Inference_composition.create ~env ~default_model:"gpt-4.5-preview"
+      Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
     in
     Agent_server.Embedded.start
       ~daemon_options:(Inference_composition.daemon_options inference_host)
@@ -2143,6 +2147,7 @@ module Embedded_interactive = struct
                   let typeahead_inference =
                     private_typeahead_execution
                       typeahead_config
+                      ~sw
                       ~env
                       ~host:(Some inference_host)
                   in

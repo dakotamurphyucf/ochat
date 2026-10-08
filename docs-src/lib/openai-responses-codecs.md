@@ -2,7 +2,7 @@
 
 `Openai.Responses.Codec` is the pure protocol boundary for new OpenAI provider integrations. `Request` validates and encodes selected locally managed requests; `Wire` captures output JSON with typed projections; `Stream` frames and validates SSE. These modules perform no network calls, authentication, retries, tool execution or session persistence.
 
-The existing `Responses.post_response` and runtime records remain on their current path. The provider driver and history migration must adopt this boundary before the running application gains lossless replay. In particular, the older reasoning record cannot retain encrypted content. Do not project a capture through that record and expect lossless history.
+The common Responses driver and inference adapter use this lossless boundary. The unused historical `Responses.post_response` transport has been removed. Historical DTOs remain explicit projections; the older reasoning record cannot retain encrypted content. Do not project a capture through that record and expect lossless history.
 
 ## Requests
 

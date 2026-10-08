@@ -220,7 +220,7 @@ let%expect_test
           Int.incr close_count;
           Agent_server.Embedded.close_connection embedded context)
         ~authenticate:(fun flow _ ->
-          Agent_transport_socket.Peer_credentials.authenticate_same_user
+          Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
             ~scopes:all_scopes
             flow)
         ~max_line_length:4_096
@@ -303,7 +303,7 @@ let%expect_test "typed client close wakes its blocked socket reader" =
            ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
            ~close_connection:(Agent_server.Embedded.close_connection embedded)
            ~authenticate:(fun flow _ ->
-             Agent_transport_socket.Peer_credentials.authenticate_same_user
+             Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
                ~scopes:all_scopes
                flow)
            ~max_line_length:4_096
@@ -339,4 +339,121 @@ let%expect_test "typed client close wakes its blocked socket reader" =
     in
     print_s [%sexp (closed : (unit, [ `Timeout ]) result)]);
   [%expect {| (Ok ()) |}]
+;;
+
+let%expect_test "socket committed malformed success retains original create intent" =
+  with_embedded (fun sw env root embedded ->
+    let path = Filename.concat root "malformed-success.sock" in
+    let listener = Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env) (`Unix path) in
+    let commits = ref 0 in
+    let handler flow _ =
+      let context =
+        Agent_server.Connection_context.create
+          ~connection_id:"malformed-wire"
+          ~principal:(Agent_server.Embedded.principal embedded)
+          ~transport:Unix_socket
+          ~publish_notification:(fun _ -> ())
+          ~max_attachments:8
+      in
+      let reader = Eio.Buf_read.of_flow flow ~max_size:(16 * 1024 * 1024) in
+      Exn.protect
+        ~finally:(fun () -> Agent_server.Embedded.close_connection embedded context)
+        ~f:(fun () ->
+          let rec loop () =
+            match Eio.Buf_read.line reader with
+            | line ->
+              let envelope =
+                Jsonaf.of_string line |> Agent_protocol.Envelope.of_json |> protocol_ok
+              in
+              let response =
+                Agent_server.Dispatcher.dispatch_envelope
+                  (Agent_server.Embedded.dispatcher embedded)
+                  ~context
+                  envelope
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              let response =
+                match envelope, response with
+                | Request request, Response reply
+                  when String.equal request.method_ "session.create" ->
+                  (match reply.outcome with
+                   | Ok _ ->
+                     incr commits;
+                     Agent_protocol.Envelope.success ~id:reply.id (`Object [])
+                   | Error _ -> response)
+                | _ -> response
+              in
+              Eio.Flow.copy_string
+                (Jsonaf.to_string (Agent_protocol.Envelope.to_json response) ^ "\n")
+                flow;
+              loop ()
+            | exception End_of_file -> ()
+          in
+          loop ())
+    in
+    Eio.Fiber.fork_daemon ~sw (fun () ->
+      Eio.Net.run_server listener handler ~on_error:(function
+        | Eio.Io _ -> ()
+        | exn -> raise exn));
+    let connection =
+      Agent_transport_socket.Client.connect
+        ~sw
+        ~net:(Eio.Stdenv.net env)
+        ~socket_path:path
+        ~max_line_length:(16 * 1024 * 1024)
+        ~notification_capacity:8
+    in
+    ignore
+      (Agent_client.Session_handle.initialize
+         connection
+         ~implementation_name:"malformed-success-test"
+         ~implementation_version:"test"
+       |> protocol_ok);
+    let original_snapshot =
+      Agent_client.Connection.request
+        (Agent_server.Embedded.connection embedded)
+        (Session_get
+           { session_id = Agent_server.Embedded.session_id embedded; history = None })
+      |> protocol_ok
+      |> function
+      | Agent_protocol.Public.Result.Session_get snapshot ->
+        Agent_protocol.Public.Snapshot.fields snapshot
+      | _ -> failwith "unexpected snapshot"
+    in
+    let request =
+      Agent_protocol.Session.Create_request.
+        { spec = original_snapshot.session.spec
+        ; requested_mode = None
+        ; subscribe = false
+        ; idempotency_key =
+            Agent_protocol.Idempotency_key.of_string "committed-malformed-create"
+            |> protocol_ok
+        }
+    in
+    let failure =
+      match Agent_client.Connection.request connection (Session_create request) with
+      | Error failure -> failure
+      | Ok _ -> failwith "malformed success accepted"
+    in
+    assert (Agent_protocol.Error.equal_code failure.code Interrupted);
+    let pending = List.hd_exn (Agent_client.Connection.pending_commands connection) in
+    let next_key =
+      Agent_protocol.Idempotency_key.of_string "new-key-after-malformed" |> protocol_ok
+    in
+    assert (
+      Result.is_error
+        (Agent_client.Connection.request
+           connection
+           (Session_create { request with idempotency_key = next_key })));
+    assert (Int.equal !commits 1);
+    (match Agent_client.Connection.reconcile connection pending |> protocol_ok with
+     | Committed (Created_session _) -> ()
+     | _ -> failwith "committed receipt not reconciled");
+    Agent_client.Connection.close connection;
+    print_endline
+      "actual socket commit; malformed success unknown; one admission; original receipt \
+       reconciled");
+  [%expect
+    {| actual socket commit; malformed success unknown; one admission; original receipt reconciled |}]
 ;;

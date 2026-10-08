@@ -4,6 +4,7 @@ type t =
   { sleep : float -> unit
   ; now : unit -> Time_ns.t
   ; connection : Connection.t
+  ; notification_lease : Connection.notification_lease option
   ; session_id : Agent_protocol.Id.Session.t
   ; mutex : Eio.Mutex.t
   ; on_update : (Projection.t -> unit) option
@@ -110,6 +111,7 @@ let mark_closed t =
     if not t.closed
     then (
       t.closed <- true;
+      Option.iter t.notification_lease ~f:Connection.release_notifications;
       Eio.Promise.resolve t.closed_resolver ()))
 ;;
 
@@ -163,24 +165,25 @@ let apply_notification t = function
   | Notification _ | Request _ | Response _ -> ()
 ;;
 
-let next_notification t =
+let next_notification t lease =
   Eio.Fiber.first
-    (fun () -> Connection.next_notification t.connection)
+    (fun () -> Connection.next_owned_notification lease)
     (fun () ->
        Eio.Promise.await t.closed_signal;
-       None)
+       Ok None)
 ;;
 
-let rec read_notifications t =
+let rec read_notifications t lease =
   if not (Eio.Mutex.use_ro t.mutex (fun () -> t.closed))
   then (
-    match next_notification t with
-    | None ->
+    match next_notification t lease with
+    | Error failure -> install_projection t (Error failure)
+    | Ok None ->
       install_projection t (Error (interrupted "session notification stream closed"));
       mark_closed t
-    | Some envelope ->
+    | Ok (Some envelope) ->
       apply_notification t envelope;
-      read_notifications t)
+      read_notifications t lease)
 ;;
 
 let renew_delay t lease =
@@ -230,6 +233,7 @@ let rec renew_owner t lease =
 ;;
 
 let make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -238,7 +242,6 @@ let make_handle
       ~reclaim_token
       ~replay
       ~latest_event_sequence
-      ~subscribe
       ?previous_projection
       ?on_update
       ?on_error
@@ -264,6 +267,7 @@ let make_handle
               (fun () ->
                 Eio.Time.now clock |> Time_ns.Span.of_sec |> Time_ns.of_span_since_epoch)
           ; connection
+          ; notification_lease
           ; session_id
           ; mutex = Eio.Mutex.create ()
           ; on_update
@@ -279,13 +283,16 @@ let make_handle
           ; closed_resolver
           }
         in
-        if subscribe then Eio.Fiber.fork ~sw (fun () -> read_notifications t);
+        Eio.Switch.on_release sw (fun () -> mark_closed t);
+        Option.iter notification_lease ~f:(fun lease ->
+          Eio.Fiber.fork ~sw (fun () -> read_notifications t lease));
         Option.iter attachment.owner_lease ~f:(fun lease ->
           Eio.Fiber.fork ~sw (fun () -> renew_owner t lease));
         Ok t))
 ;;
 
-let attach
+let attach_with_lease
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -315,6 +322,7 @@ let attach
   | Error _ as failure -> failure
   | Ok (Session_attach response) ->
     make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -323,7 +331,6 @@ let attach
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
       ~latest_event_sequence:response.latest_event_sequence
-      ~subscribe
       ?previous_projection
       ?on_update
       ?on_error
@@ -332,17 +339,29 @@ let attach
     Error (Agent_protocol.Error.invalid_request "unexpected session.attach result")
 ;;
 
-let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
+let create_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~spec
+      ~mode
+      ~subscribe
+      ?on_update
+      ?on_error
+      ()
+  =
   let open Result.Let_syntax in
   let%bind idempotency_key = key () in
   let request =
     Agent_protocol.Session.Create_request.
-      { spec; requested_mode = Some mode; subscribe = true; idempotency_key }
+      { spec; requested_mode = Some mode; subscribe; idempotency_key }
   in
   match Connection.request connection (Session_create request) with
   | Error _ as failure -> failure
   | Ok (Session_create { session; attachment = Some response; _ }) ->
     make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -351,7 +370,6 @@ let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
       ~latest_event_sequence:response.latest_event_sequence
-      ~subscribe:true
       ?on_update
       ?on_error
       ()
@@ -359,6 +377,72 @@ let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
     Error (Agent_protocol.Error.invalid_request "session.create omitted its attachment")
   | Ok _ ->
     Error (Agent_protocol.Error.invalid_request "unexpected session.create result")
+;;
+
+let with_notification_lease connection f =
+  Result.bind (Connection.claim_notifications connection) ~f:(fun notification_lease ->
+    let retained = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !retained then Connection.release_notifications notification_lease)
+      ~f:(fun () ->
+        let result = f notification_lease in
+        retained := Result.is_ok result;
+        result))
+;;
+
+let attach
+      ~sw
+      ~clock
+      ~connection
+      ~session_id
+      ~mode
+      ?(subscribe = true)
+      ?after_sequence
+      ?reclaim_token
+      ?previous_projection
+      ?on_update
+      ?on_error
+      ()
+  =
+  let attach notification_lease =
+    attach_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~session_id
+      ~mode
+      ~subscribe
+      ?after_sequence
+      ?reclaim_token
+      ?previous_projection
+      ?on_update
+      ?on_error
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> attach (Some lease))
+  else attach None
+;;
+
+let create ~sw ~clock ~connection ~spec ~mode ?(subscribe = true) ?on_update ?on_error () =
+  let create notification_lease =
+    create_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~spec
+      ~mode
+      ~subscribe
+      ?on_update
+      ?on_error
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> create (Some lease))
+  else create None
 ;;
 
 let session_id t = t.session_id

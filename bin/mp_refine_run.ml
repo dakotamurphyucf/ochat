@@ -142,121 +142,122 @@ let command : Command.t =
        Log.emit `Info "mp_refine_run: starting";
        Io.run_main
        @@ fun env ->
-       let host = Inference_composition.create ~env ~default_model:"gpt-5" in
-       let inference =
-         Inference_composition.execution host Chat_response.Config.default
-       in
-       let fs = Eio.Stdenv.fs env in
-       let task_contents =
-         Option.map ~f:(Io.load_doc ~dir:fs) task_file |> Option.value ~default:""
-       in
-       let open Meta_prompting in
-       let action =
-         match String.lowercase action with
-         | "generate" -> Context.Generate
-         | "update" -> Context.Update
-         | _ ->
-           Log.emit `Error (Printf.sprintf "Unknown action: %s" action);
-           exit 1
-       in
-       let prompt =
-         match input_file with
-         | Some file -> Io.load_doc ~dir:fs file
-         | None -> ""
-       in
-       let prompt_type =
-         match String.lowercase prompt_type with
-         | "general" -> Context.General
-         | "tool" -> Context.Tool
-         | _ ->
-           Log.emit `Error (Printf.sprintf "Unknown prompt type: %s" prompt_type);
-           exit 1
-       in
-       let online_enabled = (not classic_rmp) && meta_factory_online in
-       let result =
-         if meta_factory
-         then (
-           match input_file with
-           | None ->
-             let p : Prompt_factory.create_params =
-               { agent_name = "Meta-Prompt Agent"
-               ; goal = task_contents
-               ; success_criteria = [ "Adheres to safety and output constraints" ]
-               ; audience = Some "technical"
-               ; tone = Some "neutral"
-               ; domain =
-                   (match prompt_type with
-                    | Context.General -> Some "general"
-                    | Context.Tool -> Some "coding")
-               ; use_responses_api = true
-               ; markdown_allowed = true
-               ; eagerness = Prompt_factory.Medium
-               ; reasoning_effort = `Medium
-               ; verbosity_target = `Low
-               }
-             in
-             Prompt_factory.create_pack p ~prompt
-           | Some _ ->
-             let ip : Prompt_factory.iterate_params =
-               { goal = task_contents
-               ; desired_behaviors = []
-               ; undesired_behaviors = []
-               ; safety_boundaries = []
-               ; stop_conditions = []
-               ; reasoning_effort = `Low
-               ; verbosity_target = `Low
-               ; use_responses_api = true
-               }
-             in
-             Prompt_factory.iterate_pack ip ~current_prompt:prompt)
-         else (
-           match input_file with
-           | None when online_enabled ->
-             (match
-                Prompt_factory_online.create_pack_online
-                  ~env
-                  ~inference
-                  ~agent_name:"Meta-Prompt Agent"
-                  ~goal:task_contents
-                  ~proposer_model:(Some "gpt-5")
-              with
-              | Some txt -> txt
-              | None ->
-                Mp_flow.first_flow
-                  ~env
-                  ~inference
-                  ~task:task_contents
-                  ~prompt
-                  ~action
-                  ~use_meta_factory_online:false
-                  ())
+       Eio.Switch.run (fun sw ->
+         let host = Inference_composition.create ~sw ~env ~default_model:"gpt-5" in
+         let inference =
+           Inference_composition.execution host Chat_response.Config.default
+         in
+         let fs = Eio.Stdenv.fs env in
+         let task_contents =
+           Option.map ~f:(Io.load_doc ~dir:fs) task_file |> Option.value ~default:""
+         in
+         let open Meta_prompting in
+         let action =
+           match String.lowercase action with
+           | "generate" -> Context.Generate
+           | "update" -> Context.Update
            | _ ->
-             (match prompt_type with
-              | Context.General ->
-                Mp_flow.first_flow
-                  ~env
-                  ~inference
-                  ~task:task_contents
-                  ~prompt
-                  ~action
-                  ~use_meta_factory_online:online_enabled
-                  ()
-              | Context.Tool ->
-                Mp_flow.tool_flow
-                  ~env
-                  ~inference
-                  ~task:task_contents
-                  ~prompt
-                  ~action
-                  ~use_meta_factory_online:online_enabled
-                  ()))
-       in
-       (match output_file_opt with
-        | Some path ->
-          Log.emit `Info (Printf.sprintf "mp_refine_run: writing output to %s" path);
-          Io.append_doc ~dir:fs path result
-        | None -> print_endline result);
-       Log.emit `Info "mp_refine_run: finished")
+             Log.emit `Error (Printf.sprintf "Unknown action: %s" action);
+             exit 1
+         in
+         let prompt =
+           match input_file with
+           | Some file -> Io.load_doc ~dir:fs file
+           | None -> ""
+         in
+         let prompt_type =
+           match String.lowercase prompt_type with
+           | "general" -> Context.General
+           | "tool" -> Context.Tool
+           | _ ->
+             Log.emit `Error (Printf.sprintf "Unknown prompt type: %s" prompt_type);
+             exit 1
+         in
+         let online_enabled = (not classic_rmp) && meta_factory_online in
+         let result =
+           if meta_factory
+           then (
+             match input_file with
+             | None ->
+               let p : Prompt_factory.create_params =
+                 { agent_name = "Meta-Prompt Agent"
+                 ; goal = task_contents
+                 ; success_criteria = [ "Adheres to safety and output constraints" ]
+                 ; audience = Some "technical"
+                 ; tone = Some "neutral"
+                 ; domain =
+                     (match prompt_type with
+                      | Context.General -> Some "general"
+                      | Context.Tool -> Some "coding")
+                 ; use_responses_api = true
+                 ; markdown_allowed = true
+                 ; eagerness = Prompt_factory.Medium
+                 ; reasoning_effort = `Medium
+                 ; verbosity_target = `Low
+                 }
+               in
+               Prompt_factory.create_pack p ~prompt
+             | Some _ ->
+               let ip : Prompt_factory.iterate_params =
+                 { goal = task_contents
+                 ; desired_behaviors = []
+                 ; undesired_behaviors = []
+                 ; safety_boundaries = []
+                 ; stop_conditions = []
+                 ; reasoning_effort = `Low
+                 ; verbosity_target = `Low
+                 ; use_responses_api = true
+                 }
+               in
+               Prompt_factory.iterate_pack ip ~current_prompt:prompt)
+           else (
+             match input_file with
+             | None when online_enabled ->
+               (match
+                  Prompt_factory_online.create_pack_online
+                    ~env
+                    ~inference
+                    ~agent_name:"Meta-Prompt Agent"
+                    ~goal:task_contents
+                    ~proposer_model:(Some "gpt-5")
+                with
+                | Some txt -> txt
+                | None ->
+                  Mp_flow.first_flow
+                    ~env
+                    ~inference
+                    ~task:task_contents
+                    ~prompt
+                    ~action
+                    ~use_meta_factory_online:false
+                    ())
+             | _ ->
+               (match prompt_type with
+                | Context.General ->
+                  Mp_flow.first_flow
+                    ~env
+                    ~inference
+                    ~task:task_contents
+                    ~prompt
+                    ~action
+                    ~use_meta_factory_online:online_enabled
+                    ()
+                | Context.Tool ->
+                  Mp_flow.tool_flow
+                    ~env
+                    ~inference
+                    ~task:task_contents
+                    ~prompt
+                    ~action
+                    ~use_meta_factory_online:online_enabled
+                    ()))
+         in
+         (match output_file_opt with
+          | Some path ->
+            Log.emit `Info (Printf.sprintf "mp_refine_run: writing output to %s" path);
+            Io.append_doc ~dir:fs path result
+          | None -> print_endline result);
+         Log.emit `Info "mp_refine_run: finished"))
 ;;
 
 let () = Command_unix.run command

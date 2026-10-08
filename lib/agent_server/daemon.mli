@@ -12,8 +12,14 @@ type status =
   | Failed of Agent_protocol.Error.t
 [@@deriving sexp]
 
+type startup_mode =
+  | Execute
+  | Operator_only
+[@@deriving equal, sexp]
+
 type options =
-  { implementation_name : string
+  { startup_mode : startup_mode
+  ; implementation_name : string
   ; implementation_version : string
   ; features : string list
   ; extension_host : Agent_protocol.Extension_capabilities.host
@@ -47,7 +53,18 @@ type options =
         extensions enabled, None selects the installed native
         targets/catalog. An explicit host retains its target/compiler/source
         restrictions. This does not grant tool execution authority. *)
+  ; provider_operator_factory : Provider_operator_port.factory option
+    (** Optional host-owned provider service. Initialize once with actual server
+        identity; missing service advertises no provider.operator capability.
+        Unconfigured hosts may expose explicit setup/status without inference. *)
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
+  ; oauth_actor_resolver : (string -> Authenticator.actor_validator option) option
+  ; proxy_actor_policy :
+      (now:(unit -> Agent_protocol.Timestamp.t)
+       -> Authenticator.Request_identity.t
+       -> principal:Agent_protocol.Principal.t
+       -> (Operator_authorization.t, Agent_protocol.Error.t) result)
+        option
   }
 
 type t
@@ -65,6 +82,10 @@ val start
   -> home:string
   -> process_start_identity:string option
   -> ?options:options
+  -> ?before_activation:
+       (Agent_store.Session_store.t -> (unit, Agent_protocol.Error.t) result)
+       (** Trusted composition hook after exclusive root ownership and before
+           catalog/runtime construction. Failure closes the owned store. *)
   -> unit
   -> (t, Agent_protocol.Error.t) result
 
@@ -84,6 +105,15 @@ val close_connection : t -> Connection_context.t -> unit
 (** [reload_config] validates and atomically publishes catalog changes.
     Server/listener/storage changes are rejected as restart-required. *)
 val reload_config : t -> (Config_diff.t, Config.Diagnostic.t list) result
+
+(** Original-record proof for autonomous operator work. Static authentication
+    captures exact expiry. Legacy custom/proxy authentication without an explicit
+    actor policy remains usable for ordinary RPC but fails closed for providers. *)
+val authenticate_http_actor
+  :  t
+  -> Authenticator.Request_identity.t
+  -> string option
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result
 
 (** Authenticates one HTTP bearer credential according to the validated
     listener configuration. [None] is accepted only in explicit development

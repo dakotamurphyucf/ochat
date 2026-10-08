@@ -91,6 +91,14 @@ val create
   -> limits:Inference_runtime.Limits.t
   -> t
 
+(** Immutable driver-limit view sharing the same owned entries, status,
+    authorization and credential callbacks. Administrative mutations are visible
+    through both views; this does not create another credential authority. *)
+val with_response_limit
+  :  t
+  -> max_body_bytes:int
+  -> (t, Inference_runtime.Preparation_error.t) Result.t
+
 (** Registry mutation is trusted host administration: the caller must authorize it
     independently of session-selected/imported data. Owner/generation are host
     lifecycle labels, never durable target fields. Reauthorization strictly advances
@@ -102,6 +110,16 @@ val create
     while preserving profile/account/endpoint/binding. Switch identity by installing
     a new profile ID and explicitly admitting Selection.change. *)
 val add : t -> Profile.t -> owner:string -> generation:int64 -> (unit, Error.t) Result.t
+
+(** Trusted host mapping publication. Validate first; then mark any old entry
+    removed before replacing its shared table slot without yielding. Old captured
+    contexts/plans/leases retain the removed entry and fail currentness checks. *)
+val replace
+  :  t
+  -> Profile.t
+  -> owner:string
+  -> generation:int64
+  -> (unit, Error.t) Result.t
 
 val remove : t -> profile:string -> (unit, Error.t) Result.t
 val edit_profile : t -> Profile.t -> (unit, Error.t) Result.t

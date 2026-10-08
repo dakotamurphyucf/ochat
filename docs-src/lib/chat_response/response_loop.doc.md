@@ -21,7 +21,7 @@ do not need to display partial answers while the request streams in.
 
 ```text
 loop with current history H
-  1. R ← post_response H           (OpenAI HTTP round-trip)
+  1. R ← prepared inference H      (selected provider driver)
   2. append R.output to H
   3. extract every Function_call fc ∈ R.output
      if none → return H            (quiescent state)

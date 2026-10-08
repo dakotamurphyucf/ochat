@@ -17,6 +17,23 @@ val create
   -> max_attachments:int
   -> t
 
+(** Principal-only [create] above does not grant provider operator authority.
+    Real transports and trusted local hosts use this proof-bearing constructor. *)
+val create_authenticated
+  :  actor:Operator_authorization.t
+  -> connection_id:string
+  -> transport:transport
+  -> publish_notification:(Agent_protocol.Envelope.t -> unit)
+  -> max_attachments:int
+  -> t
+
+val actor : t -> Operator_authorization.t
+
+val request_actor
+  :  t
+  -> Operator_authorization.t option
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result
+
 val principal : t -> Agent_protocol.Principal.t
 val initialized : t -> bool
 val mark_initialized : ?version:Agent_protocol.Version.t -> t -> unit

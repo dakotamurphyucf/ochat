@@ -526,9 +526,9 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start ~sw ~clock ~registry ~capacity ~model_job_inference =
+let start_controlled ~enabled ~sw ~clock ~registry ~capacity ~model_job_inference =
   let t =
-    { closed = Atomic.make false
+    { closed = Atomic.make (not enabled)
     ; capacity
     ; model_job_inference
     ; mutex = Eio.Mutex.create ()
@@ -539,8 +539,12 @@ let start ~sw ~clock ~registry ~capacity ~model_job_inference =
     ; sleep = Eio.Time.sleep clock
     }
   in
-  Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
+  if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
+;;
+
+let start ~sw ~clock ~registry ~capacity ~model_job_inference =
+  start_controlled ~enabled:true ~sw ~clock ~registry ~capacity ~model_job_inference
 ;;
 
 let cancel t job_id =

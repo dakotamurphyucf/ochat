@@ -361,7 +361,8 @@ let submission_snapshot embedded =
       (Session_get { session_id; history = None })
     |> protocol_ok
   with
-  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
+  | Agent_protocol.Public.Result.Session_get snapshot ->
+    Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "unexpected submission snapshot"
 ;;
 
@@ -1695,4 +1696,542 @@ let%expect_test "stopped sessions require exact confirmation and can be removed"
     {|
     ((wrong_confirmation_rejected true) (receipt_matches true) (removed true))
     |}]
+;;
+
+let%expect_test
+    "operator-only embedded opening owns no session and preserves host operator identity"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    let data_root = Filename.concat root "operator-store" in
+    let config = Agent_server_test_support.config root workspace prompt_file in
+    let config = { config with server = { config.server with data_dir = data_root } } in
+    Eio.Switch.run (fun sw ->
+      let open_host () =
+        Agent_server.Embedded.open_host
+          ~sw
+          ~env
+          ~startup_mode:Operator_only
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~event_capacity:8
+          ()
+        |> protocol_ok
+      in
+      let host = open_host () in
+      let connection = Agent_server.Embedded.host_connection host in
+      let identity =
+        Option.value_exn (Agent_client.Connection.initialization connection)
+      in
+      assert (
+        Result.is_error
+          (Agent_client.Connection.request
+             connection
+             (Session_create
+                { spec = Agent_server_test_support.session_spec ()
+                ; requested_mode = None
+                ; subscribe = false
+                ; idempotency_key =
+                    Agent_protocol.Idempotency_key.of_string "operator-no-create"
+                    |> protocol_ok
+                })));
+      Agent_server.Embedded.close_host host;
+      assert (Result.is_error (Agent_server.Embedded.connect_host host));
+      let reopened = open_host () in
+      let next =
+        Option.value_exn
+          (Agent_client.Connection.initialization
+             (Agent_server.Embedded.host_connection reopened))
+      in
+      assert (Agent_protocol.Id.Server.equal identity.server_id next.server_id);
+      assert (Agent_protocol.Id.Principal.equal identity.principal.id next.principal.id);
+      Agent_server.Embedded.close_host reopened;
+      print_endline
+        "no session admission; stable host/operator; closed host cannot connect"));
+  [%expect {| no session admission; stable host/operator; closed host cannot connect |}]
+;;
+
+let%expect_test
+    "lost create reply reconciles original receipt and rechecks requested owner scopes"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let config = Agent_server_test_support.config root workspace prompt_file in
+      let daemon =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options:(inference_options ())
+          ()
+        |> protocol_ok
+      in
+      Exn.protect
+        ~finally:(fun () -> ignore (Agent_server.Daemon.shutdown daemon))
+        ~f:(fun () ->
+          let principal = Agent_server_test_support.principal () in
+          let original = Agent_server_test_support.connection daemon principal in
+          let lost = ref false in
+          let creates = ref 0 in
+          let connection =
+            Agent_client.Transport.create
+              ~request:(fun command ->
+                let result = Agent_client.Connection.request original command in
+                match command with
+                | Agent_protocol.Command.Session_create _ when not !lost ->
+                  incr creates;
+                  lost := true;
+                  Error
+                    (Agent_protocol.Error.create
+                       Interrupted
+                       ~message:"fixture reply lost after commit"
+                       ~retryable:true
+                       ())
+                | _ -> result)
+              ~next_notification:(fun () -> None)
+              ~close:(fun () -> Agent_client.Connection.close original)
+            |> Agent_client.Connection.create
+          in
+          Agent_server_test_support.initialize connection;
+          let request =
+            Agent_server_test_support.create_request ~key:"lost-create-receipt" ()
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request connection (Session_create request)));
+          let pending =
+            List.hd_exn (Agent_client.Connection.pending_commands connection)
+          in
+          let new_key =
+            Agent_protocol.Idempotency_key.of_string "blind-new-key" |> protocol_ok
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request
+                 connection
+                 (Session_create { request with idempotency_key = new_key })));
+          assert (Int.equal !creates 1);
+          let receipt =
+            Agent_client.Connection.reconcile connection pending |> protocol_ok
+          in
+          (match receipt with
+           | Committed (Created_session _) -> ()
+           | _ -> failwith "missing committed create identity");
+          assert (List.is_empty (Agent_client.Connection.pending_commands connection));
+          let restricted =
+            Agent_server_test_support.principal_with_scopes
+              (Agent_protocol.Id.Principal.to_string principal.id)
+              (Set.remove principal.scopes Send_messages)
+          in
+          let denied = Agent_server_test_support.connection daemon restricted in
+          Agent_server_test_support.initialize denied;
+          let query =
+            Agent_protocol.Command_receipt.Request.
+              { method_name = "session.create"
+              ; original_params = Agent_protocol.Session.Create_request.to_json request
+              }
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request_without_history
+                 denied
+                 (Command_receipt query)));
+          Agent_client.Connection.close denied;
+          Agent_client.Connection.close connection;
+          print_endline
+            "one create; no blind new-key retry; identity receipt; revoked original mode \
+             denied")));
+  [%expect
+    {| one create; no blind new-key retry; identity receipt; revoked original mode denied |}]
+;;
+
+let%expect_test
+    "operator-only opens existing active durable work without activation or \
+     recovery-marker completion"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+      {|
+<developer>Operator-only recovery fixture.</developer>
+<script language="chatml" kind="moderator">
+  type state = int
+  type event = [ `Session_start | `Session_resume | `Tick ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Schedule.after_ms(60000, `Tick), fun timer ->
+        Task.bind(Model.spawn("agent_prompt_v1", `Null), fun job ->
+        Task.pure(st + 1)))
+      | `Session_resume -> Task.pure(st + 100)
+      | `Tick -> Task.pure(st + 1000)
+</script>
+|};
+    Eio.Switch.run (fun sw ->
+      let config = Agent_server_test_support.config root workspace prompt_file in
+      let base = inference_options () in
+      let resolutions = ref 0 in
+      let runtime_ports = ref 0 in
+      let policy = base.inference_policy in
+      let options =
+        { base with
+          inference_policy =
+            { policy with
+              resolve_inference_context =
+                (fun target ->
+                  incr resolutions;
+                  policy.resolve_inference_context target)
+            ; runtime_inference_ports =
+                (fun actor ->
+                  incr runtime_ports;
+                  policy.runtime_inference_ports actor)
+            }
+        }
+      in
+      let daemon =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options
+          ()
+        |> protocol_ok
+      in
+      let principal = Agent_server_test_support.principal () in
+      let connection = Agent_server_test_support.connection daemon principal in
+      Agent_server_test_support.initialize connection;
+      let session, _ =
+        Agent_server_test_support.create_session ~start_immediately:true connection
+      in
+      let state =
+        Agent_server.Session_registry.read_state
+          (Agent_server.Daemon.registry daemon)
+          ~authorize:(fun _ -> Ok ())
+          session.id
+        |> protocol_ok
+      in
+      let snapshot =
+        Agent_session.Session_state.snapshot
+          ~now:(Agent_protocol.Timestamp.of_string "2026-10-08T00:00:00Z" |> protocol_ok)
+          state
+      in
+      assert (not (List.is_empty snapshot.schedules));
+      assert (not (List.is_empty snapshot.jobs));
+      assert (Agent_protocol.Session.equal_desired_state session.desired_state Running);
+      Agent_client.Connection.close connection;
+      ignore (Agent_server.Daemon.shutdown daemon |> protocol_ok);
+      let marker =
+        Filename.concat config.server.data_dir "indexes/sessions.recovery-required"
+      in
+      Eio.Path.unlink
+        Eio.Path.(
+          Eio.Stdenv.fs env / config.server.data_dir / "indexes" / "sessions.snapshot");
+      let before_resolutions = !resolutions in
+      let before_ports = !runtime_ports in
+      let operator =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options:{ options with startup_mode = Operator_only }
+          ()
+        |> protocol_ok
+      in
+      assert (
+        Int.equal
+          (Agent_server.Session_registry.stats (Agent_server.Daemon.registry operator))
+            .loaded
+          0);
+      let read =
+        Agent_server.Session_registry.read_state
+          (Agent_server.Daemon.registry operator)
+          ~authorize:(fun _ -> Ok ())
+          session.id
+        |> protocol_ok
+      in
+      assert (Agent_protocol.Id.Session.equal read.identity.session_id session.id);
+      assert (
+        Result.is_error
+          (Agent_server.Session_registry.load
+             (Agent_server.Daemon.registry operator)
+             session.id));
+      Eio.Fiber.yield ();
+      assert (Int.equal !resolutions before_resolutions);
+      assert (Int.equal !runtime_ports before_ports);
+      assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
+      ignore (Agent_server.Daemon.shutdown operator |> protocol_ok);
+      assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
+      print_endline
+        "existing active session/timer/job; zero runtime/provider resolution; no loader; \
+         recovery marker retained"));
+  [%expect
+    {| existing active session/timer/job; zero runtime/provider resolution; no loader; recovery marker retained |}]
+;;
+
+let%expect_test
+    "reconnect rejects a changed host or principal before replaying retained create \
+     intent"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = None
+        ; start_immediately = false
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      let first =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let second =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let principal = Agent_server.Embedded.principal first in
+      let candidate host principal attaches =
+        let notifications = Eio.Stream.create 128 in
+        let context =
+          Agent_server.Connection_context.create
+            ~connection_id:"identity-pin-fixture"
+            ~principal
+            ~transport:In_memory
+            ~publish_notification:(Eio.Stream.add notifications)
+            ~max_attachments:8
+        in
+        Agent_client.In_memory.create
+          ~request:(fun command ->
+            (match command with
+             | Session_attach _ -> incr attaches
+             | _ -> ());
+            Agent_server.Dispatcher.dispatch_command
+              (Agent_server.Embedded.dispatcher host)
+              ~context
+              command)
+          ~notifications
+          ~close:(fun () -> Agent_server.Embedded.close_connection host context)
+      in
+      let snapshot =
+        Agent_client.Connection.request
+          (Agent_server.Embedded.connection first)
+          (Session_get
+             { session_id = Agent_server.Embedded.session_id first; history = None })
+        |> protocol_ok
+        |> function
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
+        | _ -> failwith "unexpected snapshot"
+      in
+      List.iter [ true; false ] ~f:(fun wrong_host ->
+        let original = Agent_server.Embedded.connect first in
+        let source =
+          Agent_client.Transport.create
+            ~request:(fun command ->
+              let result = Agent_client.Connection.request original command in
+              match command with
+              | Session_create _ ->
+                Error
+                  (Agent_protocol.Error.create
+                     Interrupted
+                     ~message:"fixture admitted create reply lost"
+                     ~retryable:true
+                     ())
+              | _ -> result)
+            ~next_notification:(fun () ->
+              Agent_client.Connection.next_notification original)
+            ~close:(fun () -> Agent_client.Connection.close original)
+          |> Agent_client.Connection.create
+        in
+        Agent_server_test_support.initialize source;
+        let create =
+          Agent_protocol.Session.Create_request.
+            { spec = snapshot.session.spec
+            ; requested_mode = None
+            ; subscribe = false
+            ; idempotency_key =
+                Agent_protocol.Idempotency_key.of_string
+                  (if wrong_host then "pin-host-create" else "pin-principal-create")
+                |> protocol_ok
+            }
+        in
+        assert (
+          Result.is_error (Agent_client.Connection.request source (Session_create create)));
+        let attaches = ref 0 in
+        let destination =
+          if wrong_host
+          then candidate second principal attaches
+          else
+            candidate
+              first
+              (Agent_server_test_support.principal_with_id "pri_other_reconnect_operator")
+              attaches
+        in
+        let failed, failed_resolver = Eio.Promise.create () in
+        let manager =
+          Agent_client.Reconnect.attach
+            ~sw
+            ~clock:(Eio.Stdenv.clock env)
+            ~connection:source
+            ~reconnect:(Some (fun () -> Ok destination))
+            ~session_id:(Agent_server.Embedded.session_id first)
+            ~mode:Read_write
+            ~policy:
+              { Agent_client.Reconnect.default_policy with
+                initial_delay = Time_ns.Span.zero
+              ; maximum_delay = Time_ns.Span.zero
+              ; jitter_ratio = 0.
+              ; maximum_attempts = Some 1
+              }
+            ~on_status:(function
+              | Failed error -> ignore (Eio.Promise.try_resolve failed_resolver error)
+              | Connected | Reconnecting _ | Disconnected -> ())
+            ()
+          |> protocol_ok
+        in
+        Agent_client.Connection.close source;
+        let failure =
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+            Eio.Promise.await failed)
+        in
+        assert (Agent_protocol.Error.equal_code failure.code Permission_denied);
+        assert (Int.equal !attaches 0);
+        assert (
+          Int.equal (List.length (Agent_client.Reconnect.pending_commands manager)) 1);
+        Agent_client.Reconnect.close manager);
+      Agent_server.Embedded.close second;
+      Agent_server.Embedded.close first;
+      print_endline
+        "changed host and changed principal denied; no attachment replay; original \
+         create uncertainty retained"));
+  [%expect
+    {| changed host and changed principal denied; no attachment replay; original create uncertainty retained |}]
+;;
+
+let%expect_test
+    "lost reconnect attachment reply remains pending across candidate disposal"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = None
+        ; start_immediately = false
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      let host =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let source = Agent_server.Embedded.connect host in
+      let attach_admissions = ref 0 in
+      let candidate_count = ref 0 in
+      let reconnect () =
+        incr candidate_count;
+        let underlying = Agent_server.Embedded.connect host in
+        let transport =
+          Agent_client.Transport.create
+            ~request:(fun command ->
+              let result = Agent_client.Connection.request underlying command in
+              match command with
+              | Session_attach _ ->
+                incr attach_admissions;
+                assert (Result.is_ok result);
+                Error
+                  (Agent_protocol.Error.create
+                     Interrupted
+                     ~message:"committed reconnect attach response lost"
+                     ~retryable:true
+                     ())
+              | _ -> result)
+            ~next_notification:(fun () ->
+              Agent_client.Connection.next_notification underlying)
+            ~close:(fun () -> Agent_client.Connection.close underlying)
+        in
+        Ok (Agent_client.Connection.create transport)
+      in
+      let failed, resolver = Eio.Promise.create () in
+      let manager =
+        Agent_client.Reconnect.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection:source
+          ~reconnect:(Some reconnect)
+          ~session_id:(Agent_server.Embedded.session_id host)
+          ~mode:Read_write
+          ~policy:
+            { Agent_client.Reconnect.default_policy with
+              initial_delay = Time_ns.Span.zero
+            ; maximum_delay = Time_ns.Span.zero
+            ; jitter_ratio = 0.
+            ; maximum_attempts = Some 2
+            }
+          ~on_status:(function
+            | Failed failure -> ignore (Eio.Promise.try_resolve resolver failure)
+            | Connected | Reconnecting _ | Disconnected -> ())
+          ()
+        |> protocol_ok
+      in
+      Agent_client.Connection.close source;
+      ignore
+        (Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+           Eio.Promise.await failed));
+      assert (Int.equal !candidate_count 2);
+      assert (Int.equal !attach_admissions 1);
+      let pending = Agent_client.Reconnect.pending_commands manager in
+      assert (Int.equal (List.length pending) 1);
+      let recovery = Agent_server.Embedded.connect host in
+      Agent_server_test_support.initialize recovery;
+      Agent_client.Connection.adopt_pending recovery pending |> protocol_ok;
+      (match
+         Agent_client.Connection.reconcile recovery (List.hd_exn pending) |> protocol_ok
+       with
+       | Committed (Attached_session id) ->
+         assert (
+           Agent_protocol.Id.Session.equal id (Agent_server.Embedded.session_id host))
+       | _ -> failwith "expected attachment recovery disposition");
+      assert (List.is_empty (Agent_client.Connection.pending_commands recovery));
+      Agent_client.Connection.close recovery;
+      Agent_client.Reconnect.close manager;
+      Agent_server.Embedded.close host;
+      print_endline
+        "one committed attach; next candidate blocked; original receipt requires \
+         reattachment"));
+  [%expect
+    {| one committed attach; next candidate blocked; original receipt requires reattachment |}]
 ;;

@@ -36,6 +36,9 @@ let all_scopes =
     ; Administer_configuration
     ; Diagnostics
     ; Submit_ingress
+    ; Provider_view
+    ; Provider_manage
+    ; Provider_select
     ]
 ;;
 
@@ -91,7 +94,8 @@ let socket_listener env daemon config sw =
     ~authenticate:(fun flow _ ->
       Agent_transport_socket.Peer_credentials.authenticate_same_user
         ~scopes:all_scopes
-        flow)
+        flow
+      |> Result.map ~f:Operator_authorization.trusted_local)
     ~max_line_length:(16 * 1024 * 1024)
     ~outgoing_capacity:1_024
     ~max_attachments:
@@ -124,7 +128,7 @@ let http_listener env daemon config sw =
     ~blob_store:(Agent_server.Daemon.blob_store daemon)
     ~health:(Agent_server.Daemon.health daemon)
     ~close_connection:(Agent_server.Daemon.close_connection daemon)
-    ~authenticate:(Agent_server.Daemon.authenticate_http daemon)
+    ~authenticate:(Agent_server.Daemon.authenticate_http_actor daemon)
     ~max_body_bytes:(16 * 1024 * 1024)
     ~max_batch_size:128
     ~batch_concurrency:16
@@ -282,10 +286,10 @@ let import_legacy config_path ~legacy_id ~prompt ~workspace =
               let%bind daemon =
                 Agent_server.Daemon.start
                   ~options:
-                    (Inference_composition.daemon_options
-                       (Inference_composition.create
-                          ~env
-                          ~default_model:"gpt-4.5-preview"))
+                    (Inference_composition.daemon_options_default
+                       ~sw
+                       ~env
+                       ~default_model:"gpt-4.5-preview")
                   ~sw
                   ~env
                   ~config
@@ -326,8 +330,10 @@ let run_daemon env config =
     let%bind daemon =
       Agent_server.Daemon.start
         ~options:
-          (Inference_composition.daemon_options
-             (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
+          (Inference_composition.daemon_options_default
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview")
         ~sw
         ~env
         ~config

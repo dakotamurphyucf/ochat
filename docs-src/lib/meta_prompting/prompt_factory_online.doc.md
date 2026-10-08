@@ -105,7 +105,8 @@ Generate a full *prompt pack* from scratch.  The function
    `iterate_revised_prompt`,
 3. builds a user message that describes the target `agent_name`, the
    `goal` and several default generation parameters, and
-4. performs a single blocking call to `Openai.Responses.post_response`.
+4. performs one completion through its explicitly supplied inference execution and
+   the common provider driver.
 
 On success the assistant output is returned **verbatim** – callers are
 expected to parse out the individual sections (e.g. `System_Prompt`,

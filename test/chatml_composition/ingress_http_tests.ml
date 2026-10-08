@@ -79,9 +79,12 @@ let%expect_test
           ~authenticate:(fun _ token ->
             match token with
             | Some token ->
-              Agent_server.Authenticator.authenticate_bearer
+              Agent_server.Authenticator.authenticate_bearer_actor
                 authenticator
-                ~now:(P.Timestamp.now ())
+                ~now:(fun () ->
+                  P.Timestamp.of_time_ns
+                    (Time_ns.of_span_since_epoch
+                       (Time_ns.Span.of_sec (Eio.Time.now (Eio.Stdenv.clock env)))))
                 ~token
             | None ->
               Error

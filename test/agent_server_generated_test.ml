@@ -423,6 +423,12 @@ let%expect_test
           Eio.Path.(Eio.Stdenv.fs env / prompt_file)
           {|<developer>Parent.</developer><tool name="read_file"><read id="data" path="${workspace}/data"/></tool><tool name="append_to_file"/>|};
         let config = config root root prompt_file in
+        (* Workspace tool data is separate from the private session-store root. *)
+        let config =
+          { config with
+            server = { config.server with data_dir = Filename.concat root "store" }
+          }
+        in
         let requests = ref 0 in
         let entered, entered_u = Eio.Promise.create () in
         let cleaning, cleaning_u = Eio.Promise.create () in

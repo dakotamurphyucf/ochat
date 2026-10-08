@@ -1,8 +1,9 @@
 (library
  (name inference_composition)
- (modules inference_composition)
- (libraries core eio uri ochat.openai ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.chat_response ochat.agent_protocol ochat.transcript ochat.agent_server)
- (preprocess (pps ppx_jane)))
+ (modules inference_composition provider_defaults provider_platform provider_commands)
+ (libraries ochat.operator_authorization cstruct ochat.agent_client ochat.agent_transport_client core core_unix.command_unix eio eio.mock eio.unix eio_main uri ochat.provider_runtime ochat.provider_runtime_host ochat.provider_operator ochat.provider_oauth ochat.provider_oauth_registry ochat.credential_registry ochat.credential_registry_model ochat.provider_secret_store ochat.private_storage ochat.openai ochat.inference_host ochat.inference_client ochat.inference_runtime ochat.chat_response ochat.agent_protocol ochat.transcript ochat.agent_server)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (executable
  (package ochat)
@@ -204,7 +205,7 @@
  (name ochat_agent_server)
  (public_name ochat-agent-server)
  (modules ochat_agent_server)
- (libraries inference_composition
+ (libraries ochat.operator_authorization inference_composition
   core
   core_unix.command_unix
   eio

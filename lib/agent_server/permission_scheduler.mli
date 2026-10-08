@@ -4,6 +4,14 @@ open! Core
 
 type t
 
+(** Internal composition: false constructs a stopped service and starts no fiber. *)
+val start_controlled
+  :  enabled:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.clock
+  -> registry:Session_registry.t
+  -> t
+
 val start : sw:Eio.Switch.t -> clock:_ Eio.Time.clock -> registry:Session_registry.t -> t
 val close : t -> unit
 val is_running : t -> bool

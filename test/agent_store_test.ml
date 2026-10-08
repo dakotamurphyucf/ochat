@@ -1995,3 +1995,42 @@ let%expect_test "migration dry-run reports an older schema without applying it" 
     ((source_version 0) (status Migration_required) (apply_rejected true))
     |}]
 ;;
+
+let%expect_test "directory capability atomic publication survives anchor rename" =
+  with_temp_directory "ochat-agent-directory-cap" (fun env temporary ->
+    let anchor = Eio.Path.(Eio.Stdenv.fs env / temporary / "anchor") in
+    let retained = Eio.Path.(Eio.Stdenv.fs env / temporary / "retained") in
+    Eio.Path.mkdir ~perm:0o700 anchor;
+    Eio.Path.with_open_dir anchor (fun directory ->
+      Eio.Path.rename anchor retained;
+      Eio.Path.mkdir ~perm:0o700 anchor;
+      Agent_store.Durable_file.replace_in
+        ~directory
+        ~durability:Flush_file_and_directory
+        ~basename:"local-operator.json"
+        "identity"
+      |> store_ok;
+      assert (
+        String.equal
+          (Eio.Path.load Eio.Path.(retained / "local-operator.json"))
+          "identity");
+      assert (not (Eio.Path.is_file Eio.Path.(anchor / "local-operator.json")));
+      assert (
+        Result.is_error
+          (Agent_store.Durable_file.replace_in
+             ~directory
+             ~durability:Flush_file_and_directory
+             ~basename:"../escaped"
+             "identity"));
+      match
+        Agent_store.Durable_file.replace_in
+          ~directory
+          ~durability:Flush_file_and_directory
+          ~basename:"invalid\000name"
+          "identity"
+      with
+      | Error (Agent_store.Store_error.Corrupt _) -> ()
+      | Error _ | Ok () -> failwith "NUL basename must fail validation before IO");
+    print_endline "publication stays in opened directory; parent traversal rejected");
+  [%expect {| publication stays in opened directory; parent traversal rejected |}]
+;;

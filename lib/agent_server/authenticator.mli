@@ -9,6 +9,13 @@ module Request_identity : sig
     }
 end
 
+(** Trusted custom remote validator: return a proof bounded to THIS original
+  authentication, not a principal rematch. Never retain token bytes. *)
+type actor_validator =
+  now:(unit -> Agent_protocol.Timestamp.t)
+  -> token:string
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result
+
 type bearer_validator =
   now:Agent_protocol.Timestamp.t
   -> token:string
@@ -45,3 +52,11 @@ val authenticate_reverse_proxy
   -> scopes_header:string
   -> Request_identity.t
   -> (Agent_protocol.Principal.t option, Agent_protocol.Error.t) result
+
+(** Matches the exact original static record and retains only its expiry, never
+    the token/digest. [now] is trusted and non-yielding. *)
+val authenticate_bearer_actor
+  :  t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> token:string
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result

@@ -1,0 +1,12 @@
+(executable
+ (name lock_probe)
+ (modules lock_probe)
+ (libraries core eio eio_main ochat.private_storage)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name private_storage_test)
+ (modules private_storage_test)
+ (libraries core core_unix eio eio_main ochat.private_storage ochat.provider_secret_store)
+ (inline_tests (deps lock_probe.exe))
+ (preprocess (pps ppx_jane ppx_expect)))

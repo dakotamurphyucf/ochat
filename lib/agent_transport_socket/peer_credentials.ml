@@ -54,3 +54,8 @@ let authenticate_same_user ~scopes flow =
       ~scopes
       ~attributes:(attributes credentials))
 ;;
+
+let authenticate_same_user_actor ~scopes flow =
+  authenticate_same_user ~scopes flow
+  |> Result.map ~f:Operator_authorization.trusted_local
+;;

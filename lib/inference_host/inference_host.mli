@@ -1,10 +1,46 @@
 module Provider_profiles = Provider_profiles
+module Credential_bridge = Credential_bridge
+module Provider_configuration = Provider_configuration
 open! Core
 
 (** Explicit application composition for the initial OpenAI backend. Lower-level
     routes receive Context and Identity; they never call this module to recover
     missing configuration. No environment lookup, credential forwarding, login,
     model catalog or migration policy is supplied here. *)
+module Backend : sig
+  type t
+
+  (** Trusted composition ports, not credential authority. capture receives the
+      exact current target on recapture; it must retain that binding rather than
+      select the host default. resolve authorizes the captured target. Bounded
+      views share credentials/epochs and narrow only driver response limits. *)
+  val create
+    :  capture:
+         (current:Inference.Request.Target.t option
+          -> model:string
+          -> settings:Openai.Responses_driver.Setting.t list
+          -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+    -> resolve:Inference_runtime.resolver
+    -> with_response_limit:
+         (max_body_bytes:int -> (t, Inference_runtime.Preparation_error.t) Result.t)
+    -> t
+
+  (** Trusted composition delegation; these preserve the owned backend ports. *)
+  val capture
+    :  t
+    -> current:Inference.Request.Target.t option
+    -> model:string
+    -> settings:Openai.Responses_driver.Setting.t list
+    -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+
+  val resolve : t -> Inference_runtime.resolver
+
+  val with_response_limit
+    :  t
+    -> max_body_bytes:int
+    -> (t, Inference_runtime.Preparation_error.t) Result.t
+end
+
 type t
 
 (** Explicit host policy, default SSE. UI/CLI selection belongs to OCH-67;
@@ -18,6 +54,15 @@ val create
   -> default_model:string
   -> namespace:string
   -> limits:Inference_runtime.Limits.t
+  -> (t, Inference_runtime.Preparation_error.t) Result.t
+
+(** Explicit dynamic composition. Root model defaults and identity allocation
+    remain host-owned; Config lowering and preserving recapture are shared with
+    fixed composition. No credential lookup or ambient environment occurs here. *)
+val create_with_backend
+  :  Backend.t
+  -> default_model:string
+  -> namespace:string
   -> (t, Inference_runtime.Preparation_error.t) Result.t
 
 (** Host-owned bounded auxiliary route. Preserves profile, credential resolver,

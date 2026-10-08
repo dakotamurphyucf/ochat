@@ -88,16 +88,25 @@ let reader connection input outgoing ~max_line_length ~on_error =
   loop ()
 ;;
 
-let rec notifications connection outgoing ~on_error =
-  match Agent_client.Connection.next_notification connection with
-  | None -> ()
-  | Some envelope ->
+let rec notifications connection lease outgoing ~on_error =
+  match Agent_client.Connection.next_owned_notification lease with
+  | Error failure -> on_error failure
+  | Ok None -> ()
+  | Ok (Some envelope) ->
     if publish connection outgoing envelope
-    then notifications connection outgoing ~on_error
+    then notifications connection lease outgoing ~on_error
     else on_error (invalid "stdio gateway outgoing queue is full")
 ;;
 
-let run ~sw:_ ~connection ~input ~output ~max_line_length ~outgoing_capacity ~on_error =
+let run_owned
+      ~lease
+      ~connection
+      ~input
+      ~output
+      ~max_line_length
+      ~outgoing_capacity
+      ~on_error
+  =
   let outgoing = Agent_session.Mailbox.create ~capacity:outgoing_capacity in
   Exn.protect
     ~f:(fun () ->
@@ -108,9 +117,26 @@ let run ~sw:_ ~connection ~input ~output ~max_line_length ~outgoing_capacity ~on
              (fun () ->
                 reader connection input outgoing ~max_line_length ~on_error;
                 Agent_client.Connection.close connection)
-             (fun () -> notifications connection outgoing ~on_error);
+             (fun () -> notifications connection lease outgoing ~on_error);
            Agent_session.Mailbox.close outgoing))
     ~finally:(fun () ->
       Agent_session.Mailbox.close outgoing;
       Agent_client.Connection.close connection)
+;;
+
+let run ~sw:_ ~connection ~input ~output ~max_line_length ~outgoing_capacity ~on_error =
+  match Agent_client.Connection.claim_notifications connection with
+  | Error failure -> on_error failure
+  | Ok lease ->
+    Exn.protect
+      ~finally:(fun () -> Agent_client.Connection.release_notifications lease)
+      ~f:(fun () ->
+        run_owned
+          ~lease
+          ~connection
+          ~input
+          ~output
+          ~max_line_length
+          ~outgoing_capacity
+          ~on_error)
 ;;

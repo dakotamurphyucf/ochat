@@ -32,6 +32,7 @@ val create
        (Session_registry.entry -> (unit, Agent_protocol.Error.t) result)
   -> workspace_retained:
        (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
+  -> provider_operator:Provider_operator_port.t option
   -> prepare_administration:
        (Session_registry.entry
         -> previous:Agent_session.Session_state.t
@@ -42,6 +43,7 @@ val create
 
 val handle
   :  t
+  -> ?actor:Operator_authorization.t
   -> context:Connection_context.t
   -> inference_budget:Inference_query_budget.t
   -> Agent_protocol.Command.t

@@ -141,10 +141,15 @@ let rec run t clock registry queue resume_initial_starts =
     run t clock registry queue resume_initial_starts)
 ;;
 
-let start ~sw ~clock ~registry ~queue ~resume_initial_starts =
-  let t = { stopped = Atomic.make false } in
-  Eio.Fiber.fork ~sw (fun () -> run t clock registry queue resume_initial_starts);
+let start_controlled ~enabled ~sw ~clock ~registry ~queue ~resume_initial_starts =
+  let t = { stopped = Atomic.make (not enabled) } in
+  if enabled
+  then Eio.Fiber.fork ~sw (fun () -> run t clock registry queue resume_initial_starts);
   t
+;;
+
+let start ~sw ~clock ~registry ~queue ~resume_initial_starts =
+  start_controlled ~enabled:true ~sw ~clock ~registry ~queue ~resume_initial_starts
 ;;
 
 let close t = Atomic.set t.stopped true

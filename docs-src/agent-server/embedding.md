@@ -142,3 +142,45 @@ current agent libraries.
 For the separate installed-package and API-search workflows, see
 [the development guide](../../DEVELOPMENT.md). Those workflows have their own
 dependencies and, for semantic indexing, provider requirements.
+
+## Host ownership and operator-only opening
+
+`Embedded.open_host` owns a host independently of session creation. Its explicit
+`Daemon.Operator_only` startup mode opens the selected root and immutable catalog
+reader, while constructing stopped scheduler services and admitting no session
+creation, attachment, runtime activation or execution. Recovery-required index
+markers remain intact until an executable host completes reconciliation.
+Capabilities describe this restriction. Provider operator services can consume
+this host seam without creating a conversation; account credential-store locking
+remains separate from session-root ownership.
+
+Durable trusted-local compositions load a stable private operator identity under
+the exclusively owned root before runtime construction. The root and identity
+file must belong to the current OS user, have no group/other permissions and pass
+native descriptor validation. Identity decoding uses the validated descriptor
+and a 4096-byte limit. This is the existing compiled trusted-local scope grant,
+not a new network authentication mechanism or a configurable account grant.
+Unsupported or unrecognized existing roots are preserved and rejected.
+
+`Embedded.start` remains the convenience composition that opens an executable
+host, creates a session and attaches. Durable data does not keep process-bound
+work running after the embedding process exits. `connect_host` returns a typed
+error after host closure; the older `connect` convenience API requires an open
+host.
+
+A subscribed session handle claims the connection's exclusive notification lease
+before sending create or attach. A second subscribed handle must use another
+connection. Handles attached with `subscribe=false` may share the connection;
+they perform requests and renew their own attachment leases without consuming
+notifications or updating projections from events. Closing an unsubscribed handle
+does not release the subscribed handle's notification ownership. Switch
+release, cancellation and close release the lease; an outstanding notification
+read is cancelled and joined before replacement ownership is admitted. Notification
+ownership has a separate mutex from synchronous request serialization.
+
+The local operator record uses a validated opened host-directory capability for
+child lookup and atomic publication. Record ownership, type, permissions and
+bounded decoding use the same file descriptor. The configured root anchor and OS
+account are trusted; this policy does not promise isolation from an adversary
+already controlling the same account. The session-root ownership lock remains
+separate from any provider credential-store lock.

@@ -53,7 +53,16 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
+    [ [ "operator_authorization/" ], "../lib/operator_authorization.doc.md"
+    ; ( [ "provider_operator/"; "provider_runtime/"; "provider_runtime_host/" ]
+      , "../lib/provider_operator.doc.md" )
+    ; [ "credential_registry_model/" ], "../lib/credential_registry_model.doc.md"
+    ; [ "credential_registry/" ], "../lib/credential_registry.doc.md"
+    ; ( [ "provider_oauth/"; "provider_oauth_protocol/"; "provider_oauth_registry/" ]
+      , "../lib/provider_oauth.doc.md" )
+    ; ( [ "private_storage/"; "provider_secret_store/" ]
+      , "../lib/provider_secret_store.doc.md" )
+    ; ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
       , "../lib/inference-observations.md" )
     ; ( [ "inference_runtime/"
         ; "inference_client/"
@@ -172,6 +181,17 @@ let module_rows env root =
          ; "openai/inference_"
          ; "session_store"
          ; "source_loader"
+         ; "private_storage/"
+         ; "provider_secret_store/"
+         ; "credential_registry_model/"
+         ; "credential_registry/"
+         ; "provider_oauth/"
+         ; "provider_oauth_protocol/"
+         ; "provider_oauth_registry/"
+         ; "operator_authorization/"
+         ; "provider_operator/"
+         ; "provider_runtime/"
+         ; "provider_runtime_host/"
          ]
          ~f:(fun substring -> String.is_substring file ~substring))
   |> List.map ~f:(fun file ->
@@ -273,7 +293,11 @@ let cli_flags source =
 ;;
 
 let cli_inventory env root =
-  [ "bin/chat_tui.ml"; "bin/ochat_agent_server.ml"; "bin/ochat_agent_stdio.ml" ]
+  [ "bin/chat_tui.ml"
+  ; "bin/ochat_agent_server.ml"
+  ; "bin/ochat_agent_stdio.ml"
+  ; "bin/provider_commands.ml"
+  ]
   |> List.map ~f:(fun file ->
     let flags = cli_flags (load env root file) in
     sprintf

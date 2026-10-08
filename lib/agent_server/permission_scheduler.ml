@@ -22,11 +22,12 @@ let rec run t clock registry =
     run t clock registry)
 ;;
 
-let start ~sw ~clock ~registry =
-  let t = { closed = Atomic.make false } in
-  Eio.Fiber.fork ~sw (fun () -> run t clock registry);
+let start_controlled ~enabled ~sw ~clock ~registry =
+  let t = { closed = Atomic.make (not enabled) } in
+  if enabled then Eio.Fiber.fork ~sw (fun () -> run t clock registry);
   t
 ;;
 
+let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry
 let close t = Atomic.set t.closed true
 let is_running t = not (Atomic.get t.closed)

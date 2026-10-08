@@ -24,3 +24,9 @@ val authenticate_same_user
 
 (** [effective_uid ()] returns the daemon process effective UID. *)
 val effective_uid : unit -> int
+
+(** Same trusted local peer authentication, retaining explicit operator proof. *)
+val authenticate_same_user_actor
+  :  scopes:Agent_protocol.Scope.Set.t
+  -> _ Eio.Resource.t
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result

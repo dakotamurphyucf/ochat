@@ -68,6 +68,8 @@ let child_environment fixture cwd environment_overrides =
 ;;
 
 let spawn ~sw ~env ~fixture ?cwd ?(environment_overrides = []) arguments =
+  let key = List.Assoc.find environment_overrides "OPENAI_API_KEY" ~equal:String.equal in
+  Provider_fixture.provision ~env ?key fixture;
   Process_manager.spawn
     ~sw
     ~env

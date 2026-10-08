@@ -8,7 +8,7 @@ targets described in each reference.
 | Command | Purpose | Reference |
 |---|---|---|
 | `chat-tui` | Native local, daemon-connected, or legacy file-backed terminal UI | [CLI](chat_tui.doc.md), [controls](../guide/chat_tui.md) |
-| `ochat` | File-backed completion, shell management, indexing, and other workflows | [Command overview](main.doc.md), [completion](../cli/chat-completion.md), [shell management](../cli/shell-runtime-management.md) |
+| `ochat` | Provider administration, file-backed completion, shell management and indexing | [Command overview](main.doc.md), [providers](../lib/provider_operator.doc.md), [completion](../cli/chat-completion.md), [shell management](../cli/shell-runtime-management.md) |
 | `ochat-agent-server` | Durable daemon over private Unix sockets and optional HTTP | [Server CLI](ochat_agent_server.doc.md) |
 | `ochat-agent-stdio` | Local subprocess agent host or daemon gateway | [Stdio CLI](ochat_agent_stdio.doc.md) |
 | `md-index` / `md-search` | Build and query Markdown documentation indexes | [Indexer](md_index.doc.md), [search](md_search.doc.md) |

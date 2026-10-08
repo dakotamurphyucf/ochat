@@ -1,5 +1,5 @@
 (library
  (name inference_composition_tests)
- (libraries core inference_composition)
+ (libraries core eio eio_main mirage-crypto-rng.unix inference_composition ochat.agent_protocol ochat.private_storage ochat.provider_secret_store ochat.credential_registry_model ochat.inference_host)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

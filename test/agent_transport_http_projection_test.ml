@@ -21,7 +21,7 @@ let attachments actor =
   |> List.sort ~compare:P.Id.Attachment.compare
 ;;
 
-let start_http ~sw ~env ~daemon ~principal =
+let start_http ?authenticate ~sw ~env ~daemon ~principal () =
   let address =
     Eio.Switch.run (fun reserve_sw ->
       Eio.Net.listen
@@ -42,7 +42,9 @@ let start_http ~sw ~env ~daemon ~principal =
         ~blob_store:(Agent_server.Daemon.blob_store daemon)
         ~health:(Agent_server.Daemon.health daemon)
         ~close_connection:(Agent_server.Daemon.close_connection daemon)
-        ~authenticate:(fun _ _ -> Ok principal)
+        ~authenticate:
+          (Option.value authenticate ~default:(fun _ _ ->
+             Ok (Operator_authorization.trusted_local principal)))
         ~max_body_bytes:1048576
         ~max_batch_size:16
         ~batch_concurrency:8
@@ -161,7 +163,7 @@ let%expect_test "HTTP session projection rejection closes queued replay and atta
                   R.add registry ~session_id:session.id { entry with durable_events }
                   |> protocol_ok;
                   let before = attachments entry.actor in
-                  let port = start_http ~sw ~env ~daemon ~principal in
+                  let port = start_http ~sw ~env ~daemon ~principal () in
                   let uri =
                     Uri.of_string
                       (sprintf
@@ -209,4 +211,200 @@ let%expect_test "HTTP session projection rejection closes queued replay and atta
     "connected; sanitized snapshot.required; EOF before queued replay; attachment closed";
   [%expect
     {| connected; sanitized snapshot.required; EOF before queued replay; attachment closed |}]
+;;
+
+let%expect_test "HTTP reused logical connection retains each original bearer expiry" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () -> Eio.Path.rmtree Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let now = ref (P.Timestamp.of_string "2026-10-08T00:00:00Z" |> protocol_ok) in
+        let token_file = Filename.concat root "synthetic-tokens.sexp" in
+        let record token expires =
+          sprintf
+            "((token_sha256 %s) (principal_id pri_http_owner) (scopes (provider.manage \
+             provider.view)) (attributes ()) (expires_at %s))"
+            (Digestif.SHA256.digest_string token |> Digestif.SHA256.to_hex)
+            expires
+        in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / token_file)
+          ("("
+           ^ record "synthetic-A" "2026-10-08T00:00:01Z"
+           ^ " "
+           ^ record "synthetic-B" "2026-10-08T00:01:00Z"
+           ^ ")");
+        let auth =
+          Agent_server.Authenticator.load_static_file ~env ~path:token_file |> protocol_ok
+        in
+        let authenticate _ token =
+          Agent_server.Authenticator.authenticate_bearer_actor
+            auth
+            ~now:(fun () -> !now)
+            ~token:(Option.value token ~default:"")
+        in
+        let original = authenticate () (Some "synthetic-A") |> protocol_ok in
+        let principal = Operator_authorization.principal original in
+        let prompt_file = Filename.concat root "prompt.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          "<developer>HTTP actor regression.</developer>";
+        Eio.Switch.run (fun sw ->
+          let captured = ref None in
+          let probes = ref 0 in
+          let released, release = Eio.Promise.create () in
+          let finished, finish = Eio.Promise.create () in
+          let options =
+            { (inference_options ()) with
+              provider_operator_factory =
+                Some
+                  (fun ~sw ~server_id:_ ->
+                    Ok
+                      (Agent_server.Provider_operator_port.create
+                         ~dispatch:(fun ~actor command ->
+                           incr probes;
+                           (match command with
+                            | Provider_login_begin _ ->
+                              captured := Some actor;
+                              Eio.Fiber.fork ~sw (fun () ->
+                                Eio.Promise.await released;
+                                Eio.Promise.resolve
+                                  finish
+                                  (Operator_authorization.is_current actor))
+                            | _ -> ());
+                           Error P.Provider_operator.Error.Unsupported)
+                         ~receipt:(fun ~actor:_ _ ->
+                           Error P.Provider_operator.Error.Unsupported)
+                         ~close:(fun () -> ())))
+            }
+          in
+          let daemon =
+            Agent_server.Daemon.start
+              ~options
+              ~sw
+              ~env
+              ~config:(config root root prompt_file)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let port = start_http ~authenticate ~sw ~env ~daemon ~principal () in
+              let rpc ?connection_id token command =
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                  Eio.Switch.run (fun client_sw ->
+                    let flow =
+                      Eio.Net.connect
+                        ~sw:client_sw
+                        (Eio.Stdenv.net env)
+                        (`Tcp (Eio.Net.Ipaddr.V4.loopback, port))
+                    in
+                    let body =
+                      Jsonaf.to_string
+                        (`Object
+                            [ "jsonrpc", `String "2.0"
+                            ; "id", `Number "1"
+                            ; "method", `String (P.Command.method_name command)
+                            ; "params", P.Command.params command
+                            ])
+                    in
+                    let extra =
+                      Option.value_map connection_id ~default:"" ~f:(fun id ->
+                        "ochat-connection-id: " ^ id ^ "\r\n")
+                    in
+                    Eio.Flow.copy_string
+                      (sprintf
+                         "POST /v1/rpc HTTP/1.1\r\n\
+                          Host: localhost\r\n\
+                          Authorization: Bearer %s\r\n\
+                          Content-Type: application/json\r\n\
+                          Ochat-Protocol-Version: 2\r\n\
+                          Connection: close\r\n\
+                          %sContent-Length: %d\r\n\
+                          \r\n\
+                          %s"
+                         token
+                         extra
+                         (String.length body)
+                         body)
+                      flow;
+                    let reader = Eio.Buf_read.of_flow flow ~max_size:65536 in
+                    let status = Eio.Buf_read.line reader in
+                    let rec headers length id =
+                      match Eio.Buf_read.line reader |> String.strip with
+                      | "" -> length, id
+                      | line ->
+                        (match String.lsplit2 line ~on:':' with
+                         | Some (name, value)
+                           when String.Caseless.equal name "content-length" ->
+                           headers (Int.of_string (String.strip value)) id
+                         | Some (name, value)
+                           when String.Caseless.equal name "ochat-connection-id" ->
+                           headers length (Some (String.strip value))
+                         | _ -> headers length id)
+                    in
+                    let length, id = headers 0 None in
+                    ignore (Eio.Buf_read.take length reader : string);
+                    status, id))
+              in
+              let implementation =
+                P.Initialize.Implementation.create ~name:"actor-regression" ~version:"1"
+                |> protocol_ok
+              in
+              let init =
+                P.Initialize.Request.create
+                  ~implementation
+                  ~protocol_min:P.Version.current
+                  ~protocol_max:P.Version.current
+                  ~features:[]
+                  ~event_encodings:[ Json ]
+                  ~max_inbound_event_bytes:1048576
+                  ()
+                |> protocol_ok
+              in
+              let status, connection_id = rpc "synthetic-A" (Protocol_initialize init) in
+              assert (String.is_substring status ~substring:"200");
+              let connection_id = Option.value_exn connection_id in
+              let login =
+                P.Command.Provider_login_begin
+                  { profile =
+                      P.Provider_operator.Profile_id.of_string "fixture" |> protocol_ok
+                  ; mode = Device
+                  ; idempotency_key =
+                      P.Idempotency_key.of_string "actor-flow" |> protocol_ok
+                  }
+              in
+              ignore (rpc ~connection_id "synthetic-A" login);
+              assert (Option.is_some !captured);
+              now := P.Timestamp.of_string "2026-10-08T00:00:02Z" |> protocol_ok;
+              ignore
+                (rpc ~connection_id "synthetic-B" (Provider_status { profile = None }));
+              assert (!probes = 2);
+              assert (not (Operator_authorization.is_current (Option.value_exn !captured)));
+              assert (
+                Operator_authorization.is_current
+                  (authenticate () (Some "synthetic-B") |> protocol_ok));
+              let status, _ =
+                rpc ~connection_id "synthetic-A" (Provider_status { profile = None })
+              in
+              assert (String.is_substring status ~substring:"401");
+              assert (!probes = 2);
+              Eio.Promise.resolve release ();
+              assert (
+                not
+                  (Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                     Eio.Promise.await finished)));
+              print_endline
+                "same connection: B admitted; original A expired; no expired probe or \
+                 autonomous commit"))));
+  [%expect
+    {| same connection: B admitted; original A expired; no expired probe or autonomous commit |}]
 ;;

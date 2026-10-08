@@ -20,7 +20,7 @@ type t =
   ; authenticate :
       Agent_server.Authenticator.Request_identity.t
       -> string option
-      -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result
+      -> (Operator_authorization.t, Agent_protocol.Error.t) result
   ; max_body_bytes : int
   ; max_batch_size : int
   ; batch_concurrency : int
@@ -131,7 +131,8 @@ let find_connection t request principal =
         Error (protocol_error Permission_denied "HTTP connection authority differs"))
 ;;
 
-let create_connection t principal =
+let create_connection t actor =
+  let principal = Operator_authorization.principal actor in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Map.length t.connections >= t.max_connections
     then Error (protocol_error Resource_limit "HTTP connection limit reached")
@@ -145,9 +146,9 @@ let create_connection t principal =
         then Eio.Fiber.fork ~sw:t.sw (fun () -> close_connection_id t id)
       in
       let context =
-        Agent_server.Connection_context.create
+        Agent_server.Connection_context.create_authenticated
           ~connection_id:id
-          ~principal
+          ~actor
           ~transport:Http
           ~publish_notification
           ~max_attachments:t.max_attachments
@@ -175,14 +176,15 @@ let first_envelope = function
   | Batch [] -> assert false
 ;;
 
-let resolve_rpc_connection t request principal body =
+let resolve_rpc_connection t request actor body =
+  let principal = Operator_authorization.principal actor in
   match P.Headers.get (P.Request.headers request) connection_header with
   | Some _ ->
     Result.map (find_connection t request principal) ~f:(fun value -> value, false)
   | None ->
     (match first_envelope body with
      | envelope when initializes envelope ->
-       Result.map (create_connection t principal) ~f:(fun connection -> connection, true)
+       Result.map (create_connection t actor) ~f:(fun connection -> connection, true)
      | _ ->
        Error (protocol_error Incompatible_protocol "initialize a HTTP connection first"))
 ;;
@@ -191,31 +193,34 @@ let request_body t request =
   Request_contract.request_body ~max_body_bytes:t.max_body_bytes request
 ;;
 
-let dispatch t connection envelope =
+let dispatch t ~actor connection envelope =
   Agent_server.Dispatcher.dispatch_envelope
     t.dispatcher
     ~context:connection.context
+    ~actor
     envelope
 ;;
 
-let dispatch_batch t connection envelopes =
+let dispatch_batch t ~actor connection envelopes =
   Eio.Fiber.List.map
     ~max_fibers:t.batch_concurrency
-    (fun envelope -> dispatch t connection envelope)
+    (fun envelope -> dispatch t ~actor connection envelope)
     envelopes
 ;;
 
-let dispatch_rpc t connection ~created = function
+let dispatch_rpc t ~actor connection ~created = function
   | Rpc_body.Single envelope ->
-    Result.map (dispatch t connection envelope) ~f:Option.to_list
+    Result.map (dispatch t ~actor connection envelope) ~f:Option.to_list
   | Batch (first :: rest) when created ->
     let open Result.Let_syntax in
-    let%bind first_response = dispatch t connection first in
-    let results = dispatch_batch t connection rest in
+    let%bind first_response = dispatch t ~actor connection first in
+    let results = dispatch_batch t ~actor connection rest in
     let%map responses = Result.all results in
     Option.to_list first_response @ List.filter_opt responses
   | Batch envelopes ->
-    Result.map (Result.all (dispatch_batch t connection envelopes)) ~f:List.filter_opt
+    Result.map
+      (Result.all (dispatch_batch t ~actor connection envelopes))
+      ~f:List.filter_opt
 ;;
 
 let rpc_response ~connection_id responses =
@@ -231,7 +236,7 @@ let rpc_response ~connection_id responses =
     |> fun values -> json_response ~connection_id (`Array values)
 ;;
 
-let handle_rpc t request principal =
+let handle_rpc t request actor =
   let open Result.Let_syntax in
   match
     let%bind () = require_json_content_type request in
@@ -239,9 +244,9 @@ let handle_rpc t request principal =
     let%bind body = request_body t request in
     let%bind body = Rpc_body.parse ~max_batch_size:t.max_batch_size body in
     let%bind (connection_id, connection), created =
-      resolve_rpc_connection t request principal body
+      resolve_rpc_connection t request actor body
     in
-    let%map responses = dispatch_rpc t connection ~created body in
+    let%map responses = dispatch_rpc t ~actor connection ~created body in
     connection_id, responses
   with
   | Error failure -> error_response failure
@@ -744,9 +749,10 @@ let path_segments request =
   |> List.filter ~f:(Fn.non String.is_empty)
 ;;
 
-let handle_authenticated t ~request_sw request principal =
+let handle_authenticated t ~request_sw request actor =
+  let principal = Operator_authorization.principal actor in
   match P.Request.meth request, path_segments request with
-  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request principal
+  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request actor
   | _, [ "v1"; "rpc" ] -> method_not_allowed [ "POST" ]
   | `POST, [ "v1"; "blobs" ] -> handle_blob_upload t request principal
   | _, [ "v1"; "blobs" ] -> method_not_allowed [ "POST" ]

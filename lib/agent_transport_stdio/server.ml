@@ -70,11 +70,11 @@ let reader ~dispatcher ~context ~input ~max_line_length ~outgoing ~on_error =
   loop ()
 ;;
 
-let run
+let run_authenticated
       ~sw
       ~dispatcher
       ~close_connection
-      ~principal
+      ~actor
       ~connection_id
       ~input
       ~output
@@ -89,9 +89,9 @@ let run
     then Eio.Switch.fail sw (Failure "stdio outgoing queue overflow")
   in
   let context =
-    Agent_server.Connection_context.create
+    Agent_server.Connection_context.create_authenticated
       ~connection_id
-      ~principal
+      ~actor
       ~transport:Stdio
       ~publish_notification
       ~max_attachments
@@ -106,4 +106,31 @@ let run
     ~finally:(fun () ->
       Agent_session.Mailbox.close outgoing;
       close_connection context)
+;;
+
+let run
+      ~sw
+      ~dispatcher
+      ~close_connection
+      ~principal
+      ~connection_id
+      ~input
+      ~output
+      ~max_line_length
+      ~outgoing_capacity
+      ~max_attachments
+      ~on_error
+  =
+  run_authenticated
+    ~sw
+    ~dispatcher
+    ~close_connection
+    ~actor:(Operator_authorization.trusted_local principal)
+    ~connection_id
+    ~input
+    ~output
+    ~max_line_length
+    ~outgoing_capacity
+    ~max_attachments
+    ~on_error
 ;;

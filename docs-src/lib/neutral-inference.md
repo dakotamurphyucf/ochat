@@ -497,3 +497,34 @@ and restricted session operations. These fixture settings do not relax the watch
 or script deadlines. Provider responses are synthetic; native tool operations,
 helper process confinement, persistence and restart are real. This single workload
 qualifies those deadlines on the measured host, not every workload or platform.
+
+## Runtime-host credential composition
+
+`Inference_host.Credential_bridge` binds approved profiles to the shared
+`Credential_registry` authority. Each mapping identifies an exact provider,
+billing mode, runtime host, account and credential binding. Its profile projection
+contains no secret material. Metadata synchronization does not probe secret files
+or environment variables; authorized operator status may inspect only the selected
+binding. Capture, preparation and dispatch retain independent authorization checks.
+
+Dispatch admits the exact mapped identity before borrowing access material and
+preserves the registry owner, authorization epoch and credential revision guards.
+An expired OAuth grant remains dispatchable only when a qualified renewal port
+exists for that exact identity. The registry then performs demand-based refresh;
+status still reports renewal required until it succeeds. Uncertain refresh never
+falls back to an old token or starts interactive login. Environment sources are
+explicit host capabilities with per-lookup currentness guards. Disabling their
+binding prevents admission without claiming to erase the external variable.
+
+`Provider_configuration` opens the private-file backend and registry under the
+host switch, outside session storage roots. `Existing` refuses missing or invalid
+authority. `Initialize` is explicit create-only provisioning; it does not enroll
+credentials. Applications report setup required when ordinary startup cannot open
+that authority. Operator setup, protected key enrollment and OAuth login are
+separate explicit operations. MCP defers provider-host acquisition until a model
+operation needs it, so non-model tools do not require provider setup.
+
+The CLI, TUI, daemon, stdio service, refinement commands and model-using MCP tools
+compose this shared host. Legacy network entry points in `Openai.Responses` are
+removed; that module retains wire types/codecs. Embeddings use the common inference
+runtime and driver instead of acquiring ambient keys through codec functions.

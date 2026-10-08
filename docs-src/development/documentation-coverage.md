@@ -152,6 +152,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/authoring_reference.mli` | [contract](../../lib/agent_protocol/authoring_reference.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/blob.mli` | [contract](../../lib/agent_protocol/blob.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/command.mli` | [contract](../../lib/agent_protocol/command.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/command_receipt.mli` | [contract](../../lib/agent_protocol/command_receipt.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/completion.mli` | [contract](../../lib/agent_protocol/completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/completion_contract.mli` | [contract](../../lib/agent_protocol/completion_contract.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_protocol/completion_projection.mli` | [contract](../../lib/agent_protocol/completion_projection.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
@@ -186,6 +187,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/projection_codec.mli` | [contract](../../lib/agent_protocol/projection_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/prompt.mli` | [contract](../../lib/agent_protocol/prompt.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/protocol_error.mli` | [contract](../../lib/agent_protocol/protocol_error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/provider_operator.mli` | [contract](../../lib/agent_protocol/provider_operator.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/public.mli` | [contract](../../lib/agent_protocol/public.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/public_durable_event.mli` | [contract](../../lib/agent_protocol/public_durable_event.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/public_history.mli` | [contract](../../lib/agent_protocol/public_history.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -194,6 +196,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/schedule.mli` | [contract](../../lib/agent_protocol/schedule.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/scope.mli` | [contract](../../lib/agent_protocol/scope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session.mli` | [contract](../../lib/agent_protocol/session.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/session_ref.mli` | [contract](../../lib/agent_protocol/session_ref.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/snapshot.mli` | [contract](../../lib/agent_protocol/snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/stored_completion.mli` | [contract](../../lib/agent_protocol/stored_completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/stream_error.mli` | [contract](../../lib/agent_protocol/stream_error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -233,6 +236,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_server/permission_review_service.mli` | [contract](../../lib/agent_server/permission_review_service.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/permission_scheduler.mli` | [contract](../../lib/agent_server/permission_scheduler.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_server/principal_projection.mli` | [contract](../../lib/agent_server/principal_projection.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/agent_server/provider_operator_port.mli` | [contract](../../lib/agent_server/provider_operator_port.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/result_retention.mli` | [contract](../../lib/agent_server/result_retention.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_server/runtime_owner.mli` | [contract](../../lib/agent_server/runtime_owner.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/agent_server/schedule_scheduler.mli` | [contract](../../lib/agent_server/schedule_scheduler.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -374,6 +378,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/job_result_store.mli` | [contract](../../lib/agent_store/job_result_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/journal.mli` | [contract](../../lib/agent_store/journal.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/journal_segment.mli` | [contract](../../lib/agent_store/journal_segment.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/local_operator.mli` | [contract](../../lib/agent_store/local_operator.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/lock.mli` | [contract](../../lib/agent_store/lock.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/migration.mli` | [contract](../../lib/agent_store/migration.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_artifact_store.mli` | [contract](../../lib/agent_store/prompt_artifact_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
@@ -384,6 +389,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/snapshot.mli` | [contract](../../lib/agent_store/snapshot.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/store_error.mli` | [contract](../../lib/agent_store/store_error.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/transaction.mli` | [contract](../../lib/agent_store/transaction.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_transport_client/connection_profile.mli` | [contract](../../lib/agent_transport_client/connection_profile.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_transport_client/endpoint.mli` | [contract](../../lib/agent_transport_client/endpoint.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_transport_http/client.mli` | [contract](../../lib/agent_transport_http/client.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_transport_http/client_lifetime.mli` | [contract](../../lib/agent_transport_http/client_lifetime.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -586,6 +592,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatml/chatml_runtime.mli` | [contract](../../lib/chatml/chatml_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_surface_inventory.mli` | [contract](../../lib/chatml/chatml_surface_inventory.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_value_codec.mli` | [contract](../../lib/chatml/chatml_value_codec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/credential_registry/credential_registry.mli` | [contract](../../lib/credential_registry/credential_registry.mli) | [integration](../lib/credential_registry.doc.md) | Public interface + current host guide. |
+| `lib/credential_registry_model/credential_registry_model.mli` | [contract](../../lib/credential_registry_model/credential_registry_model.mli) | [integration](../lib/credential_registry_model.doc.md) | Public interface + current host guide. |
 | `lib/history_chatmd/history_chatmd.mli` | [contract](../../lib/history_chatmd/history_chatmd.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/inference/event.mli` | [contract](../../lib/inference/event.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
@@ -594,8 +602,10 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/inference/request.mli` | [contract](../../lib/inference/request.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference_client/inference_client.mli` | [contract](../../lib/inference_client/inference_client.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/credential_bridge.mli` | [contract](../../lib/inference_host/credential_bridge.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/inference_host.mli` | [contract](../../lib/inference_host/inference_host.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
-| `lib/inference_host/provider_profiles.mli` | [contract](../../lib/inference_host/provider_profiles.mli) | [integration](../lib/neutral-inference.md#host-provider-profiles-and-captured-intent) | Host profile registry, credential identity and authorization lifecycle. |
+| `lib/inference_host/provider_configuration.mli` | [contract](../../lib/inference_host/provider_configuration.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/provider_profiles.mli` | [contract](../../lib/inference_host/provider_profiles.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_runtime/inference_runtime.mli` | [contract](../../lib/inference_runtime/inference_runtime.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_runtime/session.mli` | [contract](../../lib/inference_runtime/session.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/inference_adapter.mli` | [contract](../../lib/openai/inference_adapter.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
@@ -611,6 +621,20 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/openai/responses_sse.mli` | [contract](../../lib/openai/responses_sse.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_websocket.mli` | [contract](../../lib/openai/responses_websocket.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/responses_wire.mli` | [contract](../../lib/openai/responses_wire.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/operator_authorization/operator_authorization.mli` | [contract](../../lib/operator_authorization/operator_authorization.mli) | [integration](../lib/operator_authorization.doc.md) | Public interface + current host guide. |
+| `lib/private_storage/private_storage.mli` | [contract](../../lib/private_storage/private_storage.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/oauth_identity.mli` | [contract](../../lib/provider_oauth/oauth_identity.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/oauth_transport.mli` | [contract](../../lib/provider_oauth/oauth_transport.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/provider_oauth.mli` | [contract](../../lib/provider_oauth/provider_oauth.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth_protocol/provider_oauth_protocol.mli` | [contract](../../lib/provider_oauth_protocol/provider_oauth_protocol.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth_registry/provider_oauth_registry.mli` | [contract](../../lib/provider_oauth_registry/provider_oauth_registry.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_operator/command_intents.mli` | [contract](../../lib/provider_operator/command_intents.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_operator/owner_records.mli` | [contract](../../lib/provider_operator/owner_records.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_operator/profile_admin.mli` | [contract](../../lib/provider_operator/profile_admin.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_operator/provider_operator.mli` | [contract](../../lib/provider_operator/provider_operator.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_runtime/provider_runtime.mli` | [contract](../../lib/provider_runtime/provider_runtime.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_runtime_host/provider_runtime_host.mli` | [contract](../../lib/provider_runtime_host/provider_runtime_host.mli) | [integration](../lib/provider_operator.doc.md) | Public interface + current host guide. |
+| `lib/provider_secret_store/provider_secret_store.mli` | [contract](../../lib/provider_secret_store/provider_secret_store.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/shell_access/process_spawn.mli` | [contract](../../lib/shell_access/process_spawn.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/request_channel.mli` | [contract](../../lib/shell_access/request_channel.mli) | [integration](../bin/ochat_agent_helper.doc.md) | Public interface + current host guide. |
@@ -916,6 +940,8 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/chatml/chatml_typechecker.doc.md) | `docs-src/lib/chatml/chatml_typechecker.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chatml/frame_env.doc.md) | `docs-src/lib/chatml/frame_env.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/context_compaction/summarizer.doc.md) | `docs-src/lib/context_compaction/summarizer.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/credential_registry.doc.md) | `docs-src/lib/credential_registry.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/credential_registry_model.doc.md) | `docs-src/lib/credential_registry_model.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/definitions.doc.md) | `docs-src/lib/definitions.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/dune_describe.doc.md) | `docs-src/lib/dune_describe.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/embed_service.doc.md) | `docs-src/lib/embed_service.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -983,9 +1009,13 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/openai/responses.doc.md) | `docs-src/lib/openai/responses.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/openai-responses-codecs.md) | `docs-src/lib/openai-responses-codecs.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/openai-responses-driver.md) | `docs-src/lib/openai-responses-driver.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/operator_authorization.doc.md) | `docs-src/lib/operator_authorization.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/package_index.doc.md) | `docs-src/lib/package_index.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/parallel_tool_calls.doc.md) | `docs-src/lib/parallel_tool_calls.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/prompt_session.doc.md) | `docs-src/lib/prompt_session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/provider_oauth.doc.md) | `docs-src/lib/provider_oauth.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/provider_operator.doc.md) | `docs-src/lib/provider_operator.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/provider_secret_store.doc.md) | `docs-src/lib/provider_secret_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session.doc.md) | `docs-src/lib/session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session_store.doc.md) | `docs-src/lib/session_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/shell_access/architecture.doc.md) | `docs-src/lib/shell_access/architecture.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

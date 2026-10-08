@@ -1,0 +1,5 @@
+(library
+ (name operator_authorization)
+ (public_name ochat.operator_authorization)
+ (libraries core ochat.agent_protocol)
+ (preprocess (pps ppx_jane)))

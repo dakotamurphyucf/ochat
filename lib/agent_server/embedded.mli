@@ -48,11 +48,42 @@ val start
   -> options
   -> (t, Agent_protocol.Error.t) result
 
+(** A host owner independent of session creation. Operator_only starts no
+    recovered runtime/scheduler and rejects activating session operations.
+    Durable local operator identity requires private OS-owned root permissions. *)
+type host
+
+val open_host
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> ?daemon_options:Daemon.options
+  -> startup_mode:Daemon.startup_mode
+  -> config:Config.t
+  -> tool_dir:string
+  -> home:string
+  -> event_capacity:int
+  -> unit
+  -> (host, Agent_protocol.Error.t) result
+
+val host_connection : host -> Agent_client.Connection.t
+
+(** Trusted local composition currently grants the same compiled local scopes
+    as [start]; it is not a configurable network-principal mapping. Operator-only
+    dispatch further restricts executable methods. Provider scopes belong to the
+    separate operator service contract. *)
+val host_principal : host -> Agent_protocol.Principal.t
+
+val host_dispatcher : host -> Dispatcher.t
+val connect_host : host -> (Agent_client.Connection.t, Agent_protocol.Error.t) result
+val close_host : host -> unit
 val connection : t -> Agent_client.Connection.t
 val session_id : t -> Agent_protocol.Id.Session.t
 val attachment : t -> Agent_protocol.Session.Attachment.t
 val dispatcher : t -> Dispatcher.t
 val principal : t -> Agent_protocol.Principal.t
+
+(** Compatibility API: caller must retain an open host; closed hosts raise. *)
 val connect : t -> Agent_client.Connection.t
+
 val close_connection : t -> Connection_context.t -> unit
 val close : t -> unit

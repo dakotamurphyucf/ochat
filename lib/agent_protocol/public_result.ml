@@ -8,9 +8,20 @@ module Non_history = struct
 
   let of_internal value =
     match value with
-    | Method_result.Session_get _ | Session_create _ | Session_attach _ ->
+    | Method_result.Provider_login_challenge _
+    | Session_get _
+    | Session_create _
+    | Session_attach _ ->
       Error
-        (Protocol_error.invalid_request "response contains inline history or snapshot")
+        (Protocol_error.invalid_request
+           "response requires an explicit history or private projection")
+    | Method_result.Provider_setup _
+    | Provider_status _
+    | Provider_login_begin _
+    | Provider_login_cancel _
+    | Provider_logout _
+    | Provider_select _
+    | Provider_configure_environment _
     | Method_result.Protocol_initialize _
     | Protocol_ping _
     | Server_info _
@@ -48,6 +59,7 @@ module Non_history = struct
     | Schedule_get _
     | Schedule_create _
     | Schedule_cancel _
+    | Command_receipt _
     | Ingress_submit _ -> Ok value
   ;;
 
@@ -183,6 +195,7 @@ module Create = struct
 end
 
 type t =
+  | Private_provider_challenge of Provider_operator.Private_challenge.t
   | Session_get of Public_snapshot.t
   | Session_attach of Attach.t
   | Session_create of Create.t
@@ -190,6 +203,7 @@ type t =
 [@@deriving sexp_of]
 
 let method_name = function
+  | Private_provider_challenge _ -> "provider.login.challenge"
   | Session_get _ -> "session.get"
   | Session_attach _ -> "session.attach"
   | Session_create _ -> "session.create"
@@ -197,6 +211,8 @@ let method_name = function
 ;;
 
 let to_json = function
+  | Private_provider_challenge value ->
+    Provider_operator.Private_challenge.Authorized_transport.to_json value
   | Session_get snapshot -> Public_snapshot.to_json snapshot
   | Session_attach attached -> Attach.to_json attached
   | Session_create created -> Create.to_json created
@@ -207,6 +223,10 @@ let of_json ~method_ json =
   let open Result.Let_syntax in
   let%bind () = Projection_codec.validate json in
   match method_ with
+  | "provider.login.challenge" ->
+    Result.map
+      (Provider_operator.Private_challenge.Authorized_transport.of_json json)
+      ~f:(fun value -> Private_provider_challenge value)
   | "session.get" ->
     Result.map (Public_snapshot.of_json json) ~f:(fun value -> Session_get value)
   | "session.attach" ->

@@ -23,17 +23,13 @@ let report_protocol_error env error =
 
 let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-let load_bearer_token env = function
-  | None -> Ok None
-  | Some path ->
-    Agent_transport_client.Endpoint.load_bearer_token ~env ~path
-    |> Result.map ~f:Option.some
-;;
-
-let endpoint env ~uri ~bearer_token_file =
-  let open Result.Let_syntax in
-  let%bind bearer_token = load_bearer_token env bearer_token_file in
-  Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token uri
+let endpoint _env ~uri ~bearer_token_file =
+  Agent_transport_client.Connection_profile.create
+    ~home:(Sys.getenv "HOME")
+    ~name:"stdio-daemon"
+    ~endpoint:uri
+    ~expected_server:None
+    ~daemon_credential_file:bearer_token_file
 ;;
 
 let run_gateway env ~uri ~bearer_token_file =
@@ -43,7 +39,7 @@ let run_gateway env ~uri ~bearer_token_file =
       endpoint env ~uri ~bearer_token_file |> Result.map_error ~f:protocol_error
     in
     let%map connection =
-      Agent_transport_client.Endpoint.connect
+      Agent_transport_client.Connection_profile.connect
         endpoint
         ~sw
         ~env
@@ -86,8 +82,10 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~author
     let%map embedded =
       Agent_server.Embedded.start
         ~daemon_options:
-          (Inference_composition.daemon_options
-             (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
+          (Inference_composition.daemon_options_default
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview")
         ~sw
         ~env
         ~authoring_package_files

@@ -33,6 +33,21 @@ val run_once
   -> now:Agent_protocol.Timestamp.t
   -> (stats, Agent_store.Store_error.t) Result.t
 
+(** Internal composition: false constructs a stopped service and starts no fiber. *)
+val start_controlled
+  :  enabled:bool
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> clock:_ Eio.Time.clock
+  -> every:float
+  -> idempotency_store:Agent_store.Idempotency_store.t
+  -> blob_store:Agent_store.Blob_store.t
+  -> response_retention:Time_ns.Span.t
+  -> registry:Session_registry.t
+  -> session_store:Agent_store.Session_store.t
+  -> on_error:(Agent_store.Store_error.t -> unit)
+  -> t
+
 val start
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base

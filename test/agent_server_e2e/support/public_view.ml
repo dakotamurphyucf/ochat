@@ -14,7 +14,7 @@ let snapshot_to_json fields =
 let non_history = function
   | Agent_protocol.Public.Result.Non_history value ->
     Agent_protocol.Public.Result.Non_history.value value
-  | Session_get _ | Session_attach _ | Session_create _ ->
+  | Session_get _ | Session_attach _ | Session_create _ | Private_provider_challenge _ ->
     failwith "expected a response without inline history"
 ;;
 

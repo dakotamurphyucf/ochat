@@ -1,8 +1,10 @@
 open! Core
 
 (** A synchronized attached-session client used by terminal and automation
-    front-ends. One handle owns notification reduction and owner renewal for
-    its connection. *)
+    front-ends. At most one subscribed handle owns notification reduction per
+    connection. Unsubscribed handles may coexist, including with that reader;
+    they do not consume events or update their projection from notifications.
+    Each handle owns renewal of its own attachment lease. *)
 
 type t
 
@@ -33,6 +35,7 @@ val create
   -> connection:Connection.t
   -> spec:Agent_protocol.Session.Spec.t
   -> mode:Agent_protocol.Session.attachment_mode
+  -> ?subscribe:bool
   -> ?on_update:(Projection.t -> unit)
   -> ?on_error:(Agent_protocol.Error.t -> unit)
   -> unit
