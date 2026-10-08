@@ -112,6 +112,7 @@
  (name agent_server_e2e)
  (modules :standard)
  (libraries ochat.operator_authorization
+  ochat.provider_runtime
   agent_server_test_support
   inference_composition
   base64

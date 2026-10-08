@@ -70,6 +70,7 @@ let with_registry ?wall_clock ?(prepare_clock = fun _ -> ()) f =
           in
           let current =
             C.initialize_new
+              ~metadata_admission:C.Metadata_admission.nonblocking
               ~sw
               ~wall_clock
               ~new_operation
@@ -177,6 +178,7 @@ let%expect_test
        C.close current;
        let restarted =
          C.open_existing
+           ~metadata_admission:C.Metadata_admission.nonblocking
            ~sw
            ~wall_clock
            ~new_operation

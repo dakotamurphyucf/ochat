@@ -271,12 +271,32 @@ end
 
 type wall_clock = Wall_clock : _ Eio.Time.clock -> wall_clock
 
+module Metadata_admission = struct
+  type error = Invalid_wait [@@deriving equal, sexp_of]
+
+  type t =
+    | Nonblocking
+    | Wait of
+        { clock : Eio.Time.Mono.ty Eio.Time.Mono.t
+        ; maximum_wait : Time_ns.Span.t
+        }
+
+  let nonblocking = Nonblocking
+
+  let wait ~clock ~maximum_wait =
+    if Time_ns.Span.(maximum_wait <= zero || maximum_wait > of_sec 60.)
+    then Error Invalid_wait
+    else Ok (Wait { clock :> Eio.Time.Mono.ty Eio.Time.Mono.t; maximum_wait })
+  ;;
+end
+
 type t =
   { directory : Storage.Directory.t
   ; secrets : Secrets.t
   ; environment : Environment.t option
   ; host : M.Id.t
   ; wall_clock : wall_clock
+  ; metadata_admission : Metadata_admission.t
   ; new_operation : unit -> M.Id.t
   ; mutable cached : M.t
   ; mutable closed : bool
@@ -366,6 +386,43 @@ let load directory host =
   else Error (Error.Model Wrong_incarnation)
 ;;
 
+let acquire_metadata admission ~directory ~sw ~is_closed =
+  let acquire_once () =
+    Eio.Switch.check sw;
+    if is_closed ()
+    then Error Error.Closed
+    else Storage.Lock.acquire directory metadata_lock ~sw ~mode:Exclusive |> storage
+  in
+  match admission with
+  | Metadata_admission.Nonblocking -> acquire_once ()
+  | Wait { clock; maximum_wait } ->
+    let started = Eio.Time.Mono.now clock in
+    let remaining () =
+      let elapsed =
+        Mtime.span started (Eio.Time.Mono.now clock) |> Mtime.Span.to_float_ns
+      in
+      Time_ns.Span.to_ns maximum_wait -. elapsed
+    in
+    let rec acquire ~initial =
+      Eio.Switch.check sw;
+      if is_closed ()
+      then Error Error.Closed
+      else if (not initial) && Float.(remaining () <= 0.)
+      then Error Error.Timed_out
+      else (
+        match acquire_once () with
+        | Error Error.Busy ->
+          let remaining = remaining () in
+          if Float.(remaining <= 0.)
+          then Error Error.Timed_out
+          else (
+            Eio.Time.Mono.sleep clock (Float.min 0.01 (remaining /. 1e9));
+            acquire ~initial:false)
+        | result -> result)
+    in
+    acquire ~initial:true
+;;
+
 let with_metadata t f =
   if t.closed
   then Error Error.Closed
@@ -373,7 +430,11 @@ let with_metadata t f =
     Eio.Switch.run (fun sw ->
       let open Result.Let_syntax in
       let%bind lock =
-        Storage.Lock.acquire t.directory metadata_lock ~sw ~mode:Exclusive |> storage
+        acquire_metadata
+          t.metadata_admission
+          ~directory:t.directory
+          ~sw
+          ~is_closed:(fun () -> t.closed)
       in
       Exn.protect
         ~finally:(fun () -> Storage.Lock.release lock)
@@ -419,6 +480,7 @@ let update t transition =
 let open_existing
       ~sw:owner_sw
       ~wall_clock
+      ~metadata_admission
       ~new_operation
       ~directory
       ~secrets
@@ -428,7 +490,7 @@ let open_existing
   Eio.Switch.run (fun sw ->
     let open Result.Let_syntax in
     let%bind lock =
-      Storage.Lock.acquire directory metadata_lock ~sw ~mode:Exclusive |> storage
+      acquire_metadata metadata_admission ~directory ~sw ~is_closed:(fun () -> false)
     in
     Exn.protect
       ~finally:(fun () -> Storage.Lock.release lock)
@@ -440,6 +502,7 @@ let open_existing
           ; environment
           ; host
           ; wall_clock = Wall_clock wall_clock
+          ; metadata_admission
           ; new_operation
           ; cached
           ; closed = false
@@ -454,6 +517,7 @@ let open_existing
 let initialize_new
       ~sw
       ~wall_clock
+      ~metadata_admission
       ~new_operation
       ~directory
       ~secrets
@@ -467,8 +531,8 @@ let initialize_new
   let%bind () =
     Eio.Switch.run (fun lock_sw ->
       let%bind lock =
-        Storage.Lock.acquire directory metadata_lock ~sw:lock_sw ~mode:Exclusive
-        |> storage
+        acquire_metadata metadata_admission ~directory ~sw:lock_sw ~is_closed:(fun () ->
+          false)
       in
       Exn.protect
         ~finally:(fun () -> Storage.Lock.release lock)
@@ -479,7 +543,15 @@ let initialize_new
             (Bytes.of_string (Document_schema.Document.to_string document))
           |> storage))
   in
-  open_existing ~sw ~wall_clock ~new_operation ~directory ~secrets ~environment ~host
+  open_existing
+    ~sw
+    ~wall_clock
+    ~metadata_admission
+    ~new_operation
+    ~directory
+    ~secrets
+    ~environment
+    ~host
 ;;
 
 let revision id = Secrets.Revision.create (M.Id.to_string id) |> secret

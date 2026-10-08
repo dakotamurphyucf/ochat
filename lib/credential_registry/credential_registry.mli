@@ -1,6 +1,6 @@
 open! Core
 
-(** DRAFT Eio host lifecycle owner. References Model = Credential_registry_model. *)
+(** Eio host lifecycle owner. References Model = Credential_registry_model. *)
 module Error : sig
   type t =
     | Model of Credential_registry_model.Error.t
@@ -174,6 +174,20 @@ end
     state. Independent instances and processes coordinate through native M/G/R;
     sharing one [t] across OCaml domains is unsupported. *)
 
+module Metadata_admission : sig
+  type t
+  type error = Invalid_wait [@@deriving equal, sexp_of]
+
+  (** Immediate kernel-backed metadata lock admission; contention returns Busy. *)
+  val nonblocking : t
+
+  (** Trusted monotonic budget, strictly positive and at most 60 seconds.
+    Waits only for metadata lock acquisition, before loading or executing any
+    callback. One deadline per admission; admitted native I/O remains joined
+    and is not falsely claimed to have a hard timeout. *)
+  val wait : clock:_ Eio.Time.Mono.t -> maximum_wait:Time_ns.Span.t -> (t, error) Result.t
+end
+
 type t
 
 (** Borrow162 directory/secret backend; keep both open through close. Existing
@@ -181,6 +195,7 @@ type t
 val open_existing
   :  sw:Eio.Switch.t
   -> wall_clock:_ Eio.Time.clock
+  -> metadata_admission:Metadata_admission.t
   -> new_operation:(unit -> Credential_registry_model.Id.t)
   -> directory:Private_storage.Directory.t
   -> secrets:Provider_secret_store.t
@@ -193,6 +208,7 @@ val open_existing
 val initialize_new
   :  sw:Eio.Switch.t
   -> wall_clock:_ Eio.Time.clock
+  -> metadata_admission:Metadata_admission.t
   -> new_operation:(unit -> Credential_registry_model.Id.t)
   -> directory:Private_storage.Directory.t
   -> secrets:Provider_secret_store.t
@@ -201,7 +217,8 @@ val initialize_new
   -> incarnation:Credential_registry_model.Id.t
   -> (t, Error.t) result
 
-(** Nonblocking lock admission: Busy if M cannot be obtained immediately.
+(** The explicit metadata policy controls M lock admission: Nonblocking returns
+    Busy; bounded waiting returns Timed_out if admission has not occurred.
     Native storage calls are joined and byte-bounded, not falsely timed out.
     UTC expiry uses explicit wall_clock borrowed at open. No held locks returned. *)
 val status : t -> binding:Credential_registry_model.Id.t -> (Status.t, Error.t) result
@@ -210,8 +227,9 @@ module Candidate : sig
   type t
 end
 
-(** These administrative calls use nonblocking M admission (Busy). They join
-    owned native work without claiming a hard I/O deadline. Callers may cancel;
+(** These administrative calls use the host's explicit M admission policy. They
+    wait only before acquiring the lock and join owned native work without
+    claiming a hard I/O deadline. Callers may cancel;
     metadata ambiguity must reconcile the original operation, never new-key retry. *)
 val begin_candidate
   :  t
@@ -408,7 +426,7 @@ module Host_snapshot : sig
   val pending_candidate_operation : binding -> Credential_registry_model.Id.t option
 end
 
-(** Metadata-only nonblockingM reload returns the durable immutable view.
+(** Metadata-only reload under the explicit M admission policy returns the durable immutable view.
     Ready means configured, not probed secret availability; no secret read or
     environment callback occurs. Explicit status/admission require authorization.
  Trusted host owner

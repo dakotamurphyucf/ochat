@@ -378,6 +378,7 @@ let%expect_test
     let secrets = Secret.open_private_files ~sw ~directory ~namespace |> ok in
     let registry =
       C.initialize_new
+        ~metadata_admission:C.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation:(fun () -> id "unused")

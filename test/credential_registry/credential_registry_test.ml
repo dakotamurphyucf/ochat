@@ -80,6 +80,7 @@ let with_registry f =
           in
           let registry =
             R.initialize_new
+              ~metadata_admission:R.Metadata_admission.nonblocking
               ~sw
               ~wall_clock:(Eio.Stdenv.clock env)
               ~new_operation
@@ -188,6 +189,7 @@ let%expect_test
       R.close registry;
       let restarted =
         R.open_existing
+          ~metadata_admission:R.Metadata_admission.nonblocking
           ~sw
           ~wall_clock:(Eio.Stdenv.clock env)
           ~new_operation
@@ -204,6 +206,7 @@ let%expect_test
       | _ -> failwith "held attempt fence ignored");
     let restarted =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -364,6 +367,7 @@ let%expect_test "process death after possibly-sent rotation cannot trigger exter
     R.close registry;
     let restarted =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -469,6 +473,7 @@ let%expect_test "close joins canceled owned exchange without orphan or false rol
     assert !callback_finished;
     let reopened =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -521,6 +526,7 @@ let%expect_test
     in
     let registry =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -666,6 +672,7 @@ let%expect_test
       R.close registry;
       let registry =
         R.open_existing
+          ~metadata_admission:R.Metadata_admission.nonblocking
           ~sw
           ~wall_clock:(Eio.Stdenv.clock env)
           ~new_operation
@@ -836,6 +843,7 @@ let%expect_test
     in
     let registry =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -898,6 +906,7 @@ let%expect_test
     let secrets = open_backend () in
     let open_registry secrets =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -991,6 +1000,7 @@ let%expect_test "final candidate admission rejects authority lost during durable
     R.close registry;
     let reopened =
       R.open_existing
+        ~metadata_admission:R.Metadata_admission.nonblocking
         ~sw
         ~wall_clock:(Eio.Stdenv.clock env)
         ~new_operation
@@ -1030,4 +1040,214 @@ let%expect_test "final candidate admission rejects authority lost during durable
        exceptional guard release original candidate");
   [%expect
     {| late denial preserves epoch and working key across restart; staged cleanup and exceptional guard release original candidate |}]
+;;
+
+let open_waiting env sw directory secrets new_operation ~clock ~maximum_wait =
+  let metadata_admission =
+    match R.Metadata_admission.wait ~clock ~maximum_wait with
+    | Ok admission -> admission
+    | Error error -> raise_s (R.Metadata_admission.sexp_of_error error)
+  in
+  R.open_existing
+    ~sw
+    ~wall_clock:(Eio.Stdenv.clock env)
+    ~metadata_admission
+    ~new_operation
+    ~directory
+    ~secrets
+    ~environment:None
+    ~host
+  |> lifecycle
+;;
+
+let hold_metadata sw directory =
+  S.Lock.acquire
+    directory
+    (S.Name.create "provider-registry-M.lock" |> storage)
+    ~sw
+    ~mode:Exclusive
+  |> storage
+;;
+
+let begin_ registry operation =
+  R.begin_candidate
+    registry
+    ~binding
+    ~operation
+    ~expectation:(M.Expectation.exact identity)
+;;
+
+let with_quiet_clock env f =
+  let quiet =
+    { Eio.Debug.traceln = (fun ?__POS__:_ fmt -> Format.ifprintf Format.err_formatter fmt)
+    }
+  in
+  Eio.Fiber.with_binding (Eio.Stdenv.debug env)#traceln quiet f
+;;
+
+let%expect_test "metadata admission crosses instances and executes publication once" =
+  with_registry (fun env sw _ directory secrets nonblocking new_operation ->
+    List.iter
+      [ Time_ns.Span.zero; Time_ns.Span.of_sec (-1.); Time_ns.Span.of_sec 61. ]
+      ~f:(fun maximum_wait ->
+        match
+          R.Metadata_admission.wait ~clock:(Eio.Stdenv.mono_clock env) ~maximum_wait
+        with
+        | Error Invalid_wait -> ()
+        | Ok _ -> failwith "invalid metadata wait accepted");
+    let waiting =
+      open_waiting
+        env
+        sw
+        directory
+        secrets
+        new_operation
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+    in
+    let publications = ref 0 in
+    R.For_testing.set_after_publication_hook waiting (Some (fun () -> incr publications));
+    let lock = hold_metadata sw directory in
+    (match R.synchronize nonblocking with
+     | Error Busy -> ()
+     | _ -> failwith "nonblocking metadata admission changed");
+    let result, resolve = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve resolve (begin_ waiting (id "waited_metadata")));
+    Eio.Fiber.yield ();
+    assert (not (Eio.Promise.is_resolved result));
+    S.Lock.release lock;
+    let candidate = Eio.Promise.await result |> lifecycle in
+    assert (Int.equal !publications 1);
+    R.For_testing.set_after_publication_hook waiting None;
+    R.cancel_candidate waiting candidate |> lifecycle;
+    R.close waiting);
+  print_endline "nonblocking stays Busy; bounded cross-instance admission publishes once";
+  [%expect {| nonblocking stays Busy; bounded cross-instance admission publishes once |}]
+;;
+
+let%expect_test "metadata wait timeout and cancellation do not mutate authority" =
+  with_registry (fun env sw _ directory secrets registry new_operation ->
+    with_quiet_clock env (fun () ->
+      let clock = Eio_mock.Clock.Mono.make () in
+      let waiting =
+        open_waiting
+          env
+          sw
+          directory
+          secrets
+          new_operation
+          ~clock
+          ~maximum_wait:(Time_ns.Span.of_sec 0.05)
+      in
+      let publications = ref 0 in
+      R.For_testing.set_after_publication_hook
+        waiting
+        (Some (fun () -> incr publications));
+      let lock = hold_metadata sw directory in
+      let result, resolve = Eio.Promise.create () in
+      Eio.Fiber.fork ~sw (fun () ->
+        Eio.Promise.resolve resolve (begin_ waiting (id "timed_out_metadata")));
+      let rec await_sleep () =
+        if Eio_mock.Clock.Mono.try_advance clock
+        then ()
+        else (
+          Eio.Fiber.yield ();
+          await_sleep ())
+      in
+      await_sleep ();
+      Eio_mock.Clock.Mono.set_time clock (Mtime.of_uint64_ns 100_000_000L);
+      (match Eio.Promise.await result with
+       | Error Timed_out -> ()
+       | _ -> failwith "metadata wait did not expire");
+      assert (Int.equal !publications 0);
+      (try
+         Eio.Fiber.first
+           (fun () ->
+              ignore
+                (begin_ waiting (id "cancelled_metadata")
+                 : (R.Candidate.t, R.Error.t) Result.t))
+           (fun () ->
+              await_sleep ();
+              raise Exit)
+       with
+       | Exit -> ());
+      assert (Int.equal !publications 0);
+      S.Lock.release lock;
+      assert (
+        List.is_empty (R.Host_snapshot.bindings (R.synchronize registry |> lifecycle)));
+      let candidate = begin_ waiting (id "after_cancel_metadata") |> lifecycle in
+      assert (Int.equal !publications 1);
+      R.For_testing.set_after_publication_hook waiting None;
+      R.cancel_candidate waiting candidate |> lifecycle;
+      R.close waiting));
+  print_endline
+    "timeout and cancelled lock admission publish nothing; next admission succeeds";
+  [%expect
+    {| timeout and cancelled lock admission publish nothing; next admission succeeds |}]
+;;
+
+let%expect_test "candidate authorization is checked after metadata admission waits" =
+  with_registry (fun env sw _ directory secrets registry new_operation ->
+    install registry (id "working_before_wait");
+    let waiting =
+      open_waiting
+        env
+        sw
+        directory
+        secrets
+        new_operation
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+    in
+    let before = R.status registry ~binding |> lifecycle in
+    let candidate = begin_ waiting (id "revoked_during_metadata_wait") |> lifecycle in
+    let authorized = ref true in
+    let lock = hold_metadata sw directory in
+    let result, resolve = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve
+        resolve
+        (R.commit_candidate
+           ~authorize_commit:(fun () -> !authorized)
+           waiting
+           candidate
+           verified));
+    Eio.Fiber.yield ();
+    assert (not (Eio.Promise.is_resolved result));
+    authorized := false;
+    S.Lock.release lock;
+    (match Eio.Promise.await result with
+     | Error Authorization_denied -> ()
+     | _ -> failwith "revoked candidate committed after waiting");
+    let after = R.status registry ~binding |> lifecycle in
+    assert (
+      R.Status.equal_availability
+        (R.Status.availability before)
+        (R.Status.availability after));
+    let snapshot =
+      R.synchronize waiting |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    let admitted =
+      R.admit
+        waiting
+        ~expected_owner:(R.Host_snapshot.owner snapshot)
+        ~expected_epoch:(R.Host_snapshot.epoch snapshot)
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 0.1)
+        ~binding
+        ~renewal:None
+      |> lifecycle
+    in
+    assert (
+      Option.equal
+        String.equal
+        (R.Admission.credential_revision admitted)
+        (Some "working_before_wait"));
+    R.close waiting);
+  print_endline
+    "authorization lost while waiting rejects replacement and preserves working login";
+  [%expect
+    {| authorization lost while waiting rejects replacement and preserves working login |}]
 ;;

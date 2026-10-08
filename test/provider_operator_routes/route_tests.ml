@@ -270,7 +270,8 @@ let completed_login route =
     F.await_poll fixture;
     F.release_poll fixture;
     let terminal = F.wait_terminal fixture owner flow in
-    assert (DTO.Flow_result.equal_phase terminal.phase Completed);
+    if not (DTO.Flow_result.equal_phase terminal.phase Completed)
+    then raise_s [%sexp "Unexpected login terminal", (terminal : DTO.Flow_result.t)];
     let selected =
       List.find_exn (status owner).profiles ~f:(fun value ->
         DTO.Profile_id.equal value.DTO.Status_result.profile F.profile)
