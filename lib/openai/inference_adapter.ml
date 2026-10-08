@@ -162,52 +162,138 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
     then Ok ()
     else Error E.Target_mismatch
   in
-  Inference_runtime.Adapter.create
-    ~id:"openai.responses"
-    ~limits
-    ~bind
-    ~prepare:(fun ~preparation_id request ->
-      let open Result.Let_syntax in
-      let%bind () = bind (R.target request) in
-      let%bind prepared = Inference_input.prepare profile request in
-      let%bind configuration =
-        O.Configuration.of_target
-          (R.target request)
-          ~preparation_id
-          ~transport:Http_sse
-          ~capabilities:(capabilities profile (R.Target.model (R.target request)))
-          ~limits:O.Admission.observation
-        |> invalid
-      in
-      let%bind auth =
-        match auth with
-        | Auth_source.Static resolver -> Ok resolver
-        | Capture capture -> capture ~target:(R.target request)
-      in
-      Inference_runtime.Plan.create
-        ~request
-        ~configuration
-        ~fingerprint:(D.Prepared.fingerprint prepared)
-        ~run:(fun ~sw ~scope ~accounting_id ~note_delivery ~on_event ~on_observation:_ ->
-          Eio.Switch.check sw;
-          let projector =
-            Inference_output.create
-              ~target:(R.target request)
-              ~scope
+  let prepare ?session ~policy ~preparation_id request =
+    let open Result.Let_syntax in
+    let%bind () = bind (R.target request) in
+    let%bind prepared = Inference_input.prepare profile request in
+    let supported =
+      match
+        D.Profile.capability
+          profile
+          ~model:(R.Target.model (R.target request))
+          ~feature:D.Capability.Websocket
+      with
+      | Supported -> true
+      | Unsupported | Unknown -> false
+    in
+    let%bind () =
+      match policy with
+      | O.Transport_policy.Require_websocket when not supported ->
+        Error E.Transport_unavailable
+      | Http_sse | Prefer_websocket | Require_websocket -> Ok ()
+    in
+    let transport =
+      match policy with
+      | O.Transport_policy.Http_sse -> O.Configuration.Http_sse
+      | Prefer_websocket | Require_websocket -> if supported then Websocket else Http_sse
+    in
+    let%bind configuration =
+      O.Configuration.of_target
+        ~transport_policy:policy
+        (R.target request)
+        ~preparation_id
+        ~transport
+        ~capabilities:(capabilities profile (R.Target.model (R.target request)))
+        ~limits:O.Admission.observation
+      |> invalid
+    in
+    let%bind auth =
+      match auth with
+      | Auth_source.Static resolver -> Ok resolver
+      | Capture capture -> capture ~target:(R.target request)
+    in
+    Inference_runtime.Plan.create
+      ~request
+      ~configuration
+      ~fingerprint:(D.Prepared.fingerprint prepared)
+      ~run:(fun ~sw ~scope ~accounting_id ~note_delivery ~on_event ~on_observation ->
+        Eio.Switch.check sw;
+        let projector =
+          Inference_output.create ~target:(R.target request) ~scope ~accounting_id ~limits
+          |> function
+          | Ok value -> value
+          | Error _ -> raise (Inference_runtime.Contract_violation Configuration_mismatch)
+        in
+        let on_selected selected fallback =
+          let selection =
+            O.Transport_selection.create
               ~accounting_id
-              ~limits
+              ~requested:policy
+              ~selected
+              ~fallback
             |> function
             | Ok value -> value
             | Error _ ->
               raise (Inference_runtime.Contract_violation Configuration_mismatch)
           in
-          let result =
-            D.run driver ~auth ~prepared ~on_event:(fun event ->
-              (match event with
-               | D.Event.Update _ | Finalized _ -> note_delivery Response_started
-               | Terminal (Provider _) -> note_delivery Response_started
-               | Terminal (Failed _) -> ());
-              Inference_output.event projector event ~on_event)
+          let id =
+            "transport:"
+            ^ (Digestif.SHA256.digest_string (O.Observation_id.to_string accounting_id)
+               |> Digestif.SHA256.to_hex)
           in
-          Inference_output.finish projector result))
+          let id =
+            O.Observation_id.of_string id
+            |> function
+            | Ok id -> id
+            | Error _ -> assert false
+          in
+          let observation =
+            O.create
+              ~scope
+              ~id
+              ~revision:0L
+              ~payload:(Transport_selection selection)
+              ~limits:O.Admission.observation
+            |> function
+            | Ok value -> value
+            | Error _ -> raise (Inference_runtime.Contract_violation Evidence_limit)
+          in
+          on_observation observation
+        in
+        try
+          let result =
+            D.run_with_transport
+              ~cache_assets:(R.assets request)
+              driver
+              ~session
+              ~policy
+              ~auth
+              ~prepared
+              ~on_selected
+              ~on_event:(fun event ->
+                (match event with
+                 | D.Event.Update _ | Finalized _ | Terminal (Provider _) ->
+                   note_delivery Response_started
+                 | Terminal (Failed _) -> ());
+                Inference_output.event projector event ~on_event)
+          in
+          Inference_output.finish projector result
+        with
+        | exn ->
+          Option.iter session ~f:D.Websocket_session.invalidate;
+          raise exn)
+  in
+  let prepare_with_policy ~policy ~preparation_id request =
+    prepare ~policy ~preparation_id request
+  in
+  let open_session owner ~policy =
+    let session =
+      D.Websocket_session.create ~sw:(Inference_runtime.Session.switch owner)
+    in
+    match
+      Inference_runtime.Session.on_release owner (fun () ->
+        D.Websocket_session.close session)
+    with
+    | Error Closed -> Error E.Session_closed
+    | Ok () ->
+      Ok (fun ~preparation_id request -> prepare ~session ~policy ~preparation_id request)
+  in
+  Inference_runtime.Adapter.create
+    ~id:"openai.responses"
+    ~limits
+    ~bind
+    ~prepare:(prepare_with_policy ~policy:O.Transport_policy.Http_sse)
+    ~prepare_with_policy
+    ~open_session
+    ()
 ;;

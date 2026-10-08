@@ -120,6 +120,7 @@ let context ?(prepared_request = Fn.id) run =
         |> ok
       in
       Runtime.Plan.create ~request ~configuration ~fingerprint:"private fingerprint" ~run)
+    ()
   |> ok
   |> Runtime.Context.create ~target
   |> ok
@@ -326,4 +327,141 @@ let%expect_test "selected target and complete prepared request cannot be substit
      admitted";
   [%expect
     {| request substitution and endpoint override rejected; explicit model override admitted |}]
+;;
+
+let%expect_test
+    "graph session binding is retained only by explicit same-session derivation"
+  =
+  Eio_main.run (fun _ ->
+    Eio.Switch.run (fun sw ->
+      let opened = ref 0 in
+      let releases = ref 0 in
+      let prepared_owners = ref [] in
+      let prepare ~owner ~policy ~preparation_id request =
+        prepared_owners := (owner, policy) :: !prepared_owners;
+        let configuration =
+          O.Configuration.of_target
+            ~transport_policy:policy
+            (R.target request)
+            ~preparation_id
+            ~transport:Websocket
+            ~capabilities:[]
+            ~limits:O.Admission.observation
+          |> ok
+        in
+        Runtime.Plan.create
+          ~request
+          ~configuration
+          ~fingerprint:"ownership"
+          ~run:
+            (fun
+              ~sw:_
+              ~scope
+              ~accounting_id
+              ~note_delivery:_
+              ~on_event:_
+              ~on_observation:_
+            -> receipt ~scope ~accounting_id ())
+      in
+      let adapter =
+        Runtime.Adapter.create
+          ~id:"synthetic"
+          ~limits:Runtime.Limits.default
+          ~bind:(fun _ -> Ok ())
+          ~prepare:(fun ~preparation_id request ->
+            prepare ~owner:0 ~policy:Require_websocket ~preparation_id request)
+          ~prepare_with_policy:(fun ~policy ~preparation_id request ->
+            prepare ~owner:0 ~policy ~preparation_id request)
+          ~open_session:(fun session ~policy ->
+            incr opened;
+            let owner = !opened in
+            Runtime.Session.on_release session (fun () -> incr releases) |> ok;
+            Ok
+              (fun ~preparation_id request ->
+                prepare ~owner ~policy ~preparation_id request))
+          ()
+        |> ok
+      in
+      let context =
+        Runtime.Context.create adapter ~target
+        |> ok
+        |> fun context -> Runtime.Context.with_transport_policy context Require_websocket
+      in
+      let session = Runtime.Session.create ~sw in
+      let context = Runtime.Context.with_session context session |> ok in
+      let selected = R.Target.with_model target ~model:"edited" ~limits |> ok in
+      let same = Runtime.Context.derive_in_session context ~target:selected |> ok in
+      let detached = Runtime.Context.derive context ~target:selected |> ok in
+      ignore
+        (Runtime.Context.prepare same ~preparation_id:"same" (request selected) |> ok
+         : Runtime.Prepared.t);
+      ignore
+        (Runtime.Context.prepare detached ~preparation_id:"child" (request selected) |> ok
+         : Runtime.Prepared.t);
+      Runtime.Session.close session;
+      print_s
+        [%sexp
+          (List.rev !prepared_owners : (int * O.Transport_policy.t) list)
+        , (!opened : int)
+        , (!releases : int)];
+      (match Runtime.Context.prepare same ~preparation_id:"closed" (request selected) with
+       | Error error -> print_s [%sexp (error : Runtime.Preparation_error.t)]
+       | Ok _ -> failwith "closed graph admitted preparation");
+      assert (
+        O.Transport_policy.equal
+          (Runtime.Context.transport_policy detached)
+          Require_websocket)));
+  [%expect
+    {|
+    (((1 Require_websocket) (0 Require_websocket)) 1 1)
+    Session_closed
+    |}]
+;;
+
+let%expect_test
+    "enclosing switch closes standalone session owner and rejects stale context"
+  =
+  Eio_main.run (fun _ ->
+    let saved = ref None in
+    let releases = ref 0 in
+    Eio.Switch.run (fun sw ->
+      let session = Runtime.Session.create ~sw in
+      Runtime.Session.on_release session (fun () -> incr releases) |> ok;
+      let context =
+        context
+          (fun
+              ~sw:_
+               ~scope
+               ~accounting_id
+               ~note_delivery:_
+               ~on_event:_
+               ~on_observation:_
+             -> receipt ~scope ~accounting_id ())
+      in
+      let context = Runtime.Context.with_session context session |> ok in
+      let prepared =
+        Runtime.Context.prepare context ~preparation_id:"held" (request target) |> ok
+      in
+      saved := Some (session, context, prepared));
+    let session, context, prepared = Option.value_exn !saved in
+    assert (Runtime.Session.is_closed session);
+    Runtime.Session.close session;
+    print_s [%sexp (!releases : int)];
+    Eio.Switch.run (fun sw ->
+      let attempt = Runtime.Prepared.start prepared ~scope ~accounting_id |> ok in
+      let receipt =
+        Runtime.Attempt.run attempt ~sw ~on_event:ignore ~on_observation:ignore |> ok
+      in
+      print_s
+        [%sexp
+          (E.Terminal.outcome (Runtime.Receipt.terminal receipt) : E.Terminal.outcome)]);
+    match Runtime.Context.prepare context ~preparation_id:"stale" (request target) with
+    | Error error -> print_s [%sexp (error : Runtime.Preparation_error.t)]
+    | Ok _ -> failwith "stale switch owner admitted preparation");
+  [%expect
+    {|
+    1
+    (Failed (Transport Session_closed))
+    Session_closed
+    |}]
 ;;

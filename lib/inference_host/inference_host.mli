@@ -7,8 +7,11 @@ open! Core
     model catalog or migration policy is supplied here. *)
 type t
 
+(** Explicit host policy, default SSE. UI/CLI selection belongs to OCH-67;
+    embedding hosts can opt in here. Resolution captures this policy immutably. *)
 val create
-  :  Openai.Responses_driver.t
+  :  ?transport_policy:Inference.Observation.Transport_policy.t
+  -> Openai.Responses_driver.t
   -> profile:Openai.Responses_driver.Profile.t
   -> profile_revision:string option
   -> auth:Openai.Responses_driver.Auth.resolver

@@ -290,6 +290,61 @@ stale capability cancellation and revalidation, owner/generation rotation during
 lookup, redacted disabled status, and incompatible account edits. Existing neutral
 inference and OpenAI adapter tests cover the shared codecs and dispatch contracts.
 
+### Optional session-owned WebSocket transport
+
+The host explicitly selects `Http_sse`, `Prefer_websocket`, or
+`Require_websocket` on an inference context. SSE remains the default. A declared
+WebSocket capability is required; capability declarations do not prove live
+provider qualification. The public Responses API with API keys is the initial
+route. Subscription OAuth acquisition and route-specific headers belong to
+OCH-66.
+
+A runtime graph owns a neutral `Inference_runtime.Session`, and the adapter
+creates a private bound preparation closure on that context. No host-wide
+adapter cache is shared between sessions. `Context.derive` detaches resources;
+`derive_in_session` explicitly retains them for sequential turns in the same
+graph. Detaching retains the requested policy. Child and auxiliary completions
+use a per-attempt ephemeral WebSocket when requested, so `Require_websocket`
+never silently becomes SSE. Graph teardown first cancels and drains workers,
+then closes and joins its channels. Channel lifetime and request lifetime are
+separate.
+
+Configuration records the requested policy and initial nomination. A distinct
+validated transport-selection observation records the actual selected route,
+its designated accounting identity, and a closed fallback reason. Public attempt
+queries disclose it with configuration. A preference may fall back before any
+`response.create` bytes could be submitted. Authentication failures never fall
+back. After partial write, response evidence, or uncertain submission there is
+no automatic resend, including on a provider continuation-cache error. Attempt
+cancellation evidence remains conservatively possibly submitted until a normal
+terminal establishes more precise evidence.
+
+Each request retains its complete local history and sends `store=false`.
+Connection-local continuation is an optimization: exact full wire-history prefix,
+tools, effective settings, immutable assets, model, endpoint, profile, account and
+authentication identity must match. Only validated completed output can seed the
+bounded cache. Edits and incompatible prefixes cause full input to be sent without continuation.
+Child execution, connection loss or changed credentials additionally require a
+fresh channel. Every new
+inference authorizes and acquires a fresh host lease. Authorization
+owner/generation identifies login/logout/replacement; the separate nonsecret
+credential operation revision changes on silent refresh. Both must match to
+reuse an authenticated channel. Missing credential revision disables reuse;
+token bytes or token hashes must never serve as that revision.
+
+The private [RFC6455](https://www.rfc-editor.org/rfc/rfc6455) client framer uses the existing verified TLS connector and
+bounds inbound frame/message bytes independently from outbound request bytes,
+fragment and control counts, cumulative event bytes, deadlines and retained
+history. It validates handshake acceptance, masking, reserved bits, fragmentation,
+control frames, UTF8 and close payloads without per-frame fibers or unbounded
+queues. Protocol failure and cancellation retire and join the channel.
+
+Host embeddings opt in through the immutable `transport_policy` argument on
+`Inference_host.create` or `Provider_profiles.create`; contexts resolved by that
+host retain the policy. Operator-facing CLI/UI selection belongs to OCH-67.
+A runtime build that rejects before dispatch may retain its empty neutral owner
+until the enclosing switch closes; it has acquired no connection or credentials.
+
 Dynamic provider plans capture the current authorization owner and generation
 at preparation, after pure request validation and without credential access.
 Each plan holds its own resolver. Logout or replacement invalidates previously

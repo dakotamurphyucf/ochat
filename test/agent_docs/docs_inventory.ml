@@ -61,6 +61,8 @@ let owner name =
         ; "inference_client/"
         ; "inference_host/"
         ; "openai/inference_"
+        ; "openai/responses_driver"
+        ; "openai/responses_websocket"
         ; "neutral_turn"
         ; "inference_config"
         ; "fork_history"

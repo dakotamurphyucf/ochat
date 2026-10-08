@@ -512,6 +512,29 @@ module Context_estimate = struct
   ;;
 end
 
+module Transport_policy = struct
+  type t =
+    | Http_sse
+    | Prefer_websocket
+    | Require_websocket
+  [@@deriving equal, sexp_of]
+
+  let to_json = function
+    | Http_sse -> string "http_sse"
+    | Prefer_websocket -> string "prefer_websocket"
+    | Require_websocket -> string "require_websocket"
+  ;;
+
+  let of_json json =
+    Decode.tag
+      json
+      [ "http_sse", Http_sse
+      ; "prefer_websocket", Prefer_websocket
+      ; "require_websocket", Require_websocket
+      ]
+  ;;
+end
+
 module Configuration = struct
   module Name = struct
     type t =
@@ -622,6 +645,7 @@ module Configuration = struct
     ; model : string
     ; preparation_id : string
     ; transport : transport
+    ; transport_policy : Transport_policy.t option
     ; settings : setting list
     ; withheld_settings : int
     ; capabilities : (feature * support) list
@@ -634,6 +658,7 @@ module Configuration = struct
   let model t = t.model
   let preparation_id t = t.preparation_id
   let transport t = t.transport
+  let transport_policy t = t.transport_policy
   let settings t = t.settings
   let withheld_settings t = t.withheld_settings
   let capabilities t = t.capabilities
@@ -652,6 +677,7 @@ module Configuration = struct
     && String.equal a.model b.model
     && String.equal a.preparation_id b.preparation_id
     && equal_transport a.transport b.transport
+    && Option.equal Transport_policy.equal a.transport_policy b.transport_policy
     && List.equal equal_setting a.settings b.settings
     && Int.equal a.withheld_settings b.withheld_settings
     && List.equal
@@ -867,35 +893,46 @@ module Configuration = struct
 
   let to_json t =
     obj
-      [ "adapter", string t.adapter
-      ; "profile", string t.profile
-      ; "profile_revision", nullable string t.profile_revision
-      ; "account", nullable string t.account
-      ; "model", string t.model
-      ; "preparation_id", string t.preparation_id
-      ; "transport", transport_to_json t.transport
-      ; ( "settings"
-        , list
-            (fun setting ->
-               obj
-                 [ "name", string (Name.to_string setting.name)
-                 ; "selection", selection_to_json setting.selection
-                 ; "provenance", nullable provenance_to_json setting.provenance
-                 ])
-            t.settings )
-      ; "withheld_settings", integer t.withheld_settings
-      ; ( "capabilities"
-        , list
-            (fun (feature, support) ->
-               obj
-                 [ "feature", feature_to_json feature
-                 ; "support", support_to_json support
-                 ])
-            t.capabilities )
-      ]
+      ([ "adapter", string t.adapter
+       ; "profile", string t.profile
+       ; "profile_revision", nullable string t.profile_revision
+       ; "account", nullable string t.account
+       ; "model", string t.model
+       ; "preparation_id", string t.preparation_id
+       ; "transport", transport_to_json t.transport
+       ; ( "settings"
+         , list
+             (fun setting ->
+                obj
+                  [ "name", string (Name.to_string setting.name)
+                  ; "selection", selection_to_json setting.selection
+                  ; "provenance", nullable provenance_to_json setting.provenance
+                  ])
+             t.settings )
+       ; "withheld_settings", integer t.withheld_settings
+       ; ( "capabilities"
+         , list
+             (fun (feature, support) ->
+                obj
+                  [ "feature", feature_to_json feature
+                  ; "support", support_to_json support
+                  ])
+             t.capabilities )
+       ]
+       @ Option.to_list
+           (Option.map t.transport_policy ~f:(fun policy ->
+              "transport_policy", Transport_policy.to_json policy)))
   ;;
 
   let admit t ~limits =
+    let* () =
+      match t.transport_policy, t.transport with
+      | None, _
+      | Some Transport_policy.Http_sse, Http_sse
+      | Some Prefer_websocket, (Http_sse | Websocket)
+      | Some Require_websocket, Websocket -> Ok ()
+      | Some _, _ -> invalid "transport_policy" "initial nomination contradicts policy"
+    in
     let* () =
       Result.all_unit
         (List.map
@@ -956,7 +993,7 @@ module Configuration = struct
     | name -> Name.to_string name, None
   ;;
 
-  let of_target target ~preparation_id ~transport ~capabilities ~limits =
+  let of_target ?transport_policy target ~preparation_id ~transport ~capabilities ~limits =
     if List.length capabilities > 64
     then invalid "capabilities" "at most 64 declarations"
     else (
@@ -1015,6 +1052,7 @@ module Configuration = struct
         ; model = Request.Target.model target
         ; preparation_id
         ; transport
+        ; transport_policy
         ; settings
         ; withheld_settings =
             List.count raw_settings ~f:(fun setting ->
@@ -1036,6 +1074,7 @@ module Configuration = struct
         ; "model"
         ; "preparation_id"
         ; "transport"
+        ; "transport_policy"
         ; "settings"
         ; "withheld_settings"
         ; "capabilities"
@@ -1050,6 +1089,11 @@ module Configuration = struct
     let* model = Decode.get fields "model" Decode.text in
     let* preparation_id = Decode.get fields "preparation_id" Decode.text in
     let* transport = Decode.get fields "transport" transport_of_json in
+    let* transport_policy =
+      match List.Assoc.find fields ~equal:String.equal "transport_policy" with
+      | None -> Ok None
+      | Some json -> Result.map (Transport_policy.of_json json) ~f:Option.some
+    in
     let* raw_settings = Decode.get fields "settings" Decode.array in
     let* () =
       if List.length raw_settings <> List.length Name.all
@@ -1090,6 +1134,7 @@ module Configuration = struct
       ; model
       ; preparation_id
       ; transport
+      ; transport_policy
       ; settings
       ; withheld_settings
       ; capabilities
@@ -1100,6 +1145,100 @@ module Configuration = struct
   let of_json json ~limits =
     let* () = json_error (D.Json.validate ~limits json) in
     decode json ~limits
+  ;;
+end
+
+module Transport_selection = struct
+  type transport =
+    | Http_sse
+    | Websocket
+  [@@deriving equal, sexp_of]
+
+  type fallback_reason =
+    | Unsupported
+    | Session_busy
+    | Connection
+    | Upgrade
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { accounting_id : Observation_id.t
+    ; requested : Transport_policy.t
+    ; selected : transport
+    ; fallback : fallback_reason option
+    }
+
+  let accounting_id t = t.accounting_id
+  let requested t = t.requested
+  let selected t = t.selected
+  let fallback t = t.fallback
+
+  let equal a b =
+    Observation_id.equal a.accounting_id b.accounting_id
+    && Transport_policy.equal a.requested b.requested
+    && equal_transport a.selected b.selected
+    && Option.equal equal_fallback_reason a.fallback b.fallback
+  ;;
+
+  let create ~accounting_id ~requested ~selected ~fallback =
+    match requested, selected, fallback with
+    | Transport_policy.Http_sse, Http_sse, None
+    | Prefer_websocket, Websocket, None
+    | Require_websocket, Websocket, None
+    | Prefer_websocket, Http_sse, Some _ ->
+      Ok { accounting_id; requested; selected; fallback }
+    | _ -> invalid "transport" "selection contradicts requested transport policy"
+  ;;
+
+  let transport_json = function
+    | Http_sse -> string "http_sse"
+    | Websocket -> string "websocket"
+  ;;
+
+  let fallback_json = function
+    | Unsupported -> string "unsupported"
+    | Session_busy -> string "session_busy"
+    | Connection -> string "connection"
+    | Upgrade -> string "upgrade"
+  ;;
+
+  let to_json t =
+    obj
+      [ "accounting_id", string (Observation_id.to_string t.accounting_id)
+      ; "requested", Transport_policy.to_json t.requested
+      ; "selected", transport_json t.selected
+      ; "fallback", nullable fallback_json t.fallback
+      ]
+  ;;
+
+  let of_json json =
+    let* fields =
+      Decode.fields json [ "accounting_id"; "requested"; "selected"; "fallback" ]
+    in
+    let* accounting_id =
+      Decode.get fields "accounting_id" (fun json ->
+        let* id = Decode.text json in
+        Observation_id.of_string id)
+    in
+    let* requested = Decode.get fields "requested" Transport_policy.of_json in
+    let* selected =
+      Decode.get fields "selected" (fun json ->
+        Decode.tag json [ "http_sse", Http_sse; "websocket", Websocket ])
+    in
+    let* fallback =
+      Decode.get
+        fields
+        "fallback"
+        (Decode.optional (fun json ->
+           Decode.tag
+             json
+             [ "unsupported", Unsupported
+             ; "session_busy", Session_busy
+             ; "connection", Connection
+             ; "upgrade", Upgrade
+             ]))
+    in
+    create ~accounting_id ~requested ~selected ~fallback
   ;;
 end
 
@@ -1350,6 +1489,7 @@ type payload =
   | Usage of Usage.t
   | Context_estimate of Context_estimate.t
   | Configuration of Configuration.t
+  | Transport_selection of Transport_selection.t
   | Diagnostic of Diagnostic.t
 
 type t =
@@ -1372,8 +1512,14 @@ let equal_payload a b =
   | Usage a, Usage b -> Usage.equal a b
   | Context_estimate a, Context_estimate b -> Context_estimate.equal a b
   | Configuration a, Configuration b -> Configuration.equal a b
+  | Transport_selection a, Transport_selection b -> Transport_selection.equal a b
   | Diagnostic a, Diagnostic b -> Diagnostic.equal a b
-  | (Usage _ | Context_estimate _ | Configuration _ | Diagnostic _), _ -> false
+  | ( ( Usage _
+      | Context_estimate _
+      | Configuration _
+      | Transport_selection _
+      | Diagnostic _ )
+    , _ ) -> false
 ;;
 
 let equal a b =
@@ -1387,6 +1533,7 @@ let payload_json = function
   | Usage value -> "usage", Usage.to_json value
   | Context_estimate value -> "context_estimate", Context_estimate.to_json value
   | Configuration value -> "configuration", Configuration.to_json value
+  | Transport_selection value -> "transport_selection", Transport_selection.to_json value
   | Diagnostic value -> "diagnostic", Diagnostic.to_json value
 ;;
 
@@ -1444,6 +1591,9 @@ let of_json json ~limits =
       | "configuration" ->
         Result.map (Configuration.decode raw ~limits) ~f:(fun value ->
           Configuration value)
+      | "transport_selection" ->
+        Result.map (Transport_selection.of_json raw) ~f:(fun value ->
+          Transport_selection value)
       | "diagnostic" ->
         Result.map (Diagnostic.of_json raw) ~f:(fun value -> Diagnostic value)
       | _ -> invalid "kind" "unknown observation kind"
@@ -1504,10 +1654,16 @@ module Latest = struct
             (Context_estimate.preparation_id b)
         then Ok ()
         else Error Error.Conflicting_kind
+      | Transport_selection a, Transport_selection b ->
+        if Transport_selection.equal a b then Ok () else Error Error.Conflicting_revision
       | Configuration a, Configuration b ->
         if Configuration.equal a b then Ok () else Error Error.Conflicting_revision
-      | (Usage _ | Context_estimate _ | Configuration _ | Diagnostic _), _ ->
-        Error Error.Conflicting_kind)
+      | ( ( Usage _
+          | Context_estimate _
+          | Configuration _
+          | Transport_selection _
+          | Diagnostic _ )
+        , _ ) -> Error Error.Conflicting_kind)
   ;;
 
   let observe t (incoming : observation) =
@@ -1524,7 +1680,11 @@ module Latest = struct
           | Some a, Configuration b when not (Configuration.equal a b) ->
             Error Error.Conflicting_revision
           | ( (Some _ | None)
-            , (Usage _ | Context_estimate _ | Configuration _ | Diagnostic _) ) -> Ok ())
+            , ( Usage _
+              | Context_estimate _
+              | Configuration _
+              | Transport_selection _
+              | Diagnostic _ ) ) -> Ok ())
     in
     let previous = Map.find t.values k in
     let* disposition =
@@ -1555,7 +1715,7 @@ module Latest = struct
         let configuration =
           match incoming.payload with
           | Configuration configuration -> Some configuration
-          | Usage _ | Context_estimate _ | Diagnostic _ ->
+          | Usage _ | Context_estimate _ | Transport_selection _ | Diagnostic _ ->
             Option.bind previous_scope ~f:(fun previous -> previous.configuration)
         in
         Ok
@@ -1677,6 +1837,24 @@ module Attempt_record = struct
                    invalid
                      "accounting_id"
                      "usage does not match designated accounting identity"
+               | Transport_selection incoming ->
+                 if
+                   not
+                     (Observation_id.equal
+                        accounting_id
+                        (Transport_selection.accounting_id incoming))
+                 then
+                   invalid
+                     "accounting_id"
+                     "transport selection belongs to another attempt"
+                 else (
+                   match Configuration.transport_policy configuration with
+                   | Some requested
+                     when Transport_policy.equal
+                            requested
+                            (Transport_selection.requested incoming) -> Ok ()
+                   | Some _ | None ->
+                     invalid "transport_policy" "selection differs from configuration")
                | Configuration incoming ->
                  if Configuration.equal configuration incoming
                  then Ok ()
@@ -1689,6 +1867,16 @@ module Attempt_record = struct
                  then Ok ()
                  else invalid "preparation_id" "context does not match actual preparation"
                | Diagnostic _ -> Ok ())))
+      in
+      let* () =
+        if
+          List.count observations ~f:(fun observation ->
+            match observation.payload with
+            | Transport_selection _ -> true
+            | _ -> false)
+          > 1
+        then invalid "transport_selection" "at most one actual selection"
+        else Ok ()
       in
       if
         List.count observations ~f:(fun observation ->

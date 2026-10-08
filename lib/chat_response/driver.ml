@@ -557,7 +557,7 @@ let selected_context (ctx : _ Ctx.t) config =
     |> Result.ok_or_failwith
   in
   let inference_context =
-    Inference_runtime.Context.derive ctx.inference_context ~target
+    Inference_runtime.Context.derive_in_session ctx.inference_context ~target
     |> Result.map_error ~f:(fun error ->
       Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
     |> Result.ok_or_failwith

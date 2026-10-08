@@ -41,6 +41,9 @@ module Terminal = struct
     | Body_limit
     | Framing_limit
     | Protocol
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
   [@@deriving equal, sexp_of]
 
@@ -159,6 +162,9 @@ module Terminal = struct
         | Body_limit -> "body_limit", []
         | Framing_limit -> "framing_limit", []
         | Protocol -> "protocol", []
+        | Unsupported_transport -> "unsupported_transport", []
+        | Session_closed -> "session_closed", []
+        | Session_busy -> "session_busy", []
         | Http_status status ->
           "http_status", [ "status", `Number (Int.to_string status) ]
       in
@@ -213,6 +219,9 @@ module Terminal = struct
        | "body_limit" -> Ok (Transport Body_limit)
        | "framing_limit" -> Ok (Transport Framing_limit)
        | "protocol" -> Ok (Transport Protocol)
+       | "unsupported_transport" -> Ok (Transport Unsupported_transport)
+       | "session_closed" -> Ok (Transport Session_closed)
+       | "session_busy" -> Ok (Transport Session_busy)
        | "http_status" ->
          (match member json "status" with
           | Value (`Number value) ->

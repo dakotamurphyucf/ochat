@@ -313,6 +313,7 @@ let context_for_tests runtime started_turns =
       ~bind:(fun _ -> Ok ())
       ~prepare:(fun ~preparation_id:_ _ ->
         Error Inference_runtime.Preparation_error.Target_unavailable)
+      ()
     |> require
     |> Inference_runtime.Context.create ~target
     |> require

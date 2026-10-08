@@ -197,3 +197,11 @@ val observations
   -> Agent_protocol.Inference_query.Request.t
   -> (Agent_protocol.Inference_query.Response.t, Agent_protocol.Error.t) result
 ```
+
+An optional immutable configuration transport policy records the requested
+policy and initial transport nomination. The separate validated transport-selection
+observation records the actual route and any definite pre-submission fallback,
+using the attempt’s designated accounting identity. Attempt queries expose this
+selection only with configuration access. A fallback does not rewrite the
+prepared configuration or fingerprint, and a nominated WebSocket is never
+reported as the actual route when HTTP/SSE was selected.

@@ -10,6 +10,7 @@ module Capability : sig
     | Function_tools
     | Custom_tools
     | Opaque_replay
+    | Websocket
     | Setting of string
   [@@deriving equal, compare, sexp_of]
 
@@ -153,6 +154,14 @@ module Auth : sig
 
   val identity : lease -> identity option
 
+  (** Nonsecret immutable credential operation revision, separate from auth
+      owner/generation. Silent refresh changes this revision without changing
+      authorization epoch. Never use token bytes or token hashes. Missing revision
+      disables authenticated WS reuse. Conflicting wrappers reject. *)
+  val with_credential_revision : lease -> string -> (lease, error) Result.t
+
+  val credential_revision : lease -> string option
+
   (** Secret host lease, deliberately without serialization or secret accessor.
       Validates header-safe nonempty bytes. Resolver is called at dispatch with
       exactly the captured identity; it may silently renew but never start login. *)
@@ -169,6 +178,9 @@ module Terminal : sig
   [@@deriving equal, sexp_of]
 
   type failure =
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
     | Invalid_http
     | Invalid_content_type
@@ -231,8 +243,38 @@ val with_response_limit : t -> max_body_bytes:int -> t Or_error.t
     propagate, including during terminal delivery. Failures preserve publication
     evidence and never retry, even when submission is uncertain. *)
 val run
-  :  t
+  :  ?on_selected:(unit -> unit)
+  -> t
   -> auth:Auth.resolver
   -> prepared:Prepared.t
+  -> on_event:(Event.t -> unit)
+  -> (Terminal.t, Auth.error) Result.t
+
+module Websocket_session : sig
+  type t
+
+  val create : sw:Eio.Switch.t -> t
+
+  (** Graph owner, not an authentication lease. Close after active attempts drain. *)
+  val close : t -> unit
+
+  val invalidate : t -> unit
+end
+
+(** Same event/outcome pipeline. Fresh auth on each attempt, including reused
+    channels. Detached contexts use an ephemeral channel owned by the request.
+    Prefer fallback is allowed only before response.create bytes; auth errors
+    never fall back. Cancellation/observer exceptions retire the channel. *)
+val run_with_transport
+  :  ?cache_assets:Inference.Request.Asset.t list
+  -> t
+  -> session:Websocket_session.t option
+  -> policy:Inference.Observation.Transport_policy.t
+  -> auth:Auth.resolver
+  -> prepared:Prepared.t
+  -> on_selected:
+       (Inference.Observation.Transport_selection.transport
+        -> Inference.Observation.Transport_selection.fallback_reason option
+        -> unit)
   -> on_event:(Event.t -> unit)
   -> (Terminal.t, Auth.error) Result.t

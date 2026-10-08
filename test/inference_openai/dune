@@ -1,5 +1,5 @@
 (library
  (name inference_openai_tests)
- (libraries core jsonaf eio eio_main expect_test_helpers_core ochat.openai ochat.inference_runtime)
+ (libraries core jsonaf eio eio_main digestif base64 mirage-crypto-rng-eio expect_test_helpers_core ochat.openai ochat.inference_runtime)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))

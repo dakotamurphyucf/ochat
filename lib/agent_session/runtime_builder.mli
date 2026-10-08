@@ -279,6 +279,8 @@ type t =
       -> Agent_protocol.Job.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; close : unit -> unit
+    (** Caller cancels/drains foreground and borrowed background workers first.
+        Closes and joins graph-owned inference channels, then persists cache. *)
   }
 
 type schedule_services =

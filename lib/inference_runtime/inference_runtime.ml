@@ -2,6 +2,7 @@ open! Core
 module Request = Inference.Request
 module Event = Inference.Event
 module Observation = Inference.Observation
+module Session = Session
 
 module Preparation_error = struct
   type t =
@@ -14,6 +15,8 @@ module Preparation_error = struct
     | Unsupported_setting
     | Incompatible_replay
     | Asset_unavailable
+    | Transport_unavailable
+    | Session_closed
     | Invalid_preparation
     | Request_limit of Document_schema.Error.t
   [@@deriving equal, sexp_of]
@@ -27,6 +30,8 @@ module Contract_error = struct
     | Conflicting_candidate
     | Missing_candidate
     | Invalid_candidate
+    | Missing_transport
+    | Conflicting_transport
     | Invalid_usage
     | Conflicting_usage
     | Backend_terminal
@@ -167,7 +172,7 @@ module Receipt = struct
     let%bind () =
       match Observation.payload usage with
       | Usage _ -> Ok ()
-      | Context_estimate _ | Configuration _ | Diagnostic _ ->
+      | Context_estimate _ | Configuration _ | Transport_selection _ | Diagnostic _ ->
         Error Contract_error.Invalid_usage
     in
     let%map candidates =
@@ -187,6 +192,7 @@ end
 let configuration_matches request configuration =
   match
     Observation.Configuration.of_target
+      ?transport_policy:(Observation.Configuration.transport_policy configuration)
       (Request.target request)
       ~preparation_id:(Observation.Configuration.preparation_id configuration)
       ~transport:(Observation.Configuration.transport configuration)
@@ -220,15 +226,22 @@ module Plan = struct
 end
 
 module Adapter = struct
+  type prepare =
+    preparation_id:string -> Request.t -> (Plan.t, Preparation_error.t) Result.t
+
   type t =
     { id : string
     ; limits : Limits.t
     ; bind : Request.Target.t -> (unit, Preparation_error.t) Result.t
-    ; prepare :
-        preparation_id:string -> Request.t -> (Plan.t, Preparation_error.t) Result.t
+    ; prepare : policy:Observation.Transport_policy.t -> prepare
+    ; open_session :
+        (Session.t
+         -> policy:Observation.Transport_policy.t
+         -> (prepare, Preparation_error.t) Result.t)
+          option
     }
 
-  let create ~id ~limits ~bind ~prepare =
+  let create ?prepare_with_policy ?open_session ~id ~limits ~bind ~prepare () =
     match
       Document_schema.Json.validate ~limits:Document_schema.Limits.default (`String id)
     with
@@ -236,7 +249,17 @@ module Adapter = struct
     | Ok () ->
       if String.is_empty id
       then Error Preparation_error.Invalid_preparation
-      else Ok { id; limits; bind; prepare }
+      else (
+        let prepare =
+          Option.value
+            prepare_with_policy
+            ~default:(fun ~policy ~preparation_id request ->
+              match policy with
+              | Observation.Transport_policy.Http_sse -> prepare ~preparation_id request
+              | Prefer_websocket | Require_websocket ->
+                Error Preparation_error.Transport_unavailable)
+        in
+        Ok { id; limits; bind; prepare; open_session })
   ;;
 end
 
@@ -282,12 +305,13 @@ module Attempt = struct
       Eio.Switch.check sw;
       let candidates = ref Candidates.empty in
       let latest_usage = ref None in
+      let selected_transport = ref None in
       let check_observation observation =
         contract_exn (check_scope t.scope (Observation.scope observation));
         let limits =
           match Observation.payload observation with
           | Diagnostic _ -> Observation.Admission.diagnostic
-          | Usage _ | Context_estimate _ | Configuration _ ->
+          | Usage _ | Context_estimate _ | Configuration _ | Transport_selection _ ->
             Observation.Admission.observation
         in
         (match Observation.validate observation ~limits with
@@ -316,6 +340,25 @@ module Attempt = struct
              else if Observation.equal previous observation
              then `Duplicate
              else raise (Contract_violation Conflicting_usage))
+        | Transport_selection selection ->
+          if Event.Terminal.equal_delivery (delivery t) Response_started
+          then raise (Contract_violation Conflicting_transport);
+          if
+            not
+              (Observation.Observation_id.equal
+                 t.accounting_id
+                 (Observation.Transport_selection.accounting_id selection))
+          then raise (Contract_violation Accounting_identity_mismatch);
+          (match Observation.Configuration.transport_policy t.plan.configuration with
+           | Some policy
+             when Observation.Transport_policy.equal
+                    policy
+                    (Observation.Transport_selection.requested selection) -> ()
+           | Some _ | None -> raise (Contract_violation Configuration_mismatch));
+          (match !selected_transport with
+           | None -> `Publish
+           | Some previous when Observation.equal previous observation -> `Duplicate
+           | Some _ -> raise (Contract_violation Conflicting_transport))
         | Configuration configuration ->
           if not (Observation.Configuration.equal t.plan.configuration configuration)
           then raise (Contract_violation Configuration_mismatch);
@@ -336,6 +379,7 @@ module Attempt = struct
         | `Publish ->
           (match Observation.payload observation with
            | Usage _ -> latest_usage := Some observation
+           | Transport_selection _ -> selected_transport := Some observation
            | Context_estimate _ | Configuration _ | Diagnostic _ -> ());
           on_observation observation
       in
@@ -399,6 +443,11 @@ module Attempt = struct
        | `Duplicate | `Publish -> ());
       let final_delivery = Event.Terminal.delivery receipt.terminal in
       if
+        Option.is_some (Observation.Configuration.transport_policy t.plan.configuration)
+        && (not (Event.Terminal.equal_delivery final_delivery Definitely_not_submitted))
+        && Option.is_none !selected_transport
+      then raise (Contract_violation Missing_transport);
+      if
         Event.Terminal.equal_delivery (delivery t) Response_started
         && not (Event.Terminal.equal_delivery final_delivery Response_started)
       then raise (Contract_violation Delivery_regression);
@@ -456,6 +505,9 @@ module Context = struct
   type t =
     { adapter : Adapter.t
     ; target : Request.Target.t
+    ; policy : Observation.Transport_policy.t
+    ; session : Session.t option
+    ; prepare : Adapter.prepare
     }
 
   let create adapter ~target =
@@ -464,17 +516,79 @@ module Context = struct
     then Error Preparation_error.Target_mismatch
     else (
       let%map () = adapter.bind target in
-      { adapter; target })
+      let policy = Observation.Transport_policy.Http_sse in
+      { adapter; target; policy; session = None; prepare = adapter.prepare ~policy })
   ;;
 
   let target t = t.target
+  let transport_policy t = t.policy
+  let detach t = { t with session = None; prepare = t.adapter.prepare ~policy:t.policy }
+
+  let with_transport_policy t policy =
+    { t with policy; session = None; prepare = t.adapter.prepare ~policy }
+  ;;
+
+  let with_session t session =
+    if Session.is_closed session
+    then Error Preparation_error.Session_closed
+    else (
+      match t.adapter.open_session with
+      | None -> Ok { t with session = Some session }
+      | Some open_session ->
+        Result.map (open_session session ~policy:t.policy) ~f:(fun prepare ->
+          { t with session = Some session; prepare }))
+  ;;
+
+  let closed_receipt ~scope ~accounting_id ~limits =
+    let count =
+      Observation.Count.create (Unknown Not_submitted)
+      |> Result.map_error ~f:(fun _ -> Contract_error.Invalid_usage)
+      |> contract_exn
+    in
+    let counts : Observation.Usage.counts =
+      { input = count
+      ; output = count
+      ; reported_total = count
+      ; cached_input = count
+      ; cache_write_input = count
+      ; reasoning_output = count
+      }
+    in
+    let usage =
+      Observation.Usage.create ~counts ~inclusions:[]
+      |> Result.map_error ~f:(fun _ -> Contract_error.Invalid_usage)
+      |> contract_exn
+    in
+    let usage =
+      Observation.create
+        ~scope
+        ~id:accounting_id
+        ~revision:0L
+        ~payload:(Usage usage)
+        ~limits:Observation.Admission.observation
+      |> Result.map_error ~f:(fun _ -> Contract_error.Invalid_usage)
+      |> contract_exn
+    in
+    let terminal =
+      Event.Terminal.create
+        ~scope
+        ~delivery:Definitely_not_submitted
+        ~outcome:(Failed (Transport Session_closed))
+      |> Result.map_error ~f:(fun _ -> Contract_error.Backend_terminal)
+      |> contract_exn
+    in
+    Receipt.create ~terminal ~usage ~output:[] ~output_coverage:Observed_prefix ~limits
+    |> contract_exn
+  ;;
 
   let prepare t ~preparation_id request =
     let open Result.Let_syntax in
-    if not (Request.Target.equal t.target (Request.target request))
+    if Option.exists t.session ~f:Session.is_closed
+    then Error Preparation_error.Session_closed
+    else if not (Request.Target.equal t.target (Request.target request))
     then Error Preparation_error.Target_mismatch
     else (
-      let%bind plan = t.adapter.prepare ~preparation_id request in
+      let%bind plan = t.prepare ~preparation_id request in
       if
         (not (request_equal plan.request request))
         || (not
@@ -483,7 +597,25 @@ module Context = struct
                  (Observation.Configuration.preparation_id plan.configuration)))
         || not (configuration_matches request plan.configuration)
       then Error Preparation_error.Invalid_preparation
-      else Ok { Prepared.plan; limits = t.adapter.limits })
+      else (
+        let original = plan.Plan.run in
+        let plan =
+          { plan with
+            Plan.run =
+              (fun ~sw ~scope ~accounting_id ~note_delivery ~on_event ~on_observation ->
+                if Option.exists t.session ~f:Session.is_closed
+                then closed_receipt ~scope ~accounting_id ~limits:t.adapter.limits
+                else
+                  original
+                    ~sw
+                    ~scope
+                    ~accounting_id
+                    ~note_delivery
+                    ~on_event
+                    ~on_observation)
+          }
+        in
+        Ok { Prepared.plan; limits = t.adapter.limits }))
   ;;
 
   let identity target =
@@ -492,16 +624,16 @@ module Context = struct
       `Object
         (List.filter fields ~f:(fun (name, _) ->
            not (String.equal name "model" || String.equal name "settings")))
-    | `Null | `True | `False | `Number _ | `String _ | `Array _ ->
-      (* Target's abstract constructor guarantees an object. *)
-      assert false
+    | `Null | `True | `False | `Number _ | `String _ | `Array _ -> assert false
   ;;
 
-  let derive t ~target =
+  let derive_in_session t ~target =
     if Document_schema.Json.equal (identity t.target) (identity target)
-    then create t.adapter ~target
+    then Result.map (t.adapter.bind target) ~f:(fun () -> { t with target })
     else Error Preparation_error.Target_mismatch
   ;;
+
+  let derive t ~target = derive_in_session (detach t) ~target
 end
 
 type resolver = Request.Target.t -> (Context.t, Preparation_error.t) Result.t

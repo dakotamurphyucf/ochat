@@ -130,11 +130,26 @@ type t =
   ; credentials :
       sw:Eio.Switch.t -> Credential_identity.t -> (D.Auth.lease, D.Auth.error) Result.t
   ; status : Credential_identity.t -> Status.availability
+  ; transport_policy : Inference.Observation.Transport_policy.t
   ; limits : Inference_runtime.Limits.t
   }
 
-let create driver ~authorize ~credentials ~status ~limits =
-  { driver; entries = String.Table.create (); authorize; credentials; status; limits }
+let create
+      ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
+      driver
+      ~authorize
+      ~credentials
+      ~status
+      ~limits
+  =
+  { driver
+  ; entries = String.Table.create ()
+  ; authorize
+  ; credentials
+  ; status
+  ; transport_policy
+  ; limits
+  }
 ;;
 
 let identity entry =
@@ -360,6 +375,8 @@ let resolve t ~principal target =
     |> Result.map_error ~f:(fun error -> Error.Preparation error)
   in
   Inference_runtime.Context.create adapter ~target
+  |> Result.map ~f:(fun context ->
+    Inference_runtime.Context.with_transport_policy context t.transport_policy)
   |> Result.map_error ~f:(fun error -> Error.Preparation error)
 ;;
 

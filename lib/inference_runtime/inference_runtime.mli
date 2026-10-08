@@ -14,6 +14,8 @@ module Preparation_error : sig
     | Unsupported_setting
     | Incompatible_replay
     | Asset_unavailable
+    | Transport_unavailable
+    | Session_closed
     | Invalid_preparation
     | Request_limit of Document_schema.Error.t
   [@@deriving equal, sexp_of]
@@ -27,6 +29,8 @@ module Contract_error : sig
     | Conflicting_candidate
     | Missing_candidate
     | Invalid_candidate
+    | Missing_transport
+    | Conflicting_transport
     | Invalid_usage
     | Conflicting_usage
     | Backend_terminal
@@ -107,9 +111,13 @@ module Plan : sig
 
       Expected auth/transport/provider failures return a truthful receipt.
       Unexpected exceptions, Eio cancellation and observer failures propagate.
-      The closure performs no retry, transport fallback or interactive login.
+      The closure performs no retry or interactive login. Explicit prefer-WS policy
+      may select SSE only before any WS inference application submission; actual
+      selected transport is published independently of immutable configuration.
       It delivers callbacks serially in this attempt's dynamic lifetime; none may
-      escape after return. Concurrent or detached callbacks violate ownership. *)
+      escape after return. When policy is explicitly captured, normal submitted
+      receipts require exactly one matching transport selection before response
+      evidence. Concurrent or detached callbacks violate ownership. *)
   val create
     :  request:Inference.Request.t
     -> configuration:Inference.Observation.Configuration.t
@@ -125,6 +133,8 @@ module Plan : sig
     -> (t, Preparation_error.t) Result.t
 end
 
+module Session = Session
+
 module Adapter : sig
   type t
 
@@ -133,13 +143,27 @@ module Adapter : sig
       checks the actual captured profile/account/endpoint/revision against host
       policy. [prepare] returns a plan bound to this exact request and identity. *)
   val create
-    :  id:string
+    :  ?prepare_with_policy:
+         (policy:Inference.Observation.Transport_policy.t
+          -> preparation_id:string
+          -> Inference.Request.t
+          -> (Plan.t, Preparation_error.t) Result.t)
+    -> ?open_session:
+         (Session.t
+          -> policy:Inference.Observation.Transport_policy.t
+          -> ( preparation_id:string
+               -> Inference.Request.t
+               -> (Plan.t, Preparation_error.t) Result.t
+               , Preparation_error.t )
+               Result.t)
+    -> id:string
     -> limits:Limits.t
     -> bind:(Inference.Request.Target.t -> (unit, Preparation_error.t) Result.t)
     -> prepare:
          (preparation_id:string
           -> Inference.Request.t
           -> (Plan.t, Preparation_error.t) Result.t)
+    -> unit
     -> (t, Preparation_error.t) Result.t
 end
 
@@ -201,6 +225,19 @@ module Context : sig
     -> (t, Preparation_error.t) Result.t
 
   val target : t -> Inference.Request.Target.t
+  val transport_policy : t -> Inference.Observation.Transport_policy.t
+
+  (** Retains requested policy when detaching. Auxiliary/child execution uses an
+      ephemeral per-attempt WS owner where supported; require never becomes SSE. *)
+  val detach : t -> t
+
+  val with_transport_policy : t -> Inference.Observation.Transport_policy.t -> t
+  val with_session : t -> Session.t -> (t, Preparation_error.t) Result.t
+
+  val derive_in_session
+    :  t
+    -> target:Inference.Request.Target.t
+    -> (t, Preparation_error.t) Result.t
 
   (** The request must match this complete selected target. Final history,
       guidance, tools and immutable assets are already captured. A plan with a
@@ -213,7 +250,9 @@ module Context : sig
 
   (** Same adapter/profile/revision/account/endpoint; explicit model/settings
       edits only. Omitted child overrides inherit by making no edit. A different
-      provider/account/endpoint requires an explicit host resolver/policy. *)
+      provider/account/endpoint requires an explicit host resolver/policy. This
+      operation detaches graph resources; [derive_in_session] explicitly retains
+      them for sequential turns in the same graph. *)
   val derive : t -> target:Inference.Request.Target.t -> (t, Preparation_error.t) Result.t
 end
 

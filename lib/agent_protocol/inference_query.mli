@@ -165,6 +165,16 @@ module Attempt : sig
   val usage : t -> Inference.Observation.t option
   val context : t -> Inference.Observation.t option
   val configuration : t -> Inference.Observation.Configuration.t option
+
+  (** Actual selected transport, disclosed with configuration. Initial nomination
+      in Configuration is never presented as evidence of actual WS dispatch. *)
+  val transport_selection : t -> Inference.Observation.t option
+
+  val with_transport_selection
+    :  t
+    -> Inference.Observation.t option
+    -> (t, Error.t) Result.t
+
   val diagnostics : t -> Inference.Observation.t list option
   val omitted_diagnostics : t -> int64 option
   val to_json : t -> Jsonaf.t

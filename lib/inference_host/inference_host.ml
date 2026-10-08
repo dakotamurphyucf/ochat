@@ -10,6 +10,7 @@ type t =
   { driver : D.t
   ; auth : D.Auth.resolver
   ; limits : Runtime.Limits.t
+  ; transport_policy : Inference.Observation.Transport_policy.t
   ; profile : D.Profile.t
   ; profile_revision : string option
   ; default_model : string
@@ -75,7 +76,16 @@ let make_identity namespace =
       }
 ;;
 
-let create driver ~profile ~profile_revision ~auth ~default_model ~namespace ~limits =
+let create
+      ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
+      driver
+      ~profile
+      ~profile_revision
+      ~auth
+      ~default_model
+      ~namespace
+      ~limits
+  =
   let open Result.Let_syntax in
   let%bind _ =
     A.capture_target
@@ -89,7 +99,16 @@ let create driver ~profile ~profile_revision ~auth ~default_model ~namespace ~li
   let%map adapter =
     A.create driver ~profile ~profile_revision ~auth:(A.Auth_source.Static auth) ~limits
   in
-  { driver; auth; limits; profile; profile_revision; default_model; adapter; identity }
+  { driver
+  ; auth
+  ; limits
+  ; transport_policy
+  ; profile
+  ; profile_revision
+  ; default_model
+  ; adapter
+  ; identity
+  }
 ;;
 
 let with_response_limit t ~max_body_bytes =
@@ -135,7 +154,11 @@ let override_config current config =
   Chat_response.Inference_config.apply_overrides current config ~limits:document_limits
 ;;
 
-let resolve t target = Runtime.Context.create t.adapter ~target
+let resolve t target =
+  Runtime.Context.create t.adapter ~target
+  |> Result.map ~f:(fun context ->
+    Runtime.Context.with_transport_policy context t.transport_policy)
+;;
 
 let recapture_config t ~current config =
   let open Result.Let_syntax in
