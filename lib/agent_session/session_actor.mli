@@ -1723,3 +1723,13 @@ val with_quiescent_state
   :  t
   -> f:(Session_state.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a option, Agent_protocol.Error.t) result
+
+(** Organization-only edit; accepts streaming and stopped sessions without activation. *)
+val update_metadata
+  :  t
+  -> ?command_audit:Document_schema.Document.t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected_metadata_revision:int64
+  -> patch:Agent_protocol.Session_metadata.Patch.t
+  -> unit
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result

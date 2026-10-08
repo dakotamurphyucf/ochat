@@ -73,6 +73,7 @@ actor state and authorization, not merely passing JSON validation.
 | `session.detach` | `Session.Detach_request` | `session.transcript.read` | Detach supplied attachment; idempotent mutation acknowledgement. |
 | `session.renew_owner` | `Session.Renew_owner_request` | `session.transcript.read` plus valid owner lease | Renew matching generation; owner lease and mutation result. |
 | `session.start` | `Session.Start_request` | `session.message.send` | Writable attachment; start or queue if permitted. |
+| `session.update_metadata` | `Session_metadata.Request` | `session.message.send` | Writable attachment; expected metadata revision; rename and label patch. |
 | `session.stop` | `Session.Stop_request` | `session.stop` | Writable attachment; graceful/cancel stop. |
 | `session.cancel_operation` | `Session.Cancel_operation_request` | `session.message.send` | Writable attachment; target current operation ID. |
 | `session.send_message` | `Session.Send_message_request` | `session.message.send` | Writable attachment; history ID, started/deferred disposition and optional operation ID. |
@@ -254,8 +255,34 @@ not consume a durable sequence.
 
 List requests carry `limit` and optional `cursor`, plus method-specific filters.
 Signed cursors bind identity/scopes, query, collection and host; changing any may
-invalidate them. Restart the listing on `invalid_request` rather than editing a
-cursor. History windows support bounded before/after/tail/cursor selectors and
+invalidate them. Session lists preserve the requested created/updated/name sort,
+with ascending session-ID ties. Default order is created time ascending; default
+archive selection is active records. Existing `owner_principal_id` is a deprecated
+creator filter; `creator_principal_id` names that role explicitly, while
+`active_owner_principal_id` filters the current unexpired owner lease. Conflicting
+creator aliases are invalid. Catalog results extend session JSON with `archived`
+and optional `active_owner_principal_id`; absent legacy fields mean false/none.
+
+Session cursors whose signed result data changed return `conflict` with
+`data.refresh_required=true`; query/principal/restart changes return an expired
+or invalid cursor. Streaming updates can change `updated_at` and invalidate a
+catalog cursor. Explicitly restart the listing after choosing to refresh; do not
+edit a cursor or silently combine pages from different catalog observations.
+`Admin.list_sessions_page` returns one rich catalog page, and
+`Admin.enumerate_sessions` completes all pages within explicit session/page bounds
+or returns an error. Legacy `Admin.list_sessions` maps entries to sessions and
+uses documented bounds of 100000 sessions and 100 pages.
+
+Metadata edits carry `expected_metadata_revision`, independently of streaming
+transaction revisions. Patches can set/clear names and set/remove labels, reject
+ambiguous duplicate/overlapping keys, and commit both persisted identity and
+public spec mirrors together. A metadata no-op preserves that metadata revision
+while recording its command receipt. Membership implementations share this
+organization revision. Names/labels never change the execution workspace, provider
+selection or tool grants. Archived records are listed without runtime activation;
+restoration remains a lifecycle operation.
+
+Restart other list methods on `invalid_request` rather than editing a cursor. History windows support bounded before/after/tail/cursor selectors and
 canonical/effective views. Partial windows advertise structural incompleteness;
 complete them before using them as model context.
 

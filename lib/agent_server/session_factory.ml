@@ -248,6 +248,7 @@ let session_identity principal request session_id now =
     ; updated_at = now
     ; labels = request.spec.labels
     ; generation = 0
+    ; metadata_revision = 0L
     }
 ;;
 
@@ -354,6 +355,55 @@ let metadata state =
     }
 ;;
 
+let runnable_job job =
+  match job.Agent_protocol.Job.status with
+  | Queued -> true
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> false
+;;
+
+let deliverable_job job =
+  match job.Agent_protocol.Job.delivery with
+  | Pending -> true
+  | Not_required | Delivered _ | Discarded _ -> false
+;;
+
+let active_schedule schedule =
+  match schedule.Agent_protocol.Schedule.status with
+  | Scheduled | Delivering -> true
+  | Delivered | Cancelled | Failed _ -> false
+;;
+
+let owner_grace_deadline state =
+  List.find_map state.Agent_session.Session_state.attachments ~f:(fun attachment ->
+    match attachment.Agent_protocol.Session.Attachment.mode, attachment.owner_lease with
+    | Owner_read_write, Some lease -> lease.disconnect_grace_until
+    | (Owner_read_write | Read_write | Read_only), _ -> None)
+;;
+
+let index_entry state =
+  let earliest_schedule_due =
+    state.Agent_session.Session_state.schedules
+    |> List.filter ~f:active_schedule
+    |> List.map ~f:(fun schedule -> schedule.Agent_protocol.Schedule.next_due_at)
+    |> List.min_elt ~compare:Agent_protocol.Timestamp.compare
+  in
+  Agent_store.Session_index.Entry.
+    { session = Agent_session.Session_state.summary state
+    ; runnable_job_count = List.count state.jobs ~f:runnable_job
+    ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
+    ; earliest_schedule_due
+    ; owner_grace_deadline = owner_grace_deadline state
+    ; pending_initial_start = state.pending_initial_start
+    ; archived = false
+    }
+;;
+
 let initialize_layout
       t
       ~principal
@@ -371,7 +421,7 @@ let initialize_layout
   =
   let open Result.Let_syntax in
   let instance_id = Agent_protocol.Id.Workspace_instance.create () in
-  let%map instance =
+  let%bind instance =
     Agent_session.Workspace_resolver.resolve
       ~env:t.env
       ~instance_id
@@ -392,7 +442,9 @@ let initialize_layout
       ~inference_target
   in
   on_state state;
-  metadata state
+  Agent_store.Session_store.Initial_projection.create
+    ~metadata:(metadata state)
+    ~entry:(index_entry state)
 ;;
 
 let prompt_directory revision =
@@ -3402,63 +3454,12 @@ let prepare_runtime
   |> Result.map ~f:(fun (runtime, shell) -> runtime, !shell)
 ;;
 
-let runnable_job job =
-  match job.Agent_protocol.Job.status with
-  | Queued -> true
-  | Running
-  | Waiting_permission _
-  | Waiting_completion _
-  | Succeeded
-  | Failed _
-  | Cancelled
-  | Interrupted _ -> false
-;;
-
-let deliverable_job job =
-  match job.Agent_protocol.Job.delivery with
-  | Pending -> true
-  | Not_required | Delivered _ | Discarded _ -> false
-;;
-
-let active_schedule schedule =
-  match schedule.Agent_protocol.Schedule.status with
-  | Scheduled | Delivering -> true
-  | Delivered | Cancelled | Failed _ -> false
-;;
-
-let owner_grace_deadline state =
-  List.find_map state.Agent_session.Session_state.attachments ~f:(fun attachment ->
-    match attachment.Agent_protocol.Session.Attachment.mode, attachment.owner_lease with
-    | Owner_read_write, Some lease -> lease.disconnect_grace_until
-    | (Owner_read_write | Read_write | Read_only), _ -> None)
-;;
-
-let index_entry state =
-  let earliest_schedule_due =
-    state.Agent_session.Session_state.schedules
-    |> List.filter ~f:active_schedule
-    |> List.map ~f:(fun schedule -> schedule.Agent_protocol.Schedule.next_due_at)
-    |> List.min_elt ~compare:Agent_protocol.Timestamp.compare
-  in
-  Agent_store.Session_index.Entry.
-    { session = Agent_session.Session_state.summary state
-    ; runnable_job_count = List.count state.jobs ~f:runnable_job
-    ; deliverable_job_count = List.count state.jobs ~f:deliverable_job
-    ; earliest_schedule_due
-    ; owner_grace_deadline = owner_grace_deadline state
-    ; pending_initial_start = state.pending_initial_start
-    ; archived = false
-    }
-;;
-
 let persist_metadata t handle state =
-  let open Result.Let_syntax in
-  let%bind () =
-    Agent_store.Session_store.write_metadata t.store handle (metadata state)
-  in
-  Agent_store.Session_index.upsert
-    (Agent_store.Session_store.session_index t.store)
-    (index_entry state)
+  Agent_store.Session_store.write_metadata
+    ~entry:(index_entry state)
+    t.store
+    handle
+    (metadata state)
 ;;
 
 let create_journal t handle session_id =
@@ -4717,6 +4718,15 @@ let finish_unloaded_creation t handle state ~command_audit =
             ~finally:(fun () -> Agent_store.Commit_writer.close writer));
     let persistence =
       Agent_session.Session_persistence.create
+        ~before_commit:
+          (Some
+             (fun state ->
+               Agent_store.Session_store.prepare_canonical_projection
+                 t.store
+                 handle
+                 ~metadata:(metadata state)
+                 ~entry:(index_entry state)
+               |> Result.map_error ~f:protocol_of_store))
         ~retention_preflight:(Some (create_retention_preflight t handle journal))
         ~limits:t.journal_document_limits
         ~archive_limits:t.document_limits
@@ -5527,6 +5537,15 @@ let recover_open_handle t handle =
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
   let persistence =
     Agent_session.Session_persistence.create
+      ~before_commit:
+        (Some
+           (fun state ->
+             Agent_store.Session_store.prepare_canonical_projection
+               t.store
+               handle
+               ~metadata:(metadata state)
+               ~entry:(index_entry state)
+             |> Result.map_error ~f:protocol_of_store))
       ~retention_preflight:(Some (create_retention_preflight t handle journal))
       ~limits:t.journal_document_limits
       ~archive_limits:t.document_limits
@@ -5743,8 +5762,12 @@ let index_requires_load entry =
 
 let recover_sessions t =
   let open Result.Let_syntax in
+  let%bind all =
+    Agent_store.Session_store.list_sessions_checked t.store
+    |> Result.map_error ~f:protocol_of_store
+  in
   let all =
-    Agent_store.Session_store.list_sessions t.store
+    all
     |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
   in
   let indexed =
@@ -5864,6 +5887,7 @@ let initialize_generated_layout t state ~staging_directory =
     ~f:(fun () ->
       let persistence =
         Agent_session.Session_persistence.create
+          ~before_commit:None
           ~retention_preflight:None
           ~limits:t.journal_document_limits
           ~archive_limits:t.document_limits
@@ -5889,8 +5913,12 @@ let initialize_generated_layout t state ~staging_directory =
             (Agent_session.Session_persistence.transaction_hash persistence)
           state
       in
-      let%map () = Store.Durable_file.sync_directory ~env:t.env ~path:staging_directory in
-      metadata state)
+      let%bind () =
+        Store.Durable_file.sync_directory ~env:t.env ~path:staging_directory
+      in
+      Store.Session_store.Initial_projection.create
+        ~metadata:(metadata state)
+        ~entry:(index_entry state))
 ;;
 
 let with_generated_creation_lock t f =
@@ -5905,6 +5933,15 @@ let with_generated_creation_lock t f =
 ;;
 
 let workspace_retained t (state : Agent_session.Session_state.t) =
+  let module Key = struct
+    module T = struct
+      type t = Agent_protocol.Id.Session.t [@@deriving compare, sexp]
+    end
+
+    include T
+    include Comparator.Make (T)
+  end
+  in
   let module D = Agent_store.Delegation_store in
   let module P = Agent_protocol in
   D.with_records
@@ -5916,13 +5953,19 @@ let workspace_retained t (state : Agent_session.Session_state.t) =
          runtime resource admission. Read index hints conservatively, without
          entering another actor while workspace maintenance holds this owner. *)
       let index = Agent_store.Session_store.session_index t.store in
+      let open Result.Let_syntax in
+      let%bind entries = Agent_store.Session_index.list_checked index in
+      let by_id =
+        Map.of_alist_exn
+          (module Key)
+          (List.map entries ~f:(fun entry ->
+             entry.Agent_store.Session_index.Entry.session.id, entry))
+      in
       Ok
         (List.exists records ~f:(fun record ->
            match record.D.stage, record.revocation, record.admission.lifetime with
            | Linked, None, Independent _ ->
-             (match
-                Agent_store.Session_index.find index record.admission.child_session_id
-              with
+             (match Map.find by_id record.admission.child_session_id with
               | Some entry ->
                 (not entry.archived)
                 && (entry.pending_initial_start
@@ -6179,49 +6222,53 @@ let resume_generated_initial_start t entry =
 
 let resume_generated_initial_starts t =
   with_generated_creation_lock t (fun () ->
-    Agent_store.Session_store.list_sessions t.store
-    |> List.filter ~f:(fun entry ->
-      entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
-    |> List.iter ~f:(fun indexed ->
-      let entry =
-        match Session_registry.find t.registry indexed.session.id with
-        | Some entry -> Ok (Some entry)
-        | None ->
-          let open Result.Let_syntax in
-          let module D = Agent_store.Delegation_store in
-          (* A lost link acknowledgement may close a new actor before registry
+    match Agent_store.Session_store.list_sessions_checked t.store with
+    | Error _ -> () (* Failed projection availability grants no automatic start. *)
+    | Ok entries ->
+      entries
+      |> List.filter ~f:(fun entry ->
+        entry.Agent_store.Session_index.Entry.pending_initial_start && not entry.archived)
+      |> List.iter ~f:(fun indexed ->
+        let entry =
+          match Session_registry.find t.registry indexed.session.id with
+          | Some entry -> Ok (Some entry)
+          | None ->
+            let open Result.Let_syntax in
+            let module D = Agent_store.Delegation_store in
+            (* A lost link acknowledgement may close a new actor before registry
              publication. Publish only a privately linked durable child here;
              unlinked creation stages remain unavailable to the scheduler. *)
-          let%bind linked =
-            D.with_records
-              (Agent_store.Session_store.delegations t.store)
-              ~max_records:t.limits.delegation_recovery_max_count
-              ~max_bytes:t.limits.delegation_recovery_max_bytes
-              ~f:(fun records ->
-                Ok
-                  (List.exists records ~f:(fun record ->
-                     D.equal_stage record.D.stage Linked
-                     && Agent_protocol.Id.Session.equal
-                          record.admission.child_session_id
-                          indexed.session.id
-                     && Option.equal
-                          Agent_protocol.Id.Prompt_revision.equal
-                          indexed.session.prompt_revision
-                          (Some record.admission.revision_id))))
-            |> Result.map_error ~f:protocol_of_store
-          in
-          (match linked with
-           | false -> Ok None
-           | true ->
-             Session_registry.index t.registry indexed;
-             Session_registry.load t.registry indexed.session.id
-             |> Result.map ~f:Option.some)
-      in
-      match entry with
-      | Error _ | Ok None -> ()
-      | Ok (Some entry) ->
-        ignore
-          (resume_generated_initial_start t entry : (unit, Agent_protocol.Error.t) result)))
+            let%bind linked =
+              D.with_records
+                (Agent_store.Session_store.delegations t.store)
+                ~max_records:t.limits.delegation_recovery_max_count
+                ~max_bytes:t.limits.delegation_recovery_max_bytes
+                ~f:(fun records ->
+                  Ok
+                    (List.exists records ~f:(fun record ->
+                       D.equal_stage record.D.stage Linked
+                       && Agent_protocol.Id.Session.equal
+                            record.admission.child_session_id
+                            indexed.session.id
+                       && Option.equal
+                            Agent_protocol.Id.Prompt_revision.equal
+                            indexed.session.prompt_revision
+                            (Some record.admission.revision_id))))
+              |> Result.map_error ~f:protocol_of_store
+            in
+            (match linked with
+             | false -> Ok None
+             | true ->
+               Session_registry.index t.registry indexed;
+               Session_registry.load t.registry indexed.session.id
+               |> Result.map ~f:Option.some)
+        in
+        match entry with
+        | Error _ | Ok None -> ()
+        | Ok (Some entry) ->
+          ignore
+            (resume_generated_initial_start t entry
+             : (unit, Agent_protocol.Error.t) result)))
 ;;
 
 (* Source-specific admission runs under the parent's runtime lease. Everything
@@ -6503,6 +6550,7 @@ let create_delegated_session
                       ; updated_at = record.admission.created_at
                       ; labels = []
                       ; generation = 0
+                      ; metadata_revision = 0L
                       }
                     ~spec:
                       { before.spec with

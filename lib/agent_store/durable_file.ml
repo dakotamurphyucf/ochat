@@ -32,6 +32,13 @@ let write_temporary path contents ~on_open =
     Eio.File.sync flow)
 ;;
 
+exception Unsupported_directory_sync_provider
+
+let unsupported_directory_sync ~operation ~path =
+  Store_error.Io
+    { operation; path; message = "directory sync requires a native directory FD" }
+;;
+
 let sync_directory_exn path =
   (* Open "." relative to a retained directory capability: Linux openat2 rejects
      the empty relative path returned by Path.with_open_dir. *)
@@ -42,7 +49,7 @@ let sync_directory_exn path =
         | `Directory -> ()
         | _ -> invalid_arg "sync_directory requires a directory");
        match Eio_unix.Resource.fd_opt directory with
-       | None -> failwith "directory sync requires a native directory FD"
+       | None -> raise Unsupported_directory_sync_provider
        | Some descriptor ->
          Eio_unix.Fd.use_exn "fsync directory" descriptor (fun unix_descriptor ->
            Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
@@ -61,6 +68,8 @@ let replace_paths ~durability ~path ~temporary_eio ~destination ~directory conte
           | Flush_file_and_directory -> sync_directory_exn directory);
          Ok ()
        with
+       | Unsupported_directory_sync_provider ->
+         Error (unsupported_directory_sync ~operation:"replace" ~path)
        | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
          Error (Store_error.of_exn ~operation:"replace" ~path exn))
     ~finally:(fun () ->
@@ -186,5 +195,9 @@ let sync_directory ~env ~path =
       sync_directory_exn (eio_path env path);
       Ok ()
     with
-    | exn -> Error (Store_error.of_exn ~operation:"sync directory" ~path exn))
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | Unsupported_directory_sync_provider ->
+      Error (unsupported_directory_sync ~operation:"sync directory" ~path)
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"sync directory" ~path exn))
 ;;

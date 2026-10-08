@@ -109,6 +109,9 @@ module Spec : sig
     -> (t, Error.t) result
 
   val to_json : t -> Jsonaf.t
+
+  (** Structural decoding retains historical metadata strings; authored creation
+      additionally uses [create], including at Create_request decoding. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
@@ -135,6 +138,9 @@ type t =
   ; workspace_instance : Id.Workspace_instance.t option
   ; active_operation : Operation.t option
   ; revision : int64
+  ; metadata_revision : int64 [@sexp.default 0L]
+    (** Nonnegative organization counter. Streaming changes advance [revision]
+        while leaving this counter intact. Legacy summaries default to zero. *)
   ; latest_event_sequence : int64
   ; inference_summary : Inference_summary.t
         [@sexp.default History_entry.Payload.Presence.Absent]
@@ -192,6 +198,10 @@ module List_request : sig
     ; workspace_id : Id.Workspace_definition.t option
     ; owner_principal_id : Id.Principal.t option
     ; labels : (string * string) list
+    ; sort : Session_catalog_query.Sort.t
+    ; archive : Session_catalog_query.Archive_filter.t
+    ; creator_principal_id : Id.Principal.t option
+    ; active_owner_principal_id : Id.Principal.t option
     }
   [@@deriving sexp]
 

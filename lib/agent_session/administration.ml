@@ -38,13 +38,21 @@ let spec state options =
 ;;
 
 let reset_state (state : Session_state.t) options =
+  let labels = if options.keep_labels then state.identity.labels else [] in
+  let metadata_revision =
+    if List.equal [%equal: string * string] labels state.identity.labels
+    then state.identity.metadata_revision
+    else Int64.succ state.identity.metadata_revision
+  in
+  let spec = spec state options in
   { state with
-    Session_state.identity =
+    identity =
       { state.identity with
         generation = state.identity.generation + 1
-      ; labels = (if options.keep_labels then state.identity.labels else [])
+      ; labels
+      ; metadata_revision
       }
-  ; spec = spec state options
+  ; spec = { spec with protocol = { spec.protocol with labels } }
   ; lifecycle = { desired = Stopped; observed = Stopped }
   ; pending_initial_start = false
   ; conversation = conversation state options
@@ -78,6 +86,11 @@ let plan_reset state options =
          ~message:"session generation overflow"
          ~retryable:false
          ())
+  else if
+    (not options.keep_labels)
+    && (not (List.is_empty state.identity.labels))
+    && Int64.equal state.identity.metadata_revision Int64.max_value
+  then Error (Agent_protocol.Error.invalid_request "metadata revision exhausted")
   else (
     let candidate = reset_state state options in
     let%map () =

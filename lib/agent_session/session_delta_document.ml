@@ -49,6 +49,18 @@ let atom_to_jsonaf ~limits ~state_document delta =
           [ "kind", `String "lifecycle_changed"
           ; "lifecycle", Session_state_document.lifecycle_to_jsonaf value
           ])
+  | Metadata_changed (values, revision) ->
+    Ok
+      (`Object
+          [ "kind", `String "metadata_changed"
+          ; "display_name", X.option_json X.text_json values.display_name
+          ; ( "labels"
+            , X.list_json
+                (fun (name, value) ->
+                   `Object [ "name", `String name; "value", `String value ])
+                values.labels )
+          ; "metadata_revision", X.int64_json revision
+          ])
   | Initial_start_consumed -> Ok (`Object [ "kind", `String "initial_start_consumed" ])
   | Stop_epoch_changed value ->
     Ok (`Object [ "kind", `String "stop_epoch_changed"; "epoch", X.int64_json value ])
@@ -351,6 +363,21 @@ let atom_of_jsonaf ~limits json =
     Result.map
       (X.required fields "lifecycle" Session_state_document.lifecycle_of_jsonaf)
       ~f:(fun value -> Delta.Lifecycle_changed value)
+  | "metadata_changed" ->
+    let%bind display_name = X.required fields "display_name" (X.nullable J.string) in
+    let%bind labels =
+      X.required
+        fields
+        "labels"
+        (X.list (fun json ->
+           let%bind fields = X.object_ json in
+           let%bind name = X.required fields "name" J.string in
+           let%map value = X.required fields "value" J.string in
+           name, value))
+    in
+    let%bind values = P.Session_metadata.Values.create ~display_name ~labels in
+    let%map revision = X.required fields "metadata_revision" X.nonnegative_int64 in
+    Delta.Metadata_changed (values, revision)
   | "initial_start_consumed" -> Ok Delta.Initial_start_consumed
   | "stop_epoch_changed" ->
     Result.map (X.required fields "epoch" X.nonnegative_int64) ~f:(fun value ->
@@ -543,6 +570,17 @@ let shape =
                , X.shape_exn
                    [ "kind", D.Shape.value; "lifecycle", Session_record_shapes.lifecycle ]
                )
+             ; ( "metadata_changed"
+               , X.shape_exn
+                   [ "kind", D.Shape.value
+                   ; "display_name", X.nullable_shape D.Shape.value
+                   ; ( "labels"
+                     , X.array_shape_exn
+                         ~allow_empty_identity:true
+                         ~identity_field:"name"
+                         (X.fields_shape [ "name"; "value" ]) )
+                   ; "metadata_revision", D.Shape.value
+                   ] )
              ; "initial_start_consumed", X.shape_exn [ "kind", D.Shape.value ]
              ; ( "stop_epoch_changed"
                , X.shape_exn [ "kind", D.Shape.value; "epoch", D.Shape.value ] )

@@ -70,6 +70,72 @@ let page t principal command request encode values =
     Agent_protocol.Page.{ items; next_cursor })
 ;;
 
+let ordered_sessions t principal command request values =
+  let open Result.Let_syntax in
+  let authority =
+    sign t (Jsonaf.to_string (Agent_protocol.Principal.to_json principal))
+  in
+  let query = sign t (Jsonaf.to_string (query command)) in
+  let data =
+    sign
+      t
+      (Jsonaf.to_string
+         (`Array (List.map values ~f:Agent_protocol.Session_catalog.to_json)))
+  in
+  let%bind offset =
+    match request.Agent_protocol.Page.Request.cursor with
+    | None -> Ok 0
+    | Some cursor ->
+      (match Base64.decode (Agent_protocol.Page.Cursor.to_string cursor) with
+       | Error _ -> Error (invalid ())
+       | Ok text ->
+         (match String.split text ~on:':' with
+          | [ "catalog"; actual_authority; actual_query; actual_data; offset; signature ]
+            ->
+            let unsigned =
+              String.concat
+                ~sep:":"
+                [ "catalog"; actual_authority; actual_query; actual_data; offset ]
+            in
+            if
+              (not (String.equal signature (sign t unsigned)))
+              || (not (String.equal actual_authority authority))
+              || not (String.equal actual_query query)
+            then Error (invalid ())
+            else if not (String.equal actual_data data)
+            then
+              Error
+                (Agent_protocol.Error.create
+                   Conflict
+                   ~message:"session catalog changed; refresh required"
+                   ~data:(`Object [ "refresh_required", `True ])
+                   ~retryable:false
+                   ())
+            else (
+              match Int.of_string_opt offset with
+              | Some offset when offset >= 0 -> Ok offset
+              | _ -> Error (invalid ()))
+          | _ -> Error (invalid ())))
+  in
+  if offset > List.length values
+  then Error (invalid ())
+  else (
+    let items = List.take (List.drop values offset) request.limit in
+    let next = offset + List.length items in
+    let%map next_cursor =
+      if next >= List.length values
+      then Ok None
+      else (
+        let unsigned =
+          String.concat ~sep:":" [ "catalog"; authority; query; data; Int.to_string next ]
+        in
+        Agent_protocol.Page.Cursor.of_string
+          (Base64.encode_exn (unsigned ^ ":" ^ sign t unsigned))
+        |> Result.map ~f:Option.some)
+    in
+    Agent_protocol.Page.{ items; next_cursor })
+;;
+
 let lists t principal command result =
   let open Result.Let_syntax in
   match command, result with
@@ -82,7 +148,7 @@ let lists t principal command result =
     in
     Agent_protocol.Method_result.Workspace_list p
   | Session_list r, Session_list p ->
-    let%map p = page t principal command r.page Agent_protocol.Session.to_json p.items in
+    let%map p = ordered_sessions t principal command r.page p.items in
     Agent_protocol.Method_result.Session_list p
   | Permission_list r, Permission_list p ->
     let%map p =

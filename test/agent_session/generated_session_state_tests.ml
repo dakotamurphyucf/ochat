@@ -148,22 +148,24 @@ let%expect_test
         |> document_ok
       in
       assert (Result.is_error (Documents.decode ~limits missing));
-      List.iter [ 0; 4 ] ~f:(fun version ->
-        let json =
-          match Document_schema.Document.json pending_document with
-          | `Object fields ->
-            `Object
-              (List.map fields ~f:(fun (key, value) ->
-                 ( key
-                 , if String.equal key "schema_version"
-                   then `Number (Int.to_string version)
-                   else value )))
-          | _ -> assert false
-        in
-        assert (
-          Result.is_error
-            (Document_schema.Document.inspect ~limits json
-             |> Result.bind ~f:(Documents.decode ~limits))));
+      List.iter
+        [ 0; Document_schema.Document.version pending_document + 1 ]
+        ~f:(fun version ->
+          let json =
+            match Document_schema.Document.json pending_document with
+            | `Object fields ->
+              `Object
+                (List.map fields ~f:(fun (key, value) ->
+                   ( key
+                   , if String.equal key "schema_version"
+                     then `Number (Int.to_string version)
+                     else value )))
+            | _ -> assert false
+          in
+          assert (
+            Result.is_error
+              (Document_schema.Document.inspect ~limits json
+               |> Result.bind ~f:(Documents.decode ~limits))));
       let wire =
         P.Session.to_json (State.summary state) |> P.Session.of_json |> protocol_ok
       in

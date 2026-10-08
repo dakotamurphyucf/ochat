@@ -17,12 +17,17 @@ type t
 
 (** [retention_preflight], when supplied, must belong to the same journal/session
     and fixed policy as [writer] for this owner's lifetime. Creation/reopen must
-    supply a fresh scope; staging and direct callers may pass [None]. *)
+    supply a fresh scope; staging and direct callers may pass [None].
+    [before_commit] prepares recovery intent after all pure admission and before
+    first archive/journal effect. Live indexed store owners supply it. [None] is
+    permitted for private staging journals unreachable until marked atomic layout
+    installation, or direct callers that do not use indexed startup. *)
 val create
   :  archive:
        (Session_state.Compaction_archive.t
         -> Document_schema.Document.t
         -> (unit, Agent_protocol.Error.t) result)
+  -> before_commit:(Session_state.t -> (unit, Agent_protocol.Error.t) result) option
   -> command_accepted:(Document_schema.Document.t -> int64 -> unit)
   -> writer:Agent_store.Commit_writer.t
   -> durability:Agent_store.Journal_segment.durability

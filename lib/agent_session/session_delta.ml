@@ -4,6 +4,7 @@ type t =
   | Batch of t list
   | Created of Session_state.t
   | Lifecycle_changed of Session_state.Lifecycle.t
+  | Metadata_changed of Agent_protocol.Session_metadata.Values.t * int64
   | Initial_start_consumed
   | Stop_epoch_changed of int64
   | Parent_stop_epoch_changed of int64
@@ -176,6 +177,36 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
           if Managed_submission.same_key value receipt then receipt else value)
     }
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
+  | Metadata_changed (values, metadata_revision) ->
+    let open Result.Let_syntax in
+    let%bind values =
+      Agent_protocol.Session_metadata.Values.create
+        ~display_name:values.display_name
+        ~labels:values.labels
+    in
+    if
+      Int64.equal state.identity.metadata_revision Int64.max_value
+      || not (Int64.equal metadata_revision (Int64.succ state.identity.metadata_revision))
+    then
+      Error (Agent_protocol.Error.invalid_request "metadata revision must advance once")
+    else
+      Ok
+        { state with
+          identity =
+            { state.identity with
+              display_name = values.display_name
+            ; labels = values.labels
+            ; metadata_revision
+            }
+        ; spec =
+            { state.spec with
+              protocol =
+                { state.spec.protocol with
+                  display_name = values.display_name
+                ; labels = values.labels
+                }
+            }
+        }
   | Initial_start_consumed -> Ok { state with pending_initial_start = false }
   | Parent_stop_epoch_changed epoch ->
     (match

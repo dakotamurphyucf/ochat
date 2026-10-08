@@ -133,6 +133,7 @@ let identity_to_jsonaf (t : S.Identity.t) =
     ; "updated_at", P.Timestamp.to_json t.updated_at
     ; "labels", pairs_to_jsonaf t.labels
     ; "generation", X.host_counter_to_json t.generation
+    ; "metadata_revision", X.int64_json t.metadata_revision
     ]
 ;;
 
@@ -148,6 +149,9 @@ let identity_of_jsonaf json =
   let%bind updated_at = X.required fields "updated_at" P.Timestamp.of_json in
   let%bind labels = X.required fields "labels" pairs_of_jsonaf in
   let%bind generation = X.required fields "generation" X.host_counter_of_json in
+  let%bind metadata_revision =
+    X.required fields "metadata_revision" X.nonnegative_int64
+  in
   let t : S.Identity.t =
     { session_id
     ; display_name
@@ -156,6 +160,7 @@ let identity_of_jsonaf json =
     ; updated_at
     ; labels
     ; generation
+    ; metadata_revision
     }
   in
   Ok t
@@ -170,6 +175,7 @@ let identity_shape =
     ; "updated_at", Document_schema.Shape.value
     ; "labels", pairs_shape
     ; "generation", Document_schema.Shape.value
+    ; "metadata_revision", Document_schema.Shape.value
     ]
 ;;
 
@@ -839,14 +845,21 @@ let upgrade document ~limits =
       let%bind identity =
         Agent_store.Document_fields.required payload "identity" Result.return
       in
-      let%bind identity = identity_of_jsonaf identity |> X.document_result in
+      let%bind identity_fields = X.object_ identity |> X.document_result in
+      let%bind session_id =
+        X.required identity_fields "session_id" P.Id.Session.of_json |> X.document_result
+      in
+      let%bind generation =
+        X.required identity_fields "generation" X.host_counter_of_json
+        |> X.document_result
+      in
       let%bind ledger =
         match D.Json.field payload ~name:"inference_ledger" with
         | Absent ->
           let%bind ledger =
             Inference_ledger.create
-              ~session_id:identity.session_id
-              ~generation:identity.generation
+              ~session_id
+              ~generation
               ~before_tracking_unknown:true
               ~limits:Inference_ledger.Limits.default
             |> Result.map_error ~f:ledger_error
@@ -869,8 +882,8 @@ let upgrade document ~limits =
             Inference_ledger.validate
               ledger
               ~limits:Inference_ledger.Limits.default
-              ~session_id:identity.session_id
-              ~generation:identity.generation
+              ~session_id
+              ~generation
             |> Result.map_error ~f:ledger_error
             |> X.document_result
           in
@@ -883,13 +896,75 @@ let upgrade document ~limits =
         else Ok (`Object (fields @ [ "inference_ledger", D.Document.json ledger ]))
       | _ -> Agent_store.Document_fields.invalid "payload" "must be an object")
   in
+  let%bind metadata_step =
+    D.Conversion.Step.of_function ~kind:"session.state" ~from_version:3 ~f:(fun payload ->
+      let%bind identity =
+        Agent_store.Document_fields.required payload "identity" Result.return
+      in
+      let%bind display_name =
+        Agent_store.Document_fields.required identity "display_name" Result.return
+      in
+      let%bind labels =
+        Agent_store.Document_fields.required
+          identity
+          "labels"
+          Agent_store.Document_fields.array
+      in
+      let%bind labels =
+        List.map labels ~f:(fun pair ->
+          let%bind name =
+            Agent_store.Document_fields.required pair "name" Result.return
+          in
+          let%bind value =
+            Agent_store.Document_fields.required pair "value" Result.return
+          in
+          match name with
+          | `String name -> Ok (name, value)
+          | _ -> Agent_store.Document_fields.invalid "labels.name" "must be a string")
+        |> Result.all
+      in
+      let%bind spec = Agent_store.Document_fields.required payload "spec" Result.return in
+      let%bind protocol =
+        Agent_store.Document_fields.required spec "protocol" Result.return
+      in
+      match identity, spec, protocol, payload with
+      | ( `Object identity_fields
+        , `Object spec_fields
+        , `Object protocol_fields
+        , `Object fields ) ->
+        let remove fields key =
+          List.filter fields ~f:(fun (name, _) -> not (String.equal name key))
+        in
+        let replace fields key value = remove fields key @ [ key, value ] in
+        let identity =
+          if List.Assoc.mem identity_fields "metadata_revision" ~equal:String.equal
+          then identity
+          else `Object (identity_fields @ [ "metadata_revision", `String "0" ])
+        in
+        let%bind protocol_fields =
+          match display_name with
+          | `Null -> Ok (remove protocol_fields "display_name")
+          | `String _ -> Ok (replace protocol_fields "display_name" display_name)
+          | _ ->
+            Agent_store.Document_fields.invalid "display_name" "must be a string or null"
+        in
+        let protocol = `Object (replace protocol_fields "labels" (`Object labels)) in
+        Ok
+          (`Object
+              (replace
+                 (replace fields "identity" identity)
+                 "spec"
+                 (`Object (replace spec_fields "protocol" protocol))))
+      | _ ->
+        Agent_store.Document_fields.invalid "identity" "metadata mirrors must be objects")
+  in
   let%bind conversion =
     D.Conversion.create
       ~limits
-      ~targets:[ "session.state", 3 ]
-      ~max_steps:2
+      ~targets:[ "session.state", 4 ]
+      ~max_steps:3
       ~max_operations:100_000
-      ~steps:[ step; ledger_step ]
+      ~steps:[ step; ledger_step; metadata_step ]
   in
   D.Conversion.upgrade conversion document
 ;;
@@ -899,7 +974,7 @@ let codec ~limits =
     D.Domain_codec.create_validated
       ~limits
       ~kind:"session.state"
-      ~version:3
+      ~version:4
       ~shape
       ~supported_semantics:[]
       ~validate:(fun state -> X.document_result (S.validate state))

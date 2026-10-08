@@ -656,6 +656,7 @@ let session_summary_fields =
   ; "workspace_instance", v
   ; "active_operation", n operation
   ; "revision", v
+  ; "metadata_revision", v
   ; "inference_summary", n inference_summary
   ; "latest_event_sequence", v
   ]

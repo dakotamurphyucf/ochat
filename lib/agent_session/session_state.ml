@@ -9,6 +9,7 @@ module Identity = struct
     ; updated_at : Agent_protocol.Timestamp.t
     ; labels : (string * string) list
     ; generation : int
+    ; metadata_revision : int64 [@sexp.default 0L]
     }
   [@@deriving sexp]
 end
@@ -355,7 +356,16 @@ let fresh_inference_ledger_exn (identity : Identity.t) =
   |> Result.ok_or_failwith
 ;;
 
-let create ~identity ~spec ~initial_history =
+let create ~(identity : Identity.t) ~(spec : Spec.t) ~initial_history =
+  let spec =
+    { spec with
+      Spec.protocol =
+        { spec.protocol with
+          display_name = identity.Identity.display_name
+        ; labels = identity.labels
+        }
+    }
+  in
   let inference_ledger = fresh_inference_ledger_exn identity in
   let desired =
     if spec.Spec.protocol.start_immediately
@@ -941,6 +951,27 @@ let validate_domain t =
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_domain t in
+  let%bind identity_metadata =
+    Agent_protocol.Session_metadata.Values.create
+      ~display_name:t.identity.display_name
+      ~labels:t.identity.labels
+  in
+  let%bind spec_metadata =
+    Agent_protocol.Session_metadata.Values.create
+      ~display_name:t.spec.protocol.display_name
+      ~labels:t.spec.protocol.labels
+  in
+  let%bind () =
+    if
+      Int64.(t.identity.metadata_revision < zero)
+      || not
+           (Agent_protocol.Session_metadata.Values.equal identity_metadata spec_metadata)
+    then
+      Error
+        (Agent_protocol.Error.invalid_request
+           "session metadata mirrors or revision are inconsistent")
+    else Ok ()
+  in
   Inference_ledger.validate
     t.inference_ledger
     ~limits:Inference_ledger.Limits.default
@@ -986,6 +1017,7 @@ let summary t =
     ; workspace_instance = Some t.spec.workspace_instance.id
     ; active_operation = t.active_operation
     ; revision = t.counters.revision
+    ; metadata_revision = t.identity.metadata_revision
     ; inference_summary = Value (Inference_ledger.summary t.inference_ledger)
     ; latest_event_sequence = t.counters.event_sequence
     }

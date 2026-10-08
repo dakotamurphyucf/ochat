@@ -356,7 +356,8 @@ module Spec = struct
       validate_optional_text "permission profile" permission_profile
     in
     let%bind display_name = validate_optional_text "display name" display_name in
-    let%map labels = validate_labels labels in
+    let%bind labels = validate_labels labels in
+    let%map metadata = Session_metadata.Values.create ~display_name ~labels in
     { execution_host
     ; prompt
     ; workspace
@@ -364,8 +365,8 @@ module Spec = struct
     ; persistence
     ; permission_profile
     ; start_immediately
-    ; display_name
-    ; labels
+    ; display_name = metadata.display_name
+    ; labels = metadata.labels
     }
   ;;
 
@@ -425,17 +426,26 @@ module Spec = struct
     let%bind permission_profile, start_immediately, display_name, labels =
       decode_metadata fields
     in
-    create
-      ~execution_host
-      ~prompt
-      ~workspace
-      ~liveness
-      ~persistence
-      ?permission_profile
-      ~start_immediately
-      ?display_name
-      ~labels
-      ()
+    let%bind () = validate_policy execution_host liveness persistence in
+    let%bind () =
+      match prompt, persistence with
+      | Prompt_ref.Generated _, Transient ->
+        Error
+          (Protocol_error.invalid_request
+             "generated sessions require durable delegation admission")
+      | (Catalog _ | Local_path _ | Generated _), (Durable | Transient) -> Ok ()
+    in
+    let%map metadata = Session_metadata.Values.create ~display_name ~labels in
+    { execution_host
+    ; prompt
+    ; workspace
+    ; liveness
+    ; persistence
+    ; permission_profile
+    ; start_immediately
+    ; display_name = metadata.display_name
+    ; labels = metadata.labels
+    }
   ;;
 end
 
@@ -475,6 +485,7 @@ type t =
   ; workspace_instance : Id.Workspace_instance.t option
   ; active_operation : Operation.t option
   ; revision : int64
+  ; metadata_revision : int64 [@sexp.default 0L]
   ; latest_event_sequence : int64
   ; inference_summary : Inference_summary.t
         [@sexp.default History_entry.Payload.Presence.Absent]
@@ -498,6 +509,7 @@ let to_json t =
         Id.Workspace_instance.to_json
     ; optional_field "active_operation" t.active_operation Operation.to_json
     ; Some ("revision", int64_to_json t.revision)
+    ; Some ("metadata_revision", int64_to_json t.metadata_revision)
     ; Some ("latest_event_sequence", int64_to_json t.latest_event_sequence)
     ]
     |> List.filter_opt
@@ -564,6 +576,10 @@ let of_json json =
   in
   let%bind prompt_revision, workspace_instance = decode_summary_references fields in
   let%bind revision = Json_codec.required_as fields "revision" nonnegative_int64 in
+  let%bind metadata_revision =
+    Json_codec.optional_as fields "metadata_revision" nonnegative_int64
+  in
+  let metadata_revision = Option.value metadata_revision ~default:0L in
   let%bind latest_event_sequence =
     Json_codec.required_as fields "latest_event_sequence" nonnegative_int64
   in
@@ -591,6 +607,7 @@ let of_json json =
       ; workspace_instance
       ; active_operation
       ; revision
+      ; metadata_revision
       ; latest_event_sequence
       ; inference_summary
       }
@@ -700,7 +717,20 @@ module Create_request = struct
   let of_json json =
     let open Result.Let_syntax in
     let%bind fields = Json_codec.fields json in
-    let%bind spec = Json_codec.required_as fields "spec" Spec.of_json in
+    let%bind decoded = Json_codec.required_as fields "spec" Spec.of_json in
+    let%bind spec =
+      Spec.create
+        ~execution_host:decoded.execution_host
+        ~prompt:decoded.prompt
+        ~workspace:decoded.workspace
+        ~liveness:decoded.liveness
+        ~persistence:decoded.persistence
+        ?permission_profile:decoded.permission_profile
+        ~start_immediately:decoded.start_immediately
+        ?display_name:decoded.display_name
+        ~labels:decoded.labels
+        ()
+    in
     let%bind requested_mode =
       Json_codec.optional_as fields "requested_mode" attachment_mode_of_json
     in
@@ -720,12 +750,23 @@ module List_request = struct
     ; workspace_id : Id.Workspace_definition.t option
     ; owner_principal_id : Id.Principal.t option
     ; labels : (string * string) list
+    ; sort : Session_catalog_query.Sort.t
+    ; archive : Session_catalog_query.Archive_filter.t
+    ; creator_principal_id : Id.Principal.t option
+    ; active_owner_principal_id : Id.Principal.t option
     }
   [@@deriving sexp]
 
   let to_json t =
     let filters =
-      [ optional_field "desired_state" t.desired_state (fun state ->
+      [ Some ("sort", Session_catalog_query.Sort.to_json t.sort)
+      ; Some ("archive", Session_catalog_query.Archive_filter.to_json t.archive)
+      ; optional_field "creator_principal_id" t.creator_principal_id Id.Principal.to_json
+      ; optional_field
+          "active_owner_principal_id"
+          t.active_owner_principal_id
+          Id.Principal.to_json
+      ; optional_field "desired_state" t.desired_state (fun state ->
           `String (desired_state_to_string state))
       ; optional_field "prompt_id" t.prompt_id Id.Prompt_definition.to_json
       ; optional_field "workspace_id" t.workspace_id Id.Workspace_definition.to_json
@@ -762,8 +803,38 @@ module List_request = struct
       decode_filters fields
     in
     let%bind labels = Json_codec.optional_as fields "labels" labels_of_json in
-    let%map labels = validate_labels (Option.value labels ~default:[]) in
-    { page; desired_state; prompt_id; workspace_id; owner_principal_id; labels }
+    let%bind labels = validate_labels (Option.value labels ~default:[]) in
+    let%bind sort =
+      Json_codec.optional_as fields "sort" Session_catalog_query.Sort.of_json
+    in
+    let%bind archive =
+      Json_codec.optional_as fields "archive" Session_catalog_query.Archive_filter.of_json
+    in
+    let%bind creator_principal_id =
+      Json_codec.optional_as fields "creator_principal_id" Id.Principal.of_json
+    in
+    let%bind active_owner_principal_id =
+      Json_codec.optional_as fields "active_owner_principal_id" Id.Principal.of_json
+    in
+    let%map () =
+      match owner_principal_id, creator_principal_id with
+      | Some old, Some current when not (Id.Principal.equal old current) ->
+        Error
+          (Protocol_error.invalid_request
+             "creator filter conflicts with legacy owner filter")
+      | _ -> Ok ()
+    in
+    { page
+    ; desired_state
+    ; prompt_id
+    ; workspace_id
+    ; owner_principal_id
+    ; labels
+    ; creator_principal_id
+    ; active_owner_principal_id
+    ; sort = Option.value sort ~default:Session_catalog_query.Sort.default
+    ; archive = Option.value archive ~default:Session_catalog_query.Archive_filter.Active
+    }
   ;;
 end
 

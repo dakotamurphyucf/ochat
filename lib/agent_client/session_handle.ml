@@ -723,3 +723,22 @@ let close t =
     ~f:(fun () ->
       if attempt then ignore (detach t : (unit, Agent_protocol.Error.t) result))
 ;;
+
+let update_metadata t ~expected_metadata_revision ~patch =
+  mutation_command
+    t
+    (fun idempotency_key ->
+       Session_update_metadata
+         { session_id = t.session_id
+         ; attachment_id = t.attachment.id
+         ; expected_metadata_revision
+         ; patch
+         ; idempotency_key
+         })
+    (function
+      | Session_update_metadata result -> Ok result.session
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "unexpected session.update_metadata result"))
+;;

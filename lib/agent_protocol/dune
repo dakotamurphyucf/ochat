@@ -46,7 +46,10 @@
   prompt
   workspace
   operation
+  session_metadata
+  session_catalog_query
   session
+  session_catalog
   snapshot
   envelope
   event

@@ -312,6 +312,7 @@ let actor_state ~workspace_instance ~liveness ~start_immediately =
       ; updated_at = timestamp
       ; labels = []
       ; generation = 0
+      ; metadata_revision = 0L
       }
   in
   let spec =

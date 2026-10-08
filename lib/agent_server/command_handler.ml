@@ -320,6 +320,8 @@ let idempotency = function
   | Session_renew_owner request ->
     standard (Some request.session_id) request.idempotency_key
   | Session_start request -> standard (Some request.session_id) request.idempotency_key
+  | Session_update_metadata request ->
+    standard (Some request.session_id) request.idempotency_key
   | Session_stop request -> standard (Some request.session_id) request.idempotency_key
   | Session_cancel_operation request ->
     standard (Some request.session_id) request.idempotency_key
@@ -785,39 +787,20 @@ let handle_session_create t context command_audit request =
     { session; mutation = mutation session; attachment }
 ;;
 
-let labels_match requested actual =
-  List.for_all requested ~f:(fun (name, value) ->
-    List.Assoc.find actual name ~equal:String.equal
-    |> Option.exists ~f:(String.equal value))
-;;
-
-let session_matches request (summary : Agent_protocol.Session.t) =
-  Option.value_map
-    request.Agent_protocol.Session.List_request.desired_state
-    ~default:true
-    ~f:(fun desired ->
-      Agent_protocol.Session.equal_desired_state desired summary.desired_state)
-  && Option.value_map request.prompt_id ~default:true ~f:(fun prompt_id ->
-    match summary.spec.prompt with
-    | Catalog actual -> Agent_protocol.Id.Prompt_definition.compare prompt_id actual = 0
-    | Local_path _ | Generated _ -> false)
-  && Option.value_map request.workspace_id ~default:true ~f:(fun workspace_id ->
-    match summary.spec.workspace with
-    | Configured actual ->
-      Agent_protocol.Id.Workspace_definition.compare workspace_id actual = 0
-    | Current | Local_path _ -> false)
-  && Option.value_map request.owner_principal_id ~default:true ~f:(fun owner ->
-    Option.exists summary.creator ~f:(fun actual ->
-      Agent_protocol.Id.Principal.compare owner actual = 0))
-  && labels_match request.labels summary.spec.labels
-;;
-
 let handle_session_list t context request =
   let principal = Connection_context.principal context in
+  let open Result.Let_syntax in
+  let%bind indexed_entries =
+    Agent_store.Session_store.list_sessions_checked t.session_store
+    |> Result.map_error ~f:persistence_error
+  in
+  let%bind entries = Session_registry.catalog t.registry ~now:(now t) ~indexed_entries in
   let sessions =
-    Session_registry.summaries t.registry
-    |> List.filter ~f:(session_visible_to principal)
-    |> List.filter ~f:(session_matches request)
+    entries
+    |> List.filter ~f:(fun entry ->
+      session_visible_to principal entry.Agent_protocol.Session_catalog.session)
+    |> List.filter ~f:(Session_catalog_policy.matches request)
+    |> List.sort ~compare:(Session_catalog_policy.compare request.sort)
   in
   Ok (Agent_protocol.Method_result.Session_list (page request.page.limit sessions))
 ;;
@@ -1116,6 +1099,31 @@ and handle_capacity_start t entry capacity command_audit request =
     acquired_capacity_start entry capacity command_audit request ~newly_acquired:false
   | Queue_required _ -> queue_capacity_start t entry command_audit request
   | Rejected error -> Error error
+;;
+
+let handle_session_update_metadata
+      t
+      context
+      command_audit
+      (request : Agent_protocol.Session_metadata.Request.t)
+  =
+  with_writer
+    t
+    context
+    ~session_id:request.session_id
+    ~attachment_id:request.attachment_id
+    (fun entry ->
+       let open Result.Let_syntax in
+       let%map session =
+         Agent_session.Session_actor.update_metadata
+           entry.actor
+           ?command_audit
+           ~attachment_id:request.attachment_id
+           ~expected_metadata_revision:request.expected_metadata_revision
+           ~patch:request.patch
+           ()
+       in
+       Agent_protocol.Method_result.Session_update_metadata (session_mutation session))
 ;;
 
 let handle_session_stop t context command_audit request =
@@ -1464,11 +1472,18 @@ let handle_session_delete t context request =
   let%bind () =
     match request.policy with
     | Agent_protocol.Session.Delete_request.Archive ->
-      let%map () =
+      let%bind () =
         Agent_store.Session_store.archive_session t.session_store request.session_id
         |> Result.map_error ~f:persistence_error
       in
-      close_deleted_entry t context request entry
+      close_deleted_entry t context request entry;
+      let%map indexed =
+        Agent_store.Session_index.find_checked
+          (Agent_store.Session_store.session_index t.session_store)
+          request.session_id
+        |> Result.map_error ~f:persistence_error
+      in
+      Option.iter indexed ~f:(Session_registry.index t.registry)
     | Remove ->
       close_deleted_entry t context request entry;
       Agent_store.Session_store.remove_session t.session_store request.session_id
@@ -2094,6 +2109,7 @@ let handle_ingress_submit t context (request : Agent_protocol.Ingress.Submit_req
 
 let mutation_attachment = function
   | Agent_protocol.Command.Session_start r -> Some (r.session_id, r.attachment_id)
+  | Session_update_metadata r -> Some (r.session_id, r.attachment_id)
   | Session_stop r -> Some (r.session_id, r.attachment_id)
   | Session_cancel_operation r -> Some (r.session_id, r.attachment_id)
   | Session_send_message r -> Some (r.session_id, r.attachment_id)
@@ -2162,6 +2178,8 @@ let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = fun
   | Session_renew_owner request ->
     handle_session_renew_owner t context command_audit request
   | Session_start request -> handle_session_start t context command_audit request
+  | Session_update_metadata request ->
+    handle_session_update_metadata t context command_audit request
   | Session_stop request -> handle_session_stop t context command_audit request
   | Session_cancel_operation request ->
     handle_session_cancel_operation t context command_audit request
@@ -2230,6 +2248,7 @@ let command_session_id = function
   | Session_detach request -> Some request.session_id
   | Session_renew_owner request -> Some request.session_id
   | Session_start request -> Some request.session_id
+  | Session_update_metadata request -> Some request.session_id
   | Session_stop request -> Some request.session_id
   | Session_cancel_operation request -> Some request.session_id
   | Session_send_message request -> Some request.session_id
@@ -2302,6 +2321,7 @@ let receipt_summary ~session_id result =
   | Session_attach value -> Ok (R.Attached_session value.attachment.session_id)
   | Session_detach value | Session_renew_owner (_, value) -> mutation value
   | Session_start value
+  | Session_update_metadata value
   | Session_stop value
   | Session_cancel_operation value
   | Session_compact value

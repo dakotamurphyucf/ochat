@@ -1207,6 +1207,7 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
           ~f:(fun () ->
             let persistence =
               Persistence.create
+                ~before_commit:None
                 ~retention_preflight:None
                 ~writer
                 ~durability:Flush
@@ -1344,4 +1345,307 @@ let%expect_test "live commits and snapshots retain the exact admitted replay bas
   in
   List.iter [ `Authored; `New_job; `Captured ] ~f:run;
   [%expect {| |}]
+;;
+
+let%expect_test
+    "legacy metadata conversion repairs mirrors and current missing revision fails"
+  =
+  with_actor_workspace (fun _ workspace_instance ->
+    let state =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let current = state_document state in
+    let payload = D.Document.payload current in
+    let legacy_payload =
+      map_field payload "identity" ~f:(fun identity ->
+        let fields =
+          match identity with
+          | `Object fields -> fields
+          | _ -> failwith "identity"
+        in
+        `Object
+          (List.filter fields ~f:(fun (name, _) ->
+             not (String.equal name "metadata_revision"))
+           |> fun fields ->
+           List.Assoc.add fields ~equal:String.equal "display_name" `Null
+           |> fun fields ->
+           List.Assoc.add
+             fields
+             ~equal:String.equal
+             "labels"
+             (`Array
+                 [ `Object
+                     [ "name", `String "tag"
+                     ; "value", `String "chosen"
+                     ; "future", `String "preserved"
+                     ]
+                 ])))
+    in
+    let legacy =
+      D.Document.create ~limits ~kind:"session.state" ~version:3 ~payload:legacy_payload
+      |> document_ok
+    in
+    let converted = A.Session_state_document.decode ~limits legacy |> document_ok in
+    let value = A.Session_state_document.value converted in
+    print_s
+      [%sexp
+        { name = (value.spec.protocol.display_name : string option)
+        ; labels = (value.spec.protocol.labels : (string * string) list)
+        ; revision = (value.identity.metadata_revision : int64)
+        }];
+    let encoded = A.Session_state_document.encode converted ~limits |> document_ok in
+    let pair =
+      member (member (D.Document.payload encoded) "identity") "labels"
+      |> function
+      | `Array [ pair ] -> pair
+      | _ -> failwith "labels"
+    in
+    print_s [%sexp (Jsonaf.to_string (member pair "future") : string)];
+    let corrupt =
+      D.Document.create ~limits ~kind:"session.state" ~version:4 ~payload:legacy_payload
+      |> document_ok
+    in
+    print_s
+      [%sexp (Result.is_error (A.Session_state_document.decode ~limits corrupt) : bool)]);
+  [%expect
+    {|
+    ((name ()) (labels ((tag chosen))) (revision 0))
+    "\"preserved\""
+    true |}]
+;;
+
+let%expect_test
+    "canonical precommit intent covers journal acknowledgement gap and failed later \
+     commit"
+  =
+  let module Store = Agent_store in
+  let module Persistence = A.Session_persistence in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let initial =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let root =
+        Filename.concat
+          initial.spec.workspace_instance.canonical_root.native_path
+          "canonical-projection"
+      in
+      let sessions =
+        Store.Session_store.create
+          ~env
+          ~sw
+          ~root
+          ~server_id:(P.Id.Server.create ())
+          ~process_start_identity:None
+          ~lock_nonce:"canonical-projection"
+        |> store_ok
+      in
+      let metadata state : Store.Session_store.Metadata.t =
+        { schema_version = 1
+        ; session = A.Session_state.summary state
+        ; prompt_artifact = P.Id.Prompt_revision.to_string state.spec.prompt_revision_id
+        ; workspace_identity = state.spec.workspace_instance.conflict_domain
+        ; data_schema_version = A.Session_state.current_schema_version
+        }
+      in
+      let entry state : Store.Session_index.Entry.t =
+        { session = A.Session_state.summary state
+        ; runnable_job_count =
+            List.count state.jobs ~f:(fun job ->
+              match job.P.Job.status with
+              | Queued -> true
+              | _ -> false)
+        ; deliverable_job_count =
+            List.count state.jobs ~f:(fun job ->
+              match job.P.Job.delivery with
+              | Pending -> true
+              | _ -> false)
+        ; earliest_schedule_due = None
+        ; owner_grace_deadline = None
+        ; pending_initial_start = state.pending_initial_start
+        ; archived = false
+        }
+      in
+      let handle =
+        Store.Session_store.create_session
+          sessions
+          ~sw
+          ~transaction_id:(P.Id.Transaction.create ())
+          ~actor_lock_nonce:"canonical-projection"
+          (metadata initial)
+        |> store_ok
+      in
+      let journal =
+        Store.Journal.create
+          ~env
+          ~directory:(Store.Session_store.Handle.journal_directory handle)
+          ~max_payload_length:1048576
+          ~max_segment_bytes:4194304L
+          ~max_segment_frames:16
+        |> store_ok
+      in
+      let writer =
+        Store.Commit_writer.create
+          ~sw
+          ~journal
+          ~session_id:initial.identity.session_id
+          ~next_transaction_sequence:1L
+          ~previous_transaction_hash:None
+          ~queue_capacity:8
+        |> store_ok
+      in
+      let persistence =
+        Persistence.create
+          ~before_commit:
+            (Some
+               (fun state ->
+                 Store.Session_store.prepare_canonical_projection
+                   sessions
+                   handle
+                   ~metadata:(metadata state)
+                   ~entry:(entry state)
+                 |> Result.map_error ~f:Store.Store_error.to_protocol_error))
+          ~retention_preflight:None
+          ~writer
+          ~durability:Flush
+          ~limits
+          ~archive_limits:limits
+          ~restored:(Persistence.Restored.authored initial)
+          ~previous_transaction_hash:None
+          ~command_accepted:(fun _ _ -> ())
+          ~archive:(fun _ _ -> failwith "unexpected archive")
+      in
+      let queued : P.Job.t =
+        { id = P.Id.Job.create ()
+        ; session_id = initial.identity.session_id
+        ; generation = 0
+        ; kind = Model_call
+        ; payload = `Object [ "work", `String "queued" ]
+        ; status = Queued
+        ; retry_policy = Never
+        ; attempt = 0
+        ; created_at = timestamp
+        ; started_at = None
+        ; next_run_at = None
+        ; completed_at = None
+        ; result = None
+        ; delivery = Pending
+        ; launch = None
+        ; progress = None
+        }
+      in
+      let transition =
+        A.Session_transition.apply
+          ~now:timestamp
+          initial
+          ~delta:(Job_changed queued)
+          ~payloads:[]
+        |> protocol_ok
+      in
+      Persistence.commit persistence ~command_audit:None ~previous:initial transition
+      |> protocol_ok;
+      let old =
+        Store.Session_index.find_checked
+          (Store.Session_store.session_index sessions)
+          initial.identity.session_id
+        |> store_ok
+        |> Option.value_exn
+      in
+      assert (old.runnable_job_count = 0);
+      assert (Int64.equal old.session.revision initial.counters.revision);
+      Store.Commit_writer.close writer;
+      let running =
+        { queued with status = Running; attempt = 1; started_at = Some timestamp }
+      in
+      let failed =
+        A.Session_transition.apply
+          ~now:timestamp
+          transition.state
+          ~delta:(Job_changed running)
+          ~payloads:[]
+        |> protocol_ok
+      in
+      assert (
+        Result.is_error
+          (Persistence.commit
+             persistence
+             ~command_audit:None
+             ~previous:transition.state
+             failed));
+      assert (
+        Result.is_error
+          (Store.Session_store.write_metadata
+             ~entry:(entry transition.state)
+             sessions
+             handle
+             (metadata transition.state)));
+      Store.Session_store.complete_index_recovery sessions |> store_ok;
+      Store.Session_store.close_session sessions handle |> store_ok;
+      Store.Session_store.close sessions |> store_ok;
+      let reopened =
+        Store.Session_store.open_existing
+          ~env
+          ~sw
+          ~root
+          ~process_start_identity:None
+          ~lock_nonce:"canonical-projection-reopen"
+        |> store_ok
+      in
+      assert (Store.Session_store.index_was_rebuilt reopened);
+      let handle =
+        Store.Session_store.open_session
+          reopened
+          ~sw
+          ~actor_lock_nonce:"canonical-projection-replay"
+          initial.identity.session_id
+        |> store_ok
+      in
+      let journal =
+        Store.Journal.open_existing
+          ~env
+          ~directory:(Store.Session_store.Handle.journal_directory handle)
+          ~max_payload_length:1048576
+          ~max_segment_bytes:4194304L
+          ~max_segment_frames:16
+        |> store_ok
+      in
+      let scan = Store.Journal.scan journal |> store_ok in
+      assert (List.length scan.entries = 1);
+      let record =
+        Store.Document_record.of_frame
+          (List.hd_exn scan.entries).frame
+          ~limits
+          ~expected_digest:None
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Store.Document_record.Error.sexp_of_t error))
+        |> Result.ok_or_failwith
+      in
+      let transaction = Store.Transaction.decode_record record ~limits |> store_ok in
+      let replayed =
+        Persistence.apply_document
+          (A.Session_state_document.authored initial)
+          ~limits
+          transaction
+        |> store_ok
+        |> A.Session_state_document.value
+      in
+      assert (List.length replayed.jobs = 1);
+      assert (
+        match (List.hd_exn replayed.jobs).status with
+        | Queued -> true
+        | _ -> false);
+      Store.Session_store.write_metadata
+        ~entry:(entry replayed)
+        reopened
+        handle
+        (metadata replayed)
+      |> store_ok;
+      Store.Session_store.complete_index_recovery reopened |> store_ok;
+      Store.Session_store.close_session reopened handle |> store_ok;
+      Store.Session_store.close reopened |> store_ok;
+      print_endline
+        "actual precommit hook protects acknowledged queued job across projection gap \
+         and failed newer commit; restart replays authority"));
+  [%expect
+    {|actual precommit hook protects acknowledged queued job across projection gap and failed newer commit; restart replays authority|}]
 ;;

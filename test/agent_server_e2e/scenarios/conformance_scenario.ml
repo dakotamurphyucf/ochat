@@ -746,13 +746,20 @@ let list_contains_session connection session_id =
       ; prompt_id = None
       ; workspace_id = None
       ; owner_principal_id = None
+      ; creator_principal_id = None
+      ; active_owner_principal_id = None
+      ; sort = Agent_protocol.Session_catalog_query.Sort.default
+      ; archive = Active
       ; labels = []
       }
   in
   match request connection (Session_list list_request) with
   | Session_list page ->
     List.exists page.items ~f:(fun session ->
-      Agent_protocol.Id.Session.compare session.Agent_protocol.Session.id session_id = 0)
+      Agent_protocol.Id.Session.compare
+        session.Agent_protocol.Session_catalog.session.id
+        session_id
+      = 0)
   | _ -> fail "session.list returned the wrong result variant"
 ;;
 

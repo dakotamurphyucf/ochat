@@ -25,6 +25,7 @@ type t =
   { archive :
       Session_state.Compaction_archive.t -> D.Document.t -> (unit, P.Error.t) result
   ; command_accepted : D.Document.t -> int64 -> unit
+  ; before_commit : (Session_state.t -> (unit, P.Error.t) result) option
   ; writer : Store.Commit_writer.t
   ; durability : Store.Journal_segment.durability
   ; limits : D.Limits.t
@@ -37,6 +38,7 @@ type t =
 
 let create
       ~archive
+      ~before_commit
       ~command_accepted
       ~writer
       ~durability
@@ -48,6 +50,7 @@ let create
   =
   { archive
   ; command_accepted
+  ; before_commit
   ; writer
   ; durability
   ; limits
@@ -164,6 +167,10 @@ let commit t ~command_audit ~(previous : Session_state.t) transition =
         ~limits:t.archive_limits
       |> Result.map ~f:Option.some
       |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
+  in
+  let%bind () =
+    Option.value_map t.before_commit ~default:(Ok ()) ~f:(fun prepare ->
+      prepare transition.state)
   in
   let%bind () =
     List.fold_result references ~init:() ~f:(fun () reference ->

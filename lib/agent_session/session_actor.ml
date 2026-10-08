@@ -475,6 +475,9 @@ type _ request =
       -> Agent_protocol.Session.t request
   | Queue_start : Agent_protocol.Id.Attachment.t -> Agent_protocol.Session.t request
   | Activate_queued_start : Agent_protocol.Session.t request
+  | Update_metadata :
+      Agent_protocol.Id.Attachment.t * int64 * Agent_protocol.Session_metadata.Patch.t
+      -> Agent_protocol.Session.t request
   | Stop :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Session.stop_mode
       -> Agent_protocol.Session.t request
@@ -10357,6 +10360,23 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Queue_start attachment_id ->
     with_writer t attachment_id (fun () -> queue_start_internal t)
   | Activate_queued_start -> activate_queued_start t
+  | Update_metadata (attachment_id, expected_metadata_revision, patch) ->
+    with_writer t attachment_id (fun () ->
+      let open Result.Let_syntax in
+      let%bind delta =
+        Session_metadata_transition.apply t.state ~expected_metadata_revision ~patch
+      in
+      match delta with
+      | None -> transition t ~delta:(Session_delta.Batch []) ~payloads:[]
+      | Some delta ->
+        let%bind candidate = Session_delta.apply t.state delta in
+        transition
+          t
+          ~delta
+          ~payloads:
+            [ Agent_protocol.Event.Durable.Payload.Session_updated
+                (Session_state.summary candidate)
+            ])
   | Stop (attachment_id, mode) ->
     with_writer t attachment_id (fun () -> stop_internal t mode)
   | Stop_delegated (reference, mode) ->
@@ -11290,4 +11310,11 @@ end
 
 let shutdown t =
   ignore (call t ~priority:Priority Shutdown : (unit, Agent_protocol.Error.t) result)
+;;
+
+let update_metadata t ?command_audit ~attachment_id ~expected_metadata_revision ~patch () =
+  call
+    t
+    ?command_audit
+    (Update_metadata (attachment_id, expected_metadata_revision, patch))
 ;;

@@ -11,6 +11,7 @@ module Identity : sig
     ; updated_at : Agent_protocol.Timestamp.t
     ; labels : (string * string) list
     ; generation : int
+    ; metadata_revision : int64 [@sexp.default 0L]
     }
   [@@deriving sexp]
 end

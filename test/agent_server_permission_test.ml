@@ -51,6 +51,7 @@ let initial_state env workspace =
       ; updated_at = now
       ; labels = []
       ; generation = 0
+      ; metadata_revision = 0L
       }
   in
   let spec =

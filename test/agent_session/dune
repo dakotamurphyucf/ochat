@@ -9,6 +9,7 @@
   inference_tracking_tests
   inference_transition_tests
   actor_tests
+  metadata_tests
   managed_output_cursor_tests
   managed_output_page_tests
   durable_event_wait_tests

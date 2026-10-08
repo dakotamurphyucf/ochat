@@ -102,7 +102,9 @@ let%test_unit "named state codec preserves complete values with present optional
         identity = { staged.identity with labels = [ "", "empty key"; "owner", "test" ] }
       ; spec =
           { staged.spec with
-            prompt_definition_id = Some prompt_id
+            protocol =
+              { staged.spec.protocol with labels = [ "", "empty key"; "owner", "test" ] }
+          ; prompt_definition_id = Some prompt_id
           ; runtime_policy = Some "retained policy"
           ; quota_key = Some { conflict_domain = "fixture"; prompt_id }
           }

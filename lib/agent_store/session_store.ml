@@ -1,19 +1,48 @@
 open Core
+module D = Document_schema
+module F = Document_fields
+module Metadata = Session_metadata
 
-module Metadata = struct
+module Initial_projection = struct
   type t =
-    { schema_version : int
-    ; session : Agent_protocol.Session.t
-    ; prompt_artifact : string
-    ; workspace_identity : string
-    ; data_schema_version : int
+    { metadata : Metadata.t
+    ; entry : Session_index.Entry.t
     }
-  [@@deriving sexp]
+
+  let metadata t = t.metadata
+  let entry t = t.entry
+
+  let create ~metadata ~entry =
+    let open Result.Let_syntax in
+    let%bind () =
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Session.to_json metadata.Metadata.session)
+          (Agent_protocol.Session.to_json entry.Session_index.Entry.session)
+      then Ok ()
+      else Error (Store_error.Corrupt "initial projection summary differs from metadata")
+    in
+    let%bind document =
+      Session_metadata_document.to_document
+        (D.Extension_carrier.of_authored_value metadata)
+      |> F.store
+    in
+    let%bind _ = Session_metadata_document.of_document document |> F.store in
+    let%bind document =
+      Session_index_document.to_document (D.Extension_carrier.of_authored_value [ entry ])
+      |> F.store
+    in
+    let%map _ = Session_index_document.of_document document |> F.store in
+    { metadata; entry }
+  ;;
 end
 
 module Handle = struct
   type t =
     { mutable metadata : Metadata.t
+    ; mutable metadata_carrier : Metadata.t D.Extension_carrier.t
+    ; mutable metadata_unavailable : Store_error.t option
+    ; mutable canonical_projection : Session_projection_update.Pending.t option
     ; directory : string
     ; metadata_path : string
     ; actor_lock : Lock.t
@@ -29,6 +58,13 @@ module Handle = struct
     }
 
   let metadata t = t.metadata
+
+  let metadata_checked t =
+    match t.metadata_unavailable with
+    | None -> Ok t.metadata
+    | Some error -> Error error
+  ;;
+
   let session_id t = t.metadata.session.id
   let directory t = t.directory
   let snapshot_directory t = t.snapshot_directory
@@ -57,6 +93,7 @@ type t =
   ; daemon_lock : Lock.t
   ; index : Session_index.t
   ; delegations : Delegation_store.t
+  ; projection_updates : Session_projection_update.t
   ; mutable index_was_rebuilt : bool
   ; mutable closed : bool
   }
@@ -86,6 +123,7 @@ let check_writable t =
       Eio.Path.unlink file;
       Ok ()
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       (try Eio.Path.unlink file with
        | _ -> ());
@@ -100,27 +138,32 @@ let timestamp env =
 ;;
 
 let save_schema ~env root =
-  let schema = Schema.{ version = current_schema_version; created_at = timestamp env } in
+  let open Result.Let_syntax in
+  let value = Store_schema_document.{ created_at = timestamp env } in
+  let%bind document =
+    Store_schema_document.to_document (D.Extension_carrier.of_authored_value value)
+    |> F.store
+  in
   Durable_file.replace
     ~env
     ~durability:Flush_file_and_directory
     ~path:(Data_root.schema_path root)
-    (Sexp.to_string_mach ([%sexp_of: Schema.t] schema))
+    (D.Document.to_string document)
 ;;
 
 let load_schema ~env root =
   let open Result.Let_syntax in
-  let%bind contents = Durable_file.load ~env ~path:(Data_root.schema_path root) in
-  try
-    let schema = [%of_sexp: Schema.t] (Sexp.of_string contents) in
-    if schema.version = current_schema_version
-    then Ok schema
-    else if schema.version > current_schema_version
-    then Error (Store_error.Schema_too_new schema.version)
-    else Error (Store_error.Migration_required schema.version)
-  with
-  | exn ->
-    Error (Store_error.Corrupt ("store schema decode failed: " ^ Exn.to_string exn))
+  let%bind contents =
+    Durable_file.load_bounded
+      ~env
+      ~path:(Data_root.schema_path root)
+      ~max_bytes:(D.Limits.max_bytes Store_schema_document.limits)
+  in
+  let%bind document =
+    D.Document.decode ~limits:Store_schema_document.limits contents |> F.store
+  in
+  let%map carrier = Store_schema_document.of_document document |> F.store in
+  Schema.{ version = 1; created_at = (D.Extension_carrier.value carrier).created_at }
 ;;
 
 let save_server_id ~env root server_id =
@@ -146,36 +189,13 @@ let recovery_marker_path root =
 ;;
 
 let read_recovery_marker ~env root =
-  let path = recovery_marker_path root in
-  try
-    match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
-    | `Not_found -> Ok false
-    | `Regular_file ->
-      Result.bind (Durable_file.load ~env ~path) ~f:(fun contents ->
-        if String.equal contents "1\n"
-        then Ok true
-        else Error (Store_error.Corrupt "session index recovery marker is invalid"))
-    | _ ->
-      Error (Store_error.Corrupt "session index recovery marker is not a regular file")
-  with
-  | exn -> Error (Store_error.of_exn ~operation:"read index recovery marker" ~path exn)
+  Session_projection_update.pending ~env ~marker_path:(recovery_marker_path root)
 ;;
 
 let complete_index_recovery t =
-  let open Result.Let_syntax in
-  let%bind pending = read_recovery_marker ~env:t.env t.root in
-  if not pending
-  then Ok ()
-  else (
-    let path = recovery_marker_path t.root in
-    try
-      Eio.Path.unlink (eio_path t path);
-      let%map () =
-        Durable_file.sync_directory ~env:t.env ~path:(Data_root.indexes_path t.root)
-      in
-      t.index_was_rebuilt <- false
-    with
-    | exn -> Error (Store_error.of_exn ~operation:"complete index recovery" ~path exn))
+  Result.map
+    (Session_projection_update.complete_recovery t.projection_updates)
+    ~f:(fun () -> t.index_was_rebuilt <- false)
 ;;
 
 let session_directories directory =
@@ -193,12 +213,38 @@ let session_directories directory =
     ~f:(Filename.concat directory)
 ;;
 
-let load_metadata_at ~env path =
+let load_metadata_carrier_at ~env path =
   let open Result.Let_syntax in
-  let%bind contents = Durable_file.load ~env ~path in
-  try Ok ([%of_sexp: Metadata.t] (Sexp.of_string contents)) with
-  | exn ->
-    Error (Store_error.Corrupt ("session metadata decode failed: " ^ Exn.to_string exn))
+  let%bind () =
+    try
+      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
+      | `Regular_file -> Ok ()
+      | _ -> Error (Store_error.Corrupt "session metadata is not a regular file")
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"inspect session metadata" ~path exn)
+  in
+  let%bind contents =
+    Durable_file.load_bounded
+      ~env
+      ~path
+      ~max_bytes:(D.Limits.max_bytes Session_metadata_document.limits)
+  in
+  let%bind document =
+    D.Document.decode ~limits:Session_metadata_document.limits contents |> F.store
+  in
+  let%bind stored_id = Session_metadata_document.stored_session_id document |> F.store in
+  if
+    not
+      (String.equal
+         (Filename.basename (Filename.dirname path))
+         (Agent_protocol.Id.Session.to_string stored_id))
+  then Error (Store_error.Corrupt "session directory and stored metadata identity differ")
+  else Session_metadata_document.of_document document |> F.store
+;;
+
+let load_metadata_at ~env path =
+  load_metadata_carrier_at ~env path |> Result.map ~f:D.Extension_carrier.value
 ;;
 
 let index_entry metadata =
@@ -215,9 +261,9 @@ let index_entry metadata =
 
 let require_kind ~env path expected =
   let actual = Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) in
-  if Poly.equal actual expected
-  then Ok ()
-  else Error (Store_error.Corrupt ("invalid session layout path: " ^ path))
+  match actual, expected with
+  | `Directory, `Directory | `Regular_file, `Regular_file -> Ok ()
+  | _ -> Error (Store_error.Corrupt ("invalid session layout path: " ^ path))
 ;;
 
 let validate_layout ~env directory =
@@ -230,7 +276,7 @@ let validate_layout ~env directory =
   require_kind ~env (metadata_path directory) `Regular_file
 ;;
 
-let validate_metadata name metadata =
+let validate_metadata ?(require_durable = false) name metadata =
   let open Result.Let_syntax in
   let validate_version version =
     if version = current_schema_version
@@ -252,8 +298,11 @@ let validate_metadata name metadata =
   if not (String.equal name (Agent_protocol.Id.Session.to_string metadata.session.id))
   then Error (Store_error.Corrupt "session directory and metadata identity differ")
   else if
-    not
-      (Agent_protocol.Session.equal_persistence metadata.session.spec.persistence Durable)
+    require_durable
+    && not
+         (Agent_protocol.Session.equal_persistence
+            metadata.session.spec.persistence
+            Durable)
   then Error (Store_error.Corrupt "durable layout contains a transient session")
   else if
     String.is_empty metadata.prompt_artifact
@@ -264,33 +313,53 @@ let validate_metadata name metadata =
   else Ok ()
 ;;
 
-let read_archive_marker ~env directory session_id =
+let archive_carrier ~env directory session_id =
   let path = archive_marker_path directory in
   try
     match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
-    | `Not_found -> Ok false
+    | `Not_found -> Ok None
     | `Regular_file ->
-      Result.bind (Durable_file.load ~env ~path) ~f:(fun contents ->
-        if String.equal contents (Agent_protocol.Id.Session.to_string session_id ^ "\n")
-        then Ok true
-        else Error (Store_error.Corrupt "session archive marker identity differs"))
+      let open Result.Let_syntax in
+      let%bind bytes =
+        Durable_file.load_bounded
+          ~env
+          ~path
+          ~max_bytes:(D.Limits.max_bytes Session_archive_document.limits)
+      in
+      let%bind document =
+        D.Document.decode ~limits:Session_archive_document.limits bytes |> F.store
+      in
+      let%bind stored_id =
+        Session_archive_document.stored_session_id document |> F.store
+      in
+      if not (Agent_protocol.Id.Session.equal stored_id session_id)
+      then Error (Store_error.Corrupt "session archive marker identity differs")
+      else
+        Session_archive_document.of_document document
+        |> F.store
+        |> Result.map ~f:Option.some
     | _ -> Error (Store_error.Corrupt "session archive marker is not a regular file")
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"read session archive marker" ~path exn)
 ;;
 
+let read_archive_marker ~env directory session_id =
+  archive_carrier ~env directory session_id |> Result.map ~f:Option.is_some
+;;
+
 let write_archive_marker ~env directory session_id =
-  try
-    Result.bind (require_kind ~env directory `Directory) ~f:(fun () ->
-      Durable_file.replace
-        ~env
-        ~durability:Flush_file_and_directory
-        ~path:(archive_marker_path directory)
-        (Agent_protocol.Id.Session.to_string session_id ^ "\n"))
-  with
-  | exn ->
-    Error
-      (Store_error.of_exn ~operation:"write session archive marker" ~path:directory exn)
+  let open Result.Let_syntax in
+  let%bind carrier = archive_carrier ~env directory session_id in
+  let carrier =
+    Option.value carrier ~default:(D.Extension_carrier.of_authored_value session_id)
+  in
+  let%bind document = Session_archive_document.to_document carrier |> F.store in
+  Durable_file.replace
+    ~env
+    ~durability:Flush_file_and_directory
+    ~path:(archive_marker_path directory)
+    (D.Document.to_string document)
 ;;
 
 let recover_index_entry ~env sessions_directory name =
@@ -298,7 +367,7 @@ let recover_index_entry ~env sessions_directory name =
   let directory = Filename.concat sessions_directory name in
   let%bind () = validate_layout ~env directory in
   let%bind metadata = load_metadata_at ~env (metadata_path directory) in
-  let%bind () = validate_metadata name metadata in
+  let%bind () = validate_metadata ~require_durable:true name metadata in
   let%map archived = read_archive_marker ~env directory metadata.session.id in
   { (index_entry metadata) with archived }
 ;;
@@ -333,7 +402,7 @@ let reconcile_archive ~env root entry =
 
 let reconcile_archives ~env root index =
   let open Result.Let_syntax in
-  let previous = Session_index.list index in
+  let%bind previous = Session_index.list_checked index in
   let%bind entries = Result.all (List.map previous ~f:(reconcile_archive ~env root)) in
   if
     List.equal
@@ -355,16 +424,28 @@ let open_index ~env root =
         if List.is_empty entries
         then Ok ()
         else
-          Durable_file.replace
-            ~env
-            ~durability:Flush_file_and_directory
-            ~path:(recovery_marker_path root)
-            "1\n"
+          Session_projection_update.require ~env ~marker_path:(recovery_marker_path root)
       in
       entries)
   in
-  let%bind () = reconcile_archives ~env root index in
-  let%map pending = read_recovery_marker ~env root in
+  let%bind pending = read_recovery_marker ~env root in
+  let%bind () =
+    if pending
+    then (
+      let%bind entries = rebuild_index ~env root in
+      let entries =
+        List.map entries ~f:(fun entry ->
+          match Session_index.find index entry.Session_index.Entry.session.id with
+          | Some old when old.archived -> { entry with archived = true }
+          | None | Some _ -> entry)
+      in
+      let%bind entries =
+        List.map entries ~f:(reconcile_archive ~env root) |> Result.all
+      in
+      Session_index.replace_all index entries)
+    else Ok ()
+  in
+  let%map () = reconcile_archives ~env root index in
   index, pending
 ;;
 
@@ -374,6 +455,8 @@ let make ~env ~root ~server_id ~daemon_lock (index, index_was_rebuilt) =
   ; server_id
   ; daemon_lock
   ; index
+  ; projection_updates =
+      Session_projection_update.create ~env ~marker_path:(recovery_marker_path root) ()
   ; index_was_rebuilt
   ; closed = false
   ; delegations = Delegation_store.create ~env ~data_root:root
@@ -438,12 +521,19 @@ let close t =
   else Result.map (Lock.release ~env:t.env t.daemon_lock) ~f:(fun () -> t.closed <- true)
 ;;
 
+let metadata_document carrier =
+  let open Result.Let_syntax in
+  let%bind document = Session_metadata_document.to_document carrier |> F.store in
+  let%map carrier = Session_metadata_document.of_document document |> F.store in
+  D.Document.to_string document, carrier
+;;
+
 let save_metadata ~env path metadata =
-  Durable_file.replace
-    ~env
-    ~durability:Flush_file_and_directory
-    ~path
-    (Sexp.to_string_mach ([%sexp_of: Metadata.t] metadata))
+  let open Result.Let_syntax in
+  let%bind bytes, _ =
+    metadata_document (D.Extension_carrier.of_authored_value metadata)
+  in
+  Durable_file.replace ~env ~durability:Flush_file_and_directory ~path bytes
 ;;
 
 let load_metadata t path = load_metadata_at ~env:t.env path
@@ -451,6 +541,9 @@ let load_metadata t path = load_metadata_at ~env:t.env path
 let make_handle ~directory:session_directory ~metadata:session_metadata ~actor_lock =
   let child name = Filename.concat session_directory name in
   { Handle.metadata = session_metadata
+  ; metadata_carrier = D.Extension_carrier.of_authored_value session_metadata
+  ; metadata_unavailable = None
+  ; canonical_projection = None
   ; directory = session_directory
   ; metadata_path = metadata_path session_directory
   ; actor_lock
@@ -466,8 +559,11 @@ let make_handle ~directory:session_directory ~metadata:session_metadata ~actor_l
   }
 ;;
 
-let acquire_handle t ~sw ~directory ~actor_lock_nonce metadata =
+let acquire_handle t ~sw ~directory ~actor_lock_nonce _metadata =
   let open Result.Let_syntax in
+  let%bind metadata_carrier =
+    load_metadata_carrier_at ~env:t.env (metadata_path directory)
+  in
   let%map actor_lock =
     Lock.acquire
       ~env:t.env
@@ -477,7 +573,10 @@ let acquire_handle t ~sw ~directory ~actor_lock_nonce metadata =
       ~process_start_identity:None
       ~nonce:actor_lock_nonce
   in
-  make_handle ~directory ~metadata ~actor_lock
+  let metadata = D.Extension_carrier.value metadata_carrier in
+  let handle = make_handle ~directory ~metadata ~actor_lock in
+  handle.Handle.metadata_carrier <- metadata_carrier;
+  handle
 ;;
 
 let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initialize =
@@ -495,6 +594,7 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
         Eio.Path.mkdir ~perm:0o700 (eio_path t path));
       Ok ()
     with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
     | exn ->
       Error
         (Store_error.of_exn
@@ -510,7 +610,7 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
        | _ -> ());
       error
   in
-  let%bind metadata =
+  let%bind initial =
     match initialize ~staging_directory:temporary_directory with
     | Ok metadata -> Ok metadata
     | Error _ as error ->
@@ -518,6 +618,8 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
        | _ -> ());
       error
   in
+  let metadata = Initial_projection.metadata initial in
+  let entry = Initial_projection.entry initial in
   let session_id = metadata.Metadata.session.id in
   let final_directory = Data_root.session_path t.root session_id in
   let destination = eio_path t final_directory in
@@ -529,24 +631,23 @@ let create_session_initialized t ~sw ~transaction_id ~actor_lock_nonce ~initiali
        | _ -> ());
       error
   in
-  let%bind () =
-    match Eio.Path.rename temporary destination with
-    | () -> Ok ()
-    | exception exn ->
-      (try Eio.Path.rmtree ~missing_ok:true temporary with
-       | _ -> ());
-      Error
-        (Store_error.of_exn ~operation:"install session layout" ~path:final_directory exn)
-  in
-  let%bind handle =
-    acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata
-  in
-  match Session_index.upsert t.index (index_entry metadata) with
-  | Ok () -> Ok handle
-  | Error _ as error ->
-    ignore
-      (Lock.release ~env:t.env handle.Handle.actor_lock : (unit, Store_error.t) result);
-    error
+  Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
+    Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
+      let%bind () = require_intent () in
+      let%bind () =
+        try
+          Eio.Path.rename temporary destination;
+          Durable_file.sync_directory ~env:t.env ~path:(Data_root.sessions_path t.root)
+        with
+        | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+        | exn ->
+          Error
+            (Store_error.of_exn
+               ~operation:"install session layout"
+               ~path:final_directory
+               exn)
+      in
+      acquire_handle t ~sw ~directory:final_directory ~actor_lock_nonce metadata))
 ;;
 
 let create_session t ~sw ~transaction_id ~actor_lock_nonce metadata =
@@ -555,30 +656,161 @@ let create_session t ~sw ~transaction_id ~actor_lock_nonce metadata =
     ~sw
     ~transaction_id
     ~actor_lock_nonce
-    ~initialize:(fun ~staging_directory:_ -> Ok metadata)
+    ~initialize:(fun ~staging_directory:_ ->
+      Initial_projection.create ~metadata ~entry:(index_entry metadata))
 ;;
 
 let open_session t ~sw ~actor_lock_nonce session_id =
   let open Result.Let_syntax in
   let directory = Data_root.session_path t.root session_id in
+  let%bind () =
+    try
+      match Eio.Path.kind ~follow:false (eio_path t directory) with
+      | `Not_found -> Error (Store_error.Missing directory)
+      | _ -> Ok ()
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"inspect session root" ~path:directory exn)
+  in
+  let%bind () = validate_layout ~env:t.env directory in
   let%bind metadata = load_metadata t (metadata_path directory) in
   if Agent_protocol.Id.Session.compare metadata.session.id session_id <> 0
   then Error (Store_error.Corrupt "session directory and metadata identity differ")
   else acquire_handle t ~sw ~directory ~actor_lock_nonce metadata
 ;;
 
-let write_metadata t handle metadata =
-  if
-    Agent_protocol.Id.Session.compare
-      metadata.Metadata.session.id
-      (Handle.session_id handle)
-    <> 0
-  then Error (Store_error.Corrupt "metadata update cannot change session identity")
-  else
-    Result.bind (save_metadata ~env:t.env handle.metadata_path metadata) ~f:(fun () ->
-      Result.map
-        (Session_index.upsert t.index (index_entry metadata))
-        ~f:(fun () -> handle.metadata <- metadata))
+let refresh_metadata t handle =
+  match load_metadata_carrier_at ~env:t.env handle.Handle.metadata_path with
+  | Ok current ->
+    handle.metadata <- D.Extension_carrier.value current;
+    handle.metadata_carrier <- current;
+    handle.metadata_unavailable <- None
+  | Error error -> handle.metadata_unavailable <- Some error
+  | exception exn ->
+    handle.metadata_unavailable
+    <- Some (Store_error.Corrupt "metadata refresh failed during uncertain publication");
+    raise exn
+;;
+
+let prepare_metadata_projection t handle metadata requested_entry =
+  let open Result.Let_syntax in
+  let%bind () =
+    match handle.Handle.metadata_unavailable with
+    | None -> Ok ()
+    | Some error -> Error error
+  in
+  let%bind () =
+    if
+      Agent_protocol.Id.Session.equal
+        metadata.Metadata.session.id
+        (Handle.session_id handle)
+    then Ok ()
+    else Error (Store_error.Corrupt "metadata update cannot change session identity")
+  in
+  let%bind () =
+    validate_metadata
+      (Agent_protocol.Id.Session.to_string (Handle.session_id handle))
+      metadata
+  in
+  let%bind bytes, carrier =
+    metadata_document
+      (D.Extension_carrier.with_value handle.Handle.metadata_carrier metadata)
+  in
+  let%bind previous = Session_index.find_checked t.index (Handle.session_id handle) in
+  let%map entry =
+    match requested_entry with
+    | Some entry ->
+      if
+        not
+          (Jsonaf.exactly_equal
+             (Agent_protocol.Session.to_json entry.Session_index.Entry.session)
+             (Agent_protocol.Session.to_json metadata.session))
+      then Error (Store_error.Corrupt "supplied index summary differs from metadata")
+      else
+        Ok
+          { entry with
+            archived =
+              entry.archived
+              || Option.exists previous ~f:(fun old -> old.Session_index.Entry.archived)
+          }
+    | None ->
+      Ok
+        (match previous with
+         | None -> index_entry metadata
+         | Some entry -> { entry with session = metadata.session })
+  in
+  bytes, carrier, entry
+;;
+
+let prepare_canonical_projection t handle ~metadata ~entry =
+  let open Result.Let_syntax in
+  let%map pending =
+    Session_projection_update.prepare_canonical
+      t.projection_updates
+      ~previous:handle.Handle.canonical_projection
+      ~prepare:(fun () ->
+        let%bind _, _, entry =
+          prepare_metadata_projection t handle metadata (Some entry)
+        in
+        let%map () = Session_index.validate_upsert t.index entry in
+        entry)
+  in
+  handle.canonical_projection <- Some pending
+;;
+
+let write_metadata ?entry:requested_entry t handle metadata =
+  let open Result.Let_syntax in
+  let%bind pending, entry =
+    Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
+      let%bind bytes, carrier, entry =
+        prepare_metadata_projection t handle metadata requested_entry
+      in
+      let pending = handle.Handle.canonical_projection in
+      let%bind () =
+        match pending with
+        | None -> Ok ()
+        | Some pending ->
+          if Session_projection_update.Pending.matches pending entry
+          then Ok ()
+          else
+            Error
+              (Store_error.Corrupt
+                 "metadata/full hints differ from latest canonical projection target")
+      in
+      Session_index.with_prepared_upsert t.index entry ~publish_authority:(fun () ->
+        let%bind () = require_intent () in
+        match
+          Durable_file.replace
+            ~env:t.env
+            ~durability:Flush_file_and_directory
+            ~path:handle.metadata_path
+            bytes
+        with
+        | Ok () ->
+          handle.metadata <- metadata;
+          handle.metadata_carrier <- carrier;
+          handle.metadata_unavailable <- None;
+          Ok (pending, entry)
+        | Error _ as error ->
+          Eio.Cancel.protect (fun () ->
+            try refresh_metadata t handle with
+            | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+            | _ -> ());
+          error
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          Eio.Cancel.protect (fun () ->
+            try refresh_metadata t handle with
+            | _ -> ());
+          Exn.raise_with_original_backtrace exn backtrace))
+  in
+  match pending with
+  | None -> Ok ()
+  | Some pending ->
+    let%map () =
+      Session_projection_update.finish_canonical t.projection_updates pending ~entry
+    in
+    handle.canonical_projection <- None
 ;;
 
 let close_session t handle = Lock.release ~env:t.env handle.Handle.actor_lock
@@ -588,16 +820,32 @@ let is_archived t handle =
 ;;
 
 let archive_session t session_id =
-  Session_index.find t.index session_id
-  |> Result.of_option
-       ~error:(Store_error.Missing (Data_root.session_path t.root session_id))
-  |> Result.bind ~f:(fun entry ->
-    Result.bind
-      (write_archive_marker
-         ~env:t.env
-         (Data_root.session_path t.root session_id)
-         session_id)
-      ~f:(fun () -> Session_index.upsert t.index { entry with archived = true }))
+  Session_projection_update.publish t.projection_updates ~f:(fun ~require_intent ->
+    let open Result.Let_syntax in
+    let%bind found = Session_index.find_checked t.index session_id in
+    let%bind entry =
+      found
+      |> Result.of_option
+           ~error:(Store_error.Missing (Data_root.session_path t.root session_id))
+    in
+    (* Marker decoding/encoding happens before acquiring the recovery intent,
+       so unsupported semantics never get replaced by an archive retry. *)
+    let directory = Data_root.session_path t.root session_id in
+    let%bind previous = archive_carrier ~env:t.env directory session_id in
+    let carrier =
+      Option.value previous ~default:(D.Extension_carrier.of_authored_value session_id)
+    in
+    let%bind document = Session_archive_document.to_document carrier |> F.store in
+    Session_index.with_prepared_upsert
+      t.index
+      { entry with archived = true }
+      ~publish_authority:(fun () ->
+        let%bind () = require_intent () in
+        Durable_file.replace
+          ~env:t.env
+          ~durability:Flush_file_and_directory
+          ~path:(archive_marker_path directory)
+          (D.Document.to_string document)))
 ;;
 
 let restore_removed_directory source tombstone error =
@@ -630,6 +878,7 @@ let remove_session t session_id =
          Eio.Path.rmtree ~missing_ok:true tombstone;
          Ok ()
        with
+       | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
        | exn ->
          Error
            (Store_error.of_exn
@@ -637,6 +886,7 @@ let remove_session t session_id =
               ~path:tombstone_path
               exn))
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn -> Error (Store_error.of_exn ~operation:"remove session" ~path:source_path exn)
 ;;
 
@@ -666,28 +916,31 @@ let rec prune_response_path t ~cutoff path =
     | `Block_device
     | `Unknown -> Ok 0
   with
+  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
   | exn ->
     Error (Store_error.of_exn ~operation:"prune response artifact" ~path:native exn)
 ;;
 
 let prune_response_artifacts t ~protected ~older_than =
   let cutoff = cutoff_seconds older_than in
-  Session_index.list t.index
-  |> List.fold_result ~init:0 ~f:(fun count entry ->
-    let session_id = entry.Session_index.Entry.session.id in
-    if
-      List.mem protected session_id ~equal:(fun a b ->
-        Agent_protocol.Id.Session.compare a b = 0)
-    then Ok count
-    else (
-      let directory =
-        Data_root.session_path t.root session_id
-        |> Fn.flip Filename.concat "responses"
-        |> eio_path t
-      in
-      if Eio.Path.is_directory directory
-      then Result.map (prune_response_path t ~cutoff directory) ~f:(( + ) count)
-      else Ok count))
+  Session_index.list_checked t.index
+  |> Result.bind ~f:(fun entries ->
+    List.fold_result entries ~init:0 ~f:(fun count entry ->
+      let session_id = entry.Session_index.Entry.session.id in
+      if
+        List.mem protected session_id ~equal:(fun a b ->
+          Agent_protocol.Id.Session.compare a b = 0)
+      then Ok count
+      else (
+        let directory =
+          Data_root.session_path t.root session_id
+          |> Fn.flip Filename.concat "responses"
+          |> eio_path t
+        in
+        if Eio.Path.is_directory directory
+        then Result.map (prune_response_path t ~cutoff directory) ~f:(( + ) count)
+        else Ok count)))
 ;;
 
 let list_sessions t = Session_index.list t.index
+let list_sessions_checked t = Session_index.list_checked t.index
