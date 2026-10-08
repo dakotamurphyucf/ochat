@@ -987,7 +987,9 @@ let rec apply ?(limits = native_limits) (state : Session_state.t) = function
   | Moderator_changed moderator -> Ok { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->
-    if Int64.(reserved_history_through < state.conversation.reserved_history_through)
+    if
+      Int64.(reserved_history_through < state.conversation.reserved_history_through)
+      || Int64.(reserved_history_through < state.conversation.next_history_sequence)
     then
       Error
         (Agent_protocol.Error.create

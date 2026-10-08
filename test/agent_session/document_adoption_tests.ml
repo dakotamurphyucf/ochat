@@ -54,6 +54,174 @@ let state_json state =
 
 let has json key = String.is_substring json ~substring:("\"" ^ key ^ "\"")
 
+let%expect_test "replay envelopes bind the resulting session and generation" =
+  with_actor_workspace (fun _ workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let previous = A.Session_state_document.authored initial in
+    let previous_bytes = state_json previous in
+    let delta = capture (Reset_generation 1) in
+    let transaction ~session_id ~generation =
+      Agent_store.Transaction.create
+        ~limits
+        ~session_id
+        ~generation
+        ~transaction_sequence:1L
+        ~previous_transaction_hash:None
+        ~session_revision:1L
+        ~first_event_sequence:None
+        ~last_event_sequence:None
+        ~accepted_at_ns:
+          (P.Timestamp.to_time_ns timestamp
+           |> Time_ns.to_int_ns_since_epoch
+           |> Int64.of_int)
+        ~command_audit:None
+        ~delta:(A.Session_delta_document.document delta)
+        ~durable_events:[]
+      |> store_ok
+    in
+    let wrong_generation = transaction ~session_id ~generation:0 in
+    let wrong_session = transaction ~session_id:(P.Id.Session.create ()) ~generation:1 in
+    List.iter [ wrong_generation; wrong_session ] ~f:(fun transaction ->
+      let bytes = Agent_store.Transaction.encode transaction in
+      let corrupt =
+        match A.Session_persistence.apply_document previous ~limits transaction with
+        | Error (Agent_store.Store_error.Corrupt _) -> true
+        | Error _ | Ok _ -> false
+      in
+      print_s
+        [%sexp
+          (corrupt : bool)
+        , (String.equal bytes (Agent_store.Transaction.encode transaction) : bool)
+        , (String.equal previous_bytes (state_json previous) : bool)]);
+    let valid = transaction ~session_id ~generation:1 in
+    let actual =
+      A.Session_persistence.apply_document previous ~limits valid
+      |> store_ok
+      |> A.Session_state_document.value
+    in
+    print_s
+      [%sexp
+        (P.Id.Session.equal actual.identity.session_id session_id : bool)
+      , (actual.identity.generation : int)
+      , (A.Inference_ledger.generation actual.inference_ledger : int)]);
+  [%expect
+    {|
+    (true true true)
+    (true true true)
+    (true 1 1)
+    |}]
+;;
+
+let%expect_test "named state decoding protects local history allocation and admits gaps" =
+  with_actor_workspace (fun _ workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let local_id =
+      History_entry.Id.create ~namespace:(P.Id.Session.to_string session_id) ~sequence:3
+      |> Result.ok_or_failwith
+    in
+    let local = A.History_codec.user_text ~id:local_id "local" in
+    let local_protocol = A.History_codec.to_protocol local in
+    let imported_id =
+      History_entry.Id.create ~namespace:"imported" ~sequence:9999
+      |> Result.ok_or_failwith
+    in
+    let imported =
+      A.History_codec.user_text ~id:imported_id "imported" |> A.History_codec.to_protocol
+    in
+    let initial =
+      { initial with
+        conversation =
+          { initial.conversation with
+            next_history_sequence = 128L
+          ; reserved_history_through = 64L
+          }
+      }
+    in
+    let canonical =
+      { initial with
+        conversation =
+          { initial.conversation with canonical_history = [ local_protocol; imported ] }
+      }
+    in
+    let deferred =
+      { initial with
+        conversation =
+          { initial.conversation with deferred_user_entries = [ local_protocol ] }
+      }
+    in
+    let overlay =
+      let snapshot = handoff_snapshot 0 in
+      let inserted : Session.Moderator_state.Identity_snapshot.Inserted.t =
+        { entry_id = local_id
+        ; change_id = 0
+        ; value = History_entry.payload local
+        ; script_label = None
+        }
+      in
+      { initial with
+        moderator =
+          Some
+            (A.Moderator_checkpoint.encode
+               { snapshot with next_change_id = 1; appended_items = [ inserted ] })
+      }
+    in
+    let retired_target =
+      let snapshot = handoff_snapshot 0 in
+      let replacement : Session.Moderator_state.Identity_snapshot.Replacement.t =
+        { target_id = local_id
+        ; change_id = 0
+        ; value = History_entry.payload local
+        ; script_label = None
+        }
+      in
+      { initial with
+        moderator =
+          Some
+            (A.Moderator_checkpoint.encode
+               { snapshot with next_change_id = 1; replacements = [ replacement ] })
+      }
+    in
+    let decode = A.Session_state_document.decode ~limits in
+    let edit_bounds document ~next ~reserved =
+      edit_document document ~f:(fun json ->
+        map_field json "payload" ~f:(fun payload ->
+          map_field payload "conversation" ~f:(fun conversation ->
+            set conversation "next_history_sequence" (`String next)
+            |> fun conversation ->
+            set conversation "reserved_history_through" (`String reserved))))
+    in
+    List.iter [ canonical; deferred; overlay; retired_target ] ~f:(fun state ->
+      let document = state_document state in
+      let bytes = D.Document.to_string document in
+      let recycled = edit_bounds document ~next:"3" ~reserved:"3" in
+      print_s
+        [%sexp
+          (Result.is_ok (decode document) : bool)
+        , (Result.is_error (decode recycled) : bool)
+        , (String.equal bytes (D.Document.to_string document) : bool)]);
+    let document = state_document canonical in
+    print_s
+      [%sexp
+        (Result.is_error (decode (edit_bounds document ~next:"128" ~reserved:"129"))
+         : bool)
+      , (Result.is_error (decode (edit_bounds document ~next:"128" ~reserved:"-1"))
+         : bool)
+      , (Result.is_error (Delta.apply canonical (History_block_reserved 96L)) : bool)
+      , (Result.is_ok (Delta.apply canonical (History_block_reserved 256L)) : bool)]);
+  [%expect
+    {|
+    (true true true)
+    (true true true)
+    (true true true)
+    (true true true)
+    (true true true true)
+    |}]
+;;
+
 let%expect_test
     "created journal child carries envelope and nested future fields into checkpoint"
   =

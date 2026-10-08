@@ -515,9 +515,9 @@ let validate_domain t =
   let open Result.Let_syntax in
   let%bind () = validate_delegation t in
   let%bind () = validate_model_job_targets t in
+  let%bind moderator = Moderator_checkpoint.decode t.moderator in
   let%bind () =
-    let%bind snapshot = Moderator_checkpoint.decode t.moderator in
-    match snapshot with
+    match moderator with
     | None -> Ok ()
     | Some snapshot ->
       Session.Moderator_state.Identity_snapshot.validate_history_ids
@@ -545,9 +545,57 @@ let validate_domain t =
     let%bind deferred =
       History_codec.all_of_protocol t.conversation.deferred_user_entries
     in
-    History_entry.validate_relations
-      (Invocation_history.Validated_history.entries retained_history @ deferred)
-    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    let entries =
+      Invocation_history.Validated_history.entries retained_history @ deferred
+    in
+    let%bind () =
+      History_entry.validate_relations entries
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    let conversation = t.conversation in
+    let%bind () =
+      nonnegative "next history sequence" conversation.next_history_sequence
+    in
+    let%bind () =
+      nonnegative "reserved history sequence" conversation.reserved_history_through
+    in
+    let%bind () =
+      if
+        Int64.(
+          conversation.reserved_history_through <= conversation.next_history_sequence)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "history reservation exceeds the allocator high-water mark")
+    in
+    let namespace = Agent_protocol.Id.Session.to_string t.identity.session_id in
+    let check_id id =
+      if
+        String.equal (History_entry.Id.namespace id) namespace
+        && Int64.(
+             of_int (History_entry.Id.sequence id) >= conversation.next_history_sequence)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "retained history identity is not below the allocator high-water mark")
+      else Ok ()
+    in
+    let%bind () =
+      List.fold_result entries ~init:() ~f:(fun () entry ->
+        check_id (History_entry.id entry))
+    in
+    match moderator with
+    | None -> Ok ()
+    | Some snapshot ->
+      let module M = Session.Moderator_state.Identity_snapshot in
+      let ids =
+        List.map (snapshot.prepended_items @ snapshot.appended_items) ~f:(fun item ->
+          item.M.Inserted.entry_id)
+        @ List.map snapshot.replacements ~f:(fun item -> item.M.Replacement.target_id)
+        @ List.map snapshot.tombstones ~f:(fun item -> item.M.Tombstone.target_id)
+      in
+      List.fold_result ids ~init:() ~f:(fun () id -> check_id id)
   in
   let%bind () =
     match t.automatic_turn_budget with
@@ -855,9 +903,6 @@ let validate_domain t =
         Error
           (Agent_protocol.Error.invalid_request
              "managed stop identity/generation is inconsistent"))
-  in
-  let%bind () =
-    nonnegative "next history sequence" t.conversation.next_history_sequence
   in
   let%bind references = authoring_references t in
   let%bind () =

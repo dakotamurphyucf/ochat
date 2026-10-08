@@ -326,7 +326,13 @@ module Draft : sig
   val mark_gap : t -> scope:Scope.Key.t option -> t
   val clear_scope : t -> Scope.Key.t -> t
   val remove_item : t -> Item.Key.t -> t
+
+  (** Retained items in first-admission order, independent of opaque provider
+      aliases. Refinement, replacement and finalization preserve their position;
+      removing and admitting an item again gives it a new position. Ordering
+      retains only the bounded set of currently admitted scoped identities. *)
   val items : t -> item_view list
+
   val sources : t -> source_view list
   val unknown_events : t -> unknown_view list
 end

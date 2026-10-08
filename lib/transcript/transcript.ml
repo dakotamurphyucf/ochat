@@ -818,6 +818,7 @@ module Draft = struct
     { limits : Limits.t
     ; scopes : retained_scope Map.M(Scope.Key).t
     ; item_map : retained_item Map.M(Item.Key).t
+    ; item_order_reversed : Item.Key.t list
     ; source_map : retained_source Map.M(Scope.Key).t
     ; unknown : retained_unknown list
     ; bytes : int
@@ -829,6 +830,7 @@ module Draft = struct
     { limits
     ; scopes = Map.empty (module Scope.Key)
     ; item_map = Map.empty (module Item.Key)
+    ; item_order_reversed = []
     ; source_map = Map.empty (module Scope.Key)
     ; unknown = []
     ; bytes = 0
@@ -840,7 +842,7 @@ module Draft = struct
   let retained_bytes t = t.bytes
 
   let items t =
-    Map.data t.item_map |> List.map ~f:(fun (item : retained_item) -> item.view)
+    List.rev_map t.item_order_reversed ~f:(fun key -> (Map.find_exn t.item_map key).view)
   ;;
 
   let sources t =
@@ -1017,7 +1019,18 @@ module Draft = struct
       let%bind charge = item_charge t item in
       let%map bytes = add_charge t.bytes old_charge charge ~cap in
       let item = { item with bytes = charge } in
-      { t with item_map = Map.set t.item_map ~key ~data:item; bytes; part_count }, item
+      let item_order_reversed =
+        match previous with
+        | Some _ -> t.item_order_reversed
+        | None -> key :: t.item_order_reversed
+      in
+      ( { t with
+          item_map = Map.set t.item_map ~key ~data:item
+        ; item_order_reversed
+        ; bytes
+        ; part_count
+        }
+      , item )
   ;;
 
   let refine_part (existing : Part.t) (incoming : Part.t) =
@@ -1361,6 +1374,9 @@ module Draft = struct
     | Some item ->
       { t with
         item_map = Map.remove t.item_map key
+      ; item_order_reversed =
+          List.filter t.item_order_reversed ~f:(fun retained ->
+            not (Item.Key.equal retained key))
       ; bytes = t.bytes - item.bytes
       ; part_count = t.part_count - count_parts item.view.state
       }

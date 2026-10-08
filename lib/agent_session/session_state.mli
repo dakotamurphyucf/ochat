@@ -69,7 +69,14 @@ module Conversation : sig
     ; deferred_user_entries : Agent_protocol.History.entry list
     ; initial_prompt_entry_count : int
     ; next_history_sequence : int64
+      (** Nonnegative allocator high-water mark, exclusive of every retained ID
+          in this session's namespace, including moderator insertions/targets.
+          Imported namespaces do not consume this allocator. Unused committed
+          blocks and retired history may leave gaps below this watermark. *)
     ; reserved_history_through : int64
+      (** Nonnegative exclusive committed reservation bound, at most
+          [next_history_sequence]. Restoring a lower allocator watermark would
+          recycle actual host occurrences. *)
     ; tasks : Jsonaf.t list
     ; kv_store : (string * string) list
     ; compaction_generation : int

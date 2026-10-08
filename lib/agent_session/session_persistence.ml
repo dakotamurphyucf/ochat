@@ -351,7 +351,12 @@ let apply_document state_document ~limits transaction =
     Session_delta_document.apply delta ~transaction_metadata ~limits state_document
     |> Result.map_error ~f:document_error
   in
-  Ok state_document
+  let state = Session_state_document.value state_document in
+  if
+    P.Id.Session.equal state.identity.session_id transaction.session_id
+    && Int.equal state.identity.generation transaction.generation
+  then Ok state_document
+  else Error (Store.Store_error.Corrupt "replayed state differs from transaction owner")
 ;;
 
 let apply_transaction ~limits (restored : Restored.t) transaction =

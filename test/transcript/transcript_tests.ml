@@ -76,6 +76,55 @@ let entry payload sequence =
   History_entry.create_with_id ~id payload
 ;;
 
+let%expect_test "opaque aliases retain admission order across scoped updates and removal" =
+  let nested =
+    scope
+      "child"
+      "attempt-1"
+      (Nested { scope = root.key; call_entry_id = None; call_alias = Some "parent" })
+  in
+  let z = descriptor ~header:(Message Assistant) root "z" in
+  let a = descriptor ~header:(Message Assistant) root "a" in
+  let child = descriptor ~header:(Message Assistant) nested "z" in
+  let show state =
+    T.Draft.items state
+    |> List.map ~f:(fun item ->
+      ( T.Source_id.to_string item.descriptor.scope.key.source
+      , T.Item_id.to_string item.descriptor.id ))
+    |> [%sexp_of: (string * string) list]
+    |> print_s
+  in
+  let state =
+    List.fold [ z; a; child ] ~init:(draft ()) ~f:(fun state item ->
+      apply state (Item_announced item))
+  in
+  show state;
+  let state =
+    apply state (Changed { target = Content (part a 0 Text); change = Replace "partial" })
+  in
+  let finalized = entry (message_payload Assistant "done") 0 in
+  let z_final =
+    descriptor ~header:(Message Assistant) ~entry_id:(History_entry.id finalized) root "z"
+  in
+  let state = apply state (Item_finalized { item = z_final; entry = finalized }) in
+  show state;
+  let state = T.Draft.remove_item state (T.Item.key a) in
+  let state = apply state (Item_announced a) in
+  show state;
+  let state = T.Draft.clear_scope state root.key in
+  show state;
+  let state = apply state (Item_announced z) in
+  show state;
+  [%expect
+    {|
+    ((root z) (root a) (child z))
+    ((root z) (root a) (child z))
+    ((root z) (child z) (root a))
+    ((child z))
+    ((child z) (root z))
+    |}]
+;;
+
 let%expect_test "orphan prefixes, exact replacement, scoped parts and Developer" =
   let item = descriptor root "item" in
   let part = part item 3 Text in

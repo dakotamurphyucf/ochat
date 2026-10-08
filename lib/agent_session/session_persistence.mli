@@ -74,7 +74,10 @@ val restore_snapshot
 
 (** Pure document replay preserving the complete state carrier. Performs the
     same transaction child/owner checks, original state admission and checked
-    metadata stamping as [apply_transaction], without an outer Snapshot owner. *)
+    metadata stamping as [apply_transaction], without an outer Snapshot owner.
+    The resulting session identity and generation must match the transaction
+    envelope; generation binds the post-transition state. A mismatch returns
+    [Store_error.Corrupt] before adopting the resulting document. *)
 val apply_document
   :  Session_state_document.t
   -> limits:Document_schema.Limits.t
