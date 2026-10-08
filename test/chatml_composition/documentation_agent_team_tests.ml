@@ -199,6 +199,7 @@ let with_team ?(sources = sources) ?reviewer_provider f =
                       |> protocol_ok
                     in
                     H.create
+                      ~subscribe:false
                       ~sw
                       ~clock:(Eio.Stdenv.clock env)
                       ~connection:client

@@ -346,6 +346,7 @@ let create_with_lease
       ~connection
       ~spec
       ~mode
+      ~subscribe
       ?on_update
       ?on_error
       ()
@@ -354,13 +355,13 @@ let create_with_lease
   let%bind idempotency_key = key () in
   let request =
     Agent_protocol.Session.Create_request.
-      { spec; requested_mode = Some mode; subscribe = true; idempotency_key }
+      { spec; requested_mode = Some mode; subscribe; idempotency_key }
   in
   match Connection.request connection (Session_create request) with
   | Error _ as failure -> failure
   | Ok (Session_create { session; attachment = Some response; _ }) ->
     make_handle
-      ~notification_lease:(Some notification_lease)
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -425,8 +426,8 @@ let attach
   else attach None
 ;;
 
-let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
-  with_notification_lease connection (fun notification_lease ->
+let create ~sw ~clock ~connection ~spec ~mode ?(subscribe = true) ?on_update ?on_error () =
+  let create notification_lease =
     create_with_lease
       ~notification_lease
       ~sw
@@ -434,9 +435,14 @@ let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
       ~connection
       ~spec
       ~mode
+      ~subscribe
       ?on_update
       ?on_error
-      ())
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> create (Some lease))
+  else create None
 ;;
 
 let session_id t = t.session_id

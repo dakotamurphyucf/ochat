@@ -1413,6 +1413,7 @@ let%expect_test "unsubscribed handles coexist without taking notification owners
     Eio.Switch.run (fun sw ->
       let reads = ref 0 in
       let attachments = ref 0 in
+      let creations = ref 0 in
       let never, _ = Eio.Promise.create () in
       let request = function
         | P.Command.Session_attach _ ->
@@ -1430,6 +1431,32 @@ let%expect_test "unsubscribed handles coexist without taking notification owners
                  ; replay = Snapshot snapshot
                  ; latest_event_sequence = 0L
                  ; reclaim_token = None
+                 })
+        | Session_create request ->
+          incr creations;
+          assert (not request.subscribe);
+          Ok
+            (Public.Result.Session_create
+               Public.Result.Create.
+                 { session
+                 ; mutation =
+                     P.Mutation_result.{ revision = 0L; latest_event_sequence = 0L }
+                 ; attachment =
+                     Some
+                       Public.Result.Attach.
+                         { attachment =
+                             P.Session.Attachment.
+                               { id =
+                                   P.Id.Attachment.of_string "att_passive_created"
+                                   |> protocol_ok
+                               ; session_id
+                               ; mode = Read_only
+                               ; owner_lease = None
+                               }
+                         ; replay = Snapshot snapshot
+                         ; latest_event_sequence = 0L
+                         ; reclaim_token = None
+                         }
                  })
         | Session_detach _ ->
           Public.Result.Non_history.of_internal
@@ -1462,16 +1489,39 @@ let%expect_test "unsubscribed handles coexist without taking notification owners
       [%test_eq: int] 0 !reads;
       let subscribed = attach true |> protocol_ok in
       let third = attach false |> protocol_ok in
+      let passive_created =
+        Agent_client.Session_handle.create
+          ~sw
+          ~clock:env#clock
+          ~connection
+          ~spec:protocol_spec
+          ~mode:Read_only
+          ~subscribe:false
+          ()
+        |> protocol_ok
+      in
+      assert (
+        Result.is_error
+          (Agent_client.Session_handle.create
+             ~sw
+             ~clock:env#clock
+             ~connection
+             ~spec:protocol_spec
+             ~mode:Read_only
+             ()));
+      [%test_eq: int] 1 !creations;
       assert (Result.is_error (attach true));
       [%test_eq: int] 4 !attachments;
-      List.iter [ first; second; third ] ~f:Agent_client.Session_handle.close;
+      List.iter
+        [ first; second; third; passive_created ]
+        ~f:Agent_client.Session_handle.close;
       assert (Result.is_error (Agent_client.Connection.claim_notifications connection));
       Agent_client.Session_handle.close subscribed;
       Agent_client.Session_handle.await_closed subscribed;
       Agent_client.Connection.close connection;
       print_endline
-        "passive handles share connection; exactly one subscribed owner; passive close \
-         retains owner"));
+        "passive attach/create share connection; exactly one subscribed owner; passive \
+         close retains owner"));
   [%expect
-    {| passive handles share connection; exactly one subscribed owner; passive close retains owner |}]
+    {| passive attach/create share connection; exactly one subscribed owner; passive close retains owner |}]
 ;;
