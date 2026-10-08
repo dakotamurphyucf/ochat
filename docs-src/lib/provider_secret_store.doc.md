@@ -52,6 +52,18 @@ never removed. Cleanup failure can leave an unreferenced revision for lifecycle
 reconciliation. Cancellation after metadata replacement or deletion is ambiguous
 and requires rereading the authoritative metadata; it does not imply rollback.
 
+A missing revision is logical absence, not by itself proof that an earlier unlink
+is durable. `confirm_absent` validates this backend's retained directory,
+nofollow-checks the exact child and, only when it is absent, syncs that same
+directory. Any existing entry, including a dangling symlink, returns Exists
+without following or deleting it. Errors have the nonmutating Confirm_absent
+operation tag and publication=None; the lifecycle must retain pending cleanup
+when confirmation fails. The caller owns lifecycle coordination around the check
+and sync. This primitive does not lock, recreate an item, guarantee future absence
+against unrelated writers, or promise physical erasure. Registry metadata and
+secret material can use independently retained roots; syncing metadata alone
+cannot confirm removal in a different secret directory.
+
 ## Lifetimes and locking
 
 Each backend borrows its Directory; closing the backend joins its operations and
@@ -71,8 +83,10 @@ with a separate [lock process](../../test/private_storage/lock_probe.ml). They
 cover actual native pre/post-publication faults, immutable retention, cancellation
 ownership, unsafe descriptor admission, cross-process shared/exclusive locking,
 owner death, stable inode identity, failed-switch adoption, anchor replacement,
-borrowed lifetime and redacted errors. On macOS, all nine native expect cases
-passed through the isolated private-storage test alias, including actual Darwin
+borrowed lifetime and redacted errors. On macOS, all eleven native expect cases
+passed through the isolated private-storage test alias, including durable absence
+confirmation, existing-file/symlink retention, the finite directory-sync failure
+seam with publication=None, and actual Darwin
 extended ACL rejection and empty ACL admission. This qualification uses owned
 synthetic directories and separate lock-holder processes. Linux native behavior
 has not been executed or qualified. No actual credentials, provider requests,

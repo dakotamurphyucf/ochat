@@ -1,0 +1,12 @@
+(library
+ (name credential_registry_test)
+ (modules credential_registry_test)
+ (libraries core core_unix eio eio_main ochat.credential_registry ochat.credential_registry_model ochat.private_storage ochat.provider_secret_store)
+ (inline_tests (deps registry_probe.exe))
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(executable
+ (name registry_probe)
+ (modules registry_probe)
+ (libraries core eio eio_main ochat.credential_registry ochat.credential_registry_model ochat.private_storage ochat.provider_secret_store)
+ (preprocess (pps ppx_jane)))

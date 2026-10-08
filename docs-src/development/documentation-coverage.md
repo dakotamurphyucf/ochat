@@ -586,6 +586,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatml/chatml_runtime.mli` | [contract](../../lib/chatml/chatml_runtime.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_surface_inventory.mli` | [contract](../../lib/chatml/chatml_surface_inventory.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_value_codec.mli` | [contract](../../lib/chatml/chatml_value_codec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/credential_registry/credential_registry.mli` | [contract](../../lib/credential_registry/credential_registry.mli) | [integration](../lib/credential_registry.doc.md) | Public interface + current host guide. |
+| `lib/credential_registry_model/credential_registry_model.mli` | [contract](../../lib/credential_registry_model/credential_registry_model.mli) | [integration](../lib/credential_registry_model.doc.md) | Public interface + current host guide. |
 | `lib/history_chatmd/history_chatmd.mli` | [contract](../../lib/history_chatmd/history_chatmd.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/history_entry.mli` | [contract](../../lib/history_entry.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/inference/event.mli` | [contract](../../lib/inference/event.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
@@ -918,6 +920,8 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/chatml/chatml_typechecker.doc.md) | `docs-src/lib/chatml/chatml_typechecker.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chatml/frame_env.doc.md) | `docs-src/lib/chatml/frame_env.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/context_compaction/summarizer.doc.md) | `docs-src/lib/context_compaction/summarizer.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/credential_registry.doc.md) | `docs-src/lib/credential_registry.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/credential_registry_model.doc.md) | `docs-src/lib/credential_registry_model.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/definitions.doc.md) | `docs-src/lib/definitions.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/dune_describe.doc.md) | `docs-src/lib/dune_describe.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/embed_service.doc.md) | `docs-src/lib/embed_service.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

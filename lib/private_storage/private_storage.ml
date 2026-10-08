@@ -10,6 +10,7 @@ module Error = struct
     | Create
     | Replace
     | Delete
+    | Confirm_absent
   [@@deriving sexp_of]
 
   type code =
@@ -101,6 +102,13 @@ external native_write
   -> int
   -> int * bool * Native_unix.file_descr
   = "ochat_private_write"
+
+external native_confirm_absent
+  :  Native_unix.file_descr
+  -> string
+  -> bool
+  -> int
+  = "ochat_private_confirm_absent"
 
 external native_delete
   :  Native_unix.file_descr
@@ -336,6 +344,17 @@ module Directory = struct
       if code = 0 then Ok () else Error (Error.mutation Delete code published))
   ;;
 
+  let confirm_absent_internal t name ~fail_directory_sync =
+    with_directory t Confirm_absent ~mutation:false (fun fd ->
+      let code = joined (fun () -> native_confirm_absent fd name fail_directory_sync) in
+      Eio.Fiber.check ();
+      if code = 0
+      then Ok ()
+      else Error (Error.make Confirm_absent (Error.native_code code)))
+  ;;
+
+  let confirm_absent t name = confirm_absent_internal t name ~fail_directory_sync:false
+
   module For_testing = struct
     type fault =
       | Before_publication
@@ -352,6 +371,10 @@ module Directory = struct
            | Before_publication -> 1
            | Before_directory_sync -> 2)
         ~after_native:Fn.ignore
+    ;;
+
+    let confirm_absent_with_sync_failure t name =
+      confirm_absent_internal t name ~fail_directory_sync:true
     ;;
 
     let create_with_completion_hook t name bytes ~after_native =

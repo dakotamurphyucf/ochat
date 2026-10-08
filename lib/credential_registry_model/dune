@@ -1,0 +1,5 @@
+(library
+ (name credential_registry_model)
+ (public_name ochat.credential_registry_model)
+ (libraries core jsonaf uri ochat.document_schema)
+ (preprocess (pps ppx_jane)))

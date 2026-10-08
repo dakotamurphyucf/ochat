@@ -6,6 +6,7 @@ module Error = struct
     | Create
     | Read
     | Delete
+    | Confirm_absent
     | Close
   [@@deriving sexp_of]
 
@@ -152,4 +153,9 @@ let read t ~revision =
 let delete t ~revision =
   with_revision t revision Delete ~mutation:true (fun name ->
     Private_storage.Directory.delete t.directory name)
+;;
+
+let confirm_absent t ~revision =
+  with_revision t revision Confirm_absent ~mutation:false (fun name ->
+    Private_storage.Directory.confirm_absent t.directory name)
 ;;
