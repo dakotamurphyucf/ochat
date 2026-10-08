@@ -86,7 +86,9 @@ let create driver ~profile ~profile_revision ~auth ~default_model ~namespace ~li
       ~limits:document_limits
   in
   let%bind identity = make_identity namespace in
-  let%map adapter = A.create driver ~profile ~profile_revision ~auth ~limits in
+  let%map adapter =
+    A.create driver ~profile ~profile_revision ~auth:(A.Auth_source.Static auth) ~limits
+  in
   { driver; auth; limits; profile; profile_revision; default_model; adapter; identity }
 ;;
 
@@ -98,7 +100,7 @@ let with_response_limit t ~max_body_bytes =
       driver
       ~profile:t.profile
       ~profile_revision:t.profile_revision
-      ~auth:t.auth
+      ~auth:(A.Auth_source.Static t.auth)
       ~limits:t.limits
   in
   { t with driver; adapter }
