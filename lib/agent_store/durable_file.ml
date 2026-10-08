@@ -33,15 +33,19 @@ let write_temporary path contents ~on_open =
 ;;
 
 let sync_directory_exn path =
-  Eio.Path.with_open_in path (fun directory ->
-    (match (Eio.File.stat directory).kind with
-     | `Directory -> ()
-     | _ -> invalid_arg "sync_directory requires a directory");
-    match Eio_unix.Resource.fd_opt directory with
-    | None -> failwith "directory sync requires a native directory FD"
-    | Some descriptor ->
-      Eio_unix.Fd.use_exn "fsync directory" descriptor (fun unix_descriptor ->
-        Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
+  (* Open "." relative to a retained directory capability: Linux openat2 rejects
+     the empty relative path returned by Path.with_open_dir. *)
+  Eio.Path.with_open_in
+    Eio.Path.(path / ".")
+    (fun directory ->
+       (match (Eio.File.stat directory).kind with
+        | `Directory -> ()
+        | _ -> invalid_arg "sync_directory requires a directory");
+       match Eio_unix.Resource.fd_opt directory with
+       | None -> failwith "directory sync requires a native directory FD"
+       | Some descriptor ->
+         Eio_unix.Fd.use_exn "fsync directory" descriptor (fun unix_descriptor ->
+           Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
 ;;
 
 let replace_paths ~durability ~path ~temporary_eio ~destination ~directory contents =
@@ -80,6 +84,7 @@ let replace_eio ~env ~durability ~path contents =
 let replace_in ~directory ~durability ~basename contents =
   if
     String.is_empty basename
+    || String.mem basename '\000'
     || (not (String.equal (Filename.basename basename) basename))
     || String.equal basename "."
     || String.equal basename ".."

@@ -1980,13 +1980,15 @@ let%expect_test "directory capability atomic publication survives anchor rename"
              ~durability:Flush_file_and_directory
              ~basename:"../escaped"
              "identity"));
-      assert (
-        Result.is_error
-          (Agent_store.Durable_file.replace_in
-             ~directory
-             ~durability:Flush_file_and_directory
-             ~basename:"invalid\000name"
-             "identity")));
+      match
+        Agent_store.Durable_file.replace_in
+          ~directory
+          ~durability:Flush_file_and_directory
+          ~basename:"invalid\000name"
+          "identity"
+      with
+      | Error (Agent_store.Store_error.Corrupt _) -> ()
+      | Error _ | Ok () -> failwith "NUL basename must fail validation before IO");
     print_endline "publication stays in opened directory; parent traversal rejected");
   [%expect {| publication stays in opened directory; parent traversal rejected |}]
 ;;
