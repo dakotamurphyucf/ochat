@@ -481,6 +481,7 @@ type t =
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
   | Session_start of Session.Start_request.t
+  | Session_update_metadata of Session_metadata.Request.t
   | Session_stop of Session.Stop_request.t
   | Session_cancel_operation of Session.Cancel_operation_request.t
   | Session_send_message of Session.Send_message_request.t
@@ -2610,7 +2611,7 @@ type t =
   | Workspace_get of Workspace.t
   | Blob_read of Blob.Chunk.t
   | Session_create of Create.t
-  | Session_list of Session.t Page.t
+  | Session_list of Session_catalog.t Page.t
   | Session_get of Snapshot.t
   | Session_inference_summary of Inference_query.Summary.t
   | Session_inference_observations of Inference_query.Response.t
@@ -2618,6 +2619,7 @@ type t =
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
   | Session_start of Session_mutation.t
+  | Session_update_metadata of Session_mutation.t
   | Session_stop of Session_mutation.t
   | Session_cancel_operation of Session_mutation.t
   | Session_send_message of Send_message.t
@@ -4159,6 +4161,9 @@ module Spec : sig
     -> (t, Error.t) result
 
   val to_json : t -> Jsonaf.t
+
+  (** Structural decoding retains historical metadata strings; authored creation
+      additionally uses [create], including at Create_request decoding. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
@@ -4185,6 +4190,9 @@ type t =
   ; workspace_instance : Id.Workspace_instance.t option
   ; active_operation : Operation.t option
   ; revision : int64
+  ; metadata_revision : int64 [@sexp.default 0L]
+    (** Nonnegative organization counter. Streaming changes advance [revision]
+        while leaving this counter intact. Legacy summaries default to zero. *)
   ; latest_event_sequence : int64
   ; inference_summary : Inference_summary.t
         [@sexp.default History_entry.Payload.Presence.Absent]
@@ -4242,6 +4250,10 @@ module List_request : sig
     ; workspace_id : Id.Workspace_definition.t option
     ; owner_principal_id : Id.Principal.t option
     ; labels : (string * string) list
+    ; sort : Session_catalog_query.Sort.t
+    ; archive : Session_catalog_query.Archive_filter.t
+    ; creator_principal_id : Id.Principal.t option
+    ; active_owner_principal_id : Id.Principal.t option
     }
   [@@deriving sexp]
 
@@ -4486,6 +4498,125 @@ module Delete_request : sig
 
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## session_catalog
+
+[JSON codec](../../lib/agent_protocol/session_catalog.ml) · [interface](../../lib/agent_protocol/session_catalog.mli)
+
+```ocaml
+(** Catalog projection: archive state is registry-owned, and active ownership
+    is evaluated at query time. Neither field is persisted in Session.t. Missing
+    legacy wire fields decode to [false]/[None], never to creator ownership. *)
+type t =
+  { session : Session.t
+  ; active_owner_principal_id : Id.Principal.t option
+  ; archived : bool
+  }
+[@@deriving sexp]
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## session_catalog_query
+
+[JSON codec](../../lib/agent_protocol/session_catalog_query.ml) · [interface](../../lib/agent_protocol/session_catalog_query.mli)
+
+```ocaml
+(** Catalog ordering uses bytewise display-name comparison and ascending typed
+    session-id tie breaking, independently of the primary direction. *)
+module Sort : sig
+  type field =
+    | Created_at
+    | Updated_at
+    | Display_name
+  [@@deriving compare, equal, sexp]
+
+  type direction =
+    | Ascending
+    | Descending
+  [@@deriving compare, equal, sexp]
+
+  type t =
+    { field : field
+    ; direction : direction
+    }
+  [@@deriving compare, equal, sexp]
+
+  val default : t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Archive_filter : sig
+  type t =
+    | Active
+    | Archived
+    | All
+  [@@deriving compare, equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## session_metadata
+
+[JSON codec](../../lib/agent_protocol/session_metadata.ml) · [interface](../../lib/agent_protocol/session_metadata.mli)
+
+```ocaml
+(** Organization metadata confers no execution authority. Stored values retain
+    historical strings under their document bounds; label keys are unique.
+    Authored patches separately bound names to 1024 bytes, 128 label operations,
+    keys to 256 bytes and values to 4096 bytes and reject malformed text. *)
+module Values : sig
+  type t = private
+    { display_name : string option
+    ; labels : (string * string) list
+    }
+  [@@deriving equal, sexp]
+
+  val create
+    :  display_name:string option
+    -> labels:(string * string) list
+    -> (t, Error.t) Result.t
+end
+
+module Patch : sig
+  type name_change =
+    | Keep
+    | Set of string
+    | Clear
+  [@@deriving equal, sexp]
+
+  type t [@@deriving sexp]
+
+  (** Duplicate keys and overlapping set/remove operations are invalid. *)
+  val create
+    :  name:name_change
+    -> set_labels:(string * string) list
+    -> remove_labels:string list
+    -> (t, Error.t) Result.t
+
+  val apply : t -> Values.t -> (Values.t, Error.t) Result.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Request : sig
+  type t =
+    { session_id : Id.Session.t
+    ; attachment_id : Id.Attachment.t
+    ; expected_metadata_revision : int64
+    ; patch : Patch.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
 end
 ```
 
