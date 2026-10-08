@@ -55,6 +55,8 @@ let owner name =
   let choices =
     [ [ "credential_registry_model/" ], "../lib/credential_registry_model.doc.md"
     ; [ "credential_registry/" ], "../lib/credential_registry.doc.md"
+    ; ( [ "provider_oauth/"; "provider_oauth_protocol/"; "provider_oauth_registry/" ]
+      , "../lib/provider_oauth.doc.md" )
     ; ( [ "private_storage/"; "provider_secret_store/" ]
       , "../lib/provider_secret_store.doc.md" )
     ; ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
@@ -179,6 +181,9 @@ let module_rows env root =
          ; "provider_secret_store/"
          ; "credential_registry_model/"
          ; "credential_registry/"
+         ; "provider_oauth/"
+         ; "provider_oauth_protocol/"
+         ; "provider_oauth_registry/"
          ]
          ~f:(fun substring -> String.is_substring file ~substring))
   |> List.map ~f:(fun file ->

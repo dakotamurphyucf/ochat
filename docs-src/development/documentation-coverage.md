@@ -620,6 +620,11 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/openai/responses_websocket.mli` | [contract](../../lib/openai/responses_websocket.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/responses_wire.mli` | [contract](../../lib/openai/responses_wire.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/private_storage/private_storage.mli` | [contract](../../lib/private_storage/private_storage.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/oauth_identity.mli` | [contract](../../lib/provider_oauth/oauth_identity.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/oauth_transport.mli` | [contract](../../lib/provider_oauth/oauth_transport.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth/provider_oauth.mli` | [contract](../../lib/provider_oauth/provider_oauth.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth_protocol/provider_oauth_protocol.mli` | [contract](../../lib/provider_oauth_protocol/provider_oauth_protocol.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
+| `lib/provider_oauth_registry/provider_oauth_registry.mli` | [contract](../../lib/provider_oauth_registry/provider_oauth_registry.mli) | [integration](../lib/provider_oauth.doc.md) | Public interface + current host guide. |
 | `lib/provider_secret_store/provider_secret_store.mli` | [contract](../../lib/provider_secret_store/provider_secret_store.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/shell_access/process_spawn.mli` | [contract](../../lib/shell_access/process_spawn.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -998,6 +1003,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/package_index.doc.md) | `docs-src/lib/package_index.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/parallel_tool_calls.doc.md) | `docs-src/lib/parallel_tool_calls.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/prompt_session.doc.md) | `docs-src/lib/prompt_session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/provider_oauth.doc.md) | `docs-src/lib/provider_oauth.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/provider_secret_store.doc.md) | `docs-src/lib/provider_secret_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session.doc.md) | `docs-src/lib/session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session_store.doc.md) | `docs-src/lib/session_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
