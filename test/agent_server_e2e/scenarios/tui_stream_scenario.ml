@@ -36,6 +36,7 @@ let fixture env temporary =
 ;;
 
 let with_daemon env fixture port f =
+  T.provision_provider env fixture ~api_url:(endpoint port);
   Eio.Switch.run (fun sw ->
     let daemon =
       Support.Daemon_process.start_in_directory_with_environment_overrides
@@ -940,7 +941,7 @@ let child env selection =
       in
       let messages =
         match mode with
-        | "embedded" -> T.with_embedded_provider env fixture run
+        | "embedded" -> T.with_embedded_provider env fixture ~api_url:(endpoint port) run
         | "unix" -> with_connected env fixture port false run
         | "http" -> with_connected env fixture port true run
         | _ -> failwith "unknown TUI stream transport"

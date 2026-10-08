@@ -32,7 +32,7 @@
 
       let comp_tools, _tbl = Ochat_function.functions ochat_functions in
       let request_tools  = Tool.convert_tools comp_tools in
-      (* … pass [request_tools] to [Openai.Responses.post_response] … *)
+      (* Tool descriptors are lowered by the explicit inference adapter. *)
     ]}
 
     {1 Warning}

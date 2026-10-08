@@ -13,8 +13,17 @@ val presentation : Eio_unix.Stdenv.base -> Support.Temporary_environment.t -> un
 val with_embedded_provider
   :  Eio_unix.Stdenv.base
   -> Support.Config_fixture.t
+  -> api_url:string
   -> (Chat_tui.Agent_session_client.t -> Agent_client.Connection.t -> 'a)
   -> 'a
+
+(** Explicit fixture-only provisioning in the private temporary home, using only
+    the synthetic loopback key. The ordinary child entrypoint opens Existing. *)
+val provision_provider
+  :  Eio_unix.Stdenv.base
+  -> Support.Config_fixture.t
+  -> api_url:string
+  -> unit
 
 val model : string -> Chat_tui.Model.t
 

@@ -316,78 +316,95 @@ let () =
      working directory.  We therefore register them inside the main Eio
      fibre where we have access to [env#cwd]. *)
   Eio_main.run (fun env ->
-    let inference_host = Inference_composition.create ~env ~default_model:"gpt-5" in
-    let inference_context =
-      Inference_composition.context inference_host Chat_response.Config.default
-    in
-    let dir = Eio.Stdenv.cwd env in
-    (* Register demo echo plus built-in functions. *)
-    setup_tool_echo core;
-    register_builtin_apply_patch core ~dir;
-    register_builtin_read_dir core ~dir;
-    register_builtin_get_contents core ~dir;
-    (* Meta-prompting refinement tool ----------------------------------- *)
-    let register_builtin_meta_refine (core : Mcp_server_core.t) : unit =
-      let module Def = Definitions.Meta_refine in
+    Eio.Switch.run (fun provider_sw ->
+      let inference_host =
+        lazy (Inference_composition.create ~sw:provider_sw ~env ~default_model:"gpt-5")
+      in
+      let inference_context =
+        lazy
+          (Inference_composition.context
+             (Lazy.force inference_host)
+             Chat_response.Config.default)
+      in
+      let dir = Eio.Stdenv.cwd env in
+      (* Register demo echo plus built-in functions. *)
+      setup_tool_echo core;
+      register_builtin_apply_patch core ~dir;
+      register_builtin_read_dir core ~dir;
+      register_builtin_get_contents core ~dir;
+      (* Meta-prompting refinement tool ----------------------------------- *)
+      let register_builtin_meta_refine (core : Mcp_server_core.t) : unit =
+        let module Def = Definitions.Meta_refine in
+        let spec : JT.Tool.t =
+          { name = Def.name
+          ; description = Def.description
+          ; input_schema = Def.parameters
+          }
+        in
+        let ochat_fn =
+          lazy
+            (let inference =
+               Inference_composition.execution
+                 (Lazy.force inference_host)
+                 Chat_response.Config.default
+             in
+             Functions.meta_refine ~env ~inference ())
+        in
+        let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
+          match args with
+          | `Object kvs ->
+            (match List.Assoc.find kvs ~equal:String.equal "prompt" with
+             | Some (`String prompt) ->
+               let input_json =
+                 `Object [ "prompt", `String prompt; "task", `String "" ]
+               in
+               let res =
+                 match (Lazy.force ochat_fn).run (Jsonaf.to_string input_json) with
+                 | Openai.Responses.Tool_output.Output.Text t -> t
+                 | _ -> "Unsupported output type"
+               in
+               Ok (`String res)
+             | _ -> Error "meta_refine expects field 'prompt' (string)")
+          | _ -> Error "meta_refine arguments must be object"
+        in
+        Mcp_server_core.register_tool core spec handler
+      in
+      register_builtin_meta_refine core;
+      (* Webpage → Markdown tool --------------------------------------- *)
+      let module Def = Definitions.Webpage_to_markdown in
       let spec : JT.Tool.t =
         { name = Def.name; description = Def.description; input_schema = Def.parameters }
       in
-      let host = Inference_composition.create ~env ~default_model:"gpt-5" in
-      let inference = Inference_composition.execution host Chat_response.Config.default in
-      let ochat_fn = Functions.meta_refine ~env ~inference () in
+      let ochat_fn = Functions.webpage_to_markdown ~dir ~net:(Eio.Stdenv.net env) in
       let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
         match args with
         | `Object kvs ->
-          (match List.Assoc.find kvs ~equal:String.equal "prompt" with
-           | Some (`String prompt) ->
-             let input_json = `Object [ "prompt", `String prompt; "task", `String "" ] in
+          (match List.Assoc.find kvs ~equal:String.equal "url" with
+           | Some (`String url) ->
+             let input_json = `Object [ "url", `String url ] in
              let res =
-               match ochat_fn.run (Jsonaf.to_string input_json) with
+               match (ochat_fn ~env).run (Jsonaf.to_string input_json) with
                | Openai.Responses.Tool_output.Output.Text t -> t
                | _ -> "Unsupported output type"
              in
              Ok (`String res)
-           | _ -> Error "meta_refine expects field 'prompt' (string)")
-        | _ -> Error "meta_refine arguments must be object"
+           | _ -> Error "webpage_to_markdown expects field 'url' (string)")
+        | _ -> Error "arguments must be object"
       in
-      Mcp_server_core.register_tool core spec handler
-    in
-    register_builtin_meta_refine core;
-    (* Webpage → Markdown tool --------------------------------------- *)
-    let module Def = Definitions.Webpage_to_markdown in
-    let spec : JT.Tool.t =
-      { name = Def.name; description = Def.description; input_schema = Def.parameters }
-    in
-    let ochat_fn = Functions.webpage_to_markdown ~dir ~net:(Eio.Stdenv.net env) in
-    let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
-      match args with
-      | `Object kvs ->
-        (match List.Assoc.find kvs ~equal:String.equal "url" with
-         | Some (`String url) ->
-           let input_json = `Object [ "url", `String url ] in
-           let res =
-             match (ochat_fn ~env).run (Jsonaf.to_string input_json) with
-             | Openai.Responses.Tool_output.Output.Text t -> t
-             | _ -> "Unsupported output type"
-           in
-           Ok (`String res)
-         | _ -> Error "webpage_to_markdown expects field 'url' (string)")
-      | _ -> Error "arguments must be object"
-    in
-    Mcp_server_core.register_tool core spec handler;
-    (* -----------------------------------------------------------------
+      Mcp_server_core.register_tool core spec handler;
+      (* -----------------------------------------------------------------
          Prompt folder scanning – every *.chatmd file is registered as both a
          prompt and an agent-backed tool.  The folder can be specified via the
          env var [MCP_PROMPTS_DIR].  If unset we look for "./prompts" relative
          to the current working directory and silently ignore missing dirs. *)
-    let prompts_dir =
-      match Sys.getenv "MCP_PROMPTS_DIR" with
-      | Some p -> Eio.Path.(dir / p)
-      | None ->
-        let default = Eio.Path.(dir / "prompts") in
-        default
-    in
-    (* -----------------------------------------------------------------
+      let prompts_dir =
+        match Sys.getenv "MCP_PROMPTS_DIR" with
+        | Some p -> Eio.Path.(dir / p)
+        | None ->
+          let default = Eio.Path.(dir / "prompts") in
+          default
+      in
+      (* -----------------------------------------------------------------
          Prompt scanning & lightweight hot-reload
          -----------------------------------------------------------------
 
@@ -399,43 +416,44 @@ let () =
          clients invalidate their cache.  We do **not** attempt to detect
          deletions at this stage; that can be added later together with a
          proper inotify/FSEvents watcher. *)
-    let processed : (string, unit) Hashtbl.t = Hashtbl.create (module String) in
-    let scan_prompts () =
-      (try
-         Eio.Path.read_dir prompts_dir
-         |> List.filter ~f:(fun fname -> Filename.check_suffix fname ".chatmd")
-         |> List.iter ~f:(fun fname ->
-           if not (Hashtbl.mem processed fname)
-           then (
-             let file_path = Eio.Path.(prompts_dir / fname) in
-             match
-               Or_error.try_with (fun () ->
-                 Mcp_prompt_agent.of_chatmd_file
-                   ~inference_context
-                   ~inference_identity:(Inference_host.identity inference_host)
-                   ~on_inference_attempt:(fun _ -> ())
-                   ~on_inference_completion:(fun _ -> ())
-                   ~env
-                   ~core
-                   ~path:file_path
-                   ())
-             with
-             | Error err ->
-               eprintf
-                 "[mcp_server] Failed to load prompt %s: %s\n"
-                 fname
-                 (Error.to_string_hum err)
-             | Ok (tool, handler, prompt) ->
-               Hashtbl.set processed ~key:fname ~data:();
-               Mcp_server_core.register_tool core tool handler;
-               Mcp_server_core.register_prompt core ~name:tool.name prompt))
-       with
-       | _exn -> ());
-      ()
-    in
-    (* Initial scan so the first batch of prompts is available immediately. *)
-    scan_prompts ();
-    (* Background hot-reload: disabled for now.
+      let processed : (string, unit) Hashtbl.t = Hashtbl.create (module String) in
+      let scan_prompts () =
+        (try
+           Eio.Path.read_dir prompts_dir
+           |> List.filter ~f:(fun fname -> Filename.check_suffix fname ".chatmd")
+           |> List.iter ~f:(fun fname ->
+             if not (Hashtbl.mem processed fname)
+             then (
+               let file_path = Eio.Path.(prompts_dir / fname) in
+               match
+                 Or_error.try_with (fun () ->
+                   Mcp_prompt_agent.of_chatmd_file
+                     ~inference_context:(Lazy.force inference_context)
+                     ~inference_identity:
+                       (Inference_host.identity (Lazy.force inference_host))
+                     ~on_inference_attempt:(fun _ -> ())
+                     ~on_inference_completion:(fun _ -> ())
+                     ~env
+                     ~core
+                     ~path:file_path
+                     ())
+               with
+               | Error err ->
+                 eprintf
+                   "[mcp_server] Failed to load prompt %s: %s\n"
+                   fname
+                   (Error.to_string_hum err)
+               | Ok (tool, handler, prompt) ->
+                 Hashtbl.set processed ~key:fname ~data:();
+                 Mcp_server_core.register_tool core tool handler;
+                 Mcp_server_core.register_prompt core ~name:tool.name prompt))
+         with
+         | _exn -> ());
+        ()
+      in
+      (* Initial scan so the first batch of prompts is available immediately. *)
+      scan_prompts ();
+      (* Background hot-reload: disabled for now.
          The code above lays the groundwork by keeping a [processed] table.
 
          We now run a very lightweight polling fibre that re-scans the prompt
@@ -445,61 +463,61 @@ let () =
          duplicate work, so the overhead is negligible.  If at some point a
          real watcher becomes available we can drop this polling loop without
          touching other parts of the server. *)
-    let start_polling_prompts ~sw () =
-      let rec loop () =
-        scan_prompts ();
-        (* Wait a bit before the next scan. *)
-        Eio.Time.sleep (Eio.Stdenv.clock env) 10.0;
-        loop ()
-      in
-      Eio.Fiber.fork ~sw loop
-    in
-    (* --------------------------------------------------------------- *)
-    (* Lightweight polling for resource list changes.                  *)
-    (* --------------------------------------------------------------- *)
-    let start_polling_resources ~sw () =
-      let previous_listing = ref String.Set.empty in
-      let cwd_string = Stdlib.Sys.getcwd () in
-      let scan_resources () =
-        let current_listing =
-          match Or_error.try_with (fun () -> Stdlib.Sys.readdir cwd_string) with
-          | Error _ -> String.Set.empty
-          | Ok arr ->
-            Array.to_list arr
-            |> List.filter ~f:(fun fname ->
-              let path = Filename.concat cwd_string fname in
-              Stdlib.Sys.file_exists path && not (Stdlib.Sys.is_directory path))
-            |> String.Set.of_list
+      let start_polling_prompts ~sw () =
+        let rec loop () =
+          scan_prompts ();
+          (* Wait a bit before the next scan. *)
+          Eio.Time.sleep (Eio.Stdenv.clock env) 10.0;
+          loop ()
         in
-        if not (Set.equal !previous_listing current_listing)
-        then (
-          previous_listing := current_listing;
-          Mcp_server_core.notify_resources_changed core)
+        Eio.Fiber.fork ~sw loop
       in
-      let rec loop () =
-        scan_resources ();
-        (* initial / periodic scan *)
-        Eio.Time.sleep (Eio.Stdenv.clock env) 10.0;
-        loop ()
+      (* --------------------------------------------------------------- *)
+      (* Lightweight polling for resource list changes.                  *)
+      (* --------------------------------------------------------------- *)
+      let start_polling_resources ~sw () =
+        let previous_listing = ref String.Set.empty in
+        let cwd_string = Stdlib.Sys.getcwd () in
+        let scan_resources () =
+          let current_listing =
+            match Or_error.try_with (fun () -> Stdlib.Sys.readdir cwd_string) with
+            | Error _ -> String.Set.empty
+            | Ok arr ->
+              Array.to_list arr
+              |> List.filter ~f:(fun fname ->
+                let path = Filename.concat cwd_string fname in
+                Stdlib.Sys.file_exists path && not (Stdlib.Sys.is_directory path))
+              |> String.Set.of_list
+          in
+          if not (Set.equal !previous_listing current_listing)
+          then (
+            previous_listing := current_listing;
+            Mcp_server_core.notify_resources_changed core)
+        in
+        let rec loop () =
+          scan_resources ();
+          (* initial / periodic scan *)
+          Eio.Time.sleep (Eio.Stdenv.clock env) 10.0;
+          loop ()
+        in
+        Eio.Fiber.fork ~sw loop
       in
-      Eio.Fiber.fork ~sw loop
-    in
-    (* ----------------------------------------------------------------- *)
-    match !http_port_ref with
-    | Some port ->
-      Eio.Switch.run (fun sw ->
-        (* Poller lives under the same switch so it terminates when the
+      (* ----------------------------------------------------------------- *)
+      match !http_port_ref with
+      | Some port ->
+        Eio.Switch.run (fun sw ->
+          (* Poller lives under the same switch so it terminates when the
                   HTTP server shuts down *)
-        start_polling_prompts ~sw ();
-        start_polling_resources ~sw ();
-        (* Launch Streamable HTTP server and block forever *)
-        Mcp_server_http.run ~require_auth:true ~env ~core ~port)
-    | None ->
-      (* stdio mode – we still spawn the polling fibre so that long-lived
+          start_polling_prompts ~sw ();
+          start_polling_resources ~sw ();
+          (* Launch Streamable HTTP server and block forever *)
+          Mcp_server_http.run ~require_auth:true ~env ~core ~port)
+      | None ->
+        (* stdio mode – we still spawn the polling fibre so that long-lived
               sessions also benefit from newly added prompts.  Since the stdio
               loop is blocking we need a dedicated switch. *)
-      Eio.Switch.run (fun sw ->
-        start_polling_prompts ~sw ();
-        start_polling_resources ~sw ();
-        run_stdio ~core ~env))
+        Eio.Switch.run (fun sw ->
+          start_polling_prompts ~sw ();
+          start_polling_resources ~sw ();
+          run_stdio ~core ~env)))
 ;;

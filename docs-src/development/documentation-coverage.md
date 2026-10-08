@@ -596,7 +596,9 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/inference/request.mli` | [contract](../../lib/inference/request.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference_client/inference_client.mli` | [contract](../../lib/inference_client/inference_client.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/credential_bridge.mli` | [contract](../../lib/inference_host/credential_bridge.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/inference_host.mli` | [contract](../../lib/inference_host/inference_host.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
+| `lib/inference_host/provider_configuration.mli` | [contract](../../lib/inference_host/provider_configuration.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/provider_profiles.mli` | [contract](../../lib/inference_host/provider_profiles.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_runtime/inference_runtime.mli` | [contract](../../lib/inference_runtime/inference_runtime.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_runtime/session.mli` | [contract](../../lib/inference_runtime/session.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |

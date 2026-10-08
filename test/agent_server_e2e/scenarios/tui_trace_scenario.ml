@@ -46,13 +46,58 @@ let with_embedded_options ~daemon_options env fixture f =
       ~finally:(fun () -> Agent_server.Embedded.close host))
 ;;
 
-let with_embedded_provider env fixture f =
-  let host = Inference_composition.create ~env ~default_model:"gpt-4.1" in
-  with_embedded_options
-    ~daemon_options:(Inference_composition.daemon_options host)
-    env
-    fixture
-    f
+let fixture_credential_id value =
+  Credential_registry_model.Id.create value
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Credential_registry_model.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
+let with_provisioned_provider env fixture ~api_url f =
+  Eio.Switch.run (fun sw ->
+    let configuration =
+      Inference_composition.Configuration.of_environment
+        ~env
+        ~home:(Temp.roots (Config.environment fixture)).home
+        ~api_url:(Some api_url)
+        ~key_name:"OPENAI_API_KEY"
+        ~lookup:(fun name ->
+          if String.equal name "OPENAI_API_KEY" then Some "tui-local-test-key" else None)
+        ~mode:(Initialize (fixture_credential_id "tui-fixture-incarnation"))
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference_composition.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let opened =
+      Inference_composition.try_open configuration ~sw ~env ~default_model:"gpt-4.1"
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference_composition.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    Inference_host.Credential_bridge.configure_environment
+      (Inference_composition.Opened.bridge opened)
+      ~principal:"local-operator"
+      ~profile:"first-party-openai-responses"
+      ~operation:(fixture_credential_id "tui-fixture-enrollment")
+      ~name:"OPENAI_API_KEY"
+      ~configuration_revision:None
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_host.Credential_bridge.Error.sexp_of_t error))
+    |> Result.ok_or_failwith;
+    f (Inference_composition.Opened.host opened))
+;;
+
+let provision_provider env fixture ~api_url =
+  with_provisioned_provider env fixture ~api_url (fun _ -> ())
+;;
+
+let with_embedded_provider env fixture ~api_url f =
+  with_provisioned_provider env fixture ~api_url (fun host ->
+    with_embedded_options
+      ~daemon_options:(Inference_composition.daemon_options host)
+      env
+      fixture
+      f)
 ;;
 
 let with_embedded env fixture f =

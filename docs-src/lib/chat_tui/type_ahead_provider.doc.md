@@ -32,7 +32,7 @@ newest visible user/assistant/developer/system texts, budgets newest-first with
 a combined 16384-byte limit, then emits chronological context. Tool outputs,
 tool arguments, reasoning, image payloads and unprojected history are excluded.
 
-`complete_suffix ~sw ~env ~config input` returns `Ok text` or a sanitized
+`complete_suffix ~sw ~env ~inference ~config input` returns `Ok text` or a sanitized
 `Unavailable` / `Timeout` error. It sends developer instructions and plain
 user context with no tools. The validated model defaults to `gpt-5.6-luna`;
 reasoning and verbosity are low. The independent output cap defaults to 200.
@@ -53,12 +53,12 @@ no fallback model or automatic retry.
 
 ## No-log transport
 
-`Openai.Responses.post_private_response_exn` uses the existing local
-`OPENAI_API_KEY` and `API_URL` endpoint configuration, without a directory or
-logging callback. Its bounded reader rejects bodies over 256 KiB before JSON
-parsing. Raw errors are discarded by the provider; status messages never include
+Typeahead receives an explicit optional `Inference_client.Execution` from the
+selected client-local host, with its response limit narrowed to 256 KiB. It uses
+the common inference driver and the same authorized profile/account/credential
+binding. Missing execution remains unavailable; no ambient key or endpoint is
+recovered. Raw errors are discarded by the provider; status messages never include
 draft, context, output, credentials, headers or exception strings.
-Existing `post_response` callers keep their logging policy.
 
 This is local editor assistance, not a session operation. Enabling it authorizes
 transmission of unsent text and additional provider charges; token bounds are

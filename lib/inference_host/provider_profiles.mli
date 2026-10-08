@@ -91,6 +91,14 @@ val create
   -> limits:Inference_runtime.Limits.t
   -> t
 
+(** Immutable driver-limit view sharing the same owned entries, status,
+    authorization and credential callbacks. Administrative mutations are visible
+    through both views; this does not create another credential authority. *)
+val with_response_limit
+  :  t
+  -> max_body_bytes:int
+  -> (t, Inference_runtime.Preparation_error.t) Result.t
+
 (** Registry mutation is trusted host administration: the caller must authorize it
     independently of session-selected/imported data. Owner/generation are host
     lifecycle labels, never durable target fields. Reauthorization strictly advances
