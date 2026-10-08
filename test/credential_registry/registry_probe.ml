@@ -33,6 +33,7 @@ let () =
       in
       let registry =
         R.open_existing
+          ~metadata_admission:R.Metadata_admission.nonblocking
           ~sw
           ~wall_clock:(Eio.Stdenv.clock env)
           ~new_operation:(fun () -> id "child_refresh")

@@ -79,14 +79,6 @@ let owner_error = function
   | Conflict | Corrupt | Storage _ -> Store_unavailable
 ;;
 
-let profile_error = function
-  | Profile_admin.Error.Missing_profile -> DTO.Error.Missing_profile
-  | Busy -> Busy
-  | Publication_uncertain -> Submission_uncertain
-  | Invalid_template | Conflict -> Invalid_request
-  | Missing_setup | Storage _ | Registry _ | Bridge _ -> Store_unavailable
-;;
-
 let registry_error = function
   | C.Error.Authorization_denied -> DTO.Error.Denied
   | Busy | Timed_out -> DTO.Error.Busy
@@ -107,6 +99,49 @@ let bridge_error = function
   | Stale_authorization -> Denied
   | Lifecycle error -> registry_error error
   | Profile _ | Preparation _ -> Store_unavailable
+;;
+
+let profile_error = function
+  | Profile_admin.Error.Missing_profile -> DTO.Error.Missing_profile
+  | Busy -> Busy
+  | Publication_uncertain -> Submission_uncertain
+  | Invalid_template | Conflict -> Invalid_request
+  | Registry error -> registry_error error
+  | Bridge error -> bridge_error error
+  | Missing_setup | Storage _ -> Store_unavailable
+;;
+
+let publish_original t ~template ~operation =
+  let started = Eio.Time.Mono.now t.clock in
+  let metadata_busy = function
+    | Profile_admin.Error.Busy
+    | Registry C.Error.Busy
+    | Bridge (Bridge.Error.Lifecycle C.Error.Busy) -> true
+    | _ -> false
+  in
+  let expired () =
+    let elapsed =
+      Mtime.span started (Eio.Time.Mono.now t.clock) |> Mtime.Span.to_float_ns
+    in
+    Float.(elapsed >= Time_ns.Span.to_ns t.maximum_wait)
+  in
+  let rec publish ~initial =
+    if (not initial) && expired ()
+    then Error DTO.Error.Submission_uncertain
+    else (
+      match Profile_admin.publish_committed t.profiles ~template ~operation with
+      | Error
+          (Registry C.Error.Timed_out | Bridge (Bridge.Error.Lifecycle C.Error.Timed_out))
+        -> Error DTO.Error.Submission_uncertain
+      | Error error when metadata_busy error ->
+        if expired ()
+        then Error DTO.Error.Submission_uncertain
+        else (
+          Eio.Time.Mono.sleep t.clock 0.01;
+          publish ~initial:false)
+      | result -> Result.map_error result ~f:profile_error)
+  in
+  publish ~initial:true
 ;;
 
 let oauth_error = function
@@ -528,11 +563,7 @@ let begin_login t ~actor (request : DTO.Login_request.t) =
                                         >= 0 -> DTO.Error.Flow_expired
                                  | _ -> oauth_error error)
                                |> Result.bind ~f:(fun () ->
-                                 Profile_admin.publish_committed
-                                   t.profiles
-                                   ~template
-                                   ~operation
-                                 |> Result.map_error ~f:profile_error))
+                                 publish_original t ~template ~operation))
                             (fun () ->
                                Eio.Promise.await stop;
                                Error DTO.Error.Flow_interrupted)))

@@ -27,7 +27,11 @@ end
     before66 commits. start_login is an explicitly configured qualified66 port;
     it cannot choose caller-supplied routes or credentials. now is host wall time,
     used for the original public flow expiry at challenge disclosure and final
-    commit admission;66 additionally owns monotonic acquisition deadlines. *)
+    commit admission;66 additionally owns monotonic acquisition deadlines.
+    After admitted credential commit, bounded metadata-only reconciliation may
+    install its exact authoritative mapping despite subsequent actor expiry. It
+    rechecks the original operation each time and never repeats acquisition or
+    credential commit. Exhausted contention reports publication uncertainty. *)
 val create
   :  sw:Eio.Switch.t
   -> server_id:P.Id.Server.t

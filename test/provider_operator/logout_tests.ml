@@ -40,6 +40,7 @@ let%expect_test "lost logout reply then reauthorization never redisables the new
           let generated = ref 0 in
           let registry =
             C.initialize_new
+              ~metadata_admission:C.Metadata_admission.nonblocking
               ~sw
               ~wall_clock:(Eio.Stdenv.clock env)
               ~new_operation:(fun () ->

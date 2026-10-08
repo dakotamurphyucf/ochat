@@ -238,7 +238,7 @@ let request_error client command =
       , (result : Agent_protocol.Public.Result.t)]
 ;;
 
-let initialize client =
+let initialize ?(features = []) client =
   let implementation =
     Agent_protocol.Initialize.Implementation.create
       ~name:"agent-server-e2e-conformance"
@@ -250,7 +250,7 @@ let initialize client =
       ~implementation
       ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
@@ -583,11 +583,32 @@ let embedded_options environment fixture data_root =
 let direct_embedded_observation env environment fixture =
   let roots : Temporary_environment.roots = Temporary_environment.roots environment in
   let data_root = Filename.concat roots.data "conformance-embedded-direct" in
+  Support.Provider_fixture.provision ~env fixture;
   Eio.Switch.run (fun sw ->
+    let module Platform = Inference_composition.Provider_platform in
+    let platform =
+      Platform.create
+        ~sw
+        ~env
+        ~home:roots.home
+        ~api_url:None
+        ~lookup:(fun _ -> None)
+        ~default_model:"gpt-4.1"
+        ~namespace:(Platform.new_namespace env)
+        ~callback_port:1455
+        ()
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Agent_protocol.Provider_operator.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let daemon_options =
+      { (Inference_composition.daemon_options (Platform.host platform)) with
+        provider_operator_factory = Some (Platform.factory platform)
+      }
+    in
     let embedded =
       Agent_server.Embedded.start
-        ~daemon_options:
-          (Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+        ~daemon_options
         ~sw
         ~env
         (embedded_options environment fixture data_root)
@@ -2072,61 +2093,92 @@ let test_history_deletion env environment =
            require_equal_history_deletion baseline (observe stdio_http "stdio-http"))))
 ;;
 
-let provider_absent_observation client ~key_prefix =
+let provider_installed_observation client ~key_prefix =
   let module P = Agent_protocol in
   let module DTO = P.Provider_operator in
-  let initialized = initialize client in
+  let initialized = initialize ~features:[ "provider.operator" ] client in
   let info =
     match request client Server_info with
     | Server_info info -> info
     | _ -> fail "provider server info variant"
   in
   if
-    List.mem initialized.enabled_features "provider.operator" ~equal:String.equal
-    || List.mem info.features "provider.operator" ~equal:String.equal
-  then fail "absent provider service advertised capability";
-  let profile = DTO.Profile_id.of_string "absent-profile" |> protocol_ok in
+    (not (List.mem initialized.enabled_features "provider.operator" ~equal:String.equal))
+    || not (List.mem info.features "provider.operator" ~equal:String.equal)
+  then fail "installed application provider service omitted capability";
+  let status () =
+    match request client (Provider_status { profile = None }) with
+    | Provider_status status -> status
+    | _ -> fail "provider status variant"
+  in
+  let before = status () in
+  if
+    before.setup_required
+    || not (P.Id.Server.equal before.server_id initialized.server_id)
+  then fail "provisioned provider status lost application authority";
+  let api_profile =
+    DTO.Profile_id.of_string "first-party-openai-responses" |> protocol_ok
+  in
+  let selected =
+    List.find before.profiles ~f:(fun profile ->
+      DTO.Profile_id.equal profile.profile api_profile)
+    |> Option.value_exn
+  in
+  if not (DTO.Status_result.equal_availability selected.availability Configured)
+  then fail "protected synthetic provider binding is not configured";
+  let profile = DTO.Profile_id.of_string "unknown-provider-profile" |> protocol_ok in
   let revision = DTO.Revision.of_string "selection-1" |> protocol_ok in
   let flow : DTO.Flow_ref.t =
     { server_id = initialized.server_id
     ; profile
-    ; flow_id = DTO.Flow_id.of_string "absent-flow" |> protocol_ok
+    ; flow_id = DTO.Flow_id.of_string "nonexistent-provider-flow" |> protocol_ok
     ; expires_at = P.Timestamp.of_string "2099-01-01T00:00:00Z" |> protocol_ok
     }
   in
   let key name = idempotency_key (key_prefix ^ "-provider-" ^ name) in
-  let commands =
-    [ P.Command.Provider_setup { idempotency_key = key "setup" }
-    ; Provider_status { profile = None }
-    ; Provider_login_begin { profile; mode = Browser; idempotency_key = key "browser" }
-    ; Provider_login_begin { profile; mode = Device; idempotency_key = key "device" }
-    ; Provider_login_challenge { flow }
-    ; Provider_login_cancel { flow; idempotency_key = key "cancel" }
-    ; Provider_logout { profile; idempotency_key = key "logout" }
-    ; Provider_select
-        { profile; expected_revision = revision; idempotency_key = key "select" }
-    ; Provider_configure_environment
-        { profile
-        ; source = DTO.Source_id.of_string "approved-source" |> protocol_ok
-        ; idempotency_key = key "environment"
-        }
+  (* Fresh setup cannot adopt an existing incarnation. Other rejected methods
+     exercise the installed service without starting OAuth or disabling a key. *)
+  let commands : (P.Command.t * DTO.Error.t) list =
+    [ Provider_setup { idempotency_key = key "setup" }, Submission_uncertain
+    ; ( Provider_login_begin { profile; mode = Browser; idempotency_key = key "browser" }
+      , Missing_profile )
+    ; ( Provider_login_begin { profile; mode = Device; idempotency_key = key "device" }
+      , Missing_profile )
+    ; Provider_login_challenge { flow }, Flow_interrupted
+    ; Provider_login_cancel { flow; idempotency_key = key "cancel" }, Flow_interrupted
+    ; Provider_logout { profile; idempotency_key = key "logout" }, Missing_profile
+    ; ( Provider_select
+          { profile; expected_revision = revision; idempotency_key = key "select" }
+      , Missing_profile )
+    ; ( Provider_configure_environment
+          { profile
+          ; source = DTO.Source_id.of_string "openai-api-key" |> protocol_ok
+          ; idempotency_key = key "environment"
+          }
+      , Denied )
     ]
   in
-  List.map commands ~f:(fun command ->
-    let error = request_error client command in
-    if (not (P.Error.equal_code error.code Method_not_found)) || error.retryable
-    then fail "absent provider service did not return nonretryable unsupported";
-    let fields = P.Json_codec.fields error.data |> protocol_ok in
-    let provider_error =
-      P.Json_codec.required_as fields "provider_error" DTO.Error.of_json |> protocol_ok
-    in
-    if not (DTO.Error.equal provider_error Unsupported)
-    then fail "absent provider service returned another failure";
-    P.Command.method_name command, P.Error.code_to_string error.code)
+  let errors =
+    List.map commands ~f:(fun (command, expected) ->
+      let error = request_error client command in
+      let fields = P.Json_codec.fields error.data |> protocol_ok in
+      let provider_error =
+        P.Json_codec.required_as fields "provider_error" DTO.Error.of_json |> protocol_ok
+      in
+      if (not (DTO.Error.equal provider_error expected)) || error.retryable
+      then fail "installed provider refusal did not preserve its typed cause";
+      P.Command.method_name command, DTO.Error.to_json provider_error |> Jsonaf.to_string)
+  in
+  let public_status = DTO.Status_result.to_json in
+  if not (Jsonaf.exactly_equal (public_status before) (public_status (status ())))
+  then fail "rejected provider command changed existing authority";
+  ("provider.operator", "installed")
+  :: ("provider.status", Jsonaf.to_string (public_status before))
+  :: errors
 ;;
 
-let test_provider_absent env environment =
-  let fixture = fixture env environment "conformance-provider-absent" in
+let test_provider_installed env environment =
+  let fixture = fixture env environment "conformance-provider-installed" in
   Eio.Switch.run (fun sw ->
     with_daemon ~sw env fixture (fun _daemon _health ->
       with_transport_matrix
@@ -2135,22 +2187,22 @@ let test_provider_absent env environment =
         environment
         fixture
         (fun unix http stdio_unix stdio_http ->
-           let baseline = provider_absent_observation unix ~key_prefix:"unix" in
+           let baseline = provider_installed_observation unix ~key_prefix:"unix" in
            List.iter
              [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
              ~f:(fun (client, key_prefix) ->
-               let actual = provider_absent_observation client ~key_prefix in
+               let actual = provider_installed_observation client ~key_prefix in
                if
                  not
                    (List.equal
                       (fun (a, b) (c, d) -> String.equal a c && String.equal b d)
                       baseline
                       actual)
-               then fail "cross-transport absent provider semantics differ"))))
+               then fail "cross-transport installed provider semantics differ"))))
 ;;
 
 let cases =
-  [ "conformance.provider-absent", test_provider_absent
+  [ "conformance.provider-installed", test_provider_installed
   ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.inference-reads", test_inference_reads
@@ -2165,14 +2217,14 @@ let cases =
 ;;
 
 let method_coverage =
-  [ "provider.setup", "conformance.provider-absent"
-  ; "provider.status", "conformance.provider-absent"
-  ; "provider.login.begin", "conformance.provider-absent"
-  ; "provider.login.challenge", "conformance.provider-absent"
-  ; "provider.login.cancel", "conformance.provider-absent"
-  ; "provider.logout", "conformance.provider-absent"
-  ; "provider.select", "conformance.provider-absent"
-  ; "provider.configure_environment", "conformance.provider-absent"
+  [ "provider.setup", "conformance.provider-installed"
+  ; "provider.status", "conformance.provider-installed"
+  ; "provider.login.begin", "conformance.provider-installed"
+  ; "provider.login.challenge", "conformance.provider-installed"
+  ; "provider.login.cancel", "conformance.provider-installed"
+  ; "provider.logout", "conformance.provider-installed"
+  ; "provider.select", "conformance.provider-installed"
+  ; "provider.configure_environment", "conformance.provider-installed"
   ; "command.receipt", "conformance.session-lifecycle"
   ; "protocol.initialize", "conformance.read-methods"
   ; "protocol.ping", "conformance.read-methods"
