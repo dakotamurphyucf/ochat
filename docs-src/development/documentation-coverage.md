@@ -595,7 +595,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/inference/selection.mli` | [contract](../../lib/inference/selection.mli) | [integration](../neutral-inference-contracts.md) | Public interface + current host guide. |
 | `lib/inference_client/inference_client.mli` | [contract](../../lib/inference_client/inference_client.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_host/inference_host.mli` | [contract](../../lib/inference_host/inference_host.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
-| `lib/inference_host/provider_profiles.mli` | [contract](../../lib/inference_host/provider_profiles.mli) | [integration](../lib/neutral-inference.md#host-provider-profiles-and-captured-intent) | Host profile registry, credential identity and authorization lifecycle. |
+| `lib/inference_host/provider_profiles.mli` | [contract](../../lib/inference_host/provider_profiles.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/inference_runtime/inference_runtime.mli` | [contract](../../lib/inference_runtime/inference_runtime.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/inference_adapter.mli` | [contract](../../lib/openai/inference_adapter.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/inference_input.mli` | [contract](../../lib/openai/inference_input.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
@@ -609,6 +609,8 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/openai/responses_request.mli` | [contract](../../lib/openai/responses_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_sse.mli` | [contract](../../lib/openai/responses_sse.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_wire.mli` | [contract](../../lib/openai/responses_wire.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/private_storage/private_storage.mli` | [contract](../../lib/private_storage/private_storage.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
+| `lib/provider_secret_store/provider_secret_store.mli` | [contract](../../lib/provider_secret_store/provider_secret_store.mli) | [integration](../lib/provider_secret_store.doc.md) | Public interface + current host guide. |
 | `lib/session_store.mli` | [contract](../../lib/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/shell_access/process_spawn.mli` | [contract](../../lib/shell_access/process_spawn.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/shell_access/request_channel.mli` | [contract](../../lib/shell_access/request_channel.mli) | [integration](../bin/ochat_agent_helper.doc.md) | Public interface + current host guide. |
@@ -984,6 +986,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/package_index.doc.md) | `docs-src/lib/package_index.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/parallel_tool_calls.doc.md) | `docs-src/lib/parallel_tool_calls.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/prompt_session.doc.md) | `docs-src/lib/prompt_session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/provider_secret_store.doc.md) | `docs-src/lib/provider_secret_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session.doc.md) | `docs-src/lib/session.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/session_store.doc.md) | `docs-src/lib/session_store.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/shell_access/architecture.doc.md) | `docs-src/lib/shell_access/architecture.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

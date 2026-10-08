@@ -53,7 +53,9 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
+    [ ( [ "private_storage/"; "provider_secret_store/" ]
+      , "../lib/provider_secret_store.doc.md" )
+    ; ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
       , "../lib/inference-observations.md" )
     ; ( [ "inference_runtime/"
         ; "inference_client/"
@@ -169,6 +171,8 @@ let module_rows env root =
          ; "openai/inference_"
          ; "session_store"
          ; "source_loader"
+         ; "private_storage/"
+         ; "provider_secret_store/"
          ]
          ~f:(fun substring -> String.is_substring file ~substring))
   |> List.map ~f:(fun file ->
