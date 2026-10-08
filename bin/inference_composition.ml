@@ -24,12 +24,6 @@ module Error = struct
   [@@deriving sexp_of]
 end
 
-(* The standard endpoint host policy permits fields implemented by this
-     adapter. This is neither a model catalog nor a live support probe: a model
-     rejecting a permitted field still returns a typed provider failure.
-     Operator-owned profiles may narrow the baseline or refine named models. *)
-let capabilities = Provider_defaults.capabilities
-
 module Configuration = struct
   type t =
     { storage : S.t
@@ -98,12 +92,18 @@ module Configuration = struct
         ~mode
       |> invalid
     in
+    let%bind profile_capabilities =
+      Provider_runtime_host.Profile_policy.capabilities
+        Public_api
+        ~endpoint:(responses_endpoint ~api_url)
+      |> invalid
+    in
     let%bind profile =
       D.Profile.create
         ~id:"first-party-openai-responses"
         ~account:None
         ~endpoint:(responses_endpoint ~api_url)
-        ~capabilities
+        ~capabilities:profile_capabilities
         ~defaults:[]
       |> invalid
     in
@@ -238,12 +238,13 @@ let try_create configuration ~sw ~env ~default_model =
   try_open configuration ~sw ~env ~default_model |> Result.map ~f:Opened.host
 ;;
 
-let platform ~sw ~env ~default_model =
+let platform ~transport_policy ~sw ~env ~default_model =
   let open Result.Let_syntax in
   let%bind home =
     Sys.getenv "HOME" |> Result.of_option ~error:Error.Invalid_configuration
   in
   Provider_platform.create
+    ~transport_policy
     ~sw
     ~env
     ~home
@@ -256,9 +257,9 @@ let platform ~sw ~env ~default_model =
   |> Result.map_error ~f:(fun _ -> Error.Invalid_configuration)
 ;;
 
-let try_create_default ~sw ~env ~default_model =
+let try_create_default_with_policy ~transport_policy ~sw ~env ~default_model =
   let open Result.Let_syntax in
-  let%bind platform = platform ~sw ~env ~default_model in
+  let%bind platform = platform ~transport_policy ~sw ~env ~default_model in
   let%map _ =
     Provider_platform.open_operator
       platform
@@ -271,14 +272,30 @@ let try_create_default ~sw ~env ~default_model =
   Provider_platform.host platform
 ;;
 
-let create ~sw ~env ~default_model =
-  match try_create_default ~sw ~env ~default_model with
+let try_create_default ~sw ~env ~default_model =
+  try_create_default_with_policy
+    ~transport_policy:Inference.Observation.Transport_policy.Http_sse
+    ~sw
+    ~env
+    ~default_model
+;;
+
+let create_with_policy ~transport_policy ~sw ~env ~default_model =
+  match try_create_default_with_policy ~transport_policy ~sw ~env ~default_model with
   | Ok host -> host
   | Error Error.Setup_required ->
     failwith
       "Provider credentials require explicit host setup; existing authority was not \
        initialized or replaced."
   | Error error -> failwith (Sexp.to_string_hum (Error.sexp_of_t error))
+;;
+
+let create ~sw ~env ~default_model =
+  create_with_policy
+    ~transport_policy:Inference.Observation.Transport_policy.Http_sse
+    ~sw
+    ~env
+    ~default_model
 ;;
 
 let context host config =
@@ -341,13 +358,21 @@ let daemon_options host =
   { Agent_server.Daemon.default_options with inference_policy }
 ;;
 
-let daemon_options_default ~sw ~env ~default_model =
+let daemon_options_default_with_policy ~transport_policy ~sw ~env ~default_model =
   let platform =
-    platform ~sw ~env ~default_model
+    platform ~transport_policy ~sw ~env ~default_model
     |> Result.map_error ~f:(fun _ -> "Provider host configuration is unavailable")
     |> Result.ok_or_failwith
   in
   { (daemon_options (Provider_platform.host platform)) with
     provider_operator_factory = Some (Provider_platform.factory platform)
   }
+;;
+
+let daemon_options_default ~sw ~env ~default_model =
+  daemon_options_default_with_policy
+    ~transport_policy:Inference.Observation.Transport_policy.Http_sse
+    ~sw
+    ~env
+    ~default_model
 ;;

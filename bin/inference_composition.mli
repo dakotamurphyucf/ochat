@@ -127,3 +127,26 @@ val daemon_options_default
   -> env:Eio_unix.Stdenv.base
   -> default_model:string
   -> Agent_server.Daemon.options
+
+(** Explicit process host policy for newly prepared attempts, including restored
+    targets. Existing prepared attempts and uncertainty remain immutable. *)
+val try_create_default_with_policy
+  :  transport_policy:Inference.Observation.Transport_policy.t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> default_model:string
+  -> (Inference_host.t, Error.t) Result.t
+
+val create_with_policy
+  :  transport_policy:Inference.Observation.Transport_policy.t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> default_model:string
+  -> Inference_host.t
+
+val daemon_options_default_with_policy
+  :  transport_policy:Inference.Observation.Transport_policy.t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> default_model:string
+  -> Agent_server.Daemon.options

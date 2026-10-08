@@ -448,6 +448,7 @@ let load_session ~env ~prompt_file ?id ~new_session () =
 ;;
 
 let run_in_env
+      ~transport_policy
       ~typeahead_config
       ~env
       ~prompt_file
@@ -468,7 +469,11 @@ let run_in_env
       else Shell_runtime.Manifest_authorizer.deny
     in
     let inference_host =
-      Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+      Inference_composition.create_with_policy
+        ~transport_policy
+        ~sw
+        ~env
+        ~default_model:"gpt-4.5-preview"
     in
     let typeahead_host =
       Inference_composition.bounded_host inference_host ~max_body_bytes:(256 * 1024)
@@ -523,6 +528,7 @@ let run_in_env
     or *Ctrl-c* ).
 *)
 let run
+      ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
       ?(typeahead_config = Chat_tui.Type_ahead_config.default)
       ?session_id
       ?(new_session = false)
@@ -536,6 +542,7 @@ let run
   =
   Env.with_env (fun env ->
     run_in_env
+      ~transport_policy
       ~typeahead_config
       ~env
       ~prompt_file
@@ -1022,6 +1029,7 @@ module Handlers = struct
   ;;
 
   let handle_interactive
+        ~transport_policy
         ~typeahead_config
         ~prompt_file
         ~session_id
@@ -1033,6 +1041,7 @@ module Handlers = struct
         ~authorize_shell_manifest
     =
     run
+      ~transport_policy
       ~typeahead_config
       ?session_id
       ~new_session
@@ -1208,6 +1217,7 @@ end
 module Cli = struct
   type raw_flags =
     { typeahead_config : Chat_tui.Type_ahead_config.t Or_error.t
+    ; inference_transport : string option
     ; conversation_file : string
     ; local : bool
     ; authoring_package_files : string list
@@ -2088,6 +2098,7 @@ module Embedded_interactive = struct
   ;;
 
   let run
+        ~transport_policy
         ~typeahead_config
         ~env
         ~prompt_file
@@ -2117,7 +2128,11 @@ module Embedded_interactive = struct
       List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
     in
     let inference_host =
-      Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+      Inference_composition.create_with_policy
+        ~transport_policy
+        ~sw
+        ~env
+        ~default_model:"gpt-4.5-preview"
     in
     Agent_server.Embedded.start
       ~daemon_options:(Inference_composition.daemon_options inference_host)
@@ -2180,7 +2195,7 @@ let run_env_action ~env (action : Cli.action) =
   | Interactive _ | Daemon_interactive _ | Daemon_admin _ | Embedded_interactive _ -> ()
 ;;
 
-let run_action ~typeahead_config (action : Cli.action) =
+let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
   match action with
   | Interactive
       { session_id
@@ -2193,6 +2208,7 @@ let run_action ~typeahead_config (action : Cli.action) =
       ; authorize_shell_manifest
       } ->
     Handlers.handle_interactive
+      ~transport_policy
       ~typeahead_config
       ~prompt_file
       ~session_id
@@ -2225,6 +2241,7 @@ let run_action ~typeahead_config (action : Cli.action) =
       } ->
     Env.with_env (fun env ->
       Embedded_interactive.run
+        ~transport_policy
         ~typeahead_config
         ~env
         ~prompt_file
@@ -2247,8 +2264,20 @@ let run_from_raw (raw : Cli.raw_flags) =
     let%bind action =
       Cli.normalize_action raw |> Or_error.tag ~tag:"Invalid flags (try --help)"
     in
+    let%bind transport_policy =
+      Provider_runtime_host.Profile_policy.Transport_policy.of_string
+        (Option.value raw.inference_transport ~default:"sse")
+    in
+    let%bind () =
+      match raw.inference_transport, action with
+      | None, _ | Some _, (Cli.Interactive _ | Embedded_interactive _) -> Ok ()
+      | Some _, _ ->
+        Or_error.error_string
+          "--inference-transport requires a local interactive host; remote and \
+           maintenance commands cannot change host policy"
+    in
     let%bind typeahead_config = raw.typeahead_config in
-    run_action ~typeahead_config action
+    run_action ~transport_policy ~typeahead_config action
 ;;
 
 let raw_flags_param =
@@ -2311,6 +2340,11 @@ let raw_flags_param =
         "--bearer-token-file"
         (optional string)
         ~doc:"FILE Read the HTTP daemon bearer token from FILE using Eio."
+    and inference_transport =
+      flag
+        "--inference-transport"
+        (optional string)
+        ~doc:"POLICY Local host: sse (default), prefer-websocket or require-websocket"
     and list_sessions =
       flag
         "--list-sessions"
@@ -2511,6 +2545,7 @@ let raw_flags_param =
            ~history_messages:typeahead_history
            ~debounce_ms:typeahead_debounce
            ~max_output_tokens:typeahead_tokens
+     ; inference_transport
      ; conversation_file
      ; local
      ; authoring_package_files
@@ -2711,7 +2746,8 @@ let inject_config_args argv selection =
             exit 1
         in
         let scalar_flags =
-          [ "--typeahead"
+          [ "--inference-transport"
+          ; "--typeahead"
           ; "--typeahead-model"
           ; "--typeahead-history-messages"
           ; "--typeahead-debounce-ms"

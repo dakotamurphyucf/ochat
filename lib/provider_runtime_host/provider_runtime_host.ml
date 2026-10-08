@@ -1,3 +1,4 @@
+module Profile_policy = Profile_policy
 open! Core
 module P = Agent_protocol
 module Actor = Operator_authorization

@@ -212,13 +212,27 @@ let chat_completion_command =
            "FILE Path to the file to save the chat completion output (default: \
             /prompts/default.md). If prompt-file is provided contents of prompt file \
             will be appended to the output file. "
+     and inference_transport =
+       flag
+         "inference-transport"
+         (optional_with_default "sse" string)
+         ~doc:"POLICY sse, prefer-websocket or require-websocket for this host"
      in
      fun () ->
+       let transport_policy =
+         Provider_runtime_host.Profile_policy.Transport_policy.of_string
+           inference_transport
+         |> Or_error.ok_exn
+       in
        run_main
        @@ fun env ->
        Eio.Switch.run (fun sw ->
          let host =
-           Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+           Inference_composition.create_with_policy
+             ~transport_policy
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview"
          in
          let inference_context =
            Inference_composition.context host Chat_response.Config.default

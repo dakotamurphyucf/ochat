@@ -94,3 +94,36 @@ The standalone login process owns its local worker and must remain running while
 login completes. For a login that survives client disconnection, connect to the
 daemon that owns the worker. Provider credentials are distinct from credentials
 used to authenticate that daemon connection.
+
+## Host inference transport policy
+
+The completion CLI, local TUI, durable daemon and local stdio host accept
+`--inference-transport sse|prefer-websocket|require-websocket`. The default is
+`sse`. Remote TUI and stdio connections reject this host option: clients cannot
+change the remote host's transport policy. Store maintenance also rejects it.
+The existing default constructors remain SSE; explicit constructors receive the
+policy through the same owned platform, backend and credential bridge. Local
+TUI typeahead uses a bounded view of that host rather than opening a second
+credential authority.
+
+`Provider_runtime_host.Profile_policy` supplies the shared pure route baseline
+and strict policy parser. Public API and direct Codex are distinct routes with
+exact canonical endpoints. Protocol declarations do not authorize credentials,
+prove account access or replace exact identity, epoch and revision checks. Direct
+Codex retains its explicit unsupported temperature, top-p and max-output-token
+settings; the application never removes a selected setting to obtain success.
+
+The shipping WebSocket model catalog is initially empty. Unlisted models and
+endpoint overrides have unknown WebSocket support, even when they resemble a
+first-party model or hostname. Required WebSocket refuses before credential
+acquisition or connection. Preferred WebSocket uses the driver's observable SSE
+fallback while support is unknown. The qualification harness may reuse the SSE
+baseline with a separately trusted provisional exact-model declaration; that
+declaration is not a shipping support claim. Live selected route/model evidence
+is required before adding supported rows. No live WebSocket qualification is
+claimed by these source changes.
+
+Process host policy governs newly prepared work, including work from restored
+targets. It is not a newly persisted session setting. An already prepared
+attempt retains its transport configuration; uncertain delivery never permits
+automatic replay, route fallback or credential/account substitution.

@@ -118,12 +118,18 @@ let create
       ~key_reference:api_binding
     |> checked
   in
+  let%bind api_capabilities =
+    Provider_runtime_host.Profile_policy.capabilities
+      Public_api
+      ~endpoint:(Provider_defaults.responses_endpoint ~api_url)
+    |> checked
+  in
   let%bind api_profile =
     D.Profile.create
       ~id:(DTO.Profile_id.to_string api_id)
       ~account:None
       ~endpoint:(Provider_defaults.responses_endpoint ~api_url)
-      ~capabilities:Provider_defaults.capabilities
+      ~capabilities:api_capabilities
       ~defaults:[]
     |> checked
   in
@@ -160,24 +166,9 @@ let create
     |> checked
   in
   let%bind codex_capabilities =
-    D.Capability.create
-      ~baseline:
-        (List.map
-           [ D.Capability.Text_input
-           ; Image_input
-           ; Function_tools
-           ; Opaque_replay
-           ; Setting "instructions"
-           ; Setting "parallel_tool_calls"
-           ; Setting "reasoning"
-           ; Setting "text"
-           ; Setting "tool_choice"
-           ; Setting "prompt_cache_key"
-           ]
-           ~f:(fun feature -> feature, D.Capability.Supported)
-         @ List.map [ "temperature"; "top_p"; "max_output_tokens" ] ~f:(fun setting ->
-           D.Capability.Setting setting, D.Capability.Unsupported))
-      ~models:[]
+    Provider_runtime_host.Profile_policy.capabilities
+      Direct_codex
+      ~endpoint:(Provider_runtime_host.Profile_policy.endpoint Direct_codex)
     |> checked
   in
   let codex_mapping identity =
