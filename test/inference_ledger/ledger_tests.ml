@@ -313,3 +313,129 @@ let%expect_test
   print_endline "captured domain uses the same active-generation and turn-identity fences";
   [%expect {| captured domain uses the same active-generation and turn-identity fences |}]
 ;;
+
+let%expect_test "transport policy and actual selection survive ledger persistence" =
+  let limits = limits () in
+  List.iter
+    [ ( O.Transport_policy.Http_sse
+      , O.Configuration.Http_sse
+      , O.Transport_selection.Http_sse
+      , None )
+    ; ( Prefer_websocket
+      , O.Configuration.Http_sse
+      , O.Transport_selection.Http_sse
+      , Some O.Transport_selection.Unsupported )
+    ; Require_websocket, O.Configuration.Websocket, O.Transport_selection.Websocket, None
+    ]
+    ~f:(fun (policy, transport, selected, fallback) ->
+      let configuration =
+        O.Configuration.to_json configuration
+        |> fun json ->
+        add
+          (replace
+             json
+             "transport"
+             (match transport with
+              | Http_sse -> `String "http_sse"
+              | Websocket -> `String "websocket"
+              | In_process -> `String "in_process"
+              | Unknown_transport -> `String "unknown"))
+          "transport_policy"
+          (match policy with
+           | Http_sse -> `String "http_sse"
+           | Prefer_websocket -> `String "prefer_websocket"
+           | Require_websocket -> `String "require_websocket")
+        |> fun json ->
+        O.Configuration.of_json json ~limits:O.Admission.observation |> observation_ok
+      in
+      let t, h, _ =
+        L.admit
+          (ledger ~limits ())
+          ~source:(Transcript.Source_id.of_string "transport" |> Result.ok_or_failwith)
+          ~relation:Root
+          ~operation_id:None
+          ~invocation_id:None
+          ~configuration
+        |> ledger_ok
+      in
+      let selection =
+        O.Transport_selection.create
+          ~accounting_id:(L.Handle.accounting_id h)
+          ~requested:policy
+          ~selected
+          ~fallback
+        |> observation_ok
+      in
+      let observation =
+        O.create
+          ~scope:(L.Handle.scope h)
+          ~id:(O.Observation_id.of_string "actual-transport" |> observation_ok)
+          ~revision:0L
+          ~payload:(Transport_selection selection)
+          ~limits:O.Admission.observation
+        |> observation_ok
+      in
+      let t, _ = L.observe t h observation |> ledger_ok in
+      let t = roundtrip t ~limits in
+      let record = List.hd_exn (L.rows t) |> L.Row.record in
+      assert (O.Configuration.equal configuration (O.Attempt_record.configuration record));
+      assert (List.exists (O.Attempt_record.observations record) ~f:(O.equal observation));
+      let raw =
+        patch_rows (document_json t) ~f:(fun row ->
+          let record =
+            match D.Json.field row ~name:"record" with
+            | Value value -> value
+            | _ -> failwith "record"
+          in
+          let observations =
+            match D.Json.field record ~name:"observations" with
+            | Value (`Array values) -> values
+            | _ -> failwith "observations"
+          in
+          let observations =
+            List.map observations ~f:(fun value ->
+              let payload =
+                match D.Json.field value ~name:"payload" with
+                | Value value -> value
+                | _ -> failwith "payload"
+              in
+              replace value "payload" (add payload "future_transport" (`Number "1e+00")))
+          in
+          replace row "record" (replace record "observations" (`Array observations)))
+      in
+      let captured = captured raw ~limits in
+      let updated =
+        L.set_state captured h interrupted |> ledger_ok |> fun t -> roundtrip t ~limits
+      in
+      assert (
+        String.is_substring
+          (D.Document.to_string (L.to_document updated |> ledger_ok))
+          ~substring:"\"future_transport\":1e+00");
+      L.validate_update captured ~incoming:updated |> ledger_ok);
+  print_endline "all policies, actual selection, and protected future payload persist";
+  [%expect {| all policies, actual selection, and protected future payload persist |}]
+;;
+
+let%expect_test "new transport failures retain exact terminal outcomes" =
+  List.iter
+    [ Inference.Event.Terminal.Unsupported_transport; Session_closed; Session_busy ]
+    ~f:(fun failure ->
+      let limits = limits () in
+      let t, h, _ = admit (ledger ~limits ()) in
+      let terminal =
+        Inference.Event.Terminal.create
+          ~scope:(L.Handle.scope h)
+          ~delivery:Definitely_not_submitted
+          ~outcome:(Failed (Transport failure))
+        |> Result.ok_or_failwith
+      in
+      let updated = L.set_state t h (Terminal terminal) |> ledger_ok in
+      L.validate_update t ~incoming:updated |> ledger_ok;
+      let restored = roundtrip updated ~limits in
+      let record = List.hd_exn (L.rows restored) |> L.Row.record in
+      match O.Attempt_record.state record with
+      | Terminal actual -> assert (Inference.Event.Terminal.equal actual terminal)
+      | Prepared | Running | Interrupted _ -> failwith "transport terminal lost");
+  print_endline "unsupported, closed, and busy outcomes persist";
+  [%expect {| unsupported, closed, and busy outcomes persist |}]
+;;

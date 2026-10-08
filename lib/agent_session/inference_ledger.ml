@@ -286,6 +286,7 @@ module Shape = struct
       ; "model", v
       ; "preparation_id", v
       ; "transport", v
+      ; "transport_policy", v
       ; ( "settings"
         , a
             ~identity_field:"name"
@@ -314,6 +315,9 @@ module Shape = struct
          ; "body_limit"
          ; "framing_limit"
          ; "protocol"
+         ; "unsupported_transport"
+         ; "session_closed"
+         ; "session_busy"
          ]
          ~f:(fun reason -> reason, fields [ "type"; "reason" ])
        @ [ "http_status", fields [ "type"; "reason"; "status" ] ])
@@ -371,6 +375,8 @@ module Shape = struct
          [ "usage", usage
          ; "context_estimate", context
          ; "configuration", configuration
+         ; ( "transport_selection"
+           , fields [ "accounting_id"; "requested"; "selected"; "fallback" ] )
          ; "diagnostic", diagnostic
          ]
          ~f:(fun (kind, payload) ->
