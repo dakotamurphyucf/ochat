@@ -8,6 +8,8 @@ module Preparation_error = struct
     | Invalid_request of Request.Error.t
     | Target_mismatch
     | Target_unavailable
+    | Target_denied
+    | Reauthorization_required
     | Unsupported_input
     | Unsupported_setting
     | Incompatible_replay

@@ -8,6 +8,8 @@ module Preparation_error : sig
     | Invalid_request of Inference.Request.Error.t
     | Target_mismatch
     | Target_unavailable
+    | Target_denied
+    | Reauthorization_required
     | Unsupported_input
     | Unsupported_setting
     | Incompatible_replay

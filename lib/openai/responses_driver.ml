@@ -419,14 +419,26 @@ module Prepared = struct
 end
 
 module Auth = struct
-  type lease = string
+  type identity =
+    { owner : string
+    ; generation : int64
+    }
+  [@@deriving equal, sexp_of]
 
   type error =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
+
+  type lease =
+    { secret : string
+    ; identity : identity option
+    ; check_current : unit -> (unit, error) Result.t
+    }
 
   let bearer secret =
     if
@@ -434,8 +446,28 @@ module Auth = struct
       || String.length secret > 8192
       || String.exists secret ~f:(fun c -> Char.to_int c <= 32 || Char.to_int c >= 127)
     then Error Invalid_credential
-    else Ok secret
+    else Ok { secret; identity = None; check_current = (fun () -> Ok ()) }
   ;;
+
+  let with_identity t ~owner ~generation ~check_current =
+    let identity = { owner; generation } in
+    if
+      String.is_empty (String.strip owner)
+      || Int64.(generation < 0L)
+      || Option.exists t.identity ~f:(fun previous ->
+        not (equal_identity previous identity))
+    then Error Invalid_credential
+    else (
+      let source_check = t.check_current in
+      let check_current () =
+        let open Result.Let_syntax in
+        let%bind () = source_check () in
+        check_current ()
+      in
+      Ok { t with identity = Some identity; check_current })
+  ;;
+
+  let identity t = t.identity
 
   type resolver = sw:Eio.Switch.t -> Profile.t -> (lease, error) Result.t
 end
@@ -847,6 +879,8 @@ let io f =
     transport_failure Connection
 ;;
 
+exception Auth_invalidated of Auth.error
+
 let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let profile = Prepared.profile prepared in
   let body = Jsonaf.to_string (Request.jsonaf_of_t (Prepared.request prepared)) in
@@ -858,6 +892,9 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let authority =
     host ^ Option.value_map (Uri.port uri) ~default:"" ~f:(fun p -> ":" ^ Int.to_string p)
   in
+  (match lease.Auth.check_current () with
+   | Ok () -> ()
+   | Error error -> raise (Auth_invalidated error));
   let header =
     sprintf
       "POST %s HTTP/1.1\r\n\
@@ -870,7 +907,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
        \r\n"
       (Uri.path uri)
       authority
-      lease
+      lease.Auth.secret
       (String.length body)
   in
   submitted := true;
@@ -1003,6 +1040,7 @@ let run t ~auth ~prepared ~on_event =
       | Error `Timeout ->
         if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
     with
+    | Auth_invalidated error -> Error error
     | Transport_failure reason -> Ok (failed reason)
   in
   match result with

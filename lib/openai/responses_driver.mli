@@ -121,14 +121,37 @@ module Prepared : sig
 end
 
 module Auth : sig
+  type identity =
+    { owner : string
+    ; generation : int64
+    }
+  [@@deriving equal, sexp_of]
+
   type lease
 
   type error =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
+
+  (** Host-only currentness guard; rechecked after connection acquisition before
+      writing credentials. Wrapping composes the existing source guard first, then
+    the supplied guard; neither can remove the other's revocation. An existing
+    owner/generation must exactly match or Invalid_credential is returned. Guards
+    are non-yielding host policy snapshots. The owner/generation identify auth lifecycle, contain
+      no token, and permit WS channel invalidation. No serializer is provided. *)
+  val with_identity
+    :  lease
+    -> owner:string
+    -> generation:int64
+    -> check_current:(unit -> (unit, error) Result.t)
+    -> (lease, error) Result.t
+
+  val identity : lease -> identity option
 
   (** Secret host lease, deliberately without serialization or secret accessor.
       Validates header-safe nonempty bytes. Resolver is called at dispatch with

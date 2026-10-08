@@ -159,12 +159,44 @@ module Setting = struct
   let equal a b = D.Json.equal a.json b.json
 end
 
+module Auth_binding = struct
+  type t =
+    { method_ : string
+    ; credential_reference : string
+    ; json : Jsonaf.t
+    }
+
+  let of_json json ~limits =
+    let open Result.Let_syntax in
+    let%bind () = validate_json json ~limits in
+    let%bind () = expect_object json in
+    let%bind method_ = required_string json "method" in
+    let%map credential_reference = required_string json "credential_reference" in
+    { method_; credential_reference; json }
+  ;;
+
+  let create ~method_ ~credential_reference ~limits =
+    of_json
+      (`Object
+          [ "method", `String method_
+          ; "credential_reference", `String credential_reference
+          ])
+      ~limits
+  ;;
+
+  let method_ t = t.method_
+  let credential_reference t = t.credential_reference
+  let to_json t = t.json
+  let equal a b = D.Json.equal a.json b.json
+end
+
 module Target = struct
   type t =
     { adapter : string
     ; profile : string
     ; profile_revision : string option
     ; account : string option
+    ; auth_binding : Auth_binding.t Presence.t
     ; endpoint : string
     ; model : string
     ; settings : Setting.t list
@@ -179,6 +211,14 @@ module Target = struct
     let%bind profile = required_string json "profile" in
     let%bind profile_revision = optional_string json "profile_revision" in
     let%bind account = optional_string json "account" in
+    let%bind auth_binding =
+      match field json "auth_binding" with
+      | Absent -> Ok Presence.Absent
+      | Null -> Ok Presence.Null
+      | Value json ->
+        Result.map (Auth_binding.of_json json ~limits) ~f:(fun value ->
+          Presence.Value value)
+    in
     let%bind endpoint = required_string json "endpoint" in
     let%bind model = required_string json "model" in
     let%bind settings =
@@ -194,7 +234,16 @@ module Target = struct
       | None -> Ok ()
       | Some name -> Error (Error.Duplicate_setting name)
     in
-    { adapter; profile; profile_revision; account; endpoint; model; settings; json }
+    { adapter
+    ; profile
+    ; profile_revision
+    ; account
+    ; auth_binding
+    ; endpoint
+    ; model
+    ; settings
+    ; json
+    }
   ;;
 
   let create
@@ -218,6 +267,21 @@ module Target = struct
        @ optional_field "account" account)
     |> fun json -> of_json json ~limits
   ;;
+
+  let with_auth_binding t ~binding ~limits =
+    let open Result.Let_syntax in
+    let%bind _ = of_json t.json ~limits in
+    let replacement =
+      match binding with
+      | Presence.Absent -> None
+      | Null -> Some `Null
+      | Value value -> Some (Auth_binding.to_json value)
+    in
+    update_member_exn t.json "auth_binding" replacement
+    |> fun json -> of_json json ~limits
+  ;;
+
+  let auth_binding t = t.auth_binding
 
   let with_model t ~model ~limits =
     let open Result.Let_syntax in

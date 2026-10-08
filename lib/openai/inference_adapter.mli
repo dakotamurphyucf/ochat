@@ -19,8 +19,12 @@ val tool_spec
   -> limits:Document_schema.Limits.t
   -> (Inference.Request.Tool_spec.t, Inference_runtime.Preparation_error.t) Result.t
 
+(** Fixed legacy composition accepts only absent auth binding by default. Dynamic
+    hosts supply the exact admitted binding. Revision is capture provenance and
+    must be supplied from the capture only after host compatibility admission. *)
 val create
-  :  Responses_driver.t
+  :  ?auth_binding:Inference.Request.Auth_binding.t History_entry.Payload.Presence.t
+  -> Responses_driver.t
   -> profile:Responses_driver.Profile.t
   -> profile_revision:string option
   -> auth:Responses_driver.Auth.resolver

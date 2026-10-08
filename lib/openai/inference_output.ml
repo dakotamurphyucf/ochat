@@ -258,6 +258,8 @@ let delivery : D.Terminal.delivery -> E.Terminal.delivery = function
 let auth : D.Auth.error -> E.Terminal.auth_failure = function
   | Missing -> Missing
   | Denied -> Denied
+  | Profile_changed -> Profile_changed
+  | Reauthorization_required -> Reauthorization_required
   | Invalid_credential -> Invalid_credential
   | Timed_out -> Timed_out
 ;;

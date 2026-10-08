@@ -141,10 +141,14 @@ let capabilities driver_profile selected_model =
     feature, support)
 ;;
 
-let create driver ~profile ~profile_revision ~auth ~limits =
+let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~limits =
   let bind target =
     if
       String.equal (R.Target.adapter target) "openai.responses"
+      && History_entry.Payload.Presence.equal
+           R.Auth_binding.equal
+           (R.Target.auth_binding target)
+           auth_binding
       && String.equal (R.Target.profile target) (D.Profile.id profile)
       && Option.equal String.equal (R.Target.profile_revision target) profile_revision
       && Option.equal String.equal (R.Target.account target) (D.Profile.account profile)

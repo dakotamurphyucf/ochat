@@ -19,6 +19,8 @@ module Terminal : sig
   type auth_failure =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]

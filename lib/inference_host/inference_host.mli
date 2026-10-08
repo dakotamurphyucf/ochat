@@ -1,3 +1,4 @@
+module Provider_profiles = Provider_profiles
 open! Core
 
 (** Explicit application composition for the initial OpenAI backend. Lower-level

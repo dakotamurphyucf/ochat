@@ -1,3 +1,4 @@
+module Provider_profiles = Provider_profiles
 open! Core
 module R = Inference.Request
 module D = Openai.Responses_driver

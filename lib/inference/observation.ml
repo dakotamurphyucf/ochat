@@ -1176,6 +1176,9 @@ module Diagnostic = struct
     match t.reason with
     | Authentication Missing -> "Inference authentication is unavailable."
     | Authentication Denied -> "Inference authentication was denied."
+    | Authentication Profile_changed -> "Inference profile changed; prepare again."
+    | Authentication Reauthorization_required ->
+      "Inference authentication requires login."
     | Authentication Invalid_credential -> "Inference credential was rejected."
     | Authentication Timed_out -> "Inference authentication timed out."
     | Connection -> "Inference connection failed."
@@ -1246,6 +1249,8 @@ module Diagnostic = struct
               (match reason with
                | Missing -> "missing"
                | Denied -> "denied"
+               | Profile_changed -> "profile_changed"
+               | Reauthorization_required -> "reauthorization_required"
                | Invalid_credential -> "invalid_credential"
                | Timed_out -> "timed_out") )
         ]
@@ -1280,6 +1285,8 @@ module Diagnostic = struct
             json
             [ "missing", Event.Terminal.Missing
             ; "denied", Denied
+            ; "profile_changed", Profile_changed
+            ; "reauthorization_required", Reauthorization_required
             ; "invalid_credential", Invalid_credential
             ; "timed_out", Timed_out
             ])

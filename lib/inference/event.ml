@@ -27,6 +27,8 @@ module Terminal = struct
   type auth_failure =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
@@ -128,6 +130,8 @@ module Terminal = struct
   let auth_name = function
     | Missing -> "missing"
     | Denied -> "denied"
+    | Profile_changed -> "profile_changed"
+    | Reauthorization_required -> "reauthorization_required"
     | Invalid_credential -> "invalid_credential"
     | Timed_out -> "timed_out"
   ;;
@@ -187,6 +191,8 @@ module Terminal = struct
       (match reason with
        | "missing" -> Ok (Authentication Missing)
        | "denied" -> Ok (Authentication Denied)
+       | "profile_changed" -> Ok (Authentication Profile_changed)
+       | "reauthorization_required" -> Ok (Authentication Reauthorization_required)
        | "invalid_credential" -> Ok (Authentication Invalid_credential)
        | "timed_out" -> Ok (Authentication Timed_out)
        | _ -> Error "unknown authentication failure")

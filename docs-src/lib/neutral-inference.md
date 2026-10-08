@@ -208,3 +208,84 @@ The command entry points capture `API_URL` and `OPENAI_API_KEY` once at host
 construction. `API_URL` retains the existing host/base-URL convention: a bare
 host uses HTTPS, and `/v1/responses` is appended to the base path. Invalid
 configured endpoints fail validation; they do not fall back to the public API.
+
+## Host provider profiles and captured intent
+
+`Inference_host.Provider_profiles` composes the existing neutral `Target`, durable
+`Selection`, OpenAI `Responses_driver.Profile`, and `Inference_runtime.resolver`.
+It does not introduce another conversation selection, secret store or login flow.
+Registry administration is trusted host configuration: imports and agent-selected
+profile labels do not authorize add, edit, disable, remove or reauthorize.
+
+A profile owns nonsecret adapter/account/endpoint identity, a credential binding,
+and current declared capabilities/defaults. The binding records an adapter method
+label and host credential reference. `api_key` and `oauth_subscription` are separate
+billing modes. The latter denotes the selected direct Codex subscription lifecycle,
+not arbitrary OAuth against the public Responses API. Credential references must
+identify the full host issuer/client registration/audience/account tuple. Future
+login integrations install that binding explicitly. Actual OAuth acquisition and
+route-specific dispatch headers await OCH-66 qualification; this registry does not
+claim a working subscription request flow. Credentials never fall back
+across accounts, subscription/API-key modes or endpoints. Provider references and
+credentials are unrelated to daemon access tokens and MCP OAuth credentials.
+
+Capture authorizes the principal/profile/account/binding and resolves settings once.
+The captured target stores effective settings and their original provenance,
+including omission and explicit null. Its profile revision records the provenance
+of captured defaults; it is not a credential generation or immutable compatibility
+identity. Restore retains that revision and settings. Resolution explicitly compares
+adapter/profile/account/endpoint/binding, then constructs the adapter with the
+captured revision and current capabilities. Preparation never consults current
+defaults. Unknown target and binding fields remain in private storage and in target
+model/settings edits; safe public configuration projections do not automatically
+expose the binding or its unknown fields.
+
+`auth_binding` absent means historical/unavailable identity. Null explicitly records
+no binding. Dynamic resolution rejects both without guessing a billing mode.
+Concrete bindings are validated and retain unknown JSON members. The explicitly
+fixed single-profile legacy composition accepts only absent binding by default,
+using its supplied profile and auth port; it rejects null or concrete bindings unless
+the caller supplies the exact concrete binding to the adapter. This limited ingress
+is not a dynamic migration/default inference rule.
+
+Authorization and status ports return non-yielding host policy snapshots on the
+registry's single Eio-domain owner; native callers deliver mutations to that owner.
+Every actual dispatch rechecks authorization before credential access. The host
+credential callback receives the exact current credential identity and may refresh
+only that binding; it cannot start interactive login. Reauthorization strictly
+advances the host generation and may replace the host auth owner. Prepared requests
+retain their captured profile/account/endpoint/mode; same-binding refresh resolves
+fresh owner/generation. The result of a yielding lookup is rejected if authorization,
+owner/generation, disable/remove state or profile configuration changed. The opaque
+lease carries nonsecret owner/generation plus a currentness guard, rechecked after
+DNS/TLS connection acquisition immediately before writing bearer headers. Once
+submitted, an HTTP attempt retains its lease and identity rather than switching
+accounts. Lease identity also supplies a channel invalidation seam for optional WS.
+
+Profile edits preserve compatibility identity and can replace defaults/capabilities/
+revision. They conservatively invalidate previously resolved contexts at dispatch:
+`Profile_changed` requires explicit resolve/reprepare of the same captured target;
+no retry occurs automatically. Current capabilities can then reject newly unsupported
+settings or input. Account/endpoint/method/reference switching requires a new profile
+ID and host-approved `Selection.change`. Removed IDs cannot be reused during the
+registry lifetime. Disable returns redacted `Disabled` status and prevents dispatch;
+it does not claim an external environment variable or secret store was erased.
+
+The typed registry errors distinguish authorization, unavailable historical binding,
+missing profile, incompatible identity, disabled state and reauthorization. The adapter
+resolver port preserves recovery categories: unavailable/disabled/missing selections
+return `Target_unavailable`, authorization returns `Target_denied`, incompatible
+identity returns `Target_mismatch`, and login-needed status returns
+`Reauthorization_required`. Detailed registry `resolve` and `status` retain finer
+profile-management errors. Source and registry lease guards compose; conflicting
+source auth-owner/generation labels reject, so wrapping never removes revocation. Authentication terminals
+include `Profile_changed` and `Reauthorization_required`; failures before headers remain
+`Definitely_not_submitted`. No status/lease serializer includes bearer tokens, and no
+raw credential diagnostic is emitted.
+
+Validation lives in `test/provider_profiles`: independent profile bearer/settings
+selection using a loopback HTTP fixture, restore against edited defaults, missing/null
+bindings, preserved future binding metadata, revoked authorization before lookup,
+stale capability cancellation and revalidation, owner/generation rotation during
+lookup, redacted disabled status, and incompatible account edits. Existing neutral
+inference and OpenAI adapter tests cover the shared codecs and dispatch contracts.
