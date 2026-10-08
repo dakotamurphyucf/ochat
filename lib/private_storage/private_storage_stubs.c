@@ -279,6 +279,27 @@ CAMLprim value ochat_private_write(value directory, value name, value data,
   CAMLreturn(tuple3(code, published, fd));
 }
 
+CAMLprim value ochat_private_confirm_absent(value directory, value name, value fail_sync) {
+  CAMLparam3(directory, name, fail_sync);
+  int dir = Int_val(directory), inject_failure = Bool_val(fail_sync), code = PS_UNAVAILABLE;
+  char *filename = strdup(String_val(name));
+  if (filename) {
+    caml_enter_blocking_section();
+    code = validate_directory(dir);
+    if (code == PS_OK) {
+      struct stat entry;
+      if (fstatat(dir, filename, &entry, AT_SYMLINK_NOFOLLOW) == 0) code = PS_EXISTS;
+      else if (errno == ENOENT) {
+        if (inject_failure) code = PS_UNAVAILABLE;
+        else if (fsync(dir) != 0) code = error_code(errno);
+      } else code = error_code(errno);
+    }
+    caml_leave_blocking_section();
+  }
+  free(filename);
+  CAMLreturn(Val_int(code));
+}
+
 CAMLprim value ochat_private_delete(value directory, value name, value owned, value check_owned) {
   CAMLparam4(directory, name, owned, check_owned); CAMLlocal1(result);
   int dir = Int_val(directory), expected = Int_val(owned), check = Bool_val(check_owned), fd = -1, removed = 0;
