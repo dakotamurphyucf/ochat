@@ -235,10 +235,6 @@ let request_locked t command =
         response_result command request_id envelope))
 ;;
 
-let request t command =
-  Eio.Mutex.use_rw ~protect:false t.mutex (fun () -> request_locked t command)
-;;
-
 let next_notification t = Agent_session.Mailbox.pop t.notifications
 
 let close_locked t =
@@ -268,6 +264,24 @@ let close_locked t =
 ;;
 
 let close t = Eio.Cancel.protect (fun () -> close_locked t)
+
+let request t command =
+  match
+    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      match request_locked t command with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* Piaf owns the writer and response monitor on the connection switch.
+           Abandoning the caller cannot establish whether the request was sent. *)
+        Eio.Cancel.protect (fun () ->
+          fail_connection t;
+          ignore (Result.try_with (fun () -> close_locked t) : (unit, exn) result));
+        Error (exn, backtrace))
+  with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
 
 let normalize_prefix uri =
   let path = Uri.path uri |> String.rstrip ~drop:(Char.equal '/') in

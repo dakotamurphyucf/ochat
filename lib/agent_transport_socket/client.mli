@@ -1,7 +1,10 @@
 open! Core
 
 (** Full-duplex Unix-domain socket client with request correlation and a
-    bounded notification queue. *)
+    bounded notification queue. Cancelling a response wait releases its local
+    correlation entry without replaying the command. A failed or cancelled
+    request write closes the channel because its JSON line may be incomplete;
+    the owning connection retains any uncertain mutation intent. *)
 
 val connect
   :  sw:Eio.Switch.t

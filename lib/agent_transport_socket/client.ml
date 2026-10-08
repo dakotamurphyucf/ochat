@@ -126,7 +126,7 @@ let remove_pending t id =
 ;;
 
 let write_request t envelope =
-  Eio.Mutex.use_rw ~protect:true t.writer_mutex (fun () ->
+  Eio.Mutex.use_rw ~protect:false t.writer_mutex (fun () ->
     envelope
     |> Agent_protocol.Envelope.to_json
     |> Jsonaf.to_string
@@ -146,15 +146,21 @@ let request t command =
       ~params:(Agent_protocol.Command.params command)
       ()
   in
-  match write_request t envelope with
-  | () -> Eio.Promise.await response
-  | exception (Eio.Cancel.Cancelled _ as exn) ->
-    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    remove_pending t id;
-    Exn.raise_with_original_backtrace exn backtrace
-  | exception exn ->
-    remove_pending t id;
-    Error (interrupted ("socket write failed: " ^ Exn.to_string exn))
+  Exn.protect
+    ~finally:(fun () -> remove_pending t id)
+    ~f:(fun () ->
+      match write_request t envelope with
+      | () -> Eio.Promise.await response
+      | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* A failed or cancelled write may have published only part of a JSON
+           line. Retire the channel before another command can append to it.
+           The higher-level connection retains the uncertain command intent. *)
+        Eio.Cancel.protect (fun () ->
+          ignore (Result.try_with (fun () -> close_internal t) : (unit, exn) result));
+        (match exn with
+         | Eio.Cancel.Cancelled _ -> Exn.raise_with_original_backtrace exn backtrace
+         | _ -> Error (interrupted ("socket write failed: " ^ Exn.to_string exn))))
 ;;
 
 let next_notification t = Agent_session.Mailbox.pop t.notifications

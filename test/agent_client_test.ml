@@ -1302,6 +1302,53 @@ let%expect_test
     {| different payloads admitted; 64 retained; capacity rejects before effects; closed adoption denied |}]
 ;;
 
+let%expect_test
+    "cancelled mutations retain accessible uncertainty without poisoning the connection"
+  =
+  Eio_main.run (fun _ ->
+    let submitted, submit = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    let admissions = ref 0 in
+    let connection =
+      Agent_client.Transport.create
+        ~request:(fun _ ->
+          incr admissions;
+          Eio.Promise.resolve submit ();
+          Eio.Promise.await never)
+        ~next_notification:(fun () -> None)
+        ~close:Fn.id
+      |> Agent_client.Connection.create
+    in
+    let command key =
+      P.Command.Session_start
+        { session_id
+        ; attachment_id = P.Id.Attachment.of_string "att_cancelled" |> protocol_ok
+        ; queue_if_limited = false
+        ; idempotency_key = P.Idempotency_key.of_string key |> protocol_ok
+        }
+    in
+    Eio.Fiber.first
+      (fun () ->
+         ignore
+           (Agent_client.Connection.request connection (command "cancelled-original")
+            : (Public.Result.t, P.Error.t) result);
+         failwith "cancelled transport returned")
+      (fun () -> Eio.Promise.await submitted);
+    assert (
+      Int.equal (List.length (Agent_client.Connection.pending_commands connection)) 1);
+    (match Agent_client.Connection.request connection (command "new-key") with
+     | Error failure -> assert (P.Error.equal_code failure.code Interrupted)
+     | Ok _ -> failwith "uncertain mutation admitted again");
+    assert (Int.equal !admissions 1);
+    Agent_client.Connection.close connection;
+    assert (
+      Int.equal (List.length (Agent_client.Connection.pending_commands connection)) 1);
+    print_endline
+      "cancellation propagated; intent inspectable after close; no new-key replay");
+  [%expect
+    {| cancellation propagated; intent inspectable after close; no new-key replay |}]
+;;
+
 let%expect_test "notification ownership cleanup is independent of a blocked request" =
   Eio_main.run (fun _ ->
     Eio.Switch.run (fun sw ->

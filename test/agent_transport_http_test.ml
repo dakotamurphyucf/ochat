@@ -199,6 +199,155 @@ let%test_unit "closing an active HTTP SSE client releases its owning switch" =
           Agent_client.Connection.close connection))))
 ;;
 
+let%expect_test "HTTP cancelled mutation retires transport and retains uncertainty" =
+  Eio_main.run (fun env ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+      Eio.Switch.run (fun server_sw ->
+        let observed, resolve_observed = Eio.Promise.create () in
+        let rpc_closed, resolve_rpc_closed = Eio.Promise.create () in
+        let events_closed, resolve_events_closed = Eio.Promise.create () in
+        let requests = ref [] in
+        let posts = ref 0 in
+        let wait_closed reader resolver =
+          (try
+             ignore (Eio.Buf_read.line reader : string);
+             failwith "unexpected request on retired HTTP transport"
+           with
+           | End_of_file | Eio.Io _ -> ());
+          Eio.Promise.resolve resolver ()
+        in
+        let handler flow _address =
+          let reader = Eio.Buf_read.of_flow flow ~max_size:16384 in
+          let request = Eio.Buf_read.line reader in
+          consume_http_headers reader;
+          requests := request :: !requests;
+          if String.is_prefix request ~prefix:"POST /v1/rpc "
+          then (
+            incr posts;
+            if Int.equal !posts 1
+            then
+              Eio.Flow.copy_string
+                (http_reply
+                   ~headers:"ochat-connection-id: fixture-connection\r\n"
+                   {|{"jsonrpc":"2.0","id":1,"result":{"server_time":"2026-09-06T00:00:00Z","ready":true,"draining":false}}|})
+                flow
+            else (
+              Eio.Promise.resolve resolve_observed ();
+              wait_closed reader resolve_rpc_closed))
+          else if String.is_prefix request ~prefix:"GET /v1/events "
+          then (
+            let notice =
+              "data: {\"jsonrpc\":\"2.0\",\"method\":\"fixture.notice\",\"params\":{}}\n\n"
+            in
+            Eio.Flow.copy_string
+              (sprintf
+                 "HTTP/1.1 200 OK\r\n\
+                  Content-Type: text/event-stream\r\n\
+                  Transfer-Encoding: chunked\r\n\
+                  \r\n\
+                  %x\r\n\
+                  %s\r\n"
+                 (String.length notice)
+                 notice)
+              flow;
+            wait_closed reader resolve_events_closed)
+          else Eio.Flow.copy_string (http_reply "") flow
+        in
+        let listener =
+          Eio.Net.listen
+            ~sw:server_sw
+            ~backlog:8
+            (Eio.Stdenv.net env)
+            (`Tcp (Eio.Net.Ipaddr.V4.loopback, 0))
+        in
+        let port =
+          match Eio.Net.listening_addr listener with
+          | `Tcp (_, port) -> port
+          | `Unix _ -> failwith "expected TCP fixture"
+        in
+        Eio.Fiber.fork_daemon ~sw:server_sw (fun () ->
+          Eio.Net.run_server listener handler ~on_error:(function
+            | Eio.Io _ -> ()
+            | exn -> raise exn));
+        Eio.Switch.run (fun sw ->
+          let module C = Agent_client.Connection in
+          let ok result =
+            Result.map_error result ~f:(fun error -> error.Agent_protocol.Error.message)
+            |> Result.ok_or_failwith
+          in
+          let connection =
+            Agent_transport_http.Client.connect
+              ~sw
+              ~env
+              ~uri:(Uri.of_string (sprintf "http://127.0.0.1:%d" port))
+              ~bearer_token:None
+              ~notification_capacity:16
+            |> ok
+          in
+          Exn.protect
+            ~finally:(fun () -> C.close connection)
+            ~f:(fun () ->
+              ignore (C.request connection (Protocol_ping { payload = None }) |> ok);
+              assert (Option.is_some (C.next_notification connection));
+              let logout key =
+                Agent_protocol.Command.Provider_logout
+                  { profile =
+                      Agent_protocol.Provider_operator.Profile_id.of_string "fixture"
+                      |> ok
+                  ; idempotency_key = Agent_protocol.Idempotency_key.of_string key |> ok
+                  }
+              in
+              let cancelled = ref false in
+              Eio.Fiber.first
+                (fun () ->
+                   match C.request connection (logout "original") with
+                   | _ -> failwith "cancelled HTTP mutation returned an ordinary result"
+                   | exception (Eio.Cancel.Cancelled _ as exn) ->
+                     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+                     cancelled := true;
+                     Exn.raise_with_original_backtrace exn backtrace)
+                (fun () -> Eio.Promise.await observed);
+              assert !cancelled;
+              Eio.Promise.await rpc_closed;
+              Eio.Promise.await events_closed;
+              let pending = C.pending_commands connection in
+              assert (List.length pending = 1);
+              (match C.request connection (logout "fresh-equivalent-key") with
+               | Error { code = Interrupted; retryable = false; _ } -> ()
+               | _ -> failwith "uncertain mutation admitted an equivalent command");
+              (* Receipt reconciliation transfers the intent to a freshly
+                 initialized connection with the same host/principal. This
+                 retired transport must reject even a read-only receipt RPC. *)
+              (match
+                 C.request
+                   connection
+                   (Command_receipt
+                      { method_name = "provider.logout"
+                      ; original_params =
+                          Agent_protocol.Command.params (logout "original")
+                      })
+               with
+               | Error { code = Interrupted; _ } -> ()
+               | _ -> failwith "retired HTTP transport accepted receipt lookup");
+              assert (List.length (C.pending_commands connection) = 1);
+              assert (Option.is_none (C.next_notification connection));
+              C.close connection;
+              C.close connection;
+              assert (!posts = 2);
+              assert (
+                List.count !requests ~f:(fun line -> String.is_prefix line ~prefix:"GET ")
+                = 1);
+              assert (
+                not
+                  (List.exists !requests ~f:(fun line ->
+                     String.is_prefix line ~prefix:"DELETE "))))))));
+  print_endline
+    "cancelled POST and SSE closed; pending intent retained; equivalent admission \
+     blocked; no DELETE or replay";
+  [%expect
+    {| cancelled POST and SSE closed; pending intent retained; equivalent admission blocked; no DELETE or replay |}]
+;;
+
 let%test_unit "HTTP lifetime cancellation releases partial initialization" =
   Eio_main.run (fun env ->
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->

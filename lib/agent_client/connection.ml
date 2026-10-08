@@ -172,8 +172,23 @@ let pending_capacity pending byte_count =
      <= maximum_pending_bytes - byte_count
 ;;
 
+let with_request_lock t f =
+  (* Cancellation is an expected request outcome. Keep it outside use_rw's
+     exception boundary so Eio does not poison the mutex and make retained
+     uncertain intents inaccessible to receipt reconciliation. *)
+  match
+    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      match f () with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
 let request t command =
-  Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+  with_request_lock t (fun () ->
     let open Result.Let_syntax in
     if Atomic.get t.closed
     then Error (closed_error ())

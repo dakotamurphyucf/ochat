@@ -9,6 +9,9 @@ open! Core
     Transport-local retries never hide event-stream loss: the shared reconnect
     owner creates a new logical connection and reattaches with its durable cursor.
     Closing a failed connection does not send a network-dependent DELETE.
+    Cancellation of an admitted request also retires the connection, joins its
+    owned fibers and rethrows the original cancellation. Its uncertain command
+    intent remains available to the shared receipt reconciliation owner.
     Each connection owns a child switch; close cancels and joins its reader,
     response monitors and transport fibers without cancelling the caller's switch. *)
 val connect

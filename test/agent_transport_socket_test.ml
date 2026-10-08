@@ -89,6 +89,135 @@ let initialize_line =
   {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"socket-test","version":"1"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":1048576}}|}
 ;;
 
+let with_scripted_peer f =
+  Eio_main.run (fun env ->
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        Eio.Switch.run (fun sw ->
+          let socket_path = Filename.concat root "scripted.sock" in
+          let listener =
+            Eio.Net.listen ~sw ~backlog:1 (Eio.Stdenv.net env) (`Unix socket_path)
+          in
+          let accepted, accept = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            let flow, _ = Eio.Net.accept ~sw listener in
+            Eio.Promise.resolve accept flow);
+          let connection =
+            Agent_transport_socket.Client.connect
+              ~sw
+              ~net:(Eio.Stdenv.net env)
+              ~socket_path
+              ~max_line_length:(16 * 1024 * 1024)
+              ~notification_capacity:8
+          in
+          Exn.protect
+            ~finally:(fun () -> Agent_client.Connection.close connection)
+            ~f:(fun () -> f sw env connection (Eio.Promise.await accepted)))))
+;;
+
+let receipt_probe params =
+  Agent_protocol.Command.Command_receipt
+    { method_name = "session.send_message"; original_params = params }
+;;
+
+let%expect_test "backpressured socket writes cancel and retire the partial frame" =
+  with_scripted_peer (fun sw env connection peer ->
+    let prefix_seen, saw_prefix = Eio.Promise.create () in
+    let completed, complete = Eio.Promise.create () in
+    let watchdog_fired = ref false in
+    Eio.Fiber.fork ~sw (fun () ->
+      let prefix = Cstruct.create 1 in
+      ignore (Eio.Flow.single_read peer prefix : int);
+      Eio.Promise.resolve saw_prefix ());
+    (* Only a broken, cancellation-shielded writer needs this escape hatch.
+       The peer never drains the remaining multi-megabyte request. *)
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Fiber.first
+        (fun () -> Eio.Promise.await completed)
+        (fun () ->
+           Eio.Time.sleep (Eio.Stdenv.clock env) 5.;
+           watchdog_fired := true;
+           Eio.Flow.shutdown peer `All));
+    let result =
+      Eio.Fiber.first
+        (fun () ->
+           ignore
+             (Agent_client.Connection.request
+                connection
+                (receipt_probe
+                   (`Object [ "large", `String (String.make (8 * 1024 * 1024) 'x') ]))
+              : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result);
+           `Request_returned)
+        (fun () ->
+           Eio.Promise.await prefix_seen;
+           `Cancelled)
+    in
+    Eio.Promise.resolve complete ();
+    assert (not !watchdog_fired);
+    (match result with
+     | `Cancelled -> ()
+     | `Request_returned -> failwith "backpressured request returned before cancellation");
+    (match Agent_client.Connection.request connection (receipt_probe (`Object [])) with
+     | Error failure -> assert (Agent_protocol.Error.equal_code failure.code Interrupted)
+     | Ok _ -> failwith "partial-frame channel accepted another command");
+    print_endline
+      "write cancellation completed; no watchdog; partial-frame channel retired");
+  [%expect {| write cancellation completed; no watchdog; partial-frame channel retired |}]
+;;
+
+let%expect_test
+    "cancelled response wait ignores late reply and preserves next correlation"
+  =
+  with_scripted_peer (fun sw _env connection peer ->
+    let received, receive = Eio.Promise.create () in
+    let cancelled, cancel = Eio.Promise.create () in
+    let read_request reader =
+      match
+        Eio.Buf_read.line reader
+        |> Jsonaf.of_string
+        |> Agent_protocol.Envelope.of_json
+        |> protocol_ok
+      with
+      | Request request -> request.id
+      | _ -> failwith "expected request"
+    in
+    let reply id status =
+      Agent_protocol.Envelope.success ~id (`Object [ "status", `String status ])
+      |> Agent_protocol.Envelope.to_json
+      |> Jsonaf.to_string
+      |> fun line -> Eio.Flow.copy_string (line ^ "\n") peer
+    in
+    Eio.Fiber.fork ~sw (fun () ->
+      let reader = Eio.Buf_read.of_flow peer ~max_size:4096 in
+      let first = read_request reader in
+      Eio.Promise.resolve receive ();
+      Eio.Promise.await cancelled;
+      reply first "unavailable";
+      let second = read_request reader in
+      reply second "missing");
+    Eio.Fiber.first
+      (fun () ->
+         ignore
+           (Agent_client.Connection.request connection (receipt_probe (`Object []))
+            : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result);
+         failwith "first reply arrived before cancellation")
+      (fun () -> Eio.Promise.await received);
+    Eio.Promise.resolve cancel ();
+    (match
+       Agent_client.Connection.request_without_history
+         connection
+         (receipt_probe (`Object []))
+       |> protocol_ok
+     with
+     | Command_receipt Missing -> ()
+     | _ -> failwith "late reply corrupted the next response");
+    print_endline "cancelled waiter released; late reply ignored; next response matched");
+  [%expect {| cancelled waiter released; late reply ignored; next response matched |}]
+;;
+
 let%expect_test "Unix peer credentials produce one stable same-user principal" =
   Eio_main.run (fun _env ->
     Eio.Switch.run (fun sw ->
