@@ -617,6 +617,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/openai/responses_history.mli` | [contract](../../lib/openai/responses_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/openai/responses_json.mli` | [contract](../../lib/openai/responses_json.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_live.mli` | [contract](../../lib/openai/responses_live.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/openai/responses_replay.mli` | [contract](../../lib/openai/responses_replay.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |
 | `lib/openai/responses_request.mli` | [contract](../../lib/openai/responses_request.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_sse.mli` | [contract](../../lib/openai/responses_sse.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/openai/responses_websocket.mli` | [contract](../../lib/openai/responses_websocket.mli) | [integration](../lib/neutral-inference.md) | Public interface + current host guide. |

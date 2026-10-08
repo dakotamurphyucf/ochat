@@ -562,3 +562,174 @@ let%expect_test "reconstructed images require immutable inline data before authe
     auth_calls=0
     |}]
 ;;
+
+let%expect_test "retained model changes preflight without auth and replay original bytes" =
+  Eio_main.run (fun env ->
+    let received = ref [] in
+    let auth_calls = ref 0 in
+    let auth ~sw:_ _ =
+      incr auth_calls;
+      D.Auth.bearer "test-only"
+    in
+    with_server
+      env
+      (fun request ->
+         received := request :: !received;
+         terminal [ message ])
+      (fun sw endpoint ->
+         let base = profile endpoint in
+         let selected = target base in
+         let source = context env base ~target:selected ~auth in
+         let first = prepare source (request selected) |> run ~sw in
+         let payload = List.hd_exn (payloads first) in
+         let entry =
+           History_entry.create_with_id
+             ~id:(History_entry.Id.create ~namespace:"switch" ~sequence:0 |> ok)
+             payload
+         in
+         let replay =
+           Openai.Responses_replay.create
+             ~transitions:[ "arbitrary-model", "next-model", [ Assistant_text ] ]
+           |> ok
+         in
+         let profile = D.Profile.with_replay_policy base replay in
+         let next =
+           A.capture_target
+             profile
+             ~profile_revision:None
+             ~model:"next-model"
+             ~settings:[]
+             ~limits
+           |> ok
+         in
+         let next_context = context env profile ~target:next ~auth in
+         Runtime.Context.preflight_history next_context [ entry ] |> ok;
+         assert (!auth_calls = 1);
+         ignore (prepare next_context (request ~history:[ entry ] next) |> run ~sw);
+         let input = Document_schema.Json.field (List.hd_exn !received) ~name:"input" in
+         (match input with
+          | Value actual ->
+            assert (Document_schema.Json.equal actual (`Array [ raw payload ]))
+          | _ -> assert false);
+         let unknown =
+           match raw payload with
+           | `Object fields -> `Object (fields @ [ "future", `Null ])
+           | _ -> assert false
+         in
+         let origin =
+           match P.representation payload with
+           | Captured { origin; _ } -> origin
+           | _ -> assert false
+         in
+         let unknown_payload =
+           P.captured (P.semantic payload) ~origin ~raw:unknown |> ok
+         in
+         let unknown_entry = History_entry.with_payload entry unknown_payload in
+         (match Runtime.Context.preflight_history next_context [ unknown_entry ] with
+          | Error Incompatible_replay -> ()
+          | _ -> assert false);
+         (match
+            Runtime.Context.prepare
+              next_context
+              ~preparation_id:"refused"
+              (request ~history:[ unknown_entry ] next)
+          with
+          | Error Incompatible_replay -> ()
+          | _ -> assert false);
+         Runtime.Context.preflight_history source [ unknown_entry ] |> ok;
+         assert (!auth_calls = 2);
+         assert (List.length !received = 2);
+         assert (Document_schema.Json.equal (raw unknown_payload) unknown)));
+  print_endline
+    "pure admission agrees with dispatch; preserved raw bytes and actual origin; refusal \
+     performs no auth/network";
+  [%expect
+    {| pure admission agrees with dispatch; preserved raw bytes and actual origin; refusal performs no auth/network |}]
+;;
+
+let%expect_test
+    "preflight checks authored and reconstructed features while deferring assets"
+  =
+  Eio_main.run (fun env ->
+    let capabilities =
+      D.Capability.create
+        ~baseline:
+          [ Text_input, Supported; Image_input, Supported; Function_tools, Unsupported ]
+        ~models:[]
+      |> ok
+    in
+    let profile =
+      D.Profile.create
+        ~id:"selected"
+        ~account:(Some "account")
+        ~endpoint:"https://api.openai.com/v1/responses"
+        ~capabilities
+        ~defaults:[]
+      |> ok
+    in
+    let target = target profile in
+    let auth_calls = ref 0 in
+    let context =
+      context env profile ~target ~auth:(fun ~sw:_ _ ->
+        incr auth_calls;
+        D.Auth.bearer "test-only")
+    in
+    let id n = History_entry.Id.create ~namespace:"preflight" ~sequence:n |> ok in
+    let call =
+      P.Semantic.create
+        (Call
+           { kind = Function
+           ; name = "tool"
+           ; namespace = Absent
+           ; input_bytes = "{}"
+           ; async = Absent
+           })
+        ~metadata:{ P.Metadata.empty with call_id = Value "call" }
+      |> ok
+    in
+    let authored = History_entry.create_with_id ~id:(id 0) (P.authored call) in
+    let reconstructed =
+      Openai.Responses_history.create_with_id_exn
+        ~id:(id 1)
+        (Openai.Responses.Item.Function_call
+           { name = "tool"
+           ; arguments = "{}"
+           ; call_id = "call"
+           ; _type = "function_call"
+           ; id = None
+           ; status = None
+           })
+    in
+    List.iter [ authored; reconstructed ] ~f:(fun entry ->
+      match Runtime.Context.preflight_history context [ entry ] with
+      | Error Incompatible_replay -> ()
+      | _ -> assert false);
+    let image =
+      P.Semantic.create
+        (Message
+           { form = Input
+           ; role = User
+           ; content = [ Image { uri = "asset:local-image"; detail = Absent } ]
+           ; phase = Absent
+           })
+        ~metadata:P.Metadata.empty
+      |> ok
+      |> P.authored
+      |> History_entry.create_with_id ~id:(id 2)
+    in
+    Runtime.Context.preflight_history context [ image ] |> ok;
+    (match
+       Runtime.Context.prepare
+         context
+         ~preparation_id:"resolve-later"
+         (request ~history:[ image ] target)
+     with
+     | Error Asset_unavailable -> ()
+     | _ -> assert false);
+    assert (!auth_calls = 0));
+  print_endline
+    "unsupported authored/reconstructed tools refused; image capability admitted but \
+     actual asset still required";
+  [%expect
+    {| unsupported authored/reconstructed tools refused; image capability admitted but actual asset still required |}]
+;;

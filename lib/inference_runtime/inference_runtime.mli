@@ -159,6 +159,10 @@ module Adapter : sig
     -> id:string
     -> limits:Limits.t
     -> bind:(Inference.Request.Target.t -> (unit, Preparation_error.t) Result.t)
+    -> preflight_history:
+         (target:Inference.Request.Target.t
+          -> History_entry.t list
+          -> (unit, Preparation_error.t) Result.t)
     -> prepare:
          (preparation_id:string
           -> Inference.Request.t
@@ -223,6 +227,14 @@ module Context : sig
     :  Adapter.t
     -> target:Inference.Request.Target.t
     -> (t, Preparation_error.t) Result.t
+
+  (** Pure retained-history compatibility check for administration. Checks the
+      exact target binding; allocates no plan/attempt and performs no auth/I/O.
+      Final preparation must independently enforce the same history policy. *)
+  val preflight_history
+    :  t
+    -> History_entry.t list
+    -> (unit, Preparation_error.t) Result.t
 
   val target : t -> Inference.Request.Target.t
   val transport_policy : t -> Inference.Observation.Transport_policy.t

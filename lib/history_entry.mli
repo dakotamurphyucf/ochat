@@ -82,6 +82,12 @@ module Payload : sig
       -> (t, string) Result.t
 
     val is_available : t -> bool
+    val model : t -> string option
+
+    (** Known adapter/provider/account/endpoint/profile/replay version equality;
+        model is deliberately excluded. Unavailable provenance never matches. *)
+    val same_replay_context : t -> t -> bool
+
     val to_json : t -> Jsonaf.t
     val of_json : Jsonaf.t -> (t, string) Result.t
   end

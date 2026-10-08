@@ -70,6 +70,7 @@ let owner name =
         ; "openai/inference_"
         ; "openai/responses_driver"
         ; "openai/responses_websocket"
+        ; "openai/responses_replay"
         ; "neutral_turn"
         ; "inference_config"
         ; "fork_history"

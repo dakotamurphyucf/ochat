@@ -355,6 +355,150 @@ preparation alone does not grant dispatch authority. Static explicit hosts use
 `Inference_adapter.Auth_source.Static`; dynamic hosts use `Capture` without a
 static fallback.
 
+## Retained history and model changes
+
+Captured provider items retain their original provenance and JSON when the session
+changes models. `Openai.Responses_replay` declares a finite set of directed model
+transitions in a trusted host profile. Declarations do not come from ChatMD
+settings and do not authorize another account or endpoint. No transition is
+inferred from a model name, the reverse direction, or a chain of earlier changes.
+The default profile requires the original model.
+
+A declaration selects the item classes that have been qualified for that pair:
+assistant text, function calls, custom calls, or reasoning. Cross-model admission
+requires a closed supported wire shape as well as the target's feature support.
+Unknown fields, annotations that have not been qualified, unknown phases and
+other opaque item classes require the original model. Reasoning declarations
+require separate same-family qualification; accepting ordinary text does not
+establish encrypted reasoning compatibility. See the
+[OpenAI reasoning guide](https://developers.openai.com/api/docs/guides/reasoning?api-mode=chat)
+for the provider's model-family boundary. Original raw fields and tool
+argument strings are never stripped or re-encoded to make a transition succeed.
+
+`Inference_runtime.Context.preflight_history` checks retained history compatibility
+without allocating an attempt or resolving credentials. Authored and reconstructed
+items reuse the provider's feature checks; local asset references remain unresolved
+at this stage, with media capability checks still required. The provider reuses this
+check during final preparation, including an independent raw/semantic integrity
+check. Context resolution may read host registry metadata and yield; the history
+preflight itself is pure and does not resolve credentials. Session administration
+invokes preflight before changing the selected model or replacing the runtime. A refusal preserves the current session. Only an
+explicit history reset checks the replacement empty history; a model change never
+silently resets or drops conversation data. Full request settings, tools and asset
+resolution remain preparation responsibilities.
+
+The offline tests qualify directed declarations, exact replay bytes, unknown-field
+refusal, and administration rollback using synthetic models. They do not establish
+live endpoint support for any model pair. Public API and direct OAuth qualification
+must record supported pairs separately before a host enables them.
+
+
+## Persistence workload and measurements
+
+`load.storage-defaults` in the existing agent-server E2E executable exercises a
+real daemon with the production 100-event / 5000-ms checkpoint cadence and real
+clocks. It sends eight 1-KiB messages, executes `run_chatml` calling `read_file`
+with a 17,500-byte UTF8/quote/backslash/newline payload, and completes 120 scheduled
+notifications through an extensibility-v1 moderator. Each notification measurement
+includes acknowledgement, durable delivery, and the corresponding moderator state
+update. The scenario also forces the time-based checkpoint, verifies retention of
+two snapshots, closes the daemon before an independent pruning check, and restarts
+it. Restart must preserve exact canonical history and nested invocation identities
+without another inference call. Provider responses are synthetic; tool execution,
+HTTP commands, storage, orchestration, timers and restart are real.
+
+Run this workload without other local builds or performance tests:
+
+```sh
+opam exec --switch=default -- dune exec --root . \
+  --build-dir _build-storage-measurement --cache=disabled \
+  test/agent_server_e2e/agent_server_e2e.exe -- \
+  --scenario load --case load.storage-defaults
+```
+
+Set `OCHAT_E2E_REPORT_ROOT` to retain the JSON phase report. Optional workload
+variables are `OCHAT_E2E_STORAGE_COMMITS` (default 120, maximum 1000),
+`OCHAT_E2E_STORAGE_SEED_MESSAGES` (default 8, maximum 128), and
+`OCHAT_E2E_STORAGE_FRAGMENT_REPEATS` (default/maximum 2500). The report records
+actual validated checkpoint settings and script execution/compilation budgets.
+
+A single isolated macOS 14.5 ARM64 run on 2026-10-08 completed with these results:
+
+| Phase | Samples | p95 | Maximum |
+| --- | ---: | ---: | ---: |
+| Seed message turn | 8 | 262 ms | 709 ms |
+| Nested large tool turn | 1 | — | 2.304 s |
+| Notification acknowledgement | 120 | 119 ms | 163 ms |
+| Notification completion | 120 | 247 ms | 3.252 s |
+| Mutation after time checkpoint becomes due | 1 | — | 996 ms |
+| Snapshot and journal replay | 1 | — | 309 ms |
+| Independent validated pruning, no deletion needed | 1 | — | 43 ms |
+| Restart to daemon readiness | 1 | — | 79 ms |
+| Restart, history verification, replay check and shutdown | 1 | — | 1.409 s |
+
+The nested tool turn completed within the configured 30-second script budget;
+its exact 17,543-byte decoded file result, including file metadata, survived.
+Restart restored 13 canonical entries and made zero provider calls. These numbers
+characterize this workload, rather than guaranteeing latency for arbitrary history
+sizes or platforms. Checkpoint and pruning work is included in synchronous phase
+timings; the report does not attribute separate internal spans. This run is not a
+before/after optimization comparison or qualification of native watcher deadlines.
+Controlled-clock helper correctness tests are separate from production timing
+qualification. Full-suite wall time must not be used as a latency estimate.
+
+Snapshot pruning now returns its retention floor from the same fully validated
+retained set. The serialized checkpoint owner uses that floor for journal pruning,
+which avoids an immediate second decode of all retained snapshots. Every call still
+validates stored frames and digests and verifies `CURRENT` before deleting files;
+there is no long-lived file or timestamp cache. The floor is returned only after
+successful deletion and required directory synchronization. Independent callers
+can still request a fresh retention-floor validation.
+
+## Native and confined-helper watcher timing
+
+`load.native-watch-defaults` uses the maintained watcher, probe and request
+scripts with real daemon clocks, the same 100-event / 5000-ms checkpoint cadence,
+eight retained 1-KiB turns and a 2,500-fragment escaped child response. It runs
+native session operations and the confined `ochat-agent-helper` request channel.
+Each variant verifies the exact child payload, one committed notification, then
+interrupts another child attempt by shutting down and reopening the daemon.
+Recovery must preserve the original subscription, deliver the interrupted outcome
+once, and issue no replacement provider request.
+
+Build the E2E executable and helper in an isolated directory, then run with no
+competing local builds or tests:
+
+```sh
+opam exec --switch=default -- dune build --root . \
+  --build-dir _build-watch-measurement --cache=disabled -j 2 \
+  test/agent_server_e2e/agent_server_e2e.exe bin/ochat_agent_helper.exe
+OCHAT_E2E_HELPER_EXE="$PWD/_build-watch-measurement/default/bin/ochat_agent_helper.exe" \
+  _build-watch-measurement/default/test/agent_server_e2e/agent_server_e2e.exe \
+  --scenario load --case load.native-watch-defaults
+```
+
+An isolated macOS 14.5 ARM64 run on 2026-10-08 passed both variants:
+
+| Variant | Watch registration through verified delivery | Interrupted attempt recovery through delivery |
+| --- | ---: | ---: |
+| Native session operations | 6.625 s | 24.631 s |
+| Confined helper channel | 7.145 s | 25.383 s |
+
+The maintained watch timeout is 30 seconds and subscription deadline is 31 seconds.
+The recovery interval includes registering the second watcher, daemon shutdown,
+reopening and the committed recovery delivery; it is not startup latency alone.
+Both variants retained the original subscription and produced exactly one delivery
+with zero provider replays. The complete case, including setup and final teardown,
+took 82.38 seconds.
+
+The transport harness uses a 120-second HTTP logical-connection idle timeout to
+permit long local observation periods. The helper fixture explicitly authorizes its
+reviewed manifest, while retaining executable-hash binding, required sandboxing
+and restricted session operations. These fixture settings do not relax the watcher
+or script deadlines. Provider responses are synthetic; native tool operations,
+helper process confinement, persistence and restart are real. This single workload
+qualifies those deadlines on the measured host, not every workload or platform.
+
 ## Runtime-host credential composition
 
 `Inference_host.Credential_bridge` binds approved profiles to the shared

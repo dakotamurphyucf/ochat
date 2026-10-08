@@ -1,3 +1,6 @@
+(** Trusted application platform composition shared by explicit local hosts. *)
+module Provider_platform : module type of Provider_platform
+
 module Provider_commands : module type of Provider_commands
 open! Core
 

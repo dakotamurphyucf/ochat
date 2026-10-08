@@ -57,6 +57,10 @@ let create
     ~finally:(fun () -> if not !retained then cleanup !cleanups)
     ~f:(fun () ->
       let open Result.Let_syntax in
+      let%bind metadata_admission =
+        C.Metadata_admission.wait ~clock:(Eio.Stdenv.mono_clock env) ~maximum_wait
+        |> Result.map_error ~f:(fun _ -> DTO.Error.Invalid_request)
+      in
       let%bind directory =
         Private_storage.Directory.open_or_create ~sw ~anchor ~components
         |> Result.map_error ~f:unavailable
@@ -77,6 +81,7 @@ let create
       let environment_port = Option.map environment ~f:Bridge.Environment.port in
       let open_registry () =
         C.open_existing
+          ~metadata_admission
           ~sw
           ~wall_clock:(Eio.Stdenv.clock env)
           ~new_operation
@@ -293,6 +298,7 @@ let create
               else Error DTO.Error.Denied
             in
             C.initialize_new
+              ~metadata_admission
               ~sw
               ~wall_clock:(Eio.Stdenv.clock env)
               ~new_operation

@@ -1,3 +1,4 @@
+module Provider_platform = Provider_platform
 module Provider_commands = Provider_commands
 open! Core
 module D = Openai.Responses_driver

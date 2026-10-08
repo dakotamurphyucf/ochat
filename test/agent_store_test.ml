@@ -443,10 +443,52 @@ let%expect_test "snapshot pruning retains bounded current and fallback checkpoin
         (snapshot sequence (Int64.to_string sequence))
       |> store_ok
       |> ignore);
-    let removed =
-      Agent_store.Snapshot.prune_older ~max_payload_length:16384 ~env ~directory ~keep:2
+    let current_path = Eio.Path.(Eio.Stdenv.fs env / directory / "CURRENT") in
+    let current = Eio.Path.load current_path in
+    let files_before =
+      Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / directory)
+      |> List.sort ~compare:String.compare
+    in
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      current_path
+      "snapshot-0000000000000001.bin\n";
+    (match
+       Agent_store.Snapshot.prune_older_with_floor
+         ~max_payload_length:16384
+         ~env
+         ~directory
+         ~keep:2
+     with
+     | Error (Agent_store.Store_error.Corrupt _) -> ()
+     | Ok _ | Error _ -> assert false);
+    assert (
+      List.equal
+        String.equal
+        files_before
+        (Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / directory)
+         |> List.sort ~compare:String.compare));
+    Eio.Path.save ~create:(`Or_truncate 0o600) current_path current;
+    let pruned =
+      Agent_store.Snapshot.prune_older_with_floor
+        ~max_payload_length:16384
+        ~env
+        ~directory
+        ~keep:2
       |> store_ok
     in
+    let removed = Agent_store.Snapshot.Pruned.removed_count pruned in
+    assert (Int64.equal (Agent_store.Snapshot.Pruned.retention_floor pruned) 2L);
+    let unchanged =
+      Agent_store.Snapshot.prune_older_with_floor
+        ~max_payload_length:16384
+        ~env
+        ~directory
+        ~keep:2
+      |> store_ok
+    in
+    assert (Int.equal (Agent_store.Snapshot.Pruned.removed_count unchanged) 0);
+    assert (Int64.equal (Agent_store.Snapshot.Pruned.retention_floor unchanged) 2L);
     let floor =
       Agent_store.Snapshot.retention_floor ~env ~directory ~max_payload_length:4096
       |> store_ok

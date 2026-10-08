@@ -72,6 +72,11 @@ module Profile : sig
     -> defaults:Setting.t list
     -> t Or_error.t
 
+  (** Trusted host qualification only; captured prompt settings cannot declare
+      cross-model replay support. Other profile identity/capabilities unchanged. *)
+  val with_replay_policy : t -> Responses_replay.t -> t
+
+  val replay_policy : t -> Responses_replay.t
   val id : t -> string
   val account : t -> string option
   val endpoint : t -> string
@@ -85,6 +90,21 @@ end
 
 module Prepared : sig
   type t
+
+  (** Pure wire feature admission, shared by retained-capture preflight and final
+      preparation. Does not resolve assets or credentials. *)
+  type asset_validation =
+    | Resolved
+    | Deferred
+
+  (** Deferred checks feature support but leaves immutable asset resolution to
+      final preparation. It does not authorize a provider URL or file ID. *)
+  val history_features
+    :  ?assets:asset_validation
+    -> Profile.t
+    -> model:string
+    -> Jsonaf.t list
+    -> unit Or_error.t
 
   (** Capture after the host has formed its final effective history (including
       final guidance) and resolved assets to inline immutable data. Precedence:

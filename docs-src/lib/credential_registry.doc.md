@@ -64,7 +64,11 @@ refresh uses R and short M transactions. External calls never hold M, and no M
 transaction waits for G or R. Different bindings do not share a network lock.
 Kernel locks coordinate independent processes; a daemon mutex is insufficient.
 
-Administrative metadata admission is nonblocking and reports Busy. Attempt and
+Each registry owner explicitly selects metadata admission at open. Nonblocking
+admission reports Busy. Production hosts use a validated monotonic wait budget
+of at most 60 seconds; expired lock admission reports Timed_out. Waiting retries
+only kernel lock acquisition, before metadata load or any effect. A metadata
+callback and filesystem publication execute once after admission. Attempt and
 rotation lock waiting uses the explicitly supplied monotonic clock and duration;
 wall-clock expiry uses the clock borrowed at open. These are not claims of hard
 native I/O timeouts. Native operations are bounded and joined through the private

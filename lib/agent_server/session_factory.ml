@@ -3711,19 +3711,14 @@ let prune_snapshot t handle journal persistence _installed =
         (create_retention_preflight t handle journal)
   in
   let%bind () = Agent_store.Journal.validate_seal_checkpoint journal in
-  let%bind _ =
-    Agent_store.Snapshot.prune_older
+  let%bind pruned =
+    Agent_store.Snapshot.prune_older_with_floor
       ~env:t.env
       ~directory
       ~keep:2
       ~max_payload_length:t.limits.snapshot_payload_limit
   in
-  let%bind transaction_sequence =
-    Agent_store.Snapshot.retention_floor
-      ~env:t.env
-      ~directory
-      ~max_payload_length:t.limits.snapshot_payload_limit
-  in
+  let transaction_sequence = Agent_store.Snapshot.Pruned.retention_floor pruned in
   let%bind _ =
     Agent_store.Journal.prune_before_transaction journal ~transaction_sequence
   in
@@ -3952,6 +3947,22 @@ let prepare_administration t entry ~previous state ~fresh_history =
     |> Result.map_error ~f:(fun error ->
       unavailable
         Permission_denied
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
+  let%bind history =
+    if fresh_history
+    then Ok []
+    else Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
+  in
+  let%bind () =
+    let compatible =
+      Result.bind
+        (t.inference_policy.resolve_inference_context proposed)
+        ~f:(fun context -> Inference_runtime.Context.preflight_history context history)
+    in
+    Result.map_error compatible ~f:(fun error ->
+      unavailable
+        Invalid_request
         (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
   in
   let%bind inference_target =

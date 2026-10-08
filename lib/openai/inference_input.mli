@@ -12,3 +12,12 @@ val prepare
 val origin
   :  Inference.Request.Target.t
   -> (History_entry.Payload.Origin.t, Inference_runtime.Preparation_error.t) Result.t
+
+(** Pure retained-capture admission shared with final preparation. No credentials,
+    transport, plan or observation allocation. Full request feature/asset/settings
+    validation still occurs during preparation. *)
+val preflight_history
+  :  Responses_driver.Profile.t
+  -> target:Inference.Request.Target.t
+  -> History_entry.t list
+  -> (unit, Inference_runtime.Preparation_error.t) Result.t

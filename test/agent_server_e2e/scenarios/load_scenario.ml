@@ -328,6 +328,8 @@ let cases =
   ; "load.reconnect-storm", reconnect
   ; "load.actor-unload-memory-settle", unload
   ; "load.jobs-schedules-capacity", capacity
+  ; "load.storage-defaults", Storage_defaults_scenario.run
+  ; "load.native-watch-defaults", Native_watch_scenario.run
   ]
 ;;
 

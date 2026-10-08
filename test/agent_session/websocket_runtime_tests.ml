@@ -148,6 +148,7 @@ let%expect_test
       in
       let adapter =
         Runtime.Adapter.create
+          ~preflight_history:(fun ~target:_ _ -> Ok ())
           ~id:"graph-transport"
           ~limits:Runtime.Limits.default
           ~bind:(fun _ -> Ok ())
