@@ -35,6 +35,7 @@ val create
   -> connection:Connection.t
   -> spec:Agent_protocol.Session.Spec.t
   -> mode:Agent_protocol.Session.attachment_mode
+  -> ?subscribe:bool
   -> ?on_update:(Projection.t -> unit)
   -> ?on_error:(Agent_protocol.Error.t -> unit)
   -> unit
