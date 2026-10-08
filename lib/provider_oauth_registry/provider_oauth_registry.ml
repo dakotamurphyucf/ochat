@@ -362,10 +362,13 @@ module Acquisition = struct
         in
         let%bind () = if authorize_commit () then Ok () else Error Error.Denied in
         t.state <- Publishing;
-        (match C.commit_candidate t.registry t.candidate verified with
+        (match C.commit_candidate ~authorize_commit t.registry t.candidate verified with
          | Ok () ->
            t.state <- Committed;
            Ok ()
+         | Error C.Error.Authorization_denied ->
+           t.state <- Pending;
+           Error Error.Denied
          | Error C.Error.Publication_uncertain ->
            t.state <- Publication_uncertain;
            Error (Error.Registry C.Error.Publication_uncertain)

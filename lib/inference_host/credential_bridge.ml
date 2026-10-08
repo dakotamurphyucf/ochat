@@ -32,6 +32,7 @@ end
 module Mapping = struct
   type t =
     { profile : D.Profile.t
+    ; revision : string
     ; configuration : H.Profile.t
     ; binding : M.Id.t
     ; identity : M.Identity.t
@@ -70,7 +71,7 @@ module Mapping = struct
       H.Profile.create profile ~revision ~binding:auth_binding
       |> Result.map_error ~f:(fun error -> Error.Profile error)
     in
-    { profile; configuration; binding; identity }
+    { profile; revision; configuration; binding; identity }
   ;;
 
   let profile t = D.Profile.id t.profile
@@ -214,6 +215,7 @@ type t =
   }
 
 let auth_error = function
+  | C.Error.Authorization_denied -> D.Auth.Denied
   | C.Error.Model (Disabled | Stale_epoch | Stale_revision | Wrong_incarnation) ->
     D.Auth.Denied
   | Model Renewal_uncertain | Renewal_rejected -> Reauthorization_required
@@ -396,6 +398,67 @@ let synchronize t =
   t.shared.synchronized <- true
 ;;
 
+let mappings t = Hashtbl.data t.shared.entries |> List.map ~f:(fun entry -> entry.mapping)
+
+let publish_mapping t mapping =
+  let open Result.Let_syntax in
+  let profile = Mapping.profile mapping in
+  let existing = Hashtbl.find t.shared.entries profile in
+  let%bind () =
+    if
+      (Option.is_none existing && Hashtbl.length t.shared.entries >= 128)
+      || Hashtbl.exists t.shared.entries ~f:(fun entry ->
+        (not (String.equal (Mapping.profile entry.mapping) profile))
+        && M.Id.equal entry.mapping.binding mapping.Mapping.binding)
+    then Error Error.Invalid_mapping
+    else Ok ()
+  in
+  let%bind snapshot =
+    C.synchronize t.shared.registry |> Result.map_error ~f:lifecycle_error
+  in
+  let%bind selected =
+    List.find (C.Host_snapshot.bindings snapshot) ~f:(fun item ->
+      M.Id.equal (C.Host_snapshot.id item) mapping.binding)
+    |> Result.of_option ~error:Error.Missing_profile
+  in
+  let%bind () =
+    if
+      Option.equal
+        M.Identity.equal
+        (C.Host_snapshot.identity selected)
+        (Some mapping.identity)
+    then Ok ()
+    else Error Error.Invalid_mapping
+  in
+  let identical =
+    Option.exists existing ~f:(fun entry ->
+      M.Identity.equal entry.mapping.identity mapping.identity
+      && M.Id.equal entry.mapping.binding mapping.binding
+      && String.equal entry.mapping.revision mapping.revision
+      && String.equal
+           (D.Profile.endpoint entry.mapping.profile)
+           (D.Profile.endpoint mapping.profile))
+  in
+  if identical
+  then synchronize t
+  else (
+    let owner = C.Host_snapshot.owner selected in
+    let epoch = C.Host_snapshot.epoch selected in
+    let%bind () =
+      H.replace t.profiles mapping.configuration ~owner ~generation:epoch
+      |> Result.map_error ~f:(fun e -> Error.Profile e)
+    in
+    Hashtbl.set
+      t.shared.entries
+      ~key:profile
+      ~data:{ mapping; snapshot = Some selected; installed = Some (owner, epoch) };
+    t.shared.synchronized <- true;
+    match C.Host_snapshot.availability selected with
+    | Disabled ->
+      H.disable t.profiles ~profile |> Result.map_error ~f:(fun e -> Error.Profile e)
+    | Ready | Missing | Renewal_required | Renewal_uncertain -> Ok ())
+;;
+
 let create
       ?oauth
       driver
@@ -413,9 +476,7 @@ let create
     if Time_ns.Span.(maximum_wait < zero) then Error Error.Invalid_mapping else Ok ()
   in
   let%bind () =
-    if List.is_empty mappings || List.length mappings > 128
-    then Error Error.Invalid_mapping
-    else Ok ()
+    if List.length mappings > 128 then Error Error.Invalid_mapping else Ok ()
   in
   let entries = String.Table.create () in
   let%bind () =
@@ -553,6 +614,7 @@ let finish_publication t ~binding ~operation result =
   let result =
     match result with
     | Ok () -> Ok ()
+    | Error C.Error.Authorization_denied -> Error Error.Denied
     | Error C.Error.Publication_uncertain ->
       (match C.reconcile_operation t.shared.registry ~binding ~operation with
        | Ok M.Operation.Committed -> Ok ()
@@ -567,7 +629,18 @@ let finish_publication t ~binding ~operation result =
   | Ok (), Ok () -> Ok ()
 ;;
 
-let enroll t ~principal ~profile ~operation ~sw ~read =
+let commit_authorized t ~principal ~profile ~captured ~authorize_commit () =
+  authorize_commit ()
+  &&
+  match api_entry t ~principal ~profile with
+  | Error _ -> false
+  | Ok current ->
+    M.Id.equal current.mapping.binding captured.mapping.binding
+    && M.Identity.equal current.mapping.identity captured.mapping.identity
+;;
+
+let enroll ?(authorize_commit = fun () -> true) t ~principal ~profile ~operation ~sw ~read
+  =
   let open Result.Let_syntax in
   let%bind entry = api_entry t ~principal ~profile in
   let%bind candidate =
@@ -611,19 +684,41 @@ let enroll t ~principal ~profile ~operation ~sw ~read =
           ~material:(C.Material.api_key access)
         |> Result.map_error ~f:lifecycle_error
       in
+      let%bind current = api_entry t ~principal ~profile in
+      let%bind () =
+        if
+          M.Id.equal current.mapping.binding entry.mapping.binding
+          && M.Identity.equal current.mapping.identity entry.mapping.identity
+        then Ok ()
+        else Error Error.Stale_authorization
+      in
+      let%bind () = if authorize_commit () then Ok () else Error Error.Denied in
       commit_started := true;
       let result =
         finish_publication
           t
           ~binding:entry.mapping.binding
           ~operation
-          (C.commit_candidate t.shared.registry candidate verified)
+          (C.commit_candidate
+             ~authorize_commit:
+               (commit_authorized t ~principal ~profile ~captured:entry ~authorize_commit)
+             t.shared.registry
+             candidate
+             verified)
       in
       finished := true;
       result)
 ;;
 
-let configure_environment t ~principal ~profile ~operation ~name ~configuration_revision =
+let configure_environment
+      ?(authorize_commit = fun () -> true)
+      t
+      ~principal
+      ~profile
+      ~operation
+      ~name
+      ~configuration_revision
+  =
   let open Result.Let_syntax in
   let%bind entry = api_entry t ~principal ~profile in
   let%bind candidate =
@@ -634,11 +729,16 @@ let configure_environment t ~principal ~profile ~operation ~name ~configuration_
       ~expectation:(M.Expectation.exact entry.mapping.identity)
     |> Result.map_error ~f:lifecycle_error
   in
+  let commit_started = ref false in
   let finished = ref false in
   Exn.protect
     ~finally:(fun () ->
       Eio.Cancel.protect (fun () ->
-        if not !finished
+        if not !commit_started
+        then
+          ignore
+            (C.cancel_candidate t.shared.registry candidate : (unit, C.Error.t) Result.t)
+        else if not !finished
         then (
           ignore
             (C.reconcile_operation
@@ -648,12 +748,24 @@ let configure_environment t ~principal ~profile ~operation ~name ~configuration_
              : (M.Operation.result, C.Error.t) Result.t);
           ignore (synchronize t : (unit, Error.t) Result.t))))
     ~f:(fun () ->
+      let%bind current = api_entry t ~principal ~profile in
+      let%bind () =
+        if
+          M.Id.equal current.mapping.binding entry.mapping.binding
+          && M.Identity.equal current.mapping.identity entry.mapping.identity
+        then Ok ()
+        else Error Error.Stale_authorization
+      in
+      let%bind () = if authorize_commit () then Ok () else Error Error.Denied in
+      commit_started := true;
       let result =
         finish_publication
           t
           ~binding:entry.mapping.binding
           ~operation
           (C.commit_environment_candidate
+             ~authorize_commit:
+               (commit_authorized t ~principal ~profile ~captured:entry ~authorize_commit)
              t.shared.registry
              candidate
              ~identity:entry.mapping.identity

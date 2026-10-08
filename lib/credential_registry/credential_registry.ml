@@ -10,6 +10,7 @@ module Error = struct
     | Secret_store of Secrets.Error.code
     | Missing_secret
     | Binding_unavailable
+    | Authorization_denied
     | Busy
     | Timed_out
     | Closed
@@ -579,7 +580,44 @@ let quarantine_candidate t candidate =
       ~deletion:Quarantined)
 ;;
 
-let commit_candidate t candidate (verified : Verified.t) =
+(* Final authorization admission runs under M after its fresh read. The callback
+   must not yield. Once admitted, publication is allowed to finish even if wall
+   time advances during filesystem I/O. A denied staged candidate is retired by
+   its original CAS, never by deleting or replacing the previous active login. *)
+let commit_authorized t candidate ~authorize_commit transition =
+  let guard_exception = ref None in
+  let result =
+    with_metadata t (fun current ->
+      let allowed =
+        try authorize_commit () with
+        | exn ->
+          guard_exception := Some (exn, Stdlib.Printexc.get_raw_backtrace ());
+          false
+      in
+      if allowed
+      then Result.bind (transition current |> model) ~f:(publish t)
+      else Error Error.Authorization_denied)
+  in
+  match result with
+  | Error Authorization_denied ->
+    let cleanup =
+      try Ok (Eio.Cancel.protect (fun () -> cancel_candidate t candidate)) with
+      | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+    in
+    (match !guard_exception, cleanup with
+     | Some (exn, backtrace), _ | None, Error (exn, backtrace) ->
+       Stdlib.Printexc.raise_with_backtrace exn backtrace
+     | None, Ok cleanup ->
+       Result.bind cleanup ~f:(fun () -> Error Error.Authorization_denied))
+  | result -> result
+;;
+
+let commit_candidate
+      ?(authorize_commit = fun () -> true)
+      t
+      candidate
+      (verified : Verified.t)
+  =
   let open Result.Let_syntax in
   let%bind () = candidate_owner t candidate in
   Eio.Switch.run (fun sw ->
@@ -604,7 +642,7 @@ let commit_candidate t candidate (verified : Verified.t) =
           Error Error.Revision_quarantined
         | Error _ as error -> error
         | Ok () ->
-          update t (fun registry ->
+          commit_authorized t candidate ~authorize_commit (fun registry ->
             M.commit_candidate
               registry
               ~binding:candidate.binding
@@ -614,14 +652,21 @@ let commit_candidate t candidate (verified : Verified.t) =
               ~grant:verified.grant)))
 ;;
 
-let commit_environment_candidate t candidate ~identity ~name ~configuration_revision =
+let commit_environment_candidate
+      ?(authorize_commit = fun () -> true)
+      t
+      candidate
+      ~identity
+      ~name
+      ~configuration_revision
+  =
   let open Result.Let_syntax in
   let%bind () = candidate_owner t candidate in
   match t.environment, M.Identity.method_ identity with
   | None, _ -> Error Error.Binding_unavailable
   | Some _, M.Identity.Oauth _ -> Error (Error.Model Invalid_identity)
   | Some _, Api_key _ ->
-    update t (fun registry ->
+    commit_authorized t candidate ~authorize_commit (fun registry ->
       M.commit_candidate
         registry
         ~binding:candidate.binding
@@ -1154,7 +1199,7 @@ let cleanup_owned t ~binding =
                  | _ -> Error (Error.Secret_store (Secrets.Error.code error)))))))
 ;;
 
-let reconcile t ~binding =
+let reconcile_owned t ~binding ~expected_operation =
   Eio.Switch.run (fun sw ->
     let open Result.Let_syntax in
     let%bind g = acquire t ~sw ~binding ~suffix:"G" ~mode:Exclusive in
@@ -1166,21 +1211,40 @@ let reconcile t ~binding =
           ~finally:(fun () -> Storage.Lock.release r)
           ~f:(fun () ->
             let%bind () =
-              update t (fun registry ->
-                let%bind removal = M.removal registry ~binding in
-                match removal with
-                | None -> Ok registry
-                | Some removal ->
-                  M.record_removal
-                    registry
-                    ~binding
-                    ~operation:(M.Removal.operation removal)
-                    ~drain:Drained
-                    ~revocation:(M.Removal.revocation removal))
+              with_metadata t (fun registry ->
+                let%bind removal = M.removal registry ~binding |> model in
+                let%bind () =
+                  match expected_operation with
+                  | None -> Ok ()
+                  | Some operation ->
+                    let%bind snapshot = M.find registry ~binding |> model in
+                    if
+                      Option.is_none (M.Snapshot.active snapshot)
+                      && Option.is_some (M.Snapshot.disabled snapshot)
+                      && Option.exists removal ~f:(fun removal ->
+                        M.Id.equal (M.Removal.operation removal) operation)
+                    then Ok ()
+                    else Error Error.Binding_unavailable
+                in
+                let%bind next =
+                  (match removal with
+                   | None -> Ok registry
+                   | Some removal ->
+                     M.record_removal
+                       registry
+                       ~binding
+                       ~operation:(M.Removal.operation removal)
+                       ~drain:Drained
+                       ~revocation:(M.Removal.revocation removal))
+                  |> model
+                in
+                publish t next)
             in
             let%bind () = cleanup_owned t ~binding in
             status t ~binding)))
 ;;
+
+let reconcile t ~binding = reconcile_owned t ~binding ~expected_operation:None
 
 module Revocation = struct
   type outcome =
@@ -1242,63 +1306,123 @@ type removal =
   }
 [@@deriving sexp_of]
 
-let disable t ~sw:_ ~clock ~maximum_wait ~binding ~revocation ~reason =
+type operation_mode =
+  | Fresh
+  | Reconcile
+[@@deriving sexp_of]
+
+let disable_with_operation
+      t
+      ~sw:_
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~operation
+      ~mode
+      ~revocation
+      ~reason
+  =
   let open Result.Let_syntax in
-  let operation = t.new_operation () in
-  let%bind active =
+  let%bind admission =
     with_metadata t (fun registry ->
-      let%bind snapshot = M.find registry ~binding |> model in
-      let%bind next = M.disable registry ~binding ~operation ~reason |> model in
-      let%map () = publish t next in
-      M.Snapshot.active snapshot)
+      match M.operation registry ~binding ~operation with
+      | Ok receipt ->
+        (match M.Operation.result receipt with
+         | Committed ->
+           let%bind snapshot = M.find registry ~binding |> model in
+           let%bind removal = M.removal registry ~binding |> model in
+           if
+             Option.is_none (M.Snapshot.active snapshot)
+             && Option.is_some (M.Snapshot.disabled snapshot)
+             && Option.exists removal ~f:(fun removal ->
+               M.Id.equal (M.Removal.operation removal) operation)
+           then Ok `Replay
+           else Error Error.Binding_unavailable
+         | Pending | Rejected | Unavailable -> Error Error.Binding_unavailable)
+      | Error M.Error.Stale_operation ->
+        (match mode with
+         | Reconcile -> Error Error.Binding_unavailable
+         | Fresh ->
+           let%bind snapshot = M.find registry ~binding |> model in
+           let%bind next = M.disable registry ~binding ~operation ~reason |> model in
+           let%map () = publish t next in
+           `Fresh (M.Snapshot.active snapshot))
+      | Error error -> Error (Error.Model error))
   in
-  Eio.Switch.run (fun sw ->
-    let locks =
-      let%bind g =
-        acquire_until
-          t
-          ~sw
-          ~clock
-          ~started:(Eio.Time.Mono.now clock)
-          ~maximum_wait
-          ~binding
-          ~suffix:"G"
-          ~mode:Exclusive
-      in
-      Exn.protect
-        ~finally:(fun () -> Storage.Lock.release g)
-        ~f:(fun () ->
-          let%bind r =
-            acquire_until
-              t
-              ~sw
-              ~clock
-              ~started:(Eio.Time.Mono.now clock)
-              ~maximum_wait
-              ~binding
-              ~suffix:"R"
-              ~mode:Exclusive
-          in
-          Exn.protect
-            ~finally:(fun () -> Storage.Lock.release r)
-            ~f:(fun () ->
-              let%bind () =
-                update t (fun registry ->
-                  M.record_removal
-                    registry
-                    ~binding
-                    ~operation
-                    ~drain:Drained
-                    ~revocation:Not_requested)
-              in
-              let%bind () = revoke_removed t ~sw ~binding ~operation ~active revocation in
-              cleanup_owned t ~binding))
+  match admission with
+  | `Replay ->
+    (* Finish only the original tombstone's local drain/owned cleanup. The
+       exact binding is rechecked under G/R and M before mutation; no revocation
+       callback or fresh disable is invoked, and a later active login refuses. *)
+    let%map current =
+      match reconcile_owned t ~binding ~expected_operation:(Some operation) with
+      | Ok current -> Ok current
+      | Error error -> Error error
     in
-    match locks with
-    | Ok () | Error Timed_out | Error Busy ->
-      let%map current = status t ~binding in
-      { disabled = true; cleanup = Status.cleanup current }
-    | Error error -> Error error)
+    { disabled = true; cleanup = Status.cleanup current }
+  | `Fresh active ->
+    Eio.Switch.run (fun sw ->
+      let locks =
+        let%bind g =
+          acquire_until
+            t
+            ~sw
+            ~clock
+            ~started:(Eio.Time.Mono.now clock)
+            ~maximum_wait
+            ~binding
+            ~suffix:"G"
+            ~mode:Exclusive
+        in
+        Exn.protect
+          ~finally:(fun () -> Storage.Lock.release g)
+          ~f:(fun () ->
+            let%bind r =
+              acquire_until
+                t
+                ~sw
+                ~clock
+                ~started:(Eio.Time.Mono.now clock)
+                ~maximum_wait
+                ~binding
+                ~suffix:"R"
+                ~mode:Exclusive
+            in
+            Exn.protect
+              ~finally:(fun () -> Storage.Lock.release r)
+              ~f:(fun () ->
+                let%bind () =
+                  update t (fun registry ->
+                    M.record_removal
+                      registry
+                      ~binding
+                      ~operation
+                      ~drain:Drained
+                      ~revocation:Not_requested)
+                in
+                let%bind () =
+                  revoke_removed t ~sw ~binding ~operation ~active revocation
+                in
+                cleanup_owned t ~binding))
+      in
+      match locks with
+      | Ok () | Error Timed_out | Error Busy ->
+        let%map current = status t ~binding in
+        { disabled = true; cleanup = Status.cleanup current }
+      | Error error -> Error error)
+;;
+
+let disable t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason =
+  disable_with_operation
+    t
+    ~sw
+    ~clock
+    ~maximum_wait
+    ~binding
+    ~operation:(t.new_operation ())
+    ~mode:Fresh
+    ~revocation
+    ~reason
 ;;
 
 (* The registry borrows native resources, but joins every operation it starts.
@@ -1322,15 +1446,28 @@ let cancel_candidate t candidate =
 
 let commit_candidate_impl = commit_candidate
 
-let commit_candidate t candidate verified =
-  with_call t (fun () -> commit_candidate_impl t candidate verified)
+let commit_candidate ?authorize_commit t candidate verified =
+  with_call t (fun () -> commit_candidate_impl ?authorize_commit t candidate verified)
 ;;
 
 let commit_environment_candidate_impl = commit_environment_candidate
 
-let commit_environment_candidate t candidate ~identity ~name ~configuration_revision =
+let commit_environment_candidate
+      ?authorize_commit
+      t
+      candidate
+      ~identity
+      ~name
+      ~configuration_revision
+  =
   with_call t (fun () ->
-    commit_environment_candidate_impl t candidate ~identity ~name ~configuration_revision)
+    commit_environment_candidate_impl
+      ?authorize_commit
+      t
+      candidate
+      ~identity
+      ~name
+      ~configuration_revision)
 ;;
 
 let refresh_impl = refresh
@@ -1352,6 +1489,32 @@ let admit t ~sw ~clock ~maximum_wait ~binding ~expected_owner ~expected_epoch ~r
       ~expected_owner
       ~expected_epoch
       ~renewal)
+;;
+
+let disable_with_operation_impl = disable_with_operation
+
+let disable_with_operation
+      t
+      ~sw
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~operation
+      ~mode
+      ~revocation
+      ~reason
+  =
+  with_call t (fun () ->
+    disable_with_operation_impl
+      t
+      ~sw
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~operation
+      ~mode
+      ~revocation
+      ~reason)
 ;;
 
 let disable_impl = disable
@@ -1379,6 +1542,10 @@ let cancel_pending_candidate t ~binding ~operation =
         ~f:(fun () ->
           update t (fun registry ->
             M.cancel_pending_candidate registry ~binding ~operation))))
+;;
+
+let incarnation t =
+  with_call t (fun () -> with_metadata t (fun registry -> Ok (M.incarnation registry)))
 ;;
 
 module For_testing = struct

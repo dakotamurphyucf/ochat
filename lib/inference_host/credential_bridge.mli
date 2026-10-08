@@ -117,6 +117,10 @@ end
 
 type t
 
+(** [authorize] is a trusted, non-yielding host check. It is also invoked under
+    the lifecycle metadata lock at credential publication admission. Empty
+    mappings permit an approved unknown-account OAuth template to bootstrap;
+    inference remains unavailable until an exact verified mapping is published. *)
 val create
   :  ?oauth:OAuth.t
   -> Openai.Responses_driver.t
@@ -133,6 +137,15 @@ val create
     update the existing62 registry; secret refresh revisions never change epochs.
     No synchronization or reauthorization occurs inside credential lookup. *)
 val synchronize : t -> (unit, Error.t) Result.t
+
+(** Trusted host administration over SAME owned entries. Mapping publication
+    requires exact committed registry identity and unique profile/binding. All
+    validation/read errors leave entries unchanged; replacement invalidates old
+    contexts/plans before installing new configuration without yielding. Identical
+    declared mapping is a no-op apart from metadata epoch synchronization. *)
+val publish_mapping : t -> Mapping.t -> (unit, Error.t) Result.t
+
+val mappings : t -> Mapping.t list
 
 (** Pure driver-limit view sharing the exact credential authority and owned
     profile entries. Mutations remain visible to both; no new registry/store. *)
@@ -166,9 +179,15 @@ val status : t -> principal:string -> profile:string -> (Status.t, Error.t) Resu
 (** Trusted local secure input only. Authorize before invoking read. Candidate
     failure preserves the working binding; a concurrent disable wins late CAS.
     API-key identities only; OAuth refuses before invoking read. No provider
-    secret is accepted through an operator RPC or command argument. *)
+    secret is accepted through an operator RPC or command argument.
+    Optional trusted currentness guard is non-yielding and additive to the host
+    authorization/mapping check after input validation and again under the final
+    lifecycle metadata lock, after staging, before commit/publication admission.
+    Filesystem publication already admitted may finish after expiry. False cancels the original candidate and preserves the old
+    login. Omission retains explicit static-host composition behavior. *)
 val enroll
-  :  t
+  :  ?authorize_commit:(unit -> bool)
+  -> t
   -> principal:string
   -> profile:string
   -> operation:Credential_registry_model.Id.t
@@ -178,9 +197,11 @@ val enroll
 
 (** Explicit declared environment reference; no key bytes copied to metadata.
     API-key identities only. No environment/protected-source fallback and no
-    implicit initial provision. *)
+    implicit initial provision. Optional non-yielding authorize_commit has the
+    same additive pre-publication semantics as enroll. *)
 val configure_environment
-  :  t
+  :  ?authorize_commit:(unit -> bool)
+  -> t
   -> principal:string
   -> profile:string
   -> operation:Credential_registry_model.Id.t

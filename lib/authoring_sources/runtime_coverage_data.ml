@@ -202,7 +202,7 @@ let implementation_sources =
   [ ( "lib/agent_session/administration.ml"
     , "3fb84e5f623d5d722f8b8da4de3c89bf8a248a62468c2a68fa31b0490f2cd897" )
   ; ( "lib/agent_server/command_handler.ml"
-    , "335e577ace0ee8886fd477ac9c5c91dc134420f014b2107dd90e7938232d1aca" )
+    , "584086f9618d423647e177904d9b5e9e4a55e67f2424dc6b546dddab91231b68" )
   ; ( "lib/agent_server/runtime_owner.ml"
     , "397da960e3f1182a210676373156ab5d26ea5e2b69015602a98e0be3617afb16" )
   ; ( "lib/agent_session/managed_submission_tracking.ml"

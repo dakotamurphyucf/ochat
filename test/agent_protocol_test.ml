@@ -624,6 +624,14 @@ let%expect_test "permission codecs preserve legacy owners and reject ambiguous o
 
 let architecture_methods =
   [ "command.receipt"
+  ; "provider.setup"
+  ; "provider.status"
+  ; "provider.login.begin"
+  ; "provider.login.challenge"
+  ; "provider.login.cancel"
+  ; "provider.logout"
+  ; "provider.select"
+  ; "provider.configure_environment"
   ; "protocol.initialize"
   ; "protocol.ping"
   ; "server.info"
@@ -680,7 +688,7 @@ let%expect_test "every architecture method has request and result dispatch" =
           (List.equal String.equal expected (normalize Method_result.supported_methods)
            : bool)
       }];
-  [%expect {| ((method_count 42) (requests true) (results true)) |}]
+  [%expect {| ((method_count 50) (requests true) (results true)) |}]
 ;;
 
 let%expect_test "history deletion requires stable ID, revision and idempotency" =
@@ -982,4 +990,118 @@ let%expect_test "receipt nullable fields roundtrip without optional values" =
     assert (Jsonaf.exactly_equal encoded (R.to_json decoded)));
   print_endline "pending and sent-message null fields roundtrip";
   [%expect {| pending and sent-message null fields roundtrip |}]
+;;
+
+let%expect_test
+    "provider private challenge has one authorized wire path and redacted reflection"
+  =
+  let module DTO = Provider_operator in
+  let secret = "PRIVATE-OWNER-CODE" in
+  let challenge =
+    DTO.Private_challenge.device
+      ~verification_uri:(Uri.of_string "https://issuer.example.test/verify")
+      ~user_code:secret
+    |> ok_or_fail
+  in
+  let public = Public.Result.Private_provider_challenge challenge in
+  let encoded = Public.Result.to_json public in
+  let decoded =
+    Public.Result.of_json ~method_:"provider.login.challenge" encoded |> ok_or_fail
+  in
+  assert (Jsonaf.exactly_equal encoded (Public.Result.to_json decoded));
+  let internal = Method_result.Provider_login_challenge challenge in
+  assert (Result.is_error (Public.Result.Non_history.of_internal internal));
+  assert (
+    Result.is_error (Method_result.of_json ~method_:"provider.login.challenge" encoded));
+  assert (Exn.does_raise (fun () -> ignore (Method_result.to_json internal : Jsonaf.t)));
+  assert (
+    Exn.does_raise (fun () ->
+      ignore
+        (DTO.Private_challenge.t_of_sexp (Sexp.Atom secret) : DTO.Private_challenge.t)));
+  let reflected = Sexp.to_string_hum (Public.Result.sexp_of_t public) in
+  assert (not (String.is_substring reflected ~substring:secret));
+  assert (
+    not
+      (String.is_substring
+         (Sexp.to_string_hum (Method_result.sexp_of_t internal))
+         ~substring:secret));
+  List.iter
+    [ {|{"kind":"device","verification_uri":"file:///private","user_code":"secret"}|}
+    ; {|{"kind":"browser","authorization_uri":"https://user:secret@issuer.example.test/authorize"}|}
+    ; {|{"kind":"device","verification_uri":"https://issuer.example.test/verify","user_code":"x","authorization_uri":"https://issuer.example.test/authorize"}|}
+    ]
+    ~f:(fun json ->
+      let result =
+        DTO.Private_challenge.Authorized_transport.of_json (Jsonaf.of_string json)
+      in
+      assert (Result.is_error result));
+  print_endline
+    "authorized private wire roundtrips; generic codecs and reflection refuse disclosure";
+  [%expect
+    {| authorized private wire roundtrips; generic codecs and reflection refuse disclosure |}]
+;;
+
+let%expect_test
+    "provider login receipt and bounded nonsecret status preserve nullable fields"
+  =
+  let module DTO = Provider_operator in
+  let profile = DTO.Profile_id.of_string "operator-profile" |> ok_or_fail in
+  let revision = DTO.Revision.of_string "selection-1" |> ok_or_fail in
+  let server_id = Id.Server.of_string "srv_operator" |> ok_or_fail in
+  let flow : DTO.Flow_ref.t =
+    { server_id
+    ; profile
+    ; flow_id = DTO.Flow_id.of_string "flow-1" |> ok_or_fail
+    ; expires_at = Timestamp.of_string "2026-10-08T12:00:00Z" |> ok_or_fail
+    }
+  in
+  let receipt = Command_receipt.Committed (Provider_login flow) in
+  let encoded = Command_receipt.to_json receipt in
+  let decoded = Command_receipt.of_json encoded |> ok_or_fail in
+  assert (Jsonaf.exactly_equal encoded (Command_receipt.to_json decoded));
+  assert (not (String.is_substring (Jsonaf.to_string encoded) ~substring:"uri"));
+  let status : DTO.Status_result.t =
+    { server_id
+    ; setup_required = false
+    ; profiles =
+        [ { profile
+          ; account = None
+          ; availability = Missing
+          ; last_failure = None
+          ; auth_epoch = None
+          ; credential_revision = None
+          }
+        ]
+    ; flows = []
+    ; selection = Some { profile; revision }
+    }
+  in
+  let encoded = DTO.Status_result.to_json status in
+  let decoded = DTO.Status_result.of_json encoded |> ok_or_fail in
+  assert (Jsonaf.exactly_equal encoded (DTO.Status_result.to_json decoded));
+  let duplicate = { status with profiles = status.profiles @ status.profiles } in
+  assert (
+    Result.is_error (DTO.Status_result.of_json (DTO.Status_result.to_json duplicate)));
+  List.iter
+    [ ""; "path/to/profile"; "nul\000id"; String.make 257 'x' ]
+    ~f:(fun id ->
+      assert (Result.is_error (DTO.Profile_id.of_string id));
+      assert (
+        Exn.does_raise (fun () ->
+          ignore (DTO.Profile_id.t_of_sexp (Sexp.Atom id) : DTO.Profile_id.t))));
+  let key = Idempotency_key.of_string "login-original" |> ok_or_fail in
+  let command =
+    Command.Provider_login_begin { profile; mode = Device; idempotency_key = key }
+  in
+  let decoded =
+    Command.of_method_and_params
+      ~method_:(Command.method_name command)
+      ~params:(Command.params command)
+    |> ok_or_fail
+  in
+  assert (Jsonaf.exactly_equal (Command.params command) (Command.params decoded));
+  print_endline
+    "login receipts contain references only; status and validated identifiers roundtrip";
+  [%expect
+    {| login receipts contain references only; status and validated identifiers roundtrip |}]
 ;;

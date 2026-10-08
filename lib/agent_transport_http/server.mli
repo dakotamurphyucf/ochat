@@ -15,7 +15,7 @@ val run
   -> authenticate:
        (Agent_server.Authenticator.Request_identity.t
         -> string option
-        -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result)
+        -> (Operator_authorization.t, Agent_protocol.Error.t) result)
   -> max_body_bytes:int
   -> max_batch_size:int
   -> batch_concurrency:int

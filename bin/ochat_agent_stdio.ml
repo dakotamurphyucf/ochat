@@ -82,8 +82,10 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~author
     let%map embedded =
       Agent_server.Embedded.start
         ~daemon_options:
-          (Inference_composition.daemon_options
-             (Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"))
+          (Inference_composition.daemon_options_default
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview")
         ~sw
         ~env
         ~authoring_package_files

@@ -303,6 +303,14 @@ module Delete = struct
 end
 
 type t =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_status of Provider_operator.Status_result.t
+  | Provider_login_begin of Provider_operator.Flow_ref.t
+  | Provider_login_challenge of Provider_operator.Private_challenge.t
+  | Provider_login_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_select of Provider_operator.Selection_result.t
+  | Provider_configure_environment of Provider_operator.Configuration_result.t
   | Protocol_initialize of Initialize.Response.t
   | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
@@ -348,6 +356,14 @@ type t =
 [@@deriving sexp]
 
 let method_name = function
+  | Provider_setup _ -> "provider.setup"
+  | Provider_status _ -> "provider.status"
+  | Provider_login_begin _ -> "provider.login.begin"
+  | Provider_login_challenge _ -> "provider.login.challenge"
+  | Provider_login_cancel _ -> "provider.login.cancel"
+  | Provider_logout _ -> "provider.logout"
+  | Provider_select _ -> "provider.select"
+  | Provider_configure_environment _ -> "provider.configure_environment"
   | Protocol_initialize _ -> "protocol.initialize"
   | Command_receipt _ -> "command.receipt"
   | Protocol_ping _ -> "protocol.ping"
@@ -393,6 +409,16 @@ let method_name = function
 ;;
 
 let to_json = function
+  | Provider_setup value -> Provider_operator.Setup_result.to_json value
+  | Provider_status value -> Provider_operator.Status_result.to_json value
+  | Provider_login_begin value -> Provider_operator.Flow_ref.to_json value
+  | Provider_login_challenge _ ->
+    invalid_arg "private provider challenge requires authorized transport projection"
+  | Provider_login_cancel value -> Provider_operator.Flow_result.to_json value
+  | Provider_logout value -> Provider_operator.Logout_result.to_json value
+  | Provider_select value -> Provider_operator.Selection_result.to_json value
+  | Provider_configure_environment value ->
+    Provider_operator.Configuration_result.to_json value
   | Protocol_initialize value -> Initialize.Response.to_json value
   | Command_receipt value -> Command_receipt.to_json value
   | Protocol_ping value -> Ping.Response.to_json value
@@ -453,7 +479,27 @@ let renew_owner_of_json json =
 let map decode wrap json = Result.map (decode json) ~f:wrap
 
 let decoders =
-  [ ( "protocol.initialize"
+  [ ( "provider.setup"
+    , map Provider_operator.Setup_result.of_json (fun x -> Provider_setup x) )
+  ; ( "provider.status"
+    , map Provider_operator.Status_result.of_json (fun x -> Provider_status x) )
+  ; ( "provider.login.begin"
+    , map Provider_operator.Flow_ref.of_json (fun x -> Provider_login_begin x) )
+  ; ( "provider.login.challenge"
+    , fun _ ->
+        Error
+          (Protocol_error.invalid_request
+             "private provider challenge requires authorized transport decoder") )
+  ; ( "provider.login.cancel"
+    , map Provider_operator.Flow_result.of_json (fun x -> Provider_login_cancel x) )
+  ; ( "provider.logout"
+    , map Provider_operator.Logout_result.of_json (fun x -> Provider_logout x) )
+  ; ( "provider.select"
+    , map Provider_operator.Selection_result.of_json (fun x -> Provider_select x) )
+  ; ( "provider.configure_environment"
+    , map Provider_operator.Configuration_result.of_json (fun x ->
+        Provider_configure_environment x) )
+  ; ( "protocol.initialize"
     , map Initialize.Response.of_json (fun x -> Protocol_initialize x) )
   ; "command.receipt", map Command_receipt.of_json (fun x -> Command_receipt x)
   ; "protocol.ping", map Ping.Response.of_json (fun x -> Protocol_ping x)

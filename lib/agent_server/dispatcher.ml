@@ -14,13 +14,13 @@ let create
   { handler; admit; inference_response_policy }
 ;;
 
-let dispatch_command t ~context command =
+let dispatch_command t ?actor ~context command =
   let open Result.Let_syntax in
   let%bind () = t.admit command in
   let%bind inference_budget =
     Inference_query_budget.for_embedded ~max_result_bytes:(16 * 1024 * 1024)
   in
-  Command_handler.handle t.handler ~context ~inference_budget command
+  Command_handler.handle t.handler ?actor ~context ~inference_budget command
 ;;
 
 let decode method_ params = Agent_protocol.Command.of_method_and_params ~method_ ~params
@@ -30,7 +30,7 @@ let inference_method method_ =
   || String.equal method_ "session.inference_observations"
 ;;
 
-let request t context (request : Agent_protocol.Envelope.request) =
+let request t ?actor context (request : Agent_protocol.Envelope.request) =
   let query = inference_method request.method_ in
   let outcome =
     let open Result.Let_syntax in
@@ -41,8 +41,8 @@ let request t context (request : Agent_protocol.Envelope.request) =
       let%bind inference_budget =
         Inference_query_budget.for_request t.inference_response_policy request.id
       in
-      Command_handler.handle t.handler ~context ~inference_budget command)
-    else dispatch_command t ~context command
+      Command_handler.handle t.handler ?actor ~context ~inference_budget command)
+    else dispatch_command t ?actor ~context command
   in
   let response =
     match outcome with
@@ -65,13 +65,13 @@ let notification_safe = function
   | _ -> false
 ;;
 
-let notification t context (notification : Agent_protocol.Envelope.notification) =
+let notification t ?actor context (notification : Agent_protocol.Envelope.notification) =
   let open Result.Let_syntax in
   let%bind command =
     decode notification.Agent_protocol.Envelope.method_ notification.params
   in
   if notification_safe command
-  then Result.map (dispatch_command t ~context command) ~f:(fun _ -> None)
+  then Result.map (dispatch_command t ?actor ~context command) ~f:(fun _ -> None)
   else
     Error
       (Agent_protocol.Error.create
@@ -81,9 +81,9 @@ let notification t context (notification : Agent_protocol.Envelope.notification)
          ())
 ;;
 
-let dispatch_envelope t ~context = function
-  | Agent_protocol.Envelope.Request value -> request t context value
-  | Notification value -> notification t context value
+let dispatch_envelope t ?actor ~context = function
+  | Agent_protocol.Envelope.Request value -> request t ?actor context value
+  | Notification value -> notification t ?actor context value
   | Response _ ->
     Error
       (Agent_protocol.Error.create

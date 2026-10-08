@@ -190,8 +190,8 @@ let request_without_history t command =
     match response.result with
     | Agent_protocol.Public.Result.Non_history value ->
       Ok (Agent_protocol.Public.Result.Non_history.value value)
-    | Session_get _ | Session_create _ | Session_attach _ ->
-      Error (Agent_protocol.Error.invalid_request "expected non-history response"))
+    | Session_get _ | Session_create _ | Session_attach _ | Private_provider_challenge _
+      -> Error (Agent_protocol.Error.invalid_request "expected non-history response"))
 ;;
 
 let initialize_request () =

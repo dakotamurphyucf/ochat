@@ -846,7 +846,8 @@ let main_command =
       "A command-line apps for using OpenAI Models for running chat completion on chatmd \
        files. Also provides Ocaml specfic functionality for indexing files into a vector \
        database, and natural language search of that ocaml code."
-    [ "chat-completion", chat_completion_command
+    [ "provider", Inference_composition.Provider_commands.command
+    ; "chat-completion", chat_completion_command
     ; "index", index_command
     ; "query", query_command
     ; "tokenize", tokenize_command

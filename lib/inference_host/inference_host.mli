@@ -24,6 +24,21 @@ module Backend : sig
     -> with_response_limit:
          (max_body_bytes:int -> (t, Inference_runtime.Preparation_error.t) Result.t)
     -> t
+
+  (** Trusted composition delegation; these preserve the owned backend ports. *)
+  val capture
+    :  t
+    -> current:Inference.Request.Target.t option
+    -> model:string
+    -> settings:Openai.Responses_driver.Setting.t list
+    -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+
+  val resolve : t -> Inference_runtime.resolver
+
+  val with_response_limit
+    :  t
+    -> max_body_bytes:int
+    -> (t, Inference_runtime.Preparation_error.t) Result.t
 end
 
 type t

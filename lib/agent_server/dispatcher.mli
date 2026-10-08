@@ -12,6 +12,7 @@ val create
 
 val dispatch_command
   :  t
+  -> ?actor:Operator_authorization.t
   -> context:Connection_context.t
   -> Agent_protocol.Command.t
   -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
@@ -22,6 +23,7 @@ val dispatch_command
     produce no response; all other input is rejected. *)
 val dispatch_envelope
   :  t
+  -> ?actor:Operator_authorization.t
   -> context:Connection_context.t
   -> Agent_protocol.Envelope.t
   -> (Agent_protocol.Envelope.t option, Agent_protocol.Error.t) result

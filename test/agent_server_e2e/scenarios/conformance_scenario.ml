@@ -2072,8 +2072,86 @@ let test_history_deletion env environment =
            require_equal_history_deletion baseline (observe stdio_http "stdio-http"))))
 ;;
 
+let provider_absent_observation client ~key_prefix =
+  let module P = Agent_protocol in
+  let module DTO = P.Provider_operator in
+  let initialized = initialize client in
+  let info =
+    match request client Server_info with
+    | Server_info info -> info
+    | _ -> fail "provider server info variant"
+  in
+  if
+    List.mem initialized.enabled_features "provider.operator" ~equal:String.equal
+    || List.mem info.features "provider.operator" ~equal:String.equal
+  then fail "absent provider service advertised capability";
+  let profile = DTO.Profile_id.of_string "absent-profile" |> protocol_ok in
+  let revision = DTO.Revision.of_string "selection-1" |> protocol_ok in
+  let flow : DTO.Flow_ref.t =
+    { server_id = initialized.server_id
+    ; profile
+    ; flow_id = DTO.Flow_id.of_string "absent-flow" |> protocol_ok
+    ; expires_at = P.Timestamp.of_string "2099-01-01T00:00:00Z" |> protocol_ok
+    }
+  in
+  let key name = idempotency_key (key_prefix ^ "-provider-" ^ name) in
+  let commands =
+    [ P.Command.Provider_setup { idempotency_key = key "setup" }
+    ; Provider_status { profile = None }
+    ; Provider_login_begin { profile; mode = Browser; idempotency_key = key "browser" }
+    ; Provider_login_begin { profile; mode = Device; idempotency_key = key "device" }
+    ; Provider_login_challenge { flow }
+    ; Provider_login_cancel { flow; idempotency_key = key "cancel" }
+    ; Provider_logout { profile; idempotency_key = key "logout" }
+    ; Provider_select
+        { profile; expected_revision = revision; idempotency_key = key "select" }
+    ; Provider_configure_environment
+        { profile
+        ; source = DTO.Source_id.of_string "approved-source" |> protocol_ok
+        ; idempotency_key = key "environment"
+        }
+    ]
+  in
+  List.map commands ~f:(fun command ->
+    let error = request_error client command in
+    if (not (P.Error.equal_code error.code Method_not_found)) || error.retryable
+    then fail "absent provider service did not return nonretryable unsupported";
+    let fields = P.Json_codec.fields error.data |> protocol_ok in
+    let provider_error =
+      P.Json_codec.required_as fields "provider_error" DTO.Error.of_json |> protocol_ok
+    in
+    if not (DTO.Error.equal provider_error Unsupported)
+    then fail "absent provider service returned another failure";
+    P.Command.method_name command, P.Error.code_to_string error.code)
+;;
+
+let test_provider_absent env environment =
+  let fixture = fixture env environment "conformance-provider-absent" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = provider_absent_observation unix ~key_prefix:"unix" in
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = provider_absent_observation client ~key_prefix in
+               if
+                 not
+                   (List.equal
+                      (fun (a, b) (c, d) -> String.equal a c && String.equal b d)
+                      baseline
+                      actual)
+               then fail "cross-transport absent provider semantics differ"))))
+;;
+
 let cases =
-  [ "conformance.read-methods", test_read_methods
+  [ "conformance.provider-absent", test_provider_absent
+  ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
   ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
@@ -2087,7 +2165,15 @@ let cases =
 ;;
 
 let method_coverage =
-  [ "command.receipt", "conformance.session-lifecycle"
+  [ "provider.setup", "conformance.provider-absent"
+  ; "provider.status", "conformance.provider-absent"
+  ; "provider.login.begin", "conformance.provider-absent"
+  ; "provider.login.challenge", "conformance.provider-absent"
+  ; "provider.login.cancel", "conformance.provider-absent"
+  ; "provider.logout", "conformance.provider-absent"
+  ; "provider.select", "conformance.provider-absent"
+  ; "provider.configure_environment", "conformance.provider-absent"
+  ; "command.receipt", "conformance.session-lifecycle"
   ; "protocol.initialize", "conformance.read-methods"
   ; "protocol.ping", "conformance.read-methods"
   ; "server.info", "conformance.read-methods"

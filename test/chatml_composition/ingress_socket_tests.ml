@@ -126,7 +126,9 @@ let%expect_test
            ~dispatcher:(Agent_server.Daemon.dispatcher daemon)
            ~close_connection:(Agent_server.Daemon.close_connection daemon)
            ~authenticate:(fun flow _ ->
-             Socket.Peer_credentials.authenticate_same_user ~scopes:!granted_scopes flow)
+             Socket.Peer_credentials.authenticate_same_user_actor
+               ~scopes:!granted_scopes
+               flow)
            ~max_line_length:(2 * 1024 * 1024)
            ~outgoing_capacity:128
            ~max_attachments:16

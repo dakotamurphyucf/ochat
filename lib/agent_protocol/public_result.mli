@@ -44,6 +44,7 @@ module Create : sig
 end
 
 type t =
+  | Private_provider_challenge of Provider_operator.Private_challenge.t
   | Session_get of Public_snapshot.t
   | Session_attach of Attach.t
   | Session_create of Create.t

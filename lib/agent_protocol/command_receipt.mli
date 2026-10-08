@@ -19,6 +19,12 @@ end
 (** Narrow result references, never a replay of a full original result.
     Create/attach recovery must use a fresh authorized attachment. *)
 type committed =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_login of Provider_operator.Flow_ref.t
+  | Provider_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_selection of Provider_operator.Selection_result.t
+  | Provider_configuration of Provider_operator.Configuration_result.t
   | Created_session of Id.Session.t
   | Attached_session of Id.Session.t
   | Session_mutation of

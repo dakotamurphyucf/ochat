@@ -1,3 +1,4 @@
+module Provider_commands : module type of Provider_commands
 open! Core
 
 (** Pure conversion of the existing CLI API_URL convention to a Responses
@@ -118,3 +119,11 @@ val bounded_execution
     durable inference ledger; the ledger integration replaces their observers.
     Other daemon authority, quotas and transport limits retain their defaults. *)
 val daemon_options : Inference_host.t -> Agent_server.Daemon.options
+
+(** Installed provider operator remains reachable before explicit host setup.
+    Factory binds the same dynamic inference backend to actual daemon identity. *)
+val daemon_options_default
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> default_model:string
+  -> Agent_server.Daemon.options

@@ -111,7 +111,7 @@
 (executable
  (name agent_server_e2e)
  (modules :standard)
- (libraries
+ (libraries ochat.operator_authorization
   agent_server_test_support
   inference_composition
   base64

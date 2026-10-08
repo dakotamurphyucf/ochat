@@ -197,6 +197,32 @@ let add t configuration ~owner ~generation =
     Ok ())
 ;;
 
+let replace t configuration ~owner ~generation =
+  if
+    (not (valid_label owner))
+    || Int64.(generation < 0L)
+    || ((not (Hashtbl.mem t.entries (Profile.id configuration)))
+        && Hashtbl.length t.entries >= 128)
+  then Error Error.Invalid_profile
+  else (
+    let replacement =
+      { configuration
+      ; owner
+      ; generation
+      ; disabled = false
+      ; revision_epoch = 0
+      ; removed = false
+      }
+    in
+    Option.iter
+      (Hashtbl.find t.entries (Profile.id configuration))
+      ~f:(fun old ->
+        old.removed <- true;
+        old.disabled <- true);
+    Hashtbl.set t.entries ~key:(Profile.id configuration) ~data:replacement;
+    Ok ())
+;;
+
 let remove t ~profile =
   Result.map (find t profile) ~f:(fun entry ->
     entry.removed <- true;

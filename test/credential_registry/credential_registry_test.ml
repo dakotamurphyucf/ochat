@@ -942,3 +942,92 @@ let%expect_test
   [%expect
     {| closed backend leaves missing revision pending; reopening confirms absence in independent secret root |}]
 ;;
+
+let%expect_test "final candidate admission rejects authority lost during durable staging" =
+  with_registry (fun env sw _ directory secrets registry new_operation ->
+    let original = id "guard_working_login" in
+    install registry original;
+    let before =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    let attempted = id "guard_replacement" in
+    let candidate =
+      R.begin_candidate
+        registry
+        ~binding
+        ~operation:attempted
+        ~expectation:(M.Expectation.exact identity)
+      |> lifecycle
+    in
+    let authorized = ref true in
+    (* This hook runs after the staging metadata publication. Admission has to
+       observe revocation after that yielding work, not only before commit entry. *)
+    R.For_testing.set_after_publication_hook
+      registry
+      (Some (fun () -> authorized := false));
+    (match
+       R.commit_candidate
+         ~authorize_commit:(fun () -> !authorized)
+         registry
+         candidate
+         verified
+     with
+     | Error Authorization_denied -> ()
+     | _ -> failwith "expired authority published a staged candidate");
+    R.For_testing.set_after_publication_hook registry None;
+    let after =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    assert (Int64.equal (R.Host_snapshot.epoch before) (R.Host_snapshot.epoch after));
+    (match R.Host_snapshot.source after with
+     | Some (M.Active.Protected_revision revision) ->
+       assert (M.Id.equal revision original)
+     | _ -> failwith "working credential changed after denied publication");
+    (match R.reconcile_operation registry ~binding ~operation:attempted |> lifecycle with
+     | M.Operation.Rejected -> ()
+     | _ -> failwith "denied operation was not durably rejected");
+    let cleaned = R.reconcile registry ~binding |> lifecycle in
+    assert (R.Status.equal_secret_cleanup (R.Status.cleanup cleaned).secrets Clean);
+    R.close registry;
+    let reopened =
+      R.open_existing
+        ~sw
+        ~wall_clock:(Eio.Stdenv.clock env)
+        ~new_operation
+        ~directory
+        ~secrets
+        ~environment:None
+        ~host
+      |> lifecycle
+    in
+    let retained =
+      R.synchronize reopened |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    assert (Int64.equal (R.Host_snapshot.epoch before) (R.Host_snapshot.epoch retained));
+    install reopened (id "guard_later_login");
+    let exceptional =
+      R.begin_candidate
+        reopened
+        ~binding
+        ~operation:(id "guard_exception")
+        ~expectation:(M.Expectation.exact identity)
+      |> lifecycle
+    in
+    (try
+       ignore
+         (R.commit_candidate
+            ~authorize_commit:(fun () -> raise Exit)
+            reopened
+            exceptional
+            verified
+          : (unit, R.Error.t) result);
+       failwith "unexpected guard exception disappeared"
+     with
+     | Exit -> ());
+    install reopened (id "guard_after_exception");
+    print_endline
+      "late denial preserves epoch and working key across restart; staged cleanup and \
+       exceptional guard release original candidate");
+  [%expect
+    {| late denial preserves epoch and working key across restart; staged cleanup and exceptional guard release original candidate |}]
+;;

@@ -220,7 +220,7 @@ let%expect_test
           Int.incr close_count;
           Agent_server.Embedded.close_connection embedded context)
         ~authenticate:(fun flow _ ->
-          Agent_transport_socket.Peer_credentials.authenticate_same_user
+          Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
             ~scopes:all_scopes
             flow)
         ~max_line_length:4_096
@@ -303,7 +303,7 @@ let%expect_test "typed client close wakes its blocked socket reader" =
            ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
            ~close_connection:(Agent_server.Embedded.close_connection embedded)
            ~authenticate:(fun flow _ ->
-             Agent_transport_socket.Peer_credentials.authenticate_same_user
+             Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
                ~scopes:all_scopes
                flow)
            ~max_line_length:4_096

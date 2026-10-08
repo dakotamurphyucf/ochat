@@ -23,6 +23,10 @@ module Backend = struct
   let create ~capture ~resolve ~with_response_limit =
     { capture; resolve; with_response_limit }
   ;;
+
+  let capture t = t.capture
+  let resolve t = t.resolve
+  let with_response_limit t = t.with_response_limit
 end
 
 type t =

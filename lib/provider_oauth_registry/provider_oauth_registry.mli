@@ -50,10 +50,12 @@ module Acquisition : sig
     -> (t * Provider_oauth.Challenge.t, Error.t) result
 
   (** Single completion: joins66 result, constructs exact validated163 identity,
-      grant and protected material, then checks [authorize_commit] immediately before
-      committing the original candidate. This trusted callback must not yield and
-      must read current operator ownership/scopes; false returns [Denied] without
-      activation, leaving the original candidate cancellable by [close]. Cancellation
+      grant and protected material, then checks [authorize_commit] and forwards it
+      to final lifecycle metadata admission after secret staging. This trusted
+      callback must not yield and must read current operator ownership/scopes.
+      False returns [Denied] without activation and retires the original candidate;
+      [close] remains safe. Filesystem publication already admitted may finish
+      after authorization expiry. Cancellation
       preserves original exception/backtrace; protected cleanup never resubmits. *)
   val complete : t -> authorize_commit:(unit -> bool) -> (unit, Error.t) result
 

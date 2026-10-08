@@ -11,6 +11,7 @@
   idempotency_key
   session_ref
   command_receipt
+  provider_operator
   initialize
   ping
   health
@@ -61,6 +62,6 @@
   stream_error
   inference_query)
  (private_modules protocol_error extension_codec projection_codec)
- (libraries ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript)
+ (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript)
  (preprocess
   (pps ppx_jane)))

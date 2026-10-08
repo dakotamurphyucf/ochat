@@ -53,7 +53,10 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "credential_registry_model/" ], "../lib/credential_registry_model.doc.md"
+    [ [ "operator_authorization/" ], "../lib/operator_authorization.doc.md"
+    ; ( [ "provider_operator/"; "provider_runtime/"; "provider_runtime_host/" ]
+      , "../lib/provider_operator.doc.md" )
+    ; [ "credential_registry_model/" ], "../lib/credential_registry_model.doc.md"
     ; [ "credential_registry/" ], "../lib/credential_registry.doc.md"
     ; ( [ "provider_oauth/"; "provider_oauth_protocol/"; "provider_oauth_registry/" ]
       , "../lib/provider_oauth.doc.md" )
@@ -184,6 +187,10 @@ let module_rows env root =
          ; "provider_oauth/"
          ; "provider_oauth_protocol/"
          ; "provider_oauth_registry/"
+         ; "operator_authorization/"
+         ; "provider_operator/"
+         ; "provider_runtime/"
+         ; "provider_runtime_host/"
          ]
          ~f:(fun substring -> String.is_substring file ~substring))
   |> List.map ~f:(fun file ->
@@ -285,7 +292,11 @@ let cli_flags source =
 ;;
 
 let cli_inventory env root =
-  [ "bin/chat_tui.ml"; "bin/ochat_agent_server.ml"; "bin/ochat_agent_stdio.ml" ]
+  [ "bin/chat_tui.ml"
+  ; "bin/ochat_agent_server.ml"
+  ; "bin/ochat_agent_stdio.ml"
+  ; "bin/provider_commands.ml"
+  ]
   |> List.map ~f:(fun file ->
     let flags = cli_flags (load env root file) in
     sprintf

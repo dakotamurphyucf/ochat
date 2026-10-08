@@ -1,3 +1,4 @@
+module Provider_commands = Provider_commands
 open! Core
 module D = Openai.Responses_driver
 
@@ -7,16 +8,7 @@ let require result =
   |> Result.ok_or_failwith
 ;;
 
-let responses_endpoint ~api_url =
-  let base =
-    Option.value api_url ~default:"https://api.openai.com"
-    |> String.chop_suffix_if_exists ~suffix:"/"
-  in
-  let base =
-    if Option.is_some (Uri.scheme (Uri.of_string base)) then base else "https://" ^ base
-  in
-  base ^ "/v1/responses"
-;;
+let responses_endpoint = Provider_defaults.responses_endpoint
 
 module M = Credential_registry_model
 module B = Inference_host.Credential_bridge
@@ -36,34 +28,7 @@ end
      adapter. This is neither a model catalog nor a live support probe: a model
      rejecting a permitted field still returns a typed provider failure.
      Operator-owned profiles may narrow the baseline or refine named models. *)
-let capabilities =
-  D.Capability.create
-    ~baseline:
-      ([ D.Capability.Text_input
-       ; Image_input
-       ; Document_input
-       ; Function_tools
-       ; Custom_tools
-       ; Opaque_replay
-       ]
-       @ List.map
-           [ "instructions"
-           ; "max_output_tokens"
-           ; "parallel_tool_calls"
-           ; "temperature"
-           ; "top_p"
-           ; "reasoning"
-           ; "text"
-           ; "tool_choice"
-           ; "prompt_cache_key"
-           ; "prompt_cache_retention"
-           ; "prompt_cache_options"
-           ]
-           ~f:(fun name -> D.Capability.Setting name)
-       |> List.map ~f:(fun feature -> feature, D.Capability.Supported))
-    ~models:[]
-  |> Or_error.ok_exn
-;;
+let capabilities = Provider_defaults.capabilities
 
 module Configuration = struct
   type t =
@@ -273,21 +238,37 @@ let try_create configuration ~sw ~env ~default_model =
   try_open configuration ~sw ~env ~default_model |> Result.map ~f:Opened.host
 ;;
 
-let try_create_default ~sw ~env ~default_model =
+let platform ~sw ~env ~default_model =
   let open Result.Let_syntax in
   let%bind home =
     Sys.getenv "HOME" |> Result.of_option ~error:Error.Invalid_configuration
   in
-  let%bind configuration =
-    Configuration.of_environment
-      ~env
-      ~home
-      ~api_url:(Sys.getenv "API_URL")
-      ~key_name:"OPENAI_API_KEY"
-      ~lookup:Sys.getenv
-      ~mode:S.Mode.Existing
+  Provider_platform.create
+    ~sw
+    ~env
+    ~home
+    ~api_url:(Sys.getenv "API_URL")
+    ~lookup:Sys.getenv
+    ~default_model
+    ~namespace:(Provider_platform.new_namespace env)
+    ~callback_port:1455
+    ()
+  |> Result.map_error ~f:(fun _ -> Error.Invalid_configuration)
+;;
+
+let try_create_default ~sw ~env ~default_model =
+  let open Result.Let_syntax in
+  let%bind platform = platform ~sw ~env ~default_model in
+  let%map _ =
+    Provider_platform.open_operator
+      platform
+      ~server_id:
+        (Agent_protocol.Id.Server.of_string "srv_local_provider_operator"
+         |> Result.map_error ~f:(fun _ -> "Invalid trusted server identity")
+         |> Result.ok_or_failwith)
+    |> Result.map_error ~f:(fun _ -> Error.Invalid_configuration)
   in
-  try_create configuration ~sw ~env ~default_model
+  Provider_platform.host platform
 ;;
 
 let create ~sw ~env ~default_model =
@@ -358,4 +339,15 @@ let daemon_options host =
     }
   in
   { Agent_server.Daemon.default_options with inference_policy }
+;;
+
+let daemon_options_default ~sw ~env ~default_model =
+  let platform =
+    platform ~sw ~env ~default_model
+    |> Result.map_error ~f:(fun _ -> "Provider host configuration is unavailable")
+    |> Result.ok_or_failwith
+  in
+  { (daemon_options (Provider_platform.host platform)) with
+    provider_operator_factory = Some (Provider_platform.factory platform)
+  }
 ;;

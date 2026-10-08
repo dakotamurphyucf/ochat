@@ -8,6 +8,7 @@ module Error : sig
     | Secret_store of Provider_secret_store.Error.code
     | Missing_secret
     | Binding_unavailable
+    | Authorization_denied
     | Busy
     | Timed_out
     | Closed
@@ -230,14 +231,28 @@ val cancel_pending_candidate
   -> operation:Credential_registry_model.Id.t
   -> (unit, Error.t) result
 
-val commit_candidate : t -> Candidate.t -> Verified.t -> (unit, Error.t) result
+(** Optional host-only, non-yielding authorization check under the final metadata
+    lease after secret staging and metadata reload, immediately before admitting
+    the active-pointer transition. Defaults to an already-authorized trusted host
+    call. A denied candidate is discarded by original CAS, preserving the old
+    login and recording staged cleanup. Cleanup failure retains its typed error.
+    Unexpected guard exceptions propagate. Publication admitted by this check may
+    finish after wall-clock expiry; the guard must not perform I/O. *)
+val commit_candidate
+  :  ?authorize_commit:(unit -> bool)
+  -> t
+  -> Candidate.t
+  -> Verified.t
+  -> (unit, Error.t) result
 
 (** Explicit63 configuration path, exact API-key Expectation only. Publishes
     reference metadata/epoch, no token copied into metadata or secret backend.
     Environment port must be present; declared variable syntax is validated.
-    Configuration revision supplied by trusted host, never a token hash. *)
+    Configuration revision supplied by trusted host, never a token hash.
+    Authorization admission has the same contract as [commit_candidate]. *)
 val commit_environment_candidate
-  :  t
+  :  ?authorize_commit:(unit -> bool)
+  -> t
   -> Candidate.t
   -> identity:Credential_registry_model.Identity.t
   -> name:string
@@ -330,6 +345,29 @@ val disable
   -> reason:Credential_registry_model.Snapshot.disabled_reason
   -> (removal, Error.t) result
 
+(** Host durable-intent admission. Fresh is allowed only for a newly persisted
+    original command intent; Reconcile never creates a missing operation. A proven
+    committed original tombstone may finish its local drain/owned cleanup on retry
+    after an exact recheck under the dispatch/refresh locks: no epoch increment,
+    revocation retry or mutation of a later reauthorized binding. Superseded or
+    unavailable proof returns Binding_unavailable. *)
+type operation_mode =
+  | Fresh
+  | Reconcile
+[@@deriving sexp_of]
+
+val disable_with_operation
+  :  t
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.Mono.t
+  -> maximum_wait:Time_ns.Span.t
+  -> binding:Credential_registry_model.Id.t
+  -> operation:Credential_registry_model.Id.t
+  -> mode:operation_mode
+  -> revocation:Revocation.t option
+  -> reason:Credential_registry_model.Snapshot.disabled_reason
+  -> (removal, Error.t) result
+
 (** Reconcile pointer acknowledgement and operation-owned inactive cleanup; no
     external rotating-token retry. Uncertainty remains until qualified66 policy
     or explicit reauthorization. *)
@@ -379,6 +417,10 @@ end
     mismatch returns typed stale identity; caller synchronizes and resolves again.
     No implicit mutable callbacks, watchers or duplicate credential authority. *)
 val synchronize : t -> (Host_snapshot.t, Error.t) result
+
+(** Validated metadata-only registry incarnation, including an empty authority.
+    Used by trusted operator owner records; does not read credentials. *)
+val incarnation : t -> (Credential_registry_model.Id.t, Error.t) result
 
 (** Close rejects new calls, joins owned work. Active attempt locks release with
     caller switches; close does not silently undo an admitted request. *)

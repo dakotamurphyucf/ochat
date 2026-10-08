@@ -29,6 +29,12 @@ module Request = struct
 end
 
 type committed =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_login of Provider_operator.Flow_ref.t
+  | Provider_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_selection of Provider_operator.Selection_result.t
+  | Provider_configuration of Provider_operator.Configuration_result.t
   | Created_session of Id.Session.t
   | Attached_session of Id.Session.t
   | Session_mutation of
@@ -68,6 +74,36 @@ let optional_nullable fields name decode =
 let mutation_fields mutation = [ "mutation", Mutation_result.to_json mutation ]
 
 let committed_to_json = function
+  | Provider_setup value ->
+    `Object
+      [ "kind", `String "provider_setup"
+      ; "value", Provider_operator.Setup_result.to_json value
+      ]
+  | Provider_login value ->
+    `Object
+      [ "kind", `String "provider_login"
+      ; "value", Provider_operator.Flow_ref.to_json value
+      ]
+  | Provider_cancel value ->
+    `Object
+      [ "kind", `String "provider_cancel"
+      ; "value", Provider_operator.Flow_result.to_json value
+      ]
+  | Provider_logout value ->
+    `Object
+      [ "kind", `String "provider_logout"
+      ; "value", Provider_operator.Logout_result.to_json value
+      ]
+  | Provider_selection value ->
+    `Object
+      [ "kind", `String "provider_selection"
+      ; "value", Provider_operator.Selection_result.to_json value
+      ]
+  | Provider_configuration value ->
+    `Object
+      [ "kind", `String "provider_configuration"
+      ; "value", Provider_operator.Configuration_result.to_json value
+      ]
   | Created_session id ->
     `Object [ "kind", `String "created_session"; "session_id", Id.Session.to_json id ]
   | Attached_session id ->
@@ -118,6 +154,24 @@ let committed_of_json json =
   let session () = Json_codec.required_as fields "session_id" Id.Session.of_json in
   let mutation () = Json_codec.required_as fields "mutation" Mutation_result.of_json in
   match kind with
+  | "provider_setup" ->
+    Json_codec.required_as fields "value" Provider_operator.Setup_result.of_json
+    |> Result.map ~f:(fun value -> Provider_setup value)
+  | "provider_login" ->
+    Json_codec.required_as fields "value" Provider_operator.Flow_ref.of_json
+    |> Result.map ~f:(fun value -> Provider_login value)
+  | "provider_cancel" ->
+    Json_codec.required_as fields "value" Provider_operator.Flow_result.of_json
+    |> Result.map ~f:(fun value -> Provider_cancel value)
+  | "provider_logout" ->
+    Json_codec.required_as fields "value" Provider_operator.Logout_result.of_json
+    |> Result.map ~f:(fun value -> Provider_logout value)
+  | "provider_selection" ->
+    Json_codec.required_as fields "value" Provider_operator.Selection_result.of_json
+    |> Result.map ~f:(fun value -> Provider_selection value)
+  | "provider_configuration" ->
+    Json_codec.required_as fields "value" Provider_operator.Configuration_result.of_json
+    |> Result.map ~f:(fun value -> Provider_configuration value)
   | "created_session" -> session () |> Result.map ~f:(fun id -> Created_session id)
   | "attached_session" ->
     let%bind recovery = Json_codec.required_as fields "recovery" Json_codec.string in

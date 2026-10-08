@@ -40,9 +40,10 @@
   session_factory
   embedded
   daemon
+  provider_operator_port
   command_handler
   dispatcher)
- (libraries
+ (libraries ochat.operator_authorization
  core
   base64
   cstruct

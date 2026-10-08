@@ -26,6 +26,12 @@ let has_command_receipt = function
   | Grant_revoke _
   | Job_cancel _
   | Schedule_create _
+  | Provider_setup _
+  | Provider_login_begin _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _
   | Schedule_cancel _ -> true
   | Protocol_initialize _
   | Command_receipt _
@@ -49,6 +55,8 @@ let has_command_receipt = function
   | Job_get _
   | Schedule_list _
   | Schedule_get _
+  | Provider_status _
+  | Provider_login_challenge _
   | Ingress_submit _ -> false
 ;;
 
@@ -379,6 +387,10 @@ let request_without_history t command =
   match request t command with
   | Ok (Agent_protocol.Public.Result.Non_history value) ->
     Ok (Agent_protocol.Public.Result.Non_history.value value)
+  | Ok (Private_provider_challenge _) ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "private provider challenge requires an explicit private consumer")
   | Ok (Session_get _ | Session_attach _ | Session_create _) ->
     Error (Agent_protocol.Error.invalid_request "unexpected history-bearing result")
   | Error _ as failure -> failure

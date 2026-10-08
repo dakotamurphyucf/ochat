@@ -2,7 +2,7 @@
  (name agent_transport_stdio)
  (public_name ochat.agent_transport_stdio)
  (modules server gateway)
- (libraries
+ (libraries ochat.operator_authorization
   core
   eio
   ochat.agent_protocol

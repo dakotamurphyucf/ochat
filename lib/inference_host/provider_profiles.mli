@@ -111,6 +111,16 @@ val with_response_limit
     a new profile ID and explicitly admitting Selection.change. *)
 val add : t -> Profile.t -> owner:string -> generation:int64 -> (unit, Error.t) Result.t
 
+(** Trusted host mapping publication. Validate first; then mark any old entry
+    removed before replacing its shared table slot without yielding. Old captured
+    contexts/plans/leases retain the removed entry and fail currentness checks. *)
+val replace
+  :  t
+  -> Profile.t
+  -> owner:string
+  -> generation:int64
+  -> (unit, Error.t) Result.t
+
 val remove : t -> profile:string -> (unit, Error.t) Result.t
 val edit_profile : t -> Profile.t -> (unit, Error.t) Result.t
 

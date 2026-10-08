@@ -48,6 +48,14 @@ actor state and authorization, not merely passing JSON validation.
 |---|---|---|---|
 | `protocol.initialize` | `Initialize.Request` | Authentication only | Negotiate protocol; must precede other methods. |
 | `command.receipt` | `Command_receipt.Request` | Original request authorization plus current session visibility | Read-only bounded committed summary or unresolved/unavailable status; never retries execution. |
+| `provider.setup` | `Provider_operator.Setup_request` | `provider.manage` | Explicit create-only trusted host bootstrap; returns host incarnation, never a credential. |
+| `provider.status` | `Provider_operator.Status_request` | `provider.view` plus profile policy | Bounded authorized nonsecret profiles, owner flows and current selection/CAS revision. |
+| `provider.login.begin` | `Provider_operator.Login_request` | `provider.manage` plus profile policy | Explicit browser/device acquisition; receipt contains only a host-qualified flow reference. |
+| `provider.login.challenge` | `Provider_operator.Challenge_request` | `provider.manage` plus exact live flow ownership | Owner-private authorized transport result; no receipt, event, history or audit payload. |
+| `provider.login.cancel` | `Provider_operator.Cancel_request` | `provider.manage` plus flow ownership | Cancel/join only the original owned flow; preserve a working login. |
+| `provider.logout` | `Provider_operator.Logout_request` | `provider.manage` plus profile policy | Local disable epoch first, then bounded drain and owned cleanup; no provider revocation claim. |
+| `provider.select` | `Provider_operator.Select_request` | `provider.select` plus profile policy | Selection revision CAS changes future default captures. Existing targets/plans remain pinned. |
+| `provider.configure_environment` | `Provider_operator.Environment_request` | `provider.manage` plus profile policy | Enroll a predeclared host source ID; no arbitrary environment name, key or path. |
 | `protocol.ping` | `Ping.Request` | Authentication only | Ping response; not proof of a model completing work. |
 | `server.info` | Empty object | Authentication only | Implementation/version/features/transports/limits and unsafe-development-auth indicator. |
 | `server.health` | `Health.Request` | Authentication only; details scoped | Current health projection. |
@@ -287,3 +295,29 @@ optional server pins and daemon credential-file references in versioned document
 They contain no provider credentials or authority. Profile connection initializes
 and checks its server pin before sensitive operations. Provider profile selection
 is a separate host service.
+
+## Provider operator privacy and recovery
+
+Provider methods require an explicitly installed trusted host service. Protocol
+support alone does not provision a registry or discover a login. The host owns
+credentials; requests never forward keys, filesystem roots or arbitrary environment
+bindings. View, management and selection scopes are independent of session ownership
+and configuration administration. Per-profile policy and exact authenticated flow
+ownership apply in addition to the method scope. An incoming flow reference is
+untrusted; the service must compare its host/profile/ID/expiry with its owner record.
+
+A login begin result and every command receipt contain nonsecret references only.
+Fetch a live challenge through the separate owner-private method after current
+scope, ownership and expiry checks. `Public.Result.Private_provider_challenge` has
+an authorized transport codec and redacted sexp. Generic internal `Method_result`
+codecs and `Non_history` consumers refuse it. Do not serialize a challenge into
+receipts, events, history, audit or debug output; render it only to the authorized
+interactive operator sink. Restart reports interrupted acquisition rather than
+resuming code exchange. An uncertain mutation reply must reconcile the original
+operation; a missing receipt does not prove noncommit and must not trigger a fresh
+key or exchange retry.
+
+`Setup_result.revision` identifies the host registry incarnation. Selection CAS
+uses the distinct revision returned in `Status_result.selection`; it is not an
+auth epoch or secret revision. Status never includes an authorization URI, device
+code or raw provider response, and it does not infer a failure from readiness.

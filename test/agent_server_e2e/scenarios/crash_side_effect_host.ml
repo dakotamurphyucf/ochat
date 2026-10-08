@@ -53,7 +53,7 @@ let listener ~sw env daemon config options =
     ~blob_store:(Agent_server.Daemon.blob_store daemon)
     ~health:(Agent_server.Daemon.health daemon)
     ~close_connection:(Agent_server.Daemon.close_connection daemon)
-    ~authenticate:(Agent_server.Daemon.authenticate_http daemon)
+    ~authenticate:(Agent_server.Daemon.authenticate_http_actor daemon)
     ~max_body_bytes:(16 * 1024 * 1024)
     ~max_batch_size:128
     ~batch_concurrency:16

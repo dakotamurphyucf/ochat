@@ -101,6 +101,14 @@ module Delete : sig
 end
 
 type t =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_status of Provider_operator.Status_result.t
+  | Provider_login_begin of Provider_operator.Flow_ref.t
+  | Provider_login_challenge of Provider_operator.Private_challenge.t
+  | Provider_login_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_select of Provider_operator.Selection_result.t
+  | Provider_configure_environment of Provider_operator.Configuration_result.t
   | Protocol_initialize of Initialize.Response.t
   | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
@@ -148,7 +156,9 @@ type t =
 (** [method_name t] returns the request method associated with [t]. *)
 val method_name : t -> string
 
-(** [to_json t] encodes the method-specific result object. *)
+(** [to_json t] encodes the method-specific result object.
+    Private provider challenges require Public.Result authorized projection;
+    generic internal encoding raises Invalid_argument without challenge content. *)
 val to_json : t -> Jsonaf.t
 
 (** [of_json ~method_ json] decodes the successful result for [method_]. *)

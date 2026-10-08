@@ -1,6 +1,14 @@
 open Core
 
 let required_scope = function
+  | Agent_protocol.Command.Provider_status _ -> Some Agent_protocol.Scope.Provider_view
+  | Provider_select _ -> Some Agent_protocol.Scope.Provider_select
+  | Provider_setup _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_configure_environment _ -> Some Agent_protocol.Scope.Provider_manage
   | Agent_protocol.Command.Protocol_initialize _
   | Command_receipt _
   | Protocol_ping _

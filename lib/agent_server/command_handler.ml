@@ -14,6 +14,7 @@ type t =
   ; workspaces : Agent_session.Workspace_catalog.t
   ; start_queue : Agent_session.Start_queue.t
   ; idempotency_store : Agent_store.Idempotency_store.t
+  ; provider_operator : Provider_operator_port.t option
   ; idempotency_mutex : Eio.Mutex.t
   ; pagination : Pagination.t
   ; audit_store : Agent_store.Audit_store.t
@@ -59,6 +60,7 @@ let create
       ~create_session
       ~prepare_session_start
       ~workspace_retained
+      ~provider_operator
       ~prepare_administration
   =
   { sw
@@ -68,6 +70,7 @@ let create
   ; workspaces
   ; start_queue
   ; idempotency_store
+  ; provider_operator
   ; idempotency_mutex = Eio.Mutex.create ()
   ; pagination = Pagination.create ()
   ; audit_store
@@ -301,6 +304,14 @@ let protected session_id key =
 let idempotency = function
   (* Ingress owns durable per-registration receipts and rechecks current
      authority on every retry. The generic response cache must not bypass it. *)
+  | Agent_protocol.Command.Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
   | Agent_protocol.Command.Session_create request ->
     standard None request.Agent_protocol.Session.Create_request.idempotency_key
@@ -2107,7 +2118,16 @@ let authorize_mutation t context command =
     with_writer t context ~session_id ~attachment_id (fun _ -> Ok ())
 ;;
 
-let dispatch_authorized t ~context ~command_audit ~inference_budget = function
+let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = function
+  | ( Agent_protocol.Command.Provider_setup _
+    | Provider_status _
+    | Provider_login_begin _
+    | Provider_login_challenge _
+    | Provider_login_cancel _
+    | Provider_logout _
+    | Provider_select _
+    | Provider_configure_environment _ ) as command ->
+    Provider_operator_port.dispatch t.provider_operator ~actor command
   | Agent_protocol.Command.Protocol_initialize request ->
     Result.map
       (t.initialize ~principal:(Connection_context.principal context) request)
@@ -2172,17 +2192,25 @@ let dispatch_authorized t ~context ~command_audit ~inference_budget = function
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
-let handle_authorized t ~context ~command_audit ~inference_budget command =
+let handle_authorized t ~actor ~context ~command_audit ~inference_budget command =
   let open Result.Let_syntax in
   let%bind () = authorize_mutation t context command in
   let%bind result =
-    dispatch_authorized t ~context ~command_audit ~inference_budget command
+    dispatch_authorized t ~actor ~context ~command_audit ~inference_budget command
   in
   Pagination.lists t.pagination (Connection_context.principal context) command result
 ;;
 
 let command_session_id = function
-  | Agent_protocol.Command.Session_create _
+  | Agent_protocol.Command.Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _
+  | Session_create _
   | Protocol_initialize _
   | Command_receipt _
   | Protocol_ping _
@@ -2261,6 +2289,14 @@ let receipt_summary ~session_id result =
     | None -> Error (error Invalid_request "receipt requires a session identity")
   in
   match result with
+  | Agent_protocol.Method_result.Provider_setup value -> Ok (R.Provider_setup value)
+  | Provider_login_begin value -> Ok (R.Provider_login value)
+  | Provider_login_cancel value -> Ok (R.Provider_cancel value)
+  | Provider_logout value -> Ok (R.Provider_logout value)
+  | Provider_select value -> Ok (R.Provider_selection value)
+  | Provider_configure_environment value -> Ok (R.Provider_configuration value)
+  | Provider_status _ | Provider_login_challenge _ ->
+    Error (error Invalid_request "method has no generic command receipt")
   | Agent_protocol.Method_result.Session_create value ->
     Ok (R.Created_session value.session.id)
   | Session_attach value -> Ok (R.Attached_session value.attachment.session_id)
@@ -2318,7 +2354,12 @@ let receipt_summary ~session_id result =
     Error (error Invalid_request "method has no generic command receipt")
 ;;
 
-let handle_command_receipt t context (request : Agent_protocol.Command_receipt.Request.t) =
+let handle_command_receipt
+      t
+      ~actor
+      context
+      (request : Agent_protocol.Command_receipt.Request.t)
+  =
   let open Result.Let_syntax in
   let principal = Connection_context.principal context in
   let%bind request =
@@ -2330,84 +2371,97 @@ let handle_command_receipt t context (request : Agent_protocol.Command_receipt.R
       ~method_:request.method_name
       ~params:request.original_params
   in
-  let%bind identity =
-    Result.of_option
-      (idempotency command)
-      ~error:(error Invalid_request "method has no generic command receipt")
-  in
   let%bind () = Authorization.authorize principal command in
-  let%bind digest = request_digest command in
-  let key = idempotency_key principal command identity in
-  let visible session_id =
-    Session_registry.read_state t.registry session_id ~authorize:(fun session ->
-      if session_visible_to principal session
-      then Ok ()
-      else Error (error Permission_denied "receipt session is not visible"))
-    |> Result.map ~f:(fun _ -> ())
-  in
-  match
-    Agent_store.Idempotency_store.lookup t.idempotency_store ~key ~request_digest:digest
-  with
-  | Missing -> Ok (Agent_protocol.Method_result.Command_receipt Missing)
-  | Conflict _ ->
-    Error (error Idempotency_conflict "receipt request does not match original payload")
-  | Replay record ->
-    let guarded () =
-      let%bind () =
-        match identity.session_id with
-        | None -> Ok ()
-        | Some session_id -> visible session_id
-      in
-      let%map receipt =
-        match record.outcome with
-        | Pending ->
-          Ok
-            (Agent_protocol.Command_receipt.Pending
-               { accepted_sequence = record.accepted_transaction_sequence
-               ; expires_at = record.expires_at
-               })
-        | Failure failure -> Ok (Agent_protocol.Command_receipt.Failed failure)
-        | Success json ->
-          let%bind result =
-            Agent_protocol.Method_result.of_json ~method_:request.method_name json
-          in
-          let%bind summary = receipt_summary ~session_id:identity.session_id result in
-          let%bind () =
-            match summary with
-            | Created_session session_id
-            | Attached_session session_id
-            | Deleted_session session_id
-            | Session_mutation { session_id; _ }
-            | Sent_message { session_id; _ } -> visible session_id
-            | Permission_response _
-            | Revoked_grant _
-            | Cancelled_job _
-            | Schedule_mutation _ -> Ok ()
-          in
-          Ok (Agent_protocol.Command_receipt.Committed summary)
-      in
-      Agent_protocol.Method_result.Command_receipt receipt
+  if Provider_operator_port.is_provider_command command
+  then
+    Provider_operator_port.receipt t.provider_operator ~actor command
+    |> Result.map ~f:(fun receipt -> Agent_protocol.Method_result.Command_receipt receipt)
+  else (
+    let%bind identity =
+      Result.of_option
+        (idempotency command)
+        ~error:(error Invalid_request "method has no generic command receipt")
     in
-    (match guarded () with
-     | Error failure when Agent_protocol.Error.equal_code failure.code Session_not_found
-       -> Ok (Agent_protocol.Method_result.Command_receipt Unavailable)
-     | result -> result)
+    let%bind digest = request_digest command in
+    let key = idempotency_key principal command identity in
+    let visible session_id =
+      Session_registry.read_state t.registry session_id ~authorize:(fun session ->
+        if session_visible_to principal session
+        then Ok ()
+        else Error (error Permission_denied "receipt session is not visible"))
+      |> Result.map ~f:(fun _ -> ())
+    in
+    match
+      Agent_store.Idempotency_store.lookup t.idempotency_store ~key ~request_digest:digest
+    with
+    | Missing -> Ok (Agent_protocol.Method_result.Command_receipt Missing)
+    | Conflict _ ->
+      Error (error Idempotency_conflict "receipt request does not match original payload")
+    | Replay record ->
+      let guarded () =
+        let%bind () =
+          match identity.session_id with
+          | None -> Ok ()
+          | Some session_id -> visible session_id
+        in
+        let%map receipt =
+          match record.outcome with
+          | Pending ->
+            Ok
+              (Agent_protocol.Command_receipt.Pending
+                 { accepted_sequence = record.accepted_transaction_sequence
+                 ; expires_at = record.expires_at
+                 })
+          | Failure failure -> Ok (Agent_protocol.Command_receipt.Failed failure)
+          | Success json ->
+            let%bind result =
+              Agent_protocol.Method_result.of_json ~method_:request.method_name json
+            in
+            let%bind summary = receipt_summary ~session_id:identity.session_id result in
+            let%bind () =
+              match summary with
+              | Created_session session_id
+              | Attached_session session_id
+              | Deleted_session session_id
+              | Session_mutation { session_id; _ }
+              | Sent_message { session_id; _ } -> visible session_id
+              | Provider_setup _
+              | Provider_login _
+              | Provider_cancel _
+              | Provider_logout _
+              | Provider_selection _
+              | Provider_configuration _
+              | Permission_response _
+              | Revoked_grant _
+              | Cancelled_job _
+              | Schedule_mutation _ -> Ok ()
+            in
+            Ok (Agent_protocol.Command_receipt.Committed summary)
+        in
+        Agent_protocol.Method_result.Command_receipt receipt
+      in
+      (match guarded () with
+       | Error failure when Agent_protocol.Error.equal_code failure.code Session_not_found
+         -> Ok (Agent_protocol.Method_result.Command_receipt Unavailable)
+       | result -> result))
 ;;
 
-let execute t context ~inference_budget command =
+let execute t ~actor context ~inference_budget command =
   match command with
   | Agent_protocol.Command.Command_receipt request ->
-    handle_command_receipt t context request
+    handle_command_receipt t ~actor context request
   | _ ->
     (match idempotency command with
-     | None -> handle_authorized t ~context ~command_audit:None ~inference_budget command
+     | None ->
+       handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
      | Some identity ->
        handle_idempotent t context command identity (fun command_audit ->
-         handle_authorized t ~context ~command_audit ~inference_budget command))
+         handle_authorized t ~actor ~context ~command_audit ~inference_budget command))
 ;;
 
-let handle t ~context ~inference_budget command =
+let handle t ?actor ~context ~inference_budget command =
   let open Result.Let_syntax in
+  let%bind actor = Connection_context.request_actor context actor in
   let%bind () = Authorization.authorize (Connection_context.principal context) command in
   if
     (not (Connection_context.initialized context))
@@ -2417,7 +2471,7 @@ let handle t ~context ~inference_budget command =
   else (
     let outcome =
       Result.bind
-        (execute t context ~inference_budget command)
+        (execute t ~actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
     in
     let outcome =

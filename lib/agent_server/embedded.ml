@@ -183,6 +183,9 @@ let all_scopes =
     ; Administer_configuration
     ; Diagnostics
     ; Submit_ingress
+    ; Provider_view
+    ; Provider_manage
+    ; Provider_select
     ]
 ;;
 
@@ -207,10 +210,10 @@ let make_connection daemon principal event_capacity ~max_attachments =
       (fun () -> Eio.Stream.add notifications envelope)
   in
   let context =
-    Connection_context.create
+    Connection_context.create_authenticated
       ~connection_id:
         (Agent_protocol.Id.Attachment.create () |> Agent_protocol.Id.Attachment.to_string)
-      ~principal
+      ~actor:(Operator_authorization.trusted_local principal)
       ~transport:In_memory
       ~publish_notification
       ~max_attachments

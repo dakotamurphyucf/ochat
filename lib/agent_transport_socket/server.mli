@@ -20,7 +20,7 @@ val serve
   -> authenticate:
        ('tag Eio.Net.stream_socket_ty Eio.Resource.t
         -> Eio.Net.Sockaddr.stream
-        -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result)
+        -> (Operator_authorization.t, Agent_protocol.Error.t) result)
   -> max_line_length:int
   -> outgoing_capacity:int
   -> max_attachments:int
@@ -39,7 +39,7 @@ val run
   -> authenticate:
        ('tag Eio.Net.stream_socket_ty Eio.Resource.t
         -> Eio.Net.Sockaddr.stream
-        -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result)
+        -> (Operator_authorization.t, Agent_protocol.Error.t) result)
   -> max_line_length:int
   -> outgoing_capacity:int
   -> max_attachments:int

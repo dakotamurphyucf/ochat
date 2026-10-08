@@ -3,6 +3,14 @@ open Core
 type t =
   | Protocol_initialize of Initialize.Request.t
   | Command_receipt of Command_receipt.Request.t
+  | Provider_setup of Provider_operator.Setup_request.t
+  | Provider_status of Provider_operator.Status_request.t
+  | Provider_login_begin of Provider_operator.Login_request.t
+  | Provider_login_challenge of Provider_operator.Challenge_request.t
+  | Provider_login_cancel of Provider_operator.Cancel_request.t
+  | Provider_logout of Provider_operator.Logout_request.t
+  | Provider_select of Provider_operator.Select_request.t
+  | Provider_configure_environment of Provider_operator.Environment_request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t
@@ -48,6 +56,14 @@ type t =
 let method_name = function
   | Protocol_initialize _ -> "protocol.initialize"
   | Command_receipt _ -> "command.receipt"
+  | Provider_setup _ -> "provider.setup"
+  | Provider_status _ -> "provider.status"
+  | Provider_login_begin _ -> "provider.login.begin"
+  | Provider_login_challenge _ -> "provider.login.challenge"
+  | Provider_login_cancel _ -> "provider.login.cancel"
+  | Provider_logout _ -> "provider.logout"
+  | Provider_select _ -> "provider.select"
+  | Provider_configure_environment _ -> "provider.configure_environment"
   | Protocol_ping _ -> "protocol.ping"
   | Server_info -> "server.info"
   | Server_health _ -> "server.health"
@@ -93,6 +109,16 @@ let method_name = function
 let params = function
   | Protocol_initialize request -> Initialize.Request.to_json request
   | Command_receipt request -> Command_receipt.Request.to_json request
+  | Provider_setup request -> Provider_operator.Setup_request.to_json request
+  | Provider_status request -> Provider_operator.Status_request.to_json request
+  | Provider_login_begin request -> Provider_operator.Login_request.to_json request
+  | Provider_login_challenge request ->
+    Provider_operator.Challenge_request.to_json request
+  | Provider_login_cancel request -> Provider_operator.Cancel_request.to_json request
+  | Provider_logout request -> Provider_operator.Logout_request.to_json request
+  | Provider_select request -> Provider_operator.Select_request.to_json request
+  | Provider_configure_environment request ->
+    Provider_operator.Environment_request.to_json request
   | Protocol_ping request -> Ping.Request.to_json request
   | Server_info -> `Object []
   | Server_health request -> Health.Request.to_json request
@@ -155,6 +181,24 @@ let map decode wrap params = Result.map (decode params) ~f:wrap
 let decoders =
   [ "protocol.initialize", map Initialize.Request.of_json (fun x -> Protocol_initialize x)
   ; "command.receipt", map Command_receipt.Request.of_json (fun x -> Command_receipt x)
+  ; ( "provider.setup"
+    , map Provider_operator.Setup_request.of_json (fun x -> Provider_setup x) )
+  ; ( "provider.status"
+    , map Provider_operator.Status_request.of_json (fun x -> Provider_status x) )
+  ; ( "provider.login.begin"
+    , map Provider_operator.Login_request.of_json (fun x -> Provider_login_begin x) )
+  ; ( "provider.login.challenge"
+    , map Provider_operator.Challenge_request.of_json (fun x ->
+        Provider_login_challenge x) )
+  ; ( "provider.login.cancel"
+    , map Provider_operator.Cancel_request.of_json (fun x -> Provider_login_cancel x) )
+  ; ( "provider.logout"
+    , map Provider_operator.Logout_request.of_json (fun x -> Provider_logout x) )
+  ; ( "provider.select"
+    , map Provider_operator.Select_request.of_json (fun x -> Provider_select x) )
+  ; ( "provider.configure_environment"
+    , map Provider_operator.Environment_request.of_json (fun x ->
+        Provider_configure_environment x) )
   ; "protocol.ping", map Ping.Request.of_json (fun x -> Protocol_ping x)
   ; "server.info", decode_server_info
   ; "server.health", map Health.Request.of_json (fun x -> Server_health x)

@@ -225,6 +225,16 @@ let attach principal (attached : P.Method_result.Attach.t) =
 ;;
 
 let project_result principal = function
+  | P.Method_result.Provider_login_challenge value ->
+    if P.Principal.has_scope principal Provider_manage
+    then Ok (P.Public.Result.Private_provider_challenge value)
+    else
+      Error
+        (P.Error.create
+           Permission_denied
+           ~message:"private provider challenge requires provider.manage"
+           ~retryable:false
+           ())
   | P.Method_result.Session_get value ->
     Result.map (snapshot principal value) ~f:(fun value ->
       P.Public.Result.Session_get value)
