@@ -757,14 +757,22 @@ let%expect_test
 ;;
 
 let%expect_test
-    "prospective revision capacity rejects rotation before provider callback while \
-     logout still cleans"
+    "nonreclaimable revision capacity rejects rotation before provider callback while \
+     logout preserves quarantine"
   =
-  with_registry (fun env sw _ _ _ registry _ ->
+  with_registry (fun env sw _ _ secrets registry _ ->
     for iteration = 1 to 64 do
-      install_expired_oauth
-        ~operation:(id (sprintf "full_revision_%d" iteration))
-        registry
+      let operation = sprintf "full_revision_%d" iteration in
+      install_expired_oauth ~operation:(id operation) registry;
+      (* Simulate corruption of this fixture's own immutable revision before
+         replacement. The next maintenance pass must quarantine its reservation,
+         rather than interpreting malformed material as deletion authority. The
+         final active revision remains valid for the attempted renewal. *)
+      if iteration < 64
+      then (
+        let revision = B.Revision.create operation |> backend in
+        B.delete secrets ~revision |> backend;
+        B.create secrets ~revision (secret "synthetic-corrupt-owned-payload") |> backend)
     done;
     let exchanges = ref 0 in
     let renewal =
@@ -805,12 +813,23 @@ let%expect_test
       |> lifecycle
     in
     assert removal.disabled;
-    assert (R.Status.equal_secret_cleanup removal.cleanup.secrets Clean);
+    assert (R.Status.equal_secret_cleanup removal.cleanup.secrets Cleanup_quarantined);
+    for iteration = 1 to 63 do
+      let revision =
+        B.Revision.create (sprintf "full_revision_%d" iteration) |> backend
+      in
+      B.Secret.with_string
+        (B.read secrets ~revision |> backend)
+        ~f:(fun value -> assert (String.equal value "synthetic-corrupt-owned-payload"))
+    done;
+    (match B.read secrets ~revision:(B.Revision.create "full_revision_64" |> backend) with
+     | Error error when B.Error.equal_code (B.Error.code error) Missing -> ()
+     | Error _ | Ok _ -> failwith "logout retained its valid owned active revision");
     print_endline
       "zero provider calls at capacity; new enrollment rejected; local logout still \
-       cleans all owned revisions");
+       cleans valid owned material and preserves quarantine");
   [%expect
-    {| zero provider calls at capacity; new enrollment rejected; local logout still cleans all owned revisions |}]
+    {| zero provider calls at capacity; new enrollment rejected; local logout still cleans valid owned material and preserves quarantine |}]
 ;;
 
 let%expect_test
@@ -1250,4 +1269,337 @@ let%expect_test "candidate authorization is checked after metadata admission wai
     "authorization lost while waiting rejects replacement and preserves working login";
   [%expect
     {| authorization lost while waiting rejects replacement and preserves working login |}]
+;;
+
+let%expect_test "successful rotations maintain inactive secrets beyond revision capacity" =
+  with_registry (fun env sw anchor directory secrets initial new_operation ->
+    install_expired_oauth initial;
+    R.close initial;
+    let wall_clock = Eio_mock.Clock.make () in
+    let quiet =
+      { Eio.Debug.traceln =
+          (fun ?__POS__:_ fmt -> Format.ifprintf Format.err_formatter fmt)
+      }
+    in
+    let set_time value =
+      Eio.Fiber.with_binding (Eio.Stdenv.debug env)#traceln quiet (fun () ->
+        Eio_mock.Clock.set_time wall_clock value)
+    in
+    set_time 1000.;
+    let registry =
+      R.open_existing
+        ~sw
+        ~wall_clock
+        ~metadata_admission:R.Metadata_admission.nonblocking
+        ~new_operation
+        ~directory
+        ~secrets
+        ~environment:None
+        ~host
+      |> lifecycle
+    in
+    let calls = ref 0 in
+    let renewal =
+      R.Renewal.create ~exchange:(fun ~sw:_ ~identity ~grant _ ->
+        incr calls;
+        let expiry = Int64.of_float ((Eio.Time.now wall_clock +. 3600.) *. 1000.) in
+        let previous = M.Grant.effective grant in
+        let grant =
+          M.Grant.create
+            ~identity
+            ~scopes:(Value previous.scopes)
+            ~expires_at_ms:(Value expiry)
+            ~refresh_policy:Require_rotated
+            ~effective:
+              { previous with expiry = Known { at_ms = expiry; provenance = Declared } }
+          |> model
+        in
+        R.Renewal.Verified
+          (R.Verified.create
+             ~identity
+             ~grant:(Some grant)
+             ~material:
+               (R.Material.oauth
+                  ~access:(secret "synthetic-renewed-access")
+                  ~refresh:(Value (secret "synthetic-renewed-refresh"))
+                  ~continuity:Absent)
+           |> lifecycle))
+    in
+    let view =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    for iteration = 1 to 70 do
+      Eio.Switch.run (fun attempt_sw ->
+        let admission =
+          R.admit
+            registry
+            ~sw:attempt_sw
+            ~clock:(Eio.Stdenv.mono_clock env)
+            ~maximum_wait:(Time_ns.Span.of_sec 1.)
+            ~binding
+            ~expected_owner:(R.Host_snapshot.owner view)
+            ~expected_epoch:1L
+            ~renewal:(Some renewal)
+          |> lifecycle
+        in
+        R.Admission.check_current admission |> lifecycle);
+      let names = Eio.Path.read_dir Eio.Path.(anchor / "private") in
+      assert (List.count names ~f:(String.is_prefix ~prefix:"s9-synthetic-") <= 2);
+      assert (Int.equal !calls iteration);
+      set_time (Eio.Time.now wall_clock +. 3601.)
+    done;
+    assert (
+      Int64.equal
+        (R.Host_snapshot.epoch
+           (R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn))
+        1L));
+  print_endline
+    "70 exact renewals; bounded inactive secret footprint; original authorization epoch \
+     retained";
+  [%expect
+    {| 70 exact renewals; bounded inactive secret footprint; original authorization epoch retained |}]
+;;
+
+let%expect_test "inactive maintenance cannot delete while an earlier attempt holds G" =
+  with_registry (fun env sw _ _ secrets registry _ ->
+    install registry (id "first_key");
+    let initial =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    let attempt =
+      R.admit
+        registry
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+        ~binding
+        ~expected_owner:(R.Host_snapshot.owner initial)
+        ~expected_epoch:1L
+        ~renewal:None
+      |> lifecycle
+    in
+    install registry (id "replacement_key");
+    let calls = ref 0 in
+    let renewal =
+      R.Renewal.create ~exchange:(fun ~sw:_ ~identity:_ ~grant:_ _ ->
+        incr calls;
+        Definitely_not_submitted)
+    in
+    (match
+       R.refresh
+         registry
+         ~sw
+         ~clock:(Eio.Stdenv.mono_clock env)
+         ~maximum_wait:(Time_ns.Span.of_sec 0.02)
+         ~binding
+         ~renewal
+     with
+     | Error Timed_out -> ()
+     | _ -> failwith "maintenance did not honor held G");
+    assert (Int.equal !calls 0);
+    ignore
+      (B.read secrets ~revision:(B.Revision.create "first_key" |> backend) |> backend
+       : B.Secret.t);
+    R.Admission.with_access attempt ~f:(fun key ->
+      B.Secret.with_string key ~f:(fun key -> assert (String.equal key "synthetic-token"))));
+  print_endline
+    "held G retains old owned secret; bounded maintenance timeout performs no exchange";
+  [%expect
+    {| held G retains old owned secret; bounded maintenance timeout performs no exchange |}]
+;;
+
+let%expect_test "renewal gap refuses a replacement epoch before external exchange" =
+  with_registry (fun env sw _ _ _ registry _ ->
+    install_expired_oauth registry;
+    let initial =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    let calls = ref 0 in
+    let renewal =
+      R.Renewal.create ~exchange:(fun ~sw:_ ~identity:_ ~grant:_ _ ->
+        incr calls;
+        Definitely_not_submitted)
+    in
+    R.For_testing.set_before_renewal_hook
+      registry
+      (Some
+         (fun () ->
+           R.For_testing.set_before_renewal_hook registry None;
+           install registry (id "gap_replacement")));
+    (match
+       R.admit
+         registry
+         ~sw
+         ~clock:(Eio.Stdenv.mono_clock env)
+         ~maximum_wait:(Time_ns.Span.of_sec 1.)
+         ~binding
+         ~expected_owner:(R.Host_snapshot.owner initial)
+         ~expected_epoch:1L
+         ~renewal:(Some renewal)
+     with
+     | Error (Model Stale_epoch) -> ()
+     | _ -> failwith "renewal gap admitted replacement authority");
+    assert (Int.equal !calls 0));
+  print_endline "replacement in released-fence gap is rejected before renewal exchange";
+  [%expect {| replacement in released-fence gap is rejected before renewal exchange |}]
+;;
+
+let%expect_test "fresh logout rechecks original authority after metadata admission" =
+  with_registry (fun env sw _ directory secrets initial new_operation ->
+    install initial (id "guarded-working-key");
+    let waiting =
+      open_waiting
+        env
+        sw
+        directory
+        secrets
+        new_operation
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+    in
+    let current_authority = ref true in
+    let admitted, signal_admitted = Eio.Promise.create () in
+    let result, finished = Eio.Promise.create () in
+    let lease = hold_metadata sw directory in
+    Eio.Fiber.fork ~sw (fun () ->
+      assert !current_authority;
+      Eio.Promise.resolve signal_admitted ();
+      Eio.Promise.resolve
+        finished
+        (R.disable_with_operation
+           ~authorize_disable:(fun () -> !current_authority)
+           waiting
+           ~sw
+           ~clock:(Eio.Stdenv.mono_clock env)
+           ~maximum_wait:(Time_ns.Span.of_sec 1.)
+           ~binding
+           ~operation:(id "denied-logout")
+           ~mode:Fresh
+           ~revocation:None
+           ~reason:Logout));
+    Eio.Promise.await admitted;
+    current_authority := false;
+    S.Lock.release lease;
+    (match Eio.Promise.await result with
+     | Error Authorization_denied -> ()
+     | _ -> failwith "expired actor published fresh tombstone");
+    let before =
+      R.synchronize waiting |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    assert (Int64.equal (R.Host_snapshot.epoch before) 1L);
+    assert (R.Host_snapshot.equal_availability (R.Host_snapshot.availability before) Ready);
+    let removal =
+      R.disable_with_operation
+        ~authorize_disable:(fun () -> true)
+        waiting
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+        ~binding
+        ~operation:(id "admitted-logout")
+        ~mode:Fresh
+        ~revocation:None
+        ~reason:Logout
+      |> lifecycle
+    in
+    assert removal.disabled;
+    let replay =
+      R.disable_with_operation
+        ~authorize_disable:(fun () -> false)
+        waiting
+        ~sw
+        ~clock:(Eio.Stdenv.mono_clock env)
+        ~maximum_wait:(Time_ns.Span.of_sec 1.)
+        ~binding
+        ~operation:(id "admitted-logout")
+        ~mode:Reconcile
+        ~revocation:None
+        ~reason:Logout
+      |> lifecycle
+    in
+    assert replay.disabled);
+  print_endline
+    "late authority denial preserves working epoch; admitted tombstone can reconcile \
+     without another disable";
+  [%expect
+    {| late authority denial preserves working epoch; admitted tombstone can reconcile without another disable |}]
+;;
+
+let%expect_test
+    "stale authoritative refresh rejection preserves a concurrent environment replacement"
+  =
+  with_registry (fun env sw _ directory secrets initial new_operation ->
+    install_expired_oauth initial;
+    R.close initial;
+    let environment =
+      R.Environment.create
+        ~resolve:
+          (fun
+            ~sw:_ ~binding:_ ~identity:_ ~name:_ ~expected_configuration_revision ->
+          Ok
+            (R.Environment.resolved
+               ~access:(secret "synthetic-environment-key")
+               ~configuration_revision:expected_configuration_revision
+               ~check_current:(fun () -> Ok ())))
+        ~status:(fun ~binding:_ ~name:_ -> Available)
+    in
+    let registry =
+      R.open_existing
+        ~sw
+        ~wall_clock:(Eio.Stdenv.clock env)
+        ~metadata_admission:R.Metadata_admission.nonblocking
+        ~new_operation
+        ~directory
+        ~secrets
+        ~environment:(Some environment)
+        ~host
+      |> lifecycle
+    in
+    let calls = ref 0 in
+    let renewal =
+      R.Renewal.create ~exchange:(fun ~sw:_ ~identity:_ ~grant:_ _ ->
+        incr calls;
+        (* Environment publication takes M and can supersede an external refresh
+         while that refresh retains R. The old result must remain CAS-bound. *)
+        let candidate =
+          R.begin_candidate
+            registry
+            ~binding
+            ~operation:(id "new-environment")
+            ~expectation:(M.Expectation.exact identity)
+          |> lifecycle
+        in
+        R.commit_environment_candidate
+          registry
+          candidate
+          ~identity
+          ~name:"SYNTHETIC_KEY"
+          ~configuration_revision:None
+        |> lifecycle;
+        Authoritative_rejection)
+    in
+    (match
+       R.refresh
+         registry
+         ~sw
+         ~clock:(Eio.Stdenv.mono_clock env)
+         ~maximum_wait:(Time_ns.Span.of_sec 1.)
+         ~binding
+         ~renewal
+     with
+     | Error (Model Stale_epoch) -> ()
+     | _ -> failwith "stale refresh rejection disabled replacement");
+    assert (Int.equal !calls 1);
+    let current =
+      R.synchronize registry |> lifecycle |> R.Host_snapshot.bindings |> List.hd_exn
+    in
+    assert (Int64.equal (R.Host_snapshot.epoch current) 2L);
+    assert (
+      R.Host_snapshot.equal_availability (R.Host_snapshot.availability current) Ready);
+    assert (
+      Option.equal M.Identity.equal (R.Host_snapshot.identity current) (Some identity)));
+  print_endline
+    "one old exchange; stale rejection cannot disable the newer environment binding";
+  [%expect
+    {| one old exchange; stale rejection cannot disable the newer environment binding |}]
 ;;

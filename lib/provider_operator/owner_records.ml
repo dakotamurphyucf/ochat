@@ -197,6 +197,35 @@ let locked t f =
     | Ok lock -> Exn.protect ~finally:(fun () -> S.Lock.release lock) ~f)
 ;;
 
+let locked_wait t ~clock ~maximum_wait f =
+  let seconds = Time_ns.Span.to_sec maximum_wait in
+  if (not (Float.is_finite seconds)) || Float.(seconds <= 0. || seconds > 60.)
+  then Error Error.Busy
+  else
+    Eio.Switch.run (fun sw ->
+      let started = Eio.Time.Mono.now clock in
+      let remaining () =
+        seconds
+        -. (Mtime.Span.to_float_ns (Mtime.span started (Eio.Time.Mono.now clock)) /. 1e9)
+      in
+      let rec acquire ~initial =
+        if (not initial) && Float.(remaining () <= 0.)
+        then Error Error.Busy
+        else (
+          match S.Lock.acquire t.directory lock_name ~sw ~mode:Exclusive with
+          | Error error when S.Error.equal_code (S.Error.code error) Busy ->
+            let remaining = remaining () in
+            if Float.(remaining <= 0.)
+            then Error Error.Busy
+            else (
+              Eio.Time.Mono.sleep clock (Float.min remaining 0.01);
+              acquire ~initial:false)
+          | Error error -> Error (storage error)
+          | Ok lease -> Exn.protect ~finally:(fun () -> S.Lock.release lease) ~f)
+      in
+      acquire ~initial:true)
+;;
+
 let list t = locked t (fun () -> read t)
 
 let write t records =
@@ -258,8 +287,8 @@ let find t flow =
     |> Result.of_option ~error:Error.Missing)
 ;;
 
-let change_phase t flow ~phase ~reconcile =
-  locked t (fun () ->
+let change_phase t flow ~phase ~reconcile ~with_lock =
+  with_lock (fun () ->
     let open Result.Let_syntax in
     let%bind records = read t in
     let%bind record =
@@ -287,8 +316,22 @@ let change_phase t flow ~phase ~reconcile =
     updated)
 ;;
 
-let set_phase t flow ~phase = change_phase t flow ~phase ~reconcile:false
-let reconcile_phase t flow ~phase = change_phase t flow ~phase ~reconcile:true
+let set_phase t flow ~phase =
+  change_phase t flow ~phase ~reconcile:false ~with_lock:(locked t)
+;;
+
+let set_phase_wait t flow ~phase ~clock ~maximum_wait =
+  change_phase
+    t
+    flow
+    ~phase
+    ~reconcile:false
+    ~with_lock:(locked_wait t ~clock ~maximum_wait)
+;;
+
+let reconcile_phase t flow ~phase =
+  change_phase t flow ~phase ~reconcile:true ~with_lock:(locked t)
+;;
 
 let flow_lock_name (flow : DTO.Flow_ref.t) =
   S.Name.create ("operator-flow-" ^ DTO.Flow_id.to_string flow.flow_id ^ ".lock")

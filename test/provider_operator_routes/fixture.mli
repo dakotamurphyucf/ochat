@@ -39,3 +39,9 @@ val assert_inference_unavailable : t -> unit
 val wait_terminal : t -> Client.t -> DTO.Flow_ref.t -> DTO.Flow_result.t
 val profile : DTO.Profile_id.t
 val key : string -> P.Idempotency_key.t
+
+(** Synthetic fixture only: independently holds the actual owner metadata lock,
+    and probes the separate worker lease after controlled OAuth completion. *)
+val hold_owner_records : t -> Private_storage.Lock.t
+
+val await_worker_finished : t -> DTO.Flow_ref.t -> unit

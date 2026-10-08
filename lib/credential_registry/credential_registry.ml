@@ -302,6 +302,7 @@ type t =
   ; mutable closed : bool
   ; mutable outstanding : unit Eio.Promise.t list
   ; mutable after_publication : (unit -> unit) option
+  ; mutable before_renewal : (unit -> unit) option
   }
 
 let close t =
@@ -507,6 +508,7 @@ let open_existing
           ; cached
           ; closed = false
           ; after_publication = None
+          ; before_renewal = None
           ; outstanding = []
           }
         in
@@ -606,7 +608,109 @@ let rec acquire_until t ~sw ~clock ~started ~maximum_wait ~binding ~suffix ~mode
     | result -> result)
 ;;
 
+let cleanup_owned t ~binding =
+  let open Result.Let_syntax in
+  let%bind retired =
+    with_metadata t (fun registry -> M.retired registry ~binding |> model)
+  in
+  List.fold retired ~init:(Ok ()) ~f:(fun result item ->
+    let%bind () = result in
+    match M.Cleanup.deletion item with
+    | Quarantined -> Ok ()
+    | Confirmed_removed -> Ok ()
+    | Pending | Removed_durability_unknown ->
+      with_metadata t (fun registry ->
+        let operation = M.Cleanup.owned_by item in
+        let id = M.Cleanup.revision item in
+        (* The pure check rejects any globally active/staged reference. G/R and M
+           stay held through this bounded native cleanup, never external I/O. *)
+        let%bind _ =
+          M.record_cleanup
+            registry
+            ~binding
+            ~operation
+            ~revision:id
+            ~deletion:(M.Cleanup.deletion item)
+          |> model
+        in
+        let record deletion =
+          let%bind next =
+            M.record_cleanup registry ~binding ~operation ~revision:id ~deletion |> model
+          in
+          publish t next
+        in
+        let confirm_removed () =
+          let%bind revision = revision id in
+          let%bind () = Secrets.confirm_absent t.secrets ~revision |> secret in
+          record Confirmed_removed
+        in
+        match read_material t ~binding id with
+        | Error Missing_secret -> confirm_removed ()
+        | Error Revision_quarantined -> record Quarantined
+        | Error (Secret_store Corrupt) -> record Quarantined
+        | Error error -> Error error
+        | Ok _ ->
+          let%bind revision = revision id in
+          (match Secrets.delete t.secrets ~revision with
+           | Ok () -> record Confirmed_removed
+           | Error error ->
+             (match Secrets.Error.publication error with
+              | Some Published_durability_unknown -> record Removed_durability_unknown
+              | Some Not_published | None ->
+                (match Secrets.Error.code error with
+                 | Missing -> confirm_removed ()
+                 | _ -> Error (Error.Secret_store (Secrets.Error.code error)))))))
+;;
+
+(* Only inactive, operation-owned revisions are eligible. No caller may hold G
+   while invoking this maintenance: exclusive G proves all earlier borrowers
+   have drained, then R excludes staging and M validates every deletion. *)
+let maintain_inactive t ~binding ~acquire_lock =
+  let open Result.Let_syntax in
+  let%bind needed =
+    with_metadata t (fun registry ->
+      match M.retired registry ~binding with
+      | Error M.Error.Not_active -> Ok false
+      | Error error -> Error (Error.Model error)
+      | Ok retired ->
+        Ok
+          (List.exists retired ~f:(fun item ->
+             match M.Cleanup.deletion item with
+             | Pending | Removed_durability_unknown -> true
+             | Quarantined | Confirmed_removed -> false)))
+  in
+  if not needed
+  then Ok ()
+  else
+    Eio.Switch.run (fun sw ->
+      let%bind g = acquire_lock ~sw ~suffix:"G" in
+      Exn.protect
+        ~finally:(fun () -> Storage.Lock.release g)
+        ~f:(fun () ->
+          let%bind r = acquire_lock ~sw ~suffix:"R" in
+          Exn.protect
+            ~finally:(fun () -> Storage.Lock.release r)
+            ~f:(fun () -> cleanup_owned t ~binding)))
+;;
+
+let maintain_opportunistically t ~binding =
+  match
+    maintain_inactive t ~binding ~acquire_lock:(fun ~sw ~suffix ->
+      acquire t ~sw ~binding ~suffix ~mode:Exclusive)
+  with
+  | Error Error.Busy -> Ok ()
+  | result -> result
+;;
+
+let maintain_before_renewal t ~binding ~clock ~maximum_wait =
+  let started = Eio.Time.Mono.now clock in
+  maintain_inactive t ~binding ~acquire_lock:(fun ~sw ~suffix ->
+    acquire_until t ~sw ~clock ~started ~maximum_wait ~binding ~suffix ~mode:Exclusive)
+;;
+
 let begin_candidate t ~binding ~operation ~expectation =
+  let open Result.Let_syntax in
+  let%bind () = maintain_opportunistically t ~binding in
   with_metadata t (fun registry ->
     let open Result.Let_syntax in
     let%bind registry, expected =
@@ -771,10 +875,30 @@ let refresh_material ~identity ~old (verified : Verified.t) =
     | _ -> Error (Error.Model Invalid_grant))
 ;;
 
-let refresh_owned t ~sw ~binding (renewal : Renewal.t) =
+let refresh_snapshot registry ~binding ~expected_authority =
+  let open Result.Let_syntax in
+  let%bind snapshot = M.find registry ~binding |> model in
+  let%map () =
+    match expected_authority with
+    | None -> Ok ()
+    | Some (expected_owner, expected_epoch) ->
+      if not (String.equal (owner registry binding) expected_owner)
+      then Error (Error.Model Wrong_incarnation)
+      else if
+        not (Int64.equal (M.Epoch.to_int64 (M.Snapshot.epoch snapshot)) expected_epoch)
+      then Error (Error.Model Stale_epoch)
+      else if Option.is_some (M.Snapshot.disabled snapshot)
+      then Error (Error.Model Disabled)
+      else Ok ()
+  in
+  snapshot
+;;
+
+let refresh_owned t ~sw ~binding ~expected_authority (renewal : Renewal.t) =
   let open Result.Let_syntax in
   let%bind snapshot =
-    with_metadata t (fun registry -> M.find registry ~binding |> model)
+    with_metadata t (fun registry ->
+      refresh_snapshot registry ~binding ~expected_authority)
   in
   let%bind active =
     Result.of_option (M.Snapshot.active snapshot) ~error:(Error.Model Not_active)
@@ -796,6 +920,20 @@ let refresh_owned t ~sw ~binding (renewal : Renewal.t) =
   let operation = t.new_operation () in
   let%bind expected =
     with_metadata t (fun registry ->
+      let%bind current = refresh_snapshot registry ~binding ~expected_authority in
+      let%bind () =
+        if not (M.Epoch.equal (M.Snapshot.epoch current) (M.Snapshot.epoch snapshot))
+        then Error (Error.Model Stale_epoch)
+        else (
+          match M.Snapshot.active current with
+          | Some current
+            when M.Identity.equal (M.Active.identity current) (M.Active.identity active)
+                 &&
+                 match M.Active.source current with
+                 | Protected_revision revision -> M.Id.equal revision previous_revision
+                 | Environment_reference _ -> false -> Ok ()
+          | Some _ | None -> Error (Error.Model Stale_revision))
+      in
       let%bind registry, expected =
         M.begin_refresh registry ~binding ~operation |> model
       in
@@ -812,11 +950,7 @@ let refresh_owned t ~sw ~binding (renewal : Renewal.t) =
   | Authoritative_rejection ->
     let%bind () =
       update t (fun registry ->
-        M.disable
-          registry
-          ~binding
-          ~operation:(t.new_operation ())
-          ~reason:Renewal_rejected)
+        M.reject_refresh registry ~binding ~expected ~operation:(t.new_operation ()))
     in
     Error Error.Renewal_rejected
   | Possibly_consumed ->
@@ -845,7 +979,9 @@ let refresh_owned t ~sw ~binding (renewal : Renewal.t) =
          M.commit_refresh registry ~binding ~expected ~revision:operation ~grant))
 ;;
 
-let refresh t ~sw:_ ~clock ~maximum_wait ~binding ~renewal =
+let refresh ?expected_authority t ~sw:_ ~clock ~maximum_wait ~binding ~renewal =
+  let open Result.Let_syntax in
+  let%bind () = maintain_before_renewal t ~binding ~clock ~maximum_wait in
   Eio.Switch.run (fun sw ->
     let open Result.Let_syntax in
     let%bind lock =
@@ -863,7 +999,8 @@ let refresh t ~sw:_ ~clock ~maximum_wait ~binding ~renewal =
       ~finally:(fun () -> Storage.Lock.release lock)
       ~f:(fun () ->
         let%bind snapshot =
-          with_metadata t (fun registry -> M.find registry ~binding |> model)
+          with_metadata t (fun registry ->
+            refresh_snapshot registry ~binding ~expected_authority)
         in
         let%bind () =
           match M.Snapshot.refresh snapshot with
@@ -873,7 +1010,7 @@ let refresh t ~sw:_ ~clock ~maximum_wait ~binding ~renewal =
         match M.Snapshot.active snapshot with
         | Some active when Option.exists (M.Active.grant active) ~f:(grant_available t) ->
           Ok ()
-        | Some _ -> refresh_owned t ~sw ~binding renewal
+        | Some _ -> refresh_owned t ~sw ~binding ~expected_authority renewal
         | None -> Error (Error.Model Not_active)))
 ;;
 
@@ -940,7 +1077,16 @@ let ensure_current t ~binding ~expected_owner ~expected_epoch ~source =
     check_current t ~binding ~expected_owner ~expected_epoch ~source ())
 ;;
 
-let admit t ~sw ~clock ~maximum_wait ~binding ~expected_owner ~expected_epoch ~renewal =
+let admit_once
+      t
+      ~sw
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~expected_owner
+      ~expected_epoch
+      ~renewal
+  =
   let open Result.Let_syntax in
   let%bind fence =
     acquire_until
@@ -977,74 +1123,116 @@ let admit t ~sw ~clock ~maximum_wait ~binding ~expected_owner ~expected_epoch ~r
           | Idle -> Ok ()
           | Possibly_sent _ | Renewal_uncertain _ -> Error (Error.Model Renewal_uncertain))
       in
-      let%bind () =
+      let%bind decision =
         match M.Active.grant active with
-        | None -> Ok ()
-        | Some grant when grant_available t grant -> Ok ()
+        | None -> Ok `Admit
+        | Some grant when grant_available t grant -> Ok `Admit
         | Some _ ->
           (match renewal with
            | None -> Error Error.Renewal_rejected
-           | Some renewal -> refresh t ~sw ~clock ~maximum_wait ~binding ~renewal)
+           | Some renewal -> Ok (`Renew renewal))
       in
-      let%bind active =
-        with_metadata t (fun registry ->
-          let%bind snapshot = M.find registry ~binding |> model in
-          Result.of_option (M.Snapshot.active snapshot) ~error:(Error.Model Not_active))
-      in
-      let%bind () =
-        match M.Active.grant active with
-        | None -> Ok ()
-        | Some grant when grant_available t grant -> Ok ()
-        | Some _ -> Error Error.Renewal_rejected
-      in
-      let source = M.Active.source active in
-      let%bind access, credential_revision, config_guard =
-        match source with
-        | Protected_revision revision ->
-          let%map material = read_material t ~binding revision in
-          Material.access material, Some (M.Id.to_string revision), fun () -> Ok ()
-        | Environment_reference { name; configuration_revision } ->
-          (match t.environment with
-           | None -> Error Error.Binding_unavailable
-           | Some environment ->
-             let%bind resolved =
-               environment.resolve
-                 ~sw
-                 ~binding
-                 ~identity:(M.Active.identity active)
-                 ~name
-                 ~expected_configuration_revision:configuration_revision
-             in
-             if
-               (not
-                  (Option.equal
-                     M.Id.equal
-                     resolved.configuration_revision
-                     configuration_revision))
-               || not (Material.header_safe resolved.access)
-             then Error (Error.Model Stale_revision)
-             else (
-               let%map () = resolved.check_current () in
-               ( resolved.access
-               , Option.map resolved.configuration_revision ~f:M.Id.to_string
-               , resolved.check_current )))
-      in
-      let%bind () = ensure_current t ~binding ~expected_owner ~expected_epoch ~source in
-      let guard () =
-        let%bind () =
-          check_current t ~binding ~expected_owner ~expected_epoch ~source ()
+      match decision with
+      | `Renew renewal -> Ok (`Renew renewal)
+      | `Admit ->
+        let%bind active =
+          with_metadata t (fun registry ->
+            let%bind snapshot = M.find registry ~binding |> model in
+            Result.of_option (M.Snapshot.active snapshot) ~error:(Error.Model Not_active))
         in
-        config_guard ()
-      in
-      keep_fence := true;
-      Ok
-        { Admission.owner = expected_owner
-        ; identity = M.Active.identity active
-        ; epoch = expected_epoch
-        ; credential_revision
-        ; access
-        ; check_current = guard
-        })
+        let%bind () =
+          match M.Active.grant active with
+          | None -> Ok ()
+          | Some grant when grant_available t grant -> Ok ()
+          | Some _ -> Error Error.Renewal_rejected
+        in
+        let source = M.Active.source active in
+        let%bind access, credential_revision, config_guard =
+          match source with
+          | Protected_revision revision ->
+            let%map material = read_material t ~binding revision in
+            Material.access material, Some (M.Id.to_string revision), fun () -> Ok ()
+          | Environment_reference { name; configuration_revision } ->
+            (match t.environment with
+             | None -> Error Error.Binding_unavailable
+             | Some environment ->
+               let%bind resolved =
+                 environment.resolve
+                   ~sw
+                   ~binding
+                   ~identity:(M.Active.identity active)
+                   ~name
+                   ~expected_configuration_revision:configuration_revision
+               in
+               if
+                 (not
+                    (Option.equal
+                       M.Id.equal
+                       resolved.configuration_revision
+                       configuration_revision))
+                 || not (Material.header_safe resolved.access)
+               then Error (Error.Model Stale_revision)
+               else (
+                 let%map () = resolved.check_current () in
+                 ( resolved.access
+                 , Option.map resolved.configuration_revision ~f:M.Id.to_string
+                 , resolved.check_current )))
+        in
+        let%bind () = ensure_current t ~binding ~expected_owner ~expected_epoch ~source in
+        let guard () =
+          let%bind () =
+            check_current t ~binding ~expected_owner ~expected_epoch ~source ()
+          in
+          config_guard ()
+        in
+        keep_fence := true;
+        Ok
+          (`Admitted
+              { Admission.owner = expected_owner
+              ; identity = M.Active.identity active
+              ; epoch = expected_epoch
+              ; credential_revision
+              ; access
+              ; check_current = guard
+              }))
+;;
+
+let admit t ~sw ~clock ~maximum_wait ~binding ~expected_owner ~expected_epoch ~renewal =
+  let open Result.Let_syntax in
+  let%bind () = maintain_opportunistically t ~binding in
+  let attempt renewal =
+    admit_once
+      t
+      ~sw
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~expected_owner
+      ~expected_epoch
+      ~renewal
+  in
+  let%bind first = attempt renewal in
+  match first with
+  | `Admitted admission -> Ok admission
+  | `Renew renewal ->
+    Option.iter t.before_renewal ~f:(fun hook -> hook ());
+    (* admit_once released its shared fence. Maintenance can now drain G without
+       a lock upgrade; after exactly one renewal, admit from fresh metadata and
+       the original captured owner/epoch. No external exchange retry is allowed. *)
+    let%bind () =
+      refresh
+        ~expected_authority:(expected_owner, expected_epoch)
+        t
+        ~sw
+        ~clock
+        ~maximum_wait
+        ~binding
+        ~renewal
+    in
+    let%bind second = attempt None in
+    (match second with
+     | `Admitted admission -> Ok admission
+     | `Renew _ -> Error Error.Renewal_rejected)
 ;;
 
 let status_of_registry t registry ~binding =
@@ -1217,60 +1405,6 @@ let synchronize t =
     |> Result.map ~f:List.rev)
 ;;
 
-let cleanup_owned t ~binding =
-  let open Result.Let_syntax in
-  let%bind retired =
-    with_metadata t (fun registry -> M.retired registry ~binding |> model)
-  in
-  List.fold retired ~init:(Ok ()) ~f:(fun result item ->
-    let%bind () = result in
-    match M.Cleanup.deletion item with
-    | Quarantined -> Ok ()
-    | Confirmed_removed -> Ok ()
-    | Pending | Removed_durability_unknown ->
-      with_metadata t (fun registry ->
-        let operation = M.Cleanup.owned_by item in
-        let id = M.Cleanup.revision item in
-        (* The pure check rejects any globally active/staged reference. G/R and M
-           stay held through this bounded native cleanup, never external I/O. *)
-        let%bind _ =
-          M.record_cleanup
-            registry
-            ~binding
-            ~operation
-            ~revision:id
-            ~deletion:(M.Cleanup.deletion item)
-          |> model
-        in
-        let record deletion =
-          let%bind next =
-            M.record_cleanup registry ~binding ~operation ~revision:id ~deletion |> model
-          in
-          publish t next
-        in
-        let confirm_removed () =
-          let%bind revision = revision id in
-          let%bind () = Secrets.confirm_absent t.secrets ~revision |> secret in
-          record Confirmed_removed
-        in
-        match read_material t ~binding id with
-        | Error Missing_secret -> confirm_removed ()
-        | Error Revision_quarantined -> record Quarantined
-        | Error (Secret_store Corrupt) -> record Quarantined
-        | Error error -> Error error
-        | Ok _ ->
-          let%bind revision = revision id in
-          (match Secrets.delete t.secrets ~revision with
-           | Ok () -> record Confirmed_removed
-           | Error error ->
-             (match Secrets.Error.publication error with
-              | Some Published_durability_unknown -> record Removed_durability_unknown
-              | Some Not_published | None ->
-                (match Secrets.Error.code error with
-                 | Missing -> confirm_removed ()
-                 | _ -> Error (Error.Secret_store (Secrets.Error.code error)))))))
-;;
-
 let reconcile_owned t ~binding ~expected_operation =
   Eio.Switch.run (fun sw ->
     let open Result.Let_syntax in
@@ -1384,6 +1518,7 @@ type operation_mode =
 [@@deriving sexp_of]
 
 let disable_with_operation
+      ?(authorize_disable = fun () -> true)
       t
       ~sw:_
       ~clock
@@ -1416,6 +1551,9 @@ let disable_with_operation
          | Reconcile -> Error Error.Binding_unavailable
          | Fresh ->
            let%bind snapshot = M.find registry ~binding |> model in
+           let%bind () =
+             if authorize_disable () then Ok () else Error Error.Authorization_denied
+           in
            let%bind next = M.disable registry ~binding ~operation ~reason |> model in
            let%map () = publish t next in
            `Fresh (M.Snapshot.active snapshot))
@@ -1484,8 +1622,9 @@ let disable_with_operation
       | Error error -> Error error)
 ;;
 
-let disable t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason =
+let disable ?authorize_disable t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason =
   disable_with_operation
+    ?authorize_disable
     t
     ~sw
     ~clock
@@ -1566,6 +1705,7 @@ let admit t ~sw ~clock ~maximum_wait ~binding ~expected_owner ~expected_epoch ~r
 let disable_with_operation_impl = disable_with_operation
 
 let disable_with_operation
+      ?authorize_disable
       t
       ~sw
       ~clock
@@ -1578,6 +1718,7 @@ let disable_with_operation
   =
   with_call t (fun () ->
     disable_with_operation_impl
+      ?authorize_disable
       t
       ~sw
       ~clock
@@ -1591,9 +1732,17 @@ let disable_with_operation
 
 let disable_impl = disable
 
-let disable t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason =
+let disable ?authorize_disable t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason =
   with_call t (fun () ->
-    disable_impl t ~sw ~clock ~maximum_wait ~binding ~revocation ~reason)
+    disable_impl
+      ?authorize_disable
+      t
+      ~sw
+      ~clock
+      ~maximum_wait
+      ~binding
+      ~revocation
+      ~reason)
 ;;
 
 let reconcile_impl = reconcile
@@ -1622,4 +1771,5 @@ let incarnation t =
 
 module For_testing = struct
   let set_after_publication_hook t hook = t.after_publication <- hook
+  let set_before_renewal_hook t hook = t.before_renewal <- hook
 end

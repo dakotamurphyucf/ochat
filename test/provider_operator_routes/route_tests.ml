@@ -319,3 +319,39 @@ let%expect_test "actual route completion publishes exact identity and logout fen
     Stdio
     verified exact account published; logout advances epoch and disables; original login never replays |}]
 ;;
+
+let completion_contention route =
+  F.with_fixture route (fun fixture ->
+    let owner = F.connect fixture Owner in
+    setup owner;
+    let flow = begin_flow owner in
+    F.await_poll fixture;
+    let lease = F.hold_owner_records fixture in
+    F.release_poll fixture;
+    (* Hold through terminal admission exhaustion and worker release. The
+       status projection must use the exact original result/receipt, never
+       presume Pending is still live or perform another exchange. *)
+    F.await_worker_finished fixture flow;
+    Private_storage.Lock.release lease;
+    let terminal = F.wait_terminal fixture owner flow in
+    assert (DTO.Flow_result.equal_phase terminal.phase Completed);
+    assert (F.login_starts fixture = 1 && F.exchanges fixture = 1);
+    same_flow flow (begin_flow owner);
+    assert (F.exchanges fixture = 1);
+    F.Client.close owner);
+  print_s [%sexp (route : F.route)];
+  print_endline
+    "terminal owner-lock contention reports original completion without exchange replay"
+;;
+
+let%expect_test "ended login remains truthful after terminal metadata admission exhausts" =
+  List.iter [ F.Http; Socket; Stdio ] ~f:completion_contention;
+  [%expect
+    {|
+    Http
+    terminal owner-lock contention reports original completion without exchange replay
+    Socket
+    terminal owner-lock contention reports original completion without exchange replay
+    Stdio
+    terminal owner-lock contention reports original completion without exchange replay |}]
+;;

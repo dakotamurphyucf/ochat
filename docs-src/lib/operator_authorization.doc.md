@@ -37,6 +37,10 @@ and checks it again at the registry’s final locked commit admission, after sta
 and metadata reload. Authentication at flow start does not authorize a new
 commit after the original grant expires. Filesystem publication already admitted
 by that check can finish after expiry; the guard cannot yield.
+Fresh selection and logout also recheck the captured proof under their final
+metadata lease. A request that waited past expiry cannot publish a new selection
+or tombstone. Reading an already committed original operation remains
+reconciliation, so it cannot repeat that selection or disable a later login.
 Callback guards must not yield or perform authentication lookup or I/O; the proof
 is not a new credential or a lower credential-registry authorization mechanism.
 

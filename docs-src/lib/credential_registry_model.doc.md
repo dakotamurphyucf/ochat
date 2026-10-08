@@ -17,7 +17,11 @@ existing reservations rather than requiring extra secret capacity.
 Candidate publication uses expected epoch, revision and operation identity.
 Refresh publication preserves the authorization epoch, changes the immutable
 revision, and requires the original rotation intent. Local disable advances the
-epoch and invalidates both publication paths. Persisted removal drain is monotonic;
+epoch and invalidates both publication paths. `reject_refresh` validates the same
+original intent, epoch and protected revision before an authoritative
+renewal rejection can disable the binding; a stale network result leaves a
+replacement unchanged and does not assert that the exchange was unsent.
+Persisted removal drain is monotonic;
 restart cannot infer completion. Quarantined foreign revisions remain explicit
 and are never treated as eligible owned cleanup.
 

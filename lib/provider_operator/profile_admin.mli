@@ -12,6 +12,7 @@ module Error : sig
     | Missing_setup
     | Busy
     | Publication_uncertain
+    | Authorization_denied
     | Storage of Private_storage.Error.t
     | Registry of Credential_registry.Error.t
     | Bridge of Bridge.Error.t
@@ -116,9 +117,13 @@ val selection : t -> (DTO.Selection_result.t, Error.t) Result.t
     Reconciliation returns the original result within the 64-proof window,
     independent of current selection. Outside it Publication_uncertain forbids
     replay; unresolved command intents are not erased. Legacy version1 metadata
-    remains readable but does not fabricate exact request evidence. *)
+    remains readable but does not fabricate exact request evidence.
+    The non-yielding authorize_commit guard runs under the selection lease
+    after fresh read/encoding and immediately before a fresh mutation. Existing
+    exact operation proofs remain reconciliation, not another selection effect. *)
 val select
-  :  t
+  :  ?authorize_commit:(unit -> bool)
+  -> t
   -> principal:P.Id.Principal.t
   -> operation:M.Id.t
   -> reconcile:bool

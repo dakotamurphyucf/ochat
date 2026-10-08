@@ -178,3 +178,58 @@ let%expect_test
       "original intent and finite receipt survive restart; changed args refused");
   [%expect {| original intent and finite receipt survive restart; changed args refused |}]
 ;;
+
+let%expect_test
+    "terminal phase waits for owner metadata admission without replaying transition"
+  =
+  with_directory (fun env sw directory ->
+    let records =
+      Records.create directory ~incarnation:(id "wait_incarnation") ~maximum_records:4
+      |> ok
+    in
+    let flow =
+      { DTO.Flow_ref.server_id = P.Id.Server.create ()
+      ; profile = DTO.Profile_id.of_string "codex" |> ok
+      ; flow_id = DTO.Flow_id.of_string "wait_operation" |> ok
+      ; expires_at = P.Timestamp.of_string "2030-01-01T00:00:00Z" |> ok
+      }
+    in
+    ignore
+      (Records.begin_
+         records
+         (Records.Record.create
+            ~incarnation:(id "wait_incarnation")
+            ~owner:(P.Id.Principal.create ())
+            ~operation:(id "wait_operation")
+            ~binding:(id "codex")
+            ~key:(P.Idempotency_key.of_string "wait-login" |> ok)
+            ~mode:Device
+            ~flow)
+       |> ok
+       : Records.Record.t);
+    let lease =
+      S.Lock.acquire
+        directory
+        (S.Name.create "operator-owner-records.lock" |> ok)
+        ~sw
+        ~mode:Exclusive
+      |> ok
+    in
+    let result, resolved = Eio.Promise.create () in
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Promise.resolve
+        resolved
+        (Records.set_phase_wait
+           records
+           flow
+           ~phase:Completed
+           ~clock:(Eio.Stdenv.mono_clock env)
+           ~maximum_wait:(Time_ns.Span.of_sec 1.)));
+    Eio.Fiber.yield ();
+    assert (not (Eio.Promise.is_resolved result));
+    S.Lock.release lease;
+    let updated = Eio.Promise.await result |> ok in
+    assert (DTO.Flow_result.equal_phase (Records.Record.result updated).phase Completed));
+  print_endline "terminal phase waits for the lease and records one monotone result";
+  [%expect {| terminal phase waits for the lease and records one monotone result |}]
+;;

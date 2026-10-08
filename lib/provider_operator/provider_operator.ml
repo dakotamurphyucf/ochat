@@ -69,6 +69,7 @@ type t =
   ; limits : DTO.Limits.t
   ; environment : Environment_source.t list
   ; live : live String.Table.t
+  ; unpublished_terminal : (Owner_records.Record.t * DTO.Flow_result.phase) String.Table.t
   ; mutable closed : bool
   }
 
@@ -105,6 +106,7 @@ let profile_error = function
   | Profile_admin.Error.Missing_profile -> DTO.Error.Missing_profile
   | Busy -> Busy
   | Publication_uncertain -> Submission_uncertain
+  | Authorization_denied -> Denied
   | Invalid_template | Conflict -> Invalid_request
   | Registry error -> registry_error error
   | Bridge error -> bridge_error error
@@ -205,6 +207,34 @@ let update_phase t flow phase =
   Owner_records.set_phase t.records flow ~phase
   |> Result.map_error ~f:owner_error
   |> Result.map ~f:Owner_records.Record.result
+;;
+
+let record_terminal t record phase =
+  let flow = (Owner_records.Record.result record).flow in
+  let key = flow_key flow in
+  (* Retain the exact computed outcome if bounded metadata admission or native
+     publication fails. Status can truthfully project it after the worker joins;
+     restart recovery still requires the original registry receipt. *)
+  let phase =
+    match Hashtbl.find t.unpublished_terminal key with
+    | Some (_, original_phase) -> original_phase
+    | None ->
+      Hashtbl.set t.unpublished_terminal ~key ~data:(record, phase);
+      phase
+  in
+  let result =
+    Owner_records.set_phase_wait
+      t.records
+      flow
+      ~phase
+      ~clock:t.clock
+      ~maximum_wait:t.maximum_wait
+    |> Result.map_error ~f:owner_error
+  in
+  (match result with
+   | Ok _ -> Hashtbl.remove t.unpublished_terminal key
+   | Error _ -> ());
+  result
 ;;
 
 let private_challenge ~(mode : DTO.Login_mode.t) challenge =
@@ -321,6 +351,7 @@ let create
     ; limits
     ; environment
     ; live = String.Table.create ()
+    ; unpublished_terminal = String.Table.create ()
     ; closed = false
     }
   in
@@ -578,20 +609,21 @@ let begin_login t ~actor (request : DTO.Login_request.t) =
                   | Error error -> Failed error)
               in
               ignore
-                (update_phase t flow phase : (DTO.Flow_result.t, DTO.Error.t) Result.t);
+                (record_terminal t record phase
+                 : (Owner_records.Record.t, DTO.Error.t) Result.t);
               ready_once (Result.map result ~f:(fun () -> flow))
             with
             | Eio.Cancel.Cancelled _ as ex ->
               Eio.Cancel.protect (fun () ->
                 ignore
-                  (update_phase t flow Interrupted
-                   : (DTO.Flow_result.t, DTO.Error.t) Result.t));
+                  (record_terminal t record Interrupted
+                   : (Owner_records.Record.t, DTO.Error.t) Result.t));
               raise ex
             | _ ->
               Eio.Cancel.protect (fun () ->
                 ignore
-                  (update_phase t flow (Failed Submission_uncertain)
-                   : (DTO.Flow_result.t, DTO.Error.t) Result.t))));
+                  (record_terminal t record (Failed Submission_uncertain)
+                   : (Owner_records.Record.t, DTO.Error.t) Result.t))));
       let%bind ready_result = Eio.Promise.await ready in
       finish_intent t intent (P.Command_receipt.Provider_login ready_result) ready_result)
 ;;
@@ -662,6 +694,51 @@ let configuration_result t profile operation =
   ; auth_epoch = C.Host_snapshot.epoch snapshot
   ; revision
   }
+;;
+
+let project_flow t record =
+  let result = Owner_records.Record.result record in
+  match result.phase with
+  | Completed | Failed _ | Cancelled | Expired -> Ok result
+  | Pending | Interrupted ->
+    let open Result.Let_syntax in
+    let%bind alive =
+      Owner_records.is_live t.records result.flow |> Result.map_error ~f:owner_error
+    in
+    if alive
+    then Ok result
+    else (
+      match Hashtbl.find t.unpublished_terminal (flow_key result.flow) with
+      | Some (original, phase)
+        when M.Id.equal
+               (Owner_records.Record.operation original)
+               (Owner_records.Record.operation record)
+             && P.Id.Principal.equal
+                  (Owner_records.Record.owner original)
+                  (Owner_records.Record.owner record) -> Ok { result with phase }
+      | Some _ -> Error DTO.Error.Store_unavailable
+      | None ->
+        let%bind receipt =
+          C.reconcile_operation
+            t.registry
+            ~binding:(Owner_records.Record.binding record)
+            ~operation:(Owner_records.Record.operation record)
+          |> Result.map_error ~f:registry_error
+        in
+        (match receipt with
+         | M.Operation.Committed ->
+           let%bind template =
+             Profile_admin.find_template t.profiles result.flow.profile
+             |> Result.map_error ~f:profile_error
+           in
+           let%map () =
+             publish_original
+               t
+               ~template
+               ~operation:(Owner_records.Record.operation record)
+           in
+           { result with phase = Completed }
+         | Pending | Rejected | Unavailable -> Ok { result with phase = Interrupted }))
 ;;
 
 let status t ~actor (request : DTO.Status_request.t) =
@@ -743,7 +820,7 @@ let status t ~actor (request : DTO.Status_request.t) =
     |> Result.all
   in
   let%bind records = Owner_records.list t.records |> Result.map_error ~f:owner_error in
-  let flows =
+  let%bind flows =
     List.filter_map records ~f:(fun record ->
       let result = Owner_records.Record.result record in
       if
@@ -755,8 +832,10 @@ let status t ~actor (request : DTO.Status_request.t) =
         match request.profile with
         | None -> true
         | Some profile -> DTO.Profile_id.equal profile result.flow.profile
-      then Some result
+      then Some record
       else None)
+    |> List.map ~f:(project_flow t)
+    |> Result.all
   in
   let%map selection =
     Profile_admin.selection t.profiles |> Result.map_error ~f:profile_error
@@ -776,6 +855,8 @@ let select_impl t ~actor ~operation ~reconcile (request : DTO.Select_request.t) 
   let open Result.Let_syntax in
   let%bind () = check t actor Select request.profile in
   Profile_admin.select
+    ~authorize_commit:(fun () ->
+      (not t.closed) && authorized t actor ~operation:Select ~profile:request.profile)
     t.profiles
     ~principal:(Actor.principal actor).id
     ~operation
@@ -838,6 +919,8 @@ let logout_impl t ~actor ~sw ~operation ~mode (request : DTO.Logout_request.t) =
      while local workers join or foreign admission drain remains pending. *)
   let%bind removal =
     C.disable_with_operation
+      ~authorize_disable:(fun () ->
+        (not t.closed) && authorized t actor ~operation:Logout ~profile:request.profile)
       t.registry
       ~sw
       ~clock:t.clock

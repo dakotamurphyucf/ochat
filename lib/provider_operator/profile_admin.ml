@@ -14,6 +14,7 @@ module Error = struct
     | Missing_setup
     | Busy
     | Publication_uncertain
+    | Authorization_denied
     | Storage of S.Error.t
     | Registry of C.Error.t
     | Bridge of Bridge.Error.t
@@ -451,7 +452,14 @@ let publish_committed t ~template ~operation =
   synchronize t
 ;;
 
-let select t ~principal ~operation ~reconcile (request : DTO.Select_request.t) =
+let select
+      ?(authorize_commit = fun () -> true)
+      t
+      ~principal
+      ~operation
+      ~reconcile
+      (request : DTO.Select_request.t)
+  =
   locked t (fun () ->
     let open Result.Let_syntax in
     let%bind _ = find_template t request.profile in
@@ -479,6 +487,9 @@ let select t ~principal ~operation ~reconcile (request : DTO.Select_request.t) =
              ~templates:t.templates
              ~selection:updated
              ~proofs)
+      in
+      let%bind () =
+        if authorize_commit () then Ok () else Error Error.Authorization_denied
       in
       let%map () =
         S.Directory.replace_metadata t.directory metadata_name encoded

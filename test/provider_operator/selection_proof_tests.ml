@@ -252,7 +252,59 @@ let%expect_test
                  ~operation:(id "operation-a")
                  ~reconcile:true
                  b));
-          assert (!next = 2))));
+          assert (!next = 2);
+          let entered, signal_entered = Eio.Promise.create () in
+          let resume, signal_resume = Eio.Promise.create () in
+          let current_authority = ref true in
+          let delayed =
+            A.open_
+              directory
+              ~incarnation:(id "incarnation")
+              ~registry
+              ~templates:[ template ]
+              ~publish:(fun _ -> Ok ())
+              ~new_revision:(fun () ->
+                Eio.Promise.resolve signal_entered ();
+                Eio.Promise.await resume;
+                revision "denied-publication")
+            |> ok
+          in
+          let result, finished = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve
+              finished
+              (A.select
+                 ~authorize_commit:(fun () -> !current_authority)
+                 delayed
+                 ~principal
+                 ~operation:(id "denied-select")
+                 ~reconcile:false
+                 (request 2 after_b.revision)));
+          Eio.Promise.await entered;
+          current_authority := false;
+          Eio.Promise.resolve signal_resume ();
+          (match Eio.Promise.await result with
+           | Error Authorization_denied -> ()
+           | _ -> failwith "expired actor published fresh selection");
+          assert (
+            DTO.Revision.equal (A.selection reopened |> ok).revision after_b.revision);
+          let original_after_expiry =
+            A.select
+              ~authorize_commit:(fun () -> false)
+              reopened
+              ~principal
+              ~operation:(id "operation-a")
+              ~reconcile:true
+              a
+            |> ok
+          in
+          assert (DTO.Revision.equal original_after_expiry.revision after_a.revision))));
   print_endline "A original result recovered after B and reopen, without selection replay";
-  [%expect {| A original result recovered after B and reopen, without selection replay |}]
+  print_endline
+    "authority lost under selection lease blocks fresh write; original committed proof \
+     still reconciles";
+  [%expect
+    {|
+    A original result recovered after B and reopen, without selection replay
+    authority lost under selection lease blocks fresh write; original committed proof still reconciles |}]
 ;;

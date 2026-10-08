@@ -1777,6 +1777,13 @@ let disable t ~binding:id ~operation ~reason =
        Operation.Committed)
 ;;
 
+let reject_refresh t ~binding:id ~expected ~operation =
+  let open Result.Let_syntax in
+  let%bind current = binding t id in
+  let%bind () = check_refresh current expected in
+  disable t ~binding:id ~operation ~reason:Renewal_rejected
+;;
+
 let record_cleanup t ~binding:id ~operation ~revision ~deletion =
   let open Result.Let_syntax in
   let%bind current = binding t id in

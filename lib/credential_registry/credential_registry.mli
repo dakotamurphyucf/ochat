@@ -297,6 +297,10 @@ module Admission : sig
 end
 
 (** SharedG retained in attempt switch; optionalR renews exact existing binding.
+    Retired revisions are maintained under exclusive G/R before renewal; an
+    expired admission releases its shared G before that drain, renews at most
+    once, then reacquires and validates the original owner/epoch. Bounded drain
+    failure never repeats external exchange or switches to a replacement login.
     Never login. expected owner/epoch comes from62 captured host registry identity.
     Idle WS must retain no Admission; every request admits afresh.
     Environment source requires explicit port, exact identity/config revision,
@@ -352,9 +356,14 @@ type removal =
 
 (** DurableM tombstone first, releaseM, then exclusiveG→R→M reconciliation.
     Timeout is a typed pending outcome; stale staged pointers cannot publish.
-    Environment removal disables only this binding, not ambient process bytes. *)
+    Environment removal disables only this binding, not ambient process bytes.
+    Optional authorize_disable is a trusted non-yielding guard after final M
+    admission/reload and immediately before a fresh tombstone transition. Denial
+    changes no metadata/epoch. Already-committed original tombstone cleanup can
+    reconcile after its original mutation was admitted. *)
 val disable
-  :  t
+  :  ?authorize_disable:(unit -> bool)
+  -> t
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.Mono.t
   -> maximum_wait:Time_ns.Span.t
@@ -375,7 +384,8 @@ type operation_mode =
 [@@deriving sexp_of]
 
 val disable_with_operation
-  :  t
+  :  ?authorize_disable:(unit -> bool)
+  -> t
   -> sw:Eio.Switch.t
   -> clock:_ Eio.Time.Mono.t
   -> maximum_wait:Time_ns.Span.t
@@ -449,4 +459,8 @@ module For_testing : sig
       replacement AND directory sync succeed, before cache acknowledgment. This
       models lost acknowledgment; it does not simulate directory-sync failure. *)
   val set_after_publication_hook : t -> (unit -> unit) option -> unit
+
+  (** Instance-local seam after an expired admission releases G and before
+      bounded renewal maintenance/reacquisition. No hook is installed by default. *)
+  val set_before_renewal_hook : t -> (unit -> unit) option -> unit
 end

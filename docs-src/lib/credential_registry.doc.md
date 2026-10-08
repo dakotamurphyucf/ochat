@@ -57,12 +57,27 @@ operator-visible condition. Logical deletion is not forensic erasure.
 Each registry instance belongs to one Eio domain; sharing its mutable cache or
 operation list across OCaml domains is unsupported. Independent instances and
 processes coordinate through native locks. The stable global metadata lock M is
-held only for bounded local state work. Each
-binding has a shared attempt fence G and exclusive rotation lock R. Dispatch
-uses G, then R when renewal is needed, then short M transactions. Background
-refresh uses R and short M transactions. External calls never hold M, and no M
-transaction waits for G or R. Different bindings do not share a network lock.
+held only for bounded local state work. Each binding has a shared attempt fence G
+and exclusive rotation lock R. Dispatch holds shared G with short M transactions.
+An expired admission releases G before renewal: inactive maintenance takes
+exclusive G then R with short M transactions, refresh takes R with short M
+transactions, and final attempt admission reacquires shared G. Background refresh
+uses the same maintenance followed by R and short M transactions. External calls
+never hold M, and no M transaction waits for G or R. Different bindings do not
+share a network lock.
 Kernel locks coordinate independent processes; a daemon mutex is insufficient.
+
+Successful rotation and replacement leave the prior immutable revision eligible
+for operation-owned cleanup. The registry attempts inactive maintenance before
+new candidate or attempt admission; contention preserves the old revision and
+healthy concurrent requests. Before renewal, bounded exclusive G/R admission
+must permit safe inactive cleanup, so repeated successful rotations do not fill
+the revision reservation window. An expired admission releases its failed shared
+G lease before this drain, rechecks its captured owner and epoch before external
+exchange, and reacquires a fresh shared lease afterward. It renews at most once;
+maintenance failure, replaced authority, or ambiguous exchange never causes an
+external retry. Every deletion still uses private ownership markers, global
+inactivity checks, and directory durability confirmation.
 
 Each registry owner explicitly selects metadata admission at open. Nonblocking
 admission reports Busy. Production hosts use a validated monotonic wait budget
@@ -95,7 +110,16 @@ Local disable first publishes a tombstone and advances the authorization epoch,
 then releases M before waiting for exclusive G, R and owned cleanup. Pending drain
 is persisted and survives restart. Missing runtime state never proves drain
 completion. Replacement activation waits for local drain and retired cleanup.
-A stale login or refresh cannot publish over the tombstone.
+A stale login or refresh cannot publish over the tombstone. Authoritative renewal
+rejection uses the model's `reject_refresh` transition, checking the exact original
+refresh operation, epoch and revision before disabling. A replacement published
+during exchange cannot be disabled by that older exchange's rejection.
+
+A host can supply the trusted non-yielding `authorize_disable` guard to
+`disable` or `disable_with_operation`. It runs after final metadata lease
+admission/reload and before a fresh tombstone transition. A denied guard leaves
+the working epoch and pointer intact. Original committed tombstone reconciliation
+finishes its admitted local cleanup without creating another disable effect.
 
 Remote revocation is optional and requires a qualified explicit port. No port
 means Not_requested, including the local-only Codex route. Its possibly-sent

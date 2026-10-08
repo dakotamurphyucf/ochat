@@ -63,6 +63,34 @@ bounded original-operation proofs: retrying selection A after selection B return
 A's original result without selecting A again. New fresh inference captures use
 the selected profile; an existing explicitly bound target keeps its profile.
 
+Terminal flow recording uses `Owner_records.set_phase_wait`: a validated
+monotonic budget admits the owner metadata lock before one transition, and never
+repeats an ambiguous native write. A status poll cannot permanently strand an
+ended login as pending. If terminal publication cannot finish, the live host
+retains the exact computed outcome; status can project that result once
+the worker lease is released. Restart recovery requires the original committed
+registry operation from a read-only receipt lookup before reporting completion;
+it can recover the in-memory profile mapping for that original publication.
+A missing worker alone is
+interrupted work, and never authorizes another exchange.
+
+Fresh logout and selection recheck the original actor under the final metadata
+lease immediately before their transition. Expiry during lock admission or
+selection preparation denies the fresh mutation. Filesystem publication already
+admitted by that check, and reconciliation of an already committed original
+operation, can finish afterward.
+
+The beta retains at most 128 durable login owner records and 1024 durable provider
+command intents per authority. Terminal rows remain available for exact owner
+and operation recovery; they are not automatically evicted. Exhaustion rejects
+new operations as `Busy` before acquisition or credential mutation and preserves
+existing inference and authority. Retrying cannot free retention capacity. Safe
+retention migration must preserve durable unavailable evidence for aged original
+keys, so an absent old row cannot authorize replay; resetting the credential
+store is not a routine capacity remedy. The separate selection proof window can
+age out a proof, which then reports publication uncertainty rather than selecting
+again. These retention limits are distinct from concurrent-flow limits.
+
 ## CLI workflow
 
 The main executable exposes the `provider` command group. Start with status,

@@ -362,6 +362,16 @@ val disable
   -> reason:Snapshot.disabled_reason
   -> (t, Error.t) result
 
+(** An authoritative rejection disables only the exact original refresh intent,
+    epoch and revision. A replaced/logout binding rejects the stale result and
+    remains unchanged; this does not claim the exchange was definitely unsent. *)
+val reject_refresh
+  :  t
+  -> binding:Id.t
+  -> expected:Expected.t
+  -> operation:Id.t
+  -> (t, Error.t) result
+
 (** Retired revisions must be explicitly operation-owned and inactive; never
     infer ownership by token inspection or delete active/unknown orphan items. *)
 val record_cleanup

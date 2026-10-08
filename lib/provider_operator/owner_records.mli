@@ -63,6 +63,18 @@ val set_phase
   -> phase:DTO.Flow_result.phase
   -> (Record.t, Error.t) Result.t
 
+(** Terminal publication may wait for the metadata lease for a strictly positive
+    monotonic budget of at most 60 seconds. Busy means admission exhausted; the
+    transition executes once after admission and never retries ambiguous writes.
+    Native work remains bounded and joined rather than falsely timed out. *)
+val set_phase_wait
+  :  t
+  -> DTO.Flow_ref.t
+  -> phase:DTO.Flow_result.phase
+  -> clock:_ Eio.Time.Mono.t
+  -> maximum_wait:Time_ns.Span.t
+  -> (Record.t, Error.t) Result.t
+
 (** Stable per-flow worker lease, separate from metadata lock. Acquire BEFORE
     record publication and retain until network/candidate cleanup is joined.
     Busy proves another local process still owns this acquisition. *)

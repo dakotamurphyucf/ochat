@@ -84,6 +84,7 @@ type t =
   ; expire_flow : unit -> unit
   ; clients : Client.t list ref
   ; runtime : Runtime.t option ref
+  ; directory : Private_storage.Directory.t
   }
 
 let wire_command command =
@@ -255,6 +256,37 @@ let await_poll t =
 ;;
 
 let release_poll t = Eio.Promise.resolve t.release ()
+
+let hold_owner_records t =
+  Private_storage.Lock.acquire
+    t.directory
+    (Private_storage.Name.create "operator-owner-records.lock" |> storage)
+    ~sw:t.sw
+    ~mode:Exclusive
+  |> storage
+;;
+
+let await_worker_finished t flow =
+  let records =
+    Provider_operator.Owner_records.create
+      t.directory
+      ~incarnation:(id "unused_probe_incarnation")
+      ~maximum_records:128
+    |> function
+    | Ok records -> records
+    | Error error -> raise_s [%sexp (error : Provider_operator.Owner_records.Error.t)]
+  in
+  let rec wait () =
+    match Provider_operator.Owner_records.claim records flow ~sw:t.sw with
+    | Error Busy ->
+      Eio.Fiber.yield ();
+      wait ()
+    | Error _ -> failwith "worker lease probe failed"
+    | Ok lease -> Private_storage.Lock.release lease
+  in
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock t.env) 5. wait
+;;
+
 let expire_owner t = t.now := t.expires_at
 let expire_flow t = t.expire_flow ()
 let poll_exits t = !(t.exited)
@@ -712,6 +744,13 @@ let with_fixture ?flow_seconds route f =
                          | `Tcp (_, port) -> Some port
                          | `Unix _ -> assert false)
                     in
+                    let directory =
+                      Private_storage.Directory.open_or_create
+                        ~sw
+                        ~anchor
+                        ~components:[ Private_storage.Name.create "authority" |> storage ]
+                      |> storage
+                    in
                     let fixture =
                       { env
                       ; sw
@@ -731,6 +770,7 @@ let with_fixture ?flow_seconds route f =
                       ; expire_flow
                       ; clients = ref []
                       ; runtime
+                      ; directory
                       }
                     in
                     Exn.protect
