@@ -53,12 +53,18 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
+    [ [ "credential_registry_model/" ], "../lib/credential_registry_model.doc.md"
+    ; [ "credential_registry/" ], "../lib/credential_registry.doc.md"
+    ; ( [ "private_storage/"; "provider_secret_store/" ]
+      , "../lib/provider_secret_store.doc.md" )
+    ; ( [ "inference_ledger"; "inference_query"; "inference_views"; "graph_tracking" ]
       , "../lib/inference-observations.md" )
     ; ( [ "inference_runtime/"
         ; "inference_client/"
         ; "inference_host/"
         ; "openai/inference_"
+        ; "openai/responses_driver"
+        ; "openai/responses_websocket"
         ; "neutral_turn"
         ; "inference_config"
         ; "fork_history"
@@ -169,6 +175,10 @@ let module_rows env root =
          ; "openai/inference_"
          ; "session_store"
          ; "source_loader"
+         ; "private_storage/"
+         ; "provider_secret_store/"
+         ; "credential_registry_model/"
+         ; "credential_registry/"
          ]
          ~f:(fun substring -> String.is_substring file ~substring))
   |> List.map ~f:(fun file ->

@@ -61,6 +61,25 @@ module Setting : sig
   val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Error.t) Result.t
 end
 
+(** Nonsecret credential identity. Method labels belong to the selected adapter;
+    they distinguish billing/auth modes, never grant access. Reference labels name
+    host credentials, never token bytes. Unknown JSON members are preserved. *)
+module Auth_binding : sig
+  type t
+
+  val create
+    :  method_:string
+    -> credential_reference:string
+    -> limits:Document_schema.Limits.t
+    -> (t, Error.t) Result.t
+
+  val method_ : t -> string
+  val credential_reference : t -> string
+  val equal : t -> t -> bool
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, Error.t) Result.t
+end
+
 module Target : sig
   type t
 
@@ -80,6 +99,18 @@ module Target : sig
     -> endpoint:string
     -> model:string
     -> settings:Setting.t list
+    -> limits:Document_schema.Limits.t
+    -> (t, Error.t) Result.t
+
+  (** Absent means historical/unavailable; Null explicitly records no binding.
+      Neither permits dynamic profile resolution. Concrete values capture the
+      selected method and credential reference. Edits preserve all unknown fields;
+      callers must authorize identity edits and persist Selection.change. *)
+  val auth_binding : t -> Auth_binding.t Presence.t
+
+  val with_auth_binding
+    :  t
+    -> binding:Auth_binding.t Presence.t
     -> limits:Document_schema.Limits.t
     -> (t, Error.t) Result.t
 

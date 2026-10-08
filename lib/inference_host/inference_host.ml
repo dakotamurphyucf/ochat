@@ -1,3 +1,6 @@
+module Provider_profiles = Provider_profiles
+module Credential_bridge = Credential_bridge
+module Provider_configuration = Provider_configuration
 open! Core
 module R = Inference.Request
 module D = Openai.Responses_driver
@@ -5,14 +8,26 @@ module Runtime = Inference_runtime
 module A = Openai.Inference_adapter
 module P = History_entry.Payload.Presence
 
+module Backend = struct
+  type t =
+    { capture :
+        current:R.Target.t option
+        -> model:string
+        -> settings:D.Setting.t list
+        -> (R.Target.t, Runtime.Preparation_error.t) Result.t
+    ; resolve : Runtime.resolver
+    ; with_response_limit :
+        max_body_bytes:int -> (t, Runtime.Preparation_error.t) Result.t
+    }
+
+  let create ~capture ~resolve ~with_response_limit =
+    { capture; resolve; with_response_limit }
+  ;;
+end
+
 type t =
-  { driver : D.t
-  ; auth : D.Auth.resolver
-  ; limits : Runtime.Limits.t
-  ; profile : D.Profile.t
-  ; profile_revision : string option
+  { backend : Backend.t
   ; default_model : string
-  ; adapter : Runtime.Adapter.t
   ; identity : Chat_response.Neutral_turn.Identity.t
   }
 
@@ -74,8 +89,55 @@ let make_identity namespace =
       }
 ;;
 
-let create driver ~profile ~profile_revision ~auth ~default_model ~namespace ~limits =
+let create_with_backend backend ~default_model ~namespace =
   let open Result.Let_syntax in
+  let%bind () =
+    if String.is_empty default_model || not (Stdlib.String.is_valid_utf_8 default_model)
+    then Error Runtime.Preparation_error.Invalid_preparation
+    else Ok ()
+  in
+  let%map identity = make_identity namespace in
+  { backend; default_model; identity }
+;;
+
+let create
+      ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
+      driver
+      ~profile
+      ~profile_revision
+      ~auth
+      ~default_model
+      ~namespace
+      ~limits
+  =
+  let open Result.Let_syntax in
+  let rec backend driver =
+    let%map adapter =
+      A.create driver ~profile ~profile_revision ~auth:(A.Auth_source.Static auth) ~limits
+    in
+    let resolve target =
+      Runtime.Context.create adapter ~target
+      |> Result.map ~f:(fun context ->
+        Runtime.Context.with_transport_policy context transport_policy)
+    in
+    Backend.create
+      ~capture:(fun ~current ~model ~settings ->
+        let%bind () =
+          match current with
+          | None -> Ok ()
+          | Some target -> Result.map (resolve target) ~f:(fun _ -> ())
+        in
+        A.capture_target
+          profile
+          ~profile_revision
+          ~model
+          ~settings
+          ~limits:document_limits)
+      ~resolve
+      ~with_response_limit:(fun ~max_body_bytes ->
+        let%bind driver = D.with_response_limit driver ~max_body_bytes |> invalid in
+        backend driver)
+  in
   let%bind _ =
     A.capture_target
       profile
@@ -84,26 +146,17 @@ let create driver ~profile ~profile_revision ~auth ~default_model ~namespace ~li
       ~settings:[]
       ~limits:document_limits
   in
-  let%bind identity = make_identity namespace in
-  let%map adapter = A.create driver ~profile ~profile_revision ~auth ~limits in
-  { driver; auth; limits; profile; profile_revision; default_model; adapter; identity }
+  let%bind backend = backend driver in
+  create_with_backend backend ~default_model ~namespace
 ;;
 
 let with_response_limit t ~max_body_bytes =
   let open Result.Let_syntax in
-  let%bind driver = D.with_response_limit t.driver ~max_body_bytes |> invalid in
-  let%map adapter =
-    A.create
-      driver
-      ~profile:t.profile
-      ~profile_revision:t.profile_revision
-      ~auth:t.auth
-      ~limits:t.limits
-  in
-  { t with driver; adapter }
+  let%map backend = t.backend.with_response_limit ~max_body_bytes in
+  { t with backend }
 ;;
 
-let capture_config t config =
+let capture_config_using t ~current config =
   let open Result.Let_syntax in
   let%bind settings =
     Chat_response.Inference_config.settings config ~limits:document_limits
@@ -120,24 +173,37 @@ let capture_config t config =
       |> Result.map_error ~f:(fun _ -> Runtime.Preparation_error.Unsupported_setting))
     |> Result.all
   in
-  A.capture_target
-    t.profile
-    ~profile_revision:t.profile_revision
+  t.backend.capture
+    ~current
     ~model:(Option.value config.model ~default:t.default_model)
     ~settings
-    ~limits:document_limits
 ;;
+
+let capture_config t config = capture_config_using t ~current:None config
 
 let override_config current config =
   Chat_response.Inference_config.apply_overrides current config ~limits:document_limits
 ;;
 
-let resolve t target = Runtime.Context.create t.adapter ~target
+let resolve t target = t.backend.resolve target
 
 let recapture_config t ~current config =
   let open Result.Let_syntax in
   let%bind _ = resolve t current in
-  let%bind captured = capture_config t config in
+  let%bind captured = capture_config_using t ~current:(Some current) config in
+  let%bind () =
+    if
+      String.equal (R.Target.adapter current) (R.Target.adapter captured)
+      && String.equal (R.Target.profile current) (R.Target.profile captured)
+      && Option.equal String.equal (R.Target.account current) (R.Target.account captured)
+      && String.equal (R.Target.endpoint current) (R.Target.endpoint captured)
+      && P.equal
+           R.Auth_binding.equal
+           (R.Target.auth_binding current)
+           (R.Target.auth_binding captured)
+    then Ok ()
+    else Error Runtime.Preparation_error.Target_mismatch
+  in
   let%bind current =
     R.Target.with_model current ~model:(R.Target.model captured) ~limits:document_limits
     |> request_error

@@ -1,5 +1,5 @@
 (library
  (name inference_host)
  (public_name ochat.inference_host)
- (libraries core jsonaf ochat.openai ochat.inference ochat.inference_runtime ochat.chat_response)
+ (libraries core jsonaf ochat.openai ochat.inference ochat.inference_runtime ochat.chat_response ochat.credential_registry ochat.provider_secret_store)
  (preprocess (pps ppx_jane)))

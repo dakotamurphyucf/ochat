@@ -235,7 +235,7 @@ let implementation_sources =
   ; ( "lib/chat_response/shell_tool.ml"
     , "5d21f554475442cc67f0feaabaa3635f30fc5c678c926ca916eb99f804ef35ac" )
   ; ( "lib/chat_response/tool.ml"
-    , "a413b40412ee0783bf1eef8df5fbf0b6149b4c46b2cab7f2e3b214e20c37fce4" )
+    , "477798dfc2e13e78dd8f481448aca3bffc00ce74d7662bf5ffc1b76d001c626d" )
   ; ( "lib/chatmd/chatmd_read_file_declaration.ml"
     , "f604a8e767cae51c15b31eb0d8a266d9ea1efd429f77cbb7b068940d38a2768e" )
   ; ( "lib/chatmd/chatmd_read_file_spec.ml"

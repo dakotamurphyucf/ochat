@@ -245,6 +245,9 @@ let failure : D.Terminal.failure -> E.Terminal.transport_failure = function
   | Body_limit -> Body_limit
   | Framing_limit -> Framing_limit
   | Protocol -> Protocol
+  | Unsupported_transport -> Unsupported_transport
+  | Session_closed -> Session_closed
+  | Session_busy -> Session_busy
   | Connection -> Connection
   | Timeout -> Timeout
 ;;
@@ -258,6 +261,8 @@ let delivery : D.Terminal.delivery -> E.Terminal.delivery = function
 let auth : D.Auth.error -> E.Terminal.auth_failure = function
   | Missing -> Missing
   | Denied -> Denied
+  | Profile_changed -> Profile_changed
+  | Reauthorization_required -> Reauthorization_required
   | Invalid_credential -> Invalid_credential
   | Timed_out -> Timed_out
 ;;

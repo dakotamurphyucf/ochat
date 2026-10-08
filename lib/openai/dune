@@ -15,9 +15,10 @@
   inference_input
   inference_output
   responses_driver
+  responses_websocket
   responses_json
   grader)
- (private_modules responses_json inference_input inference_output)
+ (private_modules responses_json inference_input inference_output responses_websocket)
  (libraries ochat.document_schema ochat.inference ochat.inference_runtime
   ochat.history_entry
   ochat.transcript

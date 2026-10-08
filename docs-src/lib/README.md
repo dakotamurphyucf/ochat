@@ -22,6 +22,8 @@ those links are not a claim of website publication or runnable examples.
 | Add retrieval | [Search setup](../guide/search-and-indexing.md) | Embedding-backed agent retrieval is separate from website search. |
 | Refine prompts | [mp-refine-run](../bin/mp_refine_run.doc.md) | Local and paid strategies differ; the broad older library overview needs API reconciliation. |
 | Reuse additional components | [Embedding and caching](embedding.md) | Keep identity-bearing histories and host-owned resources. |
+| Own host credential lifecycle | [Shared registry](credential_registry.doc.md), [metadata model](credential_registry_model.doc.md) | Epoch/revision fences, explicit ports, uncertainty and local disable; no provider endpoint is inferred. |
+| Store provider secret revisions | [Private-file secret store](provider_secret_store.doc.md) | Immutable revisions and private filesystem primitives; lifecycle authority remains with the host. |
 | Maintain older file-backed sessions | [Prompt sessions](prompt_session.doc.md), [snapshot store](session_store.doc.md) | Compatibility APIs do not administer daemon sessions. |
 | Extend the terminal UI | [Application hosts](chat_tui/app.doc.md), [controller](chat_tui/controller.doc.md), [display types](chat_tui/types.doc.md) | Editor state is local; native/daemon mutations go through the actor. |
 

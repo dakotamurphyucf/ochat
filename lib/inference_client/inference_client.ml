@@ -196,6 +196,11 @@ module Execution = struct
         ~on_completion
         ~on_observation
     =
+    let context =
+      match relation with
+      | Transcript.Scope.Root -> context
+      | Nested _ -> R.Context.detach context
+    in
     { context
     ; identity
     ; relation

@@ -216,19 +216,22 @@ let chat_completion_command =
      fun () ->
        run_main
        @@ fun env ->
-       let host = Inference_composition.create ~env ~default_model:"gpt-4.5-preview" in
-       let inference_context =
-         Inference_composition.context host Chat_response.Config.default
-       in
-       Chat_response.Driver.run_completion_stream
-         ~env
-         ~inference_context
-         ~inference_identity:(Inference_host.identity host)
-         ~on_inference_attempt:(fun _ -> ())
-         ~on_inference_completion:(fun _ -> ())
-         ?prompt_file
-         ~output_file
-         ())
+       Eio.Switch.run (fun sw ->
+         let host =
+           Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+         in
+         let inference_context =
+           Inference_composition.context host Chat_response.Config.default
+         in
+         Chat_response.Driver.run_completion_stream
+           ~env
+           ~inference_context
+           ~inference_identity:(Inference_host.identity host)
+           ~on_inference_attempt:(fun _ -> ())
+           ~on_inference_completion:(fun _ -> ())
+           ?prompt_file
+           ~output_file
+           ()))
 ;;
 
 (** [tokenize_command] prints the number of {e Tikitoken} tokens in a file.

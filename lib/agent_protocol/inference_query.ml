@@ -468,6 +468,7 @@ module Attempt = struct
     ; usage : O.t option
     ; context : O.t option
     ; configuration : O.Configuration.t option
+    ; transport_selection : O.t option
     ; diagnostics : O.t list option
     ; omitted_diagnostics : int64 option
     }
@@ -482,6 +483,7 @@ module Attempt = struct
   let usage t = t.usage
   let context t = t.context
   let configuration t = t.configuration
+  let transport_selection t = t.transport_selection
   let diagnostics t = t.diagnostics
   let omitted_diagnostics t = t.omitted_diagnostics
 
@@ -549,19 +551,22 @@ module Attempt = struct
 
   let to_json t =
     obj
-      [ "ordinal", dec t.ordinal
-      ; "generation", `Number (Int.to_string t.generation)
-      ; "scope", Transcript.Scope.to_json t.scope
-      ; "operation_id", nullable Id.Operation.to_json t.operation_id
-      ; "invocation_id", nullable Id.Invocation.to_json t.invocation_id
-      ; "accounting_id", str (O.Observation_id.to_string t.accounting_id)
-      ; "state", state_to_json t.state
-      ; "usage", nullable O.to_json t.usage
-      ; "context", nullable O.to_json t.context
-      ; "configuration", nullable O.Configuration.to_json t.configuration
-      ; "diagnostics", nullable (array O.to_json) t.diagnostics
-      ; "omitted_diagnostics", nullable dec t.omitted_diagnostics
-      ]
+      ([ "ordinal", dec t.ordinal
+       ; "generation", `Number (Int.to_string t.generation)
+       ; "scope", Transcript.Scope.to_json t.scope
+       ; "operation_id", nullable Id.Operation.to_json t.operation_id
+       ; "invocation_id", nullable Id.Invocation.to_json t.invocation_id
+       ; "accounting_id", str (O.Observation_id.to_string t.accounting_id)
+       ; "state", state_to_json t.state
+       ; "usage", nullable O.to_json t.usage
+       ; "context", nullable O.to_json t.context
+       ; "configuration", nullable O.Configuration.to_json t.configuration
+       ; "diagnostics", nullable (array O.to_json) t.diagnostics
+       ; "omitted_diagnostics", nullable dec t.omitted_diagnostics
+       ]
+       @ Option.to_list
+           (Option.map t.transport_selection ~f:(fun observation ->
+              "transport_selection", O.to_json observation)))
   ;;
 
   let create
@@ -655,12 +660,42 @@ module Attempt = struct
         ; usage
         ; context
         ; configuration
+        ; transport_selection = None
         ; diagnostics
         ; omitted_diagnostics
         }
       in
       let* _ = measure ~limits:O.Admission.attempt (to_json t) in
       Ok t
+  ;;
+
+  let with_transport_selection t value =
+    let* () =
+      match value with
+      | None -> Ok ()
+      | Some observation ->
+        if not (Transcript.Scope.equal t.scope (O.scope observation))
+        then invalid "transport scope differs"
+        else (
+          match O.payload observation, t.configuration with
+          | O.Transport_selection selection, Some configuration
+            when O.Observation_id.equal
+                   t.accounting_id
+                   (O.Transport_selection.accounting_id selection) ->
+            (match O.Configuration.transport_policy configuration with
+             | Some policy
+               when O.Transport_policy.equal
+                      policy
+                      (O.Transport_selection.requested selection) ->
+               inference_error (O.validate observation ~limits:O.Admission.observation)
+             | Some _ | None -> invalid "transport policy differs")
+          | _ ->
+            invalid
+              "transport selection requires matching configuration/accounting identity")
+    in
+    let t = { t with transport_selection = value } in
+    let* _ = measure ~limits:O.Admission.attempt (to_json t) in
+    Ok t
   ;;
 
   let of_json json =
@@ -717,6 +752,12 @@ module Attempt = struct
       ~configuration
       ~diagnostics
       ~omitted_diagnostics
+    |> Result.bind ~f:(fun t ->
+      match Json_codec.optional fields "transport_selection" with
+      | None -> Ok t
+      | Some json ->
+        let* observation = decode_observation json in
+        with_transport_selection t (Some observation))
   ;;
 end
 

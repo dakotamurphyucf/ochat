@@ -284,6 +284,7 @@ let import_legacy config_path ~legacy_id ~prompt ~workspace =
                   ~options:
                     (Inference_composition.daemon_options
                        (Inference_composition.create
+                          ~sw
                           ~env
                           ~default_model:"gpt-4.5-preview"))
                   ~sw
@@ -327,7 +328,7 @@ let run_daemon env config =
       Agent_server.Daemon.start
         ~options:
           (Inference_composition.daemon_options
-             (Inference_composition.create ~env ~default_model:"gpt-4.5-preview"))
+             (Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"))
         ~sw
         ~env
         ~config

@@ -248,7 +248,14 @@ let%test_unit "terminal outcomes are closed and all known categories roundtrip" 
         terminal
         (E.Terminal.of_json (E.Terminal.to_json terminal) ~limits |> ok)));
   List.iter
-    E.Terminal.[ Missing; Denied; Invalid_credential; Timed_out ]
+    E.Terminal.
+      [ Missing
+      ; Denied
+      ; Profile_changed
+      ; Reauthorization_required
+      ; Invalid_credential
+      ; Timed_out
+      ]
     ~f:(fun reason ->
       let terminal =
         E.Terminal.create

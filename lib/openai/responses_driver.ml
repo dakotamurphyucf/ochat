@@ -43,6 +43,7 @@ module Capability = struct
     | Function_tools
     | Custom_tools
     | Opaque_replay
+    | Websocket
     | Setting of string
   [@@deriving equal, compare, sexp_of]
 
@@ -73,6 +74,7 @@ module Capability = struct
           | Function_tools
           | Custom_tools
           | Opaque_replay
+          | Websocket
           | Setting _ -> loop (feature :: seen) rest)
     in
     loop [] entries
@@ -419,14 +421,27 @@ module Prepared = struct
 end
 
 module Auth = struct
-  type lease = string
+  type identity =
+    { owner : string
+    ; generation : int64
+    }
+  [@@deriving equal, sexp_of]
 
   type error =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
+
+  type lease =
+    { secret : string
+    ; identity : identity option
+    ; credential_revision : string option
+    ; check_current : unit -> (unit, error) Result.t
+    }
 
   let bearer secret =
     if
@@ -434,7 +449,45 @@ module Auth = struct
       || String.length secret > 8192
       || String.exists secret ~f:(fun c -> Char.to_int c <= 32 || Char.to_int c >= 127)
     then Error Invalid_credential
-    else Ok secret
+    else
+      Ok
+        { secret
+        ; identity = None
+        ; credential_revision = None
+        ; check_current = (fun () -> Ok ())
+        }
+  ;;
+
+  let with_identity t ~owner ~generation ~check_current =
+    let identity = { owner; generation } in
+    if
+      String.is_empty (String.strip owner)
+      || Int64.(generation < 0L)
+      || Option.exists t.identity ~f:(fun previous ->
+        not (equal_identity previous identity))
+    then Error Invalid_credential
+    else (
+      let source_check = t.check_current in
+      let check_current () =
+        let open Result.Let_syntax in
+        let%bind () = source_check () in
+        check_current ()
+      in
+      Ok { t with identity = Some identity; check_current })
+  ;;
+
+  let identity t = t.identity
+  let credential_revision t = t.credential_revision
+
+  let with_credential_revision t revision =
+    if
+      String.is_empty (String.strip revision)
+      || String.length revision > 512
+      || (not (String.Utf8.is_valid revision))
+      || Option.exists t.credential_revision ~f:(fun previous ->
+        not (String.equal previous revision))
+    then Error Invalid_credential
+    else Ok { t with credential_revision = Some revision }
   ;;
 
   type resolver = sw:Eio.Switch.t -> Profile.t -> (lease, error) Result.t
@@ -448,6 +501,9 @@ module Terminal = struct
   [@@deriving equal, sexp_of]
 
   type failure =
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
     | Invalid_http
     | Invalid_content_type
@@ -514,7 +570,7 @@ module Http_response = struct
     | _ -> transport_failure Invalid_http
   ;;
 
-  let headers reader ~max_bytes =
+  let headers ?(allow_upgrade = false) reader ~max_bytes =
     let bytes = ref 0 in
     let next_line () =
       let text = line reader in
@@ -535,7 +591,8 @@ module Http_response = struct
          | _ -> transport_failure Invalid_http)
       | _ -> transport_failure Invalid_http
     in
-    if status < 200 || status > 599 then transport_failure Invalid_http;
+    if (status < 200 && not (allow_upgrade && status = 101)) || status > 599
+    then transport_failure Invalid_http;
     let rec loop acc =
       let text = next_line () in
       if String.is_empty text then status, acc else loop (field text :: acc)
@@ -749,6 +806,8 @@ end
 type t =
   { connect : sw:Eio.Switch.t -> Uri.t -> Eio.Flow.two_way_ty Eio.Resource.t
   ; with_timeout : 'a. (unit -> 'a) -> ('a, [ `Timeout ]) Result.t
+  ; now : unit -> float
+  ; sleep : float -> unit
   ; max_request_bytes : int
   ; max_header_bytes : int
   ; max_body_bytes : int
@@ -818,6 +877,8 @@ let create
          independently raises [Eio.Time.Timeout]. *)
       ; with_timeout =
           (fun f -> Eio.Time.with_timeout clock timeout_seconds (fun () -> Ok (f ())))
+      ; now = (fun () -> Eio.Time.now clock)
+      ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
       ; max_request_bytes
       ; max_header_bytes
       ; max_body_bytes
@@ -847,7 +908,9 @@ let io f =
     transport_failure Connection
 ;;
 
-let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
+exception Auth_invalidated of Auth.error
+
+let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted ~on_selected =
   let profile = Prepared.profile prepared in
   let body = Jsonaf.to_string (Request.jsonaf_of_t (Prepared.request prepared)) in
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
@@ -858,6 +921,13 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let authority =
     host ^ Option.value_map (Uri.port uri) ~default:"" ~f:(fun p -> ":" ^ Int.to_string p)
   in
+  (match lease.Auth.check_current () with
+   | Ok () -> ()
+   | Error error -> raise (Auth_invalidated error));
+  on_selected ();
+  (match lease.Auth.check_current () with
+   | Ok () -> ()
+   | Error error -> raise (Auth_invalidated error));
   let header =
     sprintf
       "POST %s HTTP/1.1\r\n\
@@ -870,7 +940,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
        \r\n"
       (Uri.path uri)
       authority
-      lease
+      lease.Auth.secret
       (String.length body)
   in
   submitted := true;
@@ -973,7 +1043,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   loop ()
 ;;
 
-let run t ~auth ~prepared ~on_event =
+let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
   let authenticated = ref false in
   let submitted = ref false in
   let published = ref false in
@@ -997,12 +1067,22 @@ let run t ~auth ~prepared ~on_event =
             | Error error -> Error error
             | Ok lease ->
               authenticated := true;
-              Ok (dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted)))
+              Ok
+                (dispatch
+                   t
+                   ~sw
+                   ~lease
+                   ~prepared
+                   ~on_event
+                   ~published
+                   ~submitted
+                   ~on_selected)))
       with
       | Ok result -> result
       | Error `Timeout ->
         if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
     with
+    | Auth_invalidated error -> Error error
     | Transport_failure reason -> Ok (failed reason)
   in
   match result with
@@ -1010,4 +1090,555 @@ let run t ~auth ~prepared ~on_event =
   | Ok outcome ->
     on_event (Event.Terminal outcome);
     Ok outcome
+;;
+
+module Websocket_session = struct
+  type cache =
+    { envelope : Jsonaf.t
+    ; assets : Inference.Request.Asset.t list
+    ; prefix : Jsonaf.t list
+    ; response_id : string
+    }
+
+  type channel =
+    { flow : Eio.Flow.two_way_ty Eio.Resource.t
+    ; websocket : Responses_websocket.t
+    ; endpoint : string
+    ; profile : string
+    ; account : string option
+    ; identity : Auth.identity option
+    ; credential_revision : string option
+    ; release : unit -> unit
+    ; mutable cache : cache option
+    ; mutable last_used : float
+    ; mutable retired : bool
+    }
+
+  type t =
+    { sw : Eio.Switch.t
+    ; mutable channel : channel option
+    ; mutable busy : bool
+    ; mutable closed : bool
+    }
+
+  let create ~sw = { sw; channel = None; busy = false; closed = false }
+
+  let retire channel =
+    channel.retired <- true;
+    channel.cache <- None;
+    channel.release ()
+  ;;
+
+  let invalidate t =
+    Option.iter t.channel ~f:retire;
+    t.channel <- None
+  ;;
+
+  let close t =
+    t.closed <- true;
+    Option.iter t.channel ~f:retire;
+    t.channel <- None
+  ;;
+end
+
+let websocket_supported prepared =
+  match
+    Profile.capability
+      (Prepared.profile prepared)
+      ~model:(Prepared.model prepared)
+      ~feature:Capability.Websocket
+  with
+  | Supported -> true
+  | Unsupported | Unknown -> false
+;;
+
+let check_auth lease =
+  match lease.Auth.check_current () with
+  | Ok () -> ()
+  | Error error -> raise (Auth_invalidated error)
+;;
+
+let owned_websocket_flow t ~sw uri =
+  let acquired, acquire = Eio.Promise.create () in
+  let finished, finish = Eio.Promise.create () in
+  let forever, _ = Eio.Promise.create () in
+  let stopping = ref false in
+  let cancel_requested = ref false in
+  let announced = ref false in
+  let cancel_pending = ref None in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+    Exn.protect
+      ~finally:(fun () -> Eio.Promise.resolve finish ())
+      ~f:(fun () ->
+        try
+          Eio.Cancel.sub (fun context ->
+            let stop () =
+              stopping := true;
+              if (not !cancel_requested) && Option.is_none (Eio.Promise.peek finished)
+              then (
+                cancel_requested := true;
+                Eio.Cancel.cancel context Exit)
+            in
+            cancel_pending := Some stop;
+            if !stopping then Eio.Cancel.cancel context Exit;
+            Eio.Switch.run (fun channel_sw ->
+              let flow = io (fun () -> t.connect ~sw:channel_sw uri) in
+              let stop () =
+                stopping := true;
+                if (not !cancel_requested) && Option.is_none (Eio.Promise.peek finished)
+                then (
+                  cancel_requested := true;
+                  Eio.Cancel.cancel context Exit)
+              in
+              announced := true;
+              Eio.Promise.resolve acquire (Ok (flow, channel_sw, stop));
+              Eio.Promise.await forever))
+        with
+        | exn ->
+          if not !announced
+          then (
+            announced := true;
+            Eio.Promise.resolve
+              acquire
+              (Error (exn, Stdlib.Printexc.get_raw_backtrace ())))
+          else if not !stopping
+          then raise exn);
+    `Stop_daemon);
+  let acquired =
+    try Eio.Promise.await acquired with
+    | exn ->
+      stopping := true;
+      Option.iter !cancel_pending ~f:(fun stop -> stop ());
+      Eio.Cancel.protect (fun () -> Eio.Promise.await finished);
+      raise exn
+  in
+  match acquired with
+  | Error (exn, bt) ->
+    Eio.Cancel.protect (fun () -> Eio.Promise.await finished);
+    Stdlib.Printexc.raise_with_backtrace exn bt
+  | Ok (flow, channel_sw, stop) ->
+    let release () =
+      Eio.Cancel.protect (fun () ->
+        stop ();
+        Eio.Promise.await finished)
+    in
+    flow, channel_sw, stop, release
+;;
+
+let websocket_connect t session lease prepared =
+  let profile = Prepared.profile prepared in
+  let flow, channel_sw, stop, release =
+    owned_websocket_flow t ~sw:session.Websocket_session.sw profile.uri
+  in
+  try
+    let nonce = Base64.encode_exn (Mirage_crypto_rng.generate 16) in
+    let host = Uri.host profile.uri |> Option.value_exn in
+    let host = if String.mem host ':' then "[" ^ host ^ "]" else host in
+    let authority =
+      host
+      ^ Option.value_map (Uri.port profile.uri) ~default:"" ~f:(fun p ->
+        ":" ^ Int.to_string p)
+    in
+    check_auth lease;
+    let header =
+      sprintf
+        "GET %s HTTP/1.1\r\n\
+         Host: %s\r\n\
+         Authorization: Bearer %s\r\n\
+         Upgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: %s\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n"
+        (Uri.path profile.uri)
+        authority
+        lease.Auth.secret
+        nonce
+    in
+    io (fun () -> Eio.Flow.copy_string header flow);
+    let reader =
+      Eio.Buf_read.of_flow flow ~max_size:(Int.max t.max_header_bytes t.max_frame_bytes)
+    in
+    let status, headers =
+      io (fun () ->
+        Http_response.headers ~allow_upgrade:true reader ~max_bytes:t.max_header_bytes)
+    in
+    if status = 401 then raise (Auth_invalidated Auth.Reauthorization_required);
+    if status = 403 then raise (Auth_invalidated Auth.Denied);
+    (match Responses_websocket.validate_upgrade ~nonce ~status ~headers with
+     | Ok () -> ()
+     | Error _ -> transport_failure Invalid_http);
+    let limits =
+      Responses_websocket.Limits.create
+        ~max_frame_bytes:t.max_frame_bytes
+        ~max_message_bytes:t.max_frame_bytes
+        ~max_write_bytes:t.max_request_bytes
+        ~max_framing_bytes:t.max_framing_bytes
+        ~max_fragments:4096
+        ~max_control_frames:1024
+      |> Or_error.ok_exn
+    in
+    let websocket =
+      Responses_websocket.create
+        ~limits
+        ~read:(fun n -> io (fun () -> Eio.Buf_read.take n reader))
+        ~write:(fun bytes -> io (fun () -> Eio.Flow.copy_string bytes flow))
+        ~random:(fun n -> Mirage_crypto_rng.generate n)
+    in
+    let channel : Websocket_session.channel =
+      { flow
+      ; websocket
+      ; endpoint = profile.endpoint
+      ; profile = profile.id
+      ; account = profile.account
+      ; identity = Auth.identity lease
+      ; credential_revision = Auth.credential_revision lease
+      ; release
+      ; cache = None
+      ; last_used = t.now ()
+      ; retired = false
+      }
+    in
+    session.channel <- Some channel;
+    let born = t.now () in
+    Eio.Fiber.fork ~sw:channel_sw (fun () ->
+      let rec wait () =
+        if not channel.retired
+        then (
+          t.sleep 1.;
+          if
+            Float.(t.now () -. born >= 3300.)
+            || ((not session.busy) && Float.(t.now () -. channel.last_used >= 300.))
+          then (
+            channel.retired <- true;
+            channel.cache <- None;
+            stop ())
+          else wait ())
+      in
+      wait ());
+    channel
+  with
+  | exn ->
+    release ();
+    raise exn
+;;
+
+let compatible_channel channel lease prepared =
+  let profile = Prepared.profile prepared in
+  (not channel.Websocket_session.retired)
+  && String.equal channel.endpoint profile.endpoint
+  && String.equal channel.profile profile.id
+  && Option.equal String.equal channel.account profile.account
+  && (match channel.credential_revision, Auth.credential_revision lease with
+      | Some a, Some b -> String.equal a b
+      | None, _ | _, None -> false)
+  &&
+  match channel.identity, Auth.identity lease with
+  | Some a, Some b -> Auth.equal_identity a b
+  | None, _ | _, None -> false
+;;
+
+let websocket_dispatch
+      t
+      session
+      lease
+      prepared
+      ~on_selected
+      ~on_event
+      ~published
+      ~submitted
+      ~cache_assets
+  =
+  let channel =
+    match session.Websocket_session.channel with
+    | Some channel when compatible_channel channel lease prepared -> channel
+    | Some channel ->
+      Websocket_session.retire channel;
+      websocket_connect t session lease prepared
+    | None -> websocket_connect t session lease prepared
+  in
+  let request = Request.jsonaf_of_t (Prepared.request prepared) in
+  let fields =
+    match request with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  let input = Request.input (Prepared.request prepared) in
+  let envelope =
+    `Object
+      (List.filter fields ~f:(fun (key, _) ->
+         not (String.equal key "input" || String.equal key "stream")))
+  in
+  let prefix_suffix prefix input =
+    let rec loop prefix input =
+      match prefix, input with
+      | [], suffix -> Some suffix
+      | a :: prefix, b :: input when Document_schema.Json.equal a b -> loop prefix input
+      | _ :: _, [] | _ :: _, _ :: _ -> None
+    in
+    loop prefix input
+  in
+  let continuation =
+    Option.bind channel.cache ~f:(fun cache ->
+      if
+        List.equal Inference.Request.Asset.equal cache_assets cache.assets
+        && Document_schema.Json.equal envelope cache.envelope
+      then
+        Option.map (prefix_suffix cache.prefix input) ~f:(fun suffix ->
+          cache.response_id, suffix)
+      else None)
+  in
+  let body =
+    `Object
+      ((("type", `String "response.create")
+        :: List.filter fields ~f:(fun (key, _) ->
+          not (String.equal key "stream" || String.equal key "input")))
+       @
+       match continuation with
+       | None -> [ "input", `Array input ]
+       | Some (id, input) -> [ "input", `Array input; "previous_response_id", `String id ]
+      )
+  in
+  let body = Jsonaf.to_string body in
+  if String.length body > t.max_request_bytes then transport_failure Body_limit;
+  check_auth lease;
+  on_selected Inference.Observation.Transport_selection.Websocket None;
+  check_auth lease;
+  (* From this point cancellation or partial write is uncertain; no resend. *)
+  Responses_websocket.begin_response channel.websocket;
+  submitted := true;
+  (match Responses_websocket.write_text channel.websocket body with
+   | Ok () -> ()
+   | Error _ -> transport_failure Protocol);
+  channel.cache <- None;
+  let profile = Prepared.profile prepared in
+  let origin =
+    Wire.Origin.create
+      ~provider:profile.id
+      ~account:profile.account
+      ~endpoint:profile.endpoint
+    |> function
+    | Ok origin -> origin
+    | Error _ -> assert false
+  in
+  let parser =
+    Codec.Stream.create ~max_frame_bytes:t.max_frame_bytes origin |> Or_error.ok_exn
+  in
+  let bytes = ref 0 in
+  let rec loop () =
+    let message =
+      match Responses_websocket.read_text channel.websocket with
+      | Ok message -> message
+      | Error Framing_limit -> transport_failure Framing_limit
+      | Error Limit -> transport_failure Body_limit
+      | Error Protocol -> transport_failure Protocol
+      | Error Closed -> transport_failure Connection
+    in
+    if
+      String.length message > t.max_frame_bytes
+      || String.length message > t.max_body_bytes - !bytes
+    then transport_failure Body_limit;
+    bytes := !bytes + String.length message;
+    let feed line =
+      match Codec.Stream.feed_line parser line with
+      | Ok value -> value
+      | Error _ -> transport_failure Protocol
+    in
+    ignore (feed ("data: " ^ message) : Codec.Stream.update option);
+    match feed "" with
+    | None -> transport_failure Protocol
+    | Some update ->
+      published := true;
+      if not (Wire.Tracker.equal_disposition update.disposition Duplicate)
+      then (
+        match Wire.Event.view update.event with
+        | Terminal _ | Error _ ->
+          if not (List.is_empty update.newly_finalized)
+          then on_event (Event.Finalized update.newly_finalized)
+        | _ -> on_event (Event.Update update));
+      (match Wire.Event.view update.event with
+       | Terminal _ | Error _ ->
+         let outcome =
+           match Codec.Stream.finish parser with
+           | Ok outcome -> outcome
+           | Error _ -> transport_failure Protocol
+         in
+         (match outcome with
+          | Wire.Tracker.Response { terminal = Completed; response }
+            when match Wire.Response.outcome response with
+                 | Completed -> true
+                 | _ -> false ->
+            let prefix =
+              input @ List.map (Wire.Response.output response) ~f:Wire.Item.raw
+            in
+            let retained = `Array prefix in
+            if
+              Result.is_ok
+                (Document_schema.Json.validate
+                   ~limits:Transcript.Admission.default
+                   retained)
+              && Option.is_some channel.identity
+            then
+              channel.cache
+              <- Some
+                   { envelope
+                   ; assets = cache_assets
+                   ; prefix
+                   ; response_id = Wire.Response.id response
+                   }
+          | Response _ | Error _ -> Websocket_session.retire channel);
+         channel.last_used <- t.now ();
+         Terminal.Provider outcome
+       | _ -> loop ())
+  in
+  loop ()
+;;
+
+let run_with_transport
+      ?(cache_assets = [])
+      t
+      ~session
+      ~policy
+      ~auth
+      ~prepared
+      ~on_selected
+      ~on_event
+  =
+  let open Inference.Observation in
+  let sse fallback =
+    run
+      ~on_selected:(fun () -> on_selected Transport_selection.Http_sse fallback)
+      t
+      ~auth
+      ~prepared
+      ~on_event
+  in
+  if Option.exists session ~f:(fun session -> session.Websocket_session.closed)
+  then (
+    let terminal =
+      Terminal.Failed { delivery = Definitely_not_submitted; reason = Session_closed }
+    in
+    on_event (Event.Terminal terminal);
+    Ok terminal)
+  else (
+    match policy with
+    | Transport_policy.Http_sse -> sse None
+    | Prefer_websocket | Require_websocket ->
+      let prefer = Transport_policy.equal policy Prefer_websocket in
+      let unavailable reason failure =
+        if prefer
+        then sse (Some reason)
+        else (
+          let terminal =
+            Terminal.Failed { delivery = Definitely_not_submitted; reason = failure }
+          in
+          on_event (Event.Terminal terminal);
+          Ok terminal)
+      in
+      if Option.exists session ~f:(fun session -> session.Websocket_session.closed)
+      then (
+        let terminal =
+          Terminal.Failed { delivery = Definitely_not_submitted; reason = Session_closed }
+        in
+        on_event (Event.Terminal terminal);
+        Ok terminal)
+      else if not (websocket_supported prepared)
+      then unavailable Transport_selection.Unsupported Terminal.Unsupported_transport
+      else if Option.exists session ~f:(fun session -> session.Websocket_session.busy)
+      then unavailable Transport_selection.Session_busy Terminal.Session_busy
+      else (
+        let submitted = ref false in
+        let published = ref false in
+        let authenticated = ref false in
+        let owned = ref None in
+        let failed reason =
+          Terminal.Failed
+            { delivery =
+                (if !published
+                 then Response_started
+                 else if !submitted
+                 then Possibly_submitted
+                 else Definitely_not_submitted)
+            ; reason
+            }
+        in
+        let execute session =
+          owned := Some session;
+          session.Websocket_session.busy <- true;
+          Exn.protect
+            ~finally:(fun () -> session.busy <- false)
+            ~f:(fun () ->
+              Eio.Switch.run (fun sw ->
+                match auth ~sw (Prepared.profile prepared) with
+                | Error error -> Error error
+                | Ok lease ->
+                  authenticated := true;
+                  Ok
+                    (websocket_dispatch
+                       t
+                       session
+                       lease
+                       prepared
+                       ~on_selected
+                       ~on_event
+                       ~published
+                       ~submitted
+                       ~cache_assets)))
+        in
+        let retire () =
+          Option.iter !owned ~f:(fun session ->
+            Option.iter session.Websocket_session.channel ~f:Websocket_session.retire)
+        in
+        let result =
+          try
+            match
+              t.with_timeout (fun () ->
+                match session with
+                | Some session -> execute session
+                | None ->
+                  Eio.Switch.run (fun sw ->
+                    let session = Websocket_session.create ~sw in
+                    Exn.protect
+                      ~finally:(fun () -> Websocket_session.close session)
+                      ~f:(fun () -> execute session)))
+            with
+            | Ok result -> `Result result
+            | Error `Timeout ->
+              retire ();
+              if !authenticated
+              then `Failure Terminal.Timeout
+              else `Result (Error Auth.Timed_out)
+          with
+          | Auth_invalidated error ->
+            retire ();
+            `Result (Error error)
+          | Transport_failure reason ->
+            retire ();
+            `Failure reason
+          | exn ->
+            retire ();
+            raise exn
+        in
+        match result with
+        | `Result (Error _ as error) ->
+          retire ();
+          error
+        | `Result (Ok outcome) ->
+          (try
+             on_event (Event.Terminal outcome);
+             Ok outcome
+           with
+           | exn ->
+             retire ();
+             raise exn)
+        | `Failure reason when prefer && (not !submitted) && not !published ->
+          sse
+            (Some
+               (match reason with
+                | Invalid_http | Http_status _ -> Transport_selection.Upgrade
+                | _ -> Connection))
+        | `Failure reason ->
+          let terminal = failed reason in
+          on_event (Event.Terminal terminal);
+          Ok terminal))
 ;;

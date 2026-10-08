@@ -286,6 +286,7 @@ module Shape = struct
       ; "model", v
       ; "preparation_id", v
       ; "transport", v
+      ; "transport_policy", v
       ; ( "settings"
         , a
             ~identity_field:"name"
@@ -314,6 +315,9 @@ module Shape = struct
          ; "body_limit"
          ; "framing_limit"
          ; "protocol"
+         ; "unsupported_transport"
+         ; "session_closed"
+         ; "session_busy"
          ]
          ~f:(fun reason -> reason, fields [ "type"; "reason" ])
        @ [ "http_status", fields [ "type"; "reason"; "status" ] ])
@@ -371,6 +375,8 @@ module Shape = struct
          [ "usage", usage
          ; "context_estimate", context
          ; "configuration", configuration
+         ; ( "transport_selection"
+           , fields [ "accounting_id"; "requested"; "selected"; "fallback" ] )
          ; "diagnostic", diagnostic
          ]
          ~f:(fun (kind, payload) ->
@@ -508,7 +514,11 @@ let record_consistent (h : Handle.t) record =
          match O.payload o with
          | O.Context_estimate _ when not (O.Observation_id.equal h.context_id (O.id o)) ->
            invalid "context_id" "context is not designated identity"
-         | O.Usage _ | Context_estimate _ | Configuration _ | Diagnostic _ -> Ok ()))
+         | O.Usage _
+         | Context_estimate _
+         | Configuration _
+         | Transport_selection _
+         | Diagnostic _ -> Ok ()))
 ;;
 
 let validate_value ~limits v =
@@ -1278,7 +1288,7 @@ let observe t handle incoming =
       let diagnostics =
         match O.payload incoming with
         | O.Diagnostic _ -> true
-        | Usage _ | Context_estimate _ | Configuration _ -> false
+        | Usage _ | Context_estimate _ | Configuration _ | Transport_selection _ -> false
       in
       let* () = observation (O.validate incoming ~limits:O.Admission.observation) in
       let* () =
@@ -1294,7 +1304,11 @@ let observe t handle incoming =
                     configuration
                     (O.Attempt_record.configuration row.record)) ->
           Error (Error.Observation O.Error.Conflicting_revision)
-        | Usage _ | Context_estimate _ | Configuration _ | Diagnostic _ -> Ok ()
+        | Usage _
+        | Context_estimate _
+        | Configuration _
+        | Transport_selection _
+        | Diagnostic _ -> Ok ()
       in
       let observations = O.Attempt_record.observations row.record in
       let* latest =
@@ -1339,7 +1353,8 @@ let observe t handle incoming =
              List.fold next_observations ~init:0 ~f:(fun acc observation ->
                match O.payload observation with
                | Diagnostic _ -> acc + O.encoded_bytes observation
-               | Usage _ | Context_estimate _ | Configuration _ -> acc)
+               | Usage _ | Context_estimate _ | Configuration _ | Transport_selection _ ->
+                 acc)
            in
            let diagnostic_too_large = diagnostics && O.encoded_bytes incoming > 1024 in
            if
@@ -1349,7 +1364,10 @@ let observe t handle incoming =
                      || List.count next_observations ~f:(fun value ->
                           match O.payload value with
                           | Diagnostic _ -> true
-                          | Usage _ | Context_estimate _ | Configuration _ -> false)
+                          | Usage _
+                          | Context_estimate _
+                          | Configuration _
+                          | Transport_selection _ -> false)
                         > 16))
            then omitted ()
            else
@@ -1524,13 +1542,14 @@ let row_view (row : Row.t) ~include_configuration ~include_diagnostics =
     List.find observations ~f:(fun observation ->
       match O.payload observation with
       | Usage _ -> true
-      | Context_estimate _ | Configuration _ | Diagnostic _ -> false)
+      | Context_estimate _ | Configuration _ | Transport_selection _ | Diagnostic _ ->
+        false)
   in
   let context =
     List.find observations ~f:(fun observation ->
       match O.payload observation with
       | Context_estimate _ -> true
-      | Usage _ | Configuration _ | Diagnostic _ -> false)
+      | Usage _ | Configuration _ | Transport_selection _ | Diagnostic _ -> false)
   in
   let diagnostics =
     if include_diagnostics
@@ -1539,7 +1558,8 @@ let row_view (row : Row.t) ~include_configuration ~include_diagnostics =
         (List.filter observations ~f:(fun observation ->
            match O.payload observation with
            | Diagnostic _ -> true
-           | Usage _ | Context_estimate _ | Configuration _ -> false))
+           | Usage _ | Context_estimate _ | Configuration _ | Transport_selection _ ->
+             false))
     else None
   in
   protocol
@@ -1562,7 +1582,18 @@ let row_view (row : Row.t) ~include_configuration ~include_diagnostics =
        ~omitted_diagnostics:
          (if include_diagnostics
           then Some (O.Attempt_record.omitted_diagnostics record)
-          else None))
+          else None)
+     |> Result.bind ~f:(fun view ->
+       let selection =
+         if include_configuration
+         then
+           List.find observations ~f:(fun observation ->
+             match O.payload observation with
+             | Transport_selection _ -> true
+             | _ -> false)
+         else None
+       in
+       Q.Attempt.with_transport_selection view selection))
   |> invariant
 ;;
 
@@ -1613,7 +1644,10 @@ let metric rows component =
             ~f:(fun observation ->
               match O.payload observation with
               | Usage usage -> Some (O.Count.view (O.Usage.count usage component))
-              | Context_estimate _ | Configuration _ | Diagnostic _ -> None)
+              | Context_estimate _
+              | Configuration _
+              | Transport_selection _
+              | Diagnostic _ -> None)
           |> Option.value ~default:(O.Count.Unknown (absent_usage row))
         in
         match count with

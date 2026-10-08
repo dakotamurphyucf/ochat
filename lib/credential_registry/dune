@@ -1,0 +1,5 @@
+(library
+ (name credential_registry)
+ (public_name ochat.credential_registry)
+ (libraries core jsonaf eio eio.unix ochat.document_schema ochat.private_storage ochat.provider_secret_store ochat.credential_registry_model)
+ (preprocess (pps ppx_jane)))
