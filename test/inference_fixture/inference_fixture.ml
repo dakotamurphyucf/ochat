@@ -291,6 +291,7 @@ let create ~namespace ~default_model ~post_stream =
   in
   let adapter =
     Runtime.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
       ~id:"fixture.responses"
       ~limits:Runtime.Limits.default
       ~bind

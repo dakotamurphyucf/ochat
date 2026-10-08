@@ -50,16 +50,23 @@ let role : P.Role.t -> string = function
   | Tool -> "tool"
 ;;
 
+type assets =
+  | Resolved of (R.Asset.t * string Lazy.t) String.Map.t
+  | Deferred
+
 let inline_asset assets uri =
-  match Map.find assets uri with
-  | Some (asset, encoded) ->
-    (match R.Asset.kind asset with
-     | Image -> Ok (Lazy.force encoded)
-     | Document _ -> Error E.Asset_unavailable)
-  | None ->
-    (* Inline bytes are already immutable and bounded by Request admission;
+  match assets with
+  | Deferred -> Ok uri
+  | Resolved assets ->
+    (match Map.find assets uri with
+     | Some (asset, encoded) ->
+       (match R.Asset.kind asset with
+        | Image -> Ok (Lazy.force encoded)
+        | Document _ -> Error E.Asset_unavailable)
+     | None ->
+       (* Inline bytes are already immutable and bounded by Request admission;
        the selected request codec validates media type and base64 syntax. *)
-    if String.is_prefix uri ~prefix:"data:" then Ok uri else Error E.Asset_unavailable
+       if String.is_prefix uri ~prefix:"data:" then Ok uri else Error E.Asset_unavailable)
 ;;
 
 let content assets ~output = function
@@ -113,24 +120,27 @@ let content assets ~output = function
              | Value (`String "input_file"), (Absent | Null) -> Ok ()
              | _ -> invalid
            in
-           (match Map.find assets reference with
-            | Some (asset, encoded) ->
-              (match R.Asset.kind asset with
-               | Image -> Error E.Asset_unavailable
-               | Document { filename } ->
-                 let rest =
-                   List.filter original ~f:(fun (key, _) ->
-                     not (List.mem [ "file_url"; "file_data" ] key ~equal:String.equal))
-                 in
-                 let rest =
-                   if List.Assoc.mem rest ~equal:String.equal "filename"
-                   then rest
-                   else
-                     Option.value_map filename ~default:rest ~f:(fun name ->
-                       rest @ [ "filename", string name ])
-                 in
-                 Ok (`Object (rest @ [ "file_data", string (Lazy.force encoded) ])))
-            | None -> Error E.Asset_unavailable)
+           (match assets with
+            | Deferred -> Ok raw
+            | Resolved assets ->
+              (match Map.find assets reference with
+               | Some (asset, encoded) ->
+                 (match R.Asset.kind asset with
+                  | Image -> Error E.Asset_unavailable
+                  | Document { filename } ->
+                    let rest =
+                      List.filter original ~f:(fun (key, _) ->
+                        not (List.mem [ "file_url"; "file_data" ] key ~equal:String.equal))
+                    in
+                    let rest =
+                      if List.Assoc.mem rest ~equal:String.equal "filename"
+                      then rest
+                      else
+                        Option.value_map filename ~default:rest ~f:(fun name ->
+                          rest @ [ "filename", string name ])
+                    in
+                    Ok (`Object (rest @ [ "file_data", string (Lazy.force encoded) ])))
+               | None -> Error E.Asset_unavailable))
          | Some (`Null | `True | `False | `Number _ | `Object _ | `Array _) -> invalid
          | None -> Ok raw)
       | `Null | `True | `False | `Number _ | `String _ | `Array _ -> invalid)
@@ -196,20 +206,88 @@ let semantic assets semantic =
   | Unknown _ -> invalid
 ;;
 
-let history request =
+let captured profile ~target payload ~actual_origin ~raw =
   let open Result.Let_syntax in
-  let%bind expected_origin = origin (R.target request) in
-  let%bind wire_origin = wire_origin (R.target request) in
-  let assets =
-    List.fold (R.assets request) ~init:String.Map.empty ~f:(fun assets asset ->
-      let encoded =
-        lazy
-          ("data:"
-           ^ R.Asset.media_type asset
-           ^ ";base64,"
-           ^ Base64.encode_string (R.Asset.bytes asset))
+  let%bind expected_origin = origin target in
+  let%bind wire_origin = wire_origin target in
+  if
+    (not
+       (D.Capability.equal_support
+          (D.Profile.capability
+             profile
+             ~model:(R.Target.model target)
+             ~feature:Opaque_replay)
+          Supported))
+    || not
+         (Responses_replay.permits
+            (D.Profile.replay_policy profile)
+            ~actual:actual_origin
+            ~expected:expected_origin
+            ~raw)
+  then Error E.Incompatible_replay
+  else (
+    let%bind () =
+      D.Prepared.history_features profile ~model:(R.Target.model target) [ raw ]
+      |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
+    in
+    let%bind wire =
+      Responses_wire.Item.decode raw ~origin:wire_origin
+      |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
+    in
+    let%bind projected =
+      Responses_history.of_wire_item wire
+      |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
+    in
+    if
+      Document_schema.Json.equal
+        (P.to_json (P.authored (P.semantic payload)))
+        (P.to_json (P.authored (P.semantic projected)))
+    then Ok raw
+    else Error E.Incompatible_replay)
+;;
+
+let preflight_history profile ~target history =
+  List.fold_result history ~init:() ~f:(fun () entry ->
+    let payload = History_entry.payload entry in
+    match P.representation payload with
+    | Authored ->
+      let open Result.Let_syntax in
+      let%bind raw = semantic Deferred (P.semantic payload) in
+      D.Prepared.history_features
+        ~assets:Deferred
+        profile
+        ~model:(R.Target.model target)
+        [ raw ]
+      |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
+    | Reconstructed _ ->
+      let open Result.Let_syntax in
+      let%bind raw =
+        Responses_history.to_item payload
+        |> unsupported
+        |> Result.map ~f:Responses.Item.jsonaf_of_t
       in
-      Map.set assets ~key:(R.Asset.reference asset) ~data:(asset, encoded))
+      D.Prepared.history_features
+        ~assets:Deferred
+        profile
+        ~model:(R.Target.model target)
+        [ raw ]
+      |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
+    | Captured { origin = actual_origin; raw } ->
+      captured profile ~target payload ~actual_origin ~raw |> Result.map ~f:(fun _ -> ()))
+;;
+
+let history profile request =
+  let assets =
+    Resolved
+      (List.fold (R.assets request) ~init:String.Map.empty ~f:(fun assets asset ->
+         let encoded =
+           lazy
+             ("data:"
+              ^ R.Asset.media_type asset
+              ^ ";base64,"
+              ^ Base64.encode_string (R.Asset.bytes asset))
+         in
+         Map.set assets ~key:(R.Asset.reference asset) ~data:(asset, encoded)))
   in
   List.map (R.history request) ~f:(fun entry ->
     let payload = History_entry.payload entry in
@@ -222,27 +300,7 @@ let history request =
       |> unsupported
       |> Result.map ~f:Responses.Item.jsonaf_of_t
     | Captured { origin = actual_origin; raw } ->
-      if
-        not
-          (Document_schema.Json.equal
-             (P.Origin.to_json actual_origin)
-             (P.Origin.to_json expected_origin))
-      then Error E.Incompatible_replay
-      else (
-        let%bind wire =
-          Responses_wire.Item.decode raw ~origin:wire_origin
-          |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
-        in
-        let%bind projected =
-          Responses_history.of_wire_item wire
-          |> Result.map_error ~f:(fun _ -> E.Incompatible_replay)
-        in
-        if
-          Document_schema.Json.equal
-            (P.to_json (P.authored (P.semantic payload)))
-            (P.to_json (P.authored (P.semantic projected)))
-        then Ok raw
-        else Error E.Incompatible_replay))
+      captured profile ~target:(R.target request) payload ~actual_origin ~raw)
   |> Result.all
 ;;
 
@@ -324,7 +382,7 @@ let prepare profile request =
     then Error E.Incompatible_replay
     else Ok ()
   in
-  let%bind history = history request in
+  let%bind history = history profile request in
   let%bind tools = Result.all (List.map (R.tools request) ~f:tool) in
   let%bind settings =
     Result.all (List.map (R.Target.settings (R.target request)) ~f:setting)

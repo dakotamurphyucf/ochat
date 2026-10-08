@@ -292,6 +292,8 @@ let create ?(auth_binding = P.Absent) driver ~profile ~profile_revision ~auth ~l
     ~id:"openai.responses"
     ~limits
     ~bind
+    ~preflight_history:(fun ~target history ->
+      Inference_input.preflight_history profile ~target history)
     ~prepare:(prepare_with_policy ~policy:O.Transport_policy.Http_sse)
     ~prepare_with_policy
     ~open_session

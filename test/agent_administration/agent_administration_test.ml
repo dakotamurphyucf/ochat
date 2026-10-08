@@ -99,7 +99,7 @@ let connection daemon principal =
   connection
 ;;
 
-let with_daemon f =
+let with_daemon ?(options = inference_options ()) f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root =
@@ -124,7 +124,7 @@ let with_daemon f =
         Eio.Switch.run (fun sw ->
           let daemon =
             Agent_server.Daemon.start
-              ~options:(inference_options ())
+              ~options
               ~sw
               ~env
               ~config
@@ -747,4 +747,76 @@ let%expect_test
   assert (Int64.equal reference.revision 7L);
   print_endline "old three-field archive references remain readable";
   [%expect {| old three-field archive references remain readable |}]
+;;
+
+let%expect_test
+    "incompatible retained history rejects administration before state replacement"
+  =
+  let preflights = ref [] in
+  let options = inference_options () in
+  let policy = options.Agent_server.Daemon.inference_policy in
+  let adapter =
+    Inference_runtime.Adapter.create
+      ~id:"fixture.responses"
+      ~limits:Inference_runtime.Limits.default
+      ~bind:(fun _ -> Ok ())
+      ~preflight_history:(fun ~target history ->
+        preflights
+        := (Inference.Request.Target.model target, List.length history) :: !preflights;
+        if
+          String.equal (Inference.Request.Target.model target) "rejected-model"
+          && not (List.is_empty history)
+        then Error Inference_runtime.Preparation_error.Incompatible_replay
+        else Ok ())
+      ~prepare:(fun ~preparation_id:_ _ -> failwith "administration dispatched inference")
+      ()
+    |> Result.map_error ~f:(fun _ -> "fixture adapter")
+    |> Result.ok_or_failwith
+  in
+  let options =
+    { options with
+      inference_policy =
+        { policy with
+          resolve_inference_context =
+            (fun target -> Inference_runtime.Context.create adapter ~target)
+        }
+    }
+  in
+  with_daemon ~options (fun _sw _env root daemon ->
+    let connection = connection daemon (principal ()) in
+    let session, attachment = create_session connection in
+    let _, before = state daemon session.id in
+    let target =
+      reload
+        root
+        daemon
+        {|<config model="rejected-model"/><developer>replacement</developer>|}
+    in
+    (match
+       Agent_client.Connection.request
+         connection
+         (command `Upgrade session.id attachment.id before.counters.revision target)
+     with
+     | Error error -> assert (Agent_protocol.Error.equal_code error.code Invalid_request)
+     | Ok _ -> assert false);
+    let _, after = state daemon session.id in
+    assert (equal_state before after);
+    assert (
+      List.exists !preflights ~f:(fun (model, count) ->
+        String.equal model "rejected-model" && count > 0));
+    ignore
+      (request
+         connection
+         (command `Rebuild session.id attachment.id before.counters.revision target)
+       : Agent_protocol.Public.Result.t);
+    let _, rebuilt = state daemon session.id in
+    assert (not (equal_state before rebuilt));
+    assert (
+      List.exists !preflights ~f:(fun (model, count) ->
+        String.equal model "rejected-model" && count = 0));
+    Agent_client.Connection.close connection);
+  print_endline
+    "retained upgrade refused with identical state; explicit history reset admitted";
+  [%expect
+    {| retained upgrade refused with identical state; explicit history reset admitted |}]
 ;;

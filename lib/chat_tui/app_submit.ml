@@ -308,6 +308,7 @@ let context_for_tests runtime started_turns =
   in
   let inference_context =
     Inference_runtime.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
       ~id:"no-dispatch-fixture"
       ~limits:Inference_runtime.Limits.default
       ~bind:(fun _ -> Ok ())

@@ -27,6 +27,7 @@ let fixture_ctx ~env ~dir ~tool_dir ~cache =
   in
   let inference_context =
     Inference_runtime.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
       ~id:"moderator-fixture"
       ~limits:Inference_runtime.Limits.default
       ~bind:(fun _ -> Ok ())

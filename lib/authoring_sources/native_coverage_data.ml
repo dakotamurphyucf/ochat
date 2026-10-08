@@ -188,7 +188,7 @@ let implementation_sources =
   ; ( "lib/agent_server/managed_output_page.ml"
     , "a14130666a4495de0c35df1c01974922da31daed064f1f7622a9b686b9c38ba5" )
   ; ( "lib/agent_server/session_factory.ml"
-    , "3028c25f623281ff97fc0ed91df73d90238c50bdd561443bc7a761a1ccdafee9" )
+    , "0024d493160f6ba812f2e8cc586434f319d74589ecdca5135cbeb94ac8be54a9" )
   ; ( "lib/agent_session/authoring_context_tool.ml"
     , "46e1d8969a881efd0a3600ac521dc3d810acef6648410d01b8591c8be084f4bd" )
   ; ( "lib/agent_session/authoring_reference_scope.ml"

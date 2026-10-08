@@ -485,7 +485,17 @@ let retained_stored ~env ~directory ~max_payload_length ~allow_incomplete =
     | Error error -> Error error)
 ;;
 
-let prune_older ~max_payload_length ~env ~directory ~keep =
+module Pruned = struct
+  type t =
+    { removed_count : int
+    ; retention_floor : int64
+    }
+
+  let removed_count t = t.removed_count
+  let retention_floor t = t.retention_floor
+end
+
+let prune_older_with_floor ~max_payload_length ~env ~directory ~keep =
   if keep <= 0
   then Error (Store_error.Corrupt "snapshot retention count must be positive")
   else
@@ -493,12 +503,18 @@ let prune_older ~max_payload_length ~env ~directory ~keep =
     let%bind retained =
       retained_stored ~env ~directory ~max_payload_length ~allow_incomplete:false
     in
-    let filenames =
+    let retained =
       List.sort retained ~compare:(fun left right ->
         Int64.compare
           (Stored.metadata right.stored).transaction_sequence
           (Stored.metadata left.stored).transaction_sequence)
-      |> List.map ~f:(fun installed -> installed.filename)
+    in
+    let preserved = List.take retained keep in
+    let filenames = List.map retained ~f:(fun installed -> installed.filename) in
+    let%bind oldest_sequence =
+      match List.last preserved with
+      | None -> Error (Store_error.Missing "snapshot retention anchor")
+      | Some installed -> Ok (Stored.metadata installed.stored).transaction_sequence
     in
     let%bind current =
       Durable_file.load_bounded ~env ~path:(current_path directory) ~max_bytes:256
@@ -526,7 +542,12 @@ let prune_older ~max_payload_length ~env ~directory ~keep =
       then Ok ()
       else Durable_file.sync_directory ~env ~path:directory
     in
-    List.length removable
+    Pruned.{ removed_count = List.length removable; retention_floor = oldest_sequence }
+;;
+
+let prune_older ~max_payload_length ~env ~directory ~keep =
+  prune_older_with_floor ~max_payload_length ~env ~directory ~keep
+  |> Result.map ~f:Pruned.removed_count
 ;;
 
 let retention_floor ~env ~directory ~max_payload_length =

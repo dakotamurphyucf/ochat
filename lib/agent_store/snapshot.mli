@@ -151,6 +151,26 @@ val retained_stored
   -> allow_incomplete:bool
   -> (installed_stored list, Store_error.t) Result.t
 
+module Pruned : sig
+  (** Evidence from one completed, serialized pruning operation. It must not be
+      reused after another snapshot mutation. No persistent filesystem cache. *)
+  type t
+
+  val removed_count : t -> int
+  val retention_floor : t -> int64
+end
+
+(** Validate every retained document and CURRENT, prune, and return the oldest
+    remaining checkpoint from that same validated inventory. The caller holds
+    snapshot/journal mutation serialization through use of the returned floor.
+    No result is returned if unlinking or directory synchronization fails. *)
+val prune_older_with_floor
+  :  max_payload_length:int
+  -> env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> keep:int
+  -> (Pruned.t, Store_error.t) Result.t
+
 (** Preflight every retained document and CURRENT before any deletion. Caller
     also validates journal anchors under its existing mutation serialization. *)
 val prune_older

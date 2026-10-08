@@ -268,6 +268,23 @@ module Payload = struct
       | Known _ -> true
     ;;
 
+    let model = function
+      | Unavailable -> None
+      | Known known -> known.model
+    ;;
+
+    let same_replay_context left right =
+      match left, right with
+      | Known left, Known right ->
+        String.equal left.adapter right.adapter
+        && String.equal left.provider right.provider
+        && Option.equal String.equal left.account right.account
+        && String.equal left.endpoint right.endpoint
+        && Option.equal String.equal left.profile right.profile
+        && Int.equal left.replay_version right.replay_version
+      | Unavailable, _ | _, Unavailable -> false
+    ;;
+
     let to_json = function
       | Unavailable -> `Object [ "type", `String "unavailable" ]
       | Known { adapter; provider; account; endpoint; profile; model; replay_version } ->

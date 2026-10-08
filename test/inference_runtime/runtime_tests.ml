@@ -105,6 +105,7 @@ let receipt ?(output = []) ?(revision = 0L) ?(tokens = 3L) ~scope ~accounting_id
 
 let context ?(prepared_request = Fn.id) run =
   Runtime.Adapter.create
+    ~preflight_history:(fun ~target:_ _ -> Ok ())
     ~id:"synthetic"
     ~limits:Runtime.Limits.default
     ~bind:(fun _ -> Ok ())
@@ -365,6 +366,7 @@ let%expect_test
       in
       let adapter =
         Runtime.Adapter.create
+          ~preflight_history:(fun ~target:_ _ -> Ok ())
           ~id:"synthetic"
           ~limits:Runtime.Limits.default
           ~bind:(fun _ -> Ok ())

@@ -35,6 +35,7 @@ let execution ~target ~answer ~on_observation =
   let attempts = ref 0 in
   let context =
     Runtime.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
       ~id:"synthetic"
       ~limits:Runtime.Limits.default
       ~bind:(fun selected ->

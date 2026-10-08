@@ -84,6 +84,7 @@ let receipt scope accounting_id output =
 
 let context run =
   Runtime.Adapter.create
+    ~preflight_history:(fun ~target:_ _ -> Ok ())
     ~id:"synthetic"
     ~limits:Runtime.Limits.default
     ~bind:(fun _ -> Ok ())

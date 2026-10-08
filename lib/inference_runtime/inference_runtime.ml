@@ -233,6 +233,10 @@ module Adapter = struct
     { id : string
     ; limits : Limits.t
     ; bind : Request.Target.t -> (unit, Preparation_error.t) Result.t
+    ; preflight_history :
+        target:Request.Target.t
+        -> History_entry.t list
+        -> (unit, Preparation_error.t) Result.t
     ; prepare : policy:Observation.Transport_policy.t -> prepare
     ; open_session :
         (Session.t
@@ -241,7 +245,16 @@ module Adapter = struct
           option
     }
 
-  let create ?prepare_with_policy ?open_session ~id ~limits ~bind ~prepare () =
+  let create
+        ?prepare_with_policy
+        ?open_session
+        ~id
+        ~limits
+        ~bind
+        ~preflight_history
+        ~prepare
+        ()
+    =
     match
       Document_schema.Json.validate ~limits:Document_schema.Limits.default (`String id)
     with
@@ -259,7 +272,7 @@ module Adapter = struct
               | Prefer_websocket | Require_websocket ->
                 Error Preparation_error.Transport_unavailable)
         in
-        Ok { id; limits; bind; prepare; open_session })
+        Ok { id; limits; bind; preflight_history; prepare; open_session })
   ;;
 end
 
@@ -509,6 +522,12 @@ module Context = struct
     ; session : Session.t option
     ; prepare : Adapter.prepare
     }
+
+  let preflight_history t history =
+    let open Result.Let_syntax in
+    let%bind () = t.adapter.bind t.target in
+    t.adapter.preflight_history ~target:t.target history
+  ;;
 
   let create adapter ~target =
     let open Result.Let_syntax in

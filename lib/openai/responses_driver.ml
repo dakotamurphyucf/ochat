@@ -169,6 +169,7 @@ module Profile = struct
     ; uri : Uri.t
     ; capabilities : Capability.t
     ; defaults : Setting.t list
+    ; replay_policy : Responses_replay.t
     }
 
   let create ~id ~account ~endpoint ~capabilities ~defaults =
@@ -201,9 +202,18 @@ module Profile = struct
     then fail "profile defaults require Profile_default provenance"
     else (
       let%map.Or_error defaults = Setting.merge defaults in
-      { id; account; endpoint; uri; capabilities; defaults })
+      { id
+      ; account
+      ; endpoint
+      ; uri
+      ; capabilities
+      ; defaults
+      ; replay_policy = Responses_replay.exact_origin_only
+      })
   ;;
 
+  let with_replay_policy t replay_policy = { t with replay_policy }
+  let replay_policy t = t.replay_policy
   let id t = t.id
   let account t = t.account
   let endpoint t = t.endpoint
@@ -242,7 +252,11 @@ module Prepared = struct
            (Sexp.to_string (Capability.sexp_of_feature feature)))
   ;;
 
-  let content profile ~model json =
+  type asset_validation =
+    | Resolved
+    | Deferred
+
+  let content profile ~model ~assets json =
     let base64 text = nonempty text && Result.is_ok (Base64.decode text) in
     let inline_data data =
       match String.lsplit2 data ~on:',' with
@@ -255,18 +269,24 @@ module Prepared = struct
     match string_member json "type" with
     | Some "input_image" ->
       let%bind.Or_error () = require profile ~model Image_input in
-      (match string_member json "image_url" with
-       | Some data when inline_data data -> Ok ()
-       | _ -> fail "image must be resolved to immutable inline data")
+      (match assets with
+       | Deferred -> Ok ()
+       | Resolved ->
+         (match string_member json "image_url" with
+          | Some data when inline_data data -> Ok ()
+          | _ -> fail "image must be resolved to immutable inline data"))
     | Some "input_file" ->
       let%bind.Or_error () = require profile ~model Document_input in
-      (match string_member json "file_data", member json "file_url" with
-       | Some data, (None | Some `Null) when inline_data data || base64 data -> Ok ()
-       | _ -> fail "document must be resolved to immutable inline data")
+      (match assets with
+       | Deferred -> Ok ()
+       | Resolved ->
+         (match string_member json "file_data", member json "file_url" with
+          | Some data, (None | Some `Null) when inline_data data || base64 data -> Ok ()
+          | _ -> fail "document must be resolved to immutable inline data"))
     | Some _ | None -> Ok ()
   ;;
 
-  let history_features profile ~model history =
+  let history_features ?(assets = Resolved) profile ~model history =
     Or_error.all_unit
       (List.map history ~f:(fun item ->
          let%bind.Or_error () =
@@ -303,7 +323,7 @@ module Prepared = struct
          Or_error.all_unit
            (List.concat_map [ "content"; "output" ] ~f:(fun key ->
               match member item key with
-              | Some (`Array parts) -> List.map parts ~f:(content profile ~model)
+              | Some (`Array parts) -> List.map parts ~f:(content profile ~model ~assets)
               | _ -> []))))
   ;;
 
