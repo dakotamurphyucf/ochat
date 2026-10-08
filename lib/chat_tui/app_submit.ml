@@ -35,16 +35,21 @@ let clear_editor ~model : unit =
   Model.set_draft_mode model Model.Plain
 ;;
 
-let get_user_message_item text =
-  let open Openai.Responses in
-  Item.Input_message
-    { Input_message.role = Input_message.User
-    ; content = [ Input_message.Text { text; _type = "input_text" } ]
-    ; _type = "message"
-    }
+let user_payload text =
+  let module P = History_entry.Payload in
+  P.Semantic.create
+    (Message
+       { form = Input
+       ; role = User
+       ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+       ; phase = Absent
+       })
+    ~metadata:P.Metadata.empty
+  |> Result.map ~f:P.authored
 ;;
 
 let apply_user_submit_effects_exn
+      ~make_ctx
       ~cwd
       ~env
       ~cache
@@ -60,7 +65,7 @@ let apply_user_submit_effects_exn
     | Model.Plain ->
       ignore (Model.apply_patch model (Add_user_message { text = user_msg }));
       let entry =
-        History_entry.create ~allocator (get_user_message_item user_msg)
+        Result.bind (user_payload user_msg) ~f:(History_entry.create ~allocator)
         |> Result.ok_or_failwith
       in
       ignore @@ Model.add_history_item model entry
@@ -80,7 +85,7 @@ let apply_user_submit_effects_exn
       let user_msg =
         List.find_map_exn elements ~f:(function
           | CM.User m ->
-            let ctx = Ctx.create ~env ~dir:cwd ~cache ~tool_dir:cwd in
+            let ctx = make_ctx () in
             Some
               (Converter.convert_user_msg
                  ~ctx
@@ -114,12 +119,15 @@ let apply_user_submit_effects_exn
                (Res_item.jsonaf_of_t user_msg |> Jsonaf.to_string)
       in
       let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
-      let entry = History_entry.create ~allocator user_msg |> Result.ok_or_failwith in
+      let entry =
+        Openai.Responses_history.create ~allocator user_msg |> Result.ok_or_failwith
+      in
       ignore (Model.apply_patch model (Add_user_message { text = txt }));
       ignore (Model.add_history_item model entry))
 ;;
 
 let apply_user_submit_effects
+      ~make_ctx
       ~cwd
       ~env
       ~cache
@@ -130,6 +138,7 @@ let apply_user_submit_effects
   =
   try
     apply_user_submit_effects_exn
+      ~make_ctx
       ~cwd
       ~env
       ~cache
@@ -226,6 +235,18 @@ let start (ctx : Context.t) (submit_request : request) =
   let runtime = ctx.runtime in
   match
     apply_user_submit_effects
+      ~make_ctx:(fun () ->
+        Ctx.create
+          ~env
+          ~dir:cwd
+          ~tool_dir:cwd
+          ~cache
+          ~inference_context:services.inference_context
+          ~inference_identity:services.inference_identity
+          ~on_inference_attempt:services.on_inference_attempt
+          ~on_inference_completion:services.on_inference_completion
+          ~on_inference_observation:services.on_inference_observation
+          ())
       ~cwd
       ~env
       ~cache
@@ -243,7 +264,7 @@ let start (ctx : Context.t) (submit_request : request) =
 let model_of_history history =
   Model.create
     ~history_items:history
-    ~messages:(Conversation.of_history (History_entry.items history))
+    ~messages:(Conversation.of_history history)
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -270,9 +291,49 @@ let start_streaming_stub started_turns ~history ~op_id =
 ;;
 
 let context_for_tests runtime started_turns =
+  let require result =
+    Result.map_error result ~f:(fun _ -> "fixture context") |> Result.ok_or_failwith
+  in
+  let target =
+    Inference.Request.Target.create
+      ~adapter:"no-dispatch-fixture"
+      ~profile:"fixture"
+      ~profile_revision:None
+      ~account:None
+      ~endpoint:"local"
+      ~model:"fixture"
+      ~settings:[]
+      ~limits:Transcript.Admission.default
+    |> require
+  in
+  let inference_context =
+    Inference_runtime.Adapter.create
+      ~preflight_history:(fun ~target:_ _ -> Ok ())
+      ~id:"no-dispatch-fixture"
+      ~limits:Inference_runtime.Limits.default
+      ~bind:(fun _ -> Ok ())
+      ~prepare:(fun ~preparation_id:_ _ ->
+        Error Inference_runtime.Preparation_error.Target_unavailable)
+      ()
+    |> require
+    |> Inference_runtime.Context.create ~target
+    |> require
+  in
+  let inference_identity : Chat_response.Neutral_turn.Identity.t =
+    { new_preparation_id = (fun () -> failwith "submit fixture dispatched")
+    ; with_attempt = (fun _ ~relation:_ ~f:_ -> failwith "submit fixture started attempt")
+    }
+  in
   let shared : App_context.Resources.t =
     { services =
         { env = Obj.magic 0
+        ; inference_context
+        ; inference_identity
+        ; typeahead_inference = None
+        ; on_inference_attempt = (fun _ -> failwith "submit fixture observed attempt")
+        ; on_inference_completion = (fun _ -> ())
+        ; on_inference_observation =
+            (fun _ -> failwith "submit fixture observed inference")
         ; ui_sw = Obj.magic 0
         ; cwd = Obj.magic 0
         ; cache = Chat_response.Cache.create ~max_size:1 ()
@@ -313,7 +374,7 @@ let%test_unit "start_from_current_session preserves canonical history" =
     |> Result.ok_or_failwith
   in
   let history =
-    [ History_entry.create ~allocator (get_user_message_item "Hello")
+    [ Result.bind (user_payload "Hello") ~f:(History_entry.create ~allocator)
       |> Result.ok_or_failwith
     ]
   in
@@ -352,6 +413,8 @@ let%expect_test "raw validation preserves canonical history and recovers the dra
       let request = { Runtime.text; draft_mode = Model.Raw_xml } in
       let result =
         apply_user_submit_effects
+          ~make_ctx:(fun () ->
+            failwith "invalid raw fixture unexpectedly requested inference")
           ~cwd:(Eio.Stdenv.cwd env)
           ~env
           ~cache:(Cache.create ~max_size:1 ())
@@ -381,6 +444,7 @@ let%test_unit "start preserves submit append semantics" =
   let started_turns = ref None in
   let ctx = context_for_tests runtime started_turns in
   apply_user_submit_effects
+    ~make_ctx:(fun () -> failwith "plain fixture unexpectedly requested inference")
     ~cwd:(Obj.magic 0)
     ~env:(Obj.magic 0)
     ~cache:(Chat_response.Cache.create ~max_size:1 ())

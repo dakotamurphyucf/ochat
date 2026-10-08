@@ -64,9 +64,10 @@ let run_child env ~root ~boundary ~recover =
                Agent_store.Frame.decode ~max_payload_length:1048576 ~contents ~offset:0
              with
              | Ok (Complete { frame; _ })
-               when String.is_substring
-                      (Agent_store.Frame.payload frame)
-                      ~substring:"(stage Linked)" -> stop ()
+               when Agent_store.Delegation_store.equal_stage
+                      (Agent_server_test_support.delegation_stage
+                         (Agent_store.Frame.payload frame))
+                      Linked -> stop ()
              | _ -> ())
           | _ ->
             let scan =
@@ -83,7 +84,13 @@ let run_child env ~root ~boundary ~recover =
                  |> F.store_ok
                in
                let delta =
-                 Sexp.of_string transaction.delta |> Agent_session.Session_delta.t_of_sexp
+                 Agent_session.Session_delta_document.decode
+                   ~limits:Document_schema.Limits.default
+                   transaction.delta
+                 |> Result.map_error ~f:(fun error ->
+                   Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+                 |> Result.ok_or_failwith
+                 |> Agent_session.Session_delta_document.value
                in
                (match resolved delta with
                 | None -> ()
@@ -125,6 +132,19 @@ let run_child env ~root ~boundary ~recover =
           ; output_index = 0
           ; type_ = "response.function_call_arguments.done"
           }
+      ; Output_item_done
+          { item =
+              Function_call
+                { name = "agent_create"
+                ; arguments = Jsonaf.to_string request
+                ; call_id = sprintf "creator-%d" !requests
+                ; _type = "function_call"
+                ; id = Some "creator-item"
+                ; status = Some "completed"
+                }
+          ; output_index = 0
+          ; type_ = "response.output_item.done"
+          }
       ]
       |> Stdlib.List.to_seq
   in
@@ -145,7 +165,10 @@ let run_child env ~root ~boundary ~recover =
             ~options:
               { Daemon.default_options with
                 qualify_chatml_extensions = true
-              ; model_post_stream = Some provider
+              ; inference_policy =
+                  Agent_server_test_support.inference_policy
+                    ~default_model:"fixture-model"
+                    ~post_stream:provider
               }
             ()
           |> F.protocol_ok

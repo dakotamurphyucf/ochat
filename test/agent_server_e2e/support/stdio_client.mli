@@ -5,10 +5,10 @@ open Core
 type t
 
 type response =
-  { result : Agent_protocol.Method_result.t
+  { result : Agent_protocol.Public.Result.t
   ; notifications : Agent_protocol.Envelope.t list
   }
-[@@deriving sexp]
+[@@deriving sexp_of]
 
 val create : process:Stdio_process.t -> clock:_ Eio.Time.clock -> t
 val process : t -> Stdio_process.t

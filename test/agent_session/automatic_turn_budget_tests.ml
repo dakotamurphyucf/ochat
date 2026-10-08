@@ -93,6 +93,7 @@ let%expect_test
        let admission = Option.value_exn !first_admission in
        let transaction =
          Agent_store.Transaction.create
+           ~limits:document_limits
            ~session_id
            ~generation:0
            ~transaction_sequence:admission.state.counters.transaction_sequence
@@ -109,20 +110,15 @@ let%expect_test
               |> Time_ns.to_int63_ns_since_epoch
               |> Int63.to_int64)
            ~command_audit:None
-           ~delta:
-             (Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t admission.delta))
+           ~delta:(delta_document admission.delta)
            ~durable_events:
-             (List.map admission.events ~f:(fun event ->
-                Sexp.to_string_mach (P.Event.Durable.sexp_of_t event)))
+             (List.map admission.events ~f:(fun event -> event_document event))
          |> store_ok
          |> Agent_store.Transaction.encode
          |> Agent_store.Transaction.decode
          |> store_ok
        in
-       let replayed =
-         Agent_session.Session_persistence.apply_transaction before transaction
-         |> store_ok
-       in
+       let replayed = replay_transaction before transaction |> store_ok in
        assert_same_session_snapshot admission.state replayed;
        let before_pause = A.state actor |> protocol_ok in
        let pauses = [ R.Pause_followup_turns; Pause_internal_event_drains ] in
@@ -138,21 +134,12 @@ let%expect_test
        [%test_eq: int] 1 (budget paused).followup_turns;
        [%test_eq: int64 list] (budget before_pause).started_ms (budget paused).started_ms;
        let pause_delta = (Option.value_exn !saved_pause).delta in
-       let restored_delta =
-         Agent_session.Session_delta.sexp_of_t pause_delta
-         |> Sexp.to_string_mach
-         |> Sexp.of_string
-         |> Agent_session.Session_delta.t_of_sexp
-       in
+       let restored_delta = restore_delta pause_delta in
        let replayed_pause =
          Agent_session.Session_delta.apply before_pause restored_delta |> protocol_ok
        in
        assert (B.equal (budget paused) (budget replayed_pause));
-       let restored_pause =
-         Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t paused)
-         |> Agent_session.Session_persistence.restore_snapshot
-         |> store_ok
-       in
+       let restored_pause = restore_state paused |> store_ok in
        assert (B.equal (budget paused) (budget restored_pause));
        A.set_automatic_turn_pauses actor (List.rev pauses @ pauses) |> protocol_ok;
        assert_same_session_snapshot paused (A.state actor |> protocol_ok);
@@ -180,11 +167,7 @@ let%expect_test
           | Some (Discarded _) -> ()
           | _ -> failwith "suppressed intent not discarded");
          assert (not (A.apply_moderator_follow_up actor |> protocol_ok));
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          assert (B.equal (budget state) (budget restored));
          let repeated =
            Agent_session.Session_delta.apply

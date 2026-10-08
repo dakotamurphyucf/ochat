@@ -1,6 +1,29 @@
 (** Canonical occurrence checks for extension tool results. Provider call IDs
     alone are not unique. These checks grant no execution authority. *)
 
+module Validated_history : sig
+  (** An immutable, process-local snapshot of exact protocol entries and their
+      validated neutral payloads. Construct once for one snapshot validation;
+      never retain across session transitions. No receipt or execution authority
+      is implied by successful payload decoding. *)
+  type t
+
+  (** Decode every entry, preserving history order. Duplicate entry identities
+      are rejected. The snapshot owns the association between raw and decoded
+      entries; callers cannot supply independently decoded values. *)
+  val create : Agent_protocol.History.entry list -> (t, Agent_protocol.Error.t) result
+
+  val entries : t -> History_entry.t list
+
+  (** The same retained receipt checks as [validate_retained], reusing only the
+      snapshot's payload decoding. Provenance, routing, outcome and occurrence
+      order are checked for each invocation. *)
+  val validate_retained
+    :  t
+    -> Agent_protocol.Invocation.t
+    -> (unit, Agent_protocol.Error.t) result
+end
+
 val validate_call
   :  history:Agent_protocol.History.entry list
   -> Agent_protocol.Invocation.t

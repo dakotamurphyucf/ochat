@@ -28,7 +28,7 @@ val attach
   :  Http_driver.t
   -> Agent_protocol.Session.t
   -> string
-  -> session * Agent_protocol.Method_result.Attach.replay
+  -> session * Agent_protocol.Public.Result.Attach.replay
 
 (** [attach_after client summary key cursor] reconnects with the last consumed
     durable sequence; [None] requests a current snapshot. *)
@@ -37,9 +37,9 @@ val attach_after
   -> Agent_protocol.Session.t
   -> string
   -> int64 option
-  -> session * Agent_protocol.Method_result.Attach.replay
+  -> session * Agent_protocol.Public.Result.Attach.replay
 
-val snapshot : Http_driver.t -> session -> Agent_protocol.Snapshot.t
+val snapshot : Http_driver.t -> session -> Agent_protocol.Public.Snapshot.Fields.t
 val await : Eio_unix.Stdenv.base -> string -> (unit -> 'a option) -> 'a
 
 val await_snapshot
@@ -47,8 +47,8 @@ val await_snapshot
   -> Http_driver.t
   -> session
   -> string
-  -> (Agent_protocol.Snapshot.t -> bool)
-  -> Agent_protocol.Snapshot.t
+  -> (Agent_protocol.Public.Snapshot.Fields.t -> bool)
+  -> Agent_protocol.Public.Snapshot.Fields.t
 
 val start
   :  sw:Eio.Switch.t
@@ -76,7 +76,7 @@ val schedule_with_policy
   -> Agent_protocol.Schedule.misfire
   -> Agent_protocol.Schedule.t
 
-val events : Http_driver.t -> session -> string -> Agent_protocol.Event.Durable.t list
+val events : Http_driver.t -> session -> string -> Agent_protocol.Public.Durable.t list
 
 (** [events_since client session key cursor] requires retained replay after
     [cursor]. Use saved pre-disconnect traces when earlier segments were pruned. *)
@@ -85,7 +85,7 @@ val events_since
   -> session
   -> string
   -> int64
-  -> Agent_protocol.Event.Durable.t list
+  -> Agent_protocol.Public.Durable.t list
 
 (** [checkpoint env fixture session] reads a checksummed snapshot and replays
     complete journal frames without repairing or writing live daemon storage. *)

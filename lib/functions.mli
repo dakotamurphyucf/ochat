@@ -195,10 +195,15 @@ val webpage_to_markdown
     schema can be advertised to the model. *)
 val fork : Ochat_function.t
 
-(** [meta_refine ~env] registers the meta-prompting flow. Arguments require
+(** [meta_refine ~env ?inference ()] registers the meta-prompting flow. Arguments require
     [prompt] and [task]. An empty prompt selects generation; a nonempty prompt
-    selects updating. Running the tool may make provider requests. *)
-val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t
+    selects updating. Execution uses the supplied selected inference context;
+    invoking it without one raises [Meta_prompting.Evaluator.Configuration_required]. *)
+val meta_refine
+  :  env:Eio_unix.Stdenv.base
+  -> ?inference:Inference_client.Execution.t
+  -> unit
+  -> Ochat_function.t
 
 (** Register the [`import_image`] tool.
 

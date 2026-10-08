@@ -285,6 +285,7 @@ let%expect_test
     in
     let transaction =
       Agent_store.Transaction.create
+        ~limits:document_limits
         ~session_id
         ~generation:0
         ~transaction_sequence:transition.state.counters.transaction_sequence
@@ -297,38 +298,23 @@ let%expect_test
            |> Time_ns.to_int63_ns_since_epoch
            |> Int63.to_int64)
         ~command_audit:None
-        ~delta:(Delta.sexp_of_t transition.delta |> Sexp.to_string_mach)
+        ~delta:(delta_document transition.delta)
         ~durable_events:[]
       |> store_ok
       |> Agent_store.Transaction.encode
       |> Agent_store.Transaction.decode
       |> store_ok
     in
-    let replayed =
-      Agent_session.Session_persistence.apply_transaction state transaction |> store_ok
-    in
+    let replayed = replay_transaction state transaction |> store_ok in
     assert_same_session_snapshot transition.state replayed;
-    let restored =
-      State.sexp_of_t replayed
-      |> Sexp.to_string_mach
-      |> Agent_session.Session_persistence.restore_snapshot
-      |> store_ok
-    in
+    let restored = restore_state replayed |> store_ok in
     let retained = List.hd_exn restored.ingress_registrations in
     assert (I.equal next retained);
     assert (I.equal_receipt receipt (List.hd_exn retained.receipts));
     assert (Result.is_error (Delta.apply restored (Ingress_changed initial)));
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.restore_snapshot
-           (State.sexp_of_t { restored with subscriptions = [] } |> Sexp.to_string_mach)));
+    assert (Result.is_error (restore_state { restored with subscriptions = [] }));
     let replacement = Delta.apply restored (Reset_generation 1) |> protocol_ok in
-    let replacement =
-      State.sexp_of_t replacement
-      |> Sexp.to_string_mach
-      |> Agent_session.Session_persistence.restore_snapshot
-      |> store_ok
-    in
+    let replacement = restore_state replacement |> store_ok in
     assert (
       List.equal I.equal restored.ingress_registrations replacement.ingress_registrations);
     assert (Result.is_error (Delta.apply replacement (Ingress_changed next)));

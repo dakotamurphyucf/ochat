@@ -104,118 +104,122 @@ let item_equal left right =
     (Jsonaf.to_string (Res.Item.jsonaf_of_t right))
 ;;
 
+let allocator namespace =
+  History_entry.Allocator.create ~namespace ~next_sequence:0 |> Result.ok_or_failwith
+;;
+
+let fixture_ctx env ?dir ~namespace ~post_stream () =
+  let dir = Option.value dir ~default:(Eio.Stdenv.cwd env) in
+  Inference_fixture.create ~namespace ~default_model:"test-model" ~post_stream
+  |> fun fixture ->
+  Inference_fixture.ctx
+    fixture
+    ~env
+    ~dir
+    ~tool_dir:(Eio.Stdenv.cwd env)
+    ~cache:(Chat_response.Cache.create ~max_size:1 ())
+    ()
+;;
+
+let stream_response (response : Res.Response.t) =
+  List.mapi response.output ~f:(fun output_index item ->
+    let item = Res.Response_stream.Item.t_of_jsonaf (Res.Item.jsonaf_of_t item) in
+    Res.Response_stream.Output_item_done
+      { item; output_index; type_ = "response.output_item.done" })
+  |> Stdlib.List.to_seq
+;;
+
+let added_message id =
+  Res.Response_stream.Output_item_added
+    { item = Output_message (output_text id "")
+    ; output_index = 0
+    ; type_ = "response.output_item.added"
+    }
+;;
+
+let canonical_texts entries =
+  List.concat_map entries ~f:(fun entry ->
+    match
+      History_entry.Payload.Semantic.view
+        (History_entry.Payload.semantic (History_entry.payload entry))
+    with
+    | Message { role = Assistant; content } ->
+      List.filter_map content ~f:(function
+        | Text { text; _ } -> Some text
+        | _ -> None)
+    | _ -> [])
+;;
+
 let%expect_test "observed and unobserved entry execution preserve payloads and IDs" =
   Eio_main.run
   @@ fun env ->
-  let dir = Eio.Stdenv.cwd env in
-  let ctx =
-    Chat_response.Ctx.create
-      ~env
-      ~dir
-      ~tool_dir:dir
-      ~cache:(Chat_response.Cache.create ~max_size:1 ())
-  in
-  let create_allocator () =
-    History_entry.Allocator.create ~namespace:"driver-parity" ~next_sequence:0
+  let create_initial allocator =
+    Openai.Responses_history.create ~allocator (input_message "hello")
     |> Result.ok_or_failwith
   in
-  let create_initial allocator =
-    History_entry.create ~allocator (input_message "hello") |> Result.ok_or_failwith
-  in
-  let blocking_allocator = create_allocator () in
-  let blocking_initial = create_initial blocking_allocator in
-  let blocking_responses =
-    Queue.of_list
-      [ response [ Function_call function_call ]
-      ; response [ Output_message (output_text "provider-message" "done") ]
-      ]
-  in
-  let blocking_inputs = Queue.create () in
-  let post : Chat_response.Response_loop.post =
-    fun ~sw:_ ~dir:_ ~inputs ->
-    Queue.enqueue blocking_inputs inputs;
-    Queue.dequeue_exn blocking_responses
-  in
-  let blocking_history =
-    Chat_response.Driver.run_entries
-      ~ctx
-      ~allocator:blocking_allocator
-      ~post
-      ~model:Res.Request.Gpt4
-      ~tool_tbl:(create_tool_table ())
-      [ blocking_initial ]
-  in
-  let observed_allocator = create_allocator () in
-  let observed_initial = create_initial observed_allocator in
-  let observed_responses =
-    Queue.of_list
-      [ [ stream_done (Res.Response_stream.Item.Function_call function_call) ]
-      ; [ stream_done
-            (Res.Response_stream.Item.Output_message
-               (output_text "provider-message" "done"))
+  let run ~observed =
+    let entries = allocator "driver-parity" in
+    let initial = create_initial entries in
+    let responses =
+      Queue.of_list
+        [ response [ Function_call function_call ]
+        ; response [ Output_message (output_text "provider-message" "done") ]
         ]
-      ]
+    in
+    let requests = Queue.create () in
+    let ctx =
+      fixture_ctx
+        env
+        ~namespace:(if observed then "observed" else "plain")
+        ~post_stream:(fun ~sw:_ ~inputs ->
+          Queue.enqueue requests inputs;
+          stream_response (Queue.dequeue_exn responses))
+        ()
+    in
+    let observer : Chat_response.Driver.agent_observer =
+      { on_event = ignore; on_tool_execution = ignore }
+    in
+    let history =
+      Chat_response.Driver.run_entries
+        ~ctx
+        ~allocator:entries
+        ?observer:(if observed then Some observer else None)
+        ~tool_tbl:(create_tool_table ())
+        [ initial ]
+    in
+    history, Queue.to_list requests, History_entry.Allocator.next_sequence entries
   in
-  let observed_inputs = Queue.create () in
-  let post_stream : Chat_response.Agent_response_loop.post_stream =
-    fun ~sw:_ ~dir:_ ~inputs ->
-    Queue.enqueue observed_inputs inputs;
-    Queue.dequeue_exn observed_responses |> Stdlib.List.to_seq
-  in
-  let observer : Chat_response.Driver.agent_observer =
-    { on_event = ignore; on_tool_execution = ignore }
-  in
-  let observed_history =
-    Chat_response.Driver.run_entries
-      ~ctx
-      ~allocator:observed_allocator
-      ~observer
-      ~post_stream
-      ~model:Res.Request.Gpt4
-      ~tool_tbl:(create_tool_table ())
-      [ observed_initial ]
-  in
+  let plain, plain_requests, plain_next = run ~observed:false in
+  let observed, observed_requests, observed_next = run ~observed:true in
   let ids history =
     List.map history ~f:(fun entry -> History_entry.Id.sequence (History_entry.id entry))
-  in
-  let requests_equal =
-    List.equal
-      (List.equal item_equal)
-      (Queue.to_list blocking_inputs)
-      (Queue.to_list observed_inputs)
   in
   print_s
     [%sexp
       (List.equal
-         item_equal
-         (History_entry.items blocking_history)
-         (History_entry.items observed_history)
+         (fun left right ->
+            History_entry.Id.equal (History_entry.id left) (History_entry.id right)
+            && Document_schema.Json.equal
+                 (History_entry.Payload.to_json (History_entry.payload left))
+                 (History_entry.Payload.to_json (History_entry.payload right)))
+         plain
+         observed
        : bool)
-    , (ids blocking_history : int list)
-    , (ids observed_history : int list)
-    , (requests_equal : bool)
-    , (History_entry.Allocator.next_sequence blocking_allocator : int)
-    , (History_entry.Allocator.next_sequence observed_allocator : int)];
+    , (ids plain : int list)
+    , (ids observed : int list)
+    , (List.equal (List.equal item_equal) plain_requests observed_requests : bool)
+    , (plain_next : int)
+    , (observed_next : int)];
   [%expect {| (true (0 1 2 3) (0 1 2 3) true 4 4) |}]
 ;;
 
 let%expect_test "observed fork keeps child identity and history isolated" =
   Eio_main.run
   @@ fun env ->
-  let dir = Eio.Stdenv.cwd env in
-  let ctx =
-    Chat_response.Ctx.create
-      ~env
-      ~dir
-      ~tool_dir:dir
-      ~cache:(Chat_response.Cache.create ~max_size:1 ())
-  in
-  let allocator =
-    History_entry.Allocator.create ~namespace:"task6-parent" ~next_sequence:0
-    |> Result.ok_or_failwith
-  in
+  let entries = allocator "task6-parent" in
   let initial =
-    History_entry.create ~allocator (input_message "start") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator:entries (input_message "start")
+    |> Result.ok_or_failwith
   in
   let fork_call : Res.Function_call.t =
     { name = "fork"
@@ -229,44 +233,48 @@ let%expect_test "observed fork keeps child identity and history isolated" =
   let responses =
     Queue.of_list
       [ [ stream_done (Res.Response_stream.Item.Function_call fork_call) ]
-      ; [ stream_done
-            (Res.Response_stream.Item.Output_message
-               (output_text "reused-provider-id" "child result"))
-        ]
-      ; [ stream_done
-            (Res.Response_stream.Item.Output_message
-               (output_text "reused-provider-id" "parent done"))
-        ]
+      ; [ done_message "reused-provider-id" "child result" ]
+      ; [ done_message "reused-provider-id" "parent done" ]
       ]
   in
   let requests = Queue.create () in
-  let post_stream : Chat_response.Agent_response_loop.post_stream =
-    fun ~sw:_ ~dir:_ ~inputs ->
-    Queue.enqueue requests inputs;
-    Queue.dequeue_exn responses |> Stdlib.List.to_seq
+  let ctx =
+    fixture_ctx
+      env
+      ~namespace:"fork-parity"
+      ~post_stream:(fun ~sw:_ ~inputs ->
+        Queue.enqueue requests inputs;
+        Queue.dequeue_exn responses |> Stdlib.List.to_seq)
+      ()
   in
-  let sourced = Queue.create () in
-  let observer : Chat_response.Agent_response_loop.observer =
-    { on_event = ignore; on_tool_execution = ignore }
+  let scopes = Queue.create () in
+  let observer : Loop.observer =
+    { on_event =
+        (fun event ->
+          match Transcript.Stream.view event with
+          | Source_started { scope; _ } -> Queue.enqueue scopes scope
+          | _ -> ())
+    ; on_tool_execution = ignore
+    }
   in
   let history =
-    Chat_response.Agent_response_loop.run_entries
+    Loop.run_entries
       ~ctx
-      ~allocator
+      ~allocator:entries
       ~observer
-      ~on_sourced_event:(Queue.enqueue sourced)
-      ~post_stream
-      ~model:Res.Request.Gpt4
       ~tool_tbl:(String.Table.create ())
       [ initial ]
   in
   let kinds =
     List.map history ~f:(fun entry ->
-      match History_entry.item entry with
-      | Res.Item.Input_message _ -> "input"
-      | Function_call _ -> "call"
-      | Function_call_output _ -> "output"
-      | Output_message _ -> "message"
+      match
+        History_entry.Payload.Semantic.view
+          (History_entry.Payload.semantic (History_entry.payload entry))
+      with
+      | Message { role = User; _ } -> "input"
+      | Call _ -> "call"
+      | Result _ -> "output"
+      | Message { role = Assistant; _ } -> "message"
       | _ -> "other")
   in
   let ids =
@@ -274,78 +282,76 @@ let%expect_test "observed fork keeps child identity and history isolated" =
       let id = History_entry.id entry in
       History_entry.Id.namespace id, History_entry.Id.sequence id)
   in
+  let source_list = Queue.to_list scopes in
   let sources =
-    Queue.to_list sourced
-    |> List.map ~f:(fun event -> Option.is_some event.invocation_id, event.parent_call_id)
+    List.map source_list ~f:(fun (scope : Transcript.Scope.t) ->
+      match scope.relation with
+      | Root -> false, None
+      | Nested parent -> true, parent.call_alias)
   in
-  let child_source =
-    Queue.to_list sourced |> List.find_map_exn ~f:(fun event -> event.invocation_id)
-  in
+  let child_scope = List.nth_exn source_list 1 in
+  let parent_scope = List.hd_exn source_list in
   let child_request = List.nth_exn (Queue.to_list requests) 1 in
   let child_has_isolated_entries =
     List.exists child_request ~f:(function
-      | Res.Item.Function_call_output output ->
-        String.equal output.call_id "fork-call"
-        &&
-          (match output.output with
-          | Res.Tool_output.Output.Text text ->
-            String.is_substring text ~substring:"Forked Agent"
-          | Content _ -> false)
+      | Function_call_output { call_id; output = Text text; _ } ->
+        String.equal call_id "fork-call"
+        && String.is_substring text ~substring:"Forked Agent"
       | _ -> false)
   in
   let parent_has_child_payload =
-    List.exists history ~f:(fun entry ->
-      match History_entry.item entry with
-      | Res.Item.Output_message message ->
-        List.exists message.content ~f:(fun part -> String.equal part.text "child result")
-      | _ -> false)
+    List.mem (canonical_texts history) "child result" ~equal:String.equal
   in
   print_s
     [%sexp
       (kinds : string list)
     , (ids : (string * int) list)
     , (sources : (bool * string option) list)
-    , (String.is_prefix child_source ~prefix:"fork-invocation-" : bool)
-    , (String.equal child_source "fork-call" : bool)
+    , (not (Transcript.Scope.Key.equal child_scope.key parent_scope.key) : bool)
     , (child_has_isolated_entries : bool)
     , (parent_has_child_payload : bool)
     , (Queue.length requests : int)
-    , (History_entry.Allocator.next_sequence allocator : int)];
+    , (History_entry.Allocator.next_sequence entries : int)];
   [%expect
     {|
     ((input call output message)
      ((task6-parent 0) (task6-parent 1) (task6-parent 2) (task6-parent 3))
-     ((false ()) (true (fork-call)) (false ())) true false true false 3 4)
+     ((false ()) (true (fork-call)) (false ())) true true false 3 4)
     |}]
 ;;
 
 let%expect_test "observed streaming loop forwards deltas and preserves final text" =
   Eio_main.run
   @@ fun env ->
-  let cache = Chat_response.Cache.create ~max_size:1 () in
   let ctx =
-    Chat_response.Ctx.create
-      ~env
-      ~dir:(Eio.Stdenv.cwd env)
-      ~tool_dir:(Eio.Stdenv.cwd env)
-      ~cache
+    fixture_ctx
+      env
+      ~namespace:"deltas"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Stdlib.List.to_seq
+          [ added_message "message-1"
+          ; text_delta "message-1" "hello"
+          ; done_message "message-1" "hello"
+          ])
+      ()
   in
   let events = Queue.create () in
   let observer : Loop.observer =
-    { on_event = Queue.enqueue events; on_tool_execution = (fun _ -> ()) }
+    { on_event = Queue.enqueue events; on_tool_execution = ignore }
   in
-  let post_stream ~sw:_ ~dir:_ ~inputs:_ =
-    Stdlib.List.to_seq
-      [ text_delta "message-1" "hello"; done_message "message-1" "hello" ]
-  in
-  let tool_tbl = String.Table.create () in
   let history =
-    Loop.run ~ctx ~model:Res.Request.Gpt4 ~tool_tbl ~observer ~post_stream []
+    Loop.run_entries
+      ~ctx
+      ~allocator:(allocator "delta-history")
+      ~observer
+      ~tool_tbl:(String.Table.create ())
+      []
   in
-  Queue.iter events ~f:(function
-    | Res.Response_stream.Output_text_delta { delta; _ } -> print_endline delta
+  Queue.iter events ~f:(fun event ->
+    match Transcript.Stream.view event with
+    | Changed { change = Append text; _ } -> print_endline text
     | _ -> ());
-  print_s [%sexp (assistant_texts history : string list)];
+  print_s [%sexp (canonical_texts history : string list)];
   [%expect
     {|
     hello
@@ -353,71 +359,76 @@ let%expect_test "observed streaming loop forwards deltas and preserves final tex
     |}]
 ;;
 
-let%expect_test "observed streaming loop retries one parsing failure" =
+let%expect_test "selected streaming loop preserves parsing failure without hidden retry" =
   Eio_main.run
   @@ fun env ->
-  let cache = Chat_response.Cache.create ~max_size:1 () in
-  let ctx =
-    Chat_response.Ctx.create
-      ~env
-      ~dir:(Eio.Stdenv.cwd env)
-      ~tool_dir:(Eio.Stdenv.cwd env)
-      ~cache
-  in
   let attempts = ref 0 in
-  let post_stream ~sw:_ ~dir:_ ~inputs:_ =
-    Int.incr attempts;
-    if Int.equal !attempts 1
-    then raise (Res.Response_stream_parsing_error (`Null, Failure "malformed stream"))
-    else Stdlib.List.to_seq [ done_message "message-2" "recovered" ]
-  in
-  let observer : Loop.observer =
-    { on_event = (fun _ -> ()); on_tool_execution = (fun _ -> ()) }
-  in
-  let history =
-    Loop.run
-      ~ctx
-      ~model:Res.Request.Gpt4
-      ~tool_tbl:(String.Table.create ())
-      ~observer
-      ~post_stream
-      []
-  in
-  print_s [%sexp (!attempts : int), (assistant_texts history : string list)];
-  [%expect {| (2 (recovered)) |}]
-;;
-
-let%expect_test "observed loop uses explicit response artifact directory" =
-  Eio_main.run
-  @@ fun env ->
-  let cache = Chat_response.Cache.create ~max_size:1 () in
-  let prompt_dir = Eio.Path.(Eio.Stdenv.cwd env / "prompt-dir") in
-  let response_dir = Eio.Path.(Eio.Stdenv.cwd env / "response-dir") in
   let ctx =
-    Chat_response.Ctx.create ~env ~dir:prompt_dir ~tool_dir:(Eio.Stdenv.cwd env) ~cache
-  in
-  let selected_dir = ref None in
-  let post_stream ~sw:_ ~dir ~inputs:_ =
-    selected_dir := Some (Eio.Path.native_exn dir);
-    Stdlib.List.to_seq [ done_message "message-dir" "done" ]
+    fixture_ctx
+      env
+      ~namespace:"parse-failure"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Int.incr attempts;
+        raise (Res.Response_stream_parsing_error (`Null, Failure "malformed stream")))
+      ()
   in
   let observer : Loop.observer = { on_event = ignore; on_tool_execution = ignore } in
-  ignore
-    (Loop.run
-       ~ctx
-       ~response_dir
-       ~model:Res.Request.Gpt4
-       ~tool_tbl:(String.Table.create ())
-       ~observer
-       ~post_stream
-       []
-     : Res.Item.t list);
-  print_s
-    [%sexp
-      (Option.value_exn !selected_dir : string)
-    , (Eio.Path.native_exn prompt_dir : string)
-    , (Eio.Path.native_exn response_dir : string)];
-  [%expect {| (./response-dir ./prompt-dir ./response-dir) |}]
+  let propagated =
+    try
+      ignore
+        (Loop.run_entries
+           ~ctx
+           ~allocator:(allocator "failed-history")
+           ~observer
+           ~tool_tbl:(String.Table.create ())
+           []
+         : History_entry.t list);
+      false
+    with
+    | Res.Response_stream_parsing_error _ -> true
+  in
+  print_s [%sexp (!attempts : int), (propagated : bool)];
+  [%expect {| (1 true) |}]
+;;
+
+let%expect_test "retired provider transport rejects before selected or transport effects" =
+  Eio_main.run
+  @@ fun env ->
+  let selected_calls = ref 0 in
+  let transport_calls = ref 0 in
+  let ctx =
+    fixture_ctx
+      env
+      ~namespace:"retired"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Int.incr selected_calls;
+        Stdlib.List.to_seq [])
+      ()
+  in
+  let response_dir = Eio.Path.(Eio.Stdenv.cwd env / "response-dir") in
+  let post_stream ~sw:_ ~dir:_ ~inputs:_ =
+    Int.incr transport_calls;
+    Stdlib.List.to_seq []
+  in
+  let observer : Loop.observer = { on_event = ignore; on_tool_execution = ignore } in
+  let rejected =
+    try
+      ignore
+        (Loop.run_entries
+           ~ctx
+           ~allocator:(allocator "retired-history")
+           ~response_dir
+           ~observer
+           ~post_stream
+           ~tool_tbl:(String.Table.create ())
+           []
+         : History_entry.t list);
+      false
+    with
+    | Invalid_argument _ -> true
+  in
+  print_s [%sexp (rejected : bool), (!selected_calls : int), (!transport_calls : int)];
+  [%expect {| (true 0 0) |}]
 ;;
 
 let show_progress { Ochat_function.Progress.channel; update } =
@@ -445,13 +456,11 @@ let%expect_test "Agent trace labels deltas and nested tool activity" =
       ~emit:(Queue.enqueue progress)
       ~emit_trace:(Queue.enqueue traces)
   in
-  let observer : Chat_response.Agent_response_loop.observer =
-    { on_event = Chat_response.Agent_trace.on_event trace
-    ; on_tool_execution = Chat_response.Agent_trace.on_tool_execution trace
-    }
-  in
-  observer.on_event (text_delta "message-3" "answer");
-  observer.on_event
+  (* This test exercises the isolated legacy DTO-to-trace ingress helper;
+     selected executors publish typed Transcript events instead. *)
+  Chat_response.Agent_trace.on_event trace (text_delta "message-3" "answer");
+  Chat_response.Agent_trace.on_event
+    trace
     (Res.Response_stream.Reasoning_summary_text_delta
        { summary_index = 0
        ; delta = "thought"
@@ -459,17 +468,20 @@ let%expect_test "Agent trace labels deltas and nested tool activity" =
        ; output_index = 0
        ; type_ = "response.reasoning_summary_text.delta"
        });
-  observer.on_tool_execution
+  Chat_response.Agent_trace.on_tool_execution
+    trace
     (Started
        { call_id = "nested-1"
        ; name = "lookup"
        ; kind = `Function
        ; payload = {|{"query":"x"}|}
        });
-  observer.on_tool_execution
+  Chat_response.Agent_trace.on_tool_execution
+    trace
     (Progress
        { call_id = "nested-1"; progress = { channel = `Stdout; update = Append "chunk" } });
-  observer.on_tool_execution
+  Chat_response.Agent_trace.on_tool_execution
+    trace
     (Finished
        { call_id = "nested-1"
        ; outcome = Returned

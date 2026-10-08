@@ -35,6 +35,9 @@ type provenance =
   | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
 
+val provenance_to_json : provenance -> Jsonaf.t
+val provenance_of_json : Jsonaf.t -> (provenance, Error.t) result
+
 type entry =
   { id : Id.t
   ; role : role

@@ -4,8 +4,6 @@ module Res = Openai.Responses
 module Req = Res.Request
 module Config = Chat_response.Config
 module Execution = Chat_response.Tool_execution_event
-module Sourced = Chat_response.Sourced_response_event
-module History_stream = Chat_response.History_stream_event
 
 exception Cancelled
 
@@ -24,8 +22,8 @@ module Context = struct
 end
 
 type transport_event =
-  | Sourced_stream of Sourced.t
-  | History_stream of History_stream.t
+  | Transcript of Transcript.Stream.t
+  | History_committed of History_entry.t
   | Tool_execution of Execution.t
   | Tool_output of History_entry.t
   | Runtime_request of Chat_response.Moderation.Runtime_request.t
@@ -51,6 +49,16 @@ let run_with_terminal_event ~on_done ~on_error f =
   | ex -> on_error ex
 ;;
 
+let equal_channel (left : Ochat_function.Progress.channel) right =
+  match left, right with
+  | `Assistant, `Assistant
+  | `Reasoning, `Reasoning
+  | `Stdout, `Stdout
+  | `Stderr, `Stderr
+  | `Activity, `Activity -> true
+  | (`Assistant | `Reasoning | `Stdout | `Stderr | `Activity), _ -> false
+;;
+
 let merge_execution previous current =
   match previous, current with
   | ( Execution.Progress
@@ -59,7 +67,7 @@ let merge_execution previous current =
         { call_id = other_id
         ; progress = { channel = other; update = Ochat_function.Progress.Append right }
         } )
-    when String.equal call_id other_id && Poly.(channel = other) ->
+    when String.equal call_id other_id && equal_channel channel other ->
     Some
       (Execution.Progress
          { call_id
@@ -71,7 +79,7 @@ let merge_execution previous current =
         { call_id = other_id
         ; progress = { channel = other; update = Ochat_function.Progress.Replace text }
         } )
-    when String.equal call_id other_id && Poly.(channel = other) ->
+    when String.equal call_id other_id && equal_channel channel other ->
     Some
       (Execution.Progress
          { call_id
@@ -96,33 +104,33 @@ let coalesce_events events =
 ;;
 
 let emit_events ~internal_stream ~op_id events =
-  let rec loop sourced_acc history_acc = function
-    | Sourced_stream sourced :: rest -> loop (sourced :: sourced_acc) history_acc rest
-    | History_stream event :: rest -> loop sourced_acc (event :: history_acc) rest
+  let flush reversed =
+    match List.rev reversed with
+    | [] -> ()
+    | [ event ] -> Eio.Stream.add internal_stream (`Transcript (op_id, event))
+    | events -> Eio.Stream.add internal_stream (`Transcript_batch (op_id, events))
+  in
+  let rec loop reversed = function
+    | Transcript event :: rest -> loop (event :: reversed) rest
     | events ->
-      (match List.rev sourced_acc with
-       | [] -> ()
-       | [ sourced ] -> Eio.Stream.add internal_stream (`Sourced_stream (op_id, sourced))
-       | sourced ->
-         Eio.Stream.add internal_stream (`Sourced_stream_batch (op_id, sourced)));
-      (match List.rev history_acc with
-       | [] -> ()
-       | [ event ] -> Eio.Stream.add internal_stream (`History_stream (op_id, event))
-       | events -> Eio.Stream.add internal_stream (`History_stream_batch (op_id, events)));
+      flush reversed;
       (match events with
        | [] -> ()
+       | History_committed entry :: rest ->
+         Eio.Stream.add internal_stream (`History_committed (op_id, entry));
+         loop [] rest
        | Tool_execution event :: rest ->
          Eio.Stream.add internal_stream (`Tool_execution (op_id, event));
-         loop [] [] rest
-       | Tool_output item :: rest ->
-         Eio.Stream.add internal_stream (`Tool_output (op_id, item));
-         loop [] [] rest
-       | Runtime_request request :: rest ->
-         Eio.Stream.add internal_stream (`Moderator_runtime_request (op_id, request));
-         loop [] [] rest
-       | Sourced_stream _ :: _ | History_stream _ :: _ -> assert false)
+         loop [] rest
+       | Tool_output entry :: rest ->
+         Eio.Stream.add internal_stream (`Tool_output (op_id, entry));
+         loop [] rest
+       | Runtime_request event :: rest ->
+         Eio.Stream.add internal_stream (`Moderator_runtime_request (op_id, event));
+         loop [] rest
+       | Transcript _ :: _ -> assert false)
   in
-  loop [] [] (coalesce_events events)
+  loop [] (coalesce_events events)
 ;;
 
 let finish_transport ~internal_stream ~op_id ~events ~items =
@@ -152,8 +160,8 @@ let run_transport ~env ~sw ~internal_stream ~op_id stream =
 
 module For_testing = struct
   type event = transport_event =
-    | Sourced_stream of Sourced.t
-    | History_stream of History_stream.t
+    | Transcript of Transcript.Stream.t
+    | History_committed of History_entry.t
     | Tool_execution of Execution.t
     | Tool_output of History_entry.t
     | Runtime_request of Chat_response.Moderation.Runtime_request.t
@@ -165,52 +173,29 @@ module For_testing = struct
   let run_with_terminal_event = run_with_terminal_event
 end
 
-let prompt_cache_retention model =
-  match model with
-  | Some
-      ( "gpt-5.4"
-      | "gpt-5.2"
-      | "gp5-5.1-codex-max"
-      | "gpt-5.1"
-      | "gpt-5.1-codex"
-      | "gpt-5.1-codex-mini"
-      | "gpt-5.1-chat-latest"
-      | "gpt-5"
-      | "gpt-5-codex"
-      | "gpt-4.1" ) -> Some "24h"
-  | _ -> None
-;;
-
 let run_driver (ctx : Context.t) ~history ~stream =
-  let cfg = ctx.cfg in
   Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
     ~env:ctx.shared.services.env
+    ~inference_context:ctx.shared.services.inference_context
+    ~inference_identity:ctx.shared.services.inference_identity
+    ~on_inference_attempt:ctx.shared.services.on_inference_attempt
+    ~on_inference_completion:ctx.shared.services.on_inference_completion
+    ~on_inference_observation:ctx.shared.services.on_inference_observation
     ~datadir:ctx.shared.services.datadir
     ~allocator:ctx.allocator
     ~history
     ~tools:(Some ctx.tools)
     ~tool_tbl:ctx.tool_tbl
     ?safe_point_input:ctx.safe_point_input
-    ?temperature:cfg.temperature
-    ?max_output_tokens:cfg.max_tokens
-    ?reasoning:
-      (Option.map cfg.reasoning_effort ~f:(fun effort ->
-         Req.Reasoning.
-           { effort = Some (Req.Reasoning.Effort.of_str_exn effort)
-           ; summary = Some Req.Reasoning.Summary.Detailed
-           }))
-    ?prompt_cache_key:
-      (Option.map ctx.shared.services.session ~f:(fun session -> session.id))
-    ?prompt_cache_retention:(prompt_cache_retention cfg.model)
     ?moderator:ctx.moderator
-    ~on_history_event:(fun event -> Eio.Stream.add stream (Event (History_stream event)))
-    ~on_sourced_event:(fun event -> Eio.Stream.add stream (Event (Sourced_stream event)))
+    ~on_transcript_event:(fun event -> Eio.Stream.add stream (Event (Transcript event)))
+    ~on_history_item_appended:(fun entry ->
+      Eio.Stream.add stream (Event (History_committed entry)))
     ~on_tool_execution:(fun event -> Eio.Stream.add stream (Event (Tool_execution event)))
     ~on_history_tool_out:(fun entry -> Eio.Stream.add stream (Event (Tool_output entry)))
     ~on_runtime_request:(fun request ->
       Eio.Stream.add stream (Event (Runtime_request request)))
     ~history_compaction:ctx.history_compaction
-    ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
     ~parallel_tool_calls:ctx.parallel_tool_calls
     ()
 ;;

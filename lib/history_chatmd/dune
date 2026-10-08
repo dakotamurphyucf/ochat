@@ -1,0 +1,5 @@
+(library
+ (name history_chatmd)
+ (public_name ochat.history_chatmd)
+ (libraries core jsonaf ochat.history_entry)
+ (preprocess (pps ppx_jane)))

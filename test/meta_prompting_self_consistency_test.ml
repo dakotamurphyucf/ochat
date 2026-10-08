@@ -3,7 +3,7 @@ open Meta_prompting
 
 module Cancelled_judge : Evaluator.Judge = struct
   let name = "cancelled"
-  let evaluate ?env:_ _ = raise (Eio.Cancel.Cancelled Exit)
+  let evaluate ?env:_ ?inference:_ _ = raise (Eio.Cancel.Cancelled Exit)
 end
 
 let%expect_test "self consistency and evaluator preserve cancellation" =
@@ -33,7 +33,7 @@ module Flippy_judge : Evaluator.Judge = struct
   let name = "flippy"
   let counter = ref 0
 
-  let evaluate ?env:_ _candidate =
+  let evaluate ?env:_ ?inference:_ _candidate =
     incr counter;
     if !counter mod 2 = 1 then 0.9 else 0.1
   ;;

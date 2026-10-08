@@ -55,7 +55,7 @@ let with_client ~sw env fixture token f =
 ;;
 
 let initialize_body =
-  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"auth-security-e2e","version":"dev"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
+  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"auth-security-e2e","version":"dev"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
 ;;
 
 let bearer token = [ "authorization", "Bearer " ^ token ]
@@ -464,7 +464,10 @@ let catalog_ids client =
       (Workspace_list { page; kind = None; access = None; available = Some true })
     |> protocol_ok
   in
-  match prompts.result, workspaces.result with
+  match
+    ( Support.Public_view.non_history prompts.result
+    , Support.Public_view.non_history workspaces.result )
+  with
   | Prompt_list prompts, Workspace_list workspaces ->
     let workspace =
       List.find_exn workspaces.items ~f:(fun item -> String.equal item.name "physical")
@@ -586,7 +589,8 @@ let test_scope_denial env environment =
        principal_header
        scopes_header);
   let principal = oauth_principal () in
-  Daemon_host.with_ env fixture ~options:(oauth_options principal) (fun sw daemon ->
+  let options = Daemon_host.with_offline_inference (oauth_options principal) in
+  Daemon_host.with_ env fixture ~options (fun sw daemon ->
     with_client
       ~sw
       env
@@ -627,13 +631,15 @@ let rec await_hidden_schedule env stream =
   match event.event with
   | Some "session.event" ->
     let durable =
-      Jsonaf.of_string event.data |> Agent_protocol.Event.Durable.of_json |> protocol_ok
+      Jsonaf.of_string event.data |> Agent_protocol.Public.Durable.of_json |> protocol_ok
     in
-    require_no_private_schedule (Agent_protocol.Event.Durable.to_json durable);
+    require_no_private_schedule (Agent_protocol.Public.Durable.to_json durable);
     if Agent_protocol.Event.Durable.equal_kind durable.kind Schedule_created
     then
       require
-        (Agent_protocol.Event.Durable.equal_visibility durable.visibility Hidden)
+        (Agent_protocol.Event.Durable.equal_visibility
+           (Support.Public_view.visibility durable)
+           Hidden)
         "schedule event was not hidden"
     else await_hidden_schedule env stream
   | _ -> await_hidden_schedule env stream
@@ -653,7 +659,7 @@ let test_scope_projection_clients ~sw ~token env admin reader =
   let writer_id = (Option.value_exn created.attachment).attachment.id in
   let initial, _ = Http_driver.get_snapshot admin session_id |> http_ok in
   ignore
-    (scope_attach reader session_id None "scoped-attach" : Agent_protocol.Method_result.t);
+    (scope_attach reader session_id None "scoped-attach" : Agent_protocol.Public.Result.t);
   let stream, _ = Http_driver.open_session_events reader ~sw ~session_id () |> http_ok in
   Exn.protect
     ~finally:(fun () -> Http_driver.Sse.close stream)
@@ -685,24 +691,23 @@ let test_scope_projection_clients ~sw ~token env admin reader =
           (Piaf.Headers.get full_response.headers "etag")))
     "ETag ignored projection scopes";
   scope_attach reader session_id (Some initial.latest_event_sequence) "scoped-replay"
-  |> Agent_protocol.Method_result.to_json
+  |> Agent_protocol.Public.Result.to_json
   |> require_no_private_schedule;
   (Http_driver.request reader (Session_get { session_id; history = None }) |> protocol_ok)
     .result
-  |> Agent_protocol.Method_result.to_json
+  |> Agent_protocol.Public.Result.to_json
   |> require_no_private_schedule;
   let blob =
-    (Http_driver.request
-       admin
-       (Session_export
-          { session_id
-          ; attachment_id = writer_id
-          ; format = Json
-          ; revision = None
-          ; history = None
-          })
-     |> protocol_ok)
-      .result
+    Http_driver.request_without_history
+      admin
+      (Session_export
+         { session_id
+         ; attachment_id = writer_id
+         ; format = Json
+         ; revision = None
+         ; history = None
+         })
+    |> protocol_ok
   in
   let blob =
     match blob with
@@ -790,6 +795,7 @@ let test_scope_projection env environment =
                 | _ -> Error (auth_error Unauthenticated "invalid scoped test token")))
     }
   in
+  let options = Daemon_host.with_offline_inference options in
   Daemon_host.with_ env fixture ~options (fun sw _ ->
     with_client
       ~sw

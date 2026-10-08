@@ -49,7 +49,15 @@ let commit t ~(previous : Session_state.t) transition =
 
 let persistence t =
   Session_actor.
-    { commit = (fun ~command_audit:_ ~previous value -> commit t ~previous value) }
+    { commit = (fun ~command_audit:_ ~previous value -> commit t ~previous value)
+    ; archive_reference =
+        (fun ~previous ~kind id ->
+          Compaction_archive.reference_for
+            (Session_state_document.authored previous)
+            ~limits:Document_schema.Limits.default
+            ~kind
+            id)
+    }
 ;;
 
 let state t = Eio.Mutex.use_ro t.mutex (fun () -> t.state)

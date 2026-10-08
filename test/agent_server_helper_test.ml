@@ -7,6 +7,11 @@ module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 module Res = Openai.Responses
 
+type fixture_client =
+  { connection : Agent_client.Connection.t
+  ; invocation_handles : (P.Id.Session.t, H.t) Hashtbl.t
+  }
+
 let field = Jsonaf.member_exn
 let text json name = field name json |> Jsonaf.string_exn
 
@@ -66,12 +71,33 @@ let function_call name arguments =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string arguments
+            ; call_id = "helper-call"
+            ; _type = "function_call"
+            ; id = Some "helper-item"
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
   |> Stdlib.List.to_seq
 ;;
 
 let run env helper ~native_watch =
   Mirage_crypto_rng_unix.use_default ();
+  let watched_session = ref None in
+  let last_observed_state = ref None in
+  let state daemon id =
+    let current = state daemon id in
+    if Option.exists !watched_session ~f:(P.Id.Session.equal id)
+    then last_observed_state := Some current;
+    current
+  in
   let root = temporary_root env |> Caml_unix.realpath in
   let path file = Eio.Path.(Eio.Stdenv.fs env / file) in
   Exn.protect
@@ -292,6 +318,27 @@ let run env helper ~native_watch =
           ]
           |> Stdlib.List.to_seq
       in
+      (* Advance the daemon's wall clock at completed waits, rather than charging
+         unrelated fixture serialization and parallel test CPU time to a watch.
+         Concurrent waits advance to their deadline, never add their durations.
+         Scheduler and process waits still perform real I/O sleeps; OS resource
+         limits and the outer test timeout remain unchanged. Deadline/backoff
+         branches are separately checked with the compiled watcher recording host. *)
+      (* A different epoch also catches callbacks that accidentally bypass the
+         host clock and compare process wall time with persisted host deadlines. *)
+      let clock, _, _, advance_wall =
+        controlled_wall_clock
+          (Eio.Stdenv.clock env)
+          ~initial:(Eio.Time.now (Eio.Stdenv.clock env) -. 86_400.)
+      in
+      let mono_clock, pause_mono, _, advance_mono =
+        controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
+      in
+      (* Drive elapsed fixture time one tick per completed real polling wait.
+         Durable CPU work does not cause elapsed-time catch-up. Separate tests
+         cover logical expiry; the real watchdog bounds fixture liveness. *)
+      pause_mono ();
+      let freeze_elapsed = ref false in
       let await predicate =
         let rec loop () =
           match predicate () with
@@ -302,37 +349,6 @@ let run env helper ~native_watch =
         in
         loop ()
       in
-      (* Advance the daemon's wall clock at completed waits, rather than charging
-         unrelated fixture serialization and parallel test CPU time to a watch.
-         Concurrent waits advance to their deadline, never add their durations.
-         Scheduler and process waits still perform real I/O sleeps; OS resource
-         limits and the outer test timeout remain unchanged. Deadline/backoff
-         branches are separately checked with the compiled watcher recording host. *)
-      (* A different epoch also catches callbacks that accidentally bypass the
-         host clock and compare process wall time with persisted host deadlines. *)
-      let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env) -. 86_400.) in
-      let freeze_deadlines = ref false in
-      let mono_clock, pause_mono, resume_mono, advance_mono =
-        controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
-      in
-      let module Clock = struct
-        type t = unit
-        type time = float
-
-        let now () = !logical_now
-
-        let sleep_until () deadline =
-          let delay = Float.max 0. (deadline -. !logical_now) in
-          Eio.Time.sleep (Eio.Stdenv.clock env) delay;
-          (* Polling and real helper I/O continue while the test holds deadlines
-             fixed. Check after sleeping, including waits begun before freezing. *)
-          match !freeze_deadlines with
-          | true -> ()
-          | false -> logical_now := Float.max !logical_now deadline
-        ;;
-      end
-      in
-      let clock = Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)) in
       let daemon_env =
         object
           method fs = env#fs
@@ -352,6 +368,16 @@ let run env helper ~native_watch =
       in
       let with_daemon ?(grants = grants) f =
         Eio.Switch.run (fun sw ->
+          (* The daemon clock driver belongs to this switch, outside the body
+             watchdog. It remains alive through shutdown and non-daemon worker
+             cleanup, then the switch cancels it automatically. *)
+          Eio.Fiber.fork_daemon ~sw (fun () ->
+            let rec tick () =
+              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+              if not !freeze_elapsed then advance_mono 0.01;
+              tick ()
+            in
+            tick ());
           let daemon =
             D.start
               ~sw
@@ -363,24 +389,51 @@ let run env helper ~native_watch =
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options:{ D.default_options with model_post_stream = Some provider }
+              ~options:
+                { D.default_options with
+                  inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
+                }
               ()
             |> protocol_ok
           in
           Exn.protect
             ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
             ~f:(fun () ->
-              (* This watchdog bounds the whole multi-step fixture, including
-                 real process launches and persistence under parallel test load.
-                 It is separate from every script/process/watch deadline. *)
+              (* This watchdog bounds the multi-step functional workflow and its
+                 document validation CPU, real helper I/O and restart/recovery.
+                 The first two workflows each consume roughly 280 CPU seconds;
+                 allow scheduling headroom when both variants run concurrently.
+                 This is separate from every script/process/watch deadline. *)
               match
-                Eio.Time.with_timeout (Eio.Stdenv.clock env) 180. (fun () ->
-                  let client = connection daemon (principal ()) in
+                Eio.Time.with_timeout (Eio.Stdenv.clock env) 600. (fun () ->
+                  let client =
+                    { connection = connection daemon (principal ())
+                    ; invocation_handles = Hashtbl.create (module P.Id.Session)
+                    }
+                  in
                   Ok
                     (Exn.protect
-                       ~finally:(fun () -> Agent_client.Connection.close client)
+                       ~finally:(fun () ->
+                         Eio.Cancel.protect (fun () ->
+                           Exn.protect
+                             ~finally:(fun () ->
+                               Agent_client.Connection.close client.connection)
+                             ~f:(fun () ->
+                               let handles = Hashtbl.data client.invocation_handles in
+                               Hashtbl.clear client.invocation_handles;
+                               let rec close = function
+                                 | [] -> ()
+                                 | handle :: rest ->
+                                   Exn.protect
+                                     ~finally:(fun () -> close rest)
+                                     ~f:(fun () -> H.close handle)
+                               in
+                               close handles)))
                        ~f:(fun () ->
-                         initialize client;
+                         initialize client.connection;
                          f sw daemon client)))
               with
               | Ok result -> result
@@ -391,19 +444,24 @@ let run env helper ~native_watch =
                   , (native_watch : bool)
                   , (!last_tool : string)]))
       in
-      let invoke_status sw daemon client parent name arguments =
+      let invoke_status ?(diagnose_failure = false) sw daemon client parent name arguments
+        =
         last_tool := name;
         let before = state daemon parent in
+        (* Reuse the connection's invocation writer, as an interactive client
+           does. A fresh attachment would cache another complete snapshot for
+           every tool invocation and multiply the retained transcript. *)
         let handle =
-          H.attach
-            ~sw
-            ~clock:(Eio.Stdenv.clock env)
-            ~connection:client
-            ~session_id:parent
-            ~mode:Read_write
-            ~subscribe:false
-            ()
-          |> protocol_ok
+          Hashtbl.find_or_add client.invocation_handles parent ~default:(fun () ->
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client.connection
+              ~session_id:parent
+              ~mode:Read_write
+              ~subscribe:false
+              ()
+            |> protocol_ok)
         in
         queued := Some (name, arguments);
         H.send_message
@@ -413,7 +471,6 @@ let run env helper ~native_watch =
         |> ignore;
         await (fun () ->
           Option.is_none (state daemon parent).active_operation && Option.is_none !queued);
-        H.close handle;
         let after = state daemon parent in
         let invocation =
           List.find_exn after.invocations ~f:(fun invocation ->
@@ -422,10 +479,70 @@ let run env helper ~native_watch =
                  (List.exists before.invocations ~f:(fun old ->
                     P.Id.Invocation.equal old.context.id invocation.context.id)))
         in
+        if
+          diagnose_failure
+          &&
+          match invocation.status with
+          | Published (Complete (`String _)) -> false
+          | _ -> true
+        then (
+          (* Foreground reconciliation can publish Cancelled after a worker
+             failure. Read the retained terminal from the same observation
+             interval, without another actor read or any transcript dump. *)
+          let bounded value = String.prefix value 8_192 in
+          let failure (value : P.Error.t) =
+            [%sexp (value.code : P.Error.code), (bounded value.message : string)]
+          in
+          let entry = R.load (D.registry daemon) parent |> protocol_ok in
+          let terminals =
+            match
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:before.counters.event_sequence
+                ~through_sequence:after.counters.event_sequence
+            with
+            | Snapshot_required -> [%sexp "terminal interval no longer retained"]
+            | Available events ->
+              List.filter_map events ~f:(fun (event : P.Event.Durable.t) ->
+                match event.kind with
+                | Operation_completed
+                | Operation_failed
+                | Operation_cancelled
+                | Operation_interrupted ->
+                  let summary =
+                    match P.Operation.of_json event.payload with
+                    | Error error -> [%sexp "invalid terminal", (failure error : Sexp.t)]
+                    | Ok operation ->
+                      let terminal =
+                        match operation.state with
+                        | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                        | Interrupted { reason; retryable } ->
+                          [%sexp
+                            "interrupted", (bounded reason : string), (retryable : bool)]
+                        | Starting | Running | Cancelling | Completed | Cancelled ->
+                          [%sexp (operation.state : P.Operation.state)]
+                      in
+                      [%sexp (operation.id : P.Id.Operation.t), (terminal : Sexp.t)]
+                  in
+                  Some [%sexp (event.sequence : int64), (summary : Sexp.t)]
+                | _ -> None)
+              |> fun values -> [%sexp (List.take values 8 : Sexp.t list)]
+          in
+          print_s
+            [%sexp
+              "helper foreground failure diagnostic"
+            , (native_watch : bool)
+            , (parent : P.Id.Session.t)
+            , (name : string)
+            , (invocation.context.id : P.Id.Invocation.t)
+            , (Option.map after.failure ~f:failure : Sexp.t option)
+            , (terminals : Sexp.t)]);
         invocation.status
       in
       let invoke sw daemon client parent name arguments =
-        match invoke_status sw daemon client parent name arguments with
+        match
+          invoke_status ~diagnose_failure:true sw daemon client parent name arguments
+        with
         | Published (Complete (`String source)) -> source
         | status ->
           raise_s [%sexp "helper invocation failed", (status : P.Invocation.status)]
@@ -566,7 +683,10 @@ let run env helper ~native_watch =
       let await_watch ?(require_wake = true) daemon parent subscription_id =
         await (fun () ->
           let current = state daemon parent in
-          Option.is_none current.active_operation
+          (* Restart reads wait for their own committed notification. An
+             unrelated automatic follow-up need not be idle for that durable
+             completion to be observable; the later drain checks cover work. *)
+          ((not require_wake) || Option.is_none current.active_operation)
           && List.exists current.deliveries ~f:(fun delivery ->
             match delivery.context.work, delivery.status, delivery.wake_disposition with
             | Some (Subscription id), Committed _, _ when not require_wake ->
@@ -623,7 +743,7 @@ let run env helper ~native_watch =
       in
       let parent_id, child_id, receipt, authored, foreign_id, moderator_hash =
         with_daemon (fun sw daemon client ->
-          let parent, _ = create_session ~start_immediately:true client in
+          let parent, _ = create_session ~start_immediately:true client.connection in
           await (fun () -> Option.is_none (state daemon parent.id).active_operation);
           let entry = R.load (D.registry daemon) parent.id |> protocol_ok in
           Agent_server.Runtime_owner.with_background_runtime entry.runtime (fun runtime ->
@@ -971,30 +1091,42 @@ let run env helper ~native_watch =
           await_timer daemon parent.id cursor_watch;
           cursor_step "watch armed";
           let calls_before_cancel = !child_calls in
+          (* Freeze elapsed time before creating the cancellation target, so its
+             timer stays scheduled through cancellation. Keep wall-driven job
+             dispatch running throughout this barrier. *)
           let cancelled_watch, cancelled_timer =
-            freeze_deadlines := true;
-            pause_mono ();
+            freeze_elapsed := true;
             Exn.protect
-              ~finally:(fun () ->
-                freeze_deadlines := false;
-                resume_mono ())
+              ~finally:(fun () -> freeze_elapsed := false)
               ~f:(fun () ->
-                let id = start_watch sw daemon client parent.id cursor_query in
-                (* The committed timer is the barrier: the real probe returned
-                   pending, and no subsequent poll or expiry can become due. *)
-                await_timer daemon parent.id id;
+                let watch = start_watch sw daemon client parent.id cursor_query in
+                await_timer daemon parent.id watch;
                 let timer =
-                  (watch_subscription daemon parent.id id).timer_id |> Option.value_exn
+                  (watch_subscription daemon parent.id watch).timer_id |> Option.value_exn
                 in
+                let schedule =
+                  List.find_exn (state daemon parent.id).schedules ~f:(fun schedule ->
+                    P.Id.Schedule.equal schedule.id timer)
+                in
+                (match schedule.status with
+                 | Scheduled -> ()
+                 | status ->
+                   raise_s
+                     [%sexp
+                       "cancellation barrier requires a scheduled timer"
+                     , (timer : P.Id.Schedule.t)
+                     , (status : P.Schedule.status)]);
                 [%test_eq: string]
                   "cancelled"
-                  (cancel_watch sw daemon client parent.id id);
-                (match await_watch daemon parent.id id with
-                 | Cancelled _ -> ()
-                 | result ->
-                   raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
-                id, timer)
+                  (cancel_watch sw daemon client parent.id watch);
+                watch, timer)
           in
+          (* The cancellation acknowledgement has already committed the terminal;
+             let elapsed timer time progress while awaiting its notification. *)
+          (match await_watch daemon parent.id cancelled_watch with
+           | Cancelled _ -> ()
+           | result ->
+             raise_s [%sexp "watch cancellation failed", (result : P.Completion.t)]);
           cursor_step "cancellation tool returned";
           let cancelled_result =
             (watch_subscription daemon parent.id cancelled_watch).result
@@ -1014,13 +1146,11 @@ let run env helper ~native_watch =
           (* Cross the cancelled timer's old due point, then let the real
              scheduler deliver the other watch below. Late work must not replace
              cancellation or publish a second notification. *)
-          logical_now
-          := Float.max
-               !logical_now
-               (P.Timestamp.to_time_ns timer.next_due_at
-                |> Time_ns.to_span_since_epoch
-                |> Time_ns.Span.to_sec
-                |> fun due -> due +. 0.001);
+          advance_wall
+            (P.Timestamp.to_time_ns timer.next_due_at
+             |> Time_ns.to_span_since_epoch
+             |> Time_ns.Span.to_sec
+             |> fun due -> due +. 0.001);
           advance_mono
             (((P.Timestamp.diff_ns timer.next_due_at timer.created_at |> Int64.to_float)
               /. 1_000_000_000.)
@@ -1075,7 +1205,7 @@ let run env helper ~native_watch =
               (watch_subscription daemon parent.id cursor_watch).result);
           check_watch_notifications daemon parent.id;
           let foreign, _ =
-            create_session ~start_immediately:true ~key:"foreign-parent" client
+            create_session ~start_immediately:true ~key:"foreign-parent" client.connection
           in
           assert (not (P.Id.Session.equal parent.id foreign.id));
           (match bridge sw daemon client foreign.id "status" (`Object target) with
@@ -1151,7 +1281,7 @@ let run env helper ~native_watch =
             H.attach
               ~sw
               ~clock:(Eio.Stdenv.clock env)
-              ~connection:client
+              ~connection:client.connection
               ~session_id:parent_id
               ~mode:Read_write
               ~subscribe:false
@@ -1190,7 +1320,7 @@ let run env helper ~native_watch =
             H.attach
               ~sw
               ~clock:(Eio.Stdenv.clock env)
-              ~connection:client
+              ~connection:client.connection
               ~session_id:child_id
               ~mode:Read_write
               ~subscribe:false
@@ -1325,33 +1455,194 @@ let run env helper ~native_watch =
       with_daemon (fun sw daemon client ->
         restart_step "next daemon started";
         let step name f =
-          match
-            Eio.Time.with_timeout (Eio.Stdenv.clock env) 10. (fun () -> Ok (f ()))
-          with
-          | Ok result -> result
-          | Error _ ->
-            let current = state daemon parent_id in
+          let started = Eio.Time.now (Eio.Stdenv.clock env) in
+          let started_cpu = Stdlib.Sys.time () in
+          let started_mono = Eio.Time.Mono.now mono_clock in
+          let started_wall = Eio.Time.now clock in
+          let dump_last_observed (current : Agent_session.Session_state.t) =
+            let bounded text = String.prefix text 512 in
+            let failure (error : P.Error.t) =
+              [%sexp
+                (error.code : P.Error.code)
+              , (bounded error.message : string)
+              , (error.retryable : bool)]
+            in
+            let completion = function
+              | P.Completion.Succeeded _ -> [%sexp "succeeded"]
+              | Failed error ->
+                [%sexp
+                  "failed"
+                , (bounded error.code : string)
+                , (bounded error.message : string)]
+              | Cancelled reason -> [%sexp "cancelled", (bounded reason : string)]
+              | Expired -> [%sexp "expired"]
+            in
             let failures =
-              List.filter current.moderator_executions ~f:(fun receipt ->
-                match receipt.status with
-                | Completed _ -> false
-                | _ -> true)
+              List.filter_map current.moderator_executions ~f:(fun receipt ->
+                let status =
+                  match receipt.status with
+                  | Completed _ -> None
+                  | Running -> Some [%sexp "running"]
+                  | Interrupted reason ->
+                    Some [%sexp "interrupted", (bounded reason : string)]
+                  | Failed error ->
+                    Some
+                      [%sexp
+                        "failed"
+                      , (bounded error.code : string)
+                      , (bounded error.message : string)]
+                in
+                Option.map status ~f:(fun status ->
+                  [%sexp
+                    (receipt.context.id : P.Id.Moderator_execution.t)
+                  , (receipt.context.phase : P.Moderator_execution.phase)
+                  , (status : Sexp.t)]))
+              |> fun values -> List.take values 8
             in
             let subscriptions =
-              List.filter current.subscriptions ~f:(fun subscription ->
-                P.Id.Subscription.equal subscription.context.id cursor_watch
-                || P.Id.Subscription.equal subscription.context.id receipt_watch)
+              List.filter_map current.subscriptions ~f:(fun subscription ->
+                if
+                  P.Id.Subscription.equal subscription.context.id cursor_watch
+                  || P.Id.Subscription.equal subscription.context.id receipt_watch
+                then
+                  Some
+                    [%sexp
+                      (subscription.context.id : P.Id.Subscription.t)
+                    , (subscription.epoch : int)
+                    , (subscription.timer_id : P.Id.Schedule.t option)
+                    , (subscription.job_id : P.Id.Job.t option)
+                    , (Option.map subscription.result ~f:completion : Sexp.t option)]
+                else None)
             in
             let jobs =
-              List.map current.jobs ~f:(fun job -> job.id, job.status, job.delivery)
+              List.map current.jobs ~f:(fun job ->
+                let status =
+                  match job.status with
+                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                  | Interrupted reason -> [%sexp "interrupted", (bounded reason : string)]
+                  | Waiting_completion _ -> [%sexp "waiting_completion"]
+                  | Waiting_permission _ -> [%sexp "waiting_permission"]
+                  | Queued | Running | Succeeded | Cancelled ->
+                    [%sexp (job.status : P.Job.status)]
+                in
+                let terminal =
+                  match P.Job.terminal_completion job with
+                  | Ok value -> Option.map value ~f:completion
+                  | Error error ->
+                    Some [%sexp "terminal unavailable", (failure error : Sexp.t)]
+                in
+                [%sexp
+                  (job.id : P.Id.Job.t)
+                , (status : Sexp.t)
+                , (terminal : Sexp.t option)
+                , (job.delivery : P.Job.delivery)])
+              |> fun values -> List.take values 24
             in
-            raise_s
-              [%sexp
-                (name : string)
-              , (subscriptions : P.Subscription.t list)
-              , (failures : P.Moderator_execution.t list)
-              , (List.rev !restart_steps : (string * float) list)
-              , (jobs : (P.Id.Job.t * P.Job.status * P.Job.delivery) list)]
+            let active_operation =
+              Option.map current.active_operation ~f:(fun operation ->
+                let status =
+                  match operation.state with
+                  | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+                  | Interrupted { reason; retryable } ->
+                    [%sexp "interrupted", (bounded reason : string), (retryable : bool)]
+                  | Starting | Running | Cancelling | Completed | Cancelled ->
+                    [%sexp (operation.state : P.Operation.state)]
+                in
+                [%sexp (operation.id : P.Id.Operation.t), (status : Sexp.t)])
+            in
+            let queued =
+              match Agent_session.Moderator_checkpoint.decode current.moderator with
+              | Error error -> [%sexp "invalid checkpoint", (failure error : Sexp.t)]
+              | Ok None -> [%sexp "no checkpoint"]
+              | Ok (Some snapshot) ->
+                let head =
+                  Option.map (List.hd snapshot.queued_internal_events) ~f:(function
+                    | Session.Snapshot.Variant (tag, _) -> bounded tag
+                    | Unit | Bool _ | Int _ | Float _ | String _ | Array _ | Record _ ->
+                      "non-variant")
+                in
+                [%sexp
+                  (List.length snapshot.queued_internal_events : int)
+                , (head : string option)
+                , (snapshot.halted : bool)]
+            in
+            let observed =
+              match current.lifecycle.observed with
+              | Failed error -> [%sexp "failed", (failure error : Sexp.t)]
+              | Stopped
+              | Queued_for_slot
+              | Starting
+              | Recovering
+              | Idle
+              | Running_turn _
+              | Compacting _
+              | Waiting_for_permission _
+              | Stopping ->
+                [%sexp (current.lifecycle.observed : P.Session.observed_state)]
+            in
+            Eio.traceln
+              "%s"
+              (Sexp.to_string_hum
+                 [%sexp
+                   (name : string)
+                 , (native_watch : bool)
+                 , (current.lifecycle.desired : P.Session.desired_state)
+                 , (observed : Sexp.t)
+                 , (current.halted : bool)
+                 , (active_operation : Sexp.t option)
+                 , (Option.map current.failure ~f:failure : Sexp.t option)
+                 , (queued : Sexp.t)
+                 , (subscriptions : Sexp.t list)
+                 , (failures : Sexp.t list)
+                 , (List.rev !restart_steps : (string * float) list)
+                 , ( "real seconds"
+                   , (Eio.Time.now (Eio.Stdenv.clock env) -. started : float) )
+                 , ("CPU seconds", (Stdlib.Sys.time () -. started_cpu : float))
+                 , ( "logical Mono seconds"
+                   , (Mtime.span started_mono (Eio.Time.Mono.now mono_clock)
+                      |> Mtime.Span.to_float_ns
+                      |> fun ns -> ns /. 1_000_000_000.
+                      : float) )
+                 , ("logical wall seconds", (Eio.Time.now clock -. started_wall : float))
+                 , (jobs : Sexp.t list)])
+          in
+          watched_session := Some parent_id;
+          last_observed_state := None;
+          Exn.protect
+            ~finally:(fun () ->
+              watched_session := None;
+              last_observed_state := None)
+            ~f:(fun () ->
+              (* Pinned Eio.Time.with_timeout is this timer-first Fiber.first.
+                 Log only the immutable last observation before cancellation
+                 joins: protected cleanup may otherwise prevent a timeout dump.
+                 This is cached state, not a fresh read at the deadline. *)
+              match
+                Eio.Fiber.first
+                  (fun () ->
+                     (* Observe recovered callback commits, including validation
+                        of the retained transcript. A paired control consumed the
+                        former ten-second budget in CPU work before committing;
+                        keep headroom without changing logical watch deadlines. *)
+                     Eio.Time.sleep (Eio.Stdenv.clock env) 30.;
+                     (match !last_observed_state with
+                      | Some current -> dump_last_observed current
+                      | None ->
+                        Eio.traceln
+                          "%s"
+                          (Sexp.to_string_hum
+                             [%sexp
+                               (name : string), "no parent state observed before deadline"]));
+                     Error `Timeout)
+                  (fun () -> Ok (f ()))
+              with
+              | Ok result -> result
+              | Error `Timeout ->
+                raise_s
+                  [%sexp
+                    (name : string)
+                  , "helper restart step timed out; last observed state logged at \
+                     deadline"])
         in
         let before_calls = !child_calls in
         assert (
@@ -1405,7 +1696,7 @@ let run env helper ~native_watch =
           H.attach
             ~sw
             ~clock:(Eio.Stdenv.clock env)
-            ~connection:client
+            ~connection:client.connection
             ~session_id:child_id
             ~mode:Read_write
             ~subscribe:false
@@ -1425,7 +1716,7 @@ let run env helper ~native_watch =
              H.attach
                ~sw
                ~clock:(Eio.Stdenv.clock env)
-               ~connection:client
+               ~connection:client.connection
                ~session_id:parent_id
                ~mode:Read_write
                ~subscribe:false
@@ -1450,7 +1741,7 @@ let run env helper ~native_watch =
              H.attach
                ~sw
                ~clock:(Eio.Stdenv.clock env)
-               ~connection:client
+               ~connection:client.connection
                ~session_id:child_id
                ~mode:Read_write
                ~subscribe:false

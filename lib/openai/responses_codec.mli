@@ -19,6 +19,11 @@ type failure =
       ; error : Wire.Tracker.error
       }
 
+val protocol_violation
+  :  stage:Inference.Observation.Diagnostic.Protocol_violation.stage
+  -> failure
+  -> Inference.Observation.Diagnostic.Protocol_violation.t
+
 (** Failed known objects remain available in [Decode.raw]. Captures contain
     sensitive conversation data and must not be logged automatically. *)
 val decode_response
@@ -38,6 +43,14 @@ module Stream : sig
   (** One owner per inference attempt. [newly_finalized] is validation evidence,
       not authorization to run tools. Host admission still applies. *)
   val create : ?max_frame_bytes:int -> Wire.Origin.t -> t Or_error.t
+
+  (** Retains only finite redacted detail from this parser's original rejected
+      event. No private failure payload is serialized. *)
+  val protocol_violation
+    :  t
+    -> stage:Inference.Observation.Diagnostic.Protocol_violation.stage
+    -> failure
+    -> Inference.Observation.Diagnostic.Protocol_violation.t
 
   (** Consume newline-stripped SSE lines. Frames may span multiple lines.
       Errors poison the stream and retain the offending JSON/event where known.

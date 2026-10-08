@@ -105,3 +105,32 @@ let%expect_test "actual PPX optional vs nullable attributes are distinct" =
     {"value":null}
     |}]
 ;;
+
+let%expect_test "protocol failure projection drops raw JSON paths strings and IDs" =
+  let module C = Openai.Responses_codec in
+  let module V = Inference.Observation.Diagnostic.Protocol_violation in
+  let private_value = "PRIVATE-PROVIDER-PAYLOAD" in
+  List.iter
+    [ C.Framing private_value
+    ; Decode
+        { raw = `String private_value
+        ; error =
+            { C.Wire.Decode_error.path = private_value
+            ; reason = Wrong_type private_value
+            }
+        }
+    ; Protocol { event = None; error = Item_conflict 987654 }
+    ]
+    ~f:(fun failure ->
+      let projected = C.protocol_violation ~stage:Feed failure in
+      let wire = V.to_json projected |> Jsonaf.to_string in
+      assert (not (String.is_substring wire ~substring:private_value));
+      assert (not (String.is_substring wire ~substring:"987654"));
+      print_endline wire);
+  [%expect
+    {|
+{"stage":"feed","kind":"framing","detail":null}
+{"stage":"feed","kind":"decode","detail":"wrong_type"}
+{"stage":"feed","kind":"tracker","detail":"item_conflict"}
+|}]
+;;

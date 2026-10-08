@@ -178,7 +178,8 @@ let run_print d prepared =
         incr terminals;
         emitted := Some outcome;
         show_terminal outcome
-      | Update _ | Finalized _ -> ())
+      | Update _ | Diagnostic _ | Http_rejection _ | Response_content_type _ | Finalized _
+        -> ())
     |> unwrap
   in
   printf
@@ -386,7 +387,8 @@ let%expect_test
                then (
                  print_endline "first-event-before-server-finishes";
                  Eio.Promise.resolve signal_first ())
-             | Finalized _ -> ()
+             | Diagnostic _ | Http_rejection _ | Response_content_type _ | Finalized _ ->
+               ()
              | Terminal result ->
                terminal_value := Some result;
                show_terminal result)
@@ -476,6 +478,7 @@ let%expect_test
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
                    | Terminal outcome -> show_terminal outcome
+                   | Diagnostic _ | Http_rejection _ | Response_content_type _ -> ()
                    | Update _ | Finalized _ -> failwith "unexpected nonterminal")
                |> unwrap
              in
@@ -554,6 +557,9 @@ let%expect_test
                  ~prepared:(prepare (profile endpoint))
                  ~on_event:(function
                    | Update _ -> incr updates
+                   | Diagnostic _
+                   | Http_rejection _
+                   | Response_content_type _
                    | Finalized _ -> ()
                    | Terminal terminal -> show_terminal terminal)
                |> unwrap
@@ -594,6 +600,7 @@ let%expect_test
                     ~prepared:(prepare (profile endpoint))
                     ~on_event:(function
                       | Terminal _ -> incr terminals
+                      | Diagnostic _ | Http_rejection _ | Response_content_type _ -> ()
                       | Update _ | Finalized _ -> raise raised)
                   : (D.Terminal.t, D.Auth.error) Result.t);
                false
@@ -874,6 +881,7 @@ let%expect_test
               ~on_event:(function
                 | Finalized items -> finalized := !finalized + List.length items
                 | Terminal _ -> incr terminals
+                | Diagnostic _ | Http_rejection _ | Response_content_type _ -> ()
                 | Update _ -> failwith "unexpected update")
             |> unwrap
             : D.Terminal.t);
@@ -908,6 +916,8 @@ let%expect_test "external cancellation propagates during auth and after first pu
                             Eio.Fiber.await_cancel ()))
                         ~on_event:(function
                           | Terminal _ -> incr terminals
+                          | Diagnostic _ | Http_rejection _ | Response_content_type _ ->
+                            ()
                           | Update _ | Finalized _ ->
                             incr events;
                             Eio.Promise.resolve signal_started ();
@@ -1103,7 +1113,8 @@ let%expect_test "fake-clock timeout closes attempt socket after publication with
             | Update _ ->
               incr events;
               if blocked_callback then Eio.Fiber.await_cancel ()
-            | Finalized _ -> ()
+            | Diagnostic _ | Http_rejection _ | Response_content_type _ | Finalized _ ->
+              ()
             | Terminal terminal ->
               incr terminals;
               emitted := Some terminal;
@@ -1158,7 +1169,11 @@ let%expect_test "terminal consumer exception propagates after attempt cleanup" =
                     | Terminal _ ->
                       incr entered;
                       raise raised
-                    | Update _ | Finalized _ -> ())
+                    | Update _
+                    | Diagnostic _
+                    | Http_rejection _
+                    | Response_content_type _
+                    | Finalized _ -> ())
                 : (D.Terminal.t, D.Auth.error) Result.t);
              false
            with
@@ -1344,4 +1359,449 @@ let%expect_test
     (Response_started Invalid_http)
     terminals:1 matching:true
     |}]
+;;
+
+let%expect_test
+    "per-attempt protocol diagnostics precede terminal without changing delivery"
+  =
+  Eio_main.run (fun env ->
+    let finalized =
+      frame
+        {|{"type":"response.output_item.done","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"item_private","call_id":"call_private","name":"lookup","arguments":"PRIVATE FINALIZED BODY","status":"completed"}}|}
+    in
+    List.iter
+      [ ""; created; created ^ finalized ]
+      ~f:(fun prefix ->
+        let body = prefix ^ terminal ~status:"failed" () in
+        (* Failed terminal with Completed status violates semantic terminal agreement. *)
+        let body =
+          String.substr_replace_all
+            body
+            ~pattern:"\"status\":\"failed\""
+            ~with_:"\"status\":\"completed\""
+        in
+        with_server
+          env
+          (fun flow _ -> write flow body)
+          (fun _ endpoint ->
+             let order = ref [] in
+             D.run
+               (driver env)
+               ~auth
+               ~prepared:(prepare (profile endpoint))
+               ~on_event:(function
+                 | Diagnostic { violation; delivery } ->
+                   order := "diagnostic" :: !order;
+                   print_s
+                     [%sexp
+                       (violation : Inference.Observation.Diagnostic.Protocol_violation.t)
+                     , (delivery : D.Terminal.delivery)]
+                 | Terminal outcome ->
+                   order := "terminal" :: !order;
+                   show_terminal outcome
+                 | Update update ->
+                   if not (List.is_empty update.newly_finalized)
+                   then print_endline "finalized-prefix-retained"
+                 | Finalized _ | Http_rejection _ | Response_content_type _ -> ())
+             |> unwrap
+             |> ignore;
+             print_s [%sexp (List.rev !order : string list)])));
+  [%expect
+    {|
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Possibly_submitted)
+(Possibly_submitted Protocol)
+(diagnostic terminal)
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Response_started)
+(Response_started Protocol)
+(diagnostic terminal)
+finalized-prefix-retained
+(((stage Feed) (kind (Tracker Terminal_mismatch))) Response_started)
+(Response_started Protocol)
+(diagnostic terminal)
+|}]
+;;
+
+let%test_unit
+    "HTTP rejection diagnostics are bounded fragmented redacted and non-retrying"
+  =
+  Eio_main.run (fun env ->
+    let module H = Inference.Observation.Diagnostic.Http_rejection in
+    List.iter
+      [ ( {|{"detail":"Instructions are required"}|}
+        , H.Missing_required_parameter
+        , Some H.Instructions )
+      ; ( {|{"error":{"code":"unsupported_parameter","param":"SECRET_CANARY","message":"SECRET_CANARY"}}|}
+        , Unsupported_parameter
+        , Some Other )
+      ; ( {|{"detail":"Instructions are required","detail":"SECRET_CANARY"}|}
+        , Unclassified
+        , None )
+      ; {|{"detail":"SECRET_CANARY"}|}, Unclassified, None
+      ; ( {|{"detail":"Unsupported parameter: truncation"}|}
+        , Unsupported_parameter
+        , Some Truncation )
+      ; ( {|{"error":{"message":"Unsupported parameter: 'truncation'."}}|}
+        , Unsupported_parameter
+        , Some Truncation )
+      ; {|{"error":"Unsupported parameter: store"}|}, Unsupported_parameter, Some Store
+      ; ( {|"Unsupported parameter: 'instructions'."|}
+        , Unsupported_parameter
+        , Some Instructions )
+      ; {|{"detail":"Unsupported parameter: SECRET_CANARY"}|}, Unclassified, None
+      ; ( {|{"detail":"Unsupported parameter: truncation SECRET_CANARY"}|}
+        , Unclassified
+        , None )
+      ; {|"SECRET_CANARY"|}, Unclassified, None
+      ; ( Jsonaf.to_string
+            (`Object
+                [ "detail", `String "Unsupported parameter: truncation"
+                ; "private_junk", `String ("SECRET_CANARY" ^ String.make 2048 'x')
+                ])
+        , Unsupported_parameter
+        , Some Truncation )
+      ; String.make 17000 'x', Unclassified, None
+      ]
+      ~f:(fun (body, expected, parameter) ->
+        let calls = ref 0 in
+        with_server
+          env
+          (fun flow _ ->
+             incr calls;
+             Eio.Flow.copy_string
+               (sprintf
+                  "HTTP/1.1 400 Test\r\nContent-Length: %d\r\n\r\n"
+                  (String.length body))
+               flow;
+             Eio.Fiber.yield ();
+             (* An over-limit Content-Length is rejected before body reads. *)
+             if String.length body <= 16_384 then Eio.Flow.copy_string body flow)
+          (fun _sw endpoint ->
+             let events = ref [] in
+             let outcome =
+               D.run
+                 (driver env)
+                 ~auth
+                 ~prepared:(prepare (profile endpoint))
+                 ~on_event:(fun event -> events := event :: !events)
+               |> unwrap
+             in
+             (match outcome with
+              | Failed { delivery = Possibly_submitted; reason = Http_status 400 } -> ()
+              | _ -> assert false);
+             assert (!calls = 1);
+             match List.rev !events with
+             | [ Http_rejection { rejection; delivery = Possibly_submitted }; Terminal _ ]
+               ->
+               assert (H.equal_reason (H.reason rejection) expected);
+               assert (Option.equal H.equal_parameter (H.parameter rejection) parameter);
+               let encoded = H.to_json rejection |> Jsonaf.to_string in
+               assert (not (String.is_substring encoded ~substring:"SECRET_CANARY"));
+               assert (
+                 H.equal
+                   rejection
+                   (H.of_json (H.to_json rejection) |> Result.ok |> Option.value_exn))
+             | _ -> assert false)));
+  Eio_main.run (fun env ->
+    with_server
+      env
+      (fun flow _ -> write flow ~status:400 {|{"detail":"Instructions are required"}|})
+      (fun _sw endpoint ->
+         let raised =
+           try
+             ignore
+               (D.run
+                  (driver env)
+                  ~auth
+                  ~prepared:(prepare (profile endpoint))
+                  ~on_event:(function
+                    | Http_rejection _ | Response_content_type _ -> raise Exit
+                    | _ -> ())
+                : (D.Terminal.t, D.Auth.error) Result.t);
+             false
+           with
+           | Exit -> true
+         in
+         assert raised))
+;;
+
+let%test_unit "HTTP rejection chunked framing and cancellation retain ownership" =
+  Eio_main.run (fun env ->
+    List.iter [ true; false ] ~f:(fun valid ->
+      with_server
+        env
+        (fun flow _ ->
+           Eio.Flow.copy_string
+             "HTTP/1.1 400 Test\r\nTransfer-Encoding: chunked\r\n\r\n"
+             flow;
+           Eio.Fiber.yield ();
+           let body = {|{"detail":"Instructions are required"}|} in
+           Eio.Flow.copy_string
+             (if valid
+              then sprintf "%x\r\n%s\r\n0\r\n\r\n" (String.length body) body
+              else "not-a-chunk\r\nSECRET_CANARY")
+             flow)
+        (fun _sw endpoint ->
+           let rejection = ref None in
+           let outcome =
+             D.run
+               (driver env)
+               ~auth
+               ~prepared:(prepare (profile endpoint))
+               ~on_event:(function
+                 | Http_rejection { rejection = value; _ } -> rejection := Some value
+                 | _ -> ())
+             |> unwrap
+           in
+           (match outcome with
+            | Failed { reason = Http_status 400; delivery = Possibly_submitted } -> ()
+            | _ -> assert false);
+           let module H = Inference.Observation.Diagnostic.Http_rejection in
+           assert (
+             H.equal_reason
+               (H.reason (Option.value_exn !rejection))
+               (if valid then Missing_required_parameter else Unclassified))));
+    ())
+;;
+
+let%expect_test "HTTP rejection fake-clock deadlines and cancellation join body reader" =
+  Eio_mock.Backend.run_full (fun env ->
+    let quiet =
+      { Eio.Debug.traceln =
+          (fun ?__POS__:_ fmt -> Format.ifprintf Format.err_formatter fmt)
+      }
+    in
+    Eio.Fiber.with_binding (Eio.Stdenv.debug env)#traceln quiet (fun () ->
+      List.iter
+        [ "outer", 0.05; "diagnostic", 5.; "cancel", 5. ]
+        ~f:(fun (label, timeout_seconds) ->
+          let net = Eio_mock.Net.make "http-diagnostic-net" in
+          let flow =
+            Eio_mock.Flow.make
+              ~pp:(fun f _ -> Fmt.string f "<private bytes>")
+              "http-diagnostic-flow"
+          in
+          let entered, entered_u = Eio.Promise.create () in
+          let joined = ref false
+          and connects = ref 0
+          and diagnostics = ref 0 in
+          Eio_mock.Net.on_getaddrinfo
+            net
+            [ `Return [ `Tcp (Eio.Net.Ipaddr.V4.loopback, 80) ] ];
+          Eio_mock.Net.on_connect
+            net
+            [ `Run
+                (fun () ->
+                  incr connects;
+                  flow)
+            ];
+          Eio_mock.Flow.on_read
+            flow
+            [ `Return "HTTP/1.1 400 Test\r\nContent-Length: 100\r\n\r\n"
+            ; `Run
+                (fun () ->
+                  Eio.Promise.resolve entered_u ();
+                  Exn.protect
+                    ~f:(fun () -> Eio.Fiber.await_cancel ())
+                    ~finally:(fun () -> joined := true))
+            ];
+          let driver =
+            D.create ~net ~clock:(Eio.Stdenv.clock env) ~timeout_seconds () |> ok
+          in
+          let run () =
+            D.run
+              driver
+              ~auth
+              ~prepared:(prepare (profile "http://127.0.0.1:80/v1/responses"))
+              ~on_event:(function
+                | Http_rejection { rejection; _ } ->
+                  incr diagnostics;
+                  assert (
+                    Inference.Observation.Diagnostic.Http_rejection.equal_reason
+                      (Inference.Observation.Diagnostic.Http_rejection.reason rejection)
+                      Unclassified)
+                | _ -> ())
+            |> unwrap
+          in
+          if String.equal label "cancel"
+          then (
+            let cancelled =
+              Eio.Fiber.first
+                (fun () ->
+                   ignore (run () : D.Terminal.t);
+                   false)
+                (fun () ->
+                   Eio.Promise.await entered;
+                   true)
+            in
+            assert cancelled;
+            assert (!diagnostics = 0))
+          else (
+            (match run () with
+             | Failed { delivery = Possibly_submitted; reason = Http_status 400 } -> ()
+             | _ -> assert false);
+            assert (!diagnostics = 1));
+          assert (!joined && !connects = 1);
+          printf
+            "%s status-preserved-or-cancelled:true reader-joined:%b diagnostics:%d \
+             connects:%d\n"
+            label
+            !joined
+            !diagnostics
+            !connects)));
+  [%expect
+    {|
+    +mock time is now 0.05
+    +mock time is now 1.05
+    outer status-preserved-or-cancelled:true reader-joined:true diagnostics:1 connects:1
+    diagnostic status-preserved-or-cancelled:true reader-joined:true diagnostics:1 connects:1
+    cancel status-preserved-or-cancelled:true reader-joined:true diagnostics:0 connects:1
+    |}]
+;;
+
+let%expect_test "profile encoding omission is captured before request fingerprint" =
+  let primary = profile "http://127.0.0.1:1/v1/responses" in
+  let omitted = D.Profile.with_truncation_emission primary Omit in
+  let explicit = prepare primary
+  and absent = prepare omitted in
+  let has_truncation prepared =
+    match R.jsonaf_of_t (D.Prepared.request prepared) with
+    | `Object fields -> List.Assoc.mem fields "truncation" ~equal:String.equal
+    | _ -> assert false
+  in
+  printf
+    "default:%b omitted:%b fingerprint-distinct:%b\n"
+    (has_truncation explicit)
+    (has_truncation absent)
+    (not (String.equal (D.Prepared.fingerprint explicit) (D.Prepared.fingerprint absent)));
+  [%expect {| default:true omitted:false fingerprint-distinct:true |}]
+;;
+
+let%expect_test "rejected response content types expose only closed header summaries" =
+  Eio_main.run (fun env ->
+    List.iter
+      [ []
+      ; [ "application/json; charset=utf-8" ]
+      ; [ "text/html" ]
+      ; [ "SECRET_CANARY" ]
+      ; [ "text/event-stream"; "TEXT/EVENT-STREAM" ]
+      ; [ "application/json"; "text/event-stream" ]
+      ]
+      ~f:(fun values ->
+        with_server
+          env
+          (fun flow _ ->
+             Eio.Flow.copy_string
+               ("HTTP/1.1 200 Test\r\n"
+                ^ String.concat
+                    (List.map values ~f:(fun value -> "Content-Type: " ^ value ^ "\r\n"))
+                ^ "Content-Length: 0\r\n\r\n")
+               flow)
+          (fun _ endpoint ->
+             let events = ref [] in
+             (match
+                D.run
+                  (driver env)
+                  ~auth
+                  ~prepared:(prepare (profile endpoint))
+                  ~on_event:(fun event -> events := event :: !events)
+                |> unwrap
+              with
+              | Failed { delivery = Possibly_submitted; reason = Invalid_content_type } ->
+                ()
+              | _ -> assert false);
+             match List.rev !events with
+             | [ Response_content_type { detail; delivery = Possibly_submitted }
+               ; Terminal _
+               ] ->
+               let module C = Inference.Observation.Diagnostic.Response_content_type in
+               let json = C.to_json detail in
+               assert (C.equal detail (C.of_json json |> Result.ok |> Option.value_exn));
+               assert (
+                 not
+                   (String.is_substring
+                      (Jsonaf.to_string json)
+                      ~substring:"SECRET_CANARY"));
+               print_endline (Jsonaf.to_string json)
+             | _ -> assert false)));
+  [%expect
+    {|
+  {"shape":"absent","media":[]}
+  {"shape":"single","media":["json"]}
+  {"shape":"single","media":["html"]}
+  {"shape":"single","media":["other"]}
+  {"shape":"duplicate_same","media":["event_stream"]}
+  {"shape":"duplicate_conflicting","media":["event_stream","json"]}
+  |}]
+;;
+
+let%expect_test "trusted absent content type still requires bounded valid SSE terminal" =
+  Eio_main.run (fun env ->
+    List.iter
+      [ "public-absent", false, [], created ^ terminal ()
+      ; "direct-valid", true, [], created ^ terminal ()
+      ; "direct-empty", true, [], ""
+      ; "direct-json", true, [], {|{"private":"SECRET_CANARY"}|}
+      ; "direct-html", true, [], "<html>SECRET_CANARY</html>"
+      ; "direct-wrong", true, [ "application/json" ], created ^ terminal ()
+      ; ( "direct-duplicate"
+        , true
+        , [ "text/event-stream"; "text/event-stream" ]
+        , created ^ terminal () )
+      ]
+      ~f:(fun (label, allow_absent, headers, body) ->
+        with_server
+          env
+          (fun flow _ ->
+             Eio.Flow.copy_string
+               (sprintf
+                  "HTTP/1.1 200 Test\r\n%sContent-Length: %d\r\n\r\n%s"
+                  (String.concat
+                     (List.map headers ~f:(fun value -> "Content-Type: " ^ value ^ "\r\n")))
+                  (String.length body)
+                  body)
+               flow)
+          (fun _ endpoint ->
+             let profile = profile endpoint in
+             let profile =
+               if allow_absent
+               then
+                 D.Profile.with_response_content_type_policy
+                   profile
+                   Allow_absent_event_stream
+               else profile
+             in
+             let outcome =
+               D.run (driver env) ~auth ~prepared:(prepare profile) ~on_event:(fun _ ->
+                 ())
+               |> unwrap
+             in
+             let category =
+               match outcome with
+               | Provider (W.Tracker.Response { terminal = Completed; _ }) ->
+                 assert (String.equal label "direct-valid");
+                 "completed"
+               | Failed { reason = Invalid_content_type; delivery = Possibly_submitted }
+                 ->
+                 assert (not (String.equal label "direct-valid"));
+                 "invalid_content_type"
+               | Failed { reason = Protocol; delivery = Possibly_submitted } ->
+                 assert (
+                   List.mem
+                     [ "direct-empty"; "direct-json"; "direct-html" ]
+                     label
+                     ~equal:String.equal);
+                 "protocol"
+               | _ -> assert false
+             in
+             printf "%s:%s\n" label category)));
+  [%expect
+    {|
+  public-absent:invalid_content_type
+  direct-valid:completed
+  direct-empty:protocol
+  direct-json:protocol
+  direct-html:protocol
+  direct-wrong:invalid_content_type
+  direct-duplicate:invalid_content_type
+  |}]
 ;;

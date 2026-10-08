@@ -217,11 +217,7 @@ let%expect_test
           | _ -> assert (List.is_empty state.schedules));
          assert (
            Option.is_some (A.with_quiescent_state actor ~f:(fun _ -> Ok ()) |> protocol_ok));
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          Agent_session.Session_state.validate restored |> protocol_ok;
          print_s
            [%sexp

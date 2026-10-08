@@ -62,9 +62,6 @@
     The implementation honours several environment variables that influence the
     default behaviour.  All of them are optional.
 
-    • [OPENAI_API_KEY] – enables LLM-based transformation and evaluation.\\
-    • [META_PROPOSER_MODEL] – default model for the proposer agent.\\
-    • [META_PROMPT_BUDGET] – soft limit for the number of output tokens.\\
     • [META_PROMPT_GUIDELINES] – toggle injection of extra guidelines.\\
     • [META_PROMPT_CTX_K] – number of vector-DB context snippets to retrieve.
 
@@ -132,10 +129,10 @@ type refine_params =
   ; strategies : transform_strategy list
     (** Ordered list of candidate strategies.  At least one element is
             required. *)
-  ; proposer_model : Openai.Responses.Request.model option
-    (** Override the default OpenAI model used by transformation
-            strategies that call the LLM. *)
-  ; executor_model : Openai.Responses.Request.model option
+  ; proposer_model : string option
+    (** Override the selected model used by transformation strategies;
+            [None] inherits the captured execution target. *)
+  ; executor_model : string option
     (** Reserved for future use – at present only logged. *)
   }
 
@@ -143,17 +140,16 @@ type refine_params =
  *  Builders and defaults                                              *
  ***********************************************************************)
 
-(** [default_llm_strategy] delegates the heavy lifting to an LLM via the
-    OpenAI {/responses} endpoint.  The actual model is resolved from
-    {!field:refine_params.proposer_model} (or the [`META_PROPOSER_MODEL`]
-    environment variable), allowing callers to switch models without touching
-    the strategy value. *)
+(** [default_llm_strategy] delegates the heavy lifting to selected neutral
+    inference. The actual model is resolved from
+    {!field:refine_params.proposer_model}; omission inherits selected execution.
+    Missing selected execution is a configuration error. *)
 val default_llm_strategy : transform_strategy
 
 (** [meta_factory_online_strategy] submits the current prompt to the online
     *meta-prompt factory* template, extracts the `<Revised_Prompt>` block from
     the LLM reply and uses it as the next candidate.  When the LLM cannot be
-    reached (for instance because `OPENAI_API_KEY` is unset) the function
+    reached with an expected completion failure, the function
     degrades gracefully to a metadata-only no-op, thereby preserving the
     monotonicity guarantee of the refinement loop. *)
 val meta_factory_online_strategy : transform_strategy
@@ -176,8 +172,8 @@ val make_params
   -> ?bayes_alpha:float
   -> ?bandit_enabled:bool
   -> ?strategies:transform_strategy list
-  -> ?proposer_model:Openai.Responses.Request.model
-  -> ?executor_model:Openai.Responses.Request.model
+  -> ?proposer_model:string
+  -> ?executor_model:string
   -> unit
   -> refine_params
 
@@ -212,8 +208,8 @@ val refine
   -> ?bayes_alpha:float
   -> ?bandit_enabled:bool
   -> ?strategies:transform_strategy list
-  -> ?proposer_model:Openai.Responses.Request.model
-  -> ?executor_model:Openai.Responses.Request.model
+  -> ?proposer_model:string
+  -> ?executor_model:string
   -> Prompt_intf.t
   -> Prompt_intf.t
 

@@ -30,9 +30,7 @@ let check_storage before (job : P.Job.t) =
   let delta = Agent_session.Session_delta.Job_changed retired in
   let state = Agent_session.Session_delta.apply before delta |> protocol_ok in
   let restored =
-    Agent_session.Session_persistence.restore_snapshot
-      (State.sexp_of_t state |> Sexp.to_string_mach)
-    |> Background_recovery_tests.store_ok
+    Agent_server_test_support.roundtrip_state state |> Background_recovery_tests.store_ok
   in
   same state restored;
   same state (Agent_session.Session_delta.apply state delta |> protocol_ok);
@@ -102,7 +100,8 @@ let with_actor env initial f =
         ~initial_state:initial
         ~operation_worker:None
         ~persistence:
-          { commit =
+          { archive_reference = persistence.archive_reference
+          ; commit =
               (fun ~command_audit ~previous next ->
                 match !reject_save with
                 | true ->

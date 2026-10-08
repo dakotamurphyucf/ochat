@@ -64,7 +64,7 @@ let attach t client name =
   let session, replay = F.attach_after client t.session name !(t.cursor) in
   let kind =
     match replay with
-    | Agent_protocol.Method_result.Attach.Snapshot _ -> "snapshot"
+    | Agent_protocol.Public.Result.Attach.Snapshot _ -> "snapshot"
     | Events _ -> "events"
     | Current -> "current"
   in
@@ -92,7 +92,7 @@ let begin_job t index =
 ;;
 
 let all_delivered snapshot expected =
-  List.length snapshot.Agent_protocol.Snapshot.jobs = expected
+  List.length snapshot.Agent_protocol.Public.Snapshot.Fields.jobs = expected
   && List.for_all snapshot.jobs ~f:(fun j ->
     Poly.equal j.status Succeeded
     &&
@@ -118,7 +118,8 @@ let scheduler_lag schedules =
 
 let validate_snapshot snapshot =
   F.require
-    (List.length snapshot.Agent_protocol.Snapshot.canonical_history.entries = 1)
+    (List.length snapshot.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
+     = 1)
     "soak history grew unexpectedly";
   F.require
     ((not snapshot.halted) && Option.is_none snapshot.failure)
@@ -157,7 +158,7 @@ let sample_snapshot t client index started snapshot =
     !(t.daemon)
     client
     (sprintf "cycle-%d" index)
-    [ "jobs", number (List.length snapshot.Agent_protocol.Snapshot.jobs)
+    [ "jobs", number (List.length snapshot.Agent_protocol.Public.Snapshot.Fields.jobs)
     ; "schedules", number (List.length snapshot.schedules)
     ; ( "job_queue_depth"
       , number (List.count snapshot.jobs ~f:(fun job -> Poly.equal job.status Queued)) )

@@ -8,13 +8,13 @@ let make_model ?(history_items = []) () =
       History_entry.Allocator.create ~namespace:"agent-page-test" ~next_sequence:0
       |> Result.ok_or_failwith
     in
-    List.map history_items ~f:(History_entry.create ~allocator)
+    List.map history_items ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in
   Model.create
     ~history_items
-    ~messages:(Chat_tui.Conversation.of_history (History_entry.items history_items))
+    ~messages:(Chat_tui.Conversation.of_history history_items)
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -374,7 +374,7 @@ let%expect_test "nested calls keep custom stdout and final output with their too
   in
   let output =
     match output with
-    | Some (Openai.Responses.Tool_output.Output.Text text) -> text
+    | Some (History_entry.Payload.Output.Text text) -> text
     | Some (Content _) | None -> ""
   in
   print_s
@@ -558,7 +558,8 @@ let%expect_test "transient Agent state does not affect persisted transcript" =
   Model.set_active_page model Agent;
   print_s
     [%sexp
-      (Poly.equal history (Model.history_items model |> History_entry.items) : bool)
+      (Poly.equal history (Model.history_items model |> Openai.Responses_history.items_exn)
+       : bool)
     , (String.equal before (persisted ()) : bool)
     , (not (String.is_substring (persisted ()) ~substring:"transient") : bool)
     , (not (String.is_substring (persisted ()) ~substring:"INPUT-ONLY") : bool)
@@ -581,7 +582,7 @@ let%expect_test "canonical final output persists while progress does not" =
       }
   in
   let entry =
-    History_entry.create
+    Openai.Responses_history.create
       ~allocator:
         (History_entry.Allocator.create ~namespace:"agent-page-output" ~next_sequence:0
          |> Result.ok_or_failwith)

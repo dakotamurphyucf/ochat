@@ -14,6 +14,8 @@
   sourced_response_event
   history_stream_event
   utf8_ingest
+  inference_config
+  neutral_turn
   in_memory_stream
   model_executor
   runtime_semantics
@@ -62,9 +64,11 @@
   ingress_delivery
   ingress_operations
   mcp_discovery_cache
+  fork_history
   fork
   compact_history)
- (libraries
+ (libraries ochat.history_chatmd ochat.inference_client ochat.inference ochat.inference_runtime ochat.transcript
+  ochat.document_schema
   core
   core_unix
   openai

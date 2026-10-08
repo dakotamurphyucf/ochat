@@ -275,3 +275,135 @@ let%expect_test
     (false "close joined borrower cleanup and retired once")
     (true "close joined borrower cleanup and retired once") |}]
 ;;
+
+let%expect_test
+    "independent graph joins every resource and preserves construction error over \
+     teardown"
+  =
+  let module A = Agent_session.Session_actor in
+  let module P = Agent_protocol in
+  let module D = Agent_store.Delegation_store in
+  let module Store = Agent_store.Session_store in
+  let module G = Agent_server.Graph_tracking in
+  let module L = Agent_session.Inference_ledger in
+  let module R = Agent_server.Independent_resources in
+  let digest = Chatmd_shell_spec.Source_ref.digest in
+  Job_fixtures.with_actor (fun env sw actor writer _ ->
+    A.stop actor ~attachment_id:writer.id ~mode:Cancel |> protocol_ok |> ignore;
+    let state = A.state actor |> protocol_ok in
+    let store =
+      Store.create
+        ~env
+        ~sw
+        ~root:
+          (Filename.concat
+             state.spec.workspace_instance.canonical_root.native_path
+             "tracking")
+        ~server_id:(P.Id.Server.create ())
+        ~process_start_identity:None
+        ~lock_nonce:"independent-tracking"
+      |> store_ok
+    in
+    let owner =
+      Owner.create ~actor ~initial:None ~build:(fun () ->
+        failwith "unexpected activation")
+    in
+    Exn.protect
+      ~finally:(fun () ->
+        Owner.close_and_wait owner;
+        Store.close store |> store_ok)
+      ~f:(fun () ->
+        let context, _, prepared = Inference_tracking_tests.prepared () in
+        let admission : D.Admission.t =
+          { child_session_id = P.Id.Session.create ()
+          ; revision_id = P.Id.Prompt_revision.create ()
+          ; transaction_id = P.Id.Transaction.create ()
+          ; manifest_sha256 = digest "independent child"
+          ; parent_revision_id = state.spec.prompt_revision_id
+          ; parent_stop_epoch = Some state.stop_epoch
+          ; authority_sha256 =
+              Agent_session.Delegation_authority.fingerprint state |> protocol_ok
+          ; authored_tool = None
+          ; capability_pins = []
+          ; lifetime = Independent { authorization_sha256 = digest "fixture grant" }
+          ; created_at = timestamp
+          ; inference_target = Some (Inference_runtime.Context.target context)
+          }
+        in
+        let ledger = Store.delegations store in
+        let record =
+          D.reserve
+            ledger
+            ~key:
+              { parent_session_id = state.identity.session_id
+              ; parent_generation = state.identity.generation
+              ; principal_id
+              ; idempotency_key =
+                  P.Idempotency_key.of_string "tracking-construction" |> protocol_ok
+              }
+            ~request_sha256:(digest "tracking-construction")
+            ~admission
+            ~max_records:8
+            ~max_bytes:1048576
+          |> store_ok
+          |> function
+          | D.New record -> record
+          | _ -> assert false
+        in
+        let record =
+          List.fold
+            [ D.Artifact_installed; Child_installed; Linked ]
+            ~init:record
+            ~f:(fun record stage -> D.advance ledger record stage |> store_ok)
+        in
+        let released = ref false in
+        let failure =
+          P.Error.invalid_request "original independent construction failure"
+        in
+        let host : R.host =
+          { find = (fun _ -> Ok { state; owner })
+          ; resolve =
+              (fun reference ->
+                D.resolve ledger reference |> Result.map_error ~f:(fun _ -> assert false))
+          ; authorize = (fun _ -> Ok ())
+          ; build_root =
+              (fun ~sw ~register_tracking _ ->
+                let graph =
+                  G.create
+                    actor
+                    ~source:(Inference_tracking_tests.source "independent-failed-root")
+                    ~upstream:
+                      (Inference_tracking_tests.upstream (fun ~scope:_ ~accounting_id:_ ->
+                         ()))
+                  |> protocol_ok
+                in
+                register_tracking graph;
+                Eio.Switch.on_release sw (fun () ->
+                  released := true;
+                  raise Exit);
+                (G.identity graph).with_attempt
+                  prepared
+                  ~relation:Root
+                  ~f:(fun ~scope:_ ~accounting_id:_ -> Error failure))
+          ; build_generated = (fun ~sw:_ ~parent:_ _ -> failwith "unexpected descendant")
+          }
+        in
+        (match
+           R.with_chain ~max_depth:8 ~host ~reference:(D.reference record) ~f:(fun _ ->
+             failwith "failed resources escaped")
+         with
+         | Error actual ->
+           [%test_eq: Sexp.t] (P.Error.sexp_of_t actual) (P.Error.sexp_of_t failure)
+         | Ok _ -> assert false);
+        assert !released;
+        assert (not (Owner.is_loaded owner));
+        let row =
+          (A.state actor |> protocol_ok).inference_ledger |> L.rows |> List.hd_exn
+        in
+        (match Inference.Observation.Attempt_record.state (L.Row.record row) with
+         | Interrupted { reason = Host_interrupted; delivery = Definitely_not_submitted }
+           -> ()
+         | _ -> failwith "residual Prepared attempt was not reconciled after join");
+        print_endline "original error retained; teardown ran; graph finished after join"));
+  [%expect {| original error retained; teardown ran; graph finished after join |}]
+;;

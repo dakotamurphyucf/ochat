@@ -41,20 +41,37 @@ let status kind id state =
   |> protocol_ok
 ;;
 
+let with_fields snapshot ~f =
+  P.Public.Snapshot.create (f (P.Public.Snapshot.fields snapshot)) |> protocol_ok
+;;
+
 let snapshot jobs =
   let base = projection "existing conversation" |> Chat_tui.Agent_projection.snapshot in
-  { base with
-    P.Snapshot.jobs
-  ; extension_status =
-      [ status "invocation" "inv_ack" "published.pending"
-      ; status "subscription" "sub_wait" "active"
-      ]
-  }
+  with_fields base ~f:(fun fields ->
+    { fields with
+      jobs
+    ; extension_status =
+        [ status "invocation" "inv_ack" "published.pending"
+        ; status "subscription" "sub_wait" "active"
+        ]
+    })
+;;
+
+let public_event payload ~sequence =
+  let event =
+    P.Event.Durable.of_payload ~session_id ~sequence ~revision:sequence ~timestamp payload
+  in
+  let value = P.Public.Durable.Shared_payload.of_internal payload |> protocol_ok in
+  P.Public.Durable.of_internal_envelope
+    event
+    ~body:(Full (Shared value))
+    ~extension_status:None
+    ~replacement_snapshot:None
+  |> protocol_ok
 ;;
 
 let apply applier model client =
   Chat_tui.Agent_projection.of_client_projection client
-  |> protocol_ok
   |> Chat_tui.Agent_event_apply.apply applier ~model ~viewport_height:10
   |> protocol_ok
 ;;
@@ -98,14 +115,7 @@ let%expect_test
     ; result = Some (P.Completion.to_json (Succeeded (`String "PRIVATE-RESULT")))
     }
   in
-  let event sequence value =
-    P.Event.Durable.of_payload
-      ~session_id
-      ~sequence
-      ~revision:sequence
-      ~timestamp
-      (Job_state_changed value)
-  in
+  let event sequence value = public_event (Job_state_changed value) ~sequence in
   let completed =
     Agent_client.Projection.apply_event client (event 2L terminal) |> protocol_ok
   in
@@ -126,8 +136,8 @@ let%expect_test
     String.is_substring (render model (160, 16)) ~substring:"last known state (offline)");
   let restored =
     Agent_client.Projection.snapshot completed
-    |> P.Snapshot.to_json
-    |> P.Snapshot.of_json
+    |> P.Public.Snapshot.to_json
+    |> P.Public.Snapshot.of_json
     |> protocol_ok
     |> Agent_client.Projection.install_snapshot
   in
@@ -143,14 +153,7 @@ let%expect_test
     ; updated_at = timestamp
     }
   in
-  let next_turn =
-    P.Event.Durable.of_payload
-      ~session_id
-      ~sequence:4L
-      ~revision:4L
-      ~timestamp
-      (Operation_started operation)
-  in
+  let next_turn = public_event (Operation_started operation) ~sequence:4L in
   let started = Agent_client.Projection.apply_event restored next_turn |> protocol_ok in
   apply applier model started |> ignore;
   (match M.active_page model with
@@ -207,27 +210,31 @@ let%expect_test
     ; delivery = Not_required
     }
   in
-  let next = { initial with jobs = terminal :: List.tl_exn jobs } in
+  let next =
+    with_fields initial ~f:(fun fields ->
+      { fields with jobs = terminal :: List.tl_exn jobs })
+  in
   apply applier model (Agent_client.Projection.install_snapshot next) |> ignore;
   let after = Option.value_exn (M.session_work model) in
   [%test_eq: string] anchor after.rows.(M.work_offset model).key;
   key (`Key (`End, []));
   render model (80, 10) |> ignore;
   assert (M.work_offset model > 0);
-  let observer =
-    P.Principal.create
-      ~id:principal_id
-      ~authentication_kind:"fixture"
-      ~scopes:(P.Scope.Set.of_list [ View_session_transcript ])
-      ~attributes:[]
-    |> protocol_ok
+  let narrowed =
+    with_fields next ~f:(fun fields -> { fields with jobs = []; extension_status = [] })
   in
-  let narrowed = Agent_server.Principal_projection.snapshot observer next in
   apply applier model (Agent_client.Projection.install_snapshot narrowed) |> ignore;
   let visible = Option.value_exn (M.session_work model) in
   [%test_eq: int] 0 (Array.length visible.rows);
   assert (not (String.is_substring (render model (80, 10)) ~substring:"job_"));
-  let reset = { initial with session = { initial.session with generation = 1 } } in
+  let reset =
+    with_fields initial ~f:(fun fields ->
+      { fields with
+        session = { fields.session with generation = 1 }
+      ; jobs = []
+      ; extension_status = []
+      })
+  in
   apply applier model (Agent_client.Projection.install_snapshot reset) |> ignore;
   [%test_eq: int] 0 (Array.length (Option.value_exn (M.session_work model)).rows);
   [%test_eq: int] 0 (M.work_offset model);

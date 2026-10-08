@@ -104,7 +104,7 @@ let sessions env scratch =
   let session = Session.create ~id:"docs" ~prompt_file:"example.chatmd" () in
   Session.Io.File.write path session;
   let loaded = Session_store.read_current_file path |> Or_error.ok_exn in
-  assert (loaded.version = 5);
+  assert (Int.equal loaded.version Session.current_version);
   assert (String.equal loaded.id "docs");
   Eio.Path.save ~create:(`Or_truncate 0o600) path "invalid snapshot";
   assert (Result.is_error (Session_store.read_current_file path));

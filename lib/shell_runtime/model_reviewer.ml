@@ -39,16 +39,12 @@ let bounded_prompt t request =
 
 let complete t prompt =
   let started = Eio.Time.now (Eio.Stdenv.clock t.env) in
-  try
-    let result =
-      Eio.Time.with_timeout_exn
-        (Eio.Stdenv.clock t.env)
-        t.wall_time_seconds
-        (fun () -> t.complete ~prompt)
-    in
-    result, started
+  match
+    Eio.Time.with_timeout (Eio.Stdenv.clock t.env) t.wall_time_seconds (fun () ->
+      Ok (t.complete ~prompt))
   with
-  | Eio.Time.Timeout -> Error "model reviewer timed out", started
+  | Ok result -> result, started
+  | Error `Timeout -> Error "model reviewer timed out", started
 ;;
 
 let metadata t started (completion : completion) =

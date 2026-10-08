@@ -1,7 +1,7 @@
 open! Core
 
 type create_session =
-  command_audit:string option
+  command_audit:Document_schema.Document.t option
   -> principal:Agent_protocol.Principal.t
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
@@ -14,6 +14,7 @@ type t =
   ; workspaces : Agent_session.Workspace_catalog.t
   ; start_queue : Agent_session.Start_queue.t
   ; idempotency_store : Agent_store.Idempotency_store.t
+  ; provider_operator : Provider_operator_port.t option
   ; idempotency_mutex : Eio.Mutex.t
   ; pagination : Pagination.t
   ; audit_store : Agent_store.Audit_store.t
@@ -34,6 +35,7 @@ type t =
       Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result
   ; prepare_administration :
       Session_registry.entry
+      -> previous:Agent_session.Session_state.t
       -> Agent_session.Session_state.t
       -> fresh_history:bool
       -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
@@ -58,6 +60,7 @@ let create
       ~create_session
       ~prepare_session_start
       ~workspace_retained
+      ~provider_operator
       ~prepare_administration
   =
   { sw
@@ -67,6 +70,7 @@ let create
   ; workspaces
   ; start_queue
   ; idempotency_store
+  ; provider_operator
   ; idempotency_mutex = Eio.Mutex.create ()
   ; pagination = Pagination.create ()
   ; audit_store
@@ -300,6 +304,14 @@ let protected session_id key =
 let idempotency = function
   (* Ingress owns durable per-registration receipts and rechecks current
      authority on every retry. The generic response cache must not bypass it. *)
+  | Agent_protocol.Command.Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _ -> None
   | Agent_protocol.Command.Ingress_submit _ -> None
   | Agent_protocol.Command.Session_create request ->
     standard None request.Agent_protocol.Session.Create_request.idempotency_key
@@ -328,6 +340,7 @@ let idempotency = function
   | Schedule_create request -> protected (Some request.session_id) request.idempotency_key
   | Schedule_cancel request -> protected (Some request.session_id) request.idempotency_key
   | Protocol_initialize _
+  | Command_receipt _
   | Protocol_ping _
   | Server_info
   | Server_health _
@@ -338,6 +351,8 @@ let idempotency = function
   | Blob_read _
   | Session_list _
   | Session_get _
+  | Session_inference_summary _
+  | Session_inference_observations _
   | Session_export _
   | Permission_list _
   | Grant_list _
@@ -439,7 +454,7 @@ let handle_idempotent t context command identity execute =
       Error (error Idempotency_conflict "idempotency key was used for another request")
     | Missing ->
       let%bind _ = pending_record t key digest identity.retention in
-      let command_audit =
+      let%bind command_audit =
         Agent_store.Idempotency_store.Command_audit.
           { key
           ; request_digest = digest
@@ -449,6 +464,7 @@ let handle_idempotent t context command identity execute =
                | Protected -> true)
           }
         |> Agent_store.Idempotency_store.Command_audit.encode
+        |> Result.map_error ~f:persistence_error
       in
       store_outcome t key digest (execute (Some command_audit)))
 ;;
@@ -628,16 +644,31 @@ let handle_blob_read t context request =
       })
 ;;
 
-let rec forward_subscriber context subscriber =
-  match Agent_session.Subscriber.take subscriber with
-  | None -> ()
-  | Some (Error _) -> ()
-  | Some (Ok (Durable event)) ->
+let rec forward_subscriber context ~attachment subscriber =
+  let fail () =
+    Agent_session.Subscriber.close subscriber;
+    let error =
+      error Snapshot_required "session event stream requires a fresh snapshot"
+    in
     Connection_context.publish_notification
       context
-      (Principal_projection.durable (Connection_context.principal context) event
-       |> Agent_protocol.Event.Durable.to_notification);
-    forward_subscriber context subscriber
+      (Agent_protocol.Stream_error.create
+         ~session_id:attachment.Agent_protocol.Session.Attachment.session_id
+         ~attachment_id:attachment.id
+         error
+       |> Agent_protocol.Stream_error.to_notification)
+  in
+  match Agent_session.Subscriber.take subscriber with
+  | None -> ()
+  | Some (Error _) -> fail ()
+  | Some (Ok (Durable event)) ->
+    (match Principal_projection.durable (Connection_context.principal context) event with
+     | Error _ -> fail ()
+     | Ok event ->
+       Connection_context.publish_notification
+         context
+         (Agent_protocol.Public.Durable.to_notification event);
+       forward_subscriber context ~attachment subscriber)
   | Some (Ok (Recoverable event)) ->
     Option.iter
       (Principal_projection.recoverable (Connection_context.principal context) event)
@@ -645,29 +676,7 @@ let rec forward_subscriber context subscriber =
         Connection_context.publish_notification
           context
           (Agent_protocol.Event.Recoverable.to_notification event));
-    forward_subscriber context subscriber
-;;
-
-let authorize_attachment_mode principal mode =
-  if not (Agent_protocol.Principal.has_scope principal View_session_transcript)
-  then Error (error Permission_denied "attachment requires transcript scope")
-  else (
-    match mode with
-    | Agent_protocol.Session.Read_only -> Ok ()
-    | Read_write ->
-      if Agent_protocol.Principal.has_scope principal Send_messages
-      then Ok ()
-      else Error (error Permission_denied "read/write attachment requires send_messages")
-    | Owner_read_write ->
-      if
-        Agent_protocol.Principal.has_scope principal Send_messages
-        && Agent_protocol.Principal.has_scope principal Own_sessions
-      then Ok ()
-      else
-        Error
-          (error
-             Permission_denied
-             "owner attachment requires send_messages and own_sessions"))
+    forward_subscriber context ~attachment subscriber
 ;;
 
 let attach_entry
@@ -707,11 +716,10 @@ let attach_entry
     Connection_context.release_attachment_reservation context;
     failure
   | Ok (attachment, subscriber, snapshot, issued_reclaim_token) ->
-    let principal = Connection_context.principal context in
-    let snapshot = Principal_projection.snapshot principal snapshot in
     Connection_context.register_reserved_attachment context attachment;
     Option.iter subscriber ~f:(fun subscriber ->
-      Eio.Fiber.fork ~sw:t.sw (fun () -> forward_subscriber context subscriber));
+      Eio.Fiber.fork ~sw:t.sw (fun () ->
+        forward_subscriber context ~attachment subscriber));
     let replay =
       match after_sequence with
       | None -> Agent_protocol.Method_result.Attach.Snapshot snapshot
@@ -722,8 +730,7 @@ let attach_entry
              ~after_sequence
              ~through_sequence:snapshot.latest_event_sequence
          with
-         | Available events ->
-           Events (List.map events ~f:(Principal_projection.durable principal))
+         | Available events -> Events events
          | Snapshot_required -> Snapshot snapshot)
     in
     Ok
@@ -744,8 +751,7 @@ let handle_session_create t context command_audit request =
     | None, true ->
       Error (error Invalid_request "subscribe requires a requested attachment mode")
     | None, false -> Ok ()
-    | Some mode, _ ->
-      authorize_attachment_mode (Connection_context.principal context) mode
+    | Some _, _ -> Ok ()
   in
   let%bind entry =
     t.create_session
@@ -829,17 +835,98 @@ let handle_session_get t context request =
       request
       snapshot
   in
-  Agent_protocol.Method_result.Session_get
-    (Principal_projection.snapshot (Connection_context.principal context) snapshot)
+  Agent_protocol.Method_result.Session_get snapshot
+;;
+
+let read_inference_state t context session_id =
+  let principal = Connection_context.principal context in
+  Session_registry.read_state t.registry session_id ~authorize:(fun summary ->
+    if session_visible_to principal summary
+    then Ok ()
+    else Error (error Permission_denied "session is not visible to this principal"))
+;;
+
+let handle_inference_summary
+      t
+      context
+      (request : Agent_protocol.Inference_query.Summary_request.t)
+  =
+  let open Result.Let_syntax in
+  let%map state = read_inference_state t context request.session_id in
+  Agent_protocol.Method_result.Session_inference_summary
+    (Agent_session.Inference_ledger.summary state.inference_ledger)
+;;
+
+let handle_inference_observations
+      t
+      context
+      budget
+      (request : Agent_protocol.Inference_query.Request.t)
+  =
+  let module Q = Agent_protocol.Inference_query in
+  let module L = Agent_session.Inference_ledger in
+  let open Result.Let_syntax in
+  let%bind _ =
+    Q.Request.create
+      ~session_id:request.session_id
+      ~page:request.page
+      ~include_configuration:request.include_configuration
+      ~include_diagnostics:request.include_diagnostics
+  in
+  let%bind () =
+    if request.page.limit > (t.server_info ()).limits.max_page_size
+    then Error (error Invalid_request "inference page exceeds the advertised page limit")
+    else Ok ()
+  in
+  let%bind state = read_inference_state t context request.session_id in
+  let ledger = state.inference_ledger in
+  let%bind binding =
+    Pagination.Inference.binding
+      ~principal:(Connection_context.principal context)
+      ~request
+      ~generation:state.identity.generation
+      ~accounting_revision:(L.revision ledger)
+  in
+  let%bind after = Pagination.Inference.after t.pagination binding request.page.cursor in
+  let ordinal row = L.Handle.ordinal (L.Row.handle row) in
+  let rows =
+    L.rows ledger
+    |> List.filter ~f:(fun row -> Int64.(ordinal row > after))
+    |> List.sort ~compare:(fun a b -> Int64.compare (ordinal a) (ordinal b))
+  in
+  let%bind builder =
+    Q.Response.Builder.create
+      ~summary:(L.summary ledger)
+      ~max_bytes:(Inference_query_budget.max_result_bytes budget)
+  in
+  let rec append builder remaining rows =
+    match remaining, rows with
+    | 0, _ | _, [] -> Q.Response.Builder.finish builder
+    | _, row :: rest ->
+      let%bind next_cursor =
+        match rest with
+        | [] -> Ok None
+        | _ :: _ ->
+          Pagination.Inference.cursor t.pagination binding ~after_ordinal:(ordinal row)
+          |> Result.map ~f:Option.some
+      in
+      let row =
+        L.row_view
+          row
+          ~include_configuration:request.include_configuration
+          ~include_diagnostics:request.include_diagnostics
+      in
+      let%bind added = Q.Response.Builder.add builder row ~next_cursor in
+      (match added with
+       | None -> Q.Response.Builder.finish builder
+       | Some builder -> append builder (remaining - 1) rest)
+  in
+  let%map response = append builder request.page.limit rows in
+  Agent_protocol.Method_result.Session_inference_observations response
 ;;
 
 let handle_session_attach t context command_audit request =
   let open Result.Let_syntax in
-  let%bind () =
-    authorize_attachment_mode
-      (Connection_context.principal context)
-      request.Agent_protocol.Session.Attach_request.requested_mode
-  in
   let%bind entry, _ =
     find_visible_entry t context request.Agent_protocol.Session.Attach_request.session_id
   in
@@ -1188,37 +1275,15 @@ let render_export request snapshot entries =
       ( "application/json"
       , "session.json"
       , `Object
-          [ "snapshot", Agent_protocol.Snapshot.to_json snapshot
-          ; "history", `Array (List.map entries ~f:Agent_protocol.History.entry_to_json)
+          [ "snapshot", Agent_protocol.Public.Snapshot.to_json snapshot
+          ; "history", `Array (List.map entries ~f:Agent_protocol.Public.History.to_json)
           ]
         |> Jsonaf.to_string )
   | Chatmd ->
-    let entries =
-      List.map entries ~f:(fun (entry : Agent_protocol.History.entry) ->
-        if not entry.redacted
-        then entry
-        else
-          { entry with
-            role = Assistant
-          ; kind = Message
-          ; redacted = false
-          ; payload =
-              `Object
-                [ "type", `String "message"
-                ; "role", `String "assistant"
-                ; ( "content"
-                  , `Array
-                      [ `Object
-                          [ "type", `String "input_text"
-                          ; "text", `String "[Tool content redacted]"
-                          ]
-                      ] )
-                ]
-          })
-    in
-    Agent_session.Chatmd_export.render_protocol entries
-    |> Result.map ~f:(fun history ->
-      "text/markdown; charset=utf-8", "session.chatmd", history)
+    Ok
+      ( "text/markdown; charset=utf-8"
+      , "session.chatmd"
+      , Agent_session.Chatmd_export.render_public entries )
 ;;
 
 let create_export_blob
@@ -1305,13 +1370,16 @@ let handle_session_export t context request =
       { session_id = request.session_id; history = request.history }
       snapshot
   in
-  let snapshot =
+  let%bind snapshot =
     Principal_projection.snapshot (Connection_context.principal context) snapshot
   in
+  let projected = Agent_protocol.Public.Snapshot.fields snapshot in
   let entries =
     if Option.exists request.history ~f:(fun history -> history.effective)
-    then (Option.value_exn snapshot.effective_history).entries
-    else snapshot.canonical_history.entries
+    then
+      Option.value_map projected.effective_history ~default:[] ~f:(fun window ->
+        window.entries)
+    else projected.canonical_history.entries
   in
   let%bind media_type, display_name, content = render_export request snapshot entries in
   let%bind store_handle =
@@ -1330,8 +1398,8 @@ let handle_session_export t context request =
   in
   Agent_protocol.Method_result.Session_export
     { blob = (Agent_store.Blob_store.Handle.metadata handle).blob
-    ; session_revision = snapshot.revision
-    ; latest_event_sequence = snapshot.latest_event_sequence
+    ; session_revision = projected.revision
+    ; latest_event_sequence = projected.latest_event_sequence
     }
 ;;
 
@@ -1473,58 +1541,63 @@ let handle_session_reset t context command_audit request =
     ~attachment_id:request.attachment_id
     (fun entry ->
        let open Result.Let_syntax in
-       let%bind state = Agent_session.Session_actor.state entry.actor in
-       let%bind () = validate_stopped_revision state request.expected_revision in
-       let%bind () = Runtime_owner.unload entry.runtime in
+       let%bind expected = Agent_session.Session_actor.state entry.actor in
+       let%bind () = validate_stopped_revision expected request.expected_revision in
+       let%bind retained = t.workspace_retained expected in
+       let%bind () =
+         if retained
+         then
+           Error (error Conflict "session resources are retained by an independent child")
+         else Ok ()
+       in
+       let%bind workspace_instance =
+         replacement_workspace t entry expected request.keep_workspace
+       in
+       let options =
+         Agent_session.Administration.
+           { keep_history = request.keep_history
+           ; keep_tasks = request.keep_tasks
+           ; keep_grants = request.keep_grants
+           ; keep_labels = request.keep_labels
+           ; workspace_instance
+           }
+       in
+       let%bind candidate = Agent_session.Administration.plan_reset expected options in
+       let%bind () =
+         Agent_session.Session_state.validate_administration_candidate
+           candidate
+           ~previous:expected
+       in
        Eio.Cancel.protect (fun () ->
-         Runtime_owner.with_administration entry.runtime (fun () ->
-           let%bind state = Agent_session.Session_actor.state entry.actor in
-           let%bind () = validate_stopped_revision state request.expected_revision in
-           let%bind retained = t.workspace_retained state in
-           let%bind () =
-             match retained with
-             | false -> Ok ()
-             | true ->
-               Error
-                 (error Conflict "session resources are retained by an independent child")
-           in
-           let%bind workspace_instance =
-             replacement_workspace t entry state request.keep_workspace
-           in
-           let%bind () = if request.keep_cache then Ok () else reset_cache t entry in
-           let options =
-             Agent_session.Session_actor.
-               { keep_history = request.keep_history
-               ; keep_tasks = request.keep_tasks
-               ; keep_grants = request.keep_grants
-               ; keep_labels = request.keep_labels
-               ; workspace_instance
-               }
-           in
-           let%bind _ =
-             actor_command
-               command_audit
-               ~plain:(fun () ->
-                 Agent_session.Session_actor.reset
-                   entry.actor
-                   ~attachment_id:request.attachment_id
-                   ~expected_revision:request.expected_revision
-                   options)
-               ~audited:(fun command_audit ->
-                 Agent_session.Session_actor.reset_with_command_audit
-                   entry.actor
-                   ~command_audit
-                   ~attachment_id:request.attachment_id
-                   ~expected_revision:request.expected_revision
-                   options)
-           in
-           let%bind () =
-             Option.value_map workspace_instance ~default:(Ok ()) ~f:(fun instance ->
-               update_workspace_capacity entry instance)
-           in
-           let%map state = Agent_session.Session_actor.state entry.actor in
-           Agent_protocol.Method_result.Session_reset
-             (session_mutation (Agent_session.Session_state.summary state)))))
+         Runtime_owner.retire_administration
+           entry.runtime
+           ~validate:(fun () ->
+             let%bind () =
+               Agent_session.Session_actor.validate_administration_basis
+                 entry.actor
+                 ~attachment_id:request.attachment_id
+                 ~expected
+             in
+             if request.keep_cache then Ok () else reset_cache t entry)
+           ~commit:(fun () ->
+             let%bind _ =
+               Agent_session.Session_actor.commit_reconciled_administration
+                 entry.actor
+                 ~command_audit
+                 ~attachment_id:request.attachment_id
+                 ~expected
+                 ~kind:Reset
+                 candidate
+             in
+             let%bind () =
+               Option.value_map
+                 workspace_instance
+                 ~default:(Ok ())
+                 ~f:(update_workspace_capacity entry)
+             in
+             let%map state = Agent_session.Session_actor.state entry.actor in
+             Agent_protocol.Method_result.Session_reset
+               (session_mutation (Agent_session.Session_state.summary state)))))
 ;;
 
 let current_prompt_revision t state =
@@ -1566,25 +1639,35 @@ let commit_prepared
       entry
       command_audit
       ~attachment_id
+      ~expected
       ~expected_revision
       ~kind
       ~fresh_history
       candidate
   =
-  Runtime_owner.with_administration entry.Session_registry.runtime (fun () ->
-    let open Result.Let_syntax in
-    let%bind candidate = t.prepare_administration entry candidate ~fresh_history in
-    let%map session =
-      Agent_session.Session_actor.commit_administration
+  let open Result.Let_syntax in
+  let%bind candidate =
+    t.prepare_administration entry ~previous:expected candidate ~fresh_history
+  in
+  Runtime_owner.reinitialize_administration
+    entry.Session_registry.runtime
+    ~validate:(fun () ->
+      let%bind () = validate_stopped_revision expected expected_revision in
+      Agent_session.Session_actor.validate_administration_basis
+        entry.actor
+        ~attachment_id
+        ~expected)
+    ~commit:(fun () ->
+      Agent_session.Session_actor.commit_reconciled_administration
         entry.actor
         ~command_audit
         ~attachment_id
-        ~expected_revision
+        ~expected
         ~kind
         candidate
-    in
-    Agent_session.History_id_source.discard_reserved entry.history_ids;
-    session)
+      |> Result.map ~f:ignore)
+    ~before_initialize:(fun () ->
+      Agent_session.History_id_source.discard_reserved entry.history_ids)
 ;;
 
 let handle_session_rebuild t context command_audit request =
@@ -1606,13 +1689,14 @@ let handle_session_rebuild t context command_audit request =
              (current_prompt_revision t state)
              ~f:Agent_session.Prompt_revision.id
        in
-       let%bind candidate = Agent_session.Administration.rebuild state target in
+       let%bind candidate = Agent_session.Administration.plan_rebuild state target in
        let%map session =
          commit_prepared
            t
            entry
            command_audit
            ~attachment_id:request.attachment_id
+           ~expected:state
            ~expected_revision:request.expected_revision
            ~kind:Rebuild
            ~fresh_history:true
@@ -1649,6 +1733,7 @@ let handle_session_upgrade_prompt t context command_audit request =
            entry
            command_audit
            ~attachment_id:request.attachment_id
+           ~expected:state
            ~expected_revision:request.expected_revision
            ~kind:Upgrade
            ~fresh_history:false
@@ -2033,7 +2118,16 @@ let authorize_mutation t context command =
     with_writer t context ~session_id ~attachment_id (fun _ -> Ok ())
 ;;
 
-let dispatch_authorized t ~context ~command_audit = function
+let dispatch_authorized t ~actor ~context ~command_audit ~inference_budget = function
+  | ( Agent_protocol.Command.Provider_setup _
+    | Provider_status _
+    | Provider_login_begin _
+    | Provider_login_challenge _
+    | Provider_login_cancel _
+    | Provider_logout _
+    | Provider_select _
+    | Provider_configure_environment _ ) as command ->
+    Provider_operator_port.dispatch t.provider_operator ~actor command
   | Agent_protocol.Command.Protocol_initialize request ->
     Result.map
       (t.initialize ~principal:(Connection_context.principal context) request)
@@ -2060,6 +2154,9 @@ let dispatch_authorized t ~context ~command_audit = function
   | Session_create request -> handle_session_create t context command_audit request
   | Session_list request -> handle_session_list t context request
   | Session_get request -> handle_session_get t context request
+  | Session_inference_summary request -> handle_inference_summary t context request
+  | Session_inference_observations request ->
+    handle_inference_observations t context inference_budget request
   | Session_attach request -> handle_session_attach t context command_audit request
   | Session_detach request -> handle_session_detach t context command_audit request
   | Session_renew_owner request ->
@@ -2091,19 +2188,31 @@ let dispatch_authorized t ~context ~command_audit = function
   | Schedule_get request -> handle_schedule_get t context request
   | Schedule_create request -> handle_schedule_create t context command_audit request
   | Schedule_cancel request -> handle_schedule_cancel t context command_audit request
+  | Command_receipt _ -> Error (error Invalid_state "receipt requires read-only dispatch")
   | Ingress_submit request -> handle_ingress_submit t context request
 ;;
 
-let handle_authorized t ~context ~command_audit command =
+let handle_authorized t ~actor ~context ~command_audit ~inference_budget command =
   let open Result.Let_syntax in
   let%bind () = authorize_mutation t context command in
-  let%bind result = dispatch_authorized t ~context ~command_audit command in
+  let%bind result =
+    dispatch_authorized t ~actor ~context ~command_audit ~inference_budget command
+  in
   Pagination.lists t.pagination (Connection_context.principal context) command result
 ;;
 
 let command_session_id = function
-  | Agent_protocol.Command.Session_create _
+  | Agent_protocol.Command.Provider_setup _
+  | Provider_status _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_select _
+  | Provider_configure_environment _
+  | Session_create _
   | Protocol_initialize _
+  | Command_receipt _
   | Protocol_ping _
   | Server_info
   | Server_health _
@@ -2115,6 +2224,8 @@ let command_session_id = function
   | Blob_read request -> Some request.session_id
   | Audit_read request -> request.session_id
   | Session_get request -> Some request.Agent_protocol.Session.Get_request.session_id
+  | Session_inference_summary request -> Some request.session_id
+  | Session_inference_observations request -> Some request.session_id
   | Session_attach request -> Some request.session_id
   | Session_detach request -> Some request.session_id
   | Session_renew_owner request -> Some request.session_id
@@ -2147,7 +2258,7 @@ let audit_outcome
       t
       context
       command
-      (outcome : (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result)
+      (outcome : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result)
   =
   let method_name = Agent_protocol.Command.method_name command in
   let level, name, outcome_payload =
@@ -2170,16 +2281,187 @@ let audit_outcome
   |> Result.map_error ~f:persistence_error
 ;;
 
-let execute t context command =
-  match idempotency command with
-  | None -> handle_authorized t ~context ~command_audit:None command
-  | Some identity ->
-    handle_idempotent t context command identity (fun command_audit ->
-      handle_authorized t ~context ~command_audit command)
+let receipt_summary ~session_id result =
+  let module R = Agent_protocol.Command_receipt in
+  let mutation value =
+    match session_id with
+    | Some session_id -> Ok (R.Session_mutation { session_id; mutation = value })
+    | None -> Error (error Invalid_request "receipt requires a session identity")
+  in
+  match result with
+  | Agent_protocol.Method_result.Provider_setup value -> Ok (R.Provider_setup value)
+  | Provider_login_begin value -> Ok (R.Provider_login value)
+  | Provider_login_cancel value -> Ok (R.Provider_cancel value)
+  | Provider_logout value -> Ok (R.Provider_logout value)
+  | Provider_select value -> Ok (R.Provider_selection value)
+  | Provider_configure_environment value -> Ok (R.Provider_configuration value)
+  | Provider_status _ | Provider_login_challenge _ ->
+    Error (error Invalid_request "method has no generic command receipt")
+  | Agent_protocol.Method_result.Session_create value ->
+    Ok (R.Created_session value.session.id)
+  | Session_attach value -> Ok (R.Attached_session value.attachment.session_id)
+  | Session_detach value | Session_renew_owner (_, value) -> mutation value
+  | Session_start value
+  | Session_stop value
+  | Session_cancel_operation value
+  | Session_compact value
+  | Session_delete_history value
+  | Session_reset value
+  | Session_rebuild value
+  | Session_upgrade_prompt value ->
+    Ok (R.Session_mutation { session_id = value.session.id; mutation = value.mutation })
+  | Session_send_message value ->
+    (match session_id with
+     | None -> Error (error Invalid_request "message receipt requires session identity")
+     | Some session_id ->
+       Ok
+         (R.Sent_message
+            { session_id
+            ; history_id = value.history_id
+            ; operation_id = value.operation_id
+            ; mutation = value.mutation
+            }))
+  | Session_delete value -> Ok (R.Deleted_session value.session_id)
+  | Permission_respond value ->
+    Ok (R.Permission_response (value.permission.id, value.mutation))
+  | Grant_revoke value -> Ok (R.Revoked_grant (value.grant.id, value.mutation))
+  | Job_cancel value -> Ok (R.Cancelled_job (value.job.id, value.mutation))
+  | Schedule_create value | Schedule_cancel value ->
+    Ok (R.Schedule_mutation (value.schedule.id, value.mutation))
+  | Protocol_initialize _
+  | Command_receipt _
+  | Protocol_ping _
+  | Server_info _
+  | Server_health _
+  | Prompt_list _
+  | Prompt_get _
+  | Workspace_list _
+  | Workspace_get _
+  | Blob_read _
+  | Session_list _
+  | Session_get _
+  | Session_inference_summary _
+  | Session_inference_observations _
+  | Session_export _
+  | Permission_list _
+  | Grant_list _
+  | Audit_read _
+  | Job_list _
+  | Job_get _
+  | Schedule_list _
+  | Schedule_get _
+  | Ingress_submit _ ->
+    Error (error Invalid_request "method has no generic command receipt")
 ;;
 
-let handle t ~context command =
+let handle_command_receipt
+      t
+      ~actor
+      context
+      (request : Agent_protocol.Command_receipt.Request.t)
+  =
   let open Result.Let_syntax in
+  let principal = Connection_context.principal context in
+  let%bind request =
+    Agent_protocol.Command_receipt.Request.of_json
+      (Agent_protocol.Command_receipt.Request.to_json request)
+  in
+  let%bind command =
+    Agent_protocol.Command.of_method_and_params
+      ~method_:request.method_name
+      ~params:request.original_params
+  in
+  let%bind () = Authorization.authorize principal command in
+  if Provider_operator_port.is_provider_command command
+  then
+    Provider_operator_port.receipt t.provider_operator ~actor command
+    |> Result.map ~f:(fun receipt -> Agent_protocol.Method_result.Command_receipt receipt)
+  else (
+    let%bind identity =
+      Result.of_option
+        (idempotency command)
+        ~error:(error Invalid_request "method has no generic command receipt")
+    in
+    let%bind digest = request_digest command in
+    let key = idempotency_key principal command identity in
+    let visible session_id =
+      Session_registry.read_state t.registry session_id ~authorize:(fun session ->
+        if session_visible_to principal session
+        then Ok ()
+        else Error (error Permission_denied "receipt session is not visible"))
+      |> Result.map ~f:(fun _ -> ())
+    in
+    match
+      Agent_store.Idempotency_store.lookup t.idempotency_store ~key ~request_digest:digest
+    with
+    | Missing -> Ok (Agent_protocol.Method_result.Command_receipt Missing)
+    | Conflict _ ->
+      Error (error Idempotency_conflict "receipt request does not match original payload")
+    | Replay record ->
+      let guarded () =
+        let%bind () =
+          match identity.session_id with
+          | None -> Ok ()
+          | Some session_id -> visible session_id
+        in
+        let%map receipt =
+          match record.outcome with
+          | Pending ->
+            Ok
+              (Agent_protocol.Command_receipt.Pending
+                 { accepted_sequence = record.accepted_transaction_sequence
+                 ; expires_at = record.expires_at
+                 })
+          | Failure failure -> Ok (Agent_protocol.Command_receipt.Failed failure)
+          | Success json ->
+            let%bind result =
+              Agent_protocol.Method_result.of_json ~method_:request.method_name json
+            in
+            let%bind summary = receipt_summary ~session_id:identity.session_id result in
+            let%bind () =
+              match summary with
+              | Created_session session_id
+              | Attached_session session_id
+              | Deleted_session session_id
+              | Session_mutation { session_id; _ }
+              | Sent_message { session_id; _ } -> visible session_id
+              | Provider_setup _
+              | Provider_login _
+              | Provider_cancel _
+              | Provider_logout _
+              | Provider_selection _
+              | Provider_configuration _
+              | Permission_response _
+              | Revoked_grant _
+              | Cancelled_job _
+              | Schedule_mutation _ -> Ok ()
+            in
+            Ok (Agent_protocol.Command_receipt.Committed summary)
+        in
+        Agent_protocol.Method_result.Command_receipt receipt
+      in
+      (match guarded () with
+       | Error failure when Agent_protocol.Error.equal_code failure.code Session_not_found
+         -> Ok (Agent_protocol.Method_result.Command_receipt Unavailable)
+       | result -> result))
+;;
+
+let execute t ~actor context ~inference_budget command =
+  match command with
+  | Agent_protocol.Command.Command_receipt request ->
+    handle_command_receipt t ~actor context request
+  | _ ->
+    (match idempotency command with
+     | None ->
+       handle_authorized t ~actor ~context ~command_audit:None ~inference_budget command
+     | Some identity ->
+       handle_idempotent t context command identity (fun command_audit ->
+         handle_authorized t ~actor ~context ~command_audit ~inference_budget command))
+;;
+
+let handle t ?actor ~context ~inference_budget command =
+  let open Result.Let_syntax in
+  let%bind actor = Connection_context.request_actor context actor in
   let%bind () = Authorization.authorize (Connection_context.principal context) command in
   if
     (not (Connection_context.initialized context))
@@ -2188,9 +2470,18 @@ let handle t ~context command =
   then Error (error Incompatible_protocol "connection must initialize first")
   else (
     let outcome =
-      Result.map
-        (execute t context command)
+      Result.bind
+        (execute t ~actor context ~inference_budget command)
         ~f:(Principal_projection.result (Connection_context.principal context))
+    in
+    let outcome =
+      match command with
+      | Agent_protocol.Command.Session_inference_summary _
+      | Session_inference_observations _ ->
+        Result.bind outcome ~f:(fun result ->
+          Inference_query_budget.validate_result inference_budget result
+          |> Result.map ~f:(fun () -> result))
+      | _ -> outcome
     in
     match audit_outcome t context command outcome with
     | Ok _ -> outcome

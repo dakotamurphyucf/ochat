@@ -10,6 +10,7 @@ module Capability : sig
     | Function_tools
     | Custom_tools
     | Opaque_replay
+    | Websocket
     | Setting of string
   [@@deriving equal, compare, sexp_of]
 
@@ -57,6 +58,13 @@ module Setting : sig
 end
 
 module Profile : sig
+  module Response_content_type_policy : sig
+    type t =
+      | Require_event_stream
+      | Allow_absent_event_stream
+    [@@deriving equal, sexp_of]
+  end
+
   type t
 
   (** Endpoint is an absolute HTTPS Responses URL with a DNS hostname and canonical URI spelling, without userinfo, query or
@@ -71,13 +79,53 @@ module Profile : sig
     -> defaults:Setting.t list
     -> t Or_error.t
 
+  (** Trusted endpoint compatibility only. Default requires one event-stream
+      Content-Type. Allow_absent_event_stream accepts only an absent header and
+      still requires bounded HTTP/SSE framing and a valid response terminal;
+      wrong explicit values and duplicate headers remain rejected. *)
+  val with_response_content_type_policy : t -> Response_content_type_policy.t -> t
+
+  val response_content_type_policy : t -> Response_content_type_policy.t
+
+  (** Trusted endpoint encoding, captured before request fingerprints. Omission
+      preserves full input and store=false; it never enables automatic truncation. *)
+  val with_truncation_emission : t -> Responses_request.Truncation_emission.t -> t
+
+  val truncation_emission : t -> Responses_request.Truncation_emission.t
+
+  (** Trusted host qualification only; captured prompt settings cannot declare
+      cross-model replay support. Other profile identity/capabilities unchanged. *)
+  val with_replay_policy : t -> Responses_replay.t -> t
+
+  val replay_policy : t -> Responses_replay.t
   val id : t -> string
   val account : t -> string option
   val endpoint : t -> string
+
+  (** Pure capture of effective precedence before durable selection. No auth or
+      I/O. Execution layers may not masquerade as profile defaults. *)
+  val effective_settings : t -> Setting.t list -> Setting.t list Or_error.t
+
+  val capability : t -> model:string -> feature:Capability.feature -> Capability.support
 end
 
 module Prepared : sig
   type t
+
+  (** Pure wire feature admission, shared by retained-capture preflight and final
+      preparation. Does not resolve assets or credentials. *)
+  type asset_validation =
+    | Resolved
+    | Deferred
+
+  (** Deferred checks feature support but leaves immutable asset resolution to
+      final preparation. It does not authorize a provider URL or file ID. *)
+  val history_features
+    :  ?assets:asset_validation
+    -> Profile.t
+    -> model:string
+    -> Jsonaf.t list
+    -> unit Or_error.t
 
   (** Capture after the host has formed its final effective history (including
       final guidance) and resolved assets to inline immutable data. Precedence:
@@ -96,6 +144,17 @@ module Prepared : sig
     -> settings:Setting.t list
     -> t Or_error.t
 
+  (** Lower an already captured effective selection without consulting current
+      profile defaults. Names must be unique; provenance is retained. Absent
+      values remain omitted. This is the durable neutral adapter entry point. *)
+  val of_captured_settings
+    :  Profile.t
+    -> model:string
+    -> history:Jsonaf.t list
+    -> tools:Responses_codec.Request.Tool.t list
+    -> settings:Setting.t list
+    -> t Or_error.t
+
   val profile : t -> Profile.t
   val model : t -> string
   val request : t -> Responses_codec.Request.t
@@ -104,19 +163,59 @@ module Prepared : sig
 end
 
 module Auth : sig
+  type identity =
+    { owner : string
+    ; generation : int64
+    }
+  [@@deriving equal, sexp_of]
+
   type lease
 
   type error =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
+
+  (** Host-only currentness guard; rechecked after connection acquisition before
+      writing credentials. Wrapping composes the existing source guard first, then
+    the supplied guard; neither can remove the other's revocation. An existing
+    owner/generation must exactly match or Invalid_credential is returned. Guards
+    are non-yielding host policy snapshots. The owner/generation identify auth lifecycle, contain
+      no token, and permit WS channel invalidation. No serializer is provided. *)
+  val with_identity
+    :  lease
+    -> owner:string
+    -> generation:int64
+    -> check_current:(unit -> (unit, error) Result.t)
+    -> (lease, error) Result.t
+
+  val identity : lease -> identity option
+
+  (** Nonsecret immutable credential operation revision, separate from auth
+      owner/generation. Silent refresh changes this revision without changing
+      authorization epoch. Never use token bytes or token hashes. Missing revision
+      disables authenticated WS reuse. Conflicting wrappers reject. *)
+  val with_credential_revision : lease -> string -> (lease, error) Result.t
+
+  val credential_revision : lease -> string option
 
   (** Secret host lease, deliberately without serialization or secret accessor.
       Validates header-safe nonempty bytes. Resolver is called at dispatch with
       exactly the captured identity; it may silently renew but never start login. *)
   val bearer : string -> (lease, error) Result.t
+
+  (** Trusted host-only direct subscription lease. Adds fixed ChatGPT account
+      and OChat identification headers on BOTH HTTP and WS handshakes. Dispatch
+      rejects any endpoint except the fixed Codex Responses route before connect,
+      and requires the captured profile account to equal this lease account.
+      Account bytes are header-safe and participate in WS reuse compatibility;
+      caller still composes captured profile and163 ownership/currentness guards.
+      No arbitrary headers or alternate endpoint/billing fallback. *)
+  val direct_codex : string -> account:string -> (lease, error) Result.t
 
   type resolver = sw:Eio.Switch.t -> Profile.t -> (lease, error) Result.t
 end
@@ -129,6 +228,9 @@ module Terminal : sig
   [@@deriving equal, sexp_of]
 
   type failure =
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
     | Invalid_http
     | Invalid_content_type
@@ -154,6 +256,18 @@ module Event : sig
     | Update of Responses_codec.Stream.update
     | Finalized of (int * Responses_codec.Wire.Item.t) list
     | Terminal of Terminal.t
+    | Response_content_type of
+        { detail : Inference.Observation.Diagnostic.Response_content_type.t
+        ; delivery : Terminal.delivery
+        }
+    | Http_rejection of
+        { rejection : Inference.Observation.Diagnostic.Http_rejection.t
+        ; delivery : Terminal.delivery
+        }
+    | Diagnostic of
+        { violation : Inference.Observation.Diagnostic.Protocol_violation.t
+        ; delivery : Terminal.delivery
+        }
 end
 
 type t
@@ -180,14 +294,63 @@ val create
   -> unit
   -> t Or_error.t
 
+(** Tighten aggregate response and SSE frame byte bounds without changing network,
+    TLS, authentication, deadline or request limits. Positive values only; a larger
+    supplied value cannot enlarge either existing bound. Pure immutable copy. *)
+val with_response_limit : t -> max_body_bytes:int -> t Or_error.t
+
 (** Auth Error emits no events. Every normal Ok return delivers exactly one
     matching Terminal. Nonterminal validated codec updates arrive incrementally;
     provider terminals occur only in Terminal. Callback exceptions/cancellation
     propagate, including during terminal delivery. Failures preserve publication
     evidence and never retry, even when submission is uncertain. *)
 val run
-  :  t
+  :  ?on_selected:(unit -> unit)
+  -> t
   -> auth:Auth.resolver
   -> prepared:Prepared.t
   -> on_event:(Event.t -> unit)
   -> (Terminal.t, Auth.error) Result.t
+
+module Websocket_session : sig
+  type t
+
+  val create : sw:Eio.Switch.t -> t
+
+  (** Graph owner, not an authentication lease. Close after active attempts drain. *)
+  val close : t -> unit
+
+  val invalidate : t -> unit
+end
+
+(** Same event/outcome pipeline. Fresh auth on each attempt, including reused
+    channels. Detached contexts use an ephemeral channel owned by the request.
+    Prefer fallback is allowed only before response.create bytes; auth errors
+    never fall back. Cancellation/observer exceptions retire the channel. *)
+val run_with_transport
+  :  ?cache_assets:Inference.Request.Asset.t list
+  -> t
+  -> session:Websocket_session.t option
+  -> policy:Inference.Observation.Transport_policy.t
+  -> auth:Auth.resolver
+  -> prepared:Prepared.t
+  -> on_selected:
+       (Inference.Observation.Transport_selection.transport
+        -> Inference.Observation.Transport_selection.fallback_reason option
+        -> unit)
+  -> on_event:(Event.t -> unit)
+  -> (Terminal.t, Auth.error) Result.t
+
+(** Redacted projection of the SAME header builder used by HTTP and WS. Never
+    exposes bearer/account bytes, and does not bypass endpoint/account admission
+    or TLS verification. Synthetic assertions do not qualify the remote route. *)
+module For_testing : sig
+  type header_summary =
+    { account : bool
+    ; originator : bool
+    ; user_agent : bool
+    }
+  [@@deriving sexp_of]
+
+  val header_summary : Auth.lease -> Profile.t -> (header_summary, Auth.error) Result.t
+end

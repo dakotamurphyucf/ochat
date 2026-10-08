@@ -101,9 +101,9 @@ roots, not mutually untrusted tenants. Private Unix and authenticated loopback
 HTTP are the exercised deployment baseline; broader exposure needs deployment
 security appropriate to the environment.
 
-Outbound provider transport is another boundary: the existing `Io.Net` provider
-plumbing uses a development null TLS authenticator. This is not certificate
-verification and is separate from authenticating clients to the agent daemon.
-Review the [provider transport warning](../lib/openai/responses.doc.md#security-note-tls)
-before deploying on an untrusted network; configuring an incoming proxy does not
-automatically correct outbound TLS validation.
+Outbound provider transport is a separate boundary from authenticating clients
+to the agent daemon. The common Responses driver validates TLS with the system
+CA store and the selected endpoint hostname. Provider entry points use this
+[explicit inference host and driver](../lib/neutral-inference.md); the legacy
+codec-module HTTP helpers have been removed. Incoming daemon access credentials
+do not authorize access to a provider account.

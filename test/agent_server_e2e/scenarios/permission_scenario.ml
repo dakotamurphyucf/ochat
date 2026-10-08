@@ -161,7 +161,10 @@ let model_post_stream ?before_tool_call marker ~sw:_ ~inputs =
 
 let options ?before_tool_call marker =
   { Agent_server.Daemon.default_options with
-    model_post_stream = Some (model_post_stream ?before_tool_call marker)
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(model_post_stream ?before_tool_call marker)
   }
 ;;
 
@@ -188,7 +191,10 @@ let permissions client session_id state =
     Agent_protocol.Permission.List_request.
       { session_id; page = page_request (); state = Some state }
   in
-  match (Http_driver.request client (Permission_list request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Permission_list request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Permission_list page -> page.items
   | _ -> fail "permission.list returned the wrong result"
 ;;
@@ -198,7 +204,10 @@ let jobs client session_id =
     Agent_protocol.Job.List_request.
       { session_id; page = page_request (); status = None; kind = None }
   in
-  match (Http_driver.request client (Job_list request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Job_list request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Job_list page -> page.items
   | _ -> fail "job.list returned the wrong result"
 ;;
@@ -222,13 +231,17 @@ let catalog client =
       { page = page_request (); kind = None; access = None; available = Some true }
   in
   let prompt =
-    match (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result with
+    match
+      (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result
+      |> Support.Public_view.non_history
+    with
     | Prompt_list page -> List.hd_exn page.items
     | _ -> fail "prompt.list returned the wrong result"
   in
   let workspace =
     match
       (Http_driver.request client (Workspace_list workspaces) |> protocol_ok).result
+      |> Support.Public_view.non_history
     with
     | Workspace_list page -> List.hd_exn page.items
     | _ -> fail "workspace.list returned the wrong result"
@@ -278,7 +291,10 @@ let start_session client session key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match (Http_driver.request client (Session_start request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Session_start request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Session_start mutation -> { session with summary = mutation.session }
   | _ -> fail "session.start returned the wrong result"
 ;;
@@ -294,6 +310,7 @@ let send_message client session key =
   in
   match
     (Http_driver.request client (Session_send_message request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Session_send_message sent -> sent
   | _ -> fail "session.send_message returned the wrong result"
@@ -305,7 +322,7 @@ let get_session client session_id =
      |> protocol_ok)
       .result
   with
-  | Session_get snapshot -> snapshot.session
+  | Session_get snapshot -> (Agent_protocol.Public.Snapshot.fields snapshot).session
   | _ -> fail "session.get returned the wrong result"
 ;;
 
@@ -378,6 +395,7 @@ let respond_permission client session permission choice key =
   in
   match
     (Http_driver.request client (Permission_respond request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Permission_respond _ -> ()
   | _ -> fail "permission.respond returned the wrong result"
@@ -669,8 +687,11 @@ let require_reviewer_result marker observed allowed =
 
 let gated_model_options marker gate base =
   { (base : Agent_server.Daemon.options) with
-    model_post_stream =
-      Some (model_post_stream ~before_tool_call:(fun () -> Eio.Promise.await gate) marker)
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:
+          (model_post_stream ~before_tool_call:(fun () -> Eio.Promise.await gate) marker)
   }
 ;;
 
@@ -821,6 +842,7 @@ let cancel_operation client session operation_id key =
   in
   match
     (Http_driver.request client (Session_cancel_operation request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Session_cancel_operation _ -> ()
   | _ -> fail "session.cancel_operation returned the wrong result"
@@ -957,7 +979,10 @@ let respond_permission_result client session permission choice key =
       }
   in
   match Http_driver.request client (Permission_respond request) with
-  | Ok { result = Permission_respond _; _ } -> ()
+  | Ok { result = Non_history value; _ } ->
+    (match Agent_protocol.Public.Result.Non_history.value value with
+     | Permission_respond _ -> ()
+     | _ -> fail "permission race response returned wrong result")
   | Error error when Agent_protocol.Error.equal_code error.code Already_resolved -> ()
   | Ok _ -> fail "permission race response returned the wrong result"
   | Error error ->

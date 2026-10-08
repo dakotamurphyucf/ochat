@@ -7,7 +7,7 @@ let job_delivered = function
 ;;
 
 let reset_session connection session attachment =
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Session_reset
        { session_id = session.Agent_protocol.Session.id
@@ -39,7 +39,7 @@ let manifest_grant_count daemon session_id =
 
 let grants connection session_id state =
   let page = Agent_protocol.Page.Request.create ~limit:100 () |> protocol_ok in
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Grant_list { page; session_id = Some session_id; principal_id = None; state })
   |> protocol_ok
@@ -102,6 +102,14 @@ let operator_grant principal ~source_sha256 ~manifest_sha256 =
 
 let start_daemon sw env config root =
   Agent_server.Daemon.start
+    ~options:
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:(fun ~sw:_ ~inputs:_ ->
+              failwith "unexpected recovery fixture model dispatch")
+      }
     ~sw
     ~env
     ~config
@@ -174,9 +182,10 @@ let on_event = fun ctx state event -> match event with
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         incr model_calls;
                         failwith "idle lifecycle must not call a provider")
                 }
@@ -189,10 +198,10 @@ let on_event = fun ctx state event -> match event with
           in
           let snapshot_value state =
             match state.Agent_session.Session_state.moderator with
-            | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
+            | Some (`Object [ ("identity_snapshot", encoded) ]) ->
               let snapshot =
-                Session.Moderator_state.Identity_snapshot.t_of_sexp
-                  (Sexp.of_string encoded)
+                Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+                |> Result.ok_or_failwith
               in
               (match snapshot.current_state with
                | Session.Snapshot.Int value -> value
@@ -285,7 +294,7 @@ let on_event = fun ctx state event -> match event with
                               ~reason:None
                             |> Result.map ~f:ignore)
                          (fun () ->
-                            Agent_client.Connection.request
+                            Agent_client.Connection.request_without_history
                               client
                               (Permission_respond
                                  { session_id = created.id
@@ -422,9 +431,10 @@ let on_event = fun ctx state event -> Task.pure(state + 1)
                 ~options:
                   { Agent_server.Daemon.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs:_ ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
                           failwith "failed initialization must not call a model")
                   }
                 ()
@@ -506,9 +516,10 @@ let on_event = fun ctx state event -> match event with
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         incr model_calls;
                         failwith "unexpected model")
                 }
@@ -687,8 +698,10 @@ let on_event ctx state event = match event with
               ~options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
                 }
               ()
             |> protocol_ok
@@ -755,7 +768,7 @@ let%expect_test "shutdown gives admitted timer delivery a bounded grace before r
          and the shutdown fiber's grace sleep are controlled by the test. This
          keeps a slow machine from expiring grace while we release the gate. *)
       let logical_now = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
-      let mono_clock, pause_mono, _resume_mono, advance_mono =
+      let mono_clock, pause_mono, resume_mono, advance_mono =
         controlled_monotonic_clock (Eio.Stdenv.mono_clock env)
       in
       pause_mono ();
@@ -830,8 +843,10 @@ let on_event ctx state event = match event with
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream =
-                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected model")
                   }
                 ()
               |> protocol_ok
@@ -859,8 +874,22 @@ let on_event ctx state event = match event with
                           Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
                           wait predicate
                       in
+                      let rec wait_initial_schedule () =
+                        let state = A.state entry.actor |> protocol_ok in
+                        match state.schedules with
+                        | [] ->
+                          (* Bootstrap the same idle work as the scheduler without
+                             advancing the timer before the checkpoint is held. *)
+                          Agent_server.Runtime_owner.drain_idle_moderator entry.runtime
+                          |> protocol_ok
+                          |> ignore;
+                          Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
+                          wait_initial_schedule ()
+                        | [ { status = Scheduled; _ } ] -> ()
+                        | _ -> failwith "initial timer must remain scheduled"
+                      in
                       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-                        ignore (wait (fun state -> not (List.is_empty state.schedules)));
+                        wait_initial_schedule ();
                         let registered, register = Eio.Promise.create () in
                         let expire, expire_grace = Eio.Promise.create () in
                         Exn.protect
@@ -875,6 +904,10 @@ let on_event ctx state event = match event with
                                is held, so even its initial admission is ordered. *)
                                 logical_now := !logical_now +. 1.;
                                 advance_mono 1.;
+                                (* Keep scheduler polling alive after the due-time
+                                   step. The held gate and separate grace promise
+                                   still order delivery admission and retirement. *)
+                                resume_mono ();
                                 ignore
                                   (wait (fun state ->
                                      List.exists state.schedules ~f:(fun timer ->
@@ -1027,6 +1060,20 @@ let%expect_test
                 ; output_index = index
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name
+                      ; arguments =
+                          Jsonaf.to_string (`Object [ "revision", `String revision ])
+                      ; call_id = id
+                      ; _type = "function_call"
+                      ; id = Some id
+                      ; status = Some "completed"
+                      }
+                ; output_index = index
+                ; type_ = "response.output_item.done"
+                }
             ])
           |> Stdlib.List.to_seq
         in
@@ -1062,7 +1109,10 @@ let%expect_test
             ~options:
               { Agent_server.Daemon.default_options with
                 qualify_chatml_extensions = true
-              ; model_post_stream = Some post_stream
+              ; inference_policy =
+                  Agent_server_test_support.inference_policy
+                    ~default_model:"fixture-model"
+                    ~post_stream
               }
             ()
           |> protocol_ok
@@ -1176,9 +1226,10 @@ let%expect_test
         in
         let reviews state =
           match state.Agent_session.Session_state.moderator with
-          | Some (`Object [ ("identity_snapshot_sexp", `String value) ]) ->
+          | Some (`Object [ ("identity_snapshot", value) ]) ->
             let snapshot =
-              Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string value)
+              Session.Moderator_state.Identity_snapshot.of_jsonaf value
+              |> Result.ok_or_failwith
             in
             (match snapshot.current_state with
              | Session.Snapshot.Array reviews -> List.length reviews
@@ -1256,7 +1307,7 @@ let%expect_test
 ;;
 
 let server_health connection ~include_details =
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (Server_health Agent_protocol.Health.Request.{ include_details })
   |> protocol_ok
@@ -1290,7 +1341,11 @@ let%expect_test "public health is redacted and administrative health reports ser
           initialize public_connection;
           initialize admin_connection;
           let info_public =
-            match Agent_client.Connection.request public_connection Server_info with
+            match
+              Agent_client.Connection.request_without_history
+                public_connection
+                Server_info
+            with
             | Ok (Agent_protocol.Method_result.Server_info _) -> true
             | Ok _ | Error _ -> false
           in
@@ -1403,7 +1458,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
         Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root)));
   [%expect
     {|
-    ((expected_transaction 5) (checkpoint_transaction 5)
+    ((expected_transaction 8) (checkpoint_transaction 8)
      (checkpoint_is_latest true))
     |}]
 ;;
@@ -1534,7 +1589,7 @@ let%test_unit
               entry.actor
               ~attachment_id:attachment.id
               [ Agent_session.History_codec.to_protocol
-                  (History_entry.create_with_id ~id item)
+                  (Openai.Responses_history.create_with_id_exn ~id item)
               ]
             |> protocol_ok
             |> ignore;
@@ -1665,7 +1720,8 @@ let%expect_test "durable stopped session resets, recovers, and starts after rest
               (Session_get { session_id = reset.id; history = None })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_get snapshot -> snapshot.session
+            | Agent_protocol.Public.Result.Session_get snapshot ->
+              (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected recovered session response"
           in
           let grants_after_restart = manifest_grant_count second_daemon recovered.id in
@@ -1771,7 +1827,8 @@ let%expect_test "inactive stopped actors unload and reconstruct on demand" =
               (Session_get { session_id = created.id; history = None })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_get snapshot -> snapshot.session
+            | Agent_protocol.Public.Result.Session_get snapshot ->
+              (Agent_protocol.Public.Snapshot.fields snapshot).session
             | _ -> failwith "unexpected lazy session response"
           in
           let present_after_get =
@@ -1967,7 +2024,7 @@ let%expect_test "owner reclaim token survives restart and rotates on reclaim" =
                  })
             |> protocol_ok
             |> function
-            | Agent_protocol.Method_result.Session_create
+            | Agent_protocol.Public.Result.Session_create
                 { session; attachment = Some attachment; _ } ->
               session, attachment.attachment, Option.value_exn attachment.reclaim_token
             | _ -> failwith "unexpected owner create response"
@@ -2086,8 +2143,11 @@ let on_event : context -> int -> event -> int task = fun ctx state event -> Task
                 ~process_start_identity:None
                 ~options:
                   { Agent_server.Daemon.default_options with
-                    model_post_stream =
-                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model execution")
+                    inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                          failwith "unexpected model execution")
                   }
                 ()
               |> protocol_ok
@@ -2109,12 +2169,10 @@ let on_event : context -> int -> event -> int task = fun ctx state event -> Task
             let snapshot =
               match state.moderator with
               | Some (`Object fields) ->
-                (match
-                   List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal
-                 with
-                 | Some (`String encoded) ->
-                   Session.Moderator_state.Identity_snapshot.t_of_sexp
-                     (Sexp.of_string encoded)
+                (match List.Assoc.find fields "identity_snapshot" ~equal:String.equal with
+                 | Some encoded ->
+                   Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+                   |> Result.ok_or_failwith
                  | _ -> assert false)
               | _ -> assert false
             in
@@ -2383,7 +2441,8 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
                 (Session_get { session_id = created.id; history = None })
               |> protocol_ok
               |> function
-              | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+              | Agent_protocol.Public.Result.Session_get snapshot ->
+                Agent_protocol.Public.Snapshot.fields snapshot
               | _ -> failwith "unexpected recovered job response"
             in
             match snapshot.halted, snapshot.jobs with

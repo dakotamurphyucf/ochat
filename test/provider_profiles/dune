@@ -1,0 +1,5 @@
+(library
+ (name provider_profiles_tests)
+ (libraries core jsonaf cstruct eio eio_main expect_test_helpers_core ochat.inference_host)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

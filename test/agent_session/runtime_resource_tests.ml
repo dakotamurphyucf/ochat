@@ -89,7 +89,19 @@ let run ctx input =
         }
       in
       let prepare () =
+        let inference =
+          Inference_ports.create
+            ~config:
+              (Chat_response.Config.of_elements
+                 (Agent_session.Prompt_revision.elements revision))
+            ()
+        in
         B.prepare_resources
+          ~inference_context:inference.context
+          ~inference_identity:inference.identity
+          ~on_inference_attempt:ignore
+          ~on_inference_observation:ignore
+          ~on_inference_completion:ignore
           ~native_registrations:[]
           ~native_service_revision:None
           ~env

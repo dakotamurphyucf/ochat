@@ -84,6 +84,10 @@ module Trace : sig
     ]
 
   type t =
+    | Inference_live of Transcript.Stream.t
+    (** Already admitted neutral child event with its actual source/attempt.
+          This is transient observation, not canonical history or tool authority.
+          Consumers must route it as transcript data, not parent tool activity. *)
     | Tool_started of
         { call_id : string
         ; name : string
@@ -121,16 +125,32 @@ module Invocation : sig
       structured nested-tool activity. Observer exceptions are suppressed. *)
   val create_with_trace : progress:(Progress.t -> unit) -> trace:(Trace.t -> unit) -> t
 
+  (** Strict observation used by typed live delivery. Unexpected exceptions,
+      backtraces and cancellation propagate from emit/emit_trace. Existing
+      constructors retain protected observer delivery. *)
+  val create_strict_with_trace
+    :  progress:(Progress.t -> unit)
+    -> trace:(Trace.t -> unit)
+    -> t
+
   (** [emit t progress] synchronously sends transient [progress] to [t]'s
-      observer. Silent invocations discard it; observer exceptions are
-      suppressed. *)
+      observer. Silent invocations discard it. Protected constructors suppress
+      observer exceptions; strict construction propagates them. *)
   val emit : t -> Progress.t -> unit
 
   (** [emit_trace t trace] synchronously sends structured transient activity.
-      Silent invocations discard it and observer exceptions are suppressed. *)
+      Silent invocations discard it. Protected constructors suppress exceptions;
+      strict construction propagates them. *)
   val emit_trace : t -> Trace.t -> unit
 
-  (** [is_observed t] is [true] when [t] was created with {!create}. *)
+  (** Immutable actual tool-owner correlation, independent of observation. This
+      does not make a silent invocation observed. Absence means that the caller
+      did not have an actual parent scope; no relation is inferred from aliases. *)
+  val with_inference_parent : t -> parent:Transcript.Scope.parent -> t
+
+  val inference_parent : t -> Transcript.Scope.parent option
+
+  (** [is_observed t] is [true] for either protected or strict observation. *)
   val is_observed : t -> bool
 end
 

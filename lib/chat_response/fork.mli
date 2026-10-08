@@ -17,6 +17,13 @@ end
     [call_id]. *)
 val allocator : parent_namespace:string -> Invocation_id.t -> History_entry.Allocator.t
 
+(** Optional transient child read observer. The caller supplies the actual parent
+    scope and any actually known call entry ID; this grants no parent admission. *)
+type transcript_observer =
+  { parent : Transcript.Scope.parent
+  ; observe : Transcript.Stream.t -> unit
+  }
+
 (** [execute_entries ~env ~allocator ~history ~invocation_id ~call_id
     ~arguments ~tools ~tool_tbl ~on_event ~on_fn_out ()] runs a child to
     completion over the supplied parent history.
@@ -40,13 +47,16 @@ val allocator : parent_namespace:string -> Invocation_id.t -> History_entry.Allo
     No [===RESULT===] or [===PERSIST===] extraction occurs. Only the returned
     text becomes the completed parent tool output; child history is not merged.
 
+    Inference is detached from the parent's session transport resource, even
+    when no transcript observer is supplied.
+
     The call blocks its fiber and inherits the caller's Eio cancellation
     context. Cancellation stops local nested work; it does not guarantee that
     a remote provider stops generation or billing. Errors and cancellation
     may raise instead of returning a reply. Optional model parameters are
     forwarded to each nested request. *)
 val execute_entries
-  :  env:Eio_unix.Stdenv.base
+  :  ctx:Eio_unix.Stdenv.base Ctx.t
   -> allocator:History_entry.Allocator.t
   -> history:History_entry.t list
   -> invocation_id:Invocation_id.t
@@ -54,9 +64,8 @@ val execute_entries
   -> arguments:string
   -> tools:Openai.Responses.Request.Tool.t list
   -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
-  -> on_event:(Openai.Responses.Response_stream.t -> unit)
-  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> ?transcript_observer:transcript_observer
   -> on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?temperature:float
   -> ?max_output_tokens:int

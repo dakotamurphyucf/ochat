@@ -17,6 +17,10 @@ boundary rather than bypassing the actor from a presentation adapter.
 ```ocaml
 open! Core
 
+(** Expected provider failure after preserving the accepted canonical prefix and
+    completing already-admitted local outputs. No automatic retry is performed. *)
+exception Inference_failed of Inference.Event.Terminal.t
+
 (** Internal turn-driver implementation for moderated in-memory streams.
 
     The preferred public wrapper is {!Chat_response.Chatml_turn_driver}. For
@@ -353,6 +357,19 @@ val handle_tool_result
            overlay to compute the effective request history. The Phase 2 budget
            contract for self-triggered turn limits and internal-event drain
            limits is documented in [docs-src/chatml-budget-policy.md].
+    @param on_transcript_event Neutral transient read observations scoped to each
+           actual execution/attempt. Finalized carries the exact entry only after
+           its owning commit succeeds. Nested source entries never append parent
+           canonical history. Observer exceptions and cancellation propagate;
+           durable committed history remains authoritative for repair.
+    @param on_scoped_tool_execution Strict transient tool delivery stamped with
+           the actual execution/attempt captured when its runner starts. Direct
+           child callbacks retain their child scope; duplicate built-in fork
+           bridge traces are suppressed only on this channel. Other native-agent
+           Trace observations retain the parent scope and do not claim a child
+           source or attempt. Errors and cancellation propagate. On cancellation
+           no strict Finished callback runs: the authoritative operation terminal
+           fences live activity without claiming a tool output/outcome.
     @param on_runtime_request Optional callback invoked for surfaced moderator
            runtime requests such as compaction or end-session notifications.
 
@@ -368,13 +385,21 @@ val handle_tool_result
            tool functions.  The function does **not** swallow errors. *)
 val run_completion_stream_in_memory_entries
   :  env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?inference_relation:Transcript.Scope.relation
+  -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> ?before_inference_dispatch:(Inference_runtime.Prepared.t -> unit)
+  -> ?resolve_inference_assets:(History_entry.t list -> Inference.Request.Asset.t list)
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t
   -> allocator:History_entry.Allocator.t
   -> ?id_source:History_entry.Id_source.t
   -> history:History_entry.t list
-  -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
-  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
-  -> ?on_history_event:(History_stream_event.t -> unit)
+  -> ?on_transcript_event:(Transcript.Stream.t -> unit)
+  -> ?on_scoped_tool_execution:
+       (scope:Transcript.Scope.t -> Tool_execution_event.t -> unit)
   -> ?on_history_item_appended:(History_entry.t -> unit)
   -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?on_tool_out:(Openai.Responses.Item.t -> unit)
@@ -398,6 +423,7 @@ val run_completion_stream_in_memory_entries
   -> ?runtime_policy:Runtime_semantics.policy
   -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
   -> ?history_compaction:bool
+  -> ?fork_depth:int
   -> ?parallel_tool_calls:bool
   -> ?meta_refine:bool
   -> ?safe_point_input:Safe_point_input.t
@@ -416,6 +442,11 @@ val run_completion_stream_in_memory_entries
     stream callback is emitted only after its ID has been reserved, and the
     same ID appears in the returned history. Tool-call and tool-output entries
     remain distinct despite sharing a provider [call_id].
+
+    [fork_depth] is the legacy wrapper's explicit recursion counter. Supplied
+    depths 0 and 1 permit a built-in fork and increment the child counter; other
+    depths return the legacy tool error without starting another model attempt.
+    Omission retains the standalone engine's existing fork policy.
 
     [before_model_call] runs before each root provider request, after moderator
     admission and outside provider retries. Hosts use it to persist notification
@@ -443,6 +474,10 @@ val handle_item_appended_entries
   -> (unit, string) result
 
 module For_testing : sig
+  (** Legacy parsing utility only; selected inference execution never retries
+      transport, parsing or authentication failures automatically. *)
+  val retry_request : sleep:(float -> unit) -> f:(unit -> 'a) -> 'a
+
   (** [retry_stream_start ~sleep create_stream] retries parsing failures raised
       before the first event is available. Once an event is published, later
       failures propagate rather than replaying visible output. *)

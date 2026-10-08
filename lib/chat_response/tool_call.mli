@@ -24,7 +24,9 @@ val run_tool
         -> Res.Tool_output.Output.t)
          option
   -> ?runner:Ochat_function.runner
+  -> ?inference_parent:Transcript.Scope.parent
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> ?on_execution_event:(Tool_execution_event.t -> unit)
   -> unit
   -> Openai.Responses.Tool_output.Output.t
 

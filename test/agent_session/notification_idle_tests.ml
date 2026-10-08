@@ -112,9 +112,7 @@ let initial mode registry state =
     |> fun transition -> transition.Agent_session.Session_transition.state
   in
   let state = { state with lifecycle = { desired = Stopped; observed = Stopped } } in
-  Agent_session.Session_persistence.restore_snapshot
-    (Sexp.to_string_mach (State.sexp_of_t state))
-  |> store_ok
+  restore_state state |> store_ok
 ;;
 
 let%expect_test

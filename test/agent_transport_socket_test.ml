@@ -1,5 +1,14 @@
 open Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 let () = Mirage_crypto_rng_unix.use_default ()
 
 let protocol_ok = function
@@ -61,7 +70,14 @@ let with_embedded f =
               ; event_capacity = 128
               }
           in
-          let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+          let embedded =
+            Agent_server.Embedded.start
+              ~daemon_options:(inference_options ())
+              ~sw
+              ~env
+              options
+            |> protocol_ok
+          in
           Exn.protect
             ~f:(fun () -> f sw env root embedded)
             ~finally:(fun () -> Agent_server.Embedded.close embedded)))
@@ -70,7 +86,136 @@ let with_embedded f =
 ;;
 
 let initialize_line =
-  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"socket-test","version":"1"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":1048576}}|}
+  {|{"jsonrpc":"2.0","id":1,"method":"protocol.initialize","params":{"implementation":{"name":"socket-test","version":"1"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":1048576}}|}
+;;
+
+let with_scripted_peer f =
+  Eio_main.run (fun env ->
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        Eio.Switch.run (fun sw ->
+          let socket_path = Filename.concat root "scripted.sock" in
+          let listener =
+            Eio.Net.listen ~sw ~backlog:1 (Eio.Stdenv.net env) (`Unix socket_path)
+          in
+          let accepted, accept = Eio.Promise.create () in
+          Eio.Fiber.fork ~sw (fun () ->
+            let flow, _ = Eio.Net.accept ~sw listener in
+            Eio.Promise.resolve accept flow);
+          let connection =
+            Agent_transport_socket.Client.connect
+              ~sw
+              ~net:(Eio.Stdenv.net env)
+              ~socket_path
+              ~max_line_length:(16 * 1024 * 1024)
+              ~notification_capacity:8
+          in
+          Exn.protect
+            ~finally:(fun () -> Agent_client.Connection.close connection)
+            ~f:(fun () -> f sw env connection (Eio.Promise.await accepted)))))
+;;
+
+let receipt_probe params =
+  Agent_protocol.Command.Command_receipt
+    { method_name = "session.send_message"; original_params = params }
+;;
+
+let%expect_test "backpressured socket writes cancel and retire the partial frame" =
+  with_scripted_peer (fun sw env connection peer ->
+    let prefix_seen, saw_prefix = Eio.Promise.create () in
+    let completed, complete = Eio.Promise.create () in
+    let watchdog_fired = ref false in
+    Eio.Fiber.fork ~sw (fun () ->
+      let prefix = Cstruct.create 1 in
+      ignore (Eio.Flow.single_read peer prefix : int);
+      Eio.Promise.resolve saw_prefix ());
+    (* Only a broken, cancellation-shielded writer needs this escape hatch.
+       The peer never drains the remaining multi-megabyte request. *)
+    Eio.Fiber.fork ~sw (fun () ->
+      Eio.Fiber.first
+        (fun () -> Eio.Promise.await completed)
+        (fun () ->
+           Eio.Time.sleep (Eio.Stdenv.clock env) 5.;
+           watchdog_fired := true;
+           Eio.Flow.shutdown peer `All));
+    let result =
+      Eio.Fiber.first
+        (fun () ->
+           ignore
+             (Agent_client.Connection.request
+                connection
+                (receipt_probe
+                   (`Object [ "large", `String (String.make (8 * 1024 * 1024) 'x') ]))
+              : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result);
+           `Request_returned)
+        (fun () ->
+           Eio.Promise.await prefix_seen;
+           `Cancelled)
+    in
+    Eio.Promise.resolve complete ();
+    assert (not !watchdog_fired);
+    (match result with
+     | `Cancelled -> ()
+     | `Request_returned -> failwith "backpressured request returned before cancellation");
+    (match Agent_client.Connection.request connection (receipt_probe (`Object [])) with
+     | Error failure -> assert (Agent_protocol.Error.equal_code failure.code Interrupted)
+     | Ok _ -> failwith "partial-frame channel accepted another command");
+    print_endline
+      "write cancellation completed; no watchdog; partial-frame channel retired");
+  [%expect {| write cancellation completed; no watchdog; partial-frame channel retired |}]
+;;
+
+let%expect_test
+    "cancelled response wait ignores late reply and preserves next correlation"
+  =
+  with_scripted_peer (fun sw _env connection peer ->
+    let received, receive = Eio.Promise.create () in
+    let cancelled, cancel = Eio.Promise.create () in
+    let read_request reader =
+      match
+        Eio.Buf_read.line reader
+        |> Jsonaf.of_string
+        |> Agent_protocol.Envelope.of_json
+        |> protocol_ok
+      with
+      | Request request -> request.id
+      | _ -> failwith "expected request"
+    in
+    let reply id status =
+      Agent_protocol.Envelope.success ~id (`Object [ "status", `String status ])
+      |> Agent_protocol.Envelope.to_json
+      |> Jsonaf.to_string
+      |> fun line -> Eio.Flow.copy_string (line ^ "\n") peer
+    in
+    Eio.Fiber.fork ~sw (fun () ->
+      let reader = Eio.Buf_read.of_flow peer ~max_size:4096 in
+      let first = read_request reader in
+      Eio.Promise.resolve receive ();
+      Eio.Promise.await cancelled;
+      reply first "unavailable";
+      let second = read_request reader in
+      reply second "missing");
+    Eio.Fiber.first
+      (fun () ->
+         ignore
+           (Agent_client.Connection.request connection (receipt_probe (`Object []))
+            : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result);
+         failwith "first reply arrived before cancellation")
+      (fun () -> Eio.Promise.await received);
+    Eio.Promise.resolve cancel ();
+    (match
+       Agent_client.Connection.request_without_history
+         connection
+         (receipt_probe (`Object []))
+       |> protocol_ok
+     with
+     | Command_receipt Missing -> ()
+     | _ -> failwith "late reply corrupted the next response");
+    print_endline "cancelled waiter released; late reply ignored; next response matched");
+  [%expect {| cancelled waiter released; late reply ignored; next response matched |}]
 ;;
 
 let%expect_test "Unix peer credentials produce one stable same-user principal" =
@@ -204,7 +349,7 @@ let%expect_test
           Int.incr close_count;
           Agent_server.Embedded.close_connection embedded context)
         ~authenticate:(fun flow _ ->
-          Agent_transport_socket.Peer_credentials.authenticate_same_user
+          Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
             ~scopes:all_scopes
             flow)
         ~max_line_length:4_096
@@ -287,7 +432,7 @@ let%expect_test "typed client close wakes its blocked socket reader" =
            ~dispatcher:(Agent_server.Embedded.dispatcher embedded)
            ~close_connection:(Agent_server.Embedded.close_connection embedded)
            ~authenticate:(fun flow _ ->
-             Agent_transport_socket.Peer_credentials.authenticate_same_user
+             Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
                ~scopes:all_scopes
                flow)
            ~max_line_length:4_096
@@ -323,4 +468,121 @@ let%expect_test "typed client close wakes its blocked socket reader" =
     in
     print_s [%sexp (closed : (unit, [ `Timeout ]) result)]);
   [%expect {| (Ok ()) |}]
+;;
+
+let%expect_test "socket committed malformed success retains original create intent" =
+  with_embedded (fun sw env root embedded ->
+    let path = Filename.concat root "malformed-success.sock" in
+    let listener = Eio.Net.listen ~sw ~backlog:8 (Eio.Stdenv.net env) (`Unix path) in
+    let commits = ref 0 in
+    let handler flow _ =
+      let context =
+        Agent_server.Connection_context.create
+          ~connection_id:"malformed-wire"
+          ~principal:(Agent_server.Embedded.principal embedded)
+          ~transport:Unix_socket
+          ~publish_notification:(fun _ -> ())
+          ~max_attachments:8
+      in
+      let reader = Eio.Buf_read.of_flow flow ~max_size:(16 * 1024 * 1024) in
+      Exn.protect
+        ~finally:(fun () -> Agent_server.Embedded.close_connection embedded context)
+        ~f:(fun () ->
+          let rec loop () =
+            match Eio.Buf_read.line reader with
+            | line ->
+              let envelope =
+                Jsonaf.of_string line |> Agent_protocol.Envelope.of_json |> protocol_ok
+              in
+              let response =
+                Agent_server.Dispatcher.dispatch_envelope
+                  (Agent_server.Embedded.dispatcher embedded)
+                  ~context
+                  envelope
+                |> protocol_ok
+                |> Option.value_exn
+              in
+              let response =
+                match envelope, response with
+                | Request request, Response reply
+                  when String.equal request.method_ "session.create" ->
+                  (match reply.outcome with
+                   | Ok _ ->
+                     incr commits;
+                     Agent_protocol.Envelope.success ~id:reply.id (`Object [])
+                   | Error _ -> response)
+                | _ -> response
+              in
+              Eio.Flow.copy_string
+                (Jsonaf.to_string (Agent_protocol.Envelope.to_json response) ^ "\n")
+                flow;
+              loop ()
+            | exception End_of_file -> ()
+          in
+          loop ())
+    in
+    Eio.Fiber.fork_daemon ~sw (fun () ->
+      Eio.Net.run_server listener handler ~on_error:(function
+        | Eio.Io _ -> ()
+        | exn -> raise exn));
+    let connection =
+      Agent_transport_socket.Client.connect
+        ~sw
+        ~net:(Eio.Stdenv.net env)
+        ~socket_path:path
+        ~max_line_length:(16 * 1024 * 1024)
+        ~notification_capacity:8
+    in
+    ignore
+      (Agent_client.Session_handle.initialize
+         connection
+         ~implementation_name:"malformed-success-test"
+         ~implementation_version:"test"
+       |> protocol_ok);
+    let original_snapshot =
+      Agent_client.Connection.request
+        (Agent_server.Embedded.connection embedded)
+        (Session_get
+           { session_id = Agent_server.Embedded.session_id embedded; history = None })
+      |> protocol_ok
+      |> function
+      | Agent_protocol.Public.Result.Session_get snapshot ->
+        Agent_protocol.Public.Snapshot.fields snapshot
+      | _ -> failwith "unexpected snapshot"
+    in
+    let request =
+      Agent_protocol.Session.Create_request.
+        { spec = original_snapshot.session.spec
+        ; requested_mode = None
+        ; subscribe = false
+        ; idempotency_key =
+            Agent_protocol.Idempotency_key.of_string "committed-malformed-create"
+            |> protocol_ok
+        }
+    in
+    let failure =
+      match Agent_client.Connection.request connection (Session_create request) with
+      | Error failure -> failure
+      | Ok _ -> failwith "malformed success accepted"
+    in
+    assert (Agent_protocol.Error.equal_code failure.code Interrupted);
+    let pending = List.hd_exn (Agent_client.Connection.pending_commands connection) in
+    let next_key =
+      Agent_protocol.Idempotency_key.of_string "new-key-after-malformed" |> protocol_ok
+    in
+    assert (
+      Result.is_error
+        (Agent_client.Connection.request
+           connection
+           (Session_create { request with idempotency_key = next_key })));
+    assert (Int.equal !commits 1);
+    (match Agent_client.Connection.reconcile connection pending |> protocol_ok with
+     | Committed (Created_session _) -> ()
+     | _ -> failwith "committed receipt not reconciled");
+    Agent_client.Connection.close connection;
+    print_endline
+      "actual socket commit; malformed success unknown; one admission; original receipt \
+       reconciled");
+  [%expect
+    {| actual socket commit; malformed success unknown; one admission; original receipt reconciled |}]
 ;;

@@ -43,6 +43,7 @@ module Capability = struct
     | Function_tools
     | Custom_tools
     | Opaque_replay
+    | Websocket
     | Setting of string
   [@@deriving equal, compare, sexp_of]
 
@@ -73,6 +74,7 @@ module Capability = struct
           | Function_tools
           | Custom_tools
           | Opaque_replay
+          | Websocket
           | Setting _ -> loop (feature :: seen) rest)
     in
     loop [] entries
@@ -160,6 +162,13 @@ module Setting = struct
 end
 
 module Profile = struct
+  module Response_content_type_policy = struct
+    type t =
+      | Require_event_stream
+      | Allow_absent_event_stream
+    [@@deriving equal, sexp_of]
+  end
+
   type t =
     { id : string
     ; account : string option
@@ -167,6 +176,9 @@ module Profile = struct
     ; uri : Uri.t
     ; capabilities : Capability.t
     ; defaults : Setting.t list
+    ; response_content_type_policy : Response_content_type_policy.t
+    ; truncation_emission : Request.Truncation_emission.t
+    ; replay_policy : Responses_replay.t
     }
 
   let create ~id ~account ~endpoint ~capabilities ~defaults =
@@ -199,12 +211,39 @@ module Profile = struct
     then fail "profile defaults require Profile_default provenance"
     else (
       let%map.Or_error defaults = Setting.merge defaults in
-      { id; account; endpoint; uri; capabilities; defaults })
+      { id
+      ; account
+      ; endpoint
+      ; uri
+      ; capabilities
+      ; defaults
+      ; response_content_type_policy = Response_content_type_policy.Require_event_stream
+      ; truncation_emission = Request.Truncation_emission.Explicit_disabled
+      ; replay_policy = Responses_replay.exact_origin_only
+      })
   ;;
 
+  let with_response_content_type_policy t response_content_type_policy =
+    { t with response_content_type_policy }
+  ;;
+
+  let response_content_type_policy t = t.response_content_type_policy
+  let with_truncation_emission t truncation_emission = { t with truncation_emission }
+  let truncation_emission t = t.truncation_emission
+  let with_replay_policy t replay_policy = { t with replay_policy }
+  let replay_policy t = t.replay_policy
   let id t = t.id
   let account t = t.account
   let endpoint t = t.endpoint
+  let capability t ~model ~feature = Capability.resolve t.capabilities ~model ~feature
+
+  let effective_settings t settings =
+    if
+      List.exists settings ~f:(fun setting ->
+        Setting.equal_provenance (Setting.provenance setting) Profile_default)
+    then fail "execution settings cannot supply profile defaults"
+    else Setting.merge (t.defaults @ settings)
+  ;;
 end
 
 module Prepared = struct
@@ -231,7 +270,11 @@ module Prepared = struct
            (Sexp.to_string (Capability.sexp_of_feature feature)))
   ;;
 
-  let content profile ~model json =
+  type asset_validation =
+    | Resolved
+    | Deferred
+
+  let content profile ~model ~assets json =
     let base64 text = nonempty text && Result.is_ok (Base64.decode text) in
     let inline_data data =
       match String.lsplit2 data ~on:',' with
@@ -244,18 +287,24 @@ module Prepared = struct
     match string_member json "type" with
     | Some "input_image" ->
       let%bind.Or_error () = require profile ~model Image_input in
-      (match string_member json "image_url" with
-       | Some data when inline_data data -> Ok ()
-       | _ -> fail "image must be resolved to immutable inline data")
+      (match assets with
+       | Deferred -> Ok ()
+       | Resolved ->
+         (match string_member json "image_url" with
+          | Some data when inline_data data -> Ok ()
+          | _ -> fail "image must be resolved to immutable inline data"))
     | Some "input_file" ->
       let%bind.Or_error () = require profile ~model Document_input in
-      (match string_member json "file_data", member json "file_url" with
-       | Some data, (None | Some `Null) when inline_data data || base64 data -> Ok ()
-       | _ -> fail "document must be resolved to immutable inline data")
+      (match assets with
+       | Deferred -> Ok ()
+       | Resolved ->
+         (match string_member json "file_data", member json "file_url" with
+          | Some data, (None | Some `Null) when inline_data data || base64 data -> Ok ()
+          | _ -> fail "document must be resolved to immutable inline data"))
     | Some _ | None -> Ok ()
   ;;
 
-  let history_features profile ~model history =
+  let history_features ?(assets = Resolved) profile ~model history =
     Or_error.all_unit
       (List.map history ~f:(fun item ->
          let%bind.Or_error () =
@@ -275,7 +324,14 @@ module Prepared = struct
          let%bind.Or_error () =
            if
              supplied "namespace"
-             || supplied "caller"
+             || (match member item "caller" with
+                 | None | Some `Null -> false
+                 | Some caller ->
+                   not
+                     (Option.equal
+                        String.equal
+                        (string_member caller "type")
+                        (Some "direct")))
              || Option.exists (member item "async") ~f:(function
                | `True -> true
                | _ -> false)
@@ -285,7 +341,7 @@ module Prepared = struct
          Or_error.all_unit
            (List.concat_map [ "content"; "output" ] ~f:(fun key ->
               match member item key with
-              | Some (`Array parts) -> List.map parts ~f:(content profile ~model)
+              | Some (`Array parts) -> List.map parts ~f:(content profile ~model ~assets)
               | _ -> []))))
   ;;
 
@@ -314,16 +370,14 @@ module Prepared = struct
            | Some _ | None -> fail "unsupported tool"))
   ;;
 
-  let create profile ~model ~history ~tools ~settings =
+  let of_captured_settings profile ~model ~history ~tools ~settings =
     let%bind.Or_error () = require profile ~model Text_input in
     let%bind.Or_error () =
-      if
-        List.exists settings ~f:(fun s ->
-          Setting.equal_provenance (Setting.provenance s) Profile_default)
-      then fail "execution settings cannot supply profile defaults"
+      if List.contains_dup (List.map settings ~f:Setting.name) ~compare:String.compare
+      then fail "duplicate captured setting"
       else Ok ()
     in
-    let%bind.Or_error settings = Setting.merge (profile.Profile.defaults @ settings) in
+    let%bind.Or_error settings = Setting.merge settings in
     let%bind.Or_error () =
       Or_error.all_unit
         (List.map settings ~f:(fun s -> require profile ~model (Setting (Setting.name s))))
@@ -332,6 +386,7 @@ module Prepared = struct
     let%bind.Or_error () = tools_features profile ~model tools in
     let%bind.Or_error base =
       Request.create
+        ~truncation_emission:(Profile.truncation_emission profile)
         ~model
         ~input:history
         ~stream:true
@@ -381,10 +436,20 @@ module Prepared = struct
                    ])) )
         ]
     in
+    let%bind.Or_error () =
+      Document_schema.Json.validate ~limits:Document_schema.Limits.default identity
+      |> Result.map_error ~f:(fun _ ->
+        Error.of_string "prepared request byte/structure limit")
+    in
     let fingerprint =
       Digestif.SHA256.(digest_string (Jsonaf.to_string identity) |> to_hex)
     in
     Ok { profile; model; request; settings; fingerprint }
+  ;;
+
+  let create profile ~model ~history ~tools ~settings =
+    let%bind.Or_error settings = Profile.effective_settings profile settings in
+    of_captured_settings profile ~model ~history ~tools ~settings
   ;;
 
   let profile t = t.profile
@@ -395,14 +460,33 @@ module Prepared = struct
 end
 
 module Auth = struct
-  type lease = string
+  type identity =
+    { owner : string
+    ; generation : int64
+    }
+  [@@deriving equal, sexp_of]
 
   type error =
     | Missing
     | Denied
+    | Profile_changed
+    | Reauthorization_required
     | Invalid_credential
     | Timed_out
   [@@deriving equal, sexp_of]
+
+  type header_policy =
+    | Bearer_only
+    | Direct_codex of string
+  [@@deriving equal]
+
+  type lease =
+    { secret : string
+    ; header_policy : header_policy
+    ; identity : identity option
+    ; credential_revision : string option
+    ; check_current : unit -> (unit, error) Result.t
+    }
 
   let bearer secret =
     if
@@ -410,7 +494,72 @@ module Auth = struct
       || String.length secret > 8192
       || String.exists secret ~f:(fun c -> Char.to_int c <= 32 || Char.to_int c >= 127)
     then Error Invalid_credential
-    else Ok secret
+    else
+      Ok
+        { secret
+        ; header_policy = Bearer_only
+        ; identity = None
+        ; credential_revision = None
+        ; check_current = (fun () -> Ok ())
+        }
+  ;;
+
+  let direct_codex secret ~account =
+    let open Result.Let_syntax in
+    let%bind lease = bearer secret in
+    if
+      String.is_empty account
+      || String.length account > 512
+      || String.exists account ~f:(fun c -> Char.to_int c <= 32 || Char.to_int c >= 127)
+    then Error Invalid_credential
+    else Ok { lease with header_policy = Direct_codex account }
+  ;;
+
+  let additional_headers t ~endpoint ~profile_account =
+    match t.header_policy with
+    | Bearer_only -> Ok ""
+    | Direct_codex account ->
+      if
+        (not (String.equal endpoint "https://chatgpt.com/backend-api/codex/responses"))
+        || not (Option.equal String.equal profile_account (Some account))
+      then Error Invalid_credential
+      else
+        Ok
+          ("ChatGPT-Account-ID: "
+           ^ account
+           ^ "\r\noriginator: ochat\r\nUser-Agent: ochat\r\n")
+  ;;
+
+  let with_identity t ~owner ~generation ~check_current =
+    let identity = { owner; generation } in
+    if
+      String.is_empty (String.strip owner)
+      || Int64.(generation < 0L)
+      || Option.exists t.identity ~f:(fun previous ->
+        not (equal_identity previous identity))
+    then Error Invalid_credential
+    else (
+      let source_check = t.check_current in
+      let check_current () =
+        let open Result.Let_syntax in
+        let%bind () = source_check () in
+        check_current ()
+      in
+      Ok { t with identity = Some identity; check_current })
+  ;;
+
+  let identity t = t.identity
+  let credential_revision t = t.credential_revision
+
+  let with_credential_revision t revision =
+    if
+      String.is_empty (String.strip revision)
+      || String.length revision > 512
+      || (not (String.Utf8.is_valid revision))
+      || Option.exists t.credential_revision ~f:(fun previous ->
+        not (String.equal previous revision))
+    then Error Invalid_credential
+    else Ok { t with credential_revision = Some revision }
   ;;
 
   type resolver = sw:Eio.Switch.t -> Profile.t -> (lease, error) Result.t
@@ -424,6 +573,9 @@ module Terminal = struct
   [@@deriving equal, sexp_of]
 
   type failure =
+    | Unsupported_transport
+    | Session_closed
+    | Session_busy
     | Http_status of int
     | Invalid_http
     | Invalid_content_type
@@ -447,6 +599,18 @@ module Event = struct
     | Update of Codec.Stream.update
     | Finalized of (int * Wire.Item.t) list
     | Terminal of Terminal.t
+    | Response_content_type of
+        { detail : Inference.Observation.Diagnostic.Response_content_type.t
+        ; delivery : Terminal.delivery
+        }
+    | Http_rejection of
+        { rejection : Inference.Observation.Diagnostic.Http_rejection.t
+        ; delivery : Terminal.delivery
+        }
+    | Diagnostic of
+        { violation : Inference.Observation.Diagnostic.Protocol_violation.t
+        ; delivery : Terminal.delivery
+        }
 end
 
 exception Transport_failure of Terminal.failure
@@ -490,7 +654,7 @@ module Http_response = struct
     | _ -> transport_failure Invalid_http
   ;;
 
-  let headers reader ~max_bytes =
+  let headers ?(allow_upgrade = false) reader ~max_bytes =
     let bytes = ref 0 in
     let next_line () =
       let text = line reader in
@@ -511,7 +675,8 @@ module Http_response = struct
          | _ -> transport_failure Invalid_http)
       | _ -> transport_failure Invalid_http
     in
-    if status < 200 || status > 599 then transport_failure Invalid_http;
+    if (status < 200 && not (allow_upgrade && status = 101)) || status > 599
+    then transport_failure Invalid_http;
     let rec loop acc =
       let text = next_line () in
       if String.is_empty text then status, acc else loop (field text :: acc)
@@ -725,6 +890,8 @@ end
 type t =
   { connect : sw:Eio.Switch.t -> Uri.t -> Eio.Flow.two_way_ty Eio.Resource.t
   ; with_timeout : 'a. (unit -> 'a) -> ('a, [ `Timeout ]) Result.t
+  ; now : unit -> float
+  ; sleep : float -> unit
   ; max_request_bytes : int
   ; max_header_bytes : int
   ; max_body_bytes : int
@@ -794,12 +961,25 @@ let create
          independently raises [Eio.Time.Timeout]. *)
       ; with_timeout =
           (fun f -> Eio.Time.with_timeout clock timeout_seconds (fun () -> Ok (f ())))
+      ; now = (fun () -> Eio.Time.now clock)
+      ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
       ; max_request_bytes
       ; max_header_bytes
       ; max_body_bytes
       ; max_framing_bytes
       ; max_frame_bytes
       })
+;;
+
+let with_response_limit t ~max_body_bytes =
+  if max_body_bytes <= 0
+  then fail "positive response byte limit required"
+  else
+    Ok
+      { t with
+        max_body_bytes = Int.min t.max_body_bytes max_body_bytes
+      ; max_frame_bytes = Int.min t.max_frame_bytes max_body_bytes
+      }
 ;;
 
 let io f =
@@ -812,8 +992,174 @@ let io f =
     transport_failure Connection
 ;;
 
-let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
+exception Auth_invalidated of Auth.error
+
+module Http_rejection = struct
+  module H = Inference.Observation.Diagnostic.Http_rejection
+
+  let admitted = function
+    | Ok value -> value
+    | Error _ -> assert false
+  ;;
+
+  let unknown status = H.create ~status ~reason:Unclassified ~parameter:None |> admitted
+
+  let fields = function
+    | `Object fields
+      when not
+             (List.contains_dup fields ~compare:(fun (a, _) (b, _) -> String.compare a b))
+      -> Some fields
+    | _ -> None
+  ;;
+
+  let field values key = List.Assoc.find values key ~equal:String.equal
+
+  let parameter = function
+    | "instructions" -> H.Instructions
+    | "store" -> Store
+    | "model" -> Model
+    | "input" -> Input
+    | "tools" -> Tools
+    | "stream" -> Stream
+    | "text" -> Text
+    | "reasoning" -> Reasoning
+    | "truncation" -> Truncation
+    | _ -> Other
+  ;;
+
+  (* Only complete fixed literals enter diagnostics; no provider text is retained. *)
+  let literal status = function
+    | Some (`String message) ->
+      let make reason parameter =
+        H.create ~status ~reason ~parameter:(Some parameter) |> admitted
+      in
+      if String.equal message "Instructions are required"
+      then make Missing_required_parameter Instructions
+      else (
+        let names =
+          [ "instructions"
+          ; "store"
+          ; "model"
+          ; "input"
+          ; "tools"
+          ; "stream"
+          ; "text"
+          ; "reasoning"
+          ; "truncation"
+          ]
+        in
+        match
+          List.find names ~f:(fun name ->
+            String.equal message ("Unsupported parameter: " ^ name)
+            || String.equal message ("Unsupported parameter: '" ^ name ^ "'."))
+        with
+        | Some name -> make Unsupported_parameter (parameter name)
+        | None -> unknown status)
+    | _ -> unknown status
+  ;;
+
+  let body_limits =
+    Transcript.Admission.limits ~max_bytes:16_384
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  ;;
+
+  let classify status body =
+    let parsed = Document_schema.Json.decode ~limits:body_limits body |> Result.ok in
+    match parsed with
+    | Some (`String _ as value) -> literal status (Some value)
+    | _ ->
+      (match Option.bind parsed ~f:fields with
+       | None -> unknown status
+       | Some outer ->
+         let make reason parameter = H.create ~status ~reason ~parameter |> admitted in
+         (match field outer "error" with
+          | Some (`String _ as value) -> literal status (Some value)
+          | Some error ->
+            (match fields error with
+             | None -> unknown status
+             | Some error ->
+               let reason =
+                 match field error "code" with
+                 | Some (`String "missing_required_parameter") ->
+                   H.Missing_required_parameter
+                 | Some (`String "unsupported_parameter") -> Unsupported_parameter
+                 | Some (`String "invalid_parameter") -> Invalid_parameter
+                 | _ -> Unclassified
+               in
+               if H.equal_reason reason Unclassified
+               then literal status (field error "message")
+               else
+                 make
+                   reason
+                   (match field error "param" with
+                    | Some (`String p) -> Some (parameter p)
+                    | _ -> None))
+          | None -> literal status (field outer "detail")))
+  ;;
+
+  let read t reader headers status =
+    let read () =
+      let body =
+        try
+          if
+            List.exists headers ~f:(fun (key, value) ->
+              String.equal key "content-encoding"
+              && not (String.Caseless.equal value "identity"))
+          then None
+          else
+            io (fun () ->
+              let max_body_bytes = min 16384 t.max_body_bytes in
+              let state = Http_response.body_framing headers ~max_bytes:max_body_bytes in
+              let entity =
+                Http_response.create
+                  ~reader
+                  ~state
+                  ~max_body_bytes
+                  ~max_header_bytes:t.max_header_bytes
+                  ~max_framing_bytes:t.max_framing_bytes
+              in
+              let buffered =
+                Eio.Buf_read.of_flow
+                  (Http_response.flow entity)
+                  ~max_size:(max_body_bytes + 1)
+              in
+              Some (Eio.Buf_read.take_all buffered))
+        with
+        | Transport_failure _ -> None
+      in
+      Option.value_map body ~default:(unknown status) ~f:(classify status)
+    in
+    Eio.Fiber.first read (fun () ->
+      t.sleep 1.;
+      unknown status)
+  ;;
+end
+
+let dispatch
+      t
+      ~sw
+      ~lease
+      ~prepared
+      ~on_event
+      ~published
+      ~submitted
+      ~on_selected
+      ~rejection_status
+      ~rejection_emitted
+  =
   let profile = Prepared.profile prepared in
+  let additional_headers =
+    match
+      Auth.additional_headers
+        lease
+        ~endpoint:profile.Profile.endpoint
+        ~profile_account:profile.Profile.account
+    with
+    | Ok headers -> headers
+    | Error error -> raise (Auth_invalidated error)
+  in
   let body = Jsonaf.to_string (Request.jsonaf_of_t (Prepared.request prepared)) in
   if String.length body > t.max_request_bytes then transport_failure Body_limit;
   let uri = profile.Profile.uri in
@@ -823,19 +1169,27 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let authority =
     host ^ Option.value_map (Uri.port uri) ~default:"" ~f:(fun p -> ":" ^ Int.to_string p)
   in
+  (match lease.Auth.check_current () with
+   | Ok () -> ()
+   | Error error -> raise (Auth_invalidated error));
+  on_selected ();
+  (match lease.Auth.check_current () with
+   | Ok () -> ()
+   | Error error -> raise (Auth_invalidated error));
   let header =
     sprintf
       "POST %s HTTP/1.1\r\n\
        Host: %s\r\n\
        Authorization: Bearer %s\r\n\
-       Content-Type: application/json\r\n\
+       %sContent-Type: application/json\r\n\
        Accept: text/event-stream\r\n\
        Content-Length: %d\r\n\
        Connection: close\r\n\
        \r\n"
       (Uri.path uri)
       authority
-      lease
+      lease.Auth.secret
+      additional_headers
       (String.length body)
   in
   submitted := true;
@@ -851,7 +1205,13 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let status, headers =
     io (fun () -> Http_response.headers reader ~max_bytes:t.max_header_bytes)
   in
-  if status <> 200 then transport_failure (Http_status status);
+  if status <> 200
+  then (
+    rejection_status := Some status;
+    let rejection = Http_rejection.read t reader headers status in
+    rejection_emitted := true;
+    on_event (Event.Http_rejection { rejection; delivery = Possibly_submitted });
+    transport_failure (Http_status status));
   if
     List.exists headers ~f:(fun (key, value) ->
       String.equal key "content-encoding" && not (String.Caseless.equal value "identity"))
@@ -861,11 +1221,48 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
       if String.equal key "content-type" then Some value else None)
   in
   (match content_types with
+   | []
+     when Profile.Response_content_type_policy.equal
+            (Profile.response_content_type_policy profile)
+            Allow_absent_event_stream -> ()
    | [ value ]
      when String.Caseless.equal
             (String.strip (String.take_while value ~f:(fun c -> not (Char.equal c ';'))))
             "text/event-stream" -> ()
-   | _ -> transport_failure Invalid_content_type);
+   | _ ->
+     let module C = Inference.Observation.Diagnostic.Response_content_type in
+     let shape =
+       match content_types with
+       | [] -> C.Absent
+       | [ _ ] -> Single
+       | first :: rest ->
+         if List.for_all rest ~f:(String.Caseless.equal first)
+         then Duplicate_same
+         else Duplicate_conflicting
+     in
+     let media =
+       List.fold content_types ~init:[] ~f:(fun acc value ->
+         let normalized =
+           String.strip (String.take_while value ~f:(fun c -> not (Char.equal c ';')))
+         in
+         let media =
+           if String.Caseless.equal normalized "text/event-stream"
+           then C.Event_stream
+           else if String.Caseless.equal normalized "application/json"
+           then Json
+           else if String.Caseless.equal normalized "text/html"
+           then Html
+           else Other
+         in
+         if List.mem acc media ~equal:C.equal_media then acc else acc @ [ media ])
+     in
+     let detail =
+       match C.create ~shape ~media with
+       | Ok value -> value
+       | Error _ -> assert false
+     in
+     on_event (Event.Response_content_type { detail; delivery = Possibly_submitted });
+     transport_failure Invalid_content_type);
   let state = Http_response.body_framing headers ~max_bytes:t.max_body_bytes in
   let entity =
     Http_response.create
@@ -894,6 +1291,19 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   let parser =
     Codec.Stream.create ~max_frame_bytes:t.max_frame_bytes origin |> Or_error.ok_exn
   in
+  let protocol_failure stage error =
+    let delivery =
+      if !published
+      then Terminal.Response_started
+      else if !submitted
+      then Possibly_submitted
+      else Definitely_not_submitted
+    in
+    on_event
+      (Event.Diagnostic
+         { violation = Codec.Stream.protocol_violation parser ~stage error; delivery });
+    transport_failure Protocol
+  in
   let rec loop () =
     let line =
       io (fun () ->
@@ -904,10 +1314,10 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
     | None ->
       (match Codec.Stream.finish parser with
        | Ok outcome -> Terminal.Provider outcome
-       | Error _ -> transport_failure Protocol)
+       | Error error -> protocol_failure Eof error)
     | Some line ->
       (match Codec.Stream.feed_line parser line with
-       | Error _ -> transport_failure Protocol
+       | Error error -> protocol_failure Feed error
        | Ok None -> loop ()
        | Ok (Some update) ->
          if Wire.Tracker.equal_disposition update.disposition Duplicate
@@ -921,7 +1331,7 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
                on_event (Event.Finalized update.newly_finalized));
              (match Codec.Stream.finish parser with
               | Ok outcome -> Terminal.Provider outcome
-              | Error _ -> transport_failure Protocol)
+              | Error error -> protocol_failure Terminal error)
            | Response _
            | Item_added _
            | Item_done _
@@ -938,10 +1348,12 @@ let dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted =
   loop ()
 ;;
 
-let run t ~auth ~prepared ~on_event =
+let run ?(on_selected = fun () -> ()) t ~auth ~prepared ~on_event =
   let authenticated = ref false in
   let submitted = ref false in
   let published = ref false in
+  let rejection_status = ref None in
+  let rejection_emitted = ref false in
   let failed reason =
     Terminal.Failed
       { delivery =
@@ -962,17 +1374,625 @@ let run t ~auth ~prepared ~on_event =
             | Error error -> Error error
             | Ok lease ->
               authenticated := true;
-              Ok (dispatch t ~sw ~lease ~prepared ~on_event ~published ~submitted)))
+              Ok
+                (dispatch
+                   t
+                   ~sw
+                   ~lease
+                   ~prepared
+                   ~on_event
+                   ~published
+                   ~submitted
+                   ~on_selected
+                   ~rejection_status
+                   ~rejection_emitted)))
       with
       | Ok result -> result
       | Error `Timeout ->
-        if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out
+        (match !rejection_status with
+         | Some status -> Ok (failed (Http_status status))
+         | None -> if !authenticated then Ok (failed Timeout) else Error Auth.Timed_out)
     with
+    | Auth_invalidated error -> Error error
     | Transport_failure reason -> Ok (failed reason)
   in
   match result with
   | Error _ -> result
   | Ok outcome ->
+    Option.iter !rejection_status ~f:(fun status ->
+      if not !rejection_emitted
+      then (
+        rejection_emitted := true;
+        on_event
+          (Event.Http_rejection
+             { rejection = Http_rejection.unknown status; delivery = Possibly_submitted })));
     on_event (Event.Terminal outcome);
     Ok outcome
 ;;
+
+module Websocket_session = struct
+  type cache =
+    { envelope : Jsonaf.t
+    ; assets : Inference.Request.Asset.t list
+    ; prefix : Jsonaf.t list
+    ; response_id : string
+    }
+
+  type channel =
+    { flow : Eio.Flow.two_way_ty Eio.Resource.t
+    ; websocket : Responses_websocket.t
+    ; endpoint : string
+    ; profile : string
+    ; account : string option
+    ; identity : Auth.identity option
+    ; credential_revision : string option
+    ; header_policy : Auth.header_policy
+    ; release : unit -> unit
+    ; mutable cache : cache option
+    ; mutable last_used : float
+    ; mutable retired : bool
+    }
+
+  type t =
+    { sw : Eio.Switch.t
+    ; mutable channel : channel option
+    ; mutable busy : bool
+    ; mutable closed : bool
+    }
+
+  let create ~sw = { sw; channel = None; busy = false; closed = false }
+
+  let retire channel =
+    channel.retired <- true;
+    channel.cache <- None;
+    channel.release ()
+  ;;
+
+  let invalidate t =
+    Option.iter t.channel ~f:retire;
+    t.channel <- None
+  ;;
+
+  let close t =
+    t.closed <- true;
+    Option.iter t.channel ~f:retire;
+    t.channel <- None
+  ;;
+end
+
+let websocket_supported prepared =
+  match
+    Profile.capability
+      (Prepared.profile prepared)
+      ~model:(Prepared.model prepared)
+      ~feature:Capability.Websocket
+  with
+  | Supported -> true
+  | Unsupported | Unknown -> false
+;;
+
+let check_auth lease =
+  match lease.Auth.check_current () with
+  | Ok () -> ()
+  | Error error -> raise (Auth_invalidated error)
+;;
+
+let owned_websocket_flow t ~sw uri =
+  let acquired, acquire = Eio.Promise.create () in
+  let finished, finish = Eio.Promise.create () in
+  let forever, _ = Eio.Promise.create () in
+  let stopping = ref false in
+  let cancel_requested = ref false in
+  let announced = ref false in
+  let cancel_pending = ref None in
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+    Exn.protect
+      ~finally:(fun () -> Eio.Promise.resolve finish ())
+      ~f:(fun () ->
+        try
+          Eio.Cancel.sub (fun context ->
+            let stop () =
+              stopping := true;
+              if (not !cancel_requested) && Option.is_none (Eio.Promise.peek finished)
+              then (
+                cancel_requested := true;
+                Eio.Cancel.cancel context Exit)
+            in
+            cancel_pending := Some stop;
+            if !stopping then Eio.Cancel.cancel context Exit;
+            Eio.Switch.run (fun channel_sw ->
+              let flow = io (fun () -> t.connect ~sw:channel_sw uri) in
+              let stop () =
+                stopping := true;
+                if (not !cancel_requested) && Option.is_none (Eio.Promise.peek finished)
+                then (
+                  cancel_requested := true;
+                  Eio.Cancel.cancel context Exit)
+              in
+              announced := true;
+              Eio.Promise.resolve acquire (Ok (flow, channel_sw, stop));
+              Eio.Promise.await forever))
+        with
+        | exn ->
+          if not !announced
+          then (
+            announced := true;
+            Eio.Promise.resolve
+              acquire
+              (Error (exn, Stdlib.Printexc.get_raw_backtrace ())))
+          else if not !stopping
+          then raise exn);
+    `Stop_daemon);
+  let acquired =
+    try Eio.Promise.await acquired with
+    | exn ->
+      stopping := true;
+      Option.iter !cancel_pending ~f:(fun stop -> stop ());
+      Eio.Cancel.protect (fun () -> Eio.Promise.await finished);
+      raise exn
+  in
+  match acquired with
+  | Error (exn, bt) ->
+    Eio.Cancel.protect (fun () -> Eio.Promise.await finished);
+    Stdlib.Printexc.raise_with_backtrace exn bt
+  | Ok (flow, channel_sw, stop) ->
+    let release () =
+      Eio.Cancel.protect (fun () ->
+        stop ();
+        Eio.Promise.await finished)
+    in
+    flow, channel_sw, stop, release
+;;
+
+let websocket_connect t session lease prepared =
+  let profile = Prepared.profile prepared in
+  let additional_headers =
+    match
+      Auth.additional_headers
+        lease
+        ~endpoint:profile.Profile.endpoint
+        ~profile_account:profile.Profile.account
+    with
+    | Ok headers -> headers
+    | Error error -> raise (Auth_invalidated error)
+  in
+  let flow, channel_sw, stop, release =
+    owned_websocket_flow t ~sw:session.Websocket_session.sw profile.uri
+  in
+  try
+    let nonce = Base64.encode_exn (Mirage_crypto_rng.generate 16) in
+    let host = Uri.host profile.uri |> Option.value_exn in
+    let host = if String.mem host ':' then "[" ^ host ^ "]" else host in
+    let authority =
+      host
+      ^ Option.value_map (Uri.port profile.uri) ~default:"" ~f:(fun p ->
+        ":" ^ Int.to_string p)
+    in
+    check_auth lease;
+    let header =
+      sprintf
+        "GET %s HTTP/1.1\r\n\
+         Host: %s\r\n\
+         Authorization: Bearer %s\r\n\
+         %sUpgrade: websocket\r\n\
+         Connection: Upgrade\r\n\
+         Sec-WebSocket-Key: %s\r\n\
+         Sec-WebSocket-Version: 13\r\n\
+         \r\n"
+        (Uri.path profile.uri)
+        authority
+        lease.Auth.secret
+        additional_headers
+        nonce
+    in
+    io (fun () -> Eio.Flow.copy_string header flow);
+    let reader =
+      Eio.Buf_read.of_flow flow ~max_size:(Int.max t.max_header_bytes t.max_frame_bytes)
+    in
+    let status, headers =
+      io (fun () ->
+        Http_response.headers ~allow_upgrade:true reader ~max_bytes:t.max_header_bytes)
+    in
+    if status = 401 then raise (Auth_invalidated Auth.Reauthorization_required);
+    if status = 403 then raise (Auth_invalidated Auth.Denied);
+    (match Responses_websocket.validate_upgrade ~nonce ~status ~headers with
+     | Ok () -> ()
+     | Error _ -> transport_failure Invalid_http);
+    let limits =
+      Responses_websocket.Limits.create
+        ~max_frame_bytes:t.max_frame_bytes
+        ~max_message_bytes:t.max_frame_bytes
+        ~max_write_bytes:t.max_request_bytes
+        ~max_framing_bytes:t.max_framing_bytes
+        ~max_fragments:4096
+        ~max_control_frames:1024
+      |> Or_error.ok_exn
+    in
+    let websocket =
+      Responses_websocket.create
+        ~limits
+        ~read:(fun n -> io (fun () -> Eio.Buf_read.take n reader))
+        ~write:(fun bytes -> io (fun () -> Eio.Flow.copy_string bytes flow))
+        ~random:(fun n -> Mirage_crypto_rng.generate n)
+    in
+    let channel : Websocket_session.channel =
+      { flow
+      ; websocket
+      ; endpoint = profile.endpoint
+      ; profile = profile.id
+      ; account = profile.account
+      ; identity = Auth.identity lease
+      ; credential_revision = Auth.credential_revision lease
+      ; header_policy = lease.Auth.header_policy
+      ; release
+      ; cache = None
+      ; last_used = t.now ()
+      ; retired = false
+      }
+    in
+    session.channel <- Some channel;
+    let born = t.now () in
+    Eio.Fiber.fork ~sw:channel_sw (fun () ->
+      let rec wait () =
+        if not channel.retired
+        then (
+          t.sleep 1.;
+          if
+            Float.(t.now () -. born >= 3300.)
+            || ((not session.busy) && Float.(t.now () -. channel.last_used >= 300.))
+          then (
+            channel.retired <- true;
+            channel.cache <- None;
+            stop ())
+          else wait ())
+      in
+      wait ());
+    channel
+  with
+  | exn ->
+    release ();
+    raise exn
+;;
+
+let compatible_channel channel lease prepared =
+  let profile = Prepared.profile prepared in
+  (not channel.Websocket_session.retired)
+  && String.equal channel.endpoint profile.endpoint
+  && String.equal channel.profile profile.id
+  && Option.equal String.equal channel.account profile.account
+  && Auth.equal_header_policy channel.header_policy lease.Auth.header_policy
+  && (match channel.credential_revision, Auth.credential_revision lease with
+      | Some a, Some b -> String.equal a b
+      | None, _ | _, None -> false)
+  &&
+  match channel.identity, Auth.identity lease with
+  | Some a, Some b -> Auth.equal_identity a b
+  | None, _ | _, None -> false
+;;
+
+let websocket_dispatch
+      t
+      session
+      lease
+      prepared
+      ~on_selected
+      ~on_event
+      ~published
+      ~submitted
+      ~cache_assets
+  =
+  let channel =
+    match session.Websocket_session.channel with
+    | Some channel when compatible_channel channel lease prepared -> channel
+    | Some channel ->
+      Websocket_session.retire channel;
+      websocket_connect t session lease prepared
+    | None -> websocket_connect t session lease prepared
+  in
+  let request = Request.jsonaf_of_t (Prepared.request prepared) in
+  let fields =
+    match request with
+    | `Object fields -> fields
+    | _ -> assert false
+  in
+  let input = Request.input (Prepared.request prepared) in
+  let envelope =
+    `Object
+      (List.filter fields ~f:(fun (key, _) ->
+         not (String.equal key "input" || String.equal key "stream")))
+  in
+  let prefix_suffix prefix input =
+    let rec loop prefix input =
+      match prefix, input with
+      | [], suffix -> Some suffix
+      | a :: prefix, b :: input when Document_schema.Json.equal a b -> loop prefix input
+      | _ :: _, [] | _ :: _, _ :: _ -> None
+    in
+    loop prefix input
+  in
+  let continuation =
+    Option.bind channel.cache ~f:(fun cache ->
+      if
+        List.equal Inference.Request.Asset.equal cache_assets cache.assets
+        && Document_schema.Json.equal envelope cache.envelope
+      then
+        Option.map (prefix_suffix cache.prefix input) ~f:(fun suffix ->
+          cache.response_id, suffix)
+      else None)
+  in
+  let body =
+    `Object
+      ((("type", `String "response.create")
+        :: List.filter fields ~f:(fun (key, _) ->
+          not (String.equal key "stream" || String.equal key "input")))
+       @
+       match continuation with
+       | None -> [ "input", `Array input ]
+       | Some (id, input) -> [ "input", `Array input; "previous_response_id", `String id ]
+      )
+  in
+  let body = Jsonaf.to_string body in
+  if String.length body > t.max_request_bytes then transport_failure Body_limit;
+  check_auth lease;
+  on_selected Inference.Observation.Transport_selection.Websocket None;
+  check_auth lease;
+  (* From this point cancellation or partial write is uncertain; no resend. *)
+  Responses_websocket.begin_response channel.websocket;
+  submitted := true;
+  (match Responses_websocket.write_text channel.websocket body with
+   | Ok () -> ()
+   | Error _ -> transport_failure Protocol);
+  channel.cache <- None;
+  let profile = Prepared.profile prepared in
+  let origin =
+    Wire.Origin.create
+      ~provider:profile.id
+      ~account:profile.account
+      ~endpoint:profile.endpoint
+    |> function
+    | Ok origin -> origin
+    | Error _ -> assert false
+  in
+  let parser =
+    Codec.Stream.create ~max_frame_bytes:t.max_frame_bytes origin |> Or_error.ok_exn
+  in
+  let bytes = ref 0 in
+  let rec loop () =
+    let message =
+      match Responses_websocket.read_text channel.websocket with
+      | Ok message -> message
+      | Error Framing_limit -> transport_failure Framing_limit
+      | Error Limit -> transport_failure Body_limit
+      | Error Protocol -> transport_failure Protocol
+      | Error Closed -> transport_failure Connection
+    in
+    if
+      String.length message > t.max_frame_bytes
+      || String.length message > t.max_body_bytes - !bytes
+    then transport_failure Body_limit;
+    bytes := !bytes + String.length message;
+    let feed line =
+      match Codec.Stream.feed_line parser line with
+      | Ok value -> value
+      | Error _ -> transport_failure Protocol
+    in
+    ignore (feed ("data: " ^ message) : Codec.Stream.update option);
+    match feed "" with
+    | None -> transport_failure Protocol
+    | Some update ->
+      published := true;
+      if not (Wire.Tracker.equal_disposition update.disposition Duplicate)
+      then (
+        match Wire.Event.view update.event with
+        | Terminal _ | Error _ ->
+          if not (List.is_empty update.newly_finalized)
+          then on_event (Event.Finalized update.newly_finalized)
+        | _ -> on_event (Event.Update update));
+      (match Wire.Event.view update.event with
+       | Terminal _ | Error _ ->
+         let outcome =
+           match Codec.Stream.finish parser with
+           | Ok outcome -> outcome
+           | Error _ -> transport_failure Protocol
+         in
+         (match outcome with
+          | Wire.Tracker.Response { terminal = Completed; response }
+            when match Wire.Response.outcome response with
+                 | Completed -> true
+                 | _ -> false ->
+            let prefix =
+              input @ List.map (Wire.Response.output response) ~f:Wire.Item.raw
+            in
+            let retained = `Array prefix in
+            if
+              Result.is_ok
+                (Document_schema.Json.validate
+                   ~limits:Transcript.Admission.default
+                   retained)
+              && Option.is_some channel.identity
+            then
+              channel.cache
+              <- Some
+                   { envelope
+                   ; assets = cache_assets
+                   ; prefix
+                   ; response_id = Wire.Response.id response
+                   }
+          | Response _ | Error _ -> Websocket_session.retire channel);
+         channel.last_used <- t.now ();
+         Terminal.Provider outcome
+       | _ -> loop ())
+  in
+  loop ()
+;;
+
+let run_with_transport
+      ?(cache_assets = [])
+      t
+      ~session
+      ~policy
+      ~auth
+      ~prepared
+      ~on_selected
+      ~on_event
+  =
+  let open Inference.Observation in
+  let sse fallback =
+    run
+      ~on_selected:(fun () -> on_selected Transport_selection.Http_sse fallback)
+      t
+      ~auth
+      ~prepared
+      ~on_event
+  in
+  if Option.exists session ~f:(fun session -> session.Websocket_session.closed)
+  then (
+    let terminal =
+      Terminal.Failed { delivery = Definitely_not_submitted; reason = Session_closed }
+    in
+    on_event (Event.Terminal terminal);
+    Ok terminal)
+  else (
+    match policy with
+    | Transport_policy.Http_sse -> sse None
+    | Prefer_websocket | Require_websocket ->
+      let prefer = Transport_policy.equal policy Prefer_websocket in
+      let unavailable reason failure =
+        if prefer
+        then sse (Some reason)
+        else (
+          let terminal =
+            Terminal.Failed { delivery = Definitely_not_submitted; reason = failure }
+          in
+          on_event (Event.Terminal terminal);
+          Ok terminal)
+      in
+      if Option.exists session ~f:(fun session -> session.Websocket_session.closed)
+      then (
+        let terminal =
+          Terminal.Failed { delivery = Definitely_not_submitted; reason = Session_closed }
+        in
+        on_event (Event.Terminal terminal);
+        Ok terminal)
+      else if not (websocket_supported prepared)
+      then unavailable Transport_selection.Unsupported Terminal.Unsupported_transport
+      else if Option.exists session ~f:(fun session -> session.Websocket_session.busy)
+      then unavailable Transport_selection.Session_busy Terminal.Session_busy
+      else (
+        let submitted = ref false in
+        let published = ref false in
+        let authenticated = ref false in
+        let owned = ref None in
+        let failed reason =
+          Terminal.Failed
+            { delivery =
+                (if !published
+                 then Response_started
+                 else if !submitted
+                 then Possibly_submitted
+                 else Definitely_not_submitted)
+            ; reason
+            }
+        in
+        let execute session =
+          owned := Some session;
+          session.Websocket_session.busy <- true;
+          Exn.protect
+            ~finally:(fun () -> session.busy <- false)
+            ~f:(fun () ->
+              Eio.Switch.run (fun sw ->
+                match auth ~sw (Prepared.profile prepared) with
+                | Error error -> Error error
+                | Ok lease ->
+                  authenticated := true;
+                  Ok
+                    (websocket_dispatch
+                       t
+                       session
+                       lease
+                       prepared
+                       ~on_selected
+                       ~on_event
+                       ~published
+                       ~submitted
+                       ~cache_assets)))
+        in
+        let retire () =
+          Option.iter !owned ~f:(fun session ->
+            Option.iter session.Websocket_session.channel ~f:Websocket_session.retire)
+        in
+        let result =
+          try
+            match
+              t.with_timeout (fun () ->
+                match session with
+                | Some session -> execute session
+                | None ->
+                  Eio.Switch.run (fun sw ->
+                    let session = Websocket_session.create ~sw in
+                    Exn.protect
+                      ~finally:(fun () -> Websocket_session.close session)
+                      ~f:(fun () -> execute session)))
+            with
+            | Ok result -> `Result result
+            | Error `Timeout ->
+              retire ();
+              if !authenticated
+              then `Failure Terminal.Timeout
+              else `Result (Error Auth.Timed_out)
+          with
+          | Auth_invalidated error ->
+            retire ();
+            `Result (Error error)
+          | Transport_failure reason ->
+            retire ();
+            `Failure reason
+          | exn ->
+            retire ();
+            raise exn
+        in
+        match result with
+        | `Result (Error _ as error) ->
+          retire ();
+          error
+        | `Result (Ok outcome) ->
+          (try
+             on_event (Event.Terminal outcome);
+             Ok outcome
+           with
+           | exn ->
+             retire ();
+             raise exn)
+        | `Failure reason when prefer && (not !submitted) && not !published ->
+          sse
+            (Some
+               (match reason with
+                | Invalid_http | Http_status _ -> Transport_selection.Upgrade
+                | _ -> Connection))
+        | `Failure reason ->
+          let terminal = failed reason in
+          on_event (Event.Terminal terminal);
+          Ok terminal))
+;;
+
+module For_testing = struct
+  type header_summary =
+    { account : bool
+    ; originator : bool
+    ; user_agent : bool
+    }
+  [@@deriving sexp_of]
+
+  let header_summary lease profile =
+    Result.map
+      (Auth.additional_headers
+         lease
+         ~endpoint:profile.Profile.endpoint
+         ~profile_account:profile.Profile.account)
+      ~f:(fun headers ->
+        { account = String.is_substring headers ~substring:"ChatGPT-Account-ID: "
+        ; originator = String.is_substring headers ~substring:"originator: ochat\r\n"
+        ; user_agent = String.is_substring headers ~substring:"User-Agent: ochat\r\n"
+        })
+  ;;
+end

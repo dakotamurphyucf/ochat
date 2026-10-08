@@ -53,7 +53,7 @@ let%expect_test
                      ; idempotency_key =
                          P.Idempotency_key.of_string "audit:inject" |> H.get
                      })
-                : P.Method_result.t);
+                : P.Public.Result.t);
              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
                let rec wait () =
                  match

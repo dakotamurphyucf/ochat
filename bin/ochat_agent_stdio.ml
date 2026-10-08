@@ -23,17 +23,13 @@ let report_protocol_error env error =
 
 let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-let load_bearer_token env = function
-  | None -> Ok None
-  | Some path ->
-    Agent_transport_client.Endpoint.load_bearer_token ~env ~path
-    |> Result.map ~f:Option.some
-;;
-
-let endpoint env ~uri ~bearer_token_file =
-  let open Result.Let_syntax in
-  let%bind bearer_token = load_bearer_token env bearer_token_file in
-  Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token uri
+let endpoint _env ~uri ~bearer_token_file =
+  Agent_transport_client.Connection_profile.create
+    ~home:(Sys.getenv "HOME")
+    ~name:"stdio-daemon"
+    ~endpoint:uri
+    ~expected_server:None
+    ~daemon_credential_file:bearer_token_file
 ;;
 
 let run_gateway env ~uri ~bearer_token_file =
@@ -43,7 +39,7 @@ let run_gateway env ~uri ~bearer_token_file =
       endpoint env ~uri ~bearer_token_file |> Result.map_error ~f:protocol_error
     in
     let%map connection =
-      Agent_transport_client.Endpoint.connect
+      Agent_transport_client.Connection_profile.connect
         endpoint
         ~sw
         ~env
@@ -75,7 +71,14 @@ let local_options env ~prompt ~workspace ~data_root =
     }
 ;;
 
-let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~authoring_budget
+let run_local
+      env
+      ~transport_policy
+      ~prompt
+      ~workspace
+      ~data_root
+      ~authoring_package_files
+      ~authoring_budget
   =
   let open Or_error.Let_syntax in
   Eio.Switch.run (fun sw ->
@@ -85,6 +88,12 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~author
     in
     let%map embedded =
       Agent_server.Embedded.start
+        ~daemon_options:
+          (Inference_composition.daemon_options_default_with_policy
+             ~transport_policy
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview")
         ~sw
         ~env
         ~authoring_package_files
@@ -113,6 +122,7 @@ let run_local env ~prompt ~workspace ~data_root ~authoring_package_files ~author
 
 let run
       ~local
+      ~inference_transport
       ~connect
       ~bearer_token_file
       ~prompt
@@ -129,12 +139,17 @@ let run
      | None -> Or_error.error_string "--local requires --prompt FILE"
      | Some prompt ->
        let open Or_error.Let_syntax in
+       let%bind transport_policy =
+         Provider_runtime_host.Profile_policy.Transport_policy.of_string
+           (Option.value inference_transport ~default:"sse")
+       in
        let%bind authoring_budget =
          Agent_server.Authoring_options.resolve authoring_options
        in
        Eio_main.run (fun env ->
          run_local
            env
+           ~transport_policy
            ~prompt
            ~workspace
            ~data_root
@@ -142,15 +157,16 @@ let run
            ~authoring_budget))
   | false, Some uri ->
     if
-      Option.is_some prompt
+      Option.is_some inference_transport
+      || Option.is_some prompt
       || Option.is_some workspace
       || Option.is_some data_root
       || (not (List.is_empty authoring_package_files))
       || Agent_server.Authoring_options.is_configured authoring_options
     then
       Or_error.error_string
-        "--prompt, --workspace, --data-root, authoring package and budget flags are \
-         local-mode options"
+        "--inference-transport, --prompt, --workspace, --data-root, authoring package \
+         and budget flags are local-mode options"
     else Eio_main.run (fun env -> run_gateway env ~uri ~bearer_token_file)
   | true, Some _ -> Or_error.error_string "--local and --connect are mutually exclusive"
   | false, None when Option.is_some bearer_token_file ->
@@ -163,6 +179,11 @@ let command =
     ~summary:"Run a standalone Ochat stdio host or bridge stdio to a daemon"
     (let open Command.Let_syntax in
      let%map_open local = flag "--local" no_arg ~doc:"Host a process-bound local agent."
+     and inference_transport =
+       flag
+         "--inference-transport"
+         (optional string)
+         ~doc:"POLICY Local host: sse (default), prefer-websocket or require-websocket"
      and connect = flag "--connect" (optional string) ~doc:"URI Connect to a daemon."
      and bearer_token_file =
        flag
@@ -183,6 +204,7 @@ let command =
      fun () ->
        run
          ~local
+         ~inference_transport
          ~connect
          ~bearer_token_file
          ~prompt
@@ -192,4 +214,7 @@ let command =
          ~authoring_options)
 ;;
 
-let () = Command_unix.run command
+let () =
+  Mirage_crypto_rng_unix.use_default ();
+  Command_unix.run command
+;;

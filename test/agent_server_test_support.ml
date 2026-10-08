@@ -1,5 +1,209 @@
 open! Core
 
+(** Bounded failure-only fixture progress. Observations retain compact metadata,
+    never State/history/ledger/payloads. Reporting performs no actor or transport call. *)
+module Failure_diagnostic : sig
+  type t
+
+  val create : now:(unit -> float) -> t
+  val reset : t -> unit
+  val mark : t -> string -> unit
+  val observe : t -> Agent_session.Session_state.t -> unit
+  val report : t -> context:Sexp.t -> unit
+  val operation_status : Agent_protocol.Operation.state -> string
+  val observed_status : Agent_protocol.Session.observed_state -> string
+end = struct
+  module P = Agent_protocol
+
+  type t =
+    { now : unit -> float
+    ; mutable started_wall : float
+    ; mutable started_cpu : float
+    ; mutable phases : (string * float * float) list
+    ; mutable states : (P.Id.Session.t * Sexp.t) list
+    }
+
+  let create ~now =
+    { now
+    ; started_wall = now ()
+    ; started_cpu = Stdlib.Sys.time ()
+    ; phases = []
+    ; states = []
+    }
+  ;;
+
+  let reset t =
+    t.started_wall <- t.now ();
+    t.started_cpu <- Stdlib.Sys.time ();
+    t.phases <- [];
+    t.states <- []
+  ;;
+
+  let elapsed t = t.now () -. t.started_wall, Stdlib.Sys.time () -. t.started_cpu
+
+  let mark t phase =
+    let wall, cpu = elapsed t in
+    t.phases <- List.take ((String.prefix phase 256, wall, cpu) :: t.phases) 16
+  ;;
+
+  let outcome = function
+    | P.Invocation.Complete _ -> "complete"
+    | Pending _ -> "pending"
+    | Fail error -> "fail:" ^ String.prefix error.code 128
+    | Cancelled _ -> "cancelled"
+  ;;
+
+  let invocation_status = function
+    | P.Invocation.Admitted -> "admitted"
+    | Dispatching -> "dispatching"
+    | Resolved result -> "resolved:" ^ outcome result
+    | Published result -> "published:" ^ outcome result
+  ;;
+
+  let operation_status = function
+    | P.Operation.Starting -> "starting"
+    | Running -> "running"
+    | Cancelling -> "cancelling"
+    | Completed -> "completed"
+    | Failed _ -> "failed"
+    | Cancelled -> "cancelled"
+    | Interrupted _ -> "interrupted"
+  ;;
+
+  let observed_status = function
+    | P.Session.Stopped -> "stopped"
+    | Queued_for_slot -> "queued_for_slot"
+    | Starting -> "starting"
+    | Recovering -> "recovering"
+    | Idle -> "idle"
+    | Running_turn _ -> "running_turn"
+    | Compacting _ -> "compacting"
+    | Waiting_for_permission _ -> "waiting_for_permission"
+    | Stopping -> "stopping"
+    | Failed error -> "failed:" ^ Sexp.to_string ([%sexp_of: P.Error.code] error.code)
+  ;;
+
+  let latest entries = List.drop entries (Int.max 0 (List.length entries - 12))
+
+  let observe t (state : Agent_session.Session_state.t) =
+    let observed_wall, observed_cpu = elapsed t in
+    let active =
+      Option.map state.active_operation ~f:(fun operation ->
+        operation.P.Operation.id, operation_status operation.state)
+    in
+    let invocations =
+      latest state.invocations
+      |> List.map ~f:(fun invocation ->
+        ( invocation.P.Invocation.context.id
+        , String.prefix invocation.context.tool_name 128
+        , invocation_status invocation.status ))
+    in
+    let receipts =
+      latest state.managed_submissions
+      |> List.map ~f:(fun submission ->
+        submission.Agent_session.Managed_submission.history_id, submission.status)
+    in
+    let metadata =
+      [%message
+        "cached actor"
+          ~session_id:(state.identity.session_id : P.Id.Session.t)
+          ~generation:(state.identity.generation : int)
+          (observed_wall : float)
+          (observed_cpu : float)
+          ~revision:(state.counters.revision : int64)
+          ~event_sequence:(state.counters.event_sequence : int64)
+          ~desired:(state.lifecycle.desired : P.Session.desired_state)
+          ~observed:(observed_status state.lifecycle.observed : string)
+          (active : (P.Id.Operation.t * string) option)
+          ~deferred_count:(List.length state.conversation.deferred_user_entries : int)
+          ~permission_count:(List.length state.permissions : int)
+          ~invocation_count:(List.length state.invocations : int)
+          (invocations : (P.Id.Invocation.t * string * string) list)
+          ~receipt_count:(List.length state.managed_submissions : int)
+          (receipts : (P.History.Id.t * Agent_session.Managed_submission.status) list)]
+    in
+    t.states
+    <- List.take
+         ((state.identity.session_id, metadata)
+          :: List.filter t.states ~f:(fun (id, _) ->
+            not (P.Id.Session.equal id state.identity.session_id)))
+         16
+  ;;
+
+  let report t ~context =
+    let wall, cpu = elapsed t in
+    let phases = List.rev t.phases in
+    let states = List.map t.states ~f:snd in
+    Eio.traceln
+      "authored timeout diagnostic %s"
+      (Sexp.to_string_hum
+         [%message
+           "fixture timeout"
+             (context : Sexp.t)
+             (wall : float)
+             (cpu : float)
+             (phases : (string * float * float) list)
+             (states : Sexp.t list)])
+  ;;
+end
+
+(** Explicit synthetic selected backend for offline daemon fixtures. The mock
+    owns response completion; observations are intentionally not a durable usage
+    ledger in these tests. This fixture initializes its RNG before allocating a
+    fresh host namespace, including when constructed before the Eio harness.
+    Production compositions must supply actual tracking. *)
+let inference_policy ~default_model ~post_stream =
+  Mirage_crypto_rng_unix.use_default ();
+  let namespace =
+    Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
+  in
+  let fixture = Inference_fixture.create ~namespace ~default_model ~post_stream in
+  Agent_server.Session_factory.
+    { capture_inference_target =
+        (fun ~prompt_revision_id:_ ~config ->
+          Inference_fixture.capture_config fixture config)
+    ; recapture_inference_target =
+        (fun ~current ~prompt_revision_id:_ ~config ->
+          Inference_fixture.recapture_config fixture ~current config)
+    ; migrate_inference_target = None
+    ; migrate_model_job_target = None
+    ; approve_inference_target_change =
+        (fun ~current ~proposed ->
+          let open Result.Let_syntax in
+          let%bind context = Inference_fixture.resolve fixture current in
+          Inference_runtime.Context.derive context ~target:proposed
+          |> Result.map ~f:ignore)
+    ; resolve_inference_context = Inference_fixture.resolve fixture
+    ; runtime_inference_ports =
+        (fun _ ->
+          Ok
+            { new_preparation_id = (Inference_fixture.identity fixture).new_preparation_id
+            ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
+            ; on_attempt = ignore
+            ; on_observation = ignore
+            ; on_completion = ignore
+            })
+    }
+;;
+
+let delegation_stage payload =
+  let document =
+    Document_schema.Document.decode ~limits:Document_schema.Limits.default payload
+    |> Result.map_error ~f:(fun _ -> "invalid fixture delegation document")
+    |> Result.ok_or_failwith
+  in
+  assert (String.equal (Document_schema.Document.kind document) "delegation.intent");
+  assert (Int.equal (Document_schema.Document.version document) 6);
+  match
+    Document_schema.Json.field (Document_schema.Document.payload document) ~name:"stage"
+  with
+  | Value (`String "reserved") -> Agent_store.Delegation_store.Reserved
+  | Value (`String "artifact_installed") -> Artifact_installed
+  | Value (`String "child_installed") -> Child_installed
+  | Value (`String "linked") -> Linked
+  | Absent | Null | Value _ -> failwith "invalid fixture delegation stage"
+;;
+
 (* Keep actual polling/I/O waits while controlling the time observed by durable
    deadline bookkeeping. Resuming excludes time spent paused; it never jumps
    past deadlines merely because fixture work was slow. *)
@@ -7,6 +211,15 @@ let controlled_monotonic_clock real_clock =
   let logical_now = ref (Eio.Time.Mono.now real_clock) in
   let last_real = ref !logical_now in
   let paused = ref false in
+  (* The fixture owns clock transitions. Sleepers borrow the current promise;
+     only pause/resume/advance rotate and complete it, waking every waiter to
+     recheck logical time. A paused clock never polls the real clock in a loop. *)
+  let changed = ref (Eio.Promise.create ()) in
+  let notify_change () =
+    let _, resolver = !changed in
+    changed := Eio.Promise.create ();
+    Eio.Promise.resolve resolver ()
+  in
   let now () =
     let actual = Eio.Time.Mono.now real_clock in
     (match !paused with
@@ -23,27 +236,123 @@ let controlled_monotonic_clock real_clock =
 
     let now = now
 
-    let sleep_until () deadline =
+    let rec sleep_until () deadline =
       let current = now () in
       match Mtime.compare deadline current <= 0 with
       | true -> Eio.Fiber.yield ()
-      | false -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline)
+      | false ->
+        (* Capture this generation before yielding, so a transition cannot be
+           lost between observing the state and registering the wait. Real timer
+           completion alone never proves a controlled deadline has elapsed. *)
+        let change, _ = !changed in
+        (match !paused with
+         | true -> Eio.Promise.await change
+         | false ->
+           Eio.Fiber.first
+             (fun () -> Eio.Time.Mono.sleep_span real_clock (Mtime.span current deadline))
+             (fun () -> Eio.Promise.await change));
+        sleep_until () deadline
     ;;
   end
   in
   let pause () =
     ignore (now ());
-    paused := true
+    paused := true;
+    notify_change ()
   in
   let resume () =
     ignore (now ());
-    paused := false
+    paused := false;
+    notify_change ()
   in
   let advance seconds =
     let span = Mtime.Span.of_float_ns (seconds *. 1_000_000_000.) |> Option.value_exn in
-    logical_now := Mtime.add_span (now ()) span |> Option.value_exn
+    logical_now := Mtime.add_span (now ()) span |> Option.value_exn;
+    notify_change ()
   in
   Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance
+;;
+
+(* Logical wall time advances only after a completed wait. The fixture owns
+   transitions; sleepers borrow a generation so pauses cancel stale real timers
+   and valid completed real waits advance the earliest pending logical deadline. *)
+let controlled_wall_clock real_clock ~initial =
+  let logical_now = ref initial in
+  let paused = ref false in
+  let waiters = ref [] in
+  let changed = ref (Eio.Promise.create ()) in
+  let notify_change () =
+    let _, resolver = !changed in
+    changed := Eio.Promise.create ();
+    Eio.Promise.resolve resolver ()
+  in
+  let advance_to deadline =
+    logical_now := Float.max !logical_now deadline;
+    notify_change ()
+  in
+  let module Clock = struct
+    type t = unit
+    type time = float
+
+    let now () = !logical_now
+
+    let rec wait deadline =
+      match Float.(deadline <= !logical_now) with
+      | true -> Eio.Fiber.yield ()
+      | false ->
+        let change, _ = !changed in
+        (match !paused with
+         | true -> Eio.Promise.await change
+         | false ->
+           let completed =
+             Eio.Fiber.first
+               (fun () ->
+                  Eio.Time.sleep real_clock (deadline -. !logical_now);
+                  true)
+               (fun () ->
+                  Eio.Promise.await change;
+                  false)
+           in
+           (* Cancellation cleanup can yield: only this still-current,
+              unpaused generation may complete the logical wait. *)
+           if completed && (not !paused) && phys_equal change (fst !changed)
+           then (
+             (* A valid real wait advances shared virtual time to the earliest
+                pending logical deadline. It need not be that waiter's own real
+                timer: cooperative CPU work can make several timers runnable. *)
+             let earliest =
+               List.fold !waiters ~init:deadline ~f:(fun earliest (_, candidate) ->
+                 if Float.(candidate > !logical_now)
+                 then Float.min earliest candidate
+                 else earliest)
+             in
+             advance_to earliest));
+        wait deadline
+    ;;
+
+    let sleep_until () deadline =
+      match Float.(deadline <= !logical_now) with
+      | true -> Eio.Fiber.yield ()
+      | false ->
+        let token = ref () in
+        waiters := (token, deadline) :: !waiters;
+        Exn.protect
+          ~finally:(fun () ->
+            waiters
+            := List.filter !waiters ~f:(fun (other, _) -> not (phys_equal token other)))
+          ~f:(fun () -> wait deadline)
+    ;;
+  end
+  in
+  let pause () =
+    paused := true;
+    notify_change ()
+  in
+  let resume () =
+    paused := false;
+    notify_change ()
+  in
+  Eio.Resource.T ((), Eio.Time.Pi.clock (module Clock)), pause, resume, advance_to
 ;;
 
 let protocol_ok = function
@@ -178,6 +487,9 @@ let scopes =
     ; Administer_configuration
     ; Diagnostics
     ; Submit_ingress
+    ; Provider_view
+    ; Provider_manage
+    ; Provider_select
     ]
 ;;
 
@@ -258,7 +570,43 @@ let create_session ?(start_immediately = false) ?(key = "restart-create") connec
     (Session_create (create_request ~start_immediately ~key ()))
   |> protocol_ok
   |> function
-  | Agent_protocol.Method_result.Session_create result ->
+  | Agent_protocol.Public.Result.Session_create result ->
     result.session, (Option.value_exn result.attachment).attachment
   | _ -> failwith "unexpected create response"
+;;
+
+(* Current documents for restart fixtures. These use the real complete schema,
+   never a historical runtime serialization wrapped in a JSON string. *)
+let state_document state =
+  Agent_session.Session_state_document.authored state
+  |> Agent_session.Session_state_document.encode ~limits:Document_schema.Limits.default
+  |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+;;
+
+let roundtrip_state state =
+  let open Result.Let_syntax in
+  let%bind document = state_document state in
+  let%map restored =
+    Agent_session.Session_state_document.decode
+      ~limits:Document_schema.Limits.default
+      document
+    |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+  in
+  Agent_session.Session_state_document.value restored
+;;
+
+let authored_snapshot (state : Agent_session.Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind payload = state_document state in
+  Agent_store.Snapshot.create
+    ~limits:Document_schema.Limits.default
+    ~session_id:state.identity.session_id
+    ~transaction_sequence:state.counters.transaction_sequence
+    ~transaction_hash:None
+    ~event_sequence:state.counters.event_sequence
+    ~created_at:state.identity.updated_at
+    ~prompt_artifact:
+      (Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+    ~workspace_identity:state.spec.workspace_instance.conflict_domain
+    ~payload
 ;;

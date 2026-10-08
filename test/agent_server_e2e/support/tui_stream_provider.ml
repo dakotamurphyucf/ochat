@@ -6,6 +6,9 @@ type request =
   ; push : string option -> unit
   ; mutable closed : bool
   ; streaming : bool
+  ; mutable finalized : Res.Item.t Int.Map.t
+  ; mutable next_sequence : int64
+  ; mutable item_indices : int String.Map.t
   }
 
 type t = { mutable requests : request list }
@@ -21,7 +24,17 @@ let handler t ({ Piaf.Server.request; _ } : _ Piaf.Server.ctx) =
     in
     let streaming = Poly.equal (Jsonaf.member "stream" body) (Some `True) in
     let stream, push = Piaf.Stream.create 128 in
-    t.requests <- t.requests @ [ { body; push; closed = false; streaming } ];
+    t.requests
+    <- t.requests
+       @ [ { body
+           ; push
+           ; closed = false
+           ; streaming
+           ; finalized = Int.Map.empty
+           ; next_sequence = 0L
+           ; item_indices = String.Map.empty
+           }
+         ];
     Piaf.Response.create
       ~headers:
         (Piaf.Headers.of_list
@@ -57,9 +70,83 @@ let body t = t.body
 
 let emit t events =
   if t.closed then failwith "provider stream is already closed";
+  let push fields =
+    let fields =
+      ("sequence_number", `Number (Int64.to_string t.next_sequence)) :: fields
+    in
+    t.next_sequence <- Int64.succ t.next_sequence;
+    t.push (Some ("data: " ^ Jsonaf.to_string (`Object fields) ^ "\n\n"))
+  in
   List.iter events ~f:(fun event ->
-    t.push
-      (Some ("data: " ^ Jsonaf.to_string (Res.Response_stream.jsonaf_of_t event) ^ "\n\n")))
+    let fields =
+      match Res.Response_stream.jsonaf_of_t event with
+      | `Object fields -> fields
+      | _ -> assert false
+    in
+    let item_id =
+      match List.Assoc.find fields "item" ~equal:String.equal with
+      | Some (`Object item) -> List.Assoc.find item "id" ~equal:String.equal
+      | _ -> List.Assoc.find fields "item_id" ~equal:String.equal
+    in
+    let actual_index =
+      match item_id with
+      | Some (`String id) ->
+        let index =
+          match Map.find t.item_indices id with
+          | Some index -> index
+          | None ->
+            let index = Map.length t.item_indices in
+            t.item_indices <- Map.set t.item_indices ~key:id ~data:index;
+            index
+        in
+        Some index
+      | _ -> None
+    in
+    (match event with
+     | Res.Response_stream.Output_item_done { item; _ } ->
+       let item : Res.Item.t =
+         match item with
+         | Input_message value -> Input_message value
+         | Output_message value -> Output_message value
+         | Function_call value -> Function_call value
+         | Custom_function value -> Custom_tool_call value
+         | Reasoning value -> Reasoning value
+       in
+       t.finalized <- Map.set t.finalized ~key:(Option.value_exn actual_index) ~data:item
+     | _ -> ());
+    let fields =
+      match actual_index with
+      | None -> fields
+      | Some index ->
+        List.map fields ~f:(fun (name, value) ->
+          if String.equal name "output_index"
+          then name, `Number (Int.to_string index)
+          else name, value)
+    in
+    push fields;
+    let part =
+      match event with
+      | Res.Response_stream.Output_item_added
+          { item = Reasoning { id; summary = []; _ }; _ } ->
+        Some (id, "response.reasoning_summary_part.added", "summary_index", "summary_text")
+      | Output_item_added { item = Output_message { id; content = []; _ }; _ } ->
+        Some (id, "response.content_part.added", "content_index", "output_text")
+      | _ -> None
+    in
+    Option.iter part ~f:(fun (id, type_, index_name, part_type) ->
+      push
+        [ "type", `String type_
+        ; "item_id", `String id
+        ; "output_index", `Number (Int.to_string (Option.value_exn actual_index))
+        ; index_name, `Number "0"
+        ; ( "part"
+          , `Object
+              ([ "type", `String part_type; "text", `String "" ]
+               @
+               if String.equal part_type "output_text"
+               then [ "annotations", `Array [] ]
+               else []) )
+        ]))
 ;;
 
 let empty_response : Res.Response.t =
@@ -90,7 +177,7 @@ let empty_response : Res.Response.t =
 ;;
 
 let reply_summary t text =
-  if t.closed || t.streaming then failwith "expected an open JSON request";
+  if t.closed then failwith "provider request is already closed";
   let output =
     Res.Item.Output_message
       { role = Assistant
@@ -101,17 +188,26 @@ let reply_summary t text =
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
   in
+  let response =
+    Res.Response.jsonaf_of_t { empty_response with output = [ output ] }
+    |> Jsonaf.to_string
+  in
   t.push
     (Some
-       (Res.Response.jsonaf_of_t { empty_response with output = [ output ] }
-        |> Jsonaf.to_string));
+       (if t.streaming
+        then
+          "event: response.completed\n\
+           data: {\"type\":\"response.completed\",\"sequence_number\":0,\"response\":"
+          ^ response
+          ^ "}\n\n"
+        else response));
   t.closed <- true;
   t.push None
 ;;
 
 let finish t =
   if t.closed || not t.streaming then failwith "expected an open stream";
-  let response = empty_response in
+  let response = { empty_response with output = Map.data t.finalized } in
   emit
     t
     [ Res.Response_stream.Response_completed { type_ = "response.completed"; response } ];
@@ -181,6 +277,7 @@ let text_delta id delta =
 
 let fork_call_for ~call_id =
   let item_id = call_id ^ "-item" in
+  let arguments = {|{"command":"return fixture result","arguments":[]}|} in
   let item =
     Res.Response_stream.Item.Function_call
       { name = "fork"
@@ -193,11 +290,20 @@ let fork_call_for ~call_id =
   in
   [ added item
   ; Res.Response_stream.Function_call_arguments_done
-      { arguments = {|{"command":"return fixture result","arguments":[]}|}
+      { arguments
       ; item_id
       ; output_index = 1
       ; type_ = "response.function_call_arguments.done"
       }
+  ; done_
+      (Res.Response_stream.Item.Function_call
+         { name = "fork"
+         ; arguments
+         ; call_id
+         ; _type = "function_call"
+         ; id = Some item_id
+         ; status = Some "completed"
+         })
   ]
 ;;
 

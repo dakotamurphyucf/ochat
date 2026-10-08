@@ -199,6 +199,7 @@ module Agent_page_state : sig
     | Waiting
     | Progress of progress_entry
     | Status of Ochat_function.Trace.outcome
+    | Outcome_unavailable
 
   type call
   type t
@@ -753,7 +754,7 @@ val agent_call_finished
   :  t
   -> call_id:string
   -> outcome:Ochat_function.Trace.outcome
-  -> output:Openai.Responses.Tool_output.Output.t option
+  -> output:History_entry.Payload.Output.t option
   -> bool
 
 (** [clear_agent_calls t] clears current-operation Agent calls and transient
@@ -792,10 +793,7 @@ val agent_call_progress_entries
 val agent_call_is_truncated : Agent_page_state.call -> bool
 
 val agent_call_outcome : Agent_page_state.call -> Ochat_function.Trace.outcome option
-
-val agent_call_output
-  :  Agent_page_state.call
-  -> Openai.Responses.Tool_output.Output.t option
+val agent_call_output : Agent_page_state.call -> History_entry.Payload.Output.t option
 
 val progress_entry_text_view
   :  Agent_page_state.progress_entry
@@ -816,7 +814,7 @@ val progress_entry_tool_view
      * string
      * (Ochat_function.Progress.channel * string) list
      * Ochat_function.Trace.outcome option
-     * Openai.Responses.Tool_output.Output.t option)
+     * History_entry.Payload.Output.t option)
        option
 
 (** [agent_call_render_blocks call] returns stable-ID display blocks in document
@@ -1237,7 +1235,7 @@ val add_history_item : t -> History_entry.t -> t
     the current {!history_items}.
 
     The helper walks the OpenAI history, pairs each renderable item (as
-    determined by {!Chat_tui.Conversation.pair_of_item}) with its message
+    determined by {!Chat_tui.Conversation.Rendered.of_payload}) with its message
     index in {!messages}, and populates the map with
     {!Types.tool_output_kind} values for corresponding
     [Function_call_output] entries.
@@ -1390,3 +1388,60 @@ val set_projected_height : t -> id:Projected_message.Id.t -> height:int -> unit
 val projected_height : t -> id:Projected_message.Id.t -> int option
 val selected_projected_row : t -> Projected_message.t option
 val delete_selected_canonical_entry : t -> [ `Deleted | `Rejected of string ]
+
+(** Display metadata only from disclosed Full payloads, never canonical admission. *)
+val rebuild_tool_output_index_for_public
+  :  t
+  -> Agent_protocol.Public.History.t list
+  -> unit
+
+val agent_call_is_running : Agent_page_state.call -> bool
+
+(** Close presentation without inventing a tool result when its operation ends. *)
+val close_unobserved_agent_calls : t -> unit
+
+(** Already typed neutral attached nested activity. Parent/local call keys are
+    presentation identities, never canonical host identities. *)
+val agent_nested_call_started
+  :  t
+  -> parent_call_id:string
+  -> call_id:string
+  -> name:string
+  -> kind:Ochat_function.Trace.tool_kind
+  -> payload:string
+  -> bool
+
+val agent_nested_call_progress
+  :  t
+  -> parent_call_id:string
+  -> call_id:string
+  -> Ochat_function.Progress.t
+  -> bool
+
+val agent_nested_call_finished
+  :  t
+  -> parent_call_id:string
+  -> call_id:string
+  -> outcome:Ochat_function.Trace.outcome
+  -> output:History_entry.Payload.Output.t option
+  -> bool
+
+(** Reconcile an authoritative read view, never replay activity events.
+    Replaces retained channels/outputs with exactly the currently disclosed
+    summaries, retiring omitted calls. Full scoped Activity.Key identity keeps
+    same aliases in different source attempts separate. Parent references use
+    their actual scope+alias; missing/ambiguous parents never create a phantom
+    call. Roots are prepared before descendants and closed afterward.
+
+    Stable call selection is retained while its key remains visible. Render
+    caches are invalidated for changed content. Standalone execution callbacks
+    continue to use the existing incremental methods.
+
+    [operation_ended] marks still-running summaries' outcome unavailable;
+    actual Finished summaries retain their own typed outcome. It never maps
+    an operation terminal result into a tool result. *)
+val reconcile_agent_activity
+  :  t
+  -> Agent_protocol.Activity.Tool.summary list
+  -> operation_ended:bool
+  -> unit

@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> Stdlib.Seq.empty)
+  }
+;;
+
 let protocol_ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -84,7 +93,12 @@ let%expect_test "invalid authoring files fail before creating an embedded durabl
         }
       in
       (match
-         Agent_server.Embedded.start ~sw ~env ~authoring_package_files:[ file ] options
+         Agent_server.Embedded.start
+           ~daemon_options:(inference_options ())
+           ~sw
+           ~env
+           ~authoring_package_files:[ file ]
+           options
        with
        | Error error -> [%test_eq: Agent_protocol.Error.code] Invalid_request error.code
        | Ok host ->
@@ -111,7 +125,14 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let probe = Agent_server.Embedded.connect embedded in
       let initialized =
         Agent_client.Session_handle.initialize
@@ -144,7 +165,8 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
       in
       let snapshot =
         match response with
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected response"
       in
       let attachment = Agent_server.Embedded.attachment embedded in
@@ -182,7 +204,14 @@ let%expect_test "closing an embedded client releases its backpressured publisher
           ; event_capacity = 0
           }
         in
-        let host = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+        let host =
+          Agent_server.Embedded.start
+            ~daemon_options:(inference_options ())
+            ~sw
+            ~env
+            options
+          |> protocol_ok
+        in
         let connection = Agent_server.Embedded.connection host in
         let stop =
           Agent_protocol.Command.Session_stop
@@ -194,7 +223,9 @@ let%expect_test "closing an embedded client releases its backpressured publisher
                 |> protocol_ok
             }
         in
-        Agent_client.Connection.request connection stop |> protocol_ok |> ignore;
+        Agent_client.Connection.request_without_history connection stop
+        |> protocol_ok
+        |> ignore;
         (* A rendezvous proves the forwarder is active. The remaining stop events
            have no reader and no buffer space. Close must release that publisher. *)
         assert (Option.is_some (Agent_client.Connection.next_notification connection));
@@ -222,7 +253,14 @@ let%expect_test "session creation returns the requested attachment after session
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let original =
         Agent_client.Connection.request
@@ -231,7 +269,8 @@ let%expect_test "session creation returns the requested attachment after session
              { session_id = Agent_server.Embedded.session_id embedded; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let idempotency_key =
@@ -248,14 +287,15 @@ let%expect_test "session creation returns the requested attachment after session
              })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_create result -> result
+        | Agent_protocol.Public.Result.Session_create result -> result
         | _ -> failwith "unexpected creation response"
       in
       let attachment = Option.value_exn created.attachment in
       let first_event_present =
         match attachment.replay with
-        | Agent_protocol.Method_result.Attach.Snapshot snapshot ->
-          Int64.(snapshot.latest_event_sequence >= 2L)
+        | Agent_protocol.Public.Result.Attach.Snapshot snapshot ->
+          Int64.(
+            (Agent_protocol.Public.Snapshot.fields snapshot).latest_event_sequence >= 2L)
         | Current | Events _ -> false
       in
       Agent_server.Embedded.close embedded;
@@ -269,8 +309,8 @@ let%expect_test "session creation returns the requested attachment after session
           }]));
   [%expect
     {|
-    ((attachment_mode Read_only) (first_event_present false) (revision 3)
-     (sequence 1))
+    ((attachment_mode Read_only) (first_event_present true) (revision 6)
+     (sequence 2))
     |}]
 ;;
 
@@ -321,7 +361,8 @@ let submission_snapshot embedded =
       (Session_get { session_id; history = None })
     |> protocol_ok
   with
-  | Session_get snapshot -> snapshot
+  | Agent_protocol.Public.Result.Session_get snapshot ->
+    Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "unexpected submission snapshot"
 ;;
 
@@ -347,7 +388,7 @@ let submit_halt embedded =
       { kind = Plain_text; text = "stop at item-appended"; attachments = [] }
   in
   ignore
-    (Agent_client.Connection.request
+    (Agent_client.Connection.request_without_history
        (Agent_server.Embedded.connection embedded)
        (Session_send_message { session_id; attachment_id; idempotency_key; content })
      |> protocol_ok
@@ -374,7 +415,14 @@ let%expect_test "submitted user moderation runs once before turn-start or provid
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       Exn.protect
         ~f:(fun () ->
           let before = submission_snapshot embedded in
@@ -413,7 +461,14 @@ let%expect_test "read-only sends do not consume history IDs" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let writer = Agent_server.Embedded.connection embedded in
       let reader = Agent_server.Embedded.connect embedded in
       Agent_client.Session_handle.initialize
@@ -438,11 +493,11 @@ let%expect_test "read-only sends do not consume history IDs" =
              })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_attach attached -> attached.attachment
+        | Agent_protocol.Public.Result.Session_attach attached -> attached.attachment
         | _ -> failwith "unexpected attach response"
       in
       let send connection attachment text key =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Session_send_message
              { session_id
@@ -481,6 +536,90 @@ let%expect_test "read-only sends do not consume history IDs" =
   [%expect {| ((rejected true) (consecutive true)) |}]
 ;;
 
+let%expect_test "embedded close joins active root inference with a deferred user message" =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+      no_op_turn_prompt;
+    Eio.Switch.run (fun sw ->
+      let provider_entered, enter_provider = Eio.Promise.create () in
+      let provider_finished, finish_provider = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let provider_calls = ref 0 in
+      let daemon_options =
+        { Agent_server.Daemon.default_options with
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                incr provider_calls;
+                Exn.protect
+                  ~f:(fun () ->
+                    ignore (Eio.Promise.try_resolve enter_provider ());
+                    Eio.Promise.await never;
+                    Stdlib.Seq.empty)
+                  ~finally:(fun () -> ignore (Eio.Promise.try_resolve finish_provider ())))
+        }
+      in
+      let options =
+        Agent_server.Embedded.
+          { prompt_file
+          ; workspace
+          ; tool_dir = workspace
+          ; home = root
+          ; data_root = None
+          ; start_immediately = true
+          ; permission_profile = Agent_server.Embedded.default_permission_profile
+          ; attachment_mode = Read_write
+          ; event_capacity = 128
+          }
+      in
+      let embedded =
+        Agent_server.Embedded.start ~daemon_options ~sw ~env options |> protocol_ok
+      in
+      let send text key =
+        let session_id = Agent_server.Embedded.session_id embedded in
+        let attachment_id = (Agent_server.Embedded.attachment embedded).id in
+        let idempotency_key =
+          Agent_protocol.Idempotency_key.of_string key |> protocol_ok
+        in
+        let content =
+          Agent_protocol.Session.Message_content.
+            { kind = Plain_text; text; attachments = [] }
+        in
+        match
+          Agent_client.Connection.request_without_history
+            (Agent_server.Embedded.connection embedded)
+            (Session_send_message { session_id; attachment_id; idempotency_key; content })
+          |> protocol_ok
+        with
+        | Agent_protocol.Method_result.Session_send_message sent -> sent
+        | _ -> failwith "unexpected send response"
+      in
+      ignore
+        (send "first" "close-root:first" : Agent_protocol.Method_result.Send_message.t);
+      Eio.Promise.await provider_entered;
+      let second = send "second" "close-root:second" in
+      let deferred =
+        Agent_protocol.Method_result.Send_message.equal_disposition
+          second.disposition
+          Deferred
+      in
+      if not deferred then failwith "second message must remain deferred during inference";
+      (* The provider gate is never released. Closing must cancel its execution
+         and join its finalizer before retiring the actor and durable writer. *)
+      Agent_server.Embedded.close embedded;
+      print_s
+        [%sexp
+          { deferred : bool
+          ; provider_finished =
+              (Option.is_some (Eio.Promise.peek provider_finished) : bool)
+          ; provider_calls = (!provider_calls : int)
+          }]));
+  [%expect {| ((deferred true) (provider_finished true) (provider_calls 1)) |}]
+;;
+
 let%expect_test "mutating command idempotency replays and rejects conflicts" =
   with_fixture (fun env root workspace prompt_file ->
     Eio.Switch.run (fun sw ->
@@ -497,7 +636,14 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
@@ -515,10 +661,12 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           }
       in
       let create payload =
-        Agent_client.Connection.request connection (Schedule_create (request payload))
+        Agent_client.Connection.request_without_history
+          connection
+          (Schedule_create (request payload))
       in
       let overflow_rejected =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Schedule_create
              { (request "overflow") with
@@ -551,7 +699,8 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       Agent_server.Embedded.close embedded;
@@ -586,12 +735,19 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
       let created =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Schedule_create
              { session_id
@@ -610,7 +766,7 @@ let%expect_test "due schedules fail visibly when the prompt has no moderator" =
       in
       let rec await_terminal attempts =
         let schedule =
-          Agent_client.Connection.request
+          Agent_client.Connection.request_without_history
             connection
             (Schedule_get { session_id; schedule_id = created.id })
           |> protocol_ok
@@ -674,7 +830,14 @@ let%expect_test "ChatML session startup persists delayed schedules" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let snapshot =
@@ -683,7 +846,8 @@ let%expect_test "ChatML session startup persists delayed schedules" =
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let schedule = List.hd_exn snapshot.schedules in
@@ -740,7 +904,14 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let snapshot =
@@ -749,7 +920,8 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
           (Session_get { session_id; history = None })
         |> protocol_ok
         |> function
-        | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
         | _ -> failwith "unexpected session response"
       in
       let job = List.hd_exn snapshot.jobs in
@@ -828,7 +1000,14 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let rec await_delivery attempts =
@@ -838,7 +1017,8 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
             (Session_get { session_id; history = None })
           |> protocol_ok
           |> function
-          | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+          | Agent_protocol.Public.Result.Session_get snapshot ->
+            Agent_protocol.Public.Snapshot.fields snapshot
           | _ -> failwith "unexpected session response"
         in
         match snapshot.halted, snapshot.jobs with
@@ -915,7 +1095,14 @@ let%expect_test "due schedules drain ChatML while idle and honor end_session" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let rec await_halt attempts =
@@ -925,7 +1112,8 @@ let%expect_test "due schedules drain ChatML while idle and honor end_session" =
             (Session_get { session_id; history = None })
           |> protocol_ok
           |> function
-          | Agent_protocol.Method_result.Session_get snapshot -> snapshot
+          | Agent_protocol.Public.Result.Session_get snapshot ->
+            Agent_protocol.Public.Snapshot.fields snapshot
           | _ -> failwith "unexpected session response"
         in
         if snapshot.halted
@@ -970,7 +1158,14 @@ let%expect_test "session handle attaches, mutates, and reduces pushed events" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let _ =
         Agent_client.Session_handle.initialize
@@ -996,6 +1191,7 @@ let%expect_test "session handle attaches, mutates, and reduces pushed events" =
         let snapshot =
           Agent_client.Session_handle.projection handle
           |> Agent_client.Projection.snapshot
+          |> Agent_protocol.Public.Snapshot.fields
         in
         if observed_stopped snapshot.session.observed_state
         then snapshot
@@ -1040,7 +1236,14 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let statuses = ref [] in
       let reconnect =
@@ -1066,7 +1269,7 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
         |> protocol_ok
       in
       let _ =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           (Agent_server.Embedded.connection embedded)
           (Session_stop
              { session_id = Agent_server.Embedded.session_id embedded
@@ -1081,7 +1284,8 @@ let%expect_test "reconnect reattaches from the durable cursor and applies replay
         let attachment = Agent_client.Reconnect.attachment reconnect in
         let stopped =
           Agent_client.Projection.snapshot projection
-          |> fun (snapshot : Agent_protocol.Snapshot.t) ->
+          |> Agent_protocol.Public.Snapshot.fields
+          |> fun (snapshot : Agent_protocol.Public.Snapshot.Fields.t) ->
           observed_stopped snapshot.session.observed_state
         in
         let reattached =
@@ -1129,7 +1333,14 @@ let%expect_test "audit read returns redacted durable command outcomes" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       Agent_client.Connection.request
@@ -1139,7 +1350,7 @@ let%expect_test "audit read returns redacted durable command outcomes" =
       |> ignore;
       let page = Agent_protocol.Page.Request.create ~limit:100 () |> protocol_ok in
       let audit =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Audit_read
              { page
@@ -1186,73 +1397,127 @@ let%expect_test "reset and pinned rebuild require exact stopped revisions" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
-      let connection = Agent_server.Embedded.connect embedded in
-      let session_id = Agent_server.Embedded.session_id embedded in
-      Agent_client.Session_handle.initialize
-        connection
-        ~implementation_name:"admin-test"
-        ~implementation_version:"dev"
-      |> protocol_ok
-      |> ignore;
-      let sessions = Agent_client.Admin.list_sessions connection |> protocol_ok in
-      let handle =
-        Agent_client.Session_handle.attach
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
           ~sw
-          ~clock:(Eio.Stdenv.clock env)
-          ~connection
-          ~session_id
-          ~mode:Read_write
-          ~subscribe:false
-          ()
+          ~env
+          options
         |> protocol_ok
       in
-      let current =
-        Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+      let phase = ref "connect" in
+      let last_error = ref None in
+      let checked result =
+        (match result with
+         | Ok _ -> ()
+         | Error (error : Agent_protocol.Error.t) ->
+           last_error
+           := Some (error.code, String.prefix error.message 512, error.retryable));
+        protocol_ok result
       in
-      let reset expected =
-        Agent_client.Session_handle.reset
-          handle
-          ~expected_revision:expected
-          ~keep_history:false
-          ~keep_tasks:false
-          ~keep_cache:false
-          ~keep_workspace:true
-          ~keep_grants:false
-          ~keep_labels:true
-      in
-      let stale_rejected = Result.is_error (reset Int64.(current.revision - 1L)) in
-      let reset_session = reset current.revision |> protocol_ok in
-      let rebuilt =
-        Agent_client.Session_handle.rebuild
-          handle
-          ~expected_revision:reset_session.revision
-          ~prompt_choice:Pinned
-        |> protocol_ok
-      in
-      let started =
-        Agent_client.Session_handle.start handle ~queue_if_limited:true |> protocol_ok
-      in
-      let stopped = Agent_client.Session_handle.stop handle ~mode:Cancel |> protocol_ok in
-      Agent_client.Session_handle.detach handle |> protocol_ok;
-      Agent_client.Connection.close connection;
-      Agent_server.Embedded.close embedded;
-      print_s
-        [%sexp
-          { listed = (List.length sessions : int)
-          ; stale_rejected : bool
-          ; reset_generation = (reset_session.generation : int)
-          ; reset_stopped = (observed_stopped reset_session.observed_state : bool)
-          ; rebuild_advanced_revision =
-              (Int64.(rebuilt.revision > reset_session.revision) : bool)
-          ; rebuild_stopped = (observed_stopped rebuilt.observed_state : bool)
-          ; start_requested =
-              (Agent_protocol.Session.equal_desired_state started.desired_state Running
-               : bool)
-          ; stop_requested =
-              (Agent_protocol.Session.equal_desired_state stopped.desired_state Stopped
-               : bool)
-          }]));
+      Exn.protect
+        ~finally:(fun () -> Agent_server.Embedded.close embedded)
+        ~f:(fun () ->
+          try
+            phase := "connect";
+            let connection = Agent_server.Embedded.connect embedded in
+            let session_id = Agent_server.Embedded.session_id embedded in
+            phase := "initialize";
+            Agent_client.Session_handle.initialize
+              connection
+              ~implementation_name:"admin-test"
+              ~implementation_version:"dev"
+            |> checked
+            |> ignore;
+            phase := "list sessions";
+            let sessions = Agent_client.Admin.list_sessions connection |> checked in
+            phase := "attach";
+            let handle =
+              Agent_client.Session_handle.attach
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~connection
+                ~session_id
+                ~mode:Read_write
+                ~subscribe:false
+                ()
+              |> checked
+            in
+            phase := "projection";
+            let current =
+              Agent_client.Session_handle.projection handle
+              |> Agent_client.Projection.snapshot
+              |> Agent_protocol.Public.Snapshot.fields
+            in
+            let reset expected =
+              Agent_client.Session_handle.reset
+                handle
+                ~expected_revision:expected
+                ~keep_history:false
+                ~keep_tasks:false
+                ~keep_cache:false
+                ~keep_workspace:true
+                ~keep_grants:false
+                ~keep_labels:true
+            in
+            phase := "stale reset rejection";
+            let stale_rejected = Result.is_error (reset Int64.(current.revision - 1L)) in
+            phase := "reset";
+            let reset_session = reset current.revision |> checked in
+            phase := "rebuild";
+            let rebuilt =
+              Agent_client.Session_handle.rebuild
+                handle
+                ~expected_revision:reset_session.revision
+                ~prompt_choice:Pinned
+              |> checked
+            in
+            phase := "start";
+            let started =
+              Agent_client.Session_handle.start handle ~queue_if_limited:true |> checked
+            in
+            phase := "stop";
+            let stopped =
+              Agent_client.Session_handle.stop handle ~mode:Cancel |> checked
+            in
+            phase := "detach";
+            Agent_client.Session_handle.detach handle |> checked;
+            phase := "close connection";
+            Agent_client.Connection.close connection;
+            phase := "assert result";
+            print_s
+              [%sexp
+                { listed = (List.length sessions : int)
+                ; stale_rejected : bool
+                ; reset_generation = (reset_session.generation : int)
+                ; reset_stopped = (observed_stopped reset_session.observed_state : bool)
+                ; rebuild_advanced_revision =
+                    (Int64.(rebuilt.revision > reset_session.revision) : bool)
+                ; rebuild_stopped = (observed_stopped rebuilt.observed_state : bool)
+                ; start_requested =
+                    (Agent_protocol.Session.equal_desired_state
+                       started.desired_state
+                       Running
+                     : bool)
+                ; stop_requested =
+                    (Agent_protocol.Session.equal_desired_state
+                       stopped.desired_state
+                       Stopped
+                     : bool)
+                }]
+          with
+          | exn ->
+            let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+            (* Record the original failing phase before orderly shutdown can join
+               protected actor/runtime cleanup. Never dump error data or history. *)
+            Eio.traceln
+              "%s"
+              (Sexp.to_string_hum
+                 [%sexp
+                   "embedded administration fixture failed"
+                 , (!phase : string)
+                 , (!last_error : (Agent_protocol.Error.code * string * bool) option)]);
+            Exn.raise_with_original_backtrace exn backtrace)));
   [%expect
     {|
     ((listed 1) (stale_rejected true) (reset_generation 1) (reset_stopped true)
@@ -1278,12 +1543,19 @@ let%expect_test "session export returns a durable server-owned blob" =
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connection embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       let attachment_id = (Agent_server.Embedded.attachment embedded).id in
       let response =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Session_export
              { session_id; attachment_id; format = Json; revision = None; history = None })
@@ -1315,7 +1587,7 @@ let%expect_test "session export returns a durable server-owned blob" =
         ~output:(Eio.Flow.buffer_sink downloaded)
       |> protocol_ok;
       let foreign_attachment_rejected =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Blob_read
              { session_id
@@ -1363,7 +1635,14 @@ let%expect_test "stopped sessions require exact confirmation and can be removed"
           ; event_capacity = 128
           }
       in
-      let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let embedded =
+        Agent_server.Embedded.start
+          ~daemon_options:(inference_options ())
+          ~sw
+          ~env
+          options
+        |> protocol_ok
+      in
       let connection = Agent_server.Embedded.connect embedded in
       let session_id = Agent_server.Embedded.session_id embedded in
       Agent_client.Session_handle.initialize
@@ -1417,4 +1696,542 @@ let%expect_test "stopped sessions require exact confirmation and can be removed"
     {|
     ((wrong_confirmation_rejected true) (receipt_matches true) (removed true))
     |}]
+;;
+
+let%expect_test
+    "operator-only embedded opening owns no session and preserves host operator identity"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    let data_root = Filename.concat root "operator-store" in
+    let config = Agent_server_test_support.config root workspace prompt_file in
+    let config = { config with server = { config.server with data_dir = data_root } } in
+    Eio.Switch.run (fun sw ->
+      let open_host () =
+        Agent_server.Embedded.open_host
+          ~sw
+          ~env
+          ~startup_mode:Operator_only
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~event_capacity:8
+          ()
+        |> protocol_ok
+      in
+      let host = open_host () in
+      let connection = Agent_server.Embedded.host_connection host in
+      let identity =
+        Option.value_exn (Agent_client.Connection.initialization connection)
+      in
+      assert (
+        Result.is_error
+          (Agent_client.Connection.request
+             connection
+             (Session_create
+                { spec = Agent_server_test_support.session_spec ()
+                ; requested_mode = None
+                ; subscribe = false
+                ; idempotency_key =
+                    Agent_protocol.Idempotency_key.of_string "operator-no-create"
+                    |> protocol_ok
+                })));
+      Agent_server.Embedded.close_host host;
+      assert (Result.is_error (Agent_server.Embedded.connect_host host));
+      let reopened = open_host () in
+      let next =
+        Option.value_exn
+          (Agent_client.Connection.initialization
+             (Agent_server.Embedded.host_connection reopened))
+      in
+      assert (Agent_protocol.Id.Server.equal identity.server_id next.server_id);
+      assert (Agent_protocol.Id.Principal.equal identity.principal.id next.principal.id);
+      Agent_server.Embedded.close_host reopened;
+      print_endline
+        "no session admission; stable host/operator; closed host cannot connect"));
+  [%expect {| no session admission; stable host/operator; closed host cannot connect |}]
+;;
+
+let%expect_test
+    "lost create reply reconciles original receipt and rechecks requested owner scopes"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let config = Agent_server_test_support.config root workspace prompt_file in
+      let daemon =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options:(inference_options ())
+          ()
+        |> protocol_ok
+      in
+      Exn.protect
+        ~finally:(fun () -> ignore (Agent_server.Daemon.shutdown daemon))
+        ~f:(fun () ->
+          let principal = Agent_server_test_support.principal () in
+          let original = Agent_server_test_support.connection daemon principal in
+          let lost = ref false in
+          let creates = ref 0 in
+          let connection =
+            Agent_client.Transport.create
+              ~request:(fun command ->
+                let result = Agent_client.Connection.request original command in
+                match command with
+                | Agent_protocol.Command.Session_create _ when not !lost ->
+                  incr creates;
+                  lost := true;
+                  Error
+                    (Agent_protocol.Error.create
+                       Interrupted
+                       ~message:"fixture reply lost after commit"
+                       ~retryable:true
+                       ())
+                | _ -> result)
+              ~next_notification:(fun () -> None)
+              ~close:(fun () -> Agent_client.Connection.close original)
+            |> Agent_client.Connection.create
+          in
+          Agent_server_test_support.initialize connection;
+          let request =
+            Agent_server_test_support.create_request ~key:"lost-create-receipt" ()
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request connection (Session_create request)));
+          let pending =
+            List.hd_exn (Agent_client.Connection.pending_commands connection)
+          in
+          let new_key =
+            Agent_protocol.Idempotency_key.of_string "blind-new-key" |> protocol_ok
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request
+                 connection
+                 (Session_create { request with idempotency_key = new_key })));
+          assert (Int.equal !creates 1);
+          let receipt =
+            Agent_client.Connection.reconcile connection pending |> protocol_ok
+          in
+          (match receipt with
+           | Committed (Created_session _) -> ()
+           | _ -> failwith "missing committed create identity");
+          assert (List.is_empty (Agent_client.Connection.pending_commands connection));
+          let restricted =
+            Agent_server_test_support.principal_with_scopes
+              (Agent_protocol.Id.Principal.to_string principal.id)
+              (Set.remove principal.scopes Send_messages)
+          in
+          let denied = Agent_server_test_support.connection daemon restricted in
+          Agent_server_test_support.initialize denied;
+          let query =
+            Agent_protocol.Command_receipt.Request.
+              { method_name = "session.create"
+              ; original_params = Agent_protocol.Session.Create_request.to_json request
+              }
+          in
+          assert (
+            Result.is_error
+              (Agent_client.Connection.request_without_history
+                 denied
+                 (Command_receipt query)));
+          Agent_client.Connection.close denied;
+          Agent_client.Connection.close connection;
+          print_endline
+            "one create; no blind new-key retry; identity receipt; revoked original mode \
+             denied")));
+  [%expect
+    {| one create; no blind new-key retry; identity receipt; revoked original mode denied |}]
+;;
+
+let%expect_test
+    "operator-only opens existing active durable work without activation or \
+     recovery-marker completion"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Path.save
+      ~create:(`Or_truncate 0o600)
+      Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+      {|
+<developer>Operator-only recovery fixture.</developer>
+<script language="chatml" kind="moderator">
+  type state = int
+  type event = [ `Session_start | `Session_resume | `Tick ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Schedule.after_ms(60000, `Tick), fun timer ->
+        Task.bind(Model.spawn("agent_prompt_v1", `Null), fun job ->
+        Task.pure(st + 1)))
+      | `Session_resume -> Task.pure(st + 100)
+      | `Tick -> Task.pure(st + 1000)
+</script>
+|};
+    Eio.Switch.run (fun sw ->
+      let config = Agent_server_test_support.config root workspace prompt_file in
+      let base = inference_options () in
+      let resolutions = ref 0 in
+      let runtime_ports = ref 0 in
+      let policy = base.inference_policy in
+      let options =
+        { base with
+          inference_policy =
+            { policy with
+              resolve_inference_context =
+                (fun target ->
+                  incr resolutions;
+                  policy.resolve_inference_context target)
+            ; runtime_inference_ports =
+                (fun actor ->
+                  incr runtime_ports;
+                  policy.runtime_inference_ports actor)
+            }
+        }
+      in
+      let daemon =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options
+          ()
+        |> protocol_ok
+      in
+      let principal = Agent_server_test_support.principal () in
+      let connection = Agent_server_test_support.connection daemon principal in
+      Agent_server_test_support.initialize connection;
+      let session, _ =
+        Agent_server_test_support.create_session ~start_immediately:true connection
+      in
+      let state =
+        Agent_server.Session_registry.read_state
+          (Agent_server.Daemon.registry daemon)
+          ~authorize:(fun _ -> Ok ())
+          session.id
+        |> protocol_ok
+      in
+      let snapshot =
+        Agent_session.Session_state.snapshot
+          ~now:(Agent_protocol.Timestamp.of_string "2026-10-08T00:00:00Z" |> protocol_ok)
+          state
+      in
+      assert (not (List.is_empty snapshot.schedules));
+      assert (not (List.is_empty snapshot.jobs));
+      assert (Agent_protocol.Session.equal_desired_state session.desired_state Running);
+      Agent_client.Connection.close connection;
+      ignore (Agent_server.Daemon.shutdown daemon |> protocol_ok);
+      let marker =
+        Filename.concat config.server.data_dir "indexes/sessions.recovery-required"
+      in
+      Eio.Path.unlink
+        Eio.Path.(
+          Eio.Stdenv.fs env / config.server.data_dir / "indexes" / "sessions.snapshot");
+      let before_resolutions = !resolutions in
+      let before_ports = !runtime_ports in
+      let operator =
+        Agent_server.Daemon.start
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:workspace
+          ~home:root
+          ~process_start_identity:None
+          ~options:{ options with startup_mode = Operator_only }
+          ()
+        |> protocol_ok
+      in
+      assert (
+        Int.equal
+          (Agent_server.Session_registry.stats (Agent_server.Daemon.registry operator))
+            .loaded
+          0);
+      let read =
+        Agent_server.Session_registry.read_state
+          (Agent_server.Daemon.registry operator)
+          ~authorize:(fun _ -> Ok ())
+          session.id
+        |> protocol_ok
+      in
+      assert (Agent_protocol.Id.Session.equal read.identity.session_id session.id);
+      assert (
+        Result.is_error
+          (Agent_server.Session_registry.load
+             (Agent_server.Daemon.registry operator)
+             session.id));
+      Eio.Fiber.yield ();
+      assert (Int.equal !resolutions before_resolutions);
+      assert (Int.equal !runtime_ports before_ports);
+      assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
+      ignore (Agent_server.Daemon.shutdown operator |> protocol_ok);
+      assert (Eio.Path.is_file Eio.Path.(Eio.Stdenv.fs env / marker));
+      print_endline
+        "existing active session/timer/job; zero runtime/provider resolution; no loader; \
+         recovery marker retained"));
+  [%expect
+    {| existing active session/timer/job; zero runtime/provider resolution; no loader; recovery marker retained |}]
+;;
+
+let%expect_test
+    "reconnect rejects a changed host or principal before replaying retained create \
+     intent"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = None
+        ; start_immediately = false
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      let first =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let second =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let principal = Agent_server.Embedded.principal first in
+      let candidate host principal attaches =
+        let notifications = Eio.Stream.create 128 in
+        let context =
+          Agent_server.Connection_context.create
+            ~connection_id:"identity-pin-fixture"
+            ~principal
+            ~transport:In_memory
+            ~publish_notification:(Eio.Stream.add notifications)
+            ~max_attachments:8
+        in
+        Agent_client.In_memory.create
+          ~request:(fun command ->
+            (match command with
+             | Session_attach _ -> incr attaches
+             | _ -> ());
+            Agent_server.Dispatcher.dispatch_command
+              (Agent_server.Embedded.dispatcher host)
+              ~context
+              command)
+          ~notifications
+          ~close:(fun () -> Agent_server.Embedded.close_connection host context)
+      in
+      let snapshot =
+        Agent_client.Connection.request
+          (Agent_server.Embedded.connection first)
+          (Session_get
+             { session_id = Agent_server.Embedded.session_id first; history = None })
+        |> protocol_ok
+        |> function
+        | Agent_protocol.Public.Result.Session_get snapshot ->
+          Agent_protocol.Public.Snapshot.fields snapshot
+        | _ -> failwith "unexpected snapshot"
+      in
+      List.iter [ true; false ] ~f:(fun wrong_host ->
+        let original = Agent_server.Embedded.connect first in
+        let source =
+          Agent_client.Transport.create
+            ~request:(fun command ->
+              let result = Agent_client.Connection.request original command in
+              match command with
+              | Session_create _ ->
+                Error
+                  (Agent_protocol.Error.create
+                     Interrupted
+                     ~message:"fixture admitted create reply lost"
+                     ~retryable:true
+                     ())
+              | _ -> result)
+            ~next_notification:(fun () ->
+              Agent_client.Connection.next_notification original)
+            ~close:(fun () -> Agent_client.Connection.close original)
+          |> Agent_client.Connection.create
+        in
+        Agent_server_test_support.initialize source;
+        let create =
+          Agent_protocol.Session.Create_request.
+            { spec = snapshot.session.spec
+            ; requested_mode = None
+            ; subscribe = false
+            ; idempotency_key =
+                Agent_protocol.Idempotency_key.of_string
+                  (if wrong_host then "pin-host-create" else "pin-principal-create")
+                |> protocol_ok
+            }
+        in
+        assert (
+          Result.is_error (Agent_client.Connection.request source (Session_create create)));
+        let attaches = ref 0 in
+        let destination =
+          if wrong_host
+          then candidate second principal attaches
+          else
+            candidate
+              first
+              (Agent_server_test_support.principal_with_id "pri_other_reconnect_operator")
+              attaches
+        in
+        let failed, failed_resolver = Eio.Promise.create () in
+        let manager =
+          Agent_client.Reconnect.attach
+            ~sw
+            ~clock:(Eio.Stdenv.clock env)
+            ~connection:source
+            ~reconnect:(Some (fun () -> Ok destination))
+            ~session_id:(Agent_server.Embedded.session_id first)
+            ~mode:Read_write
+            ~policy:
+              { Agent_client.Reconnect.default_policy with
+                initial_delay = Time_ns.Span.zero
+              ; maximum_delay = Time_ns.Span.zero
+              ; jitter_ratio = 0.
+              ; maximum_attempts = Some 1
+              }
+            ~on_status:(function
+              | Failed error -> ignore (Eio.Promise.try_resolve failed_resolver error)
+              | Connected | Reconnecting _ | Disconnected -> ())
+            ()
+          |> protocol_ok
+        in
+        Agent_client.Connection.close source;
+        let failure =
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+            Eio.Promise.await failed)
+        in
+        assert (Agent_protocol.Error.equal_code failure.code Permission_denied);
+        assert (Int.equal !attaches 0);
+        assert (
+          Int.equal (List.length (Agent_client.Reconnect.pending_commands manager)) 1);
+        Agent_client.Reconnect.close manager);
+      Agent_server.Embedded.close second;
+      Agent_server.Embedded.close first;
+      print_endline
+        "changed host and changed principal denied; no attachment replay; original \
+         create uncertainty retained"));
+  [%expect
+    {| changed host and changed principal denied; no attachment replay; original create uncertainty retained |}]
+;;
+
+let%expect_test
+    "lost reconnect attachment reply remains pending across candidate disposal"
+  =
+  with_fixture (fun env root workspace prompt_file ->
+    Eio.Switch.run (fun sw ->
+      let options : Agent_server.Embedded.options =
+        { prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home = root
+        ; data_root = None
+        ; start_immediately = false
+        ; permission_profile = Agent_server.Embedded.default_permission_profile
+        ; attachment_mode = Read_write
+        ; event_capacity = 128
+        }
+      in
+      let host =
+        Agent_server.Embedded.start
+          ~sw
+          ~env
+          ~daemon_options:(inference_options ())
+          options
+        |> protocol_ok
+      in
+      let source = Agent_server.Embedded.connect host in
+      let attach_admissions = ref 0 in
+      let candidate_count = ref 0 in
+      let reconnect () =
+        incr candidate_count;
+        let underlying = Agent_server.Embedded.connect host in
+        let transport =
+          Agent_client.Transport.create
+            ~request:(fun command ->
+              let result = Agent_client.Connection.request underlying command in
+              match command with
+              | Session_attach _ ->
+                incr attach_admissions;
+                assert (Result.is_ok result);
+                Error
+                  (Agent_protocol.Error.create
+                     Interrupted
+                     ~message:"committed reconnect attach response lost"
+                     ~retryable:true
+                     ())
+              | _ -> result)
+            ~next_notification:(fun () ->
+              Agent_client.Connection.next_notification underlying)
+            ~close:(fun () -> Agent_client.Connection.close underlying)
+        in
+        Ok (Agent_client.Connection.create transport)
+      in
+      let failed, resolver = Eio.Promise.create () in
+      let manager =
+        Agent_client.Reconnect.attach
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~connection:source
+          ~reconnect:(Some reconnect)
+          ~session_id:(Agent_server.Embedded.session_id host)
+          ~mode:Read_write
+          ~policy:
+            { Agent_client.Reconnect.default_policy with
+              initial_delay = Time_ns.Span.zero
+            ; maximum_delay = Time_ns.Span.zero
+            ; jitter_ratio = 0.
+            ; maximum_attempts = Some 2
+            }
+          ~on_status:(function
+            | Failed failure -> ignore (Eio.Promise.try_resolve resolver failure)
+            | Connected | Reconnecting _ | Disconnected -> ())
+          ()
+        |> protocol_ok
+      in
+      Agent_client.Connection.close source;
+      ignore
+        (Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 2. (fun () ->
+           Eio.Promise.await failed));
+      assert (Int.equal !candidate_count 2);
+      assert (Int.equal !attach_admissions 1);
+      let pending = Agent_client.Reconnect.pending_commands manager in
+      assert (Int.equal (List.length pending) 1);
+      let recovery = Agent_server.Embedded.connect host in
+      Agent_server_test_support.initialize recovery;
+      Agent_client.Connection.adopt_pending recovery pending |> protocol_ok;
+      (match
+         Agent_client.Connection.reconcile recovery (List.hd_exn pending) |> protocol_ok
+       with
+       | Committed (Attached_session id) ->
+         assert (
+           Agent_protocol.Id.Session.equal id (Agent_server.Embedded.session_id host))
+       | _ -> failwith "expected attachment recovery disposition");
+      assert (List.is_empty (Agent_client.Connection.pending_commands recovery));
+      Agent_client.Connection.close recovery;
+      Agent_client.Reconnect.close manager;
+      Agent_server.Embedded.close host;
+      print_endline
+        "one committed attach; next candidate blocked; original receipt requires \
+         reattachment"));
+  [%expect
+    {| one committed attach; next candidate blocked; original receipt requires reattachment |}]
 ;;

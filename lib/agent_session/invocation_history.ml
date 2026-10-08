@@ -1,52 +1,56 @@
 open Core
 module P = Agent_protocol
-module Item = Openai.Responses.Item
-
-type call_kind =
-  [ `Function
-  | `Custom
-  ]
-[@@deriving equal]
+module Payload = History_entry.Payload
+module Kind = Payload.Call_kind
 
 let invalid message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
-let call = function
-  | Item.Function_call c -> Some (`Function, c.call_id, c.name)
-  | Custom_tool_call c -> Some (`Custom, c.call_id, c.name)
-  | _ -> None
+let call entry =
+  let semantic = Payload.semantic (History_entry.payload entry) in
+  match Payload.Semantic.view semantic, (Payload.Semantic.metadata semantic).call_id with
+  | Call { kind; name; _ }, Payload.Presence.Value call_id -> Some (kind, call_id, name)
+  | ( (Message _ | Call _ | Result _ | Reasoning _ | Unknown _)
+    , (Payload.Presence.Absent | Null | Value _) ) -> None
 ;;
 
-let output = function
-  | Item.Function_call_output o -> Some (`Function, o.call_id, o.output)
-  | Custom_tool_call_output o -> Some (`Custom, o.call_id, o.output)
-  | _ -> None
+let output entry =
+  let semantic = Payload.semantic (History_entry.payload entry) in
+  match Payload.Semantic.view semantic, (Payload.Semantic.metadata semantic).call_id with
+  | Result { kind; output; _ }, Payload.Presence.Value call_id ->
+    Some (kind, call_id, output)
+  | ( (Message _ | Call _ | Result _ | Reasoning _ | Unknown _)
+    , (Payload.Presence.Absent | Null | Value _) ) -> None
 ;;
 
-let canonical entry =
+let canonical ~decode entry =
   match entry.P.History.provenance with
-  | Canonical when not entry.redacted -> History_codec.of_protocol entry
+  | Canonical when not entry.redacted -> decode entry
   | _ -> invalid "invocation history must be canonical and usable as model input"
 ;;
 
-let retained_output invocation entry =
+let retained_output ~decode invocation entry =
   let open Result.Let_syntax in
   let%bind () =
     match Chat_response.Authoring_publication.validate_output invocation entry with
     | Ok () -> Ok ()
     | Error error -> invalid error.message
   in
-  History_codec.of_protocol entry
+  decode entry
 ;;
 
-let validate_routing (invocation : P.Invocation.t) item =
+let validate_routing (invocation : P.Invocation.t) entry =
   match invocation.routing with
   | None -> Ok ()
   | Some routing ->
     let candidate =
-      match item with
-      | Item.Function_call c -> Some (P.Invocation.Function, c.arguments)
-      | Custom_tool_call c -> Some (P.Invocation.Custom, c.input)
-      | _ -> None
+      match Payload.Semantic.view (Payload.semantic (History_entry.payload entry)) with
+      | Call { kind; input_bytes; _ } ->
+        Some
+          ( (match kind with
+             | Kind.Function -> P.Invocation.Function
+             | Custom -> Custom)
+          , input_bytes )
+      | Message _ | Result _ | Reasoning _ | Unknown _ -> None
     in
     (match candidate, routing.canonical_payload with
      | Some (kind, payload), Some expected
@@ -57,7 +61,7 @@ let validate_routing (invocation : P.Invocation.t) item =
      | _ -> invalid "canonical call differs from recorded routing provenance")
 ;;
 
-let bound_call ~history (invocation : P.Invocation.t) =
+let bound_call ~decode ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
   match invocation.context.call_entry_id with
   | None -> invalid "invocation has no canonical call binding"
@@ -69,9 +73,9 @@ let bound_call ~history (invocation : P.Invocation.t) =
     (match rest with
      | [] -> invalid "canonical invocation call is no longer retained"
      | entry :: following ->
-       let%bind decoded = canonical entry in
-       let%bind () = validate_routing invocation (History_entry.item decoded) in
-       (match call (History_entry.item decoded) with
+       let%bind decoded = canonical ~decode entry in
+       let%bind () = validate_routing invocation decoded in
+       (match call decoded with
         | Some (kind, provider_id, name)
           when Option.equal
                  String.equal
@@ -85,16 +89,18 @@ let bound_call ~history (invocation : P.Invocation.t) =
 let same_pair kind provider_id item =
   match call item, output item with
   | Some (k, id, _), _ | _, Some (k, id, _) ->
-    equal_call_kind kind k && String.equal id provider_id
+    Kind.equal kind k && String.equal id provider_id
   | _ -> false
 ;;
 
 let validate_call ~history invocation =
   let open Result.Let_syntax in
-  let%bind kind, provider_id, following = bound_call ~history invocation in
+  let%bind kind, provider_id, following =
+    bound_call ~decode:History_codec.of_protocol ~history invocation
+  in
   List.fold_result following ~init:() ~f:(fun () entry ->
     let%bind decoded = History_codec.of_protocol entry in
-    if same_pair kind provider_id (History_entry.item decoded)
+    if same_pair kind provider_id decoded
     then invalid "canonical call already has a result or its provider ID was reused"
     else Ok ())
 ;;
@@ -102,60 +108,80 @@ let validate_call ~history invocation =
 let validate_output (invocation : P.Invocation.t) entry =
   let open Result.Let_syntax in
   let%bind () = P.Invocation.validate invocation in
+  let%bind () =
+    match
+      ( Payload.Semantic.view (Payload.semantic (History_entry.payload entry))
+      , invocation.context.call_entry_id )
+    with
+    | Result { relation = Bound id; _ }, Some expected
+      when not (History_entry.Id.equal id expected) ->
+      invalid "tool output is bound to a different host call occurrence"
+    | Result { relation = Bound _; _ }, None ->
+      invalid "bound tool output has no recorded host call occurrence"
+    | Message _, _ | Call _, _ | Result _, _ | Reasoning _, _ | Unknown _, _ -> Ok ()
+  in
   let%bind outcome =
     match invocation.status with
     | Resolved outcome | Published outcome -> Ok outcome
     | _ -> invalid "invocation has no recorded outcome"
   in
-  match output (History_entry.item entry) with
-  | Some (_, provider_id, Openai.Responses.Tool_output.Output.Text text)
+  match output entry with
+  | Some (_, provider_id, Payload.Output.Text text)
     when Option.equal String.equal (Some provider_id) invocation.context.provider_call_id
          && String.equal text (Jsonaf.to_string (P.Invocation.outcome_to_json outcome)) ->
     Ok ()
   | _ -> invalid "tool output differs from the recorded invocation outcome"
 ;;
 
-let validate_publication ~history (invocation : P.Invocation.t) =
+let validate_publication_with_decode ~decode ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
-  let%bind kind, provider_id, following = bound_call ~history invocation in
+  let%bind kind, provider_id, following = bound_call ~decode ~history invocation in
   match invocation.output_entry_id with
   | None -> invalid "publication has no output receipt"
   | Some id ->
     let rec find = function
       | [] -> invalid "publication output occurrence is missing"
       | (entry : P.History.entry) :: rest ->
-        let%bind decoded = History_codec.of_protocol entry in
+        let%bind decoded = decode entry in
         if P.History.Id.compare entry.id id = 0
         then (
-          let%bind _ = retained_output invocation entry in
+          let%bind _ = retained_output ~decode invocation entry in
           let%bind () = validate_output invocation decoded in
-          match output (History_entry.item decoded) with
-          | Some (actual_kind, _, _) when equal_call_kind kind actual_kind -> Ok ()
+          match output decoded with
+          | Some (actual_kind, _, _) when Kind.equal kind actual_kind -> Ok ()
           | _ -> invalid "tool output kind differs from its canonical call")
-        else if same_pair kind provider_id (History_entry.item decoded)
+        else if same_pair kind provider_id decoded
         then invalid "publication crosses an earlier output or a reused call ID"
         else find rest
     in
     find following
 ;;
 
+let validate_publication ~history invocation =
+  validate_publication_with_decode ~decode:History_codec.of_protocol ~history invocation
+;;
+
 let recover_output ~history invocation =
   let open Result.Let_syntax in
-  let%bind kind, provider_id, following = bound_call ~history invocation in
+  let%bind kind, provider_id, following =
+    bound_call ~decode:History_codec.of_protocol ~history invocation
+  in
   let rec find = function
     | [] ->
       Ok
         (`Missing
             (match kind with
-             | `Function -> P.Invocation.Function
-             | `Custom -> Custom))
+             | Kind.Function -> P.Invocation.Function
+             | Custom -> Custom))
     | entry :: rest ->
       let%bind decoded = History_codec.of_protocol entry in
-      if same_pair kind provider_id (History_entry.item decoded)
+      if same_pair kind provider_id decoded
       then (
-        match output (History_entry.item decoded) with
+        match output decoded with
         | Some _ ->
-          let%bind _ = retained_output invocation entry in
+          let%bind _ =
+            retained_output ~decode:History_codec.of_protocol invocation entry
+          in
           let%map () = validate_output invocation decoded in
           `Existing decoded
         | None -> invalid "cannot recover an output across reuse of its provider call ID")
@@ -164,7 +190,7 @@ let recover_output ~history invocation =
   find following
 ;;
 
-let validate_retained ~history (invocation : P.Invocation.t) =
+let validate_retained_with_decode ~decode ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -180,7 +206,7 @@ let validate_retained ~history (invocation : P.Invocation.t) =
       List.exists history ~f:(fun (entry : P.History.entry) ->
         Option.exists invocation.context.call_entry_id ~f:(fun id ->
           P.History.Id.compare entry.id id = 0))
-    then Result.map (bound_call ~history invocation) ~f:(fun _ -> ())
+    then Result.map (bound_call ~decode ~history invocation) ~f:(fun _ -> ())
     else Ok ()
   in
   match invocation.output_entry_id with
@@ -192,12 +218,53 @@ let validate_retained ~history (invocation : P.Invocation.t) =
      with
      | None -> Ok ()
      | Some entry ->
-       let%bind decoded = retained_output invocation entry in
+       let%bind decoded = retained_output ~decode invocation entry in
        let%bind () = validate_output invocation decoded in
        if
          List.exists history ~f:(fun (e : P.History.entry) ->
            Option.exists invocation.context.call_entry_id ~f:(fun call_id ->
              P.History.Id.compare e.id call_id = 0))
-       then validate_publication ~history invocation
+       then validate_publication_with_decode ~decode ~history invocation
        else Ok ())
 ;;
+
+let validate_retained ~history invocation =
+  validate_retained_with_decode ~decode:History_codec.of_protocol ~history invocation
+;;
+
+module Validated_history = struct
+  module Key = struct
+    type t = P.History.Id.t [@@deriving compare, sexp_of]
+
+    include Comparator.Make (struct
+        type nonrec t = t [@@deriving compare, sexp_of]
+      end)
+  end
+
+  type t =
+    { history : P.History.entry list
+    ; entries : History_entry.t list
+    ; decoded : History_entry.t Map.M(Key).t
+    }
+
+  let create history =
+    let open Result.Let_syntax in
+    let%bind entries = History_codec.all_of_protocol history in
+    match
+      Map.of_alist
+        (module Key)
+        (List.map entries ~f:(fun entry -> History_entry.id entry, entry))
+    with
+    | `Duplicate_key _ -> Error (P.Error.invalid_request "duplicate history identity")
+    | `Ok decoded -> Ok { history; entries; decoded }
+  ;;
+
+  let entries t = t.entries
+
+  let validate_retained t invocation =
+    (* Only entries owned by this snapshot reach the decoder. Its immutable map
+       records the constructor's successful proof, not a cross-transition cache. *)
+    let decode (entry : P.History.entry) = Ok (Map.find_exn t.decoded entry.id) in
+    validate_retained_with_decode ~decode ~history:t.history invocation
+  ;;
+end

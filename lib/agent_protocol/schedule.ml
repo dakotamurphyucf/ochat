@@ -615,3 +615,67 @@ module Mutation_response = struct
     { schedule; mutation }
   ;;
 end
+
+module Storage = struct
+  let nullable decode = function
+    | `Null -> Ok None
+    | json -> Result.map (decode json) ~f:Option.some
+  ;;
+
+  let option encode value = Option.value_map value ~default:`Null ~f:encode
+
+  let to_json (t : t) =
+    `Object
+      [ "id", Id.Schedule.to_json t.id
+      ; "session_id", Id.Session.to_json t.session_id
+      ; "generation", `Number (Int.to_string t.generation)
+      ; "payload", t.payload
+      ; "created_at", Timestamp.to_json t.created_at
+      ; "next_due_at", Timestamp.to_json t.next_due_at
+      ; "misfire", `String (misfire_to_string t.misfire)
+      ; "status", status_to_json t.status
+      ; "delivery_count", `Number (Int.to_string t.delivery_count)
+      ; "last_delivery_at", option Timestamp.to_json t.last_delivery_at
+      ; "ownership", option ownership_to_json t.ownership
+      ; "delivery_cancellation", option (fun s -> `String s) t.delivery_cancellation
+      ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let get name decode = Json_codec.required_as fields name decode in
+    let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
+    let%bind id = get "id" Id.Schedule.of_json in
+    let%bind session_id = get "session_id" Id.Session.of_json in
+    let%bind generation = get "generation" integer in
+    let%bind payload = Json_codec.required fields "payload" in
+    let%bind created_at = get "created_at" Timestamp.of_json in
+    let%bind next_due_at = get "next_due_at" Timestamp.of_json in
+    let%bind misfire = get "misfire" misfire_of_json in
+    let%bind status = get "status" status_of_json in
+    let%bind delivery_count = get "delivery_count" integer in
+    let%bind last_delivery_at = get "last_delivery_at" (nullable Timestamp.of_json) in
+    let%bind ownership = get "ownership" (nullable ownership_of_json) in
+    let%bind delivery_cancellation =
+      get "delivery_cancellation" (nullable Json_codec.string)
+    in
+    let t =
+      { id
+      ; session_id
+      ; generation
+      ; payload
+      ; created_at
+      ; next_due_at
+      ; misfire
+      ; status
+      ; delivery_count
+      ; last_delivery_at
+      ; ownership
+      ; delivery_cancellation
+      }
+    in
+    let%map () = validate t in
+    t
+  ;;
+end

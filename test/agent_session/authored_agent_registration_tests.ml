@@ -131,12 +131,21 @@ let%expect_test
         let actor = Eio.Promise.await actor_ready in
         let agent = Agent_session.Authored_agent_source.declaration source in
         let elements = [ CM.Tool (Persistent_agent (agent, Optional)) ] in
+        let inference =
+          Inference_ports.create ~config:(Chat_response.Config.of_elements elements) ()
+        in
         let ctx =
           Chat_response.Ctx.create
+            ~inference_context:inference.context
+            ~inference_identity:inference.identity
+            ~on_inference_attempt:ignore
+            ~on_inference_observation:ignore
+            ~on_inference_completion:ignore
             ~env
             ~dir
             ~tool_dir:dir
             ~cache:(Chat_response.Cache.create ~max_size:1 ())
+            ()
         in
         let host =
           R.host
@@ -198,7 +207,7 @@ let%expect_test
         let dispatch json =
           let original, invocation = publication_call caps () in
           let call =
-            History_entry.with_item
+            Openai.Responses_history.with_item_exn
               original
               (Chat_response.Tool_call.call_item
                  ~kind:Function

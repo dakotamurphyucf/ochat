@@ -30,7 +30,7 @@ let initialize connection =
 
 let ping connection ~payload =
   match
-    Agent_client.Connection.request
+    Agent_client.Connection.request_without_history
       connection
       (Protocol_ping Agent_protocol.Ping.Request.{ payload })
   with

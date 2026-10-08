@@ -452,7 +452,9 @@ let%expect_test "manager rolls back overlay and state after failed moderation ta
 ;;
 
 let entry_history allocator items =
-  List.map items ~f:(History_entry.create ~allocator) |> Result.all |> ok_or_fail
+  List.map items ~f:(Openai.Responses_history.create ~allocator)
+  |> Result.all
+  |> ok_or_fail
 ;;
 
 let%expect_test "entry moderation preserves target identity and persists provenance" =
@@ -508,7 +510,7 @@ let%expect_test "entry moderation preserves target identity and persists provena
           ~event:Moderation.Event.Turn_start)
      : Moderation.Outcome.t);
   let effective = Manager.effective_entries manager history in
-  (match History_entry.item (List.hd_exn effective).entry with
+  (match Openai.Responses_history.item_exn (List.hd_exn effective).entry with
    | Openai.Responses.Item.Input_message { role = Developer; _ } -> ()
    | _ -> failwith "identity-based prepend must emit a developer instruction");
   List.iter effective ~f:(fun effective ->

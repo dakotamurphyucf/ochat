@@ -34,3 +34,10 @@ val validate_output
   :  Agent_protocol.Invocation.t
   -> Agent_protocol.History.entry
   -> (unit, Agent_protocol.Error.t) result
+
+(** Full named-field storage codec. The owning session must still call
+    [validate_context] with its actual identity and generation. *)
+val context_to_jsonaf : context -> Jsonaf.t
+
+val context_of_jsonaf : Jsonaf.t -> (context, Agent_protocol.Error.t) result
+val context_shape : Document_schema.Shape.t

@@ -1,9 +1,17 @@
 open! Core
 
-(** Lossless conversion between canonical response history and protocol
-    transcript entries. The protocol payload stores the complete response
-    item JSON so a durable session can rebuild the model input after restart. *)
+(** Canonical history uses the pure neutral History_entry.Payload document.
+    Provider DTO decoding occurs only at explicit runtime/presentation lowering. *)
+val to_canonical
+  :  ?provenance:Agent_protocol.History.provenance
+  -> History_entry.t
+  -> Agent_protocol.History.entry
 
+val of_canonical
+  :  Agent_protocol.History.entry
+  -> (History_entry.t, Agent_protocol.Error.t) result
+
+(** Current internal spellings are canonical aliases; they never lower DTOs. *)
 val to_protocol
   :  ?provenance:Agent_protocol.History.provenance
   -> History_entry.t
@@ -13,11 +21,13 @@ val of_protocol
   :  Agent_protocol.History.entry
   -> (History_entry.t, Agent_protocol.Error.t) result
 
-(** Build an encoder retaining provenance by committed history identity. Provider
-    items do not carry host provenance; message text never establishes it. New
-    identities use Canonical provenance. Payloads are still encoded from the
-    supplied entry, allowing the caller's history consistency checks to detect
-    unauthorized content changes. *)
+(** Temporary compatible legacy display projection. Its failure cannot make
+    a neutral canonical payload invalid or rewrite captured data. *)
+val to_presentation
+  :  ?provenance:Agent_protocol.History.provenance
+  -> History_entry.t
+  -> (Agent_protocol.History.entry, Agent_protocol.Error.t) result
+
 val canonical_encoder
   :  previous:Agent_protocol.History.entry list
   -> History_entry.t

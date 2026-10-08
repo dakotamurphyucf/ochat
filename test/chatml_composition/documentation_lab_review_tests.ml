@@ -14,17 +14,13 @@ let json_outcome outcome =
   | value -> value
 ;;
 
-let await_watch env host id =
+let await_watch ?timeout env host id =
   let delivered () =
     List.find_map (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-      match entry.P.History.provenance with
+      match entry.P.Public.History.provenance with
       | Runtime_notification _ ->
-        (match
-           Agent_session.History_codec.of_protocol entry
-           |> protocol_ok
-           |> History_entry.item
-         with
-         | Res.Item.Input_message { content = [ Text { text; _ } ]; _ } ->
+        (match Host.full_semantic entry |> History_entry.Payload.Semantic.view with
+         | Message { form = Input; content = [ Text { text; _ } ]; _ } ->
            let _, body = String.lsplit2_exn text ~on:'\n' in
            let data = Jsonaf.of_string body in
            if
@@ -36,7 +32,7 @@ let await_watch env host id =
          | _ -> failwith "unexpected runtime notification framing")
       | _ -> None)
   in
-  Background_shell_tests.wait env (fun () ->
+  Background_shell_tests.wait ?timeout env (fun () ->
     Option.is_some (delivered ())
     && Option.is_none (Host.snapshot host).session.active_operation);
   Option.value_exn (delivered ())
@@ -132,13 +128,21 @@ let%expect_test
         tool_default = Allow
       }
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env _ host ->
        Exn.protect ~finally:release_review ~f:(fun () ->
+         (* These waits cover durable workflow completion, independently of the
+            lab's unchanged response deadline and individual script budgets. *)
+         let await_watch = await_watch ~timeout:30. in
          let invoke id name fields =
            queued := [ id, name, `Object fields ];
            Workflow.send host id "Perform the requested lab review operation.";
-           Workflow.finish_call env host id;
+           Workflow.finish_call ~timeout:30. env host id;
            Host.initial_outcome (Host.snapshot host) id
          in
          let call id name fields = invoke id name fields |> json_outcome in
@@ -261,7 +265,7 @@ let%expect_test
          [%test_eq: int] 4 (Lab.field report "reviews" |> Jsonaf.list_exn |> List.length);
          let notifications =
            List.count (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in
@@ -318,7 +322,12 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
     ~sources:Lab.sources
     ~workspace_files:Lab.workspace_files
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env _ host ->
        Exn.protect
          ~finally:(fun () -> ignore (Eio.Promise.try_resolve release_resolver ()))
@@ -387,7 +396,7 @@ let%expect_test "closing the lab cancels an outstanding reviewer and its respons
            assert (Jsonaf.bool_exn (Lab.field closed_again "closed"));
            let notifications =
              List.count (Host.snapshot host).canonical_history.entries ~f:(fun entry ->
-               match entry.P.History.provenance with
+               match entry.P.Public.History.provenance with
                | Runtime_notification _ -> true
                | _ -> false)
            in

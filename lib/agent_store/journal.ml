@@ -33,6 +33,7 @@ type append_result =
   }
 
 let current_segment t = Journal_segment.id t.current
+let max_payload_length t = t.max_payload_length
 let eio_path env path = Eio.Path.(Eio.Stdenv.fs env / path)
 let current_path directory = Filename.concat directory "CURRENT"
 
@@ -156,33 +157,31 @@ let should_rotate t =
 let append_frame t ~durability encoded =
   let open Result.Let_syntax in
   let%map offset, next_offset =
-    Journal_segment.append ~env:t.env ~durability t.current ~frame:encoded
+    Journal_segment.append
+      ~env:t.env
+      ~durability
+      t.current
+      ~frame:(Frame.Encoded.bytes encoded)
   in
   t.current_bytes <- next_offset;
   t.current_frames <- t.current_frames + 1;
   { segment_id = Journal_segment.id t.current
   ; offset
   ; next_offset
-  ; checksum_hex =
-      (match
-         Frame.decode ~max_payload_length:t.max_payload_length ~contents:encoded ~offset:0
-       with
-       | Ok (Complete { frame; _ }) -> Frame.checksum_hex frame
-       | Ok (Incomplete_tail _) -> assert false
-       | Error _ -> assert false)
+  ; checksum_hex = Frame.Encoded.checksum_hex encoded
   }
 ;;
 
 let encode t ~flags payload =
-  Frame.encode ~max_payload_length:t.max_payload_length ~flags payload
+  Frame.Encoded.create ~max_payload_length:t.max_payload_length ~flags payload
   |> Result.map_error ~f:frame_error
 ;;
 
 let rotate t ~terminal_payload =
   let open Result.Let_syntax in
   let%bind terminal = encode t ~flags:1 terminal_payload in
-  let%bind (_ : append_result) = append_frame t ~durability:Flush terminal in
   let%bind next_id = Journal_segment.Id.next (Journal_segment.id t.current) in
+  let%bind (_ : append_result) = append_frame t ~durability:Flush terminal in
   let%bind next =
     Journal_segment.create_exclusive ~env:t.env ~directory:t.directory ~id:next_id
   in
@@ -195,6 +194,21 @@ let rotate t ~terminal_payload =
 let append t ~durability ~flags ~payload =
   let open Result.Let_syntax in
   let%bind encoded = encode t ~flags payload in
+  let will_rotate =
+    t.current_frames >= t.max_segment_frames - 1
+    || Int64.(
+         t.current_bytes >= t.max_segment_bytes
+         || of_int (String.length (Frame.Encoded.bytes encoded))
+            >= t.max_segment_bytes - t.current_bytes)
+  in
+  let%bind () =
+    if will_rotate
+    then (
+      let%bind (_ : Frame.Encoded.t) = encode t ~flags:1 "segment sealed" in
+      Journal_segment.Id.next (Journal_segment.id t.current)
+      |> Result.map ~f:(fun _ -> ()))
+    else Ok ()
+  in
   let%bind result = append_frame t ~durability encoded in
   let%map () =
     if should_rotate t then rotate t ~terminal_payload:"segment sealed" else Ok ()
@@ -202,7 +216,18 @@ let append t ~durability ~flags ~payload =
   result
 ;;
 
+let validate_seal_checkpoint t =
+  if t.current_frames = 0
+  then Ok ()
+  else
+    let open Result.Let_syntax in
+    let%bind (_ : Frame.Encoded.t) = encode t ~flags:1 "checkpoint boundary" in
+    Journal_segment.Id.next (Journal_segment.id t.current) |> Result.map ~f:(fun _ -> ())
+;;
+
 let seal_checkpoint t =
+  let open Result.Let_syntax in
+  let%bind () = validate_seal_checkpoint t in
   if t.current_frames = 0 then Ok () else rotate t ~terminal_payload:"checkpoint boundary"
 ;;
 
@@ -287,11 +312,16 @@ let repair_current_tail t scan =
         t.current_frames <- List.length current_scan.entries)
 ;;
 
-let transaction_sequence entry =
+let transaction_sequence entry ~limits =
   match Frame.flags entry.Journal_segment.frame with
   | 0 ->
-    Transaction.decode (Frame.payload entry.frame)
-    |> Result.map ~f:(fun transaction -> Some transaction.transaction_sequence)
+    let open Result.Let_syntax in
+    let%bind record =
+      Document_record.of_frame entry.frame ~limits ~expected_digest:None
+      |> Result.map_error ~f:Document_fields.record_error
+    in
+    let%map transaction = Transaction.Stored.of_record record in
+    Some (Transaction.Stored.metadata transaction).transaction_sequence
   | 1 -> Ok None
   | flags -> Error (Store_error.Corrupt (sprintf "unknown journal frame flags: %d" flags))
 ;;
@@ -299,7 +329,18 @@ let transaction_sequence entry =
 let segment_transactions t id =
   let open Result.Let_syntax in
   let%bind segment, scan = scan_segment t id in
-  let%map sequences = List.map scan.entries ~f:transaction_sequence |> Result.all in
+  let%bind () =
+    if scan.crash_tail
+    then Error (Store_error.Corrupt "incomplete journal prevents pruning")
+    else Ok ()
+  in
+  let%bind limits =
+    Document_fields.limits ~max_bytes:t.max_payload_length |> Document_fields.store
+  in
+  let%map sequences =
+    List.map scan.entries ~f:(fun entry -> transaction_sequence entry ~limits)
+    |> Result.all
+  in
   segment, List.filter_opt sequences
 ;;
 

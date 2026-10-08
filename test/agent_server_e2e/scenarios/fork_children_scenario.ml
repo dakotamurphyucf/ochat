@@ -58,7 +58,10 @@ let test env environment ~deny =
   in
   let options =
     { Agent_server.Daemon.default_options with
-      model_post_stream = Some model_post_stream
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:model_post_stream
     }
   in
   Support.Daemon_host.with_ env fixture ~options (fun sw daemon ->

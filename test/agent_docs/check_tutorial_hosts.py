@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix='ochat-p06-') as temporary:
             return False
     with daemon(config, ready):
         token = (root / 'admin.token').read_text().strip()
-        headers = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'ochat-protocol-version': '1.0'}
+        headers = {'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json', 'ochat-protocol-version': '2.0'}
         req = urllib.request.Request(url + '/v1/rpc', data=(root / 'initialize.json').read_bytes(), headers=headers)
         with urllib.request.urlopen(req, timeout=10) as response:
             connection = response.headers['ochat-connection-id']

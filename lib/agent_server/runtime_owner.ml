@@ -24,6 +24,8 @@ type t =
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
   ; mutable close_finished : bool
+  ; mutable foreground_retirement :
+      Agent_session.Session_actor.Runtime_retirement.t option
   ; mutable unloading : unload_outcome Eio.Promise.t option
   ; mutable background_leases : background_lease list
   ; mutable retired_resources : Agent_session.Runtime_builder.t list
@@ -38,6 +40,7 @@ let create_internal ~before_unload ~actor ~initial ~build =
   ; runtime = initial
   ; closed = false
   ; close_finished = false
+  ; foreground_retirement = None
   ; unloading = None
   ; background_leases = []
   ; retired_resources = []
@@ -63,12 +66,16 @@ let install t (runtime : Agent_session.Runtime_builder.t) =
       Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
   in
   let%bind _ =
-    Agent_session.Session_actor.change_moderator t.actor runtime.moderator_snapshot
+    Agent_session.Session_actor.change_moderator t.actor (runtime.moderator_snapshot ())
   in
   let%map () =
-    Agent_session.Session_actor.set_operation_worker t.actor (Some runtime.worker)
+    Agent_session.Session_actor.set_runtime_worker
+      t.actor
+      ~worker:(Some runtime.worker)
+      ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
   in
-  t.runtime <- Some runtime
+  t.runtime <- Some runtime;
+  t.foreground_retirement <- None
 ;;
 
 let closed_error () =
@@ -106,6 +113,13 @@ let ensure_loaded_locked t =
       (Agent_protocol.Error.create
          Conflict
          ~message:"session runtime is waiting for background cleanup"
+         ~retryable:true
+         ())
+  | false, Some _ when Option.is_some t.foreground_retirement ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"session runtime retirement must finish before execution resumes"
          ~retryable:true
          ())
   | false, Some runtime -> check runtime
@@ -157,12 +171,14 @@ let release_retired_resources_locked t runtime =
 (* Remove the reference before invoking cleanup, so a failed close cannot leave
    the same runtime available for a second retirement or poison the owner mutex. *)
 let retire_runtime_locked t =
-  let previous = t.runtime in
-  t.runtime <- None;
   match
-    ignore
-      (Agent_session.Session_actor.set_operation_worker t.actor None
-       : (unit, Agent_protocol.Error.t) result);
+    (match
+       Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
+     with
+     | Ok () -> ()
+     | Error error -> raise (Cleanup_failed error));
+    let previous = t.runtime in
+    t.runtime <- None;
     Option.iter previous ~f:(release_runtime_locked t)
   with
   | () -> Ok ()
@@ -172,6 +188,15 @@ let retire_runtime_locked t =
 let raise_cleanup = function
   | Ok () -> ()
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let foreground_retirement_finished t =
+  Option.exists t.foreground_retirement ~f:(fun retirement ->
+    Agent_session.Session_actor.Runtime_retirement.is_finished retirement
+    &&
+    match Agent_session.Session_actor.Runtime_retirement.await retirement with
+    | Ok () -> true
+    | Error error -> raise (Cleanup_failed error))
 ;;
 
 let with_lease t ~survives_stop ~admit f =
@@ -203,29 +228,52 @@ let with_lease t ~survives_stop ~admit f =
       Atomic.set active false;
       failure
     | Ok runtime ->
-      Exn.protect
-        ~finally:(fun () ->
-          (* Mutex protection starts only after acquiring it. Lease cleanup must
-             also survive cancellation while waiting for another owner callback. *)
-          Eio.Cancel.protect (fun () ->
-            Atomic.set active false;
-            Exn.protect
-              ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
-              ~f:(fun () ->
-                with_owner_lock t ~protect:true (fun () ->
-                  t.background_leases
-                  <- List.filter t.background_leases ~f:(fun current ->
-                       not (phys_equal current lease));
-                  Option.iter lease.resources ~f:(release_retired_resources_locked t);
-                  match t.closed, t.background_leases, t.before_unload, t.unloading with
-                  | true, [], None, None -> retire_runtime_locked t
-                  | _ -> Ok ())
-                |> raise_cleanup)))
-        ~f:(fun () ->
+      let cleanup () =
+        (* Cleanup must survive cancellation while waiting for another owner. *)
+        Eio.Cancel.protect (fun () ->
+          Atomic.set active false;
+          Exn.protect
+            ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
+            ~f:(fun () ->
+              with_owner_lock t ~protect:true (fun () ->
+                t.background_leases
+                <- List.filter t.background_leases ~f:(fun current ->
+                     not (phys_equal current lease));
+                Option.iter lease.resources ~f:(release_retired_resources_locked t);
+                match t.closed, t.background_leases, t.before_unload, t.unloading with
+                | true, [], None, None when foreground_retirement_finished t ->
+                  let result = retire_runtime_locked t in
+                  (match result with
+                   | Ok () -> t.close_finished <- true
+                   | Error _ -> ());
+                  result
+                | _ -> Ok ())
+              |> raise_cleanup))
+      in
+      let result =
+        try
           Eio.Fiber.check ();
           let result = f runtime in
-          Eio.Fiber.check ();
-          result))
+          (match result with
+           | Error _ -> ()
+           | Ok _ -> Eio.Fiber.check ());
+          Ok result
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      let cleaned =
+        try
+          cleanup ();
+          Ok ()
+        with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      (match result, cleaned with
+       | Error (exn, backtrace), _ -> Exn.raise_with_original_backtrace exn backtrace
+       | Ok (Error _ as failure), _ -> failure
+       | Ok result, Ok () -> result
+       | Ok (Ok _), Error (exn, backtrace) ->
+         Exn.raise_with_original_backtrace exn backtrace))
 ;;
 
 let with_runtime_lease t ~retain_resources f =
@@ -242,6 +290,21 @@ let with_runtime_lease t ~retain_resources f =
 
 let with_background_runtime t f = with_runtime_lease t ~retain_resources:false f
 let with_delegation_resources t f = with_runtime_lease t ~retain_resources:true f
+
+let with_auxiliary_execution_lifetime t f =
+  with_lease
+    t
+    ~survives_stop:false
+    ~admit:(fun () ->
+      match t.closed, t.unloading with
+      | true, _ -> Error (closed_error ())
+      | false, Some _ -> Error (background_busy ())
+      | false, None ->
+        Ok
+          ( Option.map t.runtime ~f:Agent_session.Runtime_builder.inference_execution
+          , t.runtime ))
+    f
+;;
 
 let with_resource_lifetime t f =
   with_lease
@@ -338,7 +401,9 @@ let unload_locked t =
   | [], None -> Ok ()
   | [], Some runtime ->
     let open Result.Let_syntax in
-    let%map () = Agent_session.Session_actor.set_operation_worker t.actor None in
+    let%map () =
+      Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
+    in
     t.runtime <- None;
     release_runtime_locked t runtime
 ;;
@@ -383,6 +448,13 @@ let unload_and_wait t =
         let outcome =
           try
             let result =
+              (* Foreground cancellation precedes dependency cleanup: that
+                 cleanup may itself be waiting for a foreground-owned child. *)
+              let%bind retirement =
+                Agent_session.Session_actor.retire_runtime_worker t.actor ~closing
+              in
+              with_owner_lock t ~protect:true (fun () ->
+                t.foreground_retirement <- Some retirement);
               let%bind () =
                 match t.before_unload with
                 | None -> Ok ()
@@ -393,6 +465,9 @@ let unload_and_wait t =
               in
               List.iter leases ~f:(fun lease -> lease.cancel ());
               List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
+              let%bind () =
+                Agent_session.Session_actor.Runtime_retirement.await retirement
+              in
               with_owner_lock t ~protect:true (fun () -> retire_runtime_locked t)
               |> raise_cleanup;
               Ok ()
@@ -440,12 +515,14 @@ let reserve_inactive_close t =
 ;;
 
 let retire_after_administration t =
-  let previous = t.runtime in
-  t.runtime <- None;
   Eio.Cancel.protect (fun () ->
-    ignore
-      (Agent_session.Session_actor.set_operation_worker t.actor None
-       : (unit, Agent_protocol.Error.t) result);
+    (match
+       Agent_session.Session_actor.set_runtime_worker t.actor ~worker:None ~inference:None
+     with
+     | Ok () -> ()
+     | Error error -> raise (Cleanup_failed error));
+    let previous = t.runtime in
+    t.runtime <- None;
     Option.iter previous ~f:(fun runtime ->
       ignore
         (Result.try_with runtime.Agent_session.Runtime_builder.close : (unit, exn) result)))
@@ -472,6 +549,43 @@ let with_administration t f =
   match result with
   | Ok result -> result
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let retire_administration t ~validate ~commit =
+  with_owner_lock t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if t.closed
+      then Error (closed_error ())
+      else if Option.is_some t.unloading || not (List.is_empty t.background_leases)
+      then Error (background_busy ())
+      else validate ()
+    in
+    let%bind () = unload_locked t in
+    commit ())
+;;
+
+let reinitialize_administration t ~validate ~commit ~before_initialize =
+  with_owner_lock t ~protect:false (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      if t.closed
+      then Error (closed_error ())
+      else if Option.is_some t.unloading || not (List.is_empty t.background_leases)
+      then Error (background_busy ())
+      else validate ()
+    in
+    let%bind () = unload_locked t in
+    let%bind () = commit () in
+    before_initialize ();
+    let%bind () = ensure_loaded_locked t in
+    let%bind state = Agent_session.Session_actor.state t.actor in
+    let%map () =
+      match state.lifecycle.desired with
+      | Stopped -> unload_locked t
+      | Running -> Ok ()
+    in
+    Agent_session.Session_state.summary state)
 ;;
 
 let parse_user_content t ~id content =
@@ -980,14 +1094,18 @@ module For_testing = struct
   ;;
 end
 
-let execute_model_job t ~recipe ~payload =
+let execute_model_job t ~inference_context ~capture_recipe_target ~recipe ~payload =
   let outcome =
     Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
       match
         let open Result.Let_syntax in
         let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
         let runtime = Option.value_exn t.runtime in
-        runtime.execute_model_job ~recipe ~payload
+        runtime.execute_model_job
+          ~inference_context
+          ~capture_recipe_target
+          ~recipe
+          ~payload
       with
       | result -> Ok result
       | exception (Eio.Cancel.Cancelled _ as exn) ->
@@ -1196,24 +1314,43 @@ let deliver_background_job_completion t (job : Agent_protocol.Job.t) =
 ;;
 
 let close t =
-  let leases, retired =
-    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-      t.closed <- true;
-      match t.before_unload, t.unloading, t.background_leases with
-      | Some _, _, _ -> [], Ok ()
-      | None, None, [] -> [], retire_runtime_locked t
-      | None, _, leases -> leases, Ok ())
-  in
-  List.iter leases ~f:(fun lease -> lease.cancel ());
-  raise_cleanup retired
+  if Eio.Mutex.use_ro t.mutex (fun () -> t.close_finished)
+  then ()
+  else (
+    let leases =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        if not t.closed then t.foreground_retirement <- None;
+        t.closed <- true;
+        match t.before_unload, t.unloading, t.background_leases with
+        | Some _, _, _ -> []
+        | None, _, leases -> leases)
+    in
+    (match Agent_session.Session_actor.retire_runtime_worker t.actor ~closing:true with
+     | Error error -> raise (Cleanup_failed error)
+     | Ok retirement ->
+       with_owner_lock t ~protect:true (fun () ->
+         t.foreground_retirement <- Some retirement));
+    List.iter leases ~f:(fun lease -> lease.cancel ());
+    let retired =
+      with_owner_lock t ~protect:true (fun () ->
+        match t.before_unload, t.unloading, t.background_leases with
+        | None, None, [] when foreground_retirement_finished t ->
+          let result = retire_runtime_locked t in
+          (match result with
+           | Ok () -> t.close_finished <- true
+           | Error _ -> ());
+          result
+        | _ -> Ok ())
+    in
+    raise_cleanup retired)
 ;;
 
 let close_and_wait t =
   Eio.Cancel.protect (fun () ->
-    close t;
     match Eio.Mutex.use_ro t.mutex (fun () -> t.close_finished) with
     | true -> ()
     | false ->
+      close t;
       (match unload_and_wait t with
        | Ok () ->
          (* Close can overlap an already accepted ordinary unload, which preserves

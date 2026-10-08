@@ -45,6 +45,11 @@ val id_for_call
   -> call_id:History_entry.Id.t
   -> Agent_protocol.Id.Invocation.t
 
+(** Read the admitted canonical call's semantic kind/name/input and actual call
+    alias directly, for every payload representation. Kind/name must match the
+    final routed request. Canonical display input may differ from original/final
+    execution input through authorized redaction. No DTO or presentation
+    projection supplies admission or execution authority. *)
 val create
   :  completion_contract:Agent_protocol.Completion_contract.t option
   -> input:Operation_worker.Input.t

@@ -32,7 +32,7 @@
 
       let comp_tools, _tbl = Ochat_function.functions ochat_functions in
       let request_tools  = Tool.convert_tools comp_tools in
-      (* … pass [request_tools] to [Openai.Responses.post_response] … *)
+      (* Tool descriptors are lowered by the explicit inference adapter. *)
     ]}
 
     {1 Warning}
@@ -149,7 +149,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     ;;
   end
   in
-  let run ~source ?observer (user_msg : string) : string =
+  let run ~ctx ~source ?observer (user_msg : string) : string =
     (* Build a basic content item from the provided user input. *)
     let basic_item : CM.basic_content_item =
       { type_ = "text"
@@ -188,12 +188,18 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
            in
            Some
              Agent_response_loop.
-               { on_event = Agent_trace.on_event trace
+               { on_event = Agent_trace.on_transcript_event trace
                ; on_tool_execution = Agent_trace.on_tool_execution trace
                })
          else None
        in
-       Res.Tool_output.Output.Text (run ~source ?observer args))
+       let ctx =
+         Option.value_map
+           (Ochat_function.Invocation.inference_parent invocation)
+           ~default:ctx
+           ~f:(fun parent -> Ctx.with_inference_parent ctx ~parent)
+       in
+       Res.Tool_output.Output.Text (run ~ctx ~source ?observer args))
 ;;
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
@@ -311,14 +317,33 @@ let mcp_tool
            tool name.
 *)
 let read_file_root host source (root : Chatmd_read_file_spec.Root.t) =
-  match Shell_runtime.Host.resolve_existing_directory host ~source root.path with
-  | Ok path -> Functions.read_file_root ~id:root.id ~path ?description:root.description ()
-  | Error error -> failwithf "[%s] %s" error.code error.message ()
+  Shell_runtime.Host.resolve_existing_directory host ~source root.path
+  |> Result.map ~f:(fun path ->
+    Functions.read_file_root ~id:root.id ~path ?description:root.description ())
+;;
+
+let resolve_read_roots host (specification : Chatmd_read_file_spec.t) =
+  List.map specification.roots ~f:(read_file_root host specification.source) |> Result.all
+;;
+
+let validate_read_roots host = function
+  | CM.Read_file specification ->
+    resolve_read_roots host specification |> Result.map ~f:ignore
+  | CM.Builtin _
+  | Custom _
+  | Shell _
+  | Agent _
+  | Mcp _
+  | Extension _
+  | Inherited _
+  | Persistent_agent _ -> Ok ()
 ;;
 
 let configured_read_file host ctx (specification : Chatmd_read_file_spec.t) =
   let roots =
-    List.map specification.roots ~f:(read_file_root host specification.source)
+    match resolve_read_roots host specification with
+    | Ok roots -> roots
+    | Error error -> failwithf "[%s] %s" error.code error.message ()
   in
   Functions.get_contents_scoped
     ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
@@ -388,7 +413,12 @@ let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl :
            ~net:(Ctx.net ctx)
        ]
      | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
-     | "meta_refine" -> [ Functions.meta_refine ~env:(Ctx.env ctx) ]
+     | "meta_refine" ->
+       [ Functions.meta_refine
+           ~env:(Ctx.env ctx)
+           ~inference:(Ctx.inference_execution ctx)
+           ()
+       ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Read_file specification ->
     let host =

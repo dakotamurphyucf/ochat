@@ -116,9 +116,10 @@ let on_event = fun ctx state event -> match event with
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
                   ; independent_lifetime_policy = Some "moderation-fixture-v1"
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs ->
                           Int.incr requests;
                           match List.last inputs with
                           | Some (Openai.Responses.Item.Function_call_output _) ->
@@ -143,6 +144,20 @@ let on_event = fun ctx state event -> match event with
                                 ; item_id = "read-item"
                                 ; output_index = 0
                                 ; type_ = "response.function_call_arguments.done"
+                                }
+                            ; Output_item_done
+                                { item =
+                                    Function_call
+                                      { name = "read_file"
+                                      ; arguments =
+                                          {|{"root":"data","file":"private.txt"}|}
+                                      ; call_id = sprintf "read-%d" !requests
+                                      ; _type = "function_call"
+                                      ; id = Some "read-item"
+                                      ; status = Some "completed"
+                                      }
+                                ; output_index = 0
+                                ; type_ = "response.output_item.done"
                                 }
                             ]
                             |> Stdlib.List.to_seq)

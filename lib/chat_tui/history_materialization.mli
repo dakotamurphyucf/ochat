@@ -22,7 +22,7 @@ val from_prompt
 (** [resume_or_materialize] returns nonempty persisted history unchanged and
     materializes the prompt otherwise. *)
 val resume_or_materialize
-  :  session:Session.V4.t option
+  :  session:Session.t option
   -> allocator:History_entry.Allocator.t
   -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
   -> run_agent:

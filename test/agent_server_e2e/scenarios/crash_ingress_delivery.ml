@@ -47,7 +47,7 @@ let with_host env environment fixture ~recover f =
             let initialize =
               P.Initialize.Request.create
                 ~implementation
-                ~protocol_min:P.Version.ingress_minimum
+                ~protocol_min:P.Version.current
                 ~protocol_max:P.Version.current
                 ~features:[]
                 ~event_encodings:[ Json ]
@@ -61,19 +61,23 @@ let with_host env environment fixture ~recover f =
 ;;
 
 let registration snapshot =
-  List.find_map snapshot.P.Snapshot.canonical_history.entries ~f:(fun entry ->
-    match
-      Agent_session.History_codec.of_protocol entry |> F.protocol_ok |> History_entry.item
-    with
-    | Openai.Responses.Item.Function_call_output { output = Text text; _ } ->
-      (match Jsonaf.of_string text |> P.Invocation.outcome_of_json |> F.protocol_ok with
-       | Pending (Subscription _, acknowledgement) ->
-         let fields = P.Json_codec.fields acknowledgement |> F.protocol_ok in
-         Some
-           (P.Json_codec.required_as fields "registration_id" P.Id.Capability.of_json
-            |> F.protocol_ok)
-       | _ -> None)
-    | _ -> None)
+  List.find_map
+    snapshot.P.Public.Snapshot.Fields.canonical_history.entries
+    ~f:(fun entry ->
+      match
+        History_entry.Payload.Semantic.view
+          (Support.Public_view.full_payload entry |> History_entry.Payload.semantic)
+      with
+      | Result { output = Text text; _ } ->
+        (match Jsonaf.of_string text |> P.Invocation.outcome_of_json |> F.protocol_ok with
+         | Pending (Subscription _, acknowledgement) ->
+           let fields = P.Json_codec.fields acknowledgement |> F.protocol_ok in
+           Some
+             (P.Json_codec.required_as fields "registration_id" P.Id.Capability.of_json
+              |> F.protocol_ok)
+         | Complete _ | Fail _ | Cancelled _ | Pending _ -> None)
+      | Result { output = Content _; _ } | Message _ | Call _ | Reasoning _ | Unknown _ ->
+        None)
   |> Option.value_exn
 ;;
 
@@ -133,7 +137,7 @@ let test env environment =
               && List.exists snapshot.extension_status ~f:(fun status ->
                 P.Extension_status.equal_kind status.kind Invocation
                 && String.equal status.state "published.pending"))
-         : P.Snapshot.t);
+         : P.Public.Snapshot.Fields.t);
       let request : P.Ingress.Submit_request.t =
         { session_id = session.summary.id
         ; registration_id = registration (F.get client session.summary.id)
@@ -187,7 +191,7 @@ let test env environment =
            ~provider_prefix:"ingress-provider "
            ~calls:(if reopen = 1 then 1 else 0)
            ~count:1
-         : P.Snapshot.t);
+         : P.Public.Snapshot.Fields.t);
       F.kill env child;
       let recovered = state env fixture session in
       F.require

@@ -292,9 +292,8 @@ let%expect_test "UTF8 bounds, visible opt-in history, role and output sanitizati
   in
   assert (String.is_empty no_history.history);
   (match Provider.inputs input with
-   | [ Openai.Responses.Item.Input_message { role = Developer; _ }
-     ; Openai.Responses.Item.Input_message { role = User; _ }
-     ] -> ()
+   | [ (History_entry.Payload.Role.Developer, _); (History_entry.Payload.Role.User, _) ]
+     -> ()
    | _ -> failwith "incorrect suggestion roles");
   [%expect {| |}]
 ;;
@@ -308,10 +307,8 @@ let%expect_test "completion example and explicit delimiters preserve private inp
       ~cursor:(String.length "mary had a li")
   in
   (match Provider.inputs input with
-   | [ Openai.Responses.Item.Input_message
-         { role = Developer; content = [ Text { text = instruction; _ } ]; _ }
-     ; Openai.Responses.Item.Input_message
-         { role = User; content = [ Text { text = context; _ } ]; _ }
+   | [ (History_entry.Payload.Role.Developer, instruction)
+     ; (History_entry.Payload.Role.User, context)
      ] ->
      assert (not (String.is_substring context ~substring:"PRIVATE_HISTORY"));
      print_endline instruction;
@@ -347,13 +344,7 @@ let%expect_test "completion example and explicit delimiters preserve private inp
 
 let%expect_test "configuration bounds and local credentials" =
   assert (Config.equal_mode Config.default.mode Off);
-  assert (
-    String.equal
-      (Openai.Responses.Request.model_to_str Config.default.model)
-      "gpt-5.6-luna");
-  assert (Or_error.is_ok (Config.validate_credentials Config.default ~api_key:None));
-  assert (
-    Or_error.is_error (Config.validate_credentials (config "manual") ~api_key:(Some " ")));
+  assert (String.equal Config.default.model "gpt-5.6-luna");
   List.iter
     [ -1, 200, 200; 4, 200, 200; 0, 99, 200; 0, 5001, 200; 0, 200, 0; 0, 200, 513 ]
     ~f:(fun (history_messages, debounce_ms, max_output_tokens) ->
@@ -368,22 +359,33 @@ let%expect_test "configuration bounds and local credentials" =
   [%expect {| |}]
 ;;
 
-let%expect_test "private response cap stops before parsing and error bodies are redacted" =
+let%expect_test "private answer bound and expected failures reveal no input or error data"
+  =
   Eio_main.run (fun env ->
     let input =
       Provider.prepare Config.default ~messages:[] ~draft:"PRIVATE_CANARY" ~cursor:3
     in
     let outcome =
       Provider.complete_with ~clock:(Eio.Stdenv.clock env) input ~request:(fun _ ->
-        Openai.Responses.read_private_response_exn
-          (Eio.Flow.string_source (String.make ((256 * 1024) + 1) 'x')))
+        Ok (String.make ((256 * 1024) + 1) 'x'))
     in
-    assert (Poly.equal outcome (Error `Unavailable));
+    assert (Provider.equal_outcome outcome (Error `Unavailable));
     let outcome =
       Provider.complete_with ~clock:(Eio.Stdenv.clock env) input ~request:(fun _ ->
-        failwith "SECRET_ERROR_CANARY")
+        Error `Unavailable)
     in
-    assert (Poly.equal outcome (Error `Unavailable)));
+    assert (Provider.equal_outcome outcome (Error `Unavailable));
+    let raised =
+      try
+        ignore
+          (Provider.complete_with ~clock:(Eio.Stdenv.clock env) input ~request:(fun _ ->
+             failwith "STRICT_OBSERVER_FAILURE")
+           : Provider.outcome);
+        false
+      with
+      | Failure message -> String.equal message "STRICT_OBSERVER_FAILURE"
+    in
+    assert raised);
   [%expect {| |}]
 ;;
 
@@ -408,7 +410,7 @@ let%expect_test
       assert (Option.is_none !outcome);
       Eio_mock.Clock.set_time clock 10.;
       pump ();
-      assert (Poly.equal !outcome (Some (Error `Timeout)))));
+      assert (Option.equal Provider.equal_outcome !outcome (Some (Error `Timeout)))));
   [%expect
     {|
     +mock time is now 9.9

@@ -491,14 +491,40 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     ; output_index = index
                     ; type_ = "response.function_call_arguments.done"
                     }
+                ; Output_item_done
+                    { item =
+                        Function_call
+                          { name = tool_name
+                          ; arguments = payload
+                          ; call_id = "constructed-call-" ^ Int.to_string index
+                          ; _type = "function_call"
+                          ; id = Some item_id
+                          ; status = Some "completed"
+                          }
+                    ; output_index = index
+                    ; type_ = "response.output_item.done"
+                    }
                 ])
               |> Stdlib.List.to_seq
             | _ -> Stdlib.Seq.empty
           in
           let build builder =
+            let inference =
+              Inference_ports.create
+                ~post_stream
+                ~config:
+                  (Chat_response.Config.of_elements
+                     (Agent_session.Prompt_revision.elements revision))
+                ()
+            in
             builder
               ~sw
               ~env
+              ~inference_context:inference.context
+              ~inference_identity:inference.identity
+              ~on_inference_attempt:ignore
+              ~on_inference_completion:ignore
+              ~on_inference_observation:ignore
               ~paths
               ~storage_paths:paths
               ~revision
@@ -513,7 +539,6 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
               ~approval_provider:Shell_runtime.Approval_broker.None_available
               ~approval_store:(Shell_access.Approval.create_store ())
               ~permission_profile:policy
-              ~model_post_stream:(Some post_stream)
               ~review_permission:(fun _ -> assert false)
               ~schedule_services:
                 B.
@@ -701,6 +726,37 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                 in
                 let published =
                   match mode with
+                  | `Standalone_end ->
+                    (* Both finalized calls can enter the standalone handler before
+                       the nested pre-tool event halts the session. A later call
+                       instead observes the halt at the handler boundary. *)
+                    let roots =
+                      List.filter state.invocations ~f:(fun invocation ->
+                        Agent_protocol.Invocation.equal_origin
+                          invocation.context.origin
+                          Model)
+                    in
+                    [%test_eq: int] 2 (List.length roots);
+                    assert (
+                      List.exists roots ~f:(fun invocation ->
+                        match invocation.status with
+                        | Published (Fail { code = "invocation.pre_tool_rejected"; _ }) ->
+                          true
+                        | _ -> false));
+                    List.map roots ~f:(fun invocation ->
+                      match invocation.status with
+                      | Published
+                          (Fail
+                             { code =
+                                 ( "invocation.pre_tool_rejected"
+                                 | "invocation.session_ended" )
+                             ; _
+                             }) -> "halted"
+                      | status ->
+                        raise_s
+                          [%sexp
+                            "unexpected concurrent standalone halt outcome"
+                          , (status : Agent_protocol.Invocation.status)])
                   | `One_off_end ->
                     (* Concurrent calls can observe the halt during authorization
                        or inside ChatML. Require both calls to fail, with at least
@@ -833,8 +889,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
      (policy_evaluations 0) (state 0) (published (1 1)) (operation_failed false)
      (observed 0))
     ((mode Standalone_end) (provider_calls 1) (authorized_native_calls 1)
-     (policy_evaluations 0) (state 10)
-     (published (invocation.pre_tool_rejected invocation.session_ended))
+     (policy_evaluations 0) (state 10) (published (halted halted))
      (operation_failed false) (observed 1))
     ((mode Standalone_one_off) (provider_calls 2) (authorized_native_calls 5)
      (policy_evaluations 0) (state 14) (published (1 1)) (operation_failed false)
@@ -885,4 +940,125 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
      (policy_evaluations 0) (state 0) (published ()) (operation_failed true)
      (observed 0))
     |}]
+;;
+
+let%expect_test "copied runtime wrappers share the successful startup checkpoint" =
+  let module B = Agent_session.Runtime_builder in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let root =
+        Eio.Path.(Eio.Stdenv.fs env / workspace_instance.canonical_root.native_path)
+      in
+      List.iter [ "cache"; "session" ] ~f:(fun name ->
+        Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(root / name));
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root / "root.chatmd")
+        {|<developer>Startup checkpoint owner.</developer>
+<script language="chatml" kind="moderator">
+type state = int
+type event = [ `Session_start ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx state event -> match event with
+  | `Session_start -> Task.pure(state + 1)
+</script>|};
+      let definition =
+        Agent_session.Prompt_definition.create
+          ~id:prompt_id
+          ~config_name:"startup-checkpoint"
+          ~root_file:(Eio.Path.native_exn Eio.Path.(root / "root.chatmd"))
+          ~allowed_workspaces:[ workspace_id ]
+          ~permission_profile:"interactive"
+          ~runtime_policy:None
+          ~enabled:true
+          ~description:None
+        |> store_ok
+      in
+      let artifact_store =
+        Agent_store.Prompt_artifact_store.create
+          ~env
+          ~root:(Eio.Path.native_exn Eio.Path.(root / "artifacts"))
+        |> store_ok
+      in
+      let revision =
+        Agent_session.Prompt_revision_builder.build
+          ~env
+          ~artifact_store
+          ~transaction_id
+          ~created_at:timestamp
+          definition
+        |> Result.map_error ~f:(fun errors ->
+          Sexp.to_string_hum
+            [%sexp (errors : Agent_session.Prompt_revision_builder.Diagnostic.t list)])
+        |> Result.ok_or_failwith
+      in
+      let paths : Agent_session.Runtime_paths.t =
+        { tool_dir = root
+        ; workspace = root
+        ; prompt_dir = root
+        ; session_dir = Eio.Path.(root / "session")
+        ; cache_dir = Eio.Path.(root / "cache")
+        ; home = root
+        }
+      in
+      let inference = Inference_ports.create ~config:Chat_response.Config.default () in
+      let runtime =
+        B.build
+          ~sw
+          ~env
+          ~inference_context:inference.context
+          ~inference_identity:inference.identity
+          ~on_inference_attempt:ignore
+          ~on_inference_completion:ignore
+          ~on_inference_observation:ignore
+          ~paths
+          ~storage_paths:paths
+          ~revision
+          ~session_id
+          ~history_namespace:(Agent_protocol.Id.Session.to_string session_id)
+          ~next_history_sequence:1
+          ~existing_history:(Some [])
+          ~existing_moderator_snapshot:None
+          ~moderator_reservation_size:100
+          ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+          ~approval_provider:Shell_runtime.Approval_broker.None_available
+          ~approval_store:(Shell_access.Approval.create_store ())
+          ~permission_profile:
+            (permission_policy
+               ~tool_default:Allow
+               ~fallback:Fallback_deny
+               ~evaluator:None
+               ~reviewer:None)
+          ~review_permission:(fun _ -> failwith "unexpected review")
+          ~schedule_services:
+            { after_ms = (fun ~delay_ms:_ ~payload:_ -> failwith "unexpected schedule")
+            ; cancel = (fun ~id:_ -> failwith "unexpected schedule")
+            }
+          ~job_services:
+            { spawn_model = (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+            ; call_model =
+                (fun ~recipe:_ ~payload:_ ~execute:_ -> failwith "unexpected model job")
+            }
+        |> protocol_ok
+      in
+      Exn.protect ~finally:runtime.close ~f:(fun () ->
+        let closes = ref 0 in
+        let wrapped = { runtime with close = (fun () -> Int.incr closes) } in
+        let before = wrapped.moderator_snapshot () in
+        let published = wrapped.start_moderator () |> protocol_ok in
+        assert (not (Option.equal Jsonaf.exactly_equal before published));
+        assert (
+          Option.equal Jsonaf.exactly_equal published (runtime.moderator_snapshot ()));
+        assert (
+          Option.equal Jsonaf.exactly_equal published (wrapped.moderator_snapshot ()));
+        assert (
+          Option.equal
+            Jsonaf.exactly_equal
+            published
+            (runtime.start_moderator () |> protocol_ok));
+        wrapped.close ();
+        [%test_eq: int] 1 !closes)));
+  print_endline "real startup replaces both snapshots; repeated startup is stable";
+  [%expect {| real startup replaces both snapshots; repeated startup is stable |}]
 ;;

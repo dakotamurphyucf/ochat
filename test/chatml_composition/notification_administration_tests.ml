@@ -27,8 +27,9 @@ let export_snapshot handle revision =
   Buffer.contents bytes
   |> Jsonaf.of_string
   |> Jsonaf.member_exn "snapshot"
-  |> P.Snapshot.of_json
+  |> P.Public.Snapshot.of_json
   |> protocol_ok
+  |> P.Public.Snapshot.fields
 ;;
 
 let%expect_test
@@ -181,9 +182,7 @@ let%expect_test
             && Option.is_none restarted.active_operation);
           assert (List.equal P.History.equal_entry (frames replaced) (frames restarted));
           let restored =
-            Agent_session.Session_state.sexp_of_t restarted
-            |> Sexp.to_string_mach
-            |> Agent_session.Session_persistence.restore_snapshot
+            Agent_server_test_support.roundtrip_state restarted
             |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
             |> protocol_ok
           in

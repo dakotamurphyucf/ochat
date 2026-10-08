@@ -50,7 +50,18 @@ module Item : sig
   val of_value : Lang.value -> (t, string) result
   val to_value : t -> Lang.value
   val of_response_item : id:string -> Res.Item.t -> t
+
+  (** Existing local script view derived from neutral semantics. Actual captured
+      envelopes are neither decoded as provider DTOs nor exposed as script values.
+      Missing metadata remains absent; unknown items retain their known kind. *)
+  val of_history_entry : History_entry.t -> t
+
   val to_response_item : t -> (Res.Item.t, string) result
+
+  (** Legacy authored script/companion ingress, distinct from canonical neutral
+      Identity_snapshot payloads. Keeps DTO decoding inside the producer adapter. *)
+  val to_payload : t -> (History_entry.Payload.t, string) result
+
   val text_input_message : id:string -> role:Res.Input_message.role -> text:string -> t
 end
 
@@ -217,9 +228,11 @@ module Identity_overlay : sig
     }
   [@@deriving sexp]
 
+  (** The replacement retains its complete neutral payload, including capture
+      provenance. Applying it preserves the canonical target host ID. *)
   type replacement =
     { target_id : History_entry.Id.t
-    ; item : Res.Item.t
+    ; item : History_entry.Payload.t
     ; change_id : int
     ; script_label : string option
     }

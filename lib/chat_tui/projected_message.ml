@@ -27,6 +27,7 @@ module Id = struct
 end
 
 type provenance =
+  | Public of Agent_protocol.History.provenance
   | Canonical
   | Moderator_inserted of { change_id : int }
   | Moderator_replacement of
@@ -36,6 +37,12 @@ type provenance =
   | Streaming
   | Pending_approval
   | Placeholder
+[@@deriving equal, sexp]
+
+type disclosure =
+  | Full
+  | Visible
+  | Redacted
 [@@deriving equal, sexp]
 
 type source =
@@ -53,6 +60,12 @@ type source =
       ; provider_item_id : string option
       ; call_id : string option
       }
+  | Public_history of
+      { entry_id : History_entry.Id.t
+      ; provenance : Agent_protocol.History.provenance
+      ; disclosure : disclosure
+      }
+  | Draft of { key : string }
   | Pending_approval of { local_id : string }
   | Placeholder of
       { local_id : string
@@ -66,6 +79,7 @@ type t =
   ; message : Types.message
   ; provenance : provenance
   ; source : source
+  ; editing_text : string option
   ; revision : int
   }
 
@@ -75,6 +89,7 @@ let render_equal a b =
   && String.equal (snd a.message) (snd b.message)
   && equal_provenance a.provenance b.provenance
   && equal_source a.source b.source
+  && Option.equal String.equal a.editing_text b.editing_text
 ;;
 
 let reconcile ~previous row =
@@ -85,12 +100,42 @@ let reconcile ~previous row =
   | Some previous -> { row with revision = previous.revision + 1 }
 ;;
 
-let canonical_row ~entry_id message =
+let canonical_row ?editing_text ~entry_id message =
   { id = Id.canonical entry_id
   ; entry_id = Some entry_id
   ; message
   ; provenance = Canonical
   ; source = Canonical { entry_id }
+  ; editing_text
   ; revision = 0
   }
+;;
+
+let deletion_target t =
+  match t.source with
+  | Canonical { entry_id } | Public_history { entry_id; provenance = Canonical; _ } ->
+    Some entry_id
+  | Public_history
+      { provenance = Runtime_notification _ | Runtime_authoring _; entry_id; _ } ->
+    Some entry_id
+  | Public_history { provenance = Moderator_inserted | Moderator_replaced _; _ }
+  | Moderator_inserted _
+  | Moderator_replacement _
+  | Streaming _
+  | Draft _
+  | Pending_approval _
+  | Placeholder _ -> None
+;;
+
+let editing_text t =
+  match t.source with
+  | Canonical _ | Public_history { disclosure = Full; provenance = Canonical; _ } ->
+    t.editing_text
+  | Public_history _
+  | Moderator_inserted _
+  | Moderator_replacement _
+  | Streaming _
+  | Draft _
+  | Pending_approval _
+  | Placeholder _ -> None
 ;;

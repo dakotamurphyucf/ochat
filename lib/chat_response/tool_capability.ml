@@ -172,7 +172,10 @@ let bind
         ; owner
         ; implementation_revision
         ; fingerprint
-        ; input_schema = info.parameters
+        ; input_schema =
+            (if String.equal descriptor.type_ "custom"
+             then `Object [ "type", `String "string" ]
+             else info.parameters)
         }
     ; implementation
     ; descriptor

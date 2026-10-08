@@ -45,7 +45,7 @@ let with_sources f =
         f env root))
 ;;
 
-let with_daemon env root configuration principal provider f =
+let with_daemon ?(on_timeout = fun () -> ()) env root configuration principal provider f =
   Eio.Switch.run (fun sw ->
     let daemon =
       D.start
@@ -58,7 +58,10 @@ let with_daemon env root configuration principal provider f =
         ~options:
           { D.default_options with
             qualify_chatml_extensions = true
-          ; model_post_stream = Some provider
+          ; inference_policy =
+              Agent_server_test_support.inference_policy
+                ~default_model:"fixture-model"
+                ~post_stream:provider
           }
         ()
       |> protocol_ok
@@ -66,15 +69,27 @@ let with_daemon env root configuration principal provider f =
     Exn.protect
       ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
       ~f:(fun () ->
-        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-          let client =
-            Agent_server_wire_fixture.http_connector ~sw ~env ~daemon ~root ~principal ()
-          in
-          Exn.protect
-            ~finally:(fun () -> Agent_client.Connection.close client)
-            ~f:(fun () ->
-              initialize client;
-              f sw daemon client))))
+        try
+          Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+            let client =
+              Agent_server_wire_fixture.http_connector
+                ~sw
+                ~env
+                ~daemon
+                ~root
+                ~principal
+                ()
+            in
+            Exn.protect
+              ~finally:(fun () -> Agent_client.Connection.close client)
+              ~f:(fun () ->
+                initialize client;
+                f sw daemon client))
+        with
+        | Eio.Time.Timeout as exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          on_timeout ();
+          Stdlib.Printexc.raise_with_backtrace exn backtrace))
 ;;
 
 let revision daemon =
@@ -109,6 +124,19 @@ let function_call serial name arguments =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string arguments
+            ; call_id
+            ; _type = "function_call"
+            ; id = Some call_id
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
   |> Stdlib.List.to_seq
 ;;
@@ -131,6 +159,11 @@ let qualify_authored_shell ~snapshot_replacement =
             }
         }
     in
+    let diagnostic =
+      Failure_diagnostic.create ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
+    in
+    let creation_ordinal = ref 0 in
+    let mark = Failure_diagnostic.mark diagnostic in
     let requests = ref 0 in
     let mode = ref "persistent" in
     let preflight = ref (fun () -> ()) in
@@ -164,11 +197,26 @@ let qualify_authored_shell ~snapshot_replacement =
              (`Object [ "input", `String "Run the shell tool."; "mode", `String !mode ]))
     in
     let principal = principal () in
+    let with_daemon =
+      with_daemon ~on_timeout:(fun () ->
+        Failure_diagnostic.report
+          diagnostic
+          ~context:
+            [%sexp
+              (snapshot_replacement : bool), (!creation_ordinal : int), (!requests : int)])
+    in
     with_daemon env root configuration principal provider (fun sw daemon client ->
-      let state entry = A.state entry.R.actor |> protocol_ok in
+      Failure_diagnostic.reset diagnostic;
+      mark "create parent";
+      let state entry =
+        let current = A.state entry.R.actor |> protocol_ok in
+        Failure_diagnostic.observe diagnostic current;
+        current
+      in
       let parent, _ = create_session ~start_immediately:true client in
       let parent_entry = R.load (D.registry daemon) parent.id |> protocol_ok in
       let attach connection session_id =
+        mark ("attach " ^ P.Id.Session.to_string session_id);
         H.attach
           ~sw
           ~clock:(Eio.Stdenv.clock env)
@@ -181,13 +229,14 @@ let qualify_authored_shell ~snapshot_replacement =
       in
       let parent_handle = attach client parent.id in
       let send handle =
+        mark "send";
         H.send_message
           handle
           { kind = Plain_text; text = "Run the tool."; attachments = [] }
         |> protocol_ok
         |> ignore
       in
-      let rec pending entry =
+      let rec wait_pending entry =
         let current = state entry in
         match
           List.find current.permissions ~f:(fun p ->
@@ -199,9 +248,14 @@ let qualify_authored_shell ~snapshot_replacement =
            | None -> failwith "authored call ended without expected approval"
            | Some _ ->
              Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-             pending entry)
+             wait_pending entry)
+      in
+      let pending entry =
+        mark "wait for pending permission";
+        wait_pending entry
       in
       let approve handle permission choice =
+        mark "respond permission";
         H.respond_permission
           handle
           ~permission_id:permission.P.Permission.id
@@ -209,12 +263,16 @@ let qualify_authored_shell ~snapshot_replacement =
           ~choice
           ~reason:None
       in
-      let rec idle entry =
+      let rec wait_idle entry =
         match (state entry).active_operation with
         | None -> state entry
         | Some _ ->
           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-          idle entry
+          wait_idle entry
+      in
+      let idle entry =
+        mark "wait for inactive operation";
+        wait_idle entry
       in
       let records () =
         Agent_store.Delegation_store.with_records
@@ -226,6 +284,8 @@ let qualify_authored_shell ~snapshot_replacement =
         |> protocol_ok
       in
       let create () =
+        Int.incr creation_ordinal;
+        mark (sprintf "create child %d" !creation_ordinal);
         let before = records () in
         let reached, reached_u = Eio.Promise.create () in
         let ready, ready_u = Eio.Promise.create () in
@@ -237,6 +297,7 @@ let qualify_authored_shell ~snapshot_replacement =
         let permission = pending parent_entry in
         [%test_eq: string] "researcher" permission.tool_name;
         approve parent_handle permission Approve_once |> protocol_ok |> ignore;
+        mark "wait for child provider preflight";
         Eio.Promise.await reached;
         let record =
           records ()
@@ -282,6 +343,7 @@ let qualify_authored_shell ~snapshot_replacement =
           ~root
           ~principal:reader_principal
       in
+      mark "read-only permission probes";
       let reader_client = connect_reader () in
       initialize reader_client;
       let reader =
@@ -297,7 +359,11 @@ let qualify_authored_shell ~snapshot_replacement =
       in
       let before_denials = state child in
       let reader_projection = H.projection reader in
-      let snapshot = reader_projection |> Agent_client.Projection.snapshot in
+      let snapshot =
+        reader_projection
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       assert (P.Id.Session.equal snapshot.session.id child_id);
       assert (
         List.exists snapshot.permissions ~f:(fun observed ->
@@ -318,6 +384,7 @@ let qualify_authored_shell ~snapshot_replacement =
         (Agent_session.Session_state.sexp_of_t (state child));
       H.close reader;
       Agent_client.Connection.close reader_client;
+      mark "limited-scope permission probe";
       let limited =
         principal_with_scopes
           (P.Id.Principal.to_string principal.id)
@@ -344,6 +411,7 @@ let qualify_authored_shell ~snapshot_replacement =
       in
       initialize peer_client;
       let peer = attach peer_client child_id in
+      mark "concurrent permission approval";
       let first, second =
         Eio.Fiber.pair
           (fun () -> approve handle permission Approve_session)
@@ -372,6 +440,7 @@ let qualify_authored_shell ~snapshot_replacement =
        | status -> raise_s [%sexp "authored shell failed", (status : P.Invocation.status)]);
       [%test_eq: int] 1 (List.length completed.shell.approval_grants);
       assert (List.is_empty (state parent_entry).shell.approval_grants);
+      mark "reader reconnect and replay";
       let resumed_client = connect_reader () in
       let replay_seen = ref false in
       let resumed_client =
@@ -384,6 +453,7 @@ let qualify_authored_shell ~snapshot_replacement =
                (match snapshot_replacement, response.replay with
                 | false, Events events -> assert (not (List.is_empty events))
                 | true, Snapshot replacement ->
+                  let replacement = P.Public.Snapshot.fields replacement in
                   assert (
                     Int64.(
                       replacement.latest_event_sequence > snapshot.latest_event_sequence));
@@ -392,7 +462,7 @@ let qualify_authored_shell ~snapshot_replacement =
                   raise_s
                     [%sexp
                       "unexpected HTTP replay mode"
-                    , (response.replay : P.Method_result.Attach.replay)]);
+                    , (response.replay : P.Public.Result.Attach.replay)]);
                replay_seen := true
              | Session_attach _, _ ->
                failwith "HTTP reconnect did not return event replay"
@@ -418,16 +488,25 @@ let qualify_authored_shell ~snapshot_replacement =
         |> protocol_ok
       in
       assert !replay_seen;
-      let replayed = H.projection resumed_reader |> Agent_client.Projection.snapshot in
+      let replayed =
+        H.projection resumed_reader
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       assert (Int64.(replayed.latest_event_sequence > snapshot.latest_event_sequence));
       let resolved =
         List.find_exn replayed.permissions ~f:(fun observed ->
           P.Id.Permission.equal observed.P.Permission.id permission.id)
       in
       assert (not (P.Permission.equal_state resolved.state Pending));
+      let committed =
+        List.map (state child).conversation.canonical_history ~f:(fun entry ->
+          let canonical = Agent_session.History_codec.of_canonical entry |> protocol_ok in
+          P.Public.History.full canonical ~provenance:entry.provenance |> protocol_ok)
+      in
       [%test_eq: Sexp.t]
-        ([%sexp_of: P.History.entry list] (state child).conversation.canonical_history)
-        ([%sexp_of: P.History.entry list] replayed.canonical_history.entries);
+        ([%sexp_of: P.Public.History.t list] committed)
+        ([%sexp_of: P.Public.History.t list] replayed.canonical_history.entries);
       H.close resumed_reader;
       Agent_client.Connection.close resumed_client;
       send handle;
@@ -445,6 +524,7 @@ let qualify_authored_shell ~snapshot_replacement =
       release ();
       ignore (pending cancelled_child : P.Permission.t);
       let operation = Option.value_exn (state cancelled_child).active_operation in
+      mark "concurrent cancellation";
       let first, second =
         Eio.Fiber.pair
           (fun () -> H.cancel_operation first_canceller operation.id)
@@ -477,6 +557,7 @@ let qualify_authored_shell ~snapshot_replacement =
       H.close first_canceller;
       H.close second_canceller;
       Agent_client.Connection.close cancel_client;
+      mark "unattended children";
       List.iter [ "persistent"; "one_off" ] ~f:(fun requested_mode ->
         mode := requested_mode;
         let unattended, release = create () in

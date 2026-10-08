@@ -1,0 +1,5 @@
+(library
+ (name provider_secret_store)
+ (public_name ochat.provider_secret_store)
+ (libraries core eio private_storage)
+ (preprocess (pps ppx_jane)))

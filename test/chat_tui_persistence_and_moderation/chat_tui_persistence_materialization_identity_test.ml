@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_persistence_materialization_identity_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 
 let stub_run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items = "nested"
@@ -14,7 +26,7 @@ let allocator_exn namespace next_sequence =
 let materialize ~env ~namespace source =
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let elements = CM.parse_chat_inputs ~dir source in
   Chat_tui.History_materialization.from_prompt
     ~allocator:(allocator_exn namespace 0)
@@ -81,7 +93,7 @@ let%expect_test "multipart developer input remains one history entry" =
   in
   let entries = materialize ~env ~namespace:"multipart" source |> Result.ok_or_failwith in
   let part_count =
-    match History_entry.items entries with
+    match Openai.Responses_history.items_exn entries with
     | [ Openai.Responses.Item.Input_message message ] -> List.length message.content
     | _ -> 0
   in
@@ -103,7 +115,7 @@ let%expect_test "developer document import remains one history entry" =
   in
   let entries = materialize ~env ~namespace:"document" source |> Result.ok_or_failwith in
   let text_parts =
-    match History_entry.items entries with
+    match Openai.Responses_history.items_exn entries with
     | [ Openai.Responses.Item.Input_message message ] ->
       List.filter_map message.content ~f:(function
         | Text { text; _ } -> Some text
@@ -173,8 +185,8 @@ let%expect_test "entry export/import preserves identity separately from provider
       }
   in
   let entries =
-    [ History_entry.create ~allocator call |> Result.ok_or_failwith
-    ; History_entry.create ~allocator output |> Result.ok_or_failwith
+    [ Openai.Responses_history.create ~allocator call |> Result.ok_or_failwith
+    ; Openai.Responses_history.create ~allocator output |> Result.ok_or_failwith
     ]
   in
   let chatmd =
@@ -188,7 +200,7 @@ let%expect_test "entry export/import preserves identity separately from provider
       History_entry.id entry |> History_entry.Id.to_string)
   in
   let provider_and_call_id_preserved =
-    match History_entry.items imported with
+    match Openai.Responses_history.items_exn imported with
     | [ Function_call call; Function_call_output output ] ->
       Option.equal String.equal call.id (Some "provider-call")
       && String.equal call.call_id output.call_id
@@ -205,13 +217,17 @@ let%expect_test "entry export/import preserves identity separately from provider
 let%expect_test "resume and checkpoints use persisted identities" =
   let allocator = allocator_exn "resume" 0 in
   let first =
-    History_entry.create ~allocator (reasoning_item "same") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (reasoning_item "same")
+    |> Result.ok_or_failwith
   in
   let second =
-    History_entry.create ~allocator (reasoning_item "same") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (reasoning_item "same")
+    |> Result.ok_or_failwith
   in
   let checkpoint = Chat_tui.Persistence.Checkpoint.of_entries [ first ] in
-  let replaced = History_entry.with_item first (reasoning_item "replacement") in
+  let replaced =
+    Openai.Responses_history.with_item_exn first (reasoning_item "replacement")
+  in
   let suffix =
     Chat_tui.Persistence.entries_after_checkpoint checkpoint [ second; first; replaced ]
   in
@@ -228,24 +244,20 @@ let%expect_test "nonempty staged session resumes without converting prompt" =
   @@ fun env ->
   let allocator = allocator_exn "resume-session" 0 in
   let entry =
-    History_entry.create ~allocator (reasoning_item "persisted") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (reasoning_item "persisted")
+    |> Result.ok_or_failwith
   in
-  let session : Session.V4.t =
-    { version = Session.V4.version
-    ; id = "resume-session"
-    ; prompt_file = "prompt.chatmd"
-    ; local_prompt_copy = None
-    ; history = [ entry ]
-    ; next_history_sequence = 1
-    ; tasks = []
-    ; moderator_state = Session.V4.Moderator_state.of_legacy None
-    ; kv_store = []
-    ; vfs_root = "vfs"
-    }
+  let session =
+    Session.create
+      ~id:"resume-session"
+      ~prompt_file:"prompt.chatmd"
+      ~history:[ entry ]
+      ~next_history_sequence:1
+      ()
   in
   let dir = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Chat_response.Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let ctx = fixture_ctx ~env ~dir ~cache ~tool_dir:dir in
   let run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items =
     failwith "prompt conversion should not run"
   in
@@ -272,8 +284,12 @@ let%expect_test "duplicate payload export/import keeps occurrence IDs" =
   @@ fun env ->
   let allocator = allocator_exn "duplicates" 0 in
   let payload = reasoning_item "same-provider" in
-  let first = History_entry.create ~allocator payload |> Result.ok_or_failwith in
-  let second = History_entry.create ~allocator payload |> Result.ok_or_failwith in
+  let first =
+    Openai.Responses_history.create ~allocator payload |> Result.ok_or_failwith
+  in
+  let second =
+    Openai.Responses_history.create ~allocator payload |> Result.ok_or_failwith
+  in
   let entries = [ first; second ] in
   let exported =
     Chat_tui.Persistence.history_entries_as_chatmd
@@ -295,11 +311,15 @@ let%expect_test "persisting a compacted history uses identity and revision" =
   let dir = Eio.Stdenv.cwd env in
   let allocator = allocator_exn "compaction" 0 in
   let retained =
-    History_entry.create ~allocator (reasoning_item "retained") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (reasoning_item "retained")
+    |> Result.ok_or_failwith
   in
-  let replaced = History_entry.with_item retained (reasoning_item "replacement") in
+  let replaced =
+    Openai.Responses_history.with_item_exn retained (reasoning_item "replacement")
+  in
   let summary =
-    History_entry.create ~allocator (reasoning_item "summary") |> Result.ok_or_failwith
+    Openai.Responses_history.create ~allocator (reasoning_item "summary")
+    |> Result.ok_or_failwith
   in
   let checkpoint = Chat_tui.Persistence.Checkpoint.of_entries [ retained ] in
   let prompt_file = "identity-compaction-export.chatmd" in

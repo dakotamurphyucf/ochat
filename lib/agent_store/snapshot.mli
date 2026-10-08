@@ -1,14 +1,53 @@
-(** Atomic, checksummed persistence snapshots. *)
+(** Atomic Frame v1 snapshots whose complete payload is a universal envelope.
+    Unsupported/malformed complete documents fail closed without fallback. *)
+open! Core
 
-type t =
+module Value : sig
+  type t =
+    { schema_version : int
+    ; session_id : Agent_protocol.Id.Session.t
+    ; transaction_sequence : int64
+    ; transaction_hash : string option
+    ; event_sequence : int64
+    ; created_at : Agent_protocol.Timestamp.t
+    ; prompt_artifact : string
+    ; workspace_identity : string
+    ; payload : Document_schema.Document.t
+    }
+end
+
+module Stored : sig
+  type metadata = private
+    { session_id : string
+    ; transaction_sequence : int64
+    ; transaction_hash : string option
+    ; event_sequence : int64
+    ; prompt_artifact : string
+    ; workspace_identity : string
+    ; generation : int64
+    ; session_revision : int64
+    }
+
+  type t
+
+  val of_record : Document_record.t -> (t, Store_error.t) Result.t
+  val metadata : t -> metadata
+  val record : t -> Document_record.t
+end
+
+type provenance
+
+type t = private
   { schema_version : int
+  ; session_id : Agent_protocol.Id.Session.t
   ; transaction_sequence : int64
   ; transaction_hash : string option
   ; event_sequence : int64
   ; created_at : Agent_protocol.Timestamp.t
   ; prompt_artifact : string
   ; workspace_identity : string
-  ; payload : string
+  ; payload : Document_schema.Document.t
+  ; provenance : provenance
   }
 
 type installed =
@@ -16,48 +55,133 @@ type installed =
   ; snapshot : t
   }
 
-(** [install] writes, rereads, validates, and atomically activates [snapshot]. *)
+type installed_stored =
+  { filename : string
+  ; stored : Stored.t
+  }
+
+val kind : string
+val current_schema_version : int
+val value : t -> Value.t
+val carrier : t -> Value.t Document_schema.Extension_carrier.t
+val stored : t -> Stored.t
+
+val create
+  :  limits:Document_schema.Limits.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> transaction_sequence:int64
+  -> transaction_hash:string option
+  -> event_sequence:int64
+  -> created_at:Agent_protocol.Timestamp.t
+  -> prompt_artifact:string
+  -> workspace_identity:string
+  -> payload:Document_schema.Document.t
+  -> (t, Store_error.t) Result.t
+
+(** Functional replacements preserve restored outer extensions. *)
+val with_value
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> Value.t
+  -> (t, Store_error.t) Result.t
+
+val update
+  :  t
+  -> limits:Document_schema.Limits.t
+  -> transaction_sequence:int64
+  -> transaction_hash:string option
+  -> event_sequence:int64
+  -> created_at:Agent_protocol.Timestamp.t
+  -> prompt_artifact:string
+  -> workspace_identity:string
+  -> payload:Document_schema.Document.t
+  -> (t, Store_error.t) Result.t
+
+(** Validate/encode before writing, then reread before atomic CURRENT install. *)
 val install
   :  env:Eio_unix.Stdenv.base
   -> directory:string
   -> max_payload_length:int
   -> t
-  -> (installed, Store_error.t) result
+  -> (installed, Store_error.t) Result.t
 
-(** [load_current] reads [CURRENT]. An incomplete newest snapshot falls back
-    to the newest older valid snapshot. Complete corruption fails closed. *)
-val load_current
+val restore : Stored.t -> limits:Document_schema.Limits.t -> (t, Store_error.t) Result.t
+
+val decode_stored_file
+  :  max_payload_length:int
+  -> string
+  -> (Stored.t, Store_error.t) Result.t
+
+val decode_file : max_payload_length:int -> string -> (t, Store_error.t) Result.t
+
+val read_stored_file
   :  env:Eio_unix.Stdenv.base
   -> directory:string
   -> max_payload_length:int
-  -> (installed option, Store_error.t) result
+  -> filename:string
+  -> (installed_stored, Store_error.t) Result.t
 
-(** [read_file] validates a specifically named snapshot. *)
 val read_file
   :  env:Eio_unix.Stdenv.base
   -> directory:string
   -> max_payload_length:int
   -> filename:string
-  -> (installed, Store_error.t) result
+  -> (installed, Store_error.t) Result.t
 
-(** Decode already bounded file bytes, checking framing and payload. Callers that
-    use their own reader must also validate the filename and decoded session state. *)
-val decode_file : max_payload_length:int -> string -> (t, Store_error.t) result
-
-(** [prune_older ~env ~directory ~keep] retains the newest [keep] snapshot
-    files and removes older checkpoints. [keep] must be positive so callers
-    can preserve a validated fallback checkpoint. *)
-val prune_older
+(** Only missing/physically incomplete CURRENT candidates select fallback;
+    complete unsupported or malformed documents never do. Does not rewrite CURRENT. *)
+val load_current_stored
   :  env:Eio_unix.Stdenv.base
   -> directory:string
-  -> keep:int
-  -> (int, Store_error.t) result
+  -> max_payload_length:int
+  -> (installed_stored option, Store_error.t) Result.t
 
-(** [retention_floor ~env ~directory ~max_payload_length] validates the oldest
-    retained checkpoint and returns its journal anchor. Keep this anchor and
-    every later transaction so incomplete-current fallback remains recoverable. *)
+val load_current
+  :  env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> max_payload_length:int
+  -> (installed option, Store_error.t) Result.t
+
+(** All complete retained checkpoints, before conversion. Complete errors stop
+    the attempt. Recovery may skip physical incomplete candidates; retention may not. *)
+val retained_stored
+  :  env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> max_payload_length:int
+  -> allow_incomplete:bool
+  -> (installed_stored list, Store_error.t) Result.t
+
+module Pruned : sig
+  (** Evidence from one completed, serialized pruning operation. It must not be
+      reused after another snapshot mutation. No persistent filesystem cache. *)
+  type t
+
+  val removed_count : t -> int
+  val retention_floor : t -> int64
+end
+
+(** Validate every retained document and CURRENT, prune, and return the oldest
+    remaining checkpoint from that same validated inventory. The caller holds
+    snapshot/journal mutation serialization through use of the returned floor.
+    No result is returned if unlinking or directory synchronization fails. *)
+val prune_older_with_floor
+  :  max_payload_length:int
+  -> env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> keep:int
+  -> (Pruned.t, Store_error.t) Result.t
+
+(** Preflight every retained document and CURRENT before any deletion. Caller
+    also validates journal anchors under its existing mutation serialization. *)
+val prune_older
+  :  max_payload_length:int
+  -> env:Eio_unix.Stdenv.base
+  -> directory:string
+  -> keep:int
+  -> (int, Store_error.t) Result.t
+
 val retention_floor
   :  env:Eio_unix.Stdenv.base
   -> directory:string
   -> max_payload_length:int
-  -> (int64, Store_error.t) result
+  -> (int64, Store_error.t) Result.t

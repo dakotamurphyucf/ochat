@@ -1,84 +1,183 @@
 open! Core
+module Store = Agent_store
+module D = Document_schema
+module P = Agent_protocol
+
+module Restored = struct
+  type t =
+    { state_document : Session_state_document.t
+    ; snapshot : Store.Snapshot.t option
+    }
+
+  let authored state =
+    { state_document = Session_state_document.authored state; snapshot = None }
+  ;;
+
+  let state t = Session_state_document.value t.state_document
+  let state_document t = t.state_document
+
+  let with_state t state =
+    { t with state_document = Session_state_document.with_value t.state_document state }
+  ;;
+end
 
 type t =
-  { writer : Agent_store.Commit_writer.t
-  ; durability : Agent_store.Journal_segment.durability
-  ; command_accepted : string -> int64 -> unit
-  ; archive :
-      Session_state.Compaction_archive.t
-      -> Session_state.t
-      -> (unit, Agent_protocol.Error.t) result
+  { archive :
+      Session_state.Compaction_archive.t -> D.Document.t -> (unit, P.Error.t) result
+  ; command_accepted : D.Document.t -> int64 -> unit
+  ; writer : Store.Commit_writer.t
+  ; durability : Store.Journal_segment.durability
+  ; limits : D.Limits.t
+  ; archive_limits : D.Limits.t
+  ; retention_preflight : Store.Recovery.Retention_preflight.t option
+  ; mutable restored : Restored.t
+  ; mutable replay_documents : Durable_event_document.t list
   ; mutable previous_transaction_hash : string option
   }
 
-let create ~archive ~command_accepted ~writer ~durability ~previous_transaction_hash =
-  { archive; writer; durability; command_accepted; previous_transaction_hash }
+let create
+      ~archive
+      ~command_accepted
+      ~writer
+      ~durability
+      ~limits
+      ~archive_limits
+      ~retention_preflight
+      ~restored
+      ~previous_transaction_hash
+  =
+  { archive
+  ; command_accepted
+  ; writer
+  ; durability
+  ; limits
+  ; archive_limits
+  ; retention_preflight
+  ; restored
+  ; replay_documents = []
+  ; previous_transaction_hash
+  }
 ;;
 
 let protocol_error error =
-  Agent_protocol.Error.create
+  P.Error.create
     Persistence_error
-    ~message:(Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+    ~message:(Sexp.to_string_hum (Store.Store_error.sexp_of_t error))
     ~retryable:true
     ()
 ;;
+
+let document_error error = Store.Store_error.Document error
 
 let event_range events =
   match events with
   | [] -> None, None
   | first :: rest ->
     let last = List.last rest |> Option.value ~default:first in
-    Some first.Agent_protocol.Event.Durable.sequence, Some last.sequence
+    Some first.P.Event.Durable.sequence, Some last.sequence
 ;;
 
 let accepted_at_ns state =
   state.Session_state.identity.updated_at
-  |> Agent_protocol.Timestamp.to_time_ns
+  |> P.Timestamp.to_time_ns
   |> Time_ns.to_int_ns_since_epoch
   |> Int64.of_int
 ;;
 
 let transaction t ~command_audit previous transition =
-  let first_event_sequence, last_event_sequence =
-    event_range transition.Session_transition.events
+  let open Result.Let_syntax in
+  let%bind delta =
+    Session_delta_document.create
+      transition.Session_transition.delta
+      ~limits:t.limits
+      ~state_document:(Session_state_document.with_value t.restored.state_document)
+    |> Result.map_error ~f:document_error
   in
-  Agent_store.Transaction.create
-    ~session_id:previous.Session_state.identity.session_id
-    ~generation:transition.state.identity.generation
-    ~transaction_sequence:transition.state.counters.transaction_sequence
-    ~previous_transaction_hash:t.previous_transaction_hash
-    ~session_revision:transition.state.counters.revision
-    ~first_event_sequence
-    ~last_event_sequence
-    ~accepted_at_ns:(accepted_at_ns transition.state)
-    ~command_audit
-    ~delta:(Sexp.to_string_mach ([%sexp_of: Session_delta.t] transition.delta))
-    ~durable_events:
-      (List.map transition.events ~f:(fun event ->
-         Sexp.to_string_mach ([%sexp_of: Agent_protocol.Event.Durable.t] event)))
+  let%bind events =
+    List.map transition.events ~f:(fun event ->
+      Durable_event_document.create event ~limits:t.limits)
+    |> Result.all
+    |> Result.map_error ~f:document_error
+  in
+  let first_event_sequence, last_event_sequence = event_range transition.events in
+  let%map transaction =
+    Store.Transaction.create
+      ~limits:t.limits
+      ~session_id:previous.Session_state.identity.session_id
+      ~generation:transition.state.identity.generation
+      ~transaction_sequence:transition.state.counters.transaction_sequence
+      ~previous_transaction_hash:t.previous_transaction_hash
+      ~session_revision:transition.state.counters.revision
+      ~first_event_sequence
+      ~last_event_sequence
+      ~accepted_at_ns:(accepted_at_ns transition.state)
+      ~command_audit
+      ~delta:(Session_delta_document.document delta)
+      ~durable_events:(List.map events ~f:Durable_event_document.document)
+  in
+  transaction, events
+;;
+
+let archive_reference t ~previous ~kind operation_id =
+  Compaction_archive.reference_for
+    (Session_state_document.with_value t.restored.state_document previous)
+    ~limits:t.archive_limits
+    ~kind
+    operation_id
+;;
+
+let admit_state_document state_document ~limits =
+  let open Result.Let_syntax in
+  (* Encode validates the original native value before any normalization. Keep
+     the complete admitted layout as the next preservation basis, just as
+     journal replay does, including newly present optional fields. *)
+  let%bind payload = Session_state_document.encode state_document ~limits in
+  let%map state_document = Session_state_document.decode ~limits payload in
+  payload, state_document
 ;;
 
 let commit t ~command_audit ~(previous : Session_state.t) transition =
   let open Result.Let_syntax in
-  let%bind () =
-    List.fold_result
-      transition.Session_transition.state.conversation.compaction_archives
-      ~init:()
-      ~f:(fun () archive ->
-        if
-          List.exists previous.conversation.compaction_archives ~f:(fun old ->
-            Int64.equal old.revision archive.revision)
-        then Ok ()
-        else t.archive archive previous)
+  let next = Restored.with_state t.restored transition.Session_transition.state in
+  (* Validate the complete merge and immutable transaction before any archive or
+    journal write. Unknown-bearing deletion fails with all durable owners intact. *)
+  let%bind _, state_document =
+    admit_state_document next.state_document ~limits:t.archive_limits
+    |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
   in
-  let%bind transaction =
+  let next = { next with state_document } in
+  let%bind transaction, events =
     transaction t ~command_audit previous transition |> Result.map_error ~f:protocol_error
   in
+  let references =
+    List.filter transition.state.conversation.compaction_archives ~f:(fun reference ->
+      not
+        (List.exists previous.conversation.compaction_archives ~f:(fun old ->
+           Int64.equal old.revision reference.revision)))
+  in
+  let%bind archive =
+    match references with
+    | [] -> Ok None
+    | _ ->
+      Compaction_archive.archive_document
+        (Session_state_document.with_value t.restored.state_document previous)
+        ~limits:t.archive_limits
+      |> Result.map ~f:Option.some
+      |> Result.map_error ~f:(fun e -> protocol_error (document_error e))
+  in
+  let%bind () =
+    List.fold_result references ~init:() ~f:(fun () reference ->
+      match archive with
+      | None -> assert false
+      | Some document -> t.archive reference document)
+  in
   let%map committed =
-    Agent_store.Commit_writer.commit t.writer ~durability:t.durability transaction
+    Store.Commit_writer.commit t.writer ~durability:t.durability transaction
     |> Result.map_error ~f:protocol_error
   in
   t.previous_transaction_hash <- Some committed.transaction_hash;
+  t.restored <- next;
+  t.replay_documents <- t.replay_documents @ events;
   Option.iter command_audit ~f:(fun encoded ->
     t.command_accepted encoded committed.transaction_sequence)
 ;;
@@ -88,109 +187,185 @@ let actor_persistence t =
     { commit =
         (fun ~command_audit ~previous transition ->
           commit t ~command_audit ~previous transition)
+    ; archive_reference =
+        (fun ~previous ~kind id -> archive_reference t ~previous ~kind id)
     }
 ;;
 
 let transaction_hash t = t.previous_transaction_hash
+let restored t = t.restored
+let retention_preflight t = t.retention_preflight
 
-let install_snapshot_at ~env ~directory ~max_payload_length ~transaction_hash state =
-  let snapshot =
-    Agent_store.Snapshot.
-      { schema_version = Session_state.current_schema_version
-      ; transaction_sequence = state.Session_state.counters.transaction_sequence
-      ; transaction_hash
-      ; event_sequence = state.counters.event_sequence
-      ; created_at = state.identity.updated_at
-      ; prompt_artifact =
-          Agent_protocol.Id.Prompt_revision.to_string state.spec.prompt_revision_id
-      ; workspace_identity = state.spec.workspace_instance.conflict_domain
-      ; payload = Sexp.to_string_mach ([%sexp_of: Session_state.t] state)
-      }
+let restore_replay_documents t documents =
+  t.replay_documents <- documents @ t.replay_documents
+;;
+
+let take_replay_documents t =
+  let documents = t.replay_documents in
+  t.replay_documents <- [];
+  documents
+;;
+
+let install_snapshot_at t ~env ~directory ~max_payload_length ~transaction_hash state =
+  let open Result.Let_syntax in
+  let%bind limits =
+    Persistence_codec.limits ~max_bytes:max_payload_length
+    |> Result.map_error ~f:document_error
   in
-  Agent_store.Snapshot.install ~env ~directory ~max_payload_length snapshot
+  let restored = Restored.with_state t.restored state in
+  let%bind payload, state_document =
+    admit_state_document restored.state_document ~limits
+    |> Result.map_error ~f:document_error
+  in
+  let restored = { restored with state_document } in
+  let args create =
+    create
+      ~limits
+      ~transaction_sequence:state.Session_state.counters.transaction_sequence
+      ~transaction_hash
+      ~event_sequence:state.counters.event_sequence
+      ~created_at:state.identity.updated_at
+      ~prompt_artifact:(P.Id.Prompt_revision.to_string state.spec.prompt_revision_id)
+      ~workspace_identity:state.spec.workspace_instance.conflict_domain
+      ~payload
+  in
+  let%bind snapshot =
+    match restored.snapshot with
+    | None -> args (Store.Snapshot.create ~session_id:state.identity.session_id)
+    | Some snapshot -> args (Store.Snapshot.update snapshot)
+  in
+  let%map installed =
+    Store.Snapshot.install ~env ~directory ~max_payload_length snapshot
+  in
+  t.restored <- { restored with snapshot = Some snapshot };
+  installed
 ;;
 
-let install_snapshot ~env ~handle =
+let install_snapshot t ~env ~handle =
   install_snapshot_at
+    t
     ~env
-    ~directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
+    ~directory:(Store.Session_store.Handle.snapshot_directory handle)
 ;;
 
-let restore_snapshot payload =
-  try
-    let state = Sexp.of_string payload |> [%of_sexp: Session_state.t] in
-    Result.bind (Session_state.upgrade_schema state) ~f:(fun state ->
-      Result.map (Session_state.validate state) ~f:(fun () -> state))
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-  with
-  | exn ->
-    Error
-      (Agent_store.Store_error.Corrupt
-         ("session snapshot decode failed: " ^ Exn.to_string exn))
+let restore_snapshot ~limits snapshot =
+  let open Result.Let_syntax in
+  let%map state_document =
+    Session_state_document.decode ~limits snapshot.Store.Snapshot.payload
+    |> Result.map_error ~f:document_error
+  in
+  ({ state_document; snapshot = Some snapshot } : Restored.t)
 ;;
 
 let timestamp_of_ns value =
-  Time_ns.of_int_ns_since_epoch (Int64.to_int_exn value)
-  |> Agent_protocol.Timestamp.of_time_ns
+  match Int64.to_int value with
+  | None ->
+    Error (Store.Store_error.Corrupt "transaction timestamp exceeds platform range")
+  | Some value -> Ok (Time_ns.of_int_ns_since_epoch value |> P.Timestamp.of_time_ns)
 ;;
 
-let apply_transaction state transaction =
-  try
-    let delta =
-      Sexp.of_string transaction.Agent_store.Transaction.delta
-      |> [%of_sexp: Session_delta.t]
-    in
-    Session_delta.apply state delta
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-    |> Result.map ~f:(fun state ->
-      { state with
-        identity =
-          { state.identity with updated_at = timestamp_of_ns transaction.accepted_at_ns }
-      ; counters =
-          { state.counters with
-            revision = transaction.session_revision
-          ; transaction_sequence = transaction.transaction_sequence
-          ; event_sequence =
-              Option.value
-                transaction.last_event_sequence
-                ~default:state.counters.event_sequence
-          }
-      })
-  with
-  | exn ->
-    Error
-      (Agent_store.Store_error.Corrupt
-         ("session delta decode failed: " ^ Exn.to_string exn))
-;;
-
-let durable_events transaction =
-  let decode encoded =
-    try
-      let event = Sexp.of_string encoded |> [%of_sexp: Agent_protocol.Event.Durable.t] in
-      match Agent_protocol.Event.Durable.extension_status event with
-      | Ok _ -> Ok event
-      | Error error ->
-        Error
-          (Agent_store.Store_error.Corrupt
-             ("durable extension status decode failed: " ^ error.message))
-    with
-    | exn ->
-      Error
-        (Agent_store.Store_error.Corrupt
-           ("durable event decode failed: " ^ Exn.to_string exn))
-  in
+let event_documents ~limits transaction =
   let open Result.Let_syntax in
-  let%bind events =
-    Result.all (List.map transaction.Agent_store.Transaction.durable_events ~f:decode)
+  let%bind documents =
+    List.map
+      transaction.Store.Transaction.durable_events
+      ~f:(Durable_event_document.decode ~limits)
+    |> Result.all
+    |> Result.map_error ~f:document_error
   in
+  let events = List.map documents ~f:Durable_event_document.value in
+  let first, last = event_range events in
+  let%bind () =
+    if
+      Option.equal Int64.equal first transaction.first_event_sequence
+      && Option.equal Int64.equal last transaction.last_event_sequence
+      && (let rec contiguous previous = function
+            | [] -> true
+            | event :: rest ->
+              Int64.equal event.P.Event.Durable.sequence Int64.(previous + 1L)
+              && contiguous event.sequence rest
+          in
+          match events with
+          | [] -> true
+          | first :: rest -> contiguous first.sequence rest)
+      && List.for_all events ~f:(fun event ->
+        P.Id.Session.equal event.P.Event.Durable.session_id transaction.session_id
+        && Int64.equal event.revision transaction.session_revision)
+    then Ok ()
+    else
+      Error
+        (Store.Store_error.Corrupt
+           "durable event owner, revision or sequence range mismatch")
+  in
+  Ok documents
+;;
+
+let durable_events ~limits transaction =
+  event_documents ~limits transaction
+  |> Result.map ~f:(List.map ~f:Durable_event_document.value)
+;;
+
+let validate_transaction ~limits transaction =
+  let open Result.Let_syntax in
+  let%bind delta =
+    Session_delta_document.decode ~limits transaction.Store.Transaction.delta
+    |> Result.map_error ~f:document_error
+  in
+  let rec owners = function
+    | Session_delta.Batch changes ->
+      List.fold_result changes ~init:() ~f:(fun () change -> owners change)
+    | Created state ->
+      if
+        P.Id.Session.equal state.identity.session_id transaction.session_id
+        && Int.equal state.identity.generation transaction.generation
+      then Ok ()
+      else
+        Error (Store.Store_error.Corrupt "created state belongs to another transaction")
+    | _ -> Ok ()
+  in
+  let%bind () = owners (Session_delta_document.value delta) in
+  let%bind _ = durable_events ~limits transaction in
+  match transaction.command_audit with
+  | None -> Ok ()
+  | Some audit ->
+    Store.Idempotency_store.Command_audit.decode audit |> Result.map ~f:ignore
+;;
+
+let apply_document state_document ~limits transaction =
+  let open Result.Let_syntax in
+  let%bind () = validate_transaction ~limits transaction in
+  let%bind delta =
+    Session_delta_document.decode ~limits transaction.Store.Transaction.delta
+    |> Result.map_error ~f:document_error
+  in
+  let%bind updated_at = timestamp_of_ns transaction.accepted_at_ns in
+  let%bind transaction_metadata =
+    Session_delta_document.Transaction_metadata.create
+      ~updated_at
+      ~revision:transaction.session_revision
+      ~transaction_sequence:transaction.transaction_sequence
+      ~last_event_sequence:transaction.last_event_sequence
+    |> Result.map_error ~f:document_error
+  in
+  let%bind state_document =
+    Session_delta_document.apply delta ~transaction_metadata ~limits state_document
+    |> Result.map_error ~f:document_error
+  in
+  let state = Session_state_document.value state_document in
   if
-    List.for_all events ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
-      Agent_protocol.Id.Session.compare
-        event.session_id
-        transaction.Agent_store.Transaction.session_id
-      = 0)
-  then Ok events
-  else Error (Agent_store.Store_error.Corrupt "durable event belongs to another session")
+    P.Id.Session.equal state.identity.session_id transaction.session_id
+    && Int.equal state.identity.generation transaction.generation
+  then Ok state_document
+  else Error (Store.Store_error.Corrupt "replayed state differs from transaction owner")
+;;
+
+let apply_transaction ~limits (restored : Restored.t) transaction =
+  let open Result.Let_syntax in
+  let%map state_document = apply_document restored.state_document ~limits transaction in
+  { restored with state_document }
+;;
+
+let validate restored =
+  Session_state.validate (Restored.state restored)
+  |> Result.map_error ~f:(fun e -> Store.Store_error.Corrupt e.P.Error.message)
 ;;

@@ -17,7 +17,7 @@ type response =
   }
 
 type rpc_response =
-  { result : Agent_protocol.Method_result.t
+  { result : Agent_protocol.Public.Result.t
   ; response : response
   }
 
@@ -109,7 +109,7 @@ let request_raw t ?(headers = []) ?(body = "") ~meth ~path () =
 let rpc_headers t =
   [ "content-type", "application/json"
   ; "accept", "application/json"
-  ; "ochat-protocol-version", "1.0"
+  ; "ochat-protocol-version", "2.0"
   ]
   @ authorization_headers t
   @ connection_headers t
@@ -176,13 +176,22 @@ let request t command =
       when Agent_protocol.Envelope.Request_id.compare rpc.id id = 0 ->
       let%map result =
         Result.bind rpc.outcome ~f:(fun json ->
-          Agent_protocol.Method_result.of_json
+          Agent_protocol.Public.Result.of_json
             ~method_:(Agent_protocol.Command.method_name command)
             json)
       in
       { result; response }
     | Response _ -> Error (protocol_error "HTTP response identifier differs")
     | Notification _ | Request _ -> Error (protocol_error "HTTP returned a non-response"))
+;;
+
+let request_without_history t command =
+  Result.bind (request t command) ~f:(fun response ->
+    match response.result with
+    | Agent_protocol.Public.Result.Non_history value ->
+      Ok (Agent_protocol.Public.Result.Non_history.value value)
+    | Session_get _ | Session_create _ | Session_attach _ | Private_provider_challenge _
+      -> Error (Agent_protocol.Error.invalid_request "expected non-history response"))
 ;;
 
 let initialize_request () =
@@ -194,8 +203,8 @@ let initialize_request () =
   in
   Agent_protocol.Initialize.Request.create
     ~implementation
-    ~protocol_min:Agent_protocol.Version.initial
-    ~protocol_max:Agent_protocol.Version.initial
+    ~protocol_min:Agent_protocol.Version.current
+    ~protocol_max:Agent_protocol.Version.current
     ~features:[]
     ~event_encodings:[ Json ]
     ~max_inbound_event_bytes:(16 * 1024 * 1024)
@@ -206,7 +215,7 @@ let initialize t =
   let open Result.Let_syntax in
   let%bind initialize_request = initialize_request () in
   let%bind rpc = request t (Protocol_initialize initialize_request) in
-  match rpc.result with
+  match rpc.result |> Public_view.non_history with
   | Protocol_initialize response -> Ok (response, rpc.response)
   | _ -> Error (protocol_error "initialize returned the wrong result")
 ;;
@@ -424,9 +433,10 @@ let get_snapshot t session_id =
       Result.try_with (fun () -> Jsonaf.of_string response.body)
       |> Result.map_error ~f:Exn.to_string
       |> Result.bind ~f:(fun json ->
-        Agent_protocol.Snapshot.of_json json
+        Agent_protocol.Public.Snapshot.of_json json
         |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
-      |> Result.map ~f:(fun snapshot -> snapshot, response))
+      |> Result.map ~f:(fun snapshot ->
+        Agent_protocol.Public.Snapshot.fields snapshot, response))
 ;;
 
 let shutdown t = P.Client.shutdown t.client

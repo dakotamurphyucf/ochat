@@ -63,15 +63,9 @@ let%expect_test
             ()
           |> protocol_ok
         in
-        (match
-           Agent_client.Connection.request client (Protocol_initialize initialize)
-           |> protocol_ok
-         with
-         | Protocol_initialize response ->
-           assert (P.Version.equal response.selected_version P.Version.initial);
-           assert (not (P.Principal.has_scope response.principal Submit_ingress))
-         | _ -> failwith "unexpected legacy initialization");
-        denied "legacy protocol" (Agent_client.Ingress.submit client request));
+        denied
+          "legacy protocol"
+          (Agent_client.Connection.request client (Protocol_initialize initialize)));
       use
         { owner with scopes = P.Scope.Set.of_list [ Submit_ingress ] }
         (fun client ->

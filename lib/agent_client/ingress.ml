@@ -2,7 +2,7 @@ open Core
 module P = Agent_protocol
 
 let submit connection (request : P.Ingress.Submit_request.t) =
-  match Connection.request connection (Ingress_submit request) with
+  match Connection.request_without_history connection (Ingress_submit request) with
   | Ok (Ingress_submit response)
     when P.Id.Session.equal request.session_id response.session_id
          && P.Id.Capability.equal request.registration_id response.registration_id

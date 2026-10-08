@@ -40,7 +40,15 @@ let reached env boundary filename =
       |> Agent_store.Transaction.decode
       |> F.store_ok
     in
-    let delta = Sexp.of_string transaction.delta |> Delta.t_of_sexp in
+    let delta =
+      Agent_session.Session_delta_document.decode
+        ~limits:Document_schema.Limits.default
+        transaction.delta
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+      |> Result.ok_or_failwith
+      |> Agent_session.Session_delta_document.value
+    in
     (match matches boundary delta with
      | false -> ()
      | true ->
@@ -71,6 +79,19 @@ let call =
       ; item_id = "notification-watch-item"
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
+      }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name = "watch"
+            ; arguments = "null"
+            ; call_id = "notification-watch"
+            ; _type = "function_call"
+            ; id = Some "notification-watch-item"
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
       }
   ]
 ;;
@@ -129,7 +150,10 @@ let run ?(standalone = false) env ~config_path ~boundary =
   let options =
     { Agent_server.Daemon.default_options with
       qualify_chatml_extensions = true
-    ; model_post_stream = Some post_stream
+    ; inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream
     }
   in
   Eio.Switch.run (fun sw ->

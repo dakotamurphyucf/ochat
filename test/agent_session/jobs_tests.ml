@@ -12,7 +12,8 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           ~compaction_env:None
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -92,7 +93,10 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           actor
           ~schedule_id:schedule.id
           ~generation:0
-          ~moderator_snapshot:(Some (`Object [ "queued", `True ]))
+          ~moderator_snapshot:
+            (Some
+               (Agent_session.Runtime_builder.encode_moderator_snapshot
+                  (handoff_snapshot 1)))
         |> protocol_ok
       in
       let state = Agent_session.Session_actor.state actor |> protocol_ok in
@@ -126,7 +130,8 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ~compaction_env:None
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -192,7 +197,10 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           actor
           ~job_id:job.id
           ~generation:0
-          ~moderator_snapshot:(Some (`Object [ "queued", `True ]))
+          ~moderator_snapshot:
+            (Some
+               (Agent_session.Runtime_builder.encode_moderator_snapshot
+                  (handoff_snapshot 1)))
         |> protocol_ok
       in
       let repeated_cancel =
@@ -233,7 +241,8 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ~compaction_env:None
           ~initial_state:
             (actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)

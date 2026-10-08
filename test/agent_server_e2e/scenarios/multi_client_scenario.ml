@@ -28,8 +28,12 @@ let protocol_ok = function
     raise_s [%sexp "protocol operation failed", (error : Agent_protocol.Error.t)]
 ;;
 
-let request connection command =
+let request_public connection command =
   Agent_client.Connection.request connection command |> protocol_ok
+;;
+
+let request connection command =
+  Agent_client.Connection.request_without_history connection command |> protocol_ok
 ;;
 
 let idempotency_key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
@@ -274,7 +278,7 @@ let session_spec
   |> protocol_ok
 ;;
 
-let session_of_created (created : Agent_protocol.Method_result.Create.t) =
+let session_of_created (created : Agent_protocol.Public.Result.Create.t) =
   let attached = Option.value_exn created.attachment in
   { id = created.session.id
   ; writer = attached.attachment
@@ -299,7 +303,7 @@ let create_session
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_create create_request) with
+  match request_public connection (Session_create create_request) with
   | Session_create created -> session_of_created created
   | _ -> fail "session.create returned the wrong result variant"
 ;;
@@ -315,7 +319,7 @@ let attach connection session ~mode ~subscribe key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_attach attach_request) with
+  match request_public connection (Session_attach attach_request) with
   | Session_attach attached -> attached.attachment
   | _ -> fail "session.attach returned the wrong result variant"
 ;;
@@ -368,8 +372,8 @@ let send connection session attachment text key =
 ;;
 
 let get_session connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot.session
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> (Agent_protocol.Public.Snapshot.fields snapshot).session
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -408,7 +412,7 @@ let respond_command session attachment permission choice key =
 ;;
 
 let respond connection session attachment permission choice key =
-  Agent_client.Connection.request
+  Agent_client.Connection.request_without_history
     connection
     (respond_command session attachment permission choice key)
 ;;
@@ -438,17 +442,40 @@ let history_ids_are_unique
 ;;
 
 let get_snapshot connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned wrong result"
 ;;
 
 let assert_accepted_messages snapshot sent_a sent_b =
+  let user_text entry =
+    let payload = Support.Public_view.full_payload entry in
+    match
+      History_entry.Payload.semantic payload |> History_entry.Payload.Semantic.view
+    with
+    | Message
+        { form = Input
+        ; role = User
+        ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+        ; phase = Absent
+        } -> text
+    | _ -> fail "accepted writer message has different neutral semantics"
+  in
+  let same_message actual expected =
+    Agent_protocol.History.Id.equal
+      actual.Agent_protocol.Public.History.id
+      expected.Agent_protocol.Public.History.id
+    && Agent_protocol.History.equal_provenance actual.provenance expected.provenance
+    && Support.Public_view.has_header actual (Message User)
+    && Support.Public_view.has_header expected (Message User)
+    && String.equal (user_text actual) (user_text expected)
+  in
   let expected sent text =
     Agent_session.History_codec.user_text
       ~id:sent.Agent_protocol.Method_result.Send_message.history_id
       text
-    |> Agent_session.History_codec.to_protocol
+    |> fun entry ->
+    Agent_protocol.Public.History.full entry ~provenance:Canonical |> protocol_ok
   in
   let accepted =
     [ sent_a, expected sent_a "from-unix"; sent_b, expected sent_b "from-http" ]
@@ -459,26 +486,20 @@ let assert_accepted_messages snapshot sent_a sent_b =
     |> List.map ~f:snd
   in
   let canonical =
-    snapshot.Agent_protocol.Snapshot.canonical_history.entries @ snapshot.deferred_entries
+    snapshot.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
+    @ snapshot.deferred_entries
   in
   let actual =
     List.filter canonical ~f:(fun entry ->
-      Agent_protocol.History.equal_role entry.role User)
+      Support.Public_view.has_header entry (Message User))
   in
-  if
-    not
-      (List.equal
-         String.equal
-         (List.map actual ~f:(fun entry ->
-            Agent_protocol.History.entry_to_json entry |> Jsonaf.to_string))
-         (List.map expected ~f:(fun entry ->
-            Agent_protocol.History.entry_to_json entry |> Jsonaf.to_string)))
+  if not (List.equal same_message actual expected)
   then
     raise_s
       [%sexp
         "canonical writer messages differ"
-      , (expected : Agent_protocol.History.entry list)
-      , (snapshot : Agent_protocol.Snapshot.t)]
+      , (expected : Agent_protocol.Public.History.t list)
+      , (snapshot : Agent_protocol.Public.Snapshot.Fields.t)]
 ;;
 
 let test_concurrent_messages env environment =
@@ -515,7 +536,7 @@ let test_concurrent_messages env environment =
 
 let durable_notification = function
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    Agent_protocol.Event.Durable.of_json params |> protocol_ok |> Option.some
+    Agent_protocol.Public.Durable.of_json params |> protocol_ok |> Option.some
   | Notification _ -> None
   | Request _ | Response _ -> fail "notification stream returned a non-notification"
 ;;
@@ -543,7 +564,9 @@ let rec collect_through env connection session_id previous through events =
     collect_through env connection session_id event.sequence through (event :: events))
 ;;
 
-let event_signature event = Agent_protocol.Event.Durable.to_json event |> Jsonaf.to_string
+let event_signature event =
+  Agent_protocol.Public.Durable.to_json event |> Jsonaf.to_string
+;;
 
 let test_same_event_order env environment =
   let fixture = fixture env environment "multi-observers" in
@@ -717,7 +740,7 @@ let observe_send env observer session sent =
        session.sequence
        sent.Agent_protocol.Method_result.Send_message.mutation.latest_event_sequence
        []
-     : Agent_protocol.Event.Durable.t list)
+     : Agent_protocol.Public.Durable.t list)
 ;;
 
 let test_writer_disconnect_continues env environment =

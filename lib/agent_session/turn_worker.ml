@@ -3,12 +3,14 @@ open! Core
 module Config = struct
   type t =
     { env : Eio_unix.Stdenv.base
+    ; inference_context : Inference_runtime.Context.t
+    ; inference_identity : Chat_response.Neutral_turn.Identity.t
+    ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+    ; on_inference_completion : Inference_client.Completion.t -> unit
+    ; on_inference_observation : Inference.Observation.t -> unit
     ; response_dir : Eio.Fs.dir_ty Eio.Path.t
     ; tools : Openai.Responses.Request.Tool.t list
     ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t
-    ; temperature : float option
-    ; max_output_tokens : int option
-    ; reasoning : Openai.Responses.Request.Reasoning.t option
     ; moderator : Chat_response.In_memory_stream.moderator option
     ; permission_profile : Permission_policy.t
     ; review_permission :
@@ -16,10 +18,6 @@ module Config = struct
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result
     ; history_compaction : bool
     ; parallel_tool_calls : bool
-    ; model : Openai.Responses.Request.model
-    ; prompt_cache_key : string option
-    ; prompt_cache_retention : string option
-    ; post_stream : Chat_response.In_memory_stream.post_stream option
     ; agent_page_classifications :
         (string * Chat_response.Tool_execution_event.agent_page_kind) list
     ; delegated_permission_tools : String.Set.t
@@ -36,151 +34,93 @@ let now config =
   |> Agent_protocol.Timestamp.of_time_ns
 ;;
 
-let sourced_payload event =
-  Chat_response.Sourced_response_event.(
-    `Object
-      [ ( "entry_id"
-        , Option.value_map event.entry_id ~default:`Null ~f:(fun id ->
-            `String (History_entry.Id.to_string id)) )
-      ; ( "invocation_id"
-        , Option.value_map event.invocation_id ~default:`Null ~f:(fun value ->
-            `String value) )
-      ; ( "parent_call_id"
-        , Option.value_map event.parent_call_id ~default:`Null ~f:(fun value ->
-            `String value) )
-      ; "event", Openai.Responses.Response_stream.jsonaf_of_t event.event
-      ])
-;;
-
-let history_event_payload event =
-  Chat_response.History_stream_event.(
-    `Object
-      [ "entry_id", `String (History_entry.Id.to_string event.entry_id)
-      ; ( "source"
-        , Option.value_map event.source ~default:`Null ~f:(fun value -> `String value) )
-      ; "event", Openai.Responses.Response_stream.jsonaf_of_t event.event
-      ])
-;;
-
-let tool_event_kind = function
-  | Chat_response.Tool_execution_event.Started _ ->
-    Agent_protocol.Event.Recoverable.Tool_started
-  | Progress _ -> Tool_progress
-  | Trace _ -> Tool_trace
-  | Finished _ -> Tool_finished
-;;
-
-let progress_payload progress =
-  let channel =
-    match progress.Ochat_function.Progress.channel with
-    | `Assistant -> "assistant"
-    | `Reasoning -> "reasoning"
-    | `Stdout -> "stdout"
-    | `Stderr -> "stderr"
-    | `Activity -> "activity"
+let tool_activity config ~(scope : Transcript.Scope.t) event =
+  let open Result.Let_syntax in
+  let module A = Agent_protocol.Activity in
+  let parent =
+    match scope.relation with
+    | Root -> None
+    | Nested parent ->
+      Option.map parent.call_alias ~f:(fun call_alias ->
+        A.Key.{ scope = parent.scope; call_alias })
   in
-  let update_kind, text =
-    match progress.update with
-    | Append text -> "append", text
-    | Replace text -> "replace", text
+  let key ~parent call_alias = A.Key.create ~scope:scope.key ~call_alias ~parent in
+  let progress (p : Ochat_function.Progress.t) =
+    A.Progress.
+      { channel =
+          (match p.channel with
+           | `Assistant -> Assistant
+           | `Reasoning -> Reasoning
+           | `Stdout -> Stdout
+           | `Stderr -> Stderr
+           | `Activity -> Activity)
+      ; update =
+          (match p.update with
+           | Append s -> Append s
+           | Replace s -> Replace s)
+      }
   in
-  `Object
-    [ "channel", `String channel; "update", `String update_kind; "text", `String text ]
-;;
-
-let outcome_text = function
-  | Ochat_function.Trace.Returned -> "returned"
-  | Raised -> "raised"
-  | Cancelled -> "cancelled"
-;;
-
-let optional_output output =
-  Option.value_map
-    output
-    ~default:`Null
-    ~f:Openai.Responses.Tool_output.Output.jsonaf_of_t
-;;
-
-let execution_kind_name = function
-  | `Function -> "function"
-  | `Custom -> "custom"
-;;
-
-let trace_payload = function
-  | Ochat_function.Trace.Tool_started { call_id; name; kind; payload } ->
-    `Object
-      [ "type", `String "tool_started"
-      ; "call_id", `String call_id
-      ; "name", `String name
-      ; "kind", `String (execution_kind_name kind)
-      ; "payload", `String payload
-      ]
-  | Tool_progress { call_id; progress } ->
-    `Object
-      [ "type", `String "tool_progress"
-      ; "call_id", `String call_id
-      ; "progress", progress_payload progress
-      ]
-  | Tool_finished { call_id; outcome; output } ->
-    `Object
-      [ "type", `String "tool_finished"
-      ; "call_id", `String call_id
-      ; "outcome", `String (outcome_text outcome)
-      ; "output", optional_output output
-      ]
-;;
-
-let agent_page_kind classifications name =
-  List.Assoc.find classifications name ~equal:String.equal
-  |> Option.map ~f:(function
-    | Chat_response.Tool_execution_event.Subagent -> `String "subagent"
-    | Shell_script -> `String "shell_script")
-  |> Option.value ~default:`Null
-;;
-
-let tool_event_payload_unredacted classifications event =
+  let outcome = function
+    | Ochat_function.Trace.Returned -> A.Tool.Returned
+    | Raised -> A.Tool.Raised
+    | Cancelled -> A.Tool.Cancelled
+  in
+  let started ~parent ~call_id ~name ~kind ~payload =
+    let%bind key = key ~parent call_id in
+    let classification =
+      List.Assoc.find config.Config.agent_page_classifications name ~equal:String.equal
+      |> Option.map ~f:(function
+        | Chat_response.Tool_execution_event.Subagent -> A.Tool.Subagent
+        | Shell_script -> A.Tool.Shell_script)
+    in
+    let%map descriptor =
+      A.Tool.descriptor
+        key
+        ~call_entry_id:None
+        ~name
+        ~kind:
+          (match kind with
+           | `Function -> History_entry.Payload.Call_kind.Function
+           | `Custom -> Custom)
+        ~input:(config.redact_tool_payload ~name payload)
+        ~classification
+    in
+    A.Tool.Started descriptor
+  in
+  let progressed ~parent ~call_id value =
+    let%map key = key ~parent call_id in
+    A.Tool.Progress { key; progress = progress value }
+  in
+  let finished ~parent ~call_id result output =
+    let%map key = key ~parent call_id in
+    (A.Tool.Finished
+       { key
+       ; outcome = outcome result
+       ; output = Option.map output ~f:Chat_response.Tool_execution_event.neutral_output
+       }
+     : A.Tool.event)
+  in
   match event with
   | Chat_response.Tool_execution_event.Started { call_id; name; kind; payload } ->
-    `Object
-      [ "call_id", `String call_id
-      ; "name", `String name
-      ; "kind", `String (execution_kind_name kind)
-      ; "payload", `String payload
-      ; "agent_page_kind", agent_page_kind classifications name
-      ]
-  | Progress { call_id; progress } ->
-    `Object [ "call_id", `String call_id; "progress", progress_payload progress ]
-  | Finished { call_id; outcome; output } ->
-    `Object
-      [ "call_id", `String call_id
-      ; "outcome", `String (outcome_text outcome)
-      ; "output", optional_output output
-      ]
-  | Trace { call_id; trace } ->
-    `Object [ "call_id", `String call_id; "trace", trace_payload trace ]
-;;
-
-let redacted_tool_event config = function
-  | Chat_response.Tool_execution_event.Started event ->
-    Chat_response.Tool_execution_event.Started
-      { event with
-        payload = config.Config.redact_tool_payload ~name:event.name event.payload
-      }
-  | Trace { call_id; trace = Ochat_function.Trace.Tool_started event } ->
-    let trace =
-      Ochat_function.Trace.Tool_started
-        { event with
-          payload = config.Config.redact_tool_payload ~name:event.name event.payload
-        }
-    in
-    Trace { call_id; trace }
-  | event -> event
-;;
-
-let tool_event_payload config event =
-  tool_event_payload_unredacted
-    config.Config.agent_page_classifications
-    (redacted_tool_event config event)
+    started ~parent ~call_id ~name ~kind ~payload
+  | Progress { call_id; progress } -> progressed ~parent ~call_id progress
+  | Finished { call_id; outcome; output } -> finished ~parent ~call_id outcome output
+  | Trace { call_id = parent; trace } ->
+    let parent = Some A.Key.{ scope = scope.key; call_alias = parent } in
+    (match trace with
+     | Ochat_function.Trace.Inference_live _ ->
+       Error
+         (Agent_protocol.Error.create
+            Invalid_state
+            ~message:
+              "neutral child transcript must be routed before tool activity projection"
+            ~retryable:false
+            ())
+     | Tool_started { call_id; name; kind; payload } ->
+       started ~parent ~call_id ~name ~kind ~payload
+     | Tool_progress { call_id; progress } -> progressed ~parent ~call_id progress
+     | Tool_finished { call_id; outcome; output } ->
+       finished ~parent ~call_id outcome output)
 ;;
 
 let require_ok = function
@@ -344,15 +284,7 @@ let moderator_snapshot = function
        raise
          (Worker_failure
             (Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()))
-     | Ok snapshot ->
-       Some
-         (`Object
-             [ ( "identity_snapshot_sexp"
-               , `String
-                   (Sexp.to_string_mach
-                      ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot))
-               )
-             ]))
+     | Ok snapshot -> Some (Moderator_checkpoint.encode snapshot))
 ;;
 
 let moderate_appended_history config history on_runtime_request =
@@ -449,34 +381,32 @@ let run
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
+        ~inference_context:config.inference_context
+        ~inference_identity:config.inference_identity
+        ~on_inference_attempt:config.on_inference_attempt
+        ~on_inference_completion:config.on_inference_completion
+        ~on_inference_observation:config.on_inference_observation
         ~datadir:config.response_dir
         ~allocator:(allocator capabilities)
         ~id_source:capabilities.id_source
         ~history
         ~tools:(Some config.tools)
         ~tool_tbl:config.tool_tbl
-        ?temperature:config.temperature
-        ?max_output_tokens:config.max_output_tokens
-        ?reasoning:config.reasoning
         ?moderator:config.moderator
         ?runtime_policy
         ~before_model_call:(fun () ->
           capabilities.admit_notification_turn () |> require_ok)
         ?prepare_model_input
-        ~on_sourced_event:(fun event ->
-          checkpoint_moderator ();
-          publish_live ~kind:Sourced_stream ~payload:(sourced_payload event))
-        ~on_history_event:(fun event ->
-          publish_live
-            ~kind:History_correlated_stream
-            ~payload:(history_event_payload event))
+          (* Transient observations can arrive while an invocation owns the
+           moderator checkpoint. Persistence belongs to the explicit owner and
+           turn boundaries; these callbacks only publish admitted live data. *)
+        ~on_transcript_event:(fun event ->
+          publish_live (Agent_protocol.Event.Recoverable.Transcript event))
         ~on_history_item_appended:(fun entry ->
           capabilities.commit_entry entry |> require_ok)
-        ~on_tool_execution:(fun event ->
-          checkpoint_moderator ();
-          publish_live
-            ~kind:(tool_event_kind event)
-            ~payload:(tool_event_payload config event))
+        ~on_scoped_tool_execution:(fun ~scope event ->
+          let event = tool_activity config ~scope event |> require_ok in
+          publish_live (Agent_protocol.Event.Recoverable.Tool_activity event))
         ~authorize_tool:(authorize_tool config input capabilities)
         ?dispatch_tool:
           (Option.map dispatch_tool ~f:(fun make -> make ~input ~capabilities))
@@ -490,10 +420,6 @@ let run
              ?notification_input:
                (Option.map notification_input ~f:(fun make -> make ~input))
              capabilities)
-        ~model:config.model
-        ?prompt_cache_key:config.prompt_cache_key
-        ?prompt_cache_retention:config.prompt_cache_retention
-        ?post_stream:config.post_stream
         ~sw
         ()
   in

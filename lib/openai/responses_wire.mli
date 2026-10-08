@@ -316,6 +316,14 @@ module Tracker : sig
         }
     | Error of Provider_error.t
 
+  (** Pure redacted explanation of an already rejected exact event. Does not
+      change validation, equality, tracker state or admission. *)
+  val item_conflict_detail
+    :  t
+    -> Event.t
+    -> output_index:int
+    -> Inference.Observation.Diagnostic.Protocol_violation.Item_conflict.t option
+
   val create : Origin.t -> t
 
   (** Functional, single-response state. An exact duplicate finalization is
@@ -328,6 +336,12 @@ module Tracker : sig
       Deltas are not assembled here; supplied final text/part/annotation snapshots
       are checked against final items. Retention is linear in observed slots and
       parts; retain only the returned tracker if old snapshots are unneeded.
+      An already-finalized reasoning item permits ONLY terminal-snapshot
+      encrypted_content nonempty-string replacement, with every other field
+      exact (including unknown fields and presence). The original item.done is
+      authoritative for replay; raw terminal response is retained unchanged.
+      Repeated item.done snapshots remain exact. No tool/input/identity guard
+      is relaxed.
       Equality ignores object key order but preserves array order, exact string
       and numeric representation, and field presence. Unknown annotations have
       no invented value; a null annotation still requires its indexed slot. *)

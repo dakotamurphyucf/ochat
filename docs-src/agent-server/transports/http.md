@@ -13,7 +13,7 @@ digests, scopes, attributes and optional expiry; the raw token belongs only to
 clients. Use [the generated example](../../examples/agent-server/README.md).
 
 RPC requires exactly one `Content-Type: application/json` (UTF-8 if a charset is
-specified) and `ochat-protocol-version: 1.0` (also accepts `1`). First POST an
+specified) and `ochat-protocol-version: 2.0` (also accepts `2`). First POST an
 initialization request without a connection ID; retain the returned
 `ochat-connection-id` response header. Subsequent RPCs, connection notification
 streams, and connection deletion use that ID with the same principal. This is a

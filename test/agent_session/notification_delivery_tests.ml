@@ -163,11 +163,7 @@ let%expect_test
             assert (Jsonaf.exactly_equal failure.details `Null);
             assert (not (String.is_substring failure.message ~substring:"saved result"))
           | _ -> failwith "wake disposition did not match admission");
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          assert (List.equal P.Delivery.equal state.deliveries restored.deliveries);
          print_s
            [%sexp

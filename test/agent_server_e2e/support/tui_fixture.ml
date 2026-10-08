@@ -146,6 +146,8 @@ let frame_events contents =
         Agent_store.Frame.decode ~max_payload_length:(16 * 1024 * 1024) ~contents ~offset
       with
       | Ok (Incomplete_tail _) -> List.rev acc |> List.concat
+      | Ok (Complete { frame; next_offset }) when Agent_store.Frame.flags frame <> 0 ->
+        loop next_offset acc
       | Ok (Complete { frame; next_offset }) ->
         let transaction =
           Agent_store.Frame.payload frame |> Agent_store.Transaction.decode
@@ -153,7 +155,9 @@ let frame_events contents =
         let events =
           match transaction with
           | Ok transaction ->
-            Agent_session.Session_persistence.durable_events transaction
+            Agent_session.Session_persistence.durable_events
+              ~limits:Document_schema.Limits.default
+              transaction
             |> Result.map_error ~f:(fun error ->
               Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
             |> Result.ok_or_failwith
@@ -181,14 +185,21 @@ let assert_user entries text =
   match users with
   | [ actual ] ->
     let expected =
-      Agent_session.History_codec.user_text ~id:actual.id text
+      Openai.Responses.Item.Input_message
+        { role = User
+        ; content = [ Text { text; _type = "input_text" } ]
+        ; _type = "message"
+        }
+      |> Openai.Responses_history.create_with_id_exn ~id:actual.id
       |> Agent_session.History_codec.to_protocol
     in
-    require
-      (Sexp.equal
-         ([%sexp_of: Agent_protocol.History.entry] actual)
-         ([%sexp_of: Agent_protocol.History.entry] expected))
-      "TUI submitted different content"
+    if not (Agent_protocol.History.equal_entry actual expected)
+    then
+      raise_s
+        [%sexp
+          "TUI submitted different content"
+        , (actual : Agent_protocol.History.entry)
+        , (expected : Agent_protocol.History.entry)]
   | _ ->
     raise_s
       [%sexp
@@ -229,4 +240,29 @@ let offline_environment (env : Eio_unix.Stdenv.base) : Eio_unix.Stdenv.base =
     method debug = env#debug
     method backend_id = env#backend_id
   end
+;;
+
+let assert_public_user entries text =
+  let users =
+    List.filter entries ~f:(fun entry -> Public_view.has_header entry (Message User))
+  in
+  match users with
+  | [ entry ] ->
+    require
+      (List.equal String.equal (Public_view.history_text entry) [ text ])
+      "TUI submitted different public content"
+  | [] | _ :: _ :: _ -> failwith "TUI did not submit exactly one public user entry"
+;;
+
+let assert_public_rows model entries =
+  let expected =
+    Chat_tui.Conversation.project_public_entries entries |> Chat_tui.Conversation.rows
+  in
+  let actual = Chat_tui.Model.projected_rows model |> Array.to_list in
+  require
+    (List.equal Chat_tui.Projected_message.render_equal actual expected)
+    "TUI public row IDs, provenance, disclosure or readable content differ";
+  require
+    (List.is_empty (Chat_tui.Model.history_items model))
+    "attached public rows entered standalone canonical history"
 ;;

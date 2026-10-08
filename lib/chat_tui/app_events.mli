@@ -64,12 +64,9 @@ type internal_event =
   | `Moderator_overlay_changed of Chat_response.Moderation.Overlay_change.t
   | `Start_turn of App_runtime.turn_start_reason
   | `Streaming_started of int * Eio.Switch.t
-  | `Stream of int * Openai.Responses.Response_stream.t
-  | `Stream_batch of int * Openai.Responses.Response_stream.t list
-  | `Sourced_stream of int * Chat_response.Sourced_response_event.t
-  | `Sourced_stream_batch of int * Chat_response.Sourced_response_event.t list
-  | `History_stream of int * Chat_response.History_stream_event.t
-  | `History_stream_batch of int * Chat_response.History_stream_event.t list
+  | `Transcript of int * Transcript.Stream.t
+  | `Transcript_batch of int * Transcript.Stream.t list
+  | `History_committed of int * History_entry.t
   | `Tool_execution of int * Chat_response.Tool_execution_event.t
   | `Tool_output of int * History_entry.t
   | `Moderator_runtime_request of int * Chat_response.Moderation.Runtime_request.t

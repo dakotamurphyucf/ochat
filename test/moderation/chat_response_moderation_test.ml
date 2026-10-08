@@ -335,3 +335,81 @@ let%expect_test "capability registry adapts named model recipes" =
     state={ seen = [|`Ok(`Object([|{ key = summary; value = `String(payload) }, { key = source; value = `String(moderation-test) }|])), job-1|] }
     |}]
 ;;
+
+let%test_unit "canonical captured history enters scripts through neutral semantics" =
+  let module P = History_entry.Payload in
+  let semantic =
+    P.Semantic.create
+      (Message
+         { form = Input
+         ; role = Developer
+         ; content =
+             [ Text { text = "selected policy"; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:P.Metadata.empty
+    |> ok_or_fail
+  in
+  let raw =
+    `Object
+      [ "type", `String "future.private.envelope"
+      ; "credential_like", `String "private capture must not become a script field"
+      ; "future", `Number "1e+00"
+      ]
+  in
+  let payload = P.captured semantic ~origin:P.Origin.unavailable ~raw |> ok_or_fail in
+  let id = History_entry.Id.create ~namespace:"script-view" ~sequence:0 |> ok_or_fail in
+  let entry = History_entry.create_with_id ~id payload in
+  let projected = Moderation.Entry_projection.project_item entry in
+  assert (String.equal projected.id (History_entry.Id.to_string id));
+  assert (
+    Jsonaf.exactly_equal
+      projected.value
+      (`Object
+          [ "type", `String "message"
+          ; "role", `String "developer"
+          ; ( "content"
+            , `Array
+                [ `Object
+                    [ "type", `String "input_text"; "text", `String "selected policy" ]
+                ] )
+          ]));
+  assert (
+    Jsonaf.exactly_equal (P.to_json payload) (P.to_json (History_entry.payload entry)))
+;;
+
+let%test_unit "neutral script view retains supported existing item semantics" =
+  let items =
+    [ Res.Item.Input_message
+        { role = System; content = [ input_text "policy" ]; _type = "message" }
+    ; Output_message
+        { role = Assistant
+        ; id = "wire-message"
+        ; content = [ output_text "answer" ]
+        ; status = "completed"
+        ; phase = None
+        ; _type = "message"
+        }
+    ; Function_call
+        { name = "inspect"
+        ; arguments = " exact bytes "
+        ; call_id = "wire-call"
+        ; _type = "function_call"
+        ; id = Some "wire-item"
+        ; status = Some "completed"
+        }
+    ; Function_call_output
+        { output = Text "result"
+        ; call_id = "wire-call"
+        ; _type = "function_call_output"
+        ; id = None
+        ; status = None
+        }
+    ]
+  in
+  List.iteri items ~f:(fun sequence item ->
+    let id = History_entry.Id.create ~namespace:"script-view" ~sequence |> ok_or_fail in
+    let entry = Openai.Responses_history.create_with_id_exn ~id item in
+    let projected = Moderation.Entry_projection.project_item entry in
+    assert (Document_schema.Json.equal projected.value (Res.Item.jsonaf_of_t item)))
+;;

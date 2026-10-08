@@ -5,11 +5,12 @@ version conversions, domain validation, and unknown-field preservation.
 `Agent_store.Document_record` connects this boundary to existing Frame v1 and
 original persisted-byte SHA-256 anchors. Neither library performs I/O.
 
-This is the storage foundation. Concrete adoption by snapshot, transaction,
-session state/delta, event, audit, archive, moderator and legacy prompt-session
-owners belongs to OCH-52. Existing `Snapshot.Persisted` and
-`Transaction.Persisted` binary codecs and `Session_persistence` sexp payloads
-have **not** been migrated by adding this library.
+Snapshot, transaction, session state/delta, event, audit, archive, moderator and
+standalone prompt-session owners now use complete named documents. Outer store
+wrappers use `Agent_store.Document_record`; embedded state and standalone session
+owners retain extension carriers across ordinary edits. The accepted storage
+contracts and beta format break are documented in
+[Neutral durable history](../../docs-src/neutral-history-persistence.md).
 
 ## New baseline envelope and wrappers
 
@@ -26,12 +27,11 @@ is a non-null object. Optional `required_semantics` is an array of unique,
 nonempty names; the domain codec rejects names it does not understand before
 constructing domain values. Unknown envelope members are retained.
 
-OCH-52 must put **outer** snapshot metadata and **outer** transaction counters,
-chain/session identifiers, audit, delta and events into named fields too. Placing
-this envelope inside the old derived binary wrapper does not establish the new
-boundary. Wide counters use validated decimal strings in each concrete payload
-schema. Embedded records must use their own registered document contracts, not
-opaque sexp strings containing current runtime types.
+Outer snapshot metadata and outer transaction counters, chain/session identifiers,
+audit, delta and events are named fields. The complete frame payload is the
+universal document; no derived binary wrapper surrounds it. Wide counters use
+validated decimal strings in each concrete payload schema. Embedded records use
+their own registered document contracts with explicit `Document.t` child values.
 
 Pre-baseline beta sessions may be incompatible by accepted policy. Unsupported
 binary/sexp document payloads return `Unsupported_beta_format`; damaged/newer
@@ -95,17 +95,23 @@ unknown field. This returns `Extension_conflict`, even if the values happen to
 match. Schema promotion must happen explicitly in a conversion followed by
 current decoding.
 
-Array shapes can declare an owned, unique, nonempty string identity field. Host
-IDs then attach unknown fields to the correct entries through reorder and edits;
+Array shapes can declare an owned, unique, nonempty string identity field.
+`allow_empty_identity:true` explicitly permits empty dictionary keys; host IDs
+keep the default nonempty policy. Host IDs then attach unknown fields to the correct entries through reorder and edits;
 array order follows the replacement domain. Removing an entry with unknown data
 fails with `Extension_conflict`. A carrier also retains its original identity
-policy: changing between keyed/unkeyed arrays or changing the identity field
-while unknown data exists fails with `Extension_conflict`. Without identity, an
+policy: changing between keyed/unkeyed arrays, changing the identity field, or
+changing the empty-key policy while unknown data exists fails with `Extension_conflict`. Without identity, an
 array with unknown data can
 be emitted only when its known projection is semantically unchanged: object key
 order may normalize, but array order, numeric lexemes and absence/null may not.
 The conservative check prevents unknown data from attaching to a different
 entry. Identity lookup uses maps/sets rather than an unbounded quadratic scan.
+
+`tagged_object` declares a named discriminator and variant-specific object
+ownership. Unknown members stay attached to their admitted variant; changing a
+tag while unknown data remains fails with `Extension_conflict`. A tag change
+without unknown data uses the replacement variant's shape.
 
 New records deliberately use `of_authored_value`, with an empty carrier. Ordinary
 edits must never discard a restored carrier using this constructor. When a
@@ -123,6 +129,31 @@ and strings and malformed numeric lexemes reject. Validation and conversion
 boundaries use immutable JSON trees; the carrier retains the converted document
 and unknown tree for its lifetime. Callers should release carriers with their
 own loaded record lifecycle.
+
+Each abstract `Document.t` carries an immutable certificate of the limits that
+validated its exact JSON. `Document.validate document ~limits` reuses that proof
+for equal or componentwise looser limits. Any stricter component runs the complete
+validator, preserving its ordinary error ordering. New or replaced payloads receive
+a fresh certificate only after validation; there is no shared cache. Domain
+projection and preservation checks still run on every codec operation.
+
+`Document.replace_payload_scalars` validates the original under the requested
+bounds, then replaces only existing scalar object fields within its payload.
+Each replacement receives full scalar JSON validation. The operation preserves
+all keys, node counts, depth, unknown fields and envelope metadata. When every
+edit has nonincreasing compact escaped size, the original certificate proves the
+complete final bounds; any growth uses ordinary full inspection. Ordered edits
+cannot repair an invalid original. Returned payload and metadata are refreshed
+together, and callers still perform domain validation.
+
+`Domain_codec.create` validates emitted projections by decoding them again.
+For a complete typed serializer, `create_validated` instead requires an explicit
+validator of the original domain value before serialization. Its serializer must
+faithfully represent every valid domain value; codec owners verify full domain
+roundtrips. This preserves invariants that serialization could normalize away
+and avoids reconstructing the domain solely to validate authored output. JSON
+bounds, declared shape, unexpected fields, preservation merge, final document
+admission and stored-document decoding remain checked.
 
 ## Verification
 

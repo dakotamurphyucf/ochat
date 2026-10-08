@@ -5,15 +5,24 @@
   completions
   embeddings
   responses
+  responses_history
+  responses_live
   responses_wire
   responses_request
   responses_sse
   responses_codec
+  inference_adapter
+  inference_input
+  inference_output
   responses_driver
+  responses_replay
+  responses_websocket
   responses_json
   grader)
- (private_modules responses_json)
- (libraries
+ (private_modules responses_json inference_input inference_output responses_websocket)
+ (libraries ochat.document_schema ochat.inference ochat.inference_runtime
+  ochat.history_entry
+  ochat.transcript
   io
   jsonaf_ext
   ca-certs

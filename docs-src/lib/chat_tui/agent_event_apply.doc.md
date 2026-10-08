@@ -15,21 +15,10 @@ resources; preserve typed errors/cancellation and the host's authorization
 boundary rather than bypassing the actor from a presentation adapter.
 
 ```ocaml
-open! Core
-
-(** Applies server projections to the existing mutable TUI presentation
-    model. Durable history is replaced by identity; recoverable provider
-    events remain presentation-only. Sourced events own live text; their paired
-    history-correlated notifications must not append the same delta twice.
-    Committed IDs suppress stale live rows, while tool progress is applied once
-    per operation sequence even when a durable revision rebuilds Chat rows.
-    Reconciliation considers both revision and durable sequence because one
-    commit may contain several visible changes. Durable terminal observations
-    close Agent-page calls even when transient finish events were coalesced away;
-    starting another operation clears the previous operation's transient calls.
-    Work metadata is replaced on every projection, including scope/generation
-    changes. The returned damage still describes Chat history layout only. *)
-
+(** Render authoritative typed client state. Draft/activity sequence admission,
+    gaps and terminal fencing belong to Agent_client, never a TUI event counter.
+    Public views cannot populate writable canonical context. Actual tool results
+    remain distinct from an ended operation whose tool outcome was not observed. *)
 type t
 
 val create : unit -> t

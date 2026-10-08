@@ -6,18 +6,18 @@ open Core
     restore a chat between two executions of the binary:
 
     * the system/user prompt file that seeded the conversation
-    * the full message exchange with OpenAI (the {!module:History})
+    * the provider-independent message exchange (the {!module:History})
     * an optional lightweight task-list
     * an optional persisted moderator snapshot
     * arbitrary key/value metadata
     * a virtual file-system (VFS) root used by tooling
 
-    {!module:Legacy} defines frozen historical schemas and explicit upgrade
-    functions. Use [Session_store] for migration-aware file loading;
-    {!module:Io} reads only the current production schema. *)
+    Named-field documents are converted before constructing runtime values.
+    Previous beta binary formats are deliberately unsupported. Use
+    [Session_store] for atomic, locked snapshot writes. *)
 
 module History : sig
-  (** Ordered list of OpenAI exchange items that form the conversation
+  (** Ordered list of canonical conversation entries that form the conversation
       history.  The concrete list type is exposed for convenience but
       callers should treat the list as immutable. *)
   type t = History_entry.t list [@@deriving bin_io, sexp]
@@ -47,7 +47,14 @@ module Task : sig
   val create : ?id:string -> title:string -> ?state:state -> unit -> t
 end
 
-module Snapshot = Chatml.Chatml_value_codec.Snapshot
+module Snapshot : sig
+  include
+    module type of Chatml.Chatml_value_codec.Snapshot
+    with type t = Chatml.Chatml_value_codec.Snapshot.t
+
+  val validate : t -> (unit, string) Result.t
+  val shape : Document_schema.Shape.t
+end
 
 module Moderator_snapshot : sig
   (** Persisted moderator runtime state and durable overlay data.
@@ -104,12 +111,14 @@ module Moderator_snapshot : sig
 end
 
 module Moderator_state : sig
+  (** Durable overlay values are neutral history payloads, preserving captured
+      provider data exactly. Script state and queued events remain ChatML values. *)
   module Identity_snapshot : sig
     module Inserted : sig
       type t =
         { entry_id : History_entry.Id.t
         ; change_id : int
-        ; value : Snapshot.t
+        ; value : History_entry.Payload.t
         ; script_label : string option
         }
       [@@deriving bin_io, sexp]
@@ -119,7 +128,7 @@ module Moderator_state : sig
       type t =
         { target_id : History_entry.Id.t
         ; change_id : int
-        ; value : Snapshot.t
+        ; value : History_entry.Payload.t
         ; script_label : string option
         }
       [@@deriving bin_io, sexp]
@@ -148,6 +157,22 @@ module Moderator_state : sig
       ; halted_reason : string option
       }
     [@@deriving bin_io, sexp]
+
+    (** Required nullable option fields; integer counters use decimal strings.
+        Raw decoding is pure; the owning document retains unknown fields. *)
+    val to_jsonaf : t -> Jsonaf.t
+
+    val of_jsonaf : Jsonaf.t -> (t, string) Result.t
+    val validate : t -> (unit, string) Result.t
+
+    (** Insertions must be disjoint from canonical and deferred host identities.
+        Replacements intentionally keep their target identity. *)
+    val validate_history_ids
+      :  t
+      -> history_ids:History_entry.Id.t list
+      -> (unit, string) Result.t
+
+    val shape : Document_schema.Shape.t
   end
 
   type t =
@@ -284,18 +309,23 @@ module Shell_state : sig
     }
   [@@deriving bin_io, sexp]
 
+  val to_jsonaf : t -> Jsonaf.t
+  val of_jsonaf : Jsonaf.t -> (t, string) Result.t
+  val shape : Document_schema.Shape.t
   val empty : t
 end
 
-(** Schema version emitted by the current binary.  Increment whenever
-    the latest {!type:t} becomes incompatible with its previous shape. *)
+(** Current runtime marker. Document versions are independent of changes to
+    the OCaml record representation. *)
 val current_version : int
 
-(** Latest on-disk representation (post-migration). *)
+(** Current runtime value. [storage] carries the immutable preservation context;
+    ordinary record updates must retain it. It is not a second conversation. *)
 type t =
   { version : int (** Authoring schema version.                    *)
   ; id : string (** Globally-unique session identifier.          *)
   ; prompt_file : string (** Absolute path of the source prompt file.     *)
+  ; inference_target : Inference.Selection.t
   ; local_prompt_copy : string option
     (** Optional prompt copy inside the session directory.    *)
   ; history : History.t
@@ -306,8 +336,8 @@ type t =
   ; kv_store : (string * string) list
     (** Arbitrary metadata keyed by user-defined strings.       *)
   ; vfs_root : string (** Root directory for virtual files.           *)
+  ; storage : unit Document_schema.Extension_carrier.t
   }
-[@@deriving bin_io, sexp]
 
 (** [create ?id ?local_prompt_copy ?history ?tasks ?kv_store ?vfs_root
     ~prompt_file ()] constructs a brand-new session value.
@@ -325,6 +355,7 @@ type t =
 val create
   :  ?id:string
   -> prompt_file:string
+  -> ?inference_target:Inference.Selection.t
   -> ?local_prompt_copy:string
   -> ?history:History.t
   -> ?next_history_sequence:int
@@ -351,245 +382,28 @@ val reset : ?prompt_file:string -> t -> t
     runtime. Only the prompt file may change. *)
 val reset_keep_history : ?prompt_file:string -> t -> t
 
-module Latest : sig
-  (** Alias to the latest schema – useful for version-agnostic code. *)
-  type nonrec t = t [@@deriving bin_io, sexp]
-
-  val version : int
-end
-
-module Legacy : sig
-  (** Previous schema versions plus upgrade paths to {!Latest}. *)
-
-  module Raw_history : sig
-    type t = Openai.Responses.Item.t list [@@deriving bin_io, sexp]
-  end
-
-  module V0 : sig
-    type t =
-      { id : string
-      ; prompt_file : string
-      ; history : Raw_history.t
-      ; tasks : Task.t list
-      ; kv_store : (string * string) list
-      ; vfs_root : string
-      }
-    [@@deriving bin_io, sexp]
-
-    val version : int
-  end
-
-  val upgrade_v0 : V0.t -> t
-
-  module V1 : sig
-    type t =
-      { version : int
-      ; id : string
-      ; prompt_file : string
-      ; history : Raw_history.t
-      ; tasks : Task.t list
-      ; kv_store : (string * string) list
-      ; vfs_root : string
-      }
-    [@@deriving bin_io, sexp]
-
-    val version : int
-  end
-
-  val upgrade_v1 : V1.t -> t
-
-  module V2 : sig
-    type t =
-      { version : int
-      ; id : string
-      ; prompt_file : string
-      ; local_prompt_copy : string option
-      ; history : Raw_history.t
-      ; tasks : Task.t list
-      ; kv_store : (string * string) list
-      ; vfs_root : string
-      }
-    [@@deriving bin_io, sexp]
-
-    val version : int
-  end
-
-  val upgrade_v2 : V2.t -> t
-
-  module V3 : sig
-    type t =
-      { version : int
-      ; id : string
-      ; prompt_file : string
-      ; local_prompt_copy : string option
-      ; history : Raw_history.t
-      ; tasks : Task.t list
-      ; moderator_snapshot : Moderator_snapshot.t option
-      ; kv_store : (string * string) list
-      ; vfs_root : string
-      }
-    [@@deriving bin_io, sexp]
-
-    val version : int
-  end
-
-  val v3_of_session : t -> V3.t
-  val session_of_v3 : V3.t -> t
-  val v3_of_v0 : V0.t -> V3.t
-  val v3_of_v1 : V1.t -> V3.t
-  val v3_of_v2 : V2.t -> V3.t
-end
-
-module V4 : sig
-  val version : int
-
-  module Moderator_state : sig
-    module Identity_snapshot : sig
-      module Inserted : sig
-        type t =
-          { entry_id : History_entry.Id.t
-          ; change_id : int
-          ; value : Snapshot.t
-          ; script_label : string option
-          }
-        [@@deriving bin_io, sexp]
-      end
-
-      module Replacement : sig
-        type t =
-          { target_id : History_entry.Id.t
-          ; change_id : int
-          ; value : Snapshot.t
-          ; script_label : string option
-          }
-        [@@deriving bin_io, sexp]
-      end
-
-      module Tombstone : sig
-        type t =
-          { target_id : History_entry.Id.t
-          ; change_id : int
-          }
-        [@@deriving bin_io, sexp]
-      end
-
-      type t =
-        { script_id : string
-        ; script_source_hash : string
-        ; current_state : Snapshot.t
-        ; queued_internal_events : Snapshot.t list
-        ; halted : bool
-        ; revision : int
-        ; next_change_id : int
-        ; prepended_items : Inserted.t list
-        ; appended_items : Inserted.t list
-        ; replacements : Replacement.t list
-        ; tombstones : Tombstone.t list
-        ; halted_reason : string option
-        }
-      [@@deriving bin_io, sexp]
-    end
-
-    type t =
-      { legacy_snapshot : Moderator_snapshot.t option
-      ; identity_snapshot : Identity_snapshot.t option
-      ; extensions : (string * Snapshot.t) list
-      }
-    [@@deriving bin_io, sexp]
-
-    val of_legacy : Moderator_snapshot.t option -> t
-  end
-
-  type t =
-    { version : int
-    ; id : string
-    ; prompt_file : string
-    ; local_prompt_copy : string option
-    ; history : History_entry.t list
-    ; next_history_sequence : int
-    ; tasks : Task.t list
-    ; moderator_state : Moderator_state.t
-    ; kv_store : (string * string) list
-    ; vfs_root : string
-    }
-  [@@deriving bin_io, sexp]
-
-  (** [allocator t] restores the runtime allocator from [t]'s next unused
-      sequence. *)
-  val allocator : t -> (History_entry.Allocator.t, string) result
-
-  val validate : t -> (unit, string) result
-  val of_v0 : Legacy.V0.t -> (t, string) result
-  val of_v1 : Legacy.V1.t -> (t, string) result
-  val of_v2 : Legacy.V2.t -> (t, string) result
-  val of_v3 : Legacy.V3.t -> (t, string) result
-
-  (** [reset ?prompt_file t] clears history without lowering the next unused
-      history sequence. *)
-  val reset : ?prompt_file:string -> t -> t
-
-  val reset_keep_history : ?prompt_file:string -> t -> t
-
-  module Io : sig
-    module File : sig
-      val read : Bin_prot_utils_eio.path -> t
-      val write : Bin_prot_utils_eio.path -> t -> unit
-    end
-  end
-end
-
-val of_v4 : V4.t -> t
-val to_v4 : t -> V4.t
-
-module V5 : sig
-  val version : int
-
-  type t =
-    { version : int
-    ; id : string
-    ; prompt_file : string
-    ; local_prompt_copy : string option
-    ; history : History_entry.t list
-    ; next_history_sequence : int
-    ; tasks : Task.t list
-    ; moderator_state : Moderator_state.t
-    ; shell_state : Shell_state.t
-    ; kv_store : (string * string) list
-    ; vfs_root : string
-    }
-  [@@deriving bin_io, sexp]
-
-  val of_v4 : V4.t -> t
-  val validate : t -> (unit, string) result
-  val reset : ?prompt_file:string -> t -> t
-  val reset_keep_history : ?prompt_file:string -> t -> t
-
-  module Io : sig
-    module File : sig
-      val read : Bin_prot_utils_eio.path -> t
-      val write : Bin_prot_utils_eio.path -> t -> unit
-    end
-  end
-end
-
-val of_v5 : V5.t -> t
-val to_v5 : t -> V5.t
-
-module Io : sig
-  (** Convenience wrappers for `Bin_prot_utils_eio` so that callers can
-      persist or restore a session snapshot from within an Eio fiber. *)
-
-  module File : sig
-    (** [read path] loads a version-5 snapshot produced by {!write}.
-        Use the session-store migration-aware reader for legacy snapshots. *)
-    val read : Bin_prot_utils_eio.path -> t
-
-    (** [write path session] serialises [session] to [path] using
-        `bin_dump` with a header.  The file is created (0600) or
-        truncated atomically. *)
-    val write : Bin_prot_utils_eio.path -> t -> unit
-  end
-end
-
 val allocator : t -> (History_entry.Allocator.t, string) result
 val validate : t -> (unit, string) result
+
+module Document : sig
+  (** Complete standalone.session v2 document. Version1 converts to an explicit
+      unresolved inference selection before current native decoding. Generic conversion precedes the
+      validated current decoder. Unknown fields survive edits; ambiguous edits
+      return Extension_conflict before any file write. *)
+  val encode : t -> (Document_schema.Document.t, Document_schema.Error.t) Result.t
+
+  val decode : Document_schema.Document.t -> (t, Document_schema.Error.t) Result.t
+  val to_string : t -> (string, Document_schema.Error.t) Result.t
+  val of_string : string -> (t, Document_schema.Error.t) Result.t
+end
+
+module Io : sig
+  module File : sig
+    (** Bounded document read. Raises on malformed or unsupported data. *)
+    val read : Eio.Fs.dir_ty Eio.Path.t -> t
+
+    (** Validates and encodes before opening the destination; direct write is
+        not atomic. Prefer Session_store.save for durable application updates. *)
+    val write : Eio.Fs.dir_ty Eio.Path.t -> t -> unit
+  end
+end

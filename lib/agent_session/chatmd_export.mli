@@ -1,13 +1,17 @@
 open! Core
 
-(** Rendering-neutral ChatMD export for canonical session history. *)
-
-(** [render entries] preserves stable history IDs and complete tool payloads. *)
+(** Neutral ChatMD presentation. Canonical rendering preserves host identity and
+    complete known semantic content; opaque items include inspectable neutral
+    payload JSON. No provider DTO decoding occurs. *)
 val render : History_entry.t list -> string
 
-(** Retain runtime notification provenance as an explicit export annotation.
-    An annotation is presentation metadata, not authority when a file is imported.
-    Redacted entries must first be replaced with the host's disclosure placeholder. *)
+(** Private canonical entries with explicit provenance annotations. An annotation
+    remains presentation metadata and is not authority when imported. *)
 val render_protocol
   :  Agent_protocol.History.entry list
   -> (string, Agent_protocol.Error.t) result
+
+(** Public read views retain their disclosure. Visible/Redacted export uses
+    explicit presentation markup, never fake canonical messages or placeholders.
+    The caller selects and projects entries under the current principal first. *)
+val render_public : Agent_protocol.Public.History.t list -> string

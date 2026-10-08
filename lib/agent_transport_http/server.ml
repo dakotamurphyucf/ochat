@@ -20,7 +20,7 @@ type t =
   ; authenticate :
       Agent_server.Authenticator.Request_identity.t
       -> string option
-      -> (Agent_protocol.Principal.t, Agent_protocol.Error.t) result
+      -> (Operator_authorization.t, Agent_protocol.Error.t) result
   ; max_body_bytes : int
   ; max_batch_size : int
   ; batch_concurrency : int
@@ -131,7 +131,8 @@ let find_connection t request principal =
         Error (protocol_error Permission_denied "HTTP connection authority differs"))
 ;;
 
-let create_connection t principal =
+let create_connection t actor =
+  let principal = Operator_authorization.principal actor in
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Map.length t.connections >= t.max_connections
     then Error (protocol_error Resource_limit "HTTP connection limit reached")
@@ -145,9 +146,9 @@ let create_connection t principal =
         then Eio.Fiber.fork ~sw:t.sw (fun () -> close_connection_id t id)
       in
       let context =
-        Agent_server.Connection_context.create
+        Agent_server.Connection_context.create_authenticated
           ~connection_id:id
-          ~principal
+          ~actor
           ~transport:Http
           ~publish_notification
           ~max_attachments:t.max_attachments
@@ -175,14 +176,15 @@ let first_envelope = function
   | Batch [] -> assert false
 ;;
 
-let resolve_rpc_connection t request principal body =
+let resolve_rpc_connection t request actor body =
+  let principal = Operator_authorization.principal actor in
   match P.Headers.get (P.Request.headers request) connection_header with
   | Some _ ->
     Result.map (find_connection t request principal) ~f:(fun value -> value, false)
   | None ->
     (match first_envelope body with
      | envelope when initializes envelope ->
-       Result.map (create_connection t principal) ~f:(fun connection -> connection, true)
+       Result.map (create_connection t actor) ~f:(fun connection -> connection, true)
      | _ ->
        Error (protocol_error Incompatible_protocol "initialize a HTTP connection first"))
 ;;
@@ -191,31 +193,34 @@ let request_body t request =
   Request_contract.request_body ~max_body_bytes:t.max_body_bytes request
 ;;
 
-let dispatch t connection envelope =
+let dispatch t ~actor connection envelope =
   Agent_server.Dispatcher.dispatch_envelope
     t.dispatcher
     ~context:connection.context
+    ~actor
     envelope
 ;;
 
-let dispatch_batch t connection envelopes =
+let dispatch_batch t ~actor connection envelopes =
   Eio.Fiber.List.map
     ~max_fibers:t.batch_concurrency
-    (fun envelope -> dispatch t connection envelope)
+    (fun envelope -> dispatch t ~actor connection envelope)
     envelopes
 ;;
 
-let dispatch_rpc t connection ~created = function
+let dispatch_rpc t ~actor connection ~created = function
   | Rpc_body.Single envelope ->
-    Result.map (dispatch t connection envelope) ~f:Option.to_list
+    Result.map (dispatch t ~actor connection envelope) ~f:Option.to_list
   | Batch (first :: rest) when created ->
     let open Result.Let_syntax in
-    let%bind first_response = dispatch t connection first in
-    let results = dispatch_batch t connection rest in
+    let%bind first_response = dispatch t ~actor connection first in
+    let results = dispatch_batch t ~actor connection rest in
     let%map responses = Result.all results in
     Option.to_list first_response @ List.filter_opt responses
   | Batch envelopes ->
-    Result.map (Result.all (dispatch_batch t connection envelopes)) ~f:List.filter_opt
+    Result.map
+      (Result.all (dispatch_batch t ~actor connection envelopes))
+      ~f:List.filter_opt
 ;;
 
 let rpc_response ~connection_id responses =
@@ -231,7 +236,7 @@ let rpc_response ~connection_id responses =
     |> fun values -> json_response ~connection_id (`Array values)
 ;;
 
-let handle_rpc t request principal =
+let handle_rpc t request actor =
   let open Result.Let_syntax in
   match
     let%bind () = require_json_content_type request in
@@ -239,9 +244,9 @@ let handle_rpc t request principal =
     let%bind body = request_body t request in
     let%bind body = Rpc_body.parse ~max_batch_size:t.max_batch_size body in
     let%bind (connection_id, connection), created =
-      resolve_rpc_connection t request principal body
+      resolve_rpc_connection t request actor body
     in
-    let%map responses = dispatch_rpc t connection ~created body in
+    let%map responses = dispatch_rpc t ~actor connection ~created body in
     connection_id, responses
   with
   | Error failure -> error_response failure
@@ -338,8 +343,8 @@ let parse_cursor = Request_contract.event_cursor
 let sse_durable event =
   sprintf
     "id: %Ld\nevent: session.event\ndata: %s\n\n"
-    event.Agent_protocol.Event.Durable.sequence
-    (Agent_protocol.Event.Durable.to_json event |> Jsonaf.to_string)
+    event.Agent_protocol.Public.Durable.sequence
+    (Agent_protocol.Public.Durable.to_json event |> Jsonaf.to_string)
 ;;
 
 let sse_recoverable event =
@@ -382,32 +387,42 @@ let close_session_sse entry (attachment : Agent_protocol.Session.Attachment.t) s
 
 let next_session_sse t principal entry attachment subscriber state heartbeat_interval =
   let sse_durable event =
-    sse_durable (Agent_server.Principal_projection.durable principal event)
+    match Agent_server.Principal_projection.durable principal event with
+    | Ok event -> sse_durable event
+    | Error _ ->
+      close_session_sse entry attachment state;
+      sse_snapshot_required
+        (protocol_error
+           Snapshot_required
+           "session event stream requires a fresh snapshot")
   in
-  state.last_pull <- now t;
-  match state.connected, state.replay with
-  | false, _ ->
-    state.connected <- true;
-    Some sse_connected
-  | true, event :: replay ->
-    state.replay <- replay;
-    Some (sse_durable event)
-  | true, [] ->
-    (match subscriber_item t subscriber ~heartbeat_interval with
-     | `Keep_alive -> Some ": keep-alive\n\n"
-     | `Item None ->
-       close_session_sse entry attachment state;
-       None
-     | `Item (Some (Ok (Durable event))) -> Some (sse_durable event)
-     | `Item (Some (Ok (Recoverable event))) ->
-       Some
-         (Option.value_map
-            (Agent_server.Principal_projection.recoverable principal event)
-            ~default:": filtered\n\n"
-            ~f:sse_recoverable)
-     | `Item (Some (Error error)) ->
-       close_session_sse entry attachment state;
-       Some (sse_snapshot_required error))
+  if state.closed
+  then None
+  else (
+    state.last_pull <- now t;
+    match state.connected, state.replay with
+    | false, _ ->
+      state.connected <- true;
+      Some sse_connected
+    | true, event :: replay ->
+      state.replay <- replay;
+      Some (sse_durable event)
+    | true, [] ->
+      (match subscriber_item t subscriber ~heartbeat_interval with
+       | `Keep_alive -> Some ": keep-alive\n\n"
+       | `Item None ->
+         close_session_sse entry attachment state;
+         None
+       | `Item (Some (Ok (Durable event))) -> Some (sse_durable event)
+       | `Item (Some (Ok (Recoverable event))) ->
+         Some
+           (Option.value_map
+              (Agent_server.Principal_projection.recoverable principal event)
+              ~default:": filtered\n\n"
+              ~f:sse_recoverable)
+       | `Item (Some (Error error)) ->
+         close_session_sse entry attachment state;
+         Some (sse_snapshot_required error)))
 ;;
 
 let watch_session_sse t entry attachment state stream heartbeat_interval =
@@ -478,10 +493,8 @@ let handle_session_events t request principal encoded_session_id =
 ;;
 
 let snapshot_etag snapshot =
-  sprintf
-    "\"%Ld-%Ld\""
-    snapshot.Agent_protocol.Snapshot.revision
-    snapshot.latest_event_sequence
+  let fields = Agent_protocol.Public.Snapshot.fields snapshot in
+  sprintf "\"%Ld-%Ld\"" fields.revision fields.latest_event_sequence
 ;;
 
 let handle_snapshot t request principal encoded_session_id =
@@ -489,7 +502,7 @@ let handle_snapshot t request principal encoded_session_id =
   match
     let%bind session_id = session_id encoded_session_id in
     let%bind entry, _ = authorized_entry t principal session_id in
-    let%map snapshot = Agent_session.Session_actor.snapshot entry.actor in
+    let%bind snapshot = Agent_session.Session_actor.snapshot entry.actor in
     Agent_server.Principal_projection.snapshot principal snapshot
   with
   | Error error -> error_response error
@@ -501,7 +514,8 @@ let handle_snapshot t request principal encoded_session_id =
       ^ (snapshot_etag snapshot |> String.filter ~f:(fun ch -> not (Char.equal ch '"')))
       ^ ":"
       ^ Digestif.SHA256.(
-          digest_string (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string)
+          digest_string
+            (Agent_protocol.Public.Snapshot.to_json snapshot |> Jsonaf.to_string)
           |> to_hex)
       ^ "\""
     in
@@ -514,7 +528,7 @@ let handle_snapshot t request principal encoded_session_id =
         ~headers:(P.Headers.of_list [ "content-type", "application/json"; "etag", etag ])
         ~body:
           (P.Body.of_string
-             (Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string))
+             (Agent_protocol.Public.Snapshot.to_json snapshot |> Jsonaf.to_string))
         `OK
 ;;
 
@@ -735,9 +749,10 @@ let path_segments request =
   |> List.filter ~f:(Fn.non String.is_empty)
 ;;
 
-let handle_authenticated t ~request_sw request principal =
+let handle_authenticated t ~request_sw request actor =
+  let principal = Operator_authorization.principal actor in
   match P.Request.meth request, path_segments request with
-  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request principal
+  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request actor
   | _, [ "v1"; "rpc" ] -> method_not_allowed [ "POST" ]
   | `POST, [ "v1"; "blobs" ] -> handle_blob_upload t request principal
   | _, [ "v1"; "blobs" ] -> method_not_allowed [ "POST" ]

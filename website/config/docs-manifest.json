@@ -4952,5 +4952,93 @@
     "title": "Documentation lab sample tutorial: workspace/sample-project/tutorials/passing.md",
     "reviewNote": "Included in the complete inline source reader and archive; the application walkthrough is public.",
     "provenance": "authored"
+  },
+  {
+    "id": "neutral-history-persistence",
+    "source": "docs-src/neutral-history-persistence.md",
+    "disposition": "repository-only",
+    "title": "Neutral durable history",
+    "reviewNote": "Accepted contributor architecture for canonical neutral history and durable document ownership. Provider runtime adoption remains a separate follow-up.",
+    "provenance": "authored"
+  },
+  {
+    "id": "neutral-transcript-protocol",
+    "source": "docs-src/neutral-transcript-protocol.md",
+    "disposition": "repository-only",
+    "title": "Neutral transcript projections",
+    "reviewNote": "Accepted contributor architecture for public transcript disclosure, neutral live projections and protocol ownership. User-facing protocol references remain published separately.",
+    "provenance": "authored"
+  },
+  {
+    "id": "neutral-inference-contracts",
+    "source": "docs-src/neutral-inference-contracts.md",
+    "disposition": "repository-only",
+    "title": "Neutral inference contracts",
+    "reviewNote": "Contributor architecture for pure private inference inputs, captured selections and safe observations. Runtime route migration and accounting integration require their separate implementation and qualification.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/neutral-inference",
+    "source": "docs-src/lib/neutral-inference.md",
+    "disposition": "repository-only",
+    "title": "Selected inference and host-owned execution",
+    "reviewNote": "Contributor reference for selected runtime and adapter ownership, canonical route migration, captured configuration and initializer recovery. Durable usage ledger/query integration is a separate OCH-59 change.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/inference-observations",
+    "source": "docs-src/lib/inference-observations.md",
+    "disposition": "repository-only",
+    "title": "Retained inference observations",
+    "reviewNote": "Contributor reference for bounded durable attempt and host-turn accounting, graph ownership, uncertainty, schema conversion and authorized read-only queries.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/provider_secret_store",
+    "source": "docs-src/lib/provider_secret_store.doc.md",
+    "disposition": "repository-only",
+    "title": "Private provider credential storage",
+    "reviewNote": "Contributor contract for private-file provider secret storage, native directory ownership, publication uncertainty and stable cross-process locks. No operator login workflow or live provider qualification is claimed.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/provider_oauth",
+    "source": "docs-src/lib/provider_oauth.doc.md",
+    "disposition": "repository-only",
+    "title": "Direct provider OAuth foundation",
+    "reviewNote": "Contributor contract for fixed endpoint browser/device flows, protected continuity, exact registry adapters and owner cancellation. Synthetic qualification does not claim live provider registration or direct route eligibility.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/credential_registry",
+    "source": "docs-src/lib/credential_registry.doc.md",
+    "disposition": "repository-only",
+    "title": "Shared host credential lifecycle",
+    "reviewNote": "Contributor contract for explicitly owned host credential authority, epoch and revision fencing, rotating intent uncertainty, local disable, owned cleanup and optional qualified ports. Synthetic macOS qualification only; no login workflow or live provider route is claimed.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/credential_registry_model",
+    "source": "docs-src/lib/credential_registry_model.doc.md",
+    "disposition": "repository-only",
+    "title": "Credential registry metadata model",
+    "reviewNote": "Contributor reference for bounded universal metadata, prospective revision reservations, validated grant presence/provenance and pure lifecycle transitions.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/operator_authorization",
+    "source": "docs-src/lib/operator_authorization.doc.md",
+    "disposition": "repository-only",
+    "title": "Provider operator authorization",
+    "reviewNote": "Contributor contract for opaque authenticated actor proofs, exact original credential lifetime, explicit trusted-local policy and final nonyielding publication guards.",
+    "provenance": "authored"
+  },
+  {
+    "id": "lib/provider_operator",
+    "source": "docs-src/lib/provider_operator.doc.md",
+    "disposition": "repository-only",
+    "title": "Host-owned provider operator service",
+    "reviewNote": "Contributor reference for shared runtime composition, explicit setup and protected local enrollment, owner-bound private login challenges, authorization, durable operation reconciliation and CLI recovery. Offline route tests do not claim live provider qualification.",
+    "provenance": "authored"
   }
 ]

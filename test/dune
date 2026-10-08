@@ -158,7 +158,7 @@
 (library
  (name chat_response_shell_tool_test)
  (modules chat_response_shell_tool_test)
- (libraries
+ (libraries inference_fixture
   core
   mirage-crypto-rng.unix
   eio
@@ -307,7 +307,7 @@
 (library
  (name relative_path_resolution_test)
  (modules relative_path_resolution_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   eio
@@ -585,7 +585,7 @@
 (library
  (name mcp_delegation_test)
  (modules mcp_delegation_test)
- (libraries core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
+ (libraries inference_fixture core core_unix eio eio_main mirage-crypto-rng.unix chat_response ochat.chatmd_shell_spec)
  (inline_tests (deps mcp_delegation_peer.exe))
  (preprocess (pps ppx_jane ppx_expect)))
 
@@ -763,7 +763,7 @@
 (library
  (name agent_protocol_test)
  (modules agent_protocol_test agent_invocation_test agent_extension_test)
- (libraries core expect_test_helpers_core ochat.agent_protocol)
+ (libraries uri core expect_test_helpers_core ochat.agent_protocol ochat.transcript)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -779,7 +779,7 @@
 (library
  (name agent_server_config_test)
  (modules agent_server_config_test)
- (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_server)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.operator_authorization)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -787,7 +787,7 @@
 (library
  (name agent_server_permission_test)
  (modules agent_server_permission_test)
- (libraries
+ (libraries inference_fixture
   core
   eio
   eio_main
@@ -804,7 +804,7 @@
 (library
  (name agent_client_test)
  (modules agent_client_test)
- (libraries core eio_main ochat.agent_protocol ochat.agent_client)
+ (libraries core eio_main ochat.agent_protocol ochat.agent_client ochat.transcript ochat.document_schema mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -818,6 +818,15 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_transport_http_projection_test)
+ (modules agent_transport_http_projection_test)
+ (libraries ochat.operator_authorization agent_server_test_support core eio eio_main eio.unix uri piaf
+  mirage-crypto-rng.unix ochat.agent_server ochat.agent_client
+  ochat.agent_protocol ochat.agent_transport_http)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name agent_transport_client_test)
  (modules agent_transport_client_test)
  (libraries
@@ -826,6 +835,7 @@
   eio_main
   mirage-crypto-rng.unix
   ochat.agent_protocol
+  ochat.document_schema
   ochat.agent_transport_client)
  (inline_tests)
  (preprocess
@@ -834,7 +844,7 @@
 (library
  (name agent_transport_stdio_test)
  (modules agent_transport_stdio_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -849,7 +859,7 @@
 (library
  (name agent_transport_socket_test)
  (modules agent_transport_socket_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -898,14 +908,14 @@
 (library
  (name agent_server_gap_test)
  (modules agent_server_gap_test)
- (libraries core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
+ (libraries agent_server_test_support core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_server_embedded_test)
  (modules agent_server_embedded_test)
- (libraries
+ (libraries agent_server_test_support
   core
   eio
   eio_main
@@ -920,9 +930,16 @@
 (library
  (name agent_server_test_support)
  (modules agent_server_test_support)
- (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (libraries mirage-crypto-rng.unix inference_fixture core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
  (preprocess
   (pps ppx_jane)))
+
+(library
+ (name agent_server_test_clock_test)
+ (modules agent_server_test_clock_test)
+ (libraries agent_server_test_support core eio eio.mock eio_main mtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_server_generated_test)
@@ -931,7 +948,7 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
-(test
+(executable
  (name agent_server_helper_test)
  (modules agent_server_helper_test agent_server_authored_helper_fixture)
  (libraries agent_server_test_support core core_unix eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client)
@@ -940,12 +957,25 @@
   (glob_files chatml_extensibility_fixtures/x07-helper-session/bundle/*)
   (glob_files chatml_extensibility_fixtures/x05-child-session/*)
   (glob_files chatml_extensibility_fixtures/x06-response-watcher/*))
- (action
-  (run
-   %{test}
-   %{exe:../bin/ochat_agent_helper.exe}))
  (preprocess
   (pps ppx_jane ppx_blob)))
+
+; Distinct actions let Dune schedule both complete variants independently.
+(rule
+ (alias runtest)
+ (action
+  (run
+   %{exe:agent_server_helper_test.exe}
+   %{exe:../bin/ochat_agent_helper.exe}
+   helper)))
+
+(rule
+ (alias runtest)
+ (action
+  (run
+   %{exe:agent_server_helper_test.exe}
+   %{exe:../bin/ochat_agent_helper.exe}
+   native)))
 
 (library
  (name agent_server_authored_shell_test)
@@ -1211,7 +1241,7 @@
 (executable
  (name generated_admission_test)
  (modules generated_admission_test)
- (libraries core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
+ (libraries inference_fixture core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
  (preprocess (pps ppx_jane)))
 
 (rule
@@ -1221,3 +1251,17 @@
 (alias
  (name runtest)
  (deps (alias runtest-generated-admission)))
+
+(library
+ (name credential_registry_model_test)
+ (modules credential_registry_model_test)
+ (libraries core jsonaf ochat.credential_registry_model ochat.document_schema)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name provider_operator_boundary_test)
+ (modules provider_operator_boundary_test)
+ (libraries core uri expect_test_helpers_core ochat.agent_protocol ochat.agent_server)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

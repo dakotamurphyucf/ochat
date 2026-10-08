@@ -125,7 +125,8 @@ let schedule_row (schedule : P.Schedule.t) =
   { key = P.Id.Schedule.to_string schedule.id; label = "Timer"; status; active }
 ;;
 
-let of_snapshot (snapshot : P.Snapshot.t) =
+let of_snapshot (snapshot : P.Public.Snapshot.t) =
+  let snapshot = P.Public.Snapshot.fields snapshot in
   let generation = snapshot.session.generation in
   let jobs =
     List.filter snapshot.jobs ~f:(fun job ->

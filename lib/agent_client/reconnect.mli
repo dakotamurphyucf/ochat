@@ -51,6 +51,7 @@ val create
   -> unit
   -> (t, Agent_protocol.Error.t) result
 
+val session_ref : t -> Agent_protocol.Session_ref.t
 val session_id : t -> Agent_protocol.Id.Session.t
 val attachment : t -> Agent_protocol.Session.Attachment.t option
 val reclaim_token : t -> string option
@@ -109,3 +110,9 @@ val read_audit
 
 val detach : t -> (unit, Agent_protocol.Error.t) result
 val close : t -> unit
+val pending_commands : t -> Connection.pending_command list
+
+val reconcile
+  :  t
+  -> Connection.pending_command
+  -> (Agent_protocol.Command_receipt.t, Agent_protocol.Error.t) result

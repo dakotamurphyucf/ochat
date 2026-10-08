@@ -1,8 +1,35 @@
 open Core
 open Fixtures
 
+let diagnose_terminal_failure backend ~case_index ~actual ~expected =
+  let failures =
+    Agent_session.Memory_backend.events_after backend 0L
+    |> protocol_ok
+    |> List.filter_map ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
+      match event.kind with
+      | Operation_failed ->
+        let operation = Agent_protocol.Operation.of_json event.payload |> protocol_ok in
+        (match operation.state with
+         | Failed error ->
+           Some
+             [%sexp
+               (error.code : Agent_protocol.Error.code)
+             , (String.prefix error.message 8_192 : string)]
+         | Starting | Running | Cancelling | Completed | Cancelled | Interrupted _ -> None)
+      | _ -> None)
+    |> Fn.flip List.take 8
+  in
+  print_s
+    [%sexp
+      "moderator routing failure diagnostic"
+    , (case_index : int)
+    , (actual : int)
+    , (expected : int)
+    , (failures : Sexp.t list)]
+;;
+
 let%test_unit "streamed native and moderator services share pre and post routing" =
-  List.iter
+  List.iteri
     [ `Success
     ; `Custom
     ; `Invalid
@@ -33,7 +60,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
     ; `Custom_dispatch_rejected
     ; `Custom_observer_failed
     ]
-    ~f:(fun mode ->
+    ~f:(fun case_index mode ->
       let calls = ref 0
       and admitted = ref 0
       and post_calls = ref 0
@@ -235,6 +262,29 @@ let%test_unit "streamed native and moderator services share pre and post routing
                          ; output_index = index
                          ; type_ = "response.function_call_arguments.done"
                          })
+                  ; Output_item_done
+                      { item =
+                          (if custom
+                           then
+                             Custom_function
+                               { name
+                               ; input = payload
+                               ; call_id
+                               ; _type = "custom_tool_call"
+                               ; id = Some item_id
+                               }
+                           else
+                             Function_call
+                               { name
+                               ; arguments = payload
+                               ; call_id
+                               ; _type = "function_call"
+                               ; id = Some item_id
+                               ; status = Some "completed"
+                               })
+                      ; output_index = index
+                      ; type_ = "response.output_item.done"
+                      }
                   ]
                 in
                 let initial =
@@ -308,16 +358,21 @@ let%test_unit "streamed native and moderator services share pre and post routing
             let tool_tbl = String.Table.create () in
             Hashtbl.set tool_tbl ~key:"read_file" ~data:(fun ~invocation:_ _ ->
               failwith "native adapter fell through");
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator =
                     Some
                       { manager
@@ -338,10 +393,6 @@ let%test_unit "streamed native and moderator services share pre and post routing
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload =
@@ -448,9 +499,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
                  | _ -> false
                then 0
                else 1);
-             assert (
-               !post_calls
-               =
+             let expected_post_calls =
                if
                  before_execution_failure
                  ||
@@ -460,7 +509,16 @@ let%test_unit "streamed native and moderator services share pre and post routing
                then 0
                else if mixed
                then 2
-               else 1);
+               else 1
+             in
+             if !post_calls <> expected_post_calls
+             then
+               diagnose_terminal_failure
+                 backend
+                 ~case_index
+                 ~actual:!post_calls
+                 ~expected:expected_post_calls;
+             assert (!post_calls = expected_post_calls);
              assert (
                !requests
                =
@@ -509,7 +567,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
 let%test_unit
     "streamed moderator tools use actor publication and preserve post-hook failures"
   =
-  List.iter
+  List.iteri
     [ `Success
     ; `Deny
     ; `Disclosure
@@ -550,7 +608,7 @@ let%test_unit
     ; `Pre_reject_end_multi
     ; `End_session_multi
     ]
-    ~f:(fun mode ->
+    ~f:(fun case_index mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
       let host_calls = ref 0 in
@@ -836,6 +894,29 @@ let%test_unit
                              ; output_index = 0
                              ; type_ = "response.function_call_arguments.done"
                              })
+                      ; Output_item_done
+                          { item =
+                              (if custom
+                               then
+                                 Custom_function
+                                   { name = "counter"
+                                   ; input = original_payload
+                                   ; call_id = "counter-call"
+                                   ; _type = "custom_tool_call"
+                                   ; id = Some "counter-item"
+                                   }
+                               else
+                                 Function_call
+                                   { name = (if redirected then "alias" else "counter")
+                                   ; arguments = original_payload
+                                   ; call_id = "counter-call"
+                                   ; _type = "function_call"
+                                   ; id = Some "counter-item"
+                                   ; status = Some "completed"
+                                   })
+                          ; output_index = 0
+                          ; type_ = "response.output_item.done"
+                          }
                       ]
                 in
                 if not multi
@@ -880,6 +961,18 @@ let%test_unit
                           ; output_index = 1
                           ; type_ = "response.custom_tool_call_input.done"
                           }
+                      ; Output_item_done
+                          { item =
+                              Custom_function
+                                { name = "counter"
+                                ; input = "null"
+                                ; call_id = "later-custom"
+                                ; _type = "custom_tool_call"
+                                ; id = Some "later-custom-item"
+                                }
+                          ; output_index = 1
+                          ; type_ = "response.output_item.done"
+                          }
                       ; Output_item_added
                           { item =
                               Function_call
@@ -898,6 +991,19 @@ let%test_unit
                           ; item_id = "later-native-item"
                           ; output_index = 2
                           ; type_ = "response.function_call_arguments.done"
+                          }
+                      ; Output_item_done
+                          { item =
+                              Function_call
+                                { name = "native"
+                                ; arguments = "null"
+                                ; call_id = "later-native"
+                                ; _type = "function_call"
+                                ; id = Some "later-native-item"
+                                ; status = Some "completed"
+                                }
+                          ; output_index = 2
+                          ; type_ = "response.output_item.done"
                           }
                       ; Output_item_done
                           { item = Output_message message
@@ -939,6 +1045,9 @@ let%test_unit
                   if Poly.equal mode `Disclosure then Error "blocked" else Ok ())
                 ()
             in
+            let inference =
+              Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+            in
             let worker =
               let tool_tbl = String.Table.create () in
               Hashtbl.set tool_tbl ~key:"native" ~data:(fun ~invocation:_ _ ->
@@ -947,12 +1056,14 @@ let%test_unit
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
+                ; inference_context = inference.context
+                ; inference_identity = inference.identity
+                ; on_inference_attempt = ignore
+                ; on_inference_observation = ignore
+                ; on_inference_completion = ignore
                 ; response_dir
                 ; tools = []
                 ; tool_tbl
-                ; temperature = None
-                ; max_output_tokens = None
-                ; reasoning = None
                 ; moderator =
                     Some
                       { manager
@@ -970,10 +1081,6 @@ let%test_unit
                 ; review_permission = (fun _ -> assert false)
                 ; history_compaction = false
                 ; parallel_tool_calls = true
-                ; model = Openai.Responses.Request.O3
-                ; prompt_cache_key = None
-                ; prompt_cache_retention = None
-                ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload =
@@ -1015,8 +1122,16 @@ let%test_unit
                     ~attachment_id:writer.id
                     entry));
              let after = Agent_session.Session_actor.state actor |> protocol_ok in
-             assert (Poly.equal state after));
-           assert (List.length state.invocations = if multi then 2 else 1);
+             assert_same_session_snapshot state after);
+           let expected_invocations = if multi then 2 else 1 in
+           if List.length state.invocations <> expected_invocations
+           then
+             diagnose_terminal_failure
+               backend
+               ~case_index
+               ~actual:(List.length state.invocations)
+               ~expected:expected_invocations;
+           assert (List.length state.invocations = expected_invocations);
            let invocation =
              List.find_exn state.invocations ~f:(fun inv ->
                Option.equal
@@ -1114,9 +1229,9 @@ let%test_unit
            in
            let saved_snapshot =
              match state.moderator with
-             | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
-               Session.Moderator_state.Identity_snapshot.t_of_sexp
-                 (Sexp.of_string encoded)
+             | Some (`Object [ ("identity_snapshot", encoded) ]) ->
+               Session.Moderator_state.Identity_snapshot.of_jsonaf encoded
+               |> Result.ok_or_failwith
              | _ -> assert false
            in
            let live = (Option.value_exn !live_snapshot) () in
@@ -1283,7 +1398,7 @@ let%test_unit
             let id =
               History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
             in
-            History_entry.create_with_id ~id item
+            Openai.Responses_history.create_with_id_exn ~id item
           in
           let request call_id =
             let call =
@@ -1324,7 +1439,7 @@ let%test_unit
               ~validate_work:(fun _ -> Error "no pending work")
               ~admit:(fun request ->
                 let call_id =
-                  match History_entry.item request.call with
+                  match Openai.Responses_history.item_exn request.call with
                   | Function_call c -> c.call_id
                   | _ -> assert false
                 in
@@ -1342,7 +1457,7 @@ let%test_unit
           let run request =
             let result = dispatch.run request ~authorize:ignore |> Option.value_exn in
             let call_id =
-              match History_entry.item request.call with
+              match Openai.Responses_history.item_exn request.call with
               | Function_call c -> c.call_id
               | _ -> assert false
             in

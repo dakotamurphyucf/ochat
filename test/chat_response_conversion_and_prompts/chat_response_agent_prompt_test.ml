@@ -1,4 +1,16 @@
 open Core
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_response_agent_prompt_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
@@ -48,7 +60,7 @@ let%expect_test "converter rebases local nested agent prompts to their prompt di
   @@ fun env ->
   let root, _ = write_nested_prompt env "converter" in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
+  let ctx = fixture_ctx ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
   let text =
     Converter.string_of_items
       ~ctx
@@ -75,7 +87,7 @@ let%expect_test "agent tool declarations reuse local nested prompt moderation" =
   @@ fun env ->
   let root, _ = write_nested_prompt env "tool" in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
+  let ctx = fixture_ctx ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
   Eio.Switch.run
   @@ fun sw ->
   let tools =
@@ -113,7 +125,7 @@ let%expect_test "agent tool forwards observed nested activity but direct run sta
   @@ fun env ->
   let root, _ = write_nested_prompt env "observed-tool" in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
+  let ctx = fixture_ctx ~env ~dir:root ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
   Eio.Switch.run
   @@ fun sw ->
   let observer_count = ref 0 in
@@ -124,14 +136,36 @@ let%expect_test "agent tool forwards observed nested activity but direct run sta
       observer
       ~f:(fun (observer : Chat_response.Agent_response_loop.observer) ->
         Int.incr observer_count;
-        observer.on_event
-          (Res.Response_stream.Output_text_delta
-             { content_index = 0
-             ; delta = "live"
-             ; item_id = "message"
-             ; output_index = 0
-             ; type_ = "response.output_text.delta"
-             }));
+        let ok = Result.ok_or_failwith in
+        let scope =
+          Transcript.Scope.create
+            ~source:(Transcript.Source_id.of_string "injected-child" |> ok)
+            ~attempt:(Transcript.Attempt_id.of_string "actual-fixture-invocation" |> ok)
+            ~relation:Root
+          |> ok
+        in
+        let item =
+          Transcript.Item.create
+            ~scope
+            ~id:(Transcript.Item_id.of_string "message" |> ok)
+            ~entry_id:None
+            ~header:None
+            ~call_name:None
+          |> ok
+        in
+        let part =
+          Transcript.Part.create
+            ~item
+            ~id:(Transcript.Part_id.of_string "text" |> ok)
+            ~index:(Some 0)
+            ~kind:Text
+          |> ok
+        in
+        Transcript.Stream.create
+          (Changed { target = Content part; change = Append "live" })
+          ~limits:Transcript.Admission.default
+        |> ok
+        |> observer.on_event);
     "FINAL"
   in
   let tool =
@@ -190,13 +224,22 @@ let%expect_test "mcp prompt agents pass prompt-relative context into run_agent" 
   @@ fun env ->
   let _, prompt_path = write_nested_prompt env "mcp" in
   let core = Mcp_server_core.create () in
+  let dir = Eio.Stdenv.cwd env in
+  let ctx =
+    fixture_ctx ~env ~dir ~tool_dir:dir ~cache:(Chat_response.Cache.create ~max_size:1 ())
+  in
   let _tool, handler, _prompt =
     Mcp_prompt_agent.of_chatmd_file_with_run_agent
+      ~inference_context:ctx.inference_context
+      ~inference_identity:ctx.inference_identity
+      ~on_inference_attempt:ctx.on_inference_attempt
+      ~on_inference_completion:ctx.on_inference_completion
       ~run_agent:(fun ?history_compaction:_ ?prompt_dir ?session_id ~ctx prompt items ->
         inspecting_run_agent ?prompt_dir ?session_id ~ctx prompt items)
       ~env
       ~core
       ~path:prompt_path
+      ()
   in
   (match handler (`Object [ "input", `String "hello" ]) with
    | Ok (`String text) -> print_endline text

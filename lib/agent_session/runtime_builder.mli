@@ -14,8 +14,6 @@ type model_job_outcome =
   | Model_succeeded of Jsonaf.t
   | Model_failed of string
 
-type model_post_stream = Chat_response.In_memory_stream.post_stream
-
 (** Native resources and compiled, non-evaluated extension definitions. No
     operation worker, moderator manager, history or actor service is installed. *)
 type resources = private
@@ -45,6 +43,11 @@ val prepare_resources
   :  native_registrations:Chat_response.Agent_runtime.native_registration list
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> sw:Eio.Switch.t
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
@@ -88,6 +91,11 @@ val prepare_authored_resources
   -> tool_name:string
   -> native_service_revision:string option
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> sw:Eio.Switch.t
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
@@ -198,6 +206,7 @@ type background_executor =
 
 type t =
   { worker : Operation_worker.t
+  ; inference_execution : Inference_client.Execution.t
   ; now : unit -> Agent_protocol.Timestamp.t
     (** Host wall clock shared by foreground, idle and delegated moderation and
         persisted workflow deadlines. Monotonic execution limits are separate. *)
@@ -208,7 +217,10 @@ type t =
   ; initial_history : History_entry.t list
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
-  ; mutable moderator_snapshot : Jsonaf.t option
+  ; moderator_snapshot : unit -> Jsonaf.t option
+    (** Latest successfully published startup checkpoint. Runtime record wrappers
+        share this owner-backed getter; copying the runtime does not freeze an
+        earlier checkpoint. Internal-event drains return their own snapshot values. *)
   ; moderator_manager : Chat_response.Moderator_manager.t option
   ; moderator_tools : Openai.Responses.Request.Tool.t list
   ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
@@ -256,7 +268,10 @@ type t =
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
-      recipe:string
+      inference_context:Inference_runtime.Context.t
+      -> capture_recipe_target:
+           (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
+      -> recipe:string
       -> payload:Jsonaf.t
       -> (model_job_outcome, Agent_protocol.Error.t) result
   ; enqueue_model_job_completion :
@@ -264,6 +279,8 @@ type t =
       -> Agent_protocol.Job.t
       -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; close : unit -> unit
+    (** Caller cancels/drains foreground and borrowed background workers first.
+        Closes and joins graph-owned inference channels, then persists cache. *)
   }
 
 type schedule_services =
@@ -277,7 +294,10 @@ type job_services =
       recipe:string
       -> payload:Jsonaf.t
       -> execute:
-           (unit
+           (inference_context:Inference_runtime.Context.t
+            -> before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+            -> capture_recipe_target:
+                 (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
             -> (Chat_response.Moderation.Capabilities.model_call_result, string) result)
       -> (Chat_response.Moderation.Capabilities.model_call_result, string) result
   }
@@ -310,6 +330,11 @@ val moderator_snapshot_observer
 val build
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
   -> revision:Prompt_revision.t
@@ -323,7 +348,6 @@ val build
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
   -> permission_profile:Permission_policy.t
-  -> model_post_stream:model_post_stream option
   -> review_permission:
        (Permission_policy.invocation
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
@@ -347,6 +371,11 @@ val build_with_extensions
   -> services:extension_services
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
   -> revision:Prompt_revision.t
@@ -360,7 +389,6 @@ val build_with_extensions
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
   -> permission_profile:Permission_policy.t
-  -> model_post_stream:model_post_stream option
   -> review_permission:
        (Permission_policy.invocation
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
@@ -398,6 +426,11 @@ val build_generated
   -> authority:Delegation_authority.t
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
   -> session_id:Agent_protocol.Id.Session.t
@@ -410,7 +443,6 @@ val build_generated
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
   -> permission_profile:Permission_policy.t
-  -> model_post_stream:model_post_stream option
   -> review_permission:
        (Permission_policy.invocation
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
@@ -440,6 +472,11 @@ val build_authored_child
   -> history:History_entry.t list
   -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> inference_context:Inference_runtime.Context.t
+  -> inference_identity:Chat_response.Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> on_inference_observation:(Inference.Observation.t -> unit)
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t
   -> session_id:Agent_protocol.Id.Session.t
@@ -451,10 +488,13 @@ val build_authored_child
   -> approval_provider:Shell_runtime.Approval_broker.provider
   -> approval_store:Shell_access.Approval.store
   -> permission_profile:Permission_policy.t
-  -> model_post_stream:model_post_stream option
   -> review_permission:
        (Permission_policy.invocation
         -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
   -> schedule_services:schedule_services
   -> job_services:job_services
   -> (t, Agent_protocol.Error.t) result
+
+(** Borrowed selected inference execution. Its host tracking ports and lifetime
+    belong to this runtime; install and retire it with the foreground worker. *)
+val inference_execution : t -> Inference_client.Execution.t

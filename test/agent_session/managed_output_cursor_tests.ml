@@ -25,12 +25,13 @@ let%expect_test "history epochs detect unread deletion and survive until replay 
     let before = Log.history_epoch log ~through_sequence:2L |> protocol_ok in
     Log.append
       log
-      [ event 3L (History_replaced (Agent_session.Session_state.history_window [])) ];
+      [ event 3L (History_replaced (Agent_session.Session_state.history_window [])) ]
+    |> protocol_ok;
     let replaced = Log.history_epoch log ~through_sequence:3L |> protocol_ok in
-    Log.append log [ event 4L idle ];
+    Log.append log [ event 4L idle ] |> protocol_ok;
     let retained = Log.history_epoch log ~through_sequence:4L |> protocol_ok in
     assert (Log.equal_history_epoch replaced retained);
-    Log.append log [ event 5L idle ];
+    Log.append log [ event 5L idle ] |> protocol_ok;
     let evicted = Log.history_epoch log ~through_sequence:5L |> protocol_ok in
     assert (not (Log.equal_history_epoch retained evicted));
     (match Log.history_epoch log ~through_sequence:3L with

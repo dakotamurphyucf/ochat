@@ -109,7 +109,19 @@ let on_event ctx state event = match event with
             }
           in
           let prepared =
+            let inference =
+              Inference_ports.create
+                ~config:
+                  (Chat_response.Config.of_elements
+                     (Agent_session.Prompt_revision.elements parent_revision))
+                ()
+            in
             B.prepare_authored_resources
+              ~inference_context:inference.context
+              ~inference_identity:inference.identity
+              ~on_inference_attempt:ignore
+              ~on_inference_observation:ignore
+              ~on_inference_completion:ignore
               ~native_registrations:[]
               ~parent_revision
               ~tool_name:"researcher"
@@ -160,6 +172,10 @@ let on_event ctx state event = match event with
           let parent =
             { parent with
               identity = { parent.identity with session_id = third_session_id }
+            ; inference_ledger =
+                fresh_inference_ledger
+                  ~session_id:third_session_id
+                  ~generation:parent.identity.generation
             ; spec =
                 { parent.spec with
                   prompt_revision_id = R.id parent_revision
@@ -195,6 +211,7 @@ let on_event ctx state event = match event with
                 |> protocol_ok
             ; lifetime = Owned
             ; created_at = timestamp
+            ; inference_target = None
             }
           in
           let reserved =
@@ -339,11 +356,32 @@ let on_event ctx state event = match event with
                   ; output_index = 0
                   ; type_ = "response.function_call_arguments.done"
                   }
+              ; Output_item_done
+                  { item =
+                      Function_call
+                        { name = "counter"
+                        ; arguments = "{}"
+                        ; call_id = id
+                        ; _type = "function_call"
+                        ; id = Some id
+                        ; status = Some "completed"
+                        }
+                  ; output_index = 0
+                  ; type_ = "response.output_item.done"
+                  }
               ]
               |> Stdlib.List.to_seq
             | _ -> Stdlib.Seq.empty
           in
           let build ?(snapshot = None) () =
+            let inference =
+              Inference_ports.create
+                ~post_stream
+                ~config:
+                  (Chat_response.Config.of_elements
+                     (Agent_session.Prompt_revision.elements revision))
+                ()
+            in
             B.build_authored_child
               ~services
               ~revision
@@ -363,7 +401,11 @@ let on_event ctx state event = match event with
               ~approval_provider:Shell_runtime.Approval_broker.None_available
               ~approval_store:(Shell_access.Approval.create_store ())
               ~permission_profile:profile
-              ~model_post_stream:(Some post_stream)
+              ~inference_context:inference.context
+              ~inference_identity:inference.identity
+              ~on_inference_attempt:ignore
+              ~on_inference_observation:ignore
+              ~on_inference_completion:ignore
               ~review_permission:(fun _ -> failwith "unexpected reviewer")
               ~schedule_services:
                 { after_ms = (fun ~delay_ms:_ ~payload:_ -> failwith "unexpected timer")
@@ -434,12 +476,11 @@ let on_event ctx state event = match event with
               }
             |> store_ok
           in
-          Agent_session.Session_persistence.install_snapshot
+          Agent_store.Snapshot.install
             ~env
-            ~handle
+            ~directory:(Store.Handle.snapshot_directory handle)
             ~max_payload_length:1048576
-            ~transaction_hash:None
-            initial
+            (snapshot_record initial ~transaction_hash:None)
           |> store_ok
           |> ignore;
           List.iter [ D.Child_installed; Linked ] ~f:(fun stage ->

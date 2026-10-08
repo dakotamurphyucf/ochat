@@ -10,7 +10,7 @@ the daemon is not permission to disclose it to a tool.
 
 | Variable | Consumer and behavior |
 |---|---|
-| `OPENAI_API_KEY` | OpenAI provider credential; opt-in typeahead in every TUI mode requires a nonblank key in the client process. Suggestions default off and never borrow daemon credentials. No server authentication authority. Loaded by the provider module at process initialization; restart after changes. |
+| `OPENAI_API_KEY` | OpenAI provider credential; opt-in typeahead in every TUI mode requires a nonblank key in the client process. Suggestions default off and never borrow daemon credentials. No server authentication authority. Agent inference uses this value only after explicit enrollment of the host-declared environment source; status and setup do not read it. Follow [provider administration](../lib/provider_operator.doc.md). |
 | `API_URL` | Responses endpoint host, default `api.openai.com`; the transport appends `/v1/responses`. For direct OpenAI use set `API_URL=api.openai.com` explicitly if your shell normally uses a proxy. Explicit origins are also accepted by the underlying transport. See its TLS limitation in [security](permissions-and-security.md). |
 | `OCHAT_OPENAI_IDLE_TIMEOUT_SECONDS` | Stream idle timeout, not total turn deadline: default 600 seconds, positive finite values capped at 3600; invalid values fall back to 600. |
 | `OCHAT_STREAM_TIMEOUT_SECONDS` | Compatibility fallback only when the more specific idle-timeout variable is absent. |
@@ -18,7 +18,8 @@ the daemon is not permission to disclose it to a tool.
 | `PWD` | Launch-directory capture in executable adapters; no remote workspace override. Use a consistent physical cwd and environment. |
 | `TMPDIR` | Embedded transient data-root base, default `/tmp`; it is not the configured daemon temporary-workspace catalog. |
 
-Sources: [response provider](../../lib/openai/responses.ml),
+Sources: [provider composition](../../bin/provider_platform.ml),
+[credential bridge](../../lib/inference_host/credential_bridge.ml),
 [foreground timeout](../../lib/chat_response/agent_response_loop.ml),
 [stream timeout](../../lib/chat_response/in_memory_stream.ml),
 [embedded host](../../lib/agent_server/embedded.ml), and

@@ -241,7 +241,13 @@ let agent_prompt_result_json
     ]
 ;;
 
-let recipe_agent_prompt_v1 (t : t) ~(session_id : string)
+let recipe_agent_prompt_v1
+      (t : t)
+      ~(session_id : string)
+      ?inference_context
+      ?before_inference_attempt
+      ?(capture_recipe_target = fun _ -> Ok ())
+      ()
   : Moderation.Capabilities.model_recipe
   =
   let call ~payload =
@@ -254,6 +260,38 @@ let recipe_agent_prompt_v1 (t : t) ~(session_id : string)
       let%bind prompt_xml, prompt_dir =
         t.exec_context.fetch_prompt ~ctx:t.exec_context.ctx ~prompt ~is_local
       in
+      let ctx =
+        match inference_context with
+        | None -> t.exec_context.ctx
+        | Some inference_context ->
+          Ctx.with_inference t.exec_context.ctx ~inference_context
+      in
+      let ctx =
+        match before_inference_attempt with
+        | None -> ctx
+        | Some before_attempt -> Ctx.with_inference_attempt_guard ctx ~before_attempt
+      in
+      let elements =
+        CM.parse_chat_inputs
+          ~source:prompt
+          ~dir:(Option.value prompt_dir ~default:(Ctx.dir ctx))
+          prompt_xml
+      in
+      let%bind target =
+        Inference_config.apply_overrides
+          (Inference_runtime.Context.target ctx.inference_context)
+          (Config.of_elements elements)
+          ~limits:Transcript.Admission.default
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+      in
+      let%bind () = capture_recipe_target target in
+      let%bind inference_context =
+        Inference_runtime.Context.derive ctx.inference_context ~target
+        |> Result.map_error ~f:(fun error ->
+          Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+      in
+      let ctx = Ctx.with_inference ctx ~inference_context in
       let basic_item : CM.basic_content_item =
         { type_ = "text"
         ; text = Some input
@@ -270,7 +308,7 @@ let recipe_agent_prompt_v1 (t : t) ~(session_id : string)
           ~history_compaction
           ?prompt_dir
           ~session_id:nested_session_id
-          ~ctx:t.exec_context.ctx
+          ~ctx
           prompt_xml
           [ CM.Basic basic_item ]
       in
@@ -287,6 +325,9 @@ let recipe_agent_prompt_v1 (t : t) ~(session_id : string)
       | Ok r -> Ok r
       | Error msg -> Ok (Moderation.Capabilities.Model_error msg)
     with
+    | Ctx.Inference_admission_rejected ->
+      Ok (Moderation.Capabilities.Model_error "model inference admission was revoked")
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
     | exn -> Ok (Moderation.Capabilities.Model_error (Exn.to_string exn))
   in
   let spawn ~payload =

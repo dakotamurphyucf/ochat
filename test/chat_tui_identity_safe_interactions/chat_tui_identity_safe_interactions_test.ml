@@ -33,7 +33,10 @@ let history_id sequence =
 ;;
 
 let row sequence text =
-  Projected_message.canonical_row ~entry_id:(history_id sequence) ("assistant", text)
+  Projected_message.canonical_row
+    ~editing_text:text
+    ~entry_id:(history_id sequence)
+    ("assistant", text)
 ;;
 
 let selected model =
@@ -164,10 +167,16 @@ let reasoning =
     { id = "reasoning"; summary = []; status = None; _type = "reasoning" }
 ;;
 
-let%expect_test "delete requests a canonical ID without mutation and rejects transient rows" =
-  let entry_a = History_entry.create_with_id ~id:(history_id 0) (output_message "a") in
-  let hidden = History_entry.create_with_id ~id:(history_id 2) reasoning in
-  let entry_b = History_entry.create_with_id ~id:(history_id 1) (output_message "b") in
+let%expect_test
+    "delete requests a canonical ID without mutation and rejects transient rows"
+  =
+  let entry_a =
+    Openai.Responses_history.create_with_id_exn ~id:(history_id 0) (output_message "a")
+  in
+  let hidden = Openai.Responses_history.create_with_id_exn ~id:(history_id 2) reasoning in
+  let entry_b =
+    Openai.Responses_history.create_with_id_exn ~id:(history_id 1) (output_message "b")
+  in
   let model = make_model ~history:[ entry_a; hidden; entry_b ] [] in
   let a = row 0 "a" in
   let b = row 1 "b" in
@@ -182,6 +191,7 @@ let%expect_test "delete requests a canonical ID without mutation and rejects tra
       ; message = "system", "notice"
       ; provenance = Placeholder
       ; source = Placeholder { local_id = "one"; kind = "notice" }
+      ; editing_text = None
       ; revision = 0
       }
   in
@@ -201,26 +211,23 @@ let%expect_test "delete requests a canonical ID without mutation and rejects tra
   Model.reconcile_projected_rows model [ notice; b; a ];
   Model.reconcile_messages model [ notice.message; b.message; a.message ];
   Model.select_projected model (Some notice.id);
-  assert
-    (Poly.equal
-       (Chat_tui.Controller_cmdline.execute_command model "delete")
-       Chat_tui.Controller_types.Redraw);
+  assert (
+    Poly.equal
+      (Chat_tui.Controller_cmdline.execute_command model "delete")
+      Chat_tui.Controller_types.Redraw);
   let last_message =
     List.last (Model.messages model)
     |> Option.map ~f:(fun (role, text) -> role ^ ": " ^ text)
   in
   print_s
     [%sexp
-      (( remaining
-       , requested_id
-       , last_message
-       , List.length (Model.history_items model) )
+      ((remaining, requested_id, last_message, List.length (Model.history_items model))
        : string list * string option * string option * int)];
   [%expect
     {|
     ((21:identity-interactions:0 21:identity-interactions:2
       21:identity-interactions:1)
      (21:identity-interactions:1)
-     ("system: Select a canonical history entry to delete.") 3)
+     ("system: Select a canonical history occurrence to delete.") 3)
     |}]
 ;;

@@ -14,4 +14,4 @@ val list_sessions
 val get_session
   :  Connection.t
   -> Agent_protocol.Id.Session.t
-  -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
+  -> (Agent_protocol.Public.Snapshot.t, Agent_protocol.Error.t) result

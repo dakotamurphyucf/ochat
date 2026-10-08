@@ -14,8 +14,8 @@ val body : request -> Jsonaf.t
 val emit : request -> Openai.Responses.Response_stream.t list -> unit
 val finish : request -> unit
 
-(** Answer one gated non-streaming compaction request. Reject stream requests
-    and double completion. *)
+(** Answer one gated text request using its requested JSON or SSE transport.
+    The complete response retains the actual output item. Reject double completion. *)
 val reply_summary : request -> string -> unit
 
 val reasoning : string -> string -> Openai.Responses.Response_stream.Item.t

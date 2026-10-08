@@ -45,9 +45,17 @@ val create
 
 val agent_prompt_v1_name : string
 
+(** An optional host guard is composed before the existing attempt observer and
+    inherited by derived/nested recipe inference. Ctx.Inference_admission_rejected
+    becomes the safe Model_error "model inference admission was revoked";
+    cancellation is preserved. The guard does not grant target or tool authority. *)
 val recipe_agent_prompt_v1
   :  t
   -> session_id:string
+  -> ?inference_context:Inference_runtime.Context.t
+  -> ?before_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> ?capture_recipe_target:(Inference.Request.Target.t -> (unit, string) result)
+  -> unit
   -> Moderation.Capabilities.model_recipe
 
 (** Register the moderator manager responsible for [session_id] so spawned

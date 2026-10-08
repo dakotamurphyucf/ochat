@@ -20,6 +20,10 @@ module Spec : sig
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; inference_target : (Inference.Selection.t[@sexp.opaque])
+      (** Private frozen session selection, independent of children/model jobs.
+          Historical absence converts to explicit Unresolved and grants no
+          backend defaults or execution authority. *)
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
@@ -65,7 +69,14 @@ module Conversation : sig
     ; deferred_user_entries : Agent_protocol.History.entry list
     ; initial_prompt_entry_count : int
     ; next_history_sequence : int64
+      (** Nonnegative allocator high-water mark, exclusive of every retained ID
+          in this session's namespace, including moderator insertions/targets.
+          Imported namespaces do not consume this allocator. Unused committed
+          blocks and retired history may leave gaps below this watermark. *)
     ; reserved_history_through : int64
+      (** Nonnegative exclusive committed reservation bound, at most
+          [next_history_sequence]. Restoring a lower allocator watermark would
+          recycle actual host occurrences. *)
     ; tasks : Jsonaf.t list
     ; kv_store : (string * string) list
     ; compaction_generation : int
@@ -90,6 +101,17 @@ module Lifecycle : sig
   [@@deriving sexp]
 end
 
+(** Private activation gate. Pending records a selected configuration durably
+    before initializer effects. It is never inferred from empty history. Recovery
+    keeps Pending unloaded; only explicit activation may retry. Automatic jobs
+    and runtime work require Ready. *)
+module Runtime_initialization : sig
+  type t =
+    | Ready
+    | Pending of { fresh_history : bool }
+  [@@deriving equal, sexp]
+end
+
 module Counters : sig
   type t =
     { revision : int64
@@ -105,6 +127,7 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool
     (** New generated creation's durable, unconsumed start intent. Older sessions
         never infer this from their original start_immediately configuration. *)
@@ -120,6 +143,12 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; inference_ledger : (Inference_ledger.t[@sexp.opaque])
+  ; model_job_targets : Model_job_target.t list
+    (** Exactly one private ID/generation binding per retained Model_call job.
+        Source is captured at admission, root recipe target after prompt fetch;
+        neither follows later parent selection changes. Unknown binding members
+        remain owned by the state document carrier. *)
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; managed_submissions : Managed_submission.t list [@sexp.list]
@@ -151,6 +180,10 @@ val current_schema_version : int
     inconsistent legacy fields fail closed. *)
 val upgrade_schema : t -> (t, Agent_protocol.Error.t) result
 
+(** Fresh state with known-empty tracking coverage. The identity must have a
+    valid session ID and nonnegative generation.
+    @raise Failure if that native identity precondition is violated. Decoders
+    admit untrusted identities through typed errors instead. *)
 val create
   :  identity:Identity.t
   -> spec:Spec.t
@@ -158,6 +191,16 @@ val create
   -> t
 
 val validate : t -> (unit, Agent_protocol.Error.t) result
+
+(** Planning-only validation before retiring the actual resource graph. The
+    candidate retains the byte-exact previous ledger, admitted under its previous
+    generation; all other native checks use the actual candidate identity. This
+    grants no durable admission. The actor must overlay its CURRENT reconciled
+    ledger and run ordinary [validate] before publishing a new generation. *)
+val validate_administration_candidate
+  :  t
+  -> previous:t
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 (** Decode the bounded receipt index under this session/generation. Absence is an
     empty index; it does not scan archives or infer that topic prose is present. *)

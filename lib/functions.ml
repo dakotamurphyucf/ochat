@@ -585,7 +585,7 @@ let mkdir ~dir : Ochat_function.t =
 (* Meta-prompting – recursive refinement tool                                 *)
 (* -------------------------------------------------------------------------- *)
 
-let meta_refine ~env : Ochat_function.t =
+let meta_refine ~env ?inference () : Ochat_function.t =
   let f (prompt_raw, task) =
     let open Meta_prompting in
     let action =
@@ -593,7 +593,12 @@ let meta_refine ~env : Ochat_function.t =
       | true -> Context.Generate
       | false -> Context.Update
     in
-    Mp_flow.first_flow ~env ~prompt:prompt_raw ~task ~action ()
+    let inference =
+      match inference with
+      | Some inference -> inference
+      | None -> raise Evaluator.Configuration_required
+    in
+    Mp_flow.first_flow ~env ~inference ~prompt:prompt_raw ~task ~action ()
   in
   Ochat_function.create_function
     (module Definitions.Meta_refine)

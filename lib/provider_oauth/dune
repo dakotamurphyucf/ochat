@@ -1,0 +1,7 @@
+(library
+ (name provider_oauth)
+ (public_name ochat.provider_oauth)
+ (private_modules oauth_transport oauth_identity)
+ (libraries core eio eio.unix uri jsonaf base64 cstruct ca-certs tls-eio
+  ochat.provider_oauth_protocol ochat.provider_secret_store)
+ (preprocess (pps ppx_jane)))

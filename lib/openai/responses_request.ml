@@ -1,5 +1,12 @@
 open! Core
 
+module Truncation_emission = struct
+  type t =
+    | Explicit_disabled
+    | Omit
+  [@@deriving equal, sexp_of]
+end
+
 module Field = struct
   type 'a t =
     | Absent
@@ -803,6 +810,7 @@ let create
       ~model
       ~input
       ~stream
+      ?(truncation_emission = Truncation_emission.Explicit_disabled)
       ?(instructions = Field.Absent)
       ?(max_output_tokens = Field.Absent)
       ?(parallel_tool_calls = Field.Absent)
@@ -820,12 +828,11 @@ let create
   =
   of_jsonaf
     (`Object
-        ([ "model", `String model
-         ; "input", `Array input
-         ; "store", `False
-         ; "truncation", `String "disabled"
-         ; "stream", bool_json stream
-         ]
+        ([ "model", `String model; "input", `Array input; "store", `False ]
+         @ (match truncation_emission with
+            | Explicit_disabled -> [ "truncation", `String "disabled" ]
+            | Omit -> [])
+         @ [ "stream", bool_json stream ]
          @ encoded_field "instructions" (fun s -> `String s) instructions
          @ encoded_field
              "max_output_tokens"

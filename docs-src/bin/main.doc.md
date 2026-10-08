@@ -1,6 +1,8 @@
 # `bin/main.ml` – OCaml source behind the `ochat` executable
 
-Host scope: this is the existing file-backed completion/utility CLI. New durable
+Host scope: this CLI exposes provider administration and file-backed completion/utilities.
+The [provider command group](../lib/provider_operator.doc.md) operates locally or
+through a named, host-pinned daemon connection. New durable
 agent sessions use [ochat-agent-server](../agent-server/README.md), while daemon-free
 native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
 `ochat shell` store administration targets legacy sessions, not daemon IDs.
@@ -19,7 +21,7 @@ reference for maintainers.
 `bin/main.ml` contains a single compilation unit which:
 
 1. Defines the completion, indexing, query, tokenization, and HTML conversion
-   commands, plus the nested shell-management command group.
+   commands, plus the nested shell-management and provider-administration groups.
 2. Collects them under a `Core.Command.group` called
    `main_command` and delegates execution to
    `Command_unix.run`.

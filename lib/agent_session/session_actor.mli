@@ -4,10 +4,15 @@ open! Core
 
 type persistence =
   { commit :
-      command_audit:string option
+      command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
       -> Session_transition.t
       -> (unit, Agent_protocol.Error.t) result
+  ; archive_reference :
+      previous:Session_state.t
+      -> kind:Session_state.Compaction_archive.kind
+      -> Agent_protocol.Id.Operation.t
+      -> (Session_state.Compaction_archive.t, Agent_protocol.Error.t) result
   }
 
 type services =
@@ -41,6 +46,149 @@ type reset_options = Administration.reset_options =
   }
 
 type t
+
+module Runtime_retirement : sig
+  (** A process-local foreground cleanup join. The actor remains available to
+      inference and worker finalizers until the terminal checkpoint finishes. *)
+  type t
+
+  val is_finished : t -> bool
+
+  (** Await outside the actor mailbox and runtime owner mutex. Terminal commit
+      errors are returned; unexpected failures retain their original backtrace. *)
+  val await : t -> (unit, Agent_protocol.Error.t) result
+end
+
+(** Exclude new user, deferred, automatic, start and compaction admission and cancel the
+    active foreground operation, including a worker that has not acknowledged
+    readiness yet. Returns immediately with a join completed after its actual
+    worker scope and terminal checkpoint. Concurrent requests share the join.
+    Does not change durable desired state or discard deferred messages. Successful
+    [closing=true] permanently excludes admission, including across an ordinary
+    unload already in progress. For reusable retirement, successful detachment or
+    worker installation reopens admission after the retiring operation has joined.
+    Safe points return no additional deferred/notification input after retirement
+    begins. Background lifetimes must be cancelled/joined separately by the owner. *)
+val retire_runtime_worker
+  :  t
+  -> closing:bool
+  -> (Runtime_retirement.t, Agent_protocol.Error.t) result
+
+module Compaction_inference : sig
+  (** Trusted process-local selected auxiliary lifetime. Operation and complete
+      selection are captured by durable compaction admission. The callback runs
+      after Worker_ready, outside the actor mailbox; it must not initialize a
+      runtime or reselect a provider. Its bracket joins inference work before
+      releasing tracking/resources, preserves primary errors/cancellation, and
+      propagates cleanup failure after otherwise successful work. *)
+  type t =
+    { with_execution :
+        'a.
+        operation:Agent_protocol.Operation.t
+        -> selection:Inference.Selection.t
+        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> ('a, Agent_protocol.Error.t) Result.t
+    }
+end
+
+(** Install an explicitly owned host auxiliary port. None retains direct actor
+    fixture support for an explicitly installed selected runtime, otherwise
+    compaction reports configuration unavailable. No ambient provider exists. *)
+val set_compaction_inference
+  :  t
+  -> Compaction_inference.t option
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+module Inference_owner : sig
+  (** One actual constructed graph, with no model/tool authority. The process-local
+      token survives worker detachment and authorized resource borrowing. *)
+  type t
+end
+
+(** Open before graph constructors. Fresh graph source, issuing actor and current
+    generation are captured; it cannot be reconstructed from durable state. *)
+val open_inference_owner
+  :  t
+  -> source:Transcript.Source_id.t
+  -> (Inference_owner.t, Agent_protocol.Error.t) Result.t
+
+(** Serialized original-ledger admission and durable ACK precede handle return.
+    Optional associations require actual per-execution evidence; no inference from
+    the actor's current operation. Untracked admission also ACKs its ordinal. *)
+val admit_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> relation:Transcript.Scope.relation
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> invocation_id:Agent_protocol.Id.Invocation.t option
+  -> configuration:Inference.Observation.Configuration.t
+  -> (Inference_ledger.Handle.t, Agent_protocol.Error.t) Result.t
+
+val acknowledge_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference_runtime.Attempt.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Exact retained-handle observations may arrive after inference ends. Missing
+    retired/untracked rows stay absent. Context estimate remains separate from
+    usage and must carry the designated context identity/preparation. *)
+val observe_inference
+  :  t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference.Observation.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Late revisions may use an EXACT retained admitted handle under this still
+    live graph owner. Missing/future/unallocated scope rejects; no handle is
+    constructed from incoming identifiers or lifetime tombstone index. *)
+val observe_owned_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> Inference.Observation.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val complete_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> Inference_client.Completion.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Called once after allocation's joined lifetime. Routing is removed even if
+    interruption ACK fails; the bounded durable row remains recovery authority.
+    Uses the actual live Attempt.delivery when acknowledged. Without that owned
+    instance, Prepared is definitely not submitted and Running conservatively
+    possibly submitted. No provider terminal is manufactured. *)
+val release_inference
+  :  t
+  -> owner:Inference_owner.t
+  -> handle:Inference_ledger.Handle.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+val seal_inference_owner
+  :  t
+  -> owner:Inference_owner.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Only after the actual graph excludes new calls and joins. Reconciles bounded
+    retained residual rows; success removes the owner. Actor/writer must be live. *)
+val finish_inference_owner
+  :  t
+  -> owner:Inference_owner.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Exclusive activation/recovery only, never read/query. Reconciles outstanding
+    Prepared/Running using honest conservative delivery before fresh constructors. *)
+val reconcile_inference_recovery : t -> (unit, Agent_protocol.Error.t) Result.t
+
+module Initialization_scope : sig
+  (** Process-local capability issued only to a trusted Pending constructor.
+      Bound to one actor, stable source/complete Selection and generation; it is
+      never reconstructed from durable Pending state or exposed by RPC. *)
+  type t
+end
 
 (** Mailbox-level regression support; not exposed by any wire method. *)
 module For_testing : sig
@@ -471,6 +619,16 @@ val set_operation_worker
   -> Operation_worker.t option
   -> (unit, Agent_protocol.Error.t) result
 
+(** Install or clear the actual selected runtime and inference execution together.
+    Some/None mismatches reject; Pending initialization rejects installation.
+    The constructor and legacy worker-only setter retain no inferred execution.
+    No callback reenters the runtime owner's mutex during compaction. *)
+val set_runtime_worker
+  :  t
+  -> worker:Operation_worker.t option
+  -> inference:Inference_client.Execution.t option
+  -> (unit, Agent_protocol.Error.t) result
+
 val change_moderator
   :  t
   -> Jsonaf.t option
@@ -505,7 +663,7 @@ val reset
 
 val reset_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> reset_options
@@ -517,11 +675,117 @@ val reset_with_command_audit
     have mutated the actor; candidates carry the captured revision. *)
 val commit_administration
   :  t
-  -> command_audit:string option
+  -> command_audit:Document_schema.Document.t option
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> kind:Session_state.Compaction_archive.kind
   -> Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Trusted owner-fenced administration. Validate the original writer/CAS basis
+    BEFORE resource retirement. The reconciled commit accepts only ledger,
+    counters and updated timestamp changes caused by that retirement; complete
+    opaque configuration and all other fields must still match [expected].
+    The original candidate is validated before overlaying the actual ledger,
+    preserving retained records/ordinals across the candidate generation. *)
+val validate_administration_basis
+  :  t
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected:Session_state.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val commit_reconciled_administration
+  :  t
+  -> command_audit:Document_schema.Document.t option
+  -> attachment_id:Agent_protocol.Id.Attachment.t
+  -> expected:Session_state.t
+  -> kind:Session_state.Compaction_archive.kind
+  -> Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Issue one exclusive constructor scope against the actual Pending basis.
+    Requires a captured target. Actor-owned jobs/schedules, tracking counters,
+    reservations and acknowledged shell grants may advance without replacing the
+    basis. Accepted authorized Stop permanently revokes even a stopped no-op. *)
+val begin_initialization
+  :  t
+  -> expected:Session_state.t
+  -> (Initialization_scope.t, Agent_protocol.Error.t) result
+
+(** Retire the issuing actor's scope idempotently, without a durable write. Wrong
+    actors reject. The host must call this under cancellation protection on every
+    exit before exposing the constructed runtime. *)
+val end_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Admit a fresh queued Model_call under the active constructor capability.
+    Uses ordinary job validation and atomic source binding. *)
+val add_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Admit and claim a fresh immediate, Not_required Model_call in one serialized
+    actor request. Reuses ordinary admission/claim invariants; their two ordered
+    durable commits remain crash-safe under Pending recovery. Stop cannot
+    interleave between them. *)
+val start_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Check active scope and its actually admitted running job's exact ID,
+    generation and attempt. Retired/revoked/stale scopes yield false; another
+    actor's token rejects. No authority is derived from persisted Pending. *)
+val initialization_model_job_is_current
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> (bool, Agent_protocol.Error.t) result
+
+(** Capture / complete only a running attempt actually admitted by this scope.
+    Capability checks and durable mutation share the same actor request. *)
+val capture_initialization_recipe_target
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val complete_initialization_model_job
+  :  t
+  -> scope:Initialization_scope.t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> Runtime_builder.model_job_outcome
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Trusted completion retains the scope's stable basis and requires it active.
+    Only initialized history/count/reservations, moderator and shell reviewer
+    checkpoints are overlaid. Actual jobs/bindings/schedules, tracking commits
+    and shell grants remain authoritative. Marks Ready without a second archive. *)
+val complete_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> candidate:Session_state.t
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Record failed activation under the active scope's stable basis. Retains
+    Pending and actual durable effects/configuration; no rollback is claimed. *)
+val fail_initialization
+  :  t
+  -> scope:Initialization_scope.t
+  -> Agent_protocol.Error.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
 val upgrade_prompt
@@ -533,7 +797,7 @@ val upgrade_prompt
 
 val upgrade_prompt_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> target_revision:Agent_protocol.Id.Prompt_revision.t
@@ -572,7 +836,7 @@ val replace_workspace
 val start_with_command_audit
   :  ?expected_parent_stop_epoch:int64
   -> t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -583,7 +847,7 @@ val queue_start
 
 val queue_start_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
@@ -599,7 +863,7 @@ val stop
 
 val stop_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> mode:Agent_protocol.Session.stop_mode
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -662,7 +926,7 @@ val submit_message
 
 val submit_message_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.History.entry
   -> (submission, Agent_protocol.Error.t) result
@@ -689,7 +953,7 @@ val submit_managed_message
     an exact revision; rejects borrowed moderator work. Commits before broadcast. *)
 val delete_history
   :  t
-  -> ?command_audit:string
+  -> ?command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64
   -> Agent_protocol.History.Id.t
@@ -712,7 +976,7 @@ val compact
 
 val compact_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> expected_revision:int64 option
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -807,7 +1071,7 @@ val cancel_operation
 
 val cancel_operation_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
@@ -885,7 +1149,7 @@ val respond_permission
 
 val respond_permission_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> principal_id:Agent_protocol.Id.Principal.t option
   -> permission_id:Agent_protocol.Id.Permission.t
@@ -903,7 +1167,7 @@ val revoke_grant
 
 val revoke_grant_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> grant_id:Agent_protocol.Id.Grant.t
   -> reason:string
@@ -914,6 +1178,37 @@ val change_job
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> Agent_protocol.Job.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Trusted host selection capture. The caller resolves explicit source or
+    migration policy first. Successful return acknowledges the complete durable
+    selection before runtime activation; no backend lookup or authority grant. *)
+val capture_inference_target
+  :  t
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Migration capture uses an explicitly approved target for this exact retained
+    job. It never derives from the parent's current selection. *)
+val capture_model_job_source
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
+
+(** Persist the root recipe's effective target before its first model/moderator
+    effect. Only the exact running attempt may capture; repetition must retain
+    the complete same target, including future fields and presence. *)
+val capture_recipe_target
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> target:Inference.Request.Target.t
+  -> limits:Document_schema.Limits.t
+  -> (unit, Agent_protocol.Error.t) Result.t
 
 val add_job
   :  t
@@ -1008,7 +1303,7 @@ val authorize_writer
     separate privileged operation below. *)
 val cancel_job
   :  t
-  -> ?command_audit:string
+  -> ?command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> job_id:Agent_protocol.Id.Job.t
   -> unit
@@ -1021,7 +1316,7 @@ val cancel_job_internal
 
 val cancel_job_internal_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> job_id:Agent_protocol.Id.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
@@ -1044,7 +1339,7 @@ val change_schedule
 
 val change_schedule_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> event:[ `Created | `Cancelled ]
   -> Agent_protocol.Schedule.t
@@ -1372,7 +1667,7 @@ val attach_with_snapshot
 
 val attach_with_snapshot_and_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> principal_id:Agent_protocol.Id.Principal.t option
   -> reclaim_token:string option
   -> mode:Agent_protocol.Session.attachment_mode
@@ -1388,7 +1683,7 @@ val detach : t -> Agent_protocol.Id.Attachment.t -> (unit, Agent_protocol.Error.
 
 val detach_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> Agent_protocol.Id.Attachment.t
   -> (unit, Agent_protocol.Error.t) result
 
@@ -1402,7 +1697,7 @@ val renew_owner
 
 val renew_owner_with_command_audit
   :  t
-  -> command_audit:string
+  -> command_audit:Document_schema.Document.t
   -> attachment_id:Agent_protocol.Id.Attachment.t
   -> lease_generation:int64
   -> ( Agent_protocol.Session.Owner_lease.t * Agent_protocol.Session.t

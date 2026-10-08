@@ -36,6 +36,27 @@ val install_loader
   -> (Agent_store.Session_index.Entry.t -> (entry, Agent_protocol.Error.t) result)
   -> unit
 
+(** Install an immutable durable reader separate from the activating loader. The
+    callback must not repair, write state/journal/recovery metadata, construct a
+    runtime, resolve provider credentials or retain resources. Temporary store
+    lock metadata changes are permitted. *)
+val install_reader
+  :  t
+  -> (Agent_store.Session_index.Entry.t
+      -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
+  -> unit
+
+(** Serialized with load/removal/shutdown. Loaded actors return one immutable
+    state without runtime activation. Indexed summaries are authorized BEFORE
+    reader IO, then the recovered actual session identity and summary are checked
+    and authorized again. No actor/cache/index registration or tail repair occurs.
+    Recovery cancellation propagates and the registry lock is released. *)
+val read_state
+  :  t
+  -> authorize:(Agent_protocol.Session.t -> (unit, Agent_protocol.Error.t) result)
+  -> Agent_protocol.Id.Session.t
+  -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result
+
 val index : t -> Agent_store.Session_index.Entry.t -> unit
 val index_all : t -> Agent_store.Session_index.Entry.t list -> unit
 

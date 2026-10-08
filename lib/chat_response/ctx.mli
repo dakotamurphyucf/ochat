@@ -28,7 +28,13 @@
 *)
 
 type 'env t = private
-  { env : 'env (** Underlying Eio standard environment. *)
+  { inference_relation : Transcript.Scope.relation
+  ; inference_context : Inference_runtime.Context.t
+  ; inference_identity : Neutral_turn.Identity.t
+  ; on_inference_attempt : Inference_runtime.Attempt.t -> unit
+  ; on_inference_completion : Inference_client.Completion.t -> unit
+  ; on_inference_observation : Inference.Observation.t -> unit
+  ; env : 'env (** Underlying Eio standard environment. *)
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Base directory used when a function needs to access the
             file-system – e.g. reading a local include. *)
@@ -44,10 +50,17 @@ type 'env t = private
     of [env]; the caller is responsible for ensuring that the provided
     directories remain valid for the desired lifetime. *)
 val create
-  :  env:'env
+  :  inference_context:Inference_runtime.Context.t
+  -> inference_identity:Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?inference_relation:Transcript.Scope.relation
+  -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> env:'env
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> tool_dir:Eio.Fs.dir_ty Eio.Path.t
   -> cache:Cache.t
+  -> unit
   -> 'env t
 
 (** [of_env ~env ~cache] is a convenience constructor that takes the
@@ -58,9 +71,44 @@ val create
       tool_dir = Eio.Stdenv.cwd env
     v} *)
 val of_env
-  :  env:(< fs : Eio.Fs.dir_ty Eio.Path.t ; cwd : Eio.Fs.dir_ty Eio.Path.t ; .. > as 'env)
+  :  inference_context:Inference_runtime.Context.t
+  -> inference_identity:Neutral_turn.Identity.t
+  -> on_inference_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> on_inference_completion:(Inference_client.Completion.t -> unit)
+  -> ?inference_relation:Transcript.Scope.relation
+  -> ?on_inference_observation:(Inference.Observation.t -> unit)
+  -> env:(< fs : Eio.Fs.dir_ty Eio.Path.t ; cwd : Eio.Fs.dir_ty Eio.Path.t ; .. > as 'env)
   -> cache:Cache.t
+  -> unit
   -> 'env t
+
+(** Expected host revocation before authentication or wire dispatch. Contains no
+    private error or request payload. A successful guard acknowledgement is the
+    admission point: a later Stop can race an already-admitted dispatch. *)
+exception Inference_admission_rejected
+
+(** Add a host admission guard before the existing strict attempt observer.
+    Inference derivation and child contexts preserve both callbacks. Unexpected
+    failures and cancellation propagate; no observer or backend is replaced. *)
+val with_inference_attempt_guard
+  :  'env t
+  -> before_attempt:(Inference_runtime.Attempt.t -> unit)
+  -> 'env t
+
+(** Rebind only the explicitly selected inference context, retaining host identity
+    and observers. Call Context.derive or the host resolver/policy first; this
+    operation neither authorizes a target change nor recaptures stored selection. *)
+val with_inference : 'env t -> inference_context:Inference_runtime.Context.t -> 'env t
+
+(** Rebind actual tool-owner correlation on an immutable child context. The
+    parent must come from Invocation.inference_parent or another actual owner;
+    absent correlation must never be fabricated from a call alias. *)
+val with_inference_parent : 'env t -> parent:Transcript.Scope.parent -> 'env t
+
+(** Selected inference ports for auxiliary requests owned by this invocation.
+    Attempt admission remains the supplied host identity and acknowledgement;
+    no actor lookup, ambient backend resolution or additional callback is installed. *)
+val inference_execution : 'env t -> Inference_client.Execution.t
 
 (** [net t] exposes the network namespace obtained from [t.env#net]. *)
 val net : < net : 'a ; .. > t -> 'a

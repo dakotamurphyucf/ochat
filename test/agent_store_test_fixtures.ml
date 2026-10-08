@@ -100,6 +100,7 @@ let session_summary revision =
     ; active_operation = None
     ; revision
     ; latest_event_sequence = revision
+    ; inference_summary = History_entry.Payload.Presence.Absent
     }
 ;;
 
@@ -111,4 +112,88 @@ let metadata revision =
     ; workspace_identity = "workspace-instance"
     ; data_schema_version = 1
     }
+;;
+
+let document_ok = function
+  | Ok value -> value
+  | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+;;
+
+let named_document kind payload =
+  Document_schema.Document.create
+    ~limits:Document_schema.Limits.default
+    ~kind
+    ~version:1
+    ~payload
+  |> document_ok
+;;
+
+let document_text document =
+  match
+    Document_schema.Json.field (Document_schema.Document.payload document) ~name:"text"
+  with
+  | Value (`String value) -> value
+  | Absent | Null | Value _ -> failwith "test document has no text"
+;;
+
+let state_document
+      ~transaction_sequence
+      ~event_sequence
+      ~revision
+      ~prompt_artifact
+      ~workspace_identity
+      text
+  =
+  let decimal value = `String (Int64.to_string value) in
+  named_document
+    "session.state"
+    (`Object
+        [ ( "identity"
+          , `Object
+              [ "session_id", `String (Agent_protocol.Id.Session.to_string session_id)
+              ; "generation", `String "0"
+              ] )
+        ; ( "counters"
+          , `Object
+              [ "transaction_sequence", decimal transaction_sequence
+              ; "event_sequence", decimal event_sequence
+              ; "revision", decimal revision
+              ] )
+        ; ( "spec"
+          , `Object
+              [ "prompt_revision_id", `String prompt_artifact
+              ; ( "workspace_instance"
+                , `Object [ "conflict_domain", `String workspace_identity ] )
+              ] )
+        ; "text", `String text
+        ])
+;;
+
+let snapshot_record
+      ~transaction_sequence
+      ~transaction_hash
+      ~event_sequence
+      ~revision
+      ~prompt_artifact
+      ~workspace_identity
+      text
+  =
+  Agent_store.Snapshot.create
+    ~limits:Document_schema.Limits.default
+    ~session_id
+    ~transaction_sequence
+    ~transaction_hash
+    ~event_sequence
+    ~created_at:timestamp
+    ~prompt_artifact
+    ~workspace_identity
+    ~payload:
+      (state_document
+         ~transaction_sequence
+         ~event_sequence
+         ~revision
+         ~prompt_artifact
+         ~workspace_identity
+         text)
+  |> store_ok
 ;;

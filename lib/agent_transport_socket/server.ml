@@ -77,13 +77,13 @@ let serve
   =
   match authenticate flow address with
   | Error failure -> on_protocol_error failure
-  | Ok principal ->
+  | Ok actor ->
     Eio.Switch.run (fun connection_switch ->
-      Agent_transport_stdio.Server.run
+      Agent_transport_stdio.Server.run_authenticated
         ~sw:connection_switch
         ~dispatcher
         ~close_connection
-        ~principal
+        ~actor
         ~connection_id:
           (Agent_protocol.Id.Attachment.create ()
            |> Agent_protocol.Id.Attachment.to_string)

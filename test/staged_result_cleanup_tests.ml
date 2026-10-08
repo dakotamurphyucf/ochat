@@ -133,8 +133,8 @@ let%expect_test
           ~before_open_in:(fun path ->
             fail
               (match phase with
-               | "blob-sync" -> String.is_suffix path ~suffix:"/blobs"
-               | "intent-sync" -> String.is_suffix path ~suffix:"/result-preparations"
+               | "blob-sync" -> String.is_suffix path ~suffix:"/blobs/."
+               | "intent-sync" -> String.is_suffix path ~suffix:"/result-preparations/."
                | _ -> false)))
       (fun env sw blobs _ session _ ->
          let id = P.Id.Blob.create () in

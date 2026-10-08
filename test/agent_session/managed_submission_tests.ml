@@ -105,11 +105,7 @@ let%expect_test
        List.iter done_state.managed_submissions ~f:(fun receipt ->
          assert (M.equal_status (Terminal (Some operation, Completed)) receipt.status));
        [%test_eq: int] 1 !runs;
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (State.sexp_of_t done_state |> Sexp.to_string_mach)
-         |> store_ok
-       in
+       let restored = restore_state done_state |> store_ok in
        assert (
          List.equal M.equal done_state.managed_submissions restored.managed_submissions);
        let receipt = send reference "two" 7 "second" |> protocol_ok in

@@ -114,6 +114,55 @@ module Session_persist = struct
 end
 
 module Setup = struct
+  let select_session_target selection ~session_id ~capture =
+    match Inference.Selection.view selection with
+    | Captured target -> Ok (target, selection, false)
+    | Unresolved ->
+      let open Result.Let_syntax in
+      let request_error result =
+        Result.map_error result ~f:(fun error ->
+          Inference_runtime.Preparation_error.Invalid_request error)
+      in
+      let%bind target = capture () in
+      let%bind target =
+        Inference.Request.Target.with_setting
+          target
+          ~name:"prompt_cache_key"
+          ~value:(Value (`String session_id))
+          ~provenance:Execution_override
+          ~limits:Transcript.Admission.default
+        |> request_error
+      in
+      (* Preserve the existing TUI retention heuristic at capture time. This
+         list is host policy, not a model capability catalog or live probe. *)
+      let%bind target =
+        match Inference.Request.Target.model target with
+        | "gpt-5.4"
+        | "gpt-5.2"
+        | "gp5-5.1-codex-max"
+        | "gpt-5.1"
+        | "gpt-5.1-codex"
+        | "gpt-5.1-codex-mini"
+        | "gpt-5.1-chat-latest"
+        | "gpt-5"
+        | "gpt-5-codex"
+        | "gpt-4.1" ->
+          Inference.Request.Target.with_setting
+            target
+            ~name:"prompt_cache_retention"
+            ~value:(Value (`String "24h"))
+            ~provenance:Execution_override
+            ~limits:Transcript.Admission.default
+          |> request_error
+        | _ -> Ok target
+      in
+      let%map selection =
+        Inference.Selection.capture selection ~target ~limits:Transcript.Admission.default
+        |> request_error
+      in
+      target, selection, true
+  ;;
+
   let now_ms ~env = Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
 
   let init_datadir ~env ~cwd ~session : _ Eio.Path.t =
@@ -159,8 +208,19 @@ module Setup = struct
 
   let cfg_of_elements prompt_elements = Config.of_elements prompt_elements
 
-  let build_ctx ~env ~prompt_dir ~tool_dir ~cache =
-    Ctx.create ~env ~dir:prompt_dir ~tool_dir ~cache
+  let build_ctx ~services ~prompt_dir ~tool_dir =
+    let services : App_context.Services.t = services in
+    Ctx.create
+      ~env:services.env
+      ~dir:prompt_dir
+      ~tool_dir
+      ~cache:services.cache
+      ~inference_context:services.inference_context
+      ~inference_identity:services.inference_identity
+      ~on_inference_attempt:services.on_inference_attempt
+      ~on_inference_completion:services.on_inference_completion
+      ~on_inference_observation:services.on_inference_observation
+      ()
   ;;
 
   let agent_runtime_host ~ctx ~response_dir ~session_id ~prompt_elements =
@@ -296,7 +356,8 @@ module Setup = struct
               [ ( Chat_response.Model_executor.agent_prompt_v1_name
                 , Chat_response.Model_executor.recipe_agent_prompt_v1
                     model_executor
-                    ~session_id )
+                    ~session_id
+                    () )
               ]
         }
       in
@@ -615,6 +676,7 @@ module Ui = struct
 end
 
 module For_testing = struct
+  let select_session_target = Setup.select_session_target
   let should_warm_history_before_redraw = Ui.should_warm_history_before_redraw
   let cursor_for_frame = Ui.cursor_for_frame
 end
@@ -664,7 +726,7 @@ module Agent_mode = struct
   ;;
 
   let sync_activity model projection =
-    let session = (Agent_projection.snapshot projection).session in
+    let session = (Agent_projection.fields projection).session in
     let activity =
       match session.active_operation with
       | Some { Agent_protocol.Operation.kind = Compaction; _ } -> Some Model.Compacting
@@ -777,7 +839,7 @@ module Agent_mode = struct
       true
     | None ->
       (match
-         (Agent_projection.snapshot (Agent_session_client.projection t.client)).session
+         (Agent_projection.fields (Agent_session_client.projection t.client)).session
            .active_operation
        with
        | None -> false
@@ -802,7 +864,7 @@ module Agent_mode = struct
              ~f:
                (Agent_security_projection.audit_page
                   ~session_id:
-                    (Agent_projection.snapshot (Agent_session_client.projection t.client))
+                    (Agent_projection.fields (Agent_session_client.projection t.client))
                       .session
                       .id)
       in
@@ -967,11 +1029,7 @@ module Agent_mode = struct
 
   let initial_model client =
     let projection = Agent_session_client.projection client in
-    let model =
-      Setup.init_model
-        ~session:None
-        ~history_items:(Agent_projection.canonical_history projection)
-    in
+    let model = Setup.init_model ~session:None ~history_items:[] in
     Model.set_connection_status model (Some (Connection_status.connected ()));
     model, projection
   ;;
@@ -994,7 +1052,7 @@ module Agent_mode = struct
        | Agent_protocol.Session.Read_only -> None
        | _ ->
          let snapshot =
-           Agent_projection.snapshot (Agent_session_client.projection client)
+           Agent_projection.fields (Agent_session_client.projection client)
          in
          let grants = List.map snapshot.grants ~f:Agent_protocol.Grant.sexp_of_t in
          Some
@@ -1003,7 +1061,16 @@ module Agent_mode = struct
     | _ -> None
   ;;
 
-  let run_terminal ~env ~sw ~client ~model ~projection ~typeahead_config ~render_config =
+  let run_terminal
+        ~typeahead_inference
+        ~env
+        ~sw
+        ~client
+        ~model
+        ~projection
+        ~typeahead_config
+        ~render_config
+    =
     let input_stream = Eio.Stream.create 4096 in
     let resize_stream = Eio.Stream.create 16 in
     let redraw_stream = Eio.Stream.create 1 in
@@ -1036,6 +1103,7 @@ module Agent_mode = struct
     in
     let typeahead =
       Type_ahead_ui.create
+        ~inference:typeahead_inference
         ~sw
         ~env
         ~config:typeahead_config
@@ -1075,7 +1143,7 @@ module Agent_mode = struct
       (fun () -> loop state input_stream resize_stream redraw_stream)
   ;;
 
-  let run ~env ~client ~textmate_grammar_files ~typeahead_config =
+  let run ~typeahead_inference ~env ~client ~textmate_grammar_files ~typeahead_config =
     load_explicit_grammars ~env textmate_grammar_files;
     let custom_grammars =
       Highlight_grammar_discovery.load_explicit_sources
@@ -1092,22 +1160,32 @@ module Agent_mode = struct
     in
     Switch.run (fun sw ->
       let model, projection = initial_model client in
-      run_terminal ~env ~sw ~client ~model ~projection ~typeahead_config ~render_config)
+      run_terminal
+        ~typeahead_inference
+        ~env
+        ~sw
+        ~client
+        ~model
+        ~projection
+        ~typeahead_config
+        ~render_config)
   ;;
 end
 
 let run_agent_session
+      ?typeahead_inference
       ~env
       ~client
       ?(textmate_grammar_files = [])
       ?(typeahead_config = Type_ahead_config.default)
       ()
   =
-  Type_ahead_config.validate_credentials
-    typeahead_config
-    ~api_key:(Sys.getenv "OPENAI_API_KEY")
-  |> Or_error.ok_exn;
-  Agent_mode.run ~env ~client ~textmate_grammar_files ~typeahead_config
+  Agent_mode.run
+    ~typeahead_inference
+    ~env
+    ~client
+    ~textmate_grammar_files
+    ~typeahead_config
 ;;
 
 (* ────────────────────────────────────────────────────────────────────────── *)
@@ -1287,6 +1365,9 @@ let time_startup_phase label f =
 ;;
 
 let run_chat
+      ~inference_host
+      ~resolve_typeahead
+      ~migrate_inference_target
       ?(typeahead_config = Type_ahead_config.default)
       ~env
       ~prompt_file
@@ -1299,10 +1380,6 @@ let run_chat
       ?shell_approval_provider
       ()
   =
-  Type_ahead_config.validate_credentials
-    typeahead_config
-    ~api_key:(Sys.getenv "OPENAI_API_KEY")
-  |> Or_error.ok_exn;
   let fs = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
   let grammar_registry = time_startup_phase "bundled grammars" Highlight_registry.get in
@@ -1435,7 +1512,6 @@ let run_chat
        prompt_file
        (Option.value_map session ~default:"<none>" ~f:(fun (s : Session.t) -> s.id)));
   let cache = Setup.load_cache ~datadir in
-  let services : App_context.Services.t = { env; ui_sw; cwd; cache; datadir; session } in
   (* Base directory of the prompt file – used for resolving relative paths in
      <import/> and <doc src="…"> tags. *)
   let prompt_dir = Setup.resolve_prompt_dir ~env ~cwd ~prompt_file in
@@ -1463,7 +1539,63 @@ let run_chat
         ~fallback:shell_manifest_authorizer
   in
   let cfg = Setup.cfg_of_elements prompt_elements in
-  let ctx = Setup.build_ctx ~env ~prompt_dir ~tool_dir:cwd ~cache in
+  let require result =
+    Result.map_error result ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  let target =
+    match session_state with
+    | None -> Inference_host.capture_config inference_host cfg |> require
+    | Some state ->
+      let target, inference_target, captured =
+        Setup.select_session_target
+          !state.inference_target
+          ~session_id:!state.id
+          ~capture:(fun () -> migrate_inference_target cfg)
+        |> require
+      in
+      if captured
+      then (
+        let updated = { !state with inference_target } in
+        (* Durable selection precedes all initializer-bearing runtime construction. *)
+        Session_store.save_exn ~env updated;
+        state := updated);
+      target
+  in
+  let inference_context = Inference_host.resolve inference_host target |> require in
+  let typeahead_inference =
+    match typeahead_config.mode with
+    | Type_ahead_config.Off -> None
+    | Manual | Auto ->
+      let context = resolve_typeahead target |> require in
+      Some
+        (Inference_client.Execution.create
+           ~context
+           ~identity:(Inference_host.identity inference_host)
+           ~relation:Transcript.Scope.Root
+           ~before_dispatch:(fun _ -> ())
+           ~on_attempt:(fun _ -> ())
+           ~on_observation:(fun _ -> ())
+           ~on_completion:(fun _ -> ()))
+  in
+  let session = Option.map session_state ~f:(fun state -> !state) in
+  let services : App_context.Services.t =
+    { env
+    ; inference_context
+    ; inference_identity = Inference_host.identity inference_host
+    ; typeahead_inference
+    ; on_inference_attempt = (fun _ -> ())
+    ; on_inference_completion = (fun _ -> ())
+    ; on_inference_observation = (fun _ -> ())
+    ; ui_sw
+    ; cwd
+    ; cache
+    ; datadir
+    ; session
+    }
+  in
+  let ctx = Setup.build_ctx ~services ~prompt_dir ~tool_dir:cwd in
   let moderator_session_id = Setup.moderator_session_id ~session ~prompt_file in
   let exec_context : Chat_response.Model_executor.exec_context =
     { ctx
@@ -1539,7 +1671,9 @@ let run_chat
       |> Result.ok_or_failwith
   in
   let history_items_prompt =
-    List.map history_items_prompt ~f:(History_entry.create ~allocator:history_allocator)
+    List.map
+      history_items_prompt
+      ~f:(Openai.Responses_history.create ~allocator:history_allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in

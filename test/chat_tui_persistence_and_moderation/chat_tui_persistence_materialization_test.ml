@@ -1,4 +1,66 @@
 open Core
+
+let%expect_test
+    "standalone target capture stores cache policy and resume leaves it unchanged"
+  =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"tui-cache-capture"
+      ~default_model:"gpt-5.4"
+      ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected inference")
+  in
+  let require result =
+    Result.map_error result ~f:(fun _ -> "admission") |> Result.ok_or_failwith
+  in
+  let session = Session.create ~id:"tui-cache-session" ~prompt_file:"prompt.chatmd" () in
+  let target, inference_target, captured =
+    Chat_tui.App.For_testing.select_session_target
+      session.inference_target
+      ~session_id:session.id
+      ~capture:(fun () ->
+        Inference_fixture.capture_config fixture Chat_response.Config.default)
+    |> require
+  in
+  [%test_eq: bool] true captured;
+  let session = { session with inference_target } in
+  let restored =
+    Session.Document.to_string session |> require |> Session.Document.of_string |> require
+  in
+  let resumed, resumed_selection, captured =
+    Chat_tui.App.For_testing.select_session_target
+      restored.inference_target
+      ~session_id:"different-session-key"
+      ~capture:(fun () -> failwith "resumed target was recaptured")
+    |> require
+  in
+  [%test_eq: bool] false captured;
+  [%test_eq: bool] true (Inference.Request.Target.equal target resumed);
+  [%test_eq: bool] true (Inference.Selection.equal inference_target resumed_selection);
+  let settings =
+    Inference.Request.Target.settings resumed
+    |> List.map ~f:(fun setting ->
+      let value =
+        match Inference.Request.Setting.value setting with
+        | Value (`String value) -> value
+        | Absent | Null | Value _ -> failwith "unexpected cache setting"
+      in
+      Inference.Request.Setting.name setting, value)
+  in
+  print_s [%sexp (settings : (string * string) list)];
+  [%expect {| ((prompt_cache_key tui-cache-session) (prompt_cache_retention 24h)) |}]
+;;
+
+let fixture_ctx ~env ~dir ~tool_dir ~cache =
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_persistence_materialization_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "fixture unexpectedly dispatched inference")
+  in
+  Inference_fixture.ctx fixture ~env ~dir ~tool_dir ~cache ()
+;;
+
 module CM = Prompt.Chat_markdown
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
@@ -96,9 +158,11 @@ let%expect_test "persist_session materializes synthetic moderator messages" =
   [%expect
     {|
     <system>hello</system>
-    <msg role="assistant" id="moderation-overlay-1">
+    <assistant id="moderation-overlay-1" status="completed">
+    RAW|
     synthetic moderation output
-    </msg>
+    |RAW
+    </assistant>
     <msg role="developer" id="moderation-deletion-msg-1">
     Moderator deleted message "msg-1" from the effective transcript.
     </msg>
@@ -139,7 +203,7 @@ let%expect_test "denied tool transcript round-trips through export and parse" =
     |> Result.ok_or_failwith
   in
   let history =
-    List.map history_items ~f:(History_entry.create ~allocator)
+    List.map history_items ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.ok_or_failwith
   in
@@ -151,7 +215,7 @@ let%expect_test "denied tool transcript round-trips through export and parse" =
     ~history;
   let prompt_xml = Io.load_doc ~dir:out_dir prompt_file in
   let cache = Chat_response.Cache.create ~max_size:16 () in
-  let ctx = Ctx.create ~env ~dir:out_dir ~tool_dir:(Eio.Stdenv.cwd env) ~cache in
+  let ctx = fixture_ctx ~env ~dir:out_dir ~tool_dir:(Eio.Stdenv.cwd env) ~cache in
   let elements = CM.parse_chat_inputs ~dir:out_dir prompt_xml in
   let items = Converter.to_items ~ctx ~run_agent:stub_run_agent elements in
   print_s [%sexp (summarize_items items : Sexp.t list)];

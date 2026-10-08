@@ -8,8 +8,14 @@ type status =
   | Failed of Agent_protocol.Error.t
 [@@deriving sexp]
 
+type startup_mode =
+  | Execute
+  | Operator_only
+[@@deriving equal, sexp]
+
 type options =
-  { implementation_name : string
+  { startup_mode : startup_mode
+  ; implementation_name : string
   ; implementation_version : string
   ; features : string list
   ; extension_host : Agent_protocol.Extension_capabilities.host
@@ -19,13 +25,21 @@ type options =
   ; quota_limits : Agent_session.Quota_manager.limits
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
-  ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; inference_policy : Session_factory.inference_policy
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
   ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
+  ; provider_operator_factory : Provider_operator_port.factory option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
+  ; oauth_actor_resolver : (string -> Authenticator.actor_validator option) option
+  ; proxy_actor_policy :
+      (now:(unit -> Agent_protocol.Timestamp.t)
+       -> Authenticator.Request_identity.t
+       -> principal:Agent_protocol.Principal.t
+       -> (Operator_authorization.t, Agent_protocol.Error.t) result)
+        option
   }
 
 type t =
@@ -36,6 +50,7 @@ type t =
   ; workspaces : Agent_session.Workspace_catalog.t
   ; registry : Session_registry.t
   ; handler : Command_handler.t
+  ; provider_operator : Provider_operator_port.t option
   ; dispatcher : Dispatcher.t
   ; start_scheduler : Start_scheduler.t
   ; job_scheduler : Job_scheduler.t
@@ -46,6 +61,13 @@ type t =
   ; factory : Session_factory.t
   ; http_authenticator : Authenticator.t option
   ; oauth_bearer_validator : Authenticator.bearer_validator option
+  ; oauth_actor_validator : Authenticator.actor_validator option
+  ; proxy_actor_policy :
+      (now:(unit -> Agent_protocol.Timestamp.t)
+       -> Authenticator.Request_identity.t
+       -> principal:Agent_protocol.Principal.t
+       -> (Operator_authorization.t, Agent_protocol.Error.t) result)
+        option
   ; reverse_proxy : Config.Server.reverse_proxy option
   ; anonymous_http_principal : Agent_protocol.Principal.t option
   ; shutdown_grace_seconds : float
@@ -66,7 +88,8 @@ type health_services =
   }
 
 let default_options =
-  { implementation_name = "ochat-agent-server"
+  { startup_mode = Execute
+  ; implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
   ; extension_host = Daemon
   ; features =
@@ -78,6 +101,7 @@ let default_options =
       ; "workspaces.configured"
       ]
       @ Agent_protocol.Extension_capabilities.known_features
+      @ Agent_protocol.Inference_query.Features.all
   ; protocol_limits =
       { max_request_bytes = 16 * 1024 * 1024
       ; max_event_bytes = 16 * 1024 * 1024
@@ -136,13 +160,32 @@ let default_options =
       }
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
-  ; model_post_stream = None
+  ; inference_policy =
+      { capture_inference_target =
+          (fun ~prompt_revision_id:_ ~config:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; recapture_inference_target =
+          (fun ~current:_ ~prompt_revision_id:_ ~config:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; migrate_inference_target = None
+      ; migrate_model_job_target = None
+      ; approve_inference_target_change =
+          (fun ~current:_ ~proposed:_ ->
+            Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; resolve_inference_context =
+          (fun _ -> Error Inference_runtime.Preparation_error.Target_unavailable)
+      ; runtime_inference_ports =
+          (fun _ -> Error Inference_runtime.Preparation_error.Target_unavailable)
+      }
   ; qualify_chatml_extensions = true
   ; session_helpers = []
   ; independent_lifetime_policy = None
   ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
+  ; provider_operator_factory = None
   ; oauth_resolver = None
+  ; oauth_actor_resolver = None
+  ; proxy_actor_policy = None
   }
 ;;
 
@@ -210,6 +253,48 @@ let authenticate_http t identity token =
   | None, None, None -> Error (unauthenticated "HTTP authentication is required")
 ;;
 
+let authenticate_http_actor t identity token =
+  let open Result.Let_syntax in
+  let now () = timestamp t.env in
+  let principal_only principal =
+    Operator_authorization.guarded ~principal ~is_current:(fun () -> false)
+  in
+  let%bind proxy = authenticate_proxy t identity in
+  match proxy, token, t.anonymous_http_principal with
+  | Some principal, _, _ ->
+    (match t.proxy_actor_policy with
+     | None -> Ok (principal_only principal)
+     | Some policy ->
+       let%bind actor = policy ~now identity ~principal in
+       let actual = Operator_authorization.principal actor in
+       if
+         Agent_protocol.Id.Principal.equal actual.id principal.id
+         && String.equal actual.authentication_kind principal.authentication_kind
+         && Agent_protocol.Scope.Set.equal actual.scopes principal.scopes
+         && List.equal
+              (fun (left_name, left_value) (right_name, right_value) ->
+                 String.equal left_name right_name && String.equal left_value right_value)
+              actual.attributes
+              principal.attributes
+       then Ok actor
+       else
+         Error
+           (unauthenticated "proxy authorization policy changed authenticated authority"))
+  | None, Some token, _ ->
+    let static =
+      Option.map t.http_authenticator ~f:(fun authenticator ->
+        Authenticator.authenticate_bearer_actor authenticator ~now ~token)
+    in
+    (match static with
+     | Some (Ok actor) -> Ok actor
+     | Some (Error _) | None ->
+       (match t.oauth_actor_validator with
+        | Some validate -> validate ~now ~token
+        | None -> authenticate_with_validators t token |> Result.map ~f:principal_only))
+  | None, None, Some principal -> Ok (principal_only principal)
+  | None, None, None -> Error (unauthenticated "HTTP authentication is required")
+;;
+
 let authenticate_http_bearer t token =
   let identity =
     Authenticator.Request_identity.
@@ -262,7 +347,14 @@ let http_authenticator ~env (server : Config.Server.t) =
 let oauth_bearer_validator options (server : Config.Server.t) =
   match server.http.enabled, server.http.require_auth, server.http.oauth_validator with
   | true, true, Some id ->
-    Option.bind options.oauth_resolver ~f:(fun resolve -> resolve id)
+    (match Option.bind options.oauth_resolver ~f:(fun resolve -> resolve id) with
+     | Some validate -> Some validate
+     | None ->
+       Option.map
+         (Option.bind options.oauth_actor_resolver ~f:(fun resolve -> resolve id))
+         ~f:(fun validate ~now ~token ->
+           validate ~now:(fun () -> now) ~token
+           |> Result.map ~f:Operator_authorization.principal))
     |> Result.of_option
          ~error:(unauthenticated ("HTTP OAuth validator is unavailable: " ^ id))
     |> Result.map ~f:Option.some
@@ -281,22 +373,37 @@ let open_store ~sw ~env config ~process_start_identity =
   let lock_nonce =
     Agent_protocol.Id.Transaction.create () |> Agent_protocol.Id.Transaction.to_string
   in
-  if Eio.Path.is_file schema
-  then
+  match Eio.Path.kind ~follow:false schema with
+  | `Regular_file ->
     Agent_store.Session_store.open_existing
       ~env
       ~sw
       ~root
       ~process_start_identity
       ~lock_nonce
-  else
-    Agent_store.Session_store.create
-      ~env
-      ~sw
-      ~root
-      ~server_id:(Agent_protocol.Id.Server.create ())
-      ~process_start_identity
-      ~lock_nonce
+  | `Not_found ->
+    let root_path = Eio.Path.(Eio.Stdenv.fs env / root) in
+    let admissible =
+      match Eio.Path.kind ~follow:false root_path with
+      | `Not_found -> true
+      | `Directory -> List.is_empty (Eio.Path.read_dir root_path)
+      | _ -> false
+    in
+    if not admissible
+    then
+      Error
+        (Agent_store.Store_error.Corrupt
+           "unrecognized existing host root; preserve bytes and use explicit supported \
+            conversion")
+    else
+      Agent_store.Session_store.create
+        ~env
+        ~sw
+        ~root
+        ~server_id:(Agent_protocol.Id.Server.create ())
+        ~process_start_identity
+        ~lock_nonce
+  | _ -> Error (Agent_store.Store_error.Corrupt "host root schema is not a regular file")
 ;;
 
 let build_catalog ~env store config reviewer_resolver policy_evaluator_resolver =
@@ -376,7 +483,7 @@ let initialize
     Agent_protocol.Version.negotiate
       ~client_min:request.Agent_protocol.Initialize.Request.protocol_min
       ~client_max:request.protocol_max
-      ~supported:[ Agent_protocol.Version.initial; Agent_protocol.Version.current ]
+      ~supported:[ Agent_protocol.Version.current ]
   in
   if Poly.equal !status_ref Draining || Poly.equal !status_ref Stopped
   then
@@ -625,6 +732,7 @@ let config_build_diagnostic config error =
 ;;
 
 let config_watcher
+      ~enabled
       ~sw
       ~env
       ~config
@@ -695,7 +803,8 @@ let config_watcher
       ~initial:config
       ~hooks:{ prepare; commit; audit }
   in
-  Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
+  if enabled then Config_watcher.run ~sw ~clock:(Eio.Stdenv.clock env) ~every:1. watcher;
+  if not enabled then Config_watcher.close watcher;
   watcher
 ;;
 
@@ -708,7 +817,18 @@ let close_store_on_error store result =
     failure
 ;;
 
-let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built prompts =
+let compose
+      ~sw
+      ~env
+      ~(config : Config.t)
+      ~tool_dir
+      ~home
+      ~options
+      ~provider_operator
+      store
+      built
+      prompts
+  =
   let open Result.Let_syntax in
   let%bind configured_helpers =
     Session_helper_policy.grants
@@ -849,7 +969,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~job_capacity
       ~tool_dir
       ~home
-      ~model_post_stream:options.model_post_stream
+      ~inference_policy:options.inference_policy
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~session_helpers:options.session_helpers
       ~independent_lifetime_policy:options.independent_lifetime_policy
@@ -863,39 +983,46 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     |> List.filter ~f:(fun entry -> not entry.Agent_store.Session_index.Entry.archived)
   in
   Session_registry.index_all registry indexed_sessions;
-  Session_registry.install_loader registry (Session_factory.recover_session factory);
-  let%bind _ = Session_factory.recover_sessions factory in
-  let%bind () = Session_factory.reconcile_generated_creations factory in
-  let pinned_revisions =
-    List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
-      entry.Agent_store.Session_index.Entry.session.prompt_revision)
-  in
-  ignore
-    (Agent_store.Delegation_store.with_artifact_retention
-       (Agent_store.Session_store.delegations store)
-       ~max_records:factory_limits.delegation_recovery_max_count
-       ~max_bytes:factory_limits.delegation_recovery_max_bytes
-       ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
-       ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
-       ~f:(fun generated_revisions ->
-         Agent_session.Prompt_catalog.prune_unreferenced_artifacts
-           prompts
-           ~additional:(generated_revisions @ pinned_revisions))
-     : (int, Agent_store.Store_error.t) result);
-  let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
-  let startup_time = timestamp env in
+  let execute = equal_startup_mode options.startup_mode Execute in
+  if execute
+  then Session_registry.install_loader registry (Session_factory.recover_session factory);
+  Session_registry.install_reader registry (Session_factory.read_session factory);
   let%bind () =
-    Job_scheduler.reconcile_recovered
-      ~registry
-      ~max_count:factory_limits.job_result_recovery_max_count
-      ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
-  in
-  let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
-  let%bind () =
-    Session_factory.complete_index_recovery factory (Session_registry.entries registry)
+    if not execute
+    then Ok ()
+    else (
+      let%bind _ = Session_factory.recover_sessions factory in
+      let%bind () = Session_factory.reconcile_generated_creations factory in
+      let pinned_revisions =
+        List.filter_map (Agent_store.Session_store.list_sessions store) ~f:(fun entry ->
+          entry.Agent_store.Session_index.Entry.session.prompt_revision)
+      in
+      ignore
+        (Agent_store.Delegation_store.with_artifact_retention
+           (Agent_store.Session_store.delegations store)
+           ~max_records:factory_limits.delegation_recovery_max_count
+           ~max_bytes:factory_limits.delegation_recovery_max_bytes
+           ~max_artifact_entries:factory_limits.delegation_artifact_max_entries
+           ~max_artifact_bytes:factory_limits.delegation_artifact_max_bytes
+           ~f:(fun generated_revisions ->
+             Agent_session.Prompt_catalog.prune_unreferenced_artifacts
+               prompts
+               ~additional:(generated_revisions @ pinned_revisions))
+         : (int, Agent_store.Store_error.t) result);
+      let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
+      let startup_time = timestamp env in
+      let%bind () =
+        Job_scheduler.reconcile_recovered
+          ~registry
+          ~max_count:factory_limits.job_result_recovery_max_count
+          ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
+      in
+      let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
+      Session_factory.complete_index_recovery factory (Session_registry.entries registry))
   in
   let start_scheduler =
-    Start_scheduler.start
+    Start_scheduler.start_controlled
+      ~enabled:execute
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~registry
@@ -904,16 +1031,31 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
         Session_factory.resume_generated_initial_starts factory)
   in
   let job_scheduler =
-    Job_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry ~capacity:job_capacity
+    Job_scheduler.start_controlled
+      ~enabled:execute
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
+      ~capacity:job_capacity
+      ~model_job_inference:(Session_factory.model_job_inference factory)
   in
   let permission_scheduler =
-    Permission_scheduler.start ~sw ~clock:(Eio.Stdenv.clock env) ~registry
+    Permission_scheduler.start_controlled
+      ~enabled:execute
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~registry
   in
   let schedule_scheduler =
-    Schedule_scheduler.start ~sw ~clock:(Eio.Stdenv.mono_clock env) ~registry
+    Schedule_scheduler.start_controlled
+      ~enabled:execute
+      ~sw
+      ~clock:(Eio.Stdenv.mono_clock env)
+      ~registry
   in
   let maintenance =
-    Maintenance.start
+    Maintenance.start_controlled
+      ~enabled:execute
       ~env
       ~sw
       ~clock:(Eio.Stdenv.clock env)
@@ -930,6 +1072,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
   let status_ref = ref Ready in
   let config_watcher =
     config_watcher
+      ~enabled:execute
       ~sw
       ~env
       ~config
@@ -981,8 +1124,73 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~prepare_session_start:(Session_factory.prepare_session_start factory)
       ~workspace_retained:(Session_factory.workspace_retained factory)
       ~prepare_administration:(Session_factory.prepare_administration factory)
+      ~provider_operator
   in
-  let dispatcher = Dispatcher.create handler in
+  let admit command =
+    if execute
+    then Ok ()
+    else (
+      match command with
+      | Agent_protocol.Command.Protocol_initialize _
+      | Protocol_ping _
+      | Server_info
+      | Server_health _
+      | Prompt_list _
+      | Prompt_get _
+      | Workspace_list _
+      | Workspace_get _
+      | Session_list _
+      | Session_inference_summary _
+      | Session_inference_observations _
+      | Command_receipt _
+      | Provider_setup _
+      | Provider_status _
+      | Provider_login_begin _
+      | Provider_login_challenge _
+      | Provider_login_cancel _
+      | Provider_logout _
+      | Provider_select _
+      | Provider_configure_environment _ -> Ok ()
+      | Session_create _
+      | Session_get _
+      | Session_attach _
+      | Session_detach _
+      | Session_renew_owner _
+      | Session_start _
+      | Session_stop _
+      | Session_cancel_operation _
+      | Session_send_message _
+      | Session_compact _
+      | Session_delete_history _
+      | Session_export _
+      | Session_reset _
+      | Session_rebuild _
+      | Session_upgrade_prompt _
+      | Session_delete _
+      | Blob_read _
+      | Permission_list _
+      | Permission_respond _
+      | Grant_list _
+      | Grant_revoke _
+      | Audit_read _
+      | Job_list _
+      | Job_get _
+      | Job_cancel _
+      | Schedule_list _
+      | Schedule_get _
+      | Schedule_create _
+      | Schedule_cancel _
+      | Ingress_submit _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:
+               "operator-only host does not admit session execution or activating \
+                operations"
+             ~retryable:false
+             ()))
+  in
+  let dispatcher = Dispatcher.create ~admit handler in
   Ok
     { env
     ; store
@@ -991,6 +1199,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     ; workspaces = built.workspaces
     ; registry
     ; handler
+    ; provider_operator
     ; dispatcher
     ; start_scheduler
     ; job_scheduler
@@ -1001,6 +1210,10 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
     ; factory
     ; http_authenticator
     ; oauth_bearer_validator
+    ; oauth_actor_validator =
+        Option.bind config.server.http.oauth_validator ~f:(fun id ->
+          Option.bind options.oauth_actor_resolver ~f:(fun resolve -> resolve id))
+    ; proxy_actor_policy = options.proxy_actor_policy
     ; reverse_proxy = config.server.http.reverse_proxy
     ; anonymous_http_principal
     ; shutdown_grace_seconds = Float.of_int config.server.shutdown_grace_ms /. 1_000.
@@ -1016,9 +1229,23 @@ let start
       ~home
       ~process_start_identity
       ?(options = default_options)
+      ?(before_activation = fun _ -> Ok ())
       ()
   =
   Mirage_crypto_rng_unix.use_default ();
+  let options =
+    match options.startup_mode with
+    | Execute -> options
+    | Operator_only ->
+      { options with
+        qualify_chatml_extensions = false
+      ; features =
+          [ "sessions.catalog.readonly"
+          ; "commands.receipts.readonly"
+          ; "host.operator_only"
+          ]
+      }
+  in
   let open Result.Let_syntax in
   let%bind () =
     match options.qualify_chatml_extensions with
@@ -1033,16 +1260,54 @@ let start
   in
   close_store_on_error store
   @@
-  let%bind built, prompts =
-    build_catalog
-      ~env
-      store
-      config
-      options.reviewer_resolver
-      options.policy_evaluator_resolver
-    |> Result.map_error ~f:protocol_of_store
+  let%bind () = before_activation store in
+  let%bind provider_operator =
+    match options.provider_operator_factory with
+    | None -> Ok None
+    | Some factory ->
+      factory ~sw ~server_id:(Agent_store.Session_store.server_id store)
+      |> Result.map ~f:Option.some
   in
-  compose ~sw ~env ~config ~tool_dir ~home ~options store built prompts
+  Option.iter provider_operator ~f:(fun port ->
+    Eio.Switch.on_release sw (fun () -> Provider_operator_port.close port));
+  let features =
+    List.filter options.features ~f:(fun feature ->
+      not (String.equal feature "provider.operator"))
+  in
+  let options =
+    { options with
+      features =
+        (match provider_operator with
+         | None -> features
+         | Some _ -> features @ [ "provider.operator" ])
+    }
+  in
+  let result =
+    let%bind built, prompts =
+      build_catalog
+        ~env
+        store
+        config
+        options.reviewer_resolver
+        options.policy_evaluator_resolver
+      |> Result.map_error ~f:protocol_of_store
+    in
+    compose
+      ~sw
+      ~env
+      ~config
+      ~tool_dir
+      ~home
+      ~options
+      ~provider_operator
+      store
+      built
+      prompts
+  in
+  (match result with
+   | Error _ -> Option.iter provider_operator ~f:Provider_operator_port.close
+   | Ok _ -> ());
+  result
 ;;
 
 let close_connection t context = Command_handler.close_connection t.handler context
@@ -1096,6 +1361,7 @@ let shutdown t =
     Maintenance.close t.maintenance;
     Config_watcher.close t.config_watcher;
     shutdown_sessions t;
+    Option.iter t.provider_operator ~f:Provider_operator_port.close;
     Agent_store.Session_store.close t.store
     |> Result.map_error ~f:protocol_of_store
     |> Result.map ~f:(fun () -> t.status_ref := Stopped)

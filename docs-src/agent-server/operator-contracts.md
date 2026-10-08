@@ -17,26 +17,32 @@ and [command reference](../bin/README.md) for accepted combinations.
 
 [Parser/normalizer](../../bin/chat_tui.ml).
 
-`--archive`, `--authoring-package`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
+`--archive`, `--authoring-package`, `--authorize-shell-manifest`, `--auto-persist`, `--bearer-token-file`, `--build-info`, `--cancel`, `--config`, `--connect`, `--delete-session`, `--detached`, `--disconnect-grace-ms`, `--dry-run`, `--export-file`, `--export-session`, `--format`, `--help`, `--help-short`, `--inference-transport`, `--json`, `--keep-history`, `--list-sessions`, `--local`, `--new-daemon-session`, `--new-session`, `--no-config`, `--no-parallel-tool-calls`, `--no-persist`, `--out`, `--owner-bound`, `--parallel-tool-calls`, `--print-effective-args`, `--prompt`, `--prompt-file`, `--read-only`, `--rebuild-from-prompt`, `--reset-session`, `--session`, `--session-info`, `--start-session`, `--stop-session`, `--textmate-grammar`, `--typeahead`, `--typeahead-debounce-ms`, `--typeahead-history-messages`, `--typeahead-max-output-tokens`, `--typeahead-model`, `--version`, `--workspace`, `-build-info`, `-file`, `-h`, `-help`, `-prompt-preview-max`, `-query`, `-version`
 
 ## ochat_agent_server.ml flag inventory
 
 [Parser/normalizer](../../bin/ochat_agent_server.ml).
 
-`-config`, `-dry-run`, `-import-legacy`, `-inspect-store`, `-migrate-store`, `-print-config`, `-prompt`, `-validate-only`, `-workspace`
+`-config`, `-dry-run`, `-import-legacy`, `-inference-transport`, `-inspect-store`, `-migrate-store`, `-print-config`, `-prompt`, `-validate-only`, `-workspace`
 
 ## ochat_agent_stdio.ml flag inventory
 
 [Parser/normalizer](../../bin/ochat_agent_stdio.ml).
 
-`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--local`, `--prompt`, `--workspace`
+`--authoring-package`, `--bearer-token-file`, `--connect`, `--data-root`, `--inference-transport`, `--local`, `--prompt`, `--workspace`
+
+## provider_commands.ml flag inventory
+
+[Parser/normalizer](../../bin/provider_commands.ml).
+
+`-connection-profile`, `-expected-revision`, `-expires-at`, `-flow`, `-key`, `-key-file`, `-mode`, `-profile`, `-provider-home`
 
 ## HTTP route inventory
 
 [Dispatcher](../../lib/agent_transport_http/server.ml).
 
 ```ocaml
-  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request principal
+  | `POST, [ "v1"; "rpc" ] -> handle_rpc t request actor
   | `POST, [ "v1"; "blobs" ] -> handle_blob_upload t request principal
   | `GET, [ "v1"; "blobs"; id ] -> handle_blob_download t principal id
   | `GET, [ "v1"; "sessions"; id; "events" ] ->
@@ -290,6 +296,9 @@ module T = struct
     | Administer_configuration
     | Diagnostics
     | Submit_ingress
+    | Provider_view
+    | Provider_manage
+    | Provider_select
   [@@deriving compare, equal, sexp]
 end
 
@@ -312,6 +321,9 @@ let to_string = function
   | Administer_configuration -> "configuration.admin"
   | Diagnostics -> "diagnostics.read"
   | Submit_ingress -> "ingress.submit"
+  | Provider_view -> "provider.view"
+  | Provider_manage -> "provider.manage"
+  | Provider_select -> "provider.select"
 ;;
 
 let of_string = function
@@ -330,6 +342,9 @@ let of_string = function
   | "configuration.admin" -> Ok Administer_configuration
   | "diagnostics.read" -> Ok Diagnostics
   | "ingress.submit" -> Ok Submit_ingress
+  | "provider.view" -> Ok Provider_view
+  | "provider.manage" -> Ok Provider_manage
+  | "provider.select" -> Ok Provider_select
   | encoded -> Error (Protocol_error.invalid_request ("unknown scope: " ^ encoded))
 ;;
 
@@ -389,7 +404,7 @@ let require_json_content_type request =
 
 let require_protocol_version request =
   match P.Headers.get_multi (P.Request.headers request) protocol_version_header with
-  | [ "1" ] | [ "1.0" ] -> Ok ()
+  | [ "2" ] | [ "2.0" ] -> Ok ()
   | [ _ ] -> Error (error Incompatible_protocol "unsupported HTTP protocol version")
   | [] -> Error (error Incompatible_protocol "HTTP protocol version is required")
   | _ -> Error (error Invalid_request "HTTP protocol version must appear exactly once")

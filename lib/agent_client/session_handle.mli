@@ -1,8 +1,10 @@
 open! Core
 
 (** A synchronized attached-session client used by terminal and automation
-    front-ends. One handle owns notification reduction and owner renewal for
-    its connection. *)
+    front-ends. At most one subscribed handle owns notification reduction per
+    connection. Unsubscribed handles may coexist, including with that reader;
+    they do not consume events or update their projection from notifications.
+    Each handle owns renewal of its own attachment lease. *)
 
 type t
 
@@ -33,6 +35,7 @@ val create
   -> connection:Connection.t
   -> spec:Agent_protocol.Session.Spec.t
   -> mode:Agent_protocol.Session.attachment_mode
+  -> ?subscribe:bool
   -> ?on_update:(Projection.t -> unit)
   -> ?on_error:(Agent_protocol.Error.t -> unit)
   -> unit
@@ -48,7 +51,12 @@ val reclaim_token : t -> string option
 
 val projection : t -> Projection.t
 val last_error : t -> Agent_protocol.Error.t option
+
+(** Closure means notification/renewal reduction has stopped; a stream error
+    retains a stale snapshot and requires repair. This does not mean the server
+    attachment was detached. [close] still attempts detach exactly once. *)
 val await_closed : t -> unit
+
 val is_closed : t -> bool
 
 val start

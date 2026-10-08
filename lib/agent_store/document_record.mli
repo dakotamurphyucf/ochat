@@ -23,6 +23,21 @@ type t
     JSON normalization. Callers use this for original transaction chain anchors. *)
 val digest : string -> string
 
+(** Reuse a frame already verified by the existing Frame/Journal owner.
+    Digest verification still precedes document inspection. *)
+val of_frame
+  :  Frame.t
+  -> limits:Document_schema.Limits.t
+  -> expected_digest:string option
+  -> (t, Error.t) Result.t
+
+(** Encode and validate a new document once, retaining precisely the payload
+    bytes that the existing journal owner will append. *)
+val of_document
+  :  Document_schema.Document.t
+  -> limits:Document_schema.Limits.t
+  -> (t, Error.t) Result.t
+
 (** Frame validation precedes document inspection. Expected digest, when given,
     is a lowercase 64-character SHA-256 anchor and is checked against the exact
     stored bytes before parsing or conversion. Offset permits journal records. *)
@@ -43,6 +58,7 @@ val decode_file
 val stored_bytes : t -> string
 val stored_digest : t -> string
 val document : t -> Document_schema.Document.t
+val flags : t -> int
 
 (** Conversion returns a new logical document alongside an unchanged verified
     record. It cannot replace the stored-byte digest. Domain validation follows

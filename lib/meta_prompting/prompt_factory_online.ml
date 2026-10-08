@@ -3,19 +3,13 @@ open Core
 [@@@warning "-16-27-32-39"]
 
 let getenv_opt = Core.Sys.getenv
-
-let read_file_opt path =
-  try Some (In_channel.read_all path) with
-  | _ -> None
-;;
-
 let guardrails_default = Templates.system_prompt_guardrails
 
 let load_template ~(env : Eio_unix.Stdenv.base) name =
   let dir = Eio.Stdenv.fs env in
   let path = Eio.Path.(dir / "meta-prompt" / "templates" / name) in
   try Some (Eio.Path.load path) with
-  | _ -> None
+  | Eio.Io _ -> None
 ;;
 
 let load_guardrails ~(env : Eio_unix.Stdenv.base) =
@@ -24,7 +18,7 @@ let load_guardrails ~(env : Eio_unix.Stdenv.base) =
     Eio.Path.(dir / "meta-prompt" / "integration" / "system_prompt_guardrails.txt")
   in
   try Eio.Path.load path with
-  | _ -> guardrails_default
+  | Eio.Io _ -> guardrails_default
 ;;
 
 let load_kv_overrides ~(env : Eio_unix.Stdenv.base) : (string, string) Hashtbl.t option =
@@ -49,7 +43,7 @@ let load_kv_overrides ~(env : Eio_unix.Stdenv.base) : (string, string) Hashtbl.t
   let dir = Eio.Stdenv.fs env in
   let try_load p =
     try Some (Eio.Path.load p |> parse_lines) with
-    | _ -> None
+    | Eio.Io _ -> None
   in
   match getenv_opt "META_PROMPT_ONLINE_CONFIG" with
   | Some rel -> try_load Eio.Path.(dir / rel)
@@ -136,68 +130,25 @@ let get_iterate_system_prompt env =
   system_text
 ;;
 
-let iterate_revised_prompt ~env ~goal ~current_prompt ~proposer_model : string option =
-  match getenv_opt "OPENAI_API_KEY" with
-  | None -> None
-  | Some _ ->
-    (try
-       let dir = Eio.Stdenv.fs env in
-       let net = Eio.Stdenv.net env in
-       let open Openai.Responses in
-       let system_text = get_iterate_system_prompt env in
-       let system_msg : Input_message.t =
-         { role = Developer
-         ; content = [ Text { text = system_text; _type = "input_text" } ]
-         ; _type = "message"
-         }
-       in
-       let user_msg : Input_message.t =
-         { role = User
-         ; content =
-             [ Text
-                 { text = build_iteration_user_content ~env ~goal ~current_prompt
-                 ; _type = "input_text"
-                 }
-             ]
-         ; _type = "message"
-         }
-       in
-       let inputs : Item.t list =
-         [ Item.Input_message system_msg; Item.Input_message user_msg ]
-       in
-       let max_output_tokens = 1000000 in
-       let chosen_model = Option.value proposer_model ~default:Request.Gpt5 in
-       let ({ Response.output; _ } : Response.t) =
-         Eio.Switch.run (fun sw ->
-           post_response
-             Default
-             ~sw
-             ~reasoning:{ effort = Some High; summary = Some Detailed }
-             ~max_output_tokens
-             ~model:chosen_model
-             ~dir
-             net
-             ~inputs)
-       in
-       let rec first_text = function
-         | [] -> None
-         | Item.Output_message om :: _ ->
-           (match om.Output_message.content with
-            | [] -> None
-            | { text; _ } :: _ -> Some text)
-         | _ :: tl -> first_text tl
-       in
-       match first_text output with
-       | None -> None
-       | Some txt -> extract_section ~text:txt ~section:"Revised_Prompt\n"
-     with
-     | exn ->
-       Log.emit
-         `Debug
-         (Printf.sprintf
-            "prompt_factory_online.iterate_revised_prompt: %s"
-            (Exn.to_string exn));
-       None)
+let iterate_revised_prompt ~env ~inference ~goal ~current_prompt ~proposer_model =
+  match
+    Inference_support.complete
+      inference
+      ?model:proposer_model
+      ~settings:
+        [ Inference_support.setting
+            "reasoning"
+            (`Object [ "effort", `String "high"; "summary", `String "detailed" ])
+        ; Inference_support.setting "max_output_tokens" (`Number "1000000")
+        ]
+      ~messages:
+        [ Developer, get_iterate_system_prompt env
+        ; User, build_iteration_user_content ~env ~goal ~current_prompt
+        ]
+      ()
+  with
+  | Ok text -> extract_section ~text ~section:"Revised_Prompt\n"
+  | Error _ -> None
 ;;
 
 let build_generator_user_content ~(env : Eio_unix.Stdenv.base) ~agent_name ~goal =
@@ -245,69 +196,26 @@ let build_generator_user_content ~(env : Eio_unix.Stdenv.base) ~agent_name ~goal
   Buffer.contents b
 ;;
 
-let create_pack_online ~env ~agent_name ~goal ~proposer_model : string option =
-  match getenv_opt "OPENAI_API_KEY" with
-  | None -> None
-  | Some _ ->
-    (try
-       let dir = Eio.Stdenv.fs env in
-       let net = Eio.Stdenv.net env in
-       let open Openai.Responses in
-       let templ =
-         match load_template ~env "generator_prompt_v2.txt" with
-         | Some t -> t
-         | None -> Templates.generator_prompt_v2
-       in
-       let system_text = templ in
-       let system_msg : Input_message.t =
-         { role = Developer
-         ; content = [ Text { text = system_text; _type = "input_text" } ]
-         ; _type = "message"
-         }
-       in
-       let user_msg : Input_message.t =
-         { role = User
-         ; content =
-             [ Text
-                 { text = build_generator_user_content ~env ~agent_name ~goal
-                 ; _type = "input_text"
-                 }
-             ]
-         ; _type = "message"
-         }
-       in
-       let inputs : Item.t list =
-         [ Item.Input_message system_msg; Item.Input_message user_msg ]
-       in
-       let max_output_tokens = 1000000 in
-       let chosen_model = Option.value proposer_model ~default:Request.Gpt5 in
-       let ({ Response.output; _ } : Response.t) =
-         Eio.Switch.run (fun sw ->
-           post_response
-             Default
-             ~sw
-             ~reasoning:{ effort = Some High; summary = Some Detailed }
-             ~max_output_tokens
-             ~model:chosen_model
-             ~dir
-             net
-             ~inputs)
-       in
-       let rec first_text = function
-         | [] -> None
-         | Item.Output_message om :: _ ->
-           (match om.Output_message.content with
-            | [] -> None
-            | { text; _ } :: _ -> Some text)
-         | _ :: tl -> first_text tl
-       in
-       first_text output
-     with
-     | exn ->
-       Log.emit
-         `Debug
-         (Printf.sprintf
-            "prompt_factory_online.create_pack_online: %s"
-            (Exn.to_string exn));
-       None)
+let create_pack_online ~env ~inference ~agent_name ~goal ~proposer_model =
+  let template =
+    Option.value
+      (load_template ~env "generator_prompt_v2.txt")
+      ~default:Templates.generator_prompt_v2
+  in
+  match
+    Inference_support.complete
+      inference
+      ?model:proposer_model
+      ~settings:
+        [ Inference_support.setting
+            "reasoning"
+            (`Object [ "effort", `String "high"; "summary", `String "detailed" ])
+        ; Inference_support.setting "max_output_tokens" (`Number "1000000")
+        ]
+      ~messages:
+        [ Developer, template; User, build_generator_user_content ~env ~agent_name ~goal ]
+      ()
+  with
+  | Ok text -> Some text
+  | Error _ -> None
 ;;

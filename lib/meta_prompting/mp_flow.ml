@@ -2,9 +2,9 @@
 
     The two entry-points {!val:first_flow} and {!val:tool_flow} take an initial
     draft prompt and iterate a refinement loop powered by
-    {!module:Recursive_mp}.  Each iteration calls a *proposer* model (GPT-4o by
-    default) to transform the prompt and then evaluates the candidate with an
-    OpenAI reward-model based {!module:Evaluator}.  The best-scoring candidate
+    {!module:Recursive_mp}. Each iteration inherits the selected *proposer*
+    model to transform the prompt, then evaluates the candidate under the
+    existing reward rubric. The best-scoring candidate
     is kept and the process stops once the score plateaus or the fixed maximum
     number of iterations is reached.
 
@@ -13,12 +13,11 @@
     control-flow and defaults are identical.
 
     Both helpers require an {!module:Eio_unix.Stdenv.base} capability record so
-    that all IO (HTTP requests to the OpenAI API, vector-DB look-ups, …) is
+    that all IO (selected inference, vector-DB look-ups, …) is
     executed inside the caller-supplied event loop.
 
-    Neither function raises; any network or evaluator error degrades
-    gracefully by falling back to conservative defaults provided by the
-    underlying modules.
+    Expected completion/parse failures retain each underlying fallback policy;
+    configuration errors, cancellation and strict callback failures propagate.
 *)
 
 open Core
@@ -61,6 +60,7 @@ module E = Evaluator
 
 let first_flow
       ~(env : Eio_unix.Stdenv.base)
+      ~inference
       ~(task : string)
       ~prompt
       ?(action = Context.Generate)
@@ -94,8 +94,6 @@ let first_flow
       ~judges
       ~bandit_enabled:true
       ~max_iters:5
-      ~proposer_model:Openai.Responses.Request.Gpt5
-      ~executor_model:Openai.Responses.Request.Gpt5
       ~strategies
       ~score_epsilon:1e-8
       ~bayes_alpha:0.05
@@ -104,15 +102,16 @@ let first_flow
   Log.emit `Debug "mp_flow: refine parameters built";
   Log.emit `Debug "mp_flow: preparing context";
   let base_ctx = Context.default () in
-  let ctx_with_env = { base_ctx with env = Some env; action } in
+  let ctx_with_env =
+    { base_ctx with env = Some env; inference = Some inference; action }
+  in
   let context : Context.t = Context.with_guidelines ctx_with_env ~guidelines:None in
   Log.emit `Debug "mp_flow: context prepared";
   (* ----------------------------------------------------------------
      Run refinement                                                   *)
   Log.emit `Info "mp_flow: starting refinement";
   let refined_prompt =
-    Log.with_span "recursive_refine" (fun () ->
-      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.Gpt5)
+    Log.with_span "recursive_refine" (fun () -> RMP.refine ~context ~params prompt)
   in
   Log.emit `Info "mp_flow: refinement completed";
   refined_prompt.body
@@ -146,6 +145,7 @@ let first_flow
 
 let tool_flow
       ~(env : Eio_unix.Stdenv.base)
+      ~inference
       ~(task : string)
       ~prompt
       ?(action = Context.Generate)
@@ -181,8 +181,6 @@ let tool_flow
       ~judges
       ~bandit_enabled:true
       ~max_iters:3
-      ~proposer_model:Openai.Responses.Request.Gpt5
-      ~executor_model:Openai.Responses.Request.Gpt5
       ~strategies
       ~score_epsilon:1e-8
       ~bayes_alpha:0.05
@@ -191,13 +189,19 @@ let tool_flow
   Log.emit `Debug "mp_flow: refine parameters built";
   Log.emit `Debug "mp_flow: preparing context";
   let base_ctx = Context.default () in
-  let ctx_with_env = { base_ctx with env = Some env; action; prompt_type = Tool } in
+  let ctx_with_env =
+    { base_ctx with
+      env = Some env
+    ; inference = Some inference
+    ; action
+    ; prompt_type = Tool
+    }
+  in
   let context : Context.t = Context.with_guidelines ctx_with_env ~guidelines:None in
   Log.emit `Debug "mp_flow: context prepared";
   Log.emit `Info "mp_flow: starting refinement";
   let refined_prompt =
-    Log.with_span "recursive_refine" (fun () ->
-      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.Gpt5)
+    Log.with_span "recursive_refine" (fun () -> RMP.refine ~context ~params prompt)
   in
   Log.emit `Info "mp_flow: refinement completed";
   refined_prompt.body

@@ -42,7 +42,8 @@ let%expect_test "session actor publishes committed events to multiple subscriber
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit ~previous:_ _transition ->
                   Int.incr commits;
                   command_audits := command_audit :: !command_audits;
@@ -76,7 +77,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
       let _, second = attach () in
       Agent_session.Session_actor.start_with_command_audit
         actor
-        ~command_audit:"audited-start"
+        ~command_audit:(command_audit ~principal_id ~session_id "audited-start")
         ~attachment_id:first_attachment.id
       |> protocol_ok
       |> ignore;
@@ -143,7 +144,13 @@ let%expect_test "session actor publishes committed events to multiple subscriber
           { same_first_event =
               (Agent_protocol.Event.Durable.equal_kind first_kind second_kind : bool)
           ; commits = (!commits : int)
-          ; command_audits = (List.filter_opt !command_audits |> List.rev : string list)
+          ; command_audits =
+              (List.filter_opt !command_audits
+               |> List.rev
+               |> List.map ~f:(fun document ->
+                 (Agent_store.Idempotency_store.Command_audit.decode document |> store_ok)
+                   .request_digest)
+               : string list)
           ; history = (List.length snapshot.canonical_history.entries : int)
           ; manifest_grants = (List.length manifest_grants : int)
           ; security_grants = (List.length security_snapshot.grants : int)
@@ -176,7 +183,8 @@ let%expect_test "session actor enforces its configured attachment limit" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -226,7 +234,8 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
                ~workspace_instance
                ~liveness:(Owner_bound { disconnect_grace_ms = 5; stop_mode = Graceful })
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -277,7 +286,8 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
                ~workspace_instance
                ~liveness:(Owner_bound { disconnect_grace_ms = 20; stop_mode = Graceful })
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -362,7 +372,8 @@ let%expect_test "read-only attachments cannot mutate actor state" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -410,7 +421,8 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
                ~liveness:Process_bound
                ~start_immediately:false)
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit:_ ~previous:_ _ ->
                   Int.incr commits;
                   Ok ())
@@ -475,7 +487,8 @@ let%expect_test "durable history source adapts the response engine contract" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> timestamp)
@@ -510,13 +523,13 @@ let%expect_test "durable history source adapts the response engine contract" =
           ; _type = "message"
           }
       in
-      let entry = History_entry.create_with_id ~id item in
+      let entry = Openai.Responses_history.create_with_id_exn ~id item in
       let validation = History_entry.Id_source.validate adapted [ entry ] in
       let invalid_id =
         History_entry.Id.create ~namespace:"durable-source" ~sequence:2
         |> Result.ok_or_failwith
       in
-      let invalid = History_entry.create_with_id ~id:invalid_id item in
+      let invalid = Openai.Responses_history.create_with_id_exn ~id:invalid_id item in
       let invalid_validation = History_entry.Id_source.validate adapted [ invalid ] in
       (* Another allocator in the same actor may validate existing input before
          allocating its own block. It must use committed actor state, while
@@ -584,7 +597,8 @@ let%expect_test "foreground worker commits history before terminal operation" =
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:(Some (completed_worker ~started ~release:release_worker))
           ~services:
             { now = (fun () -> Agent_protocol.Timestamp.now ())
@@ -675,28 +689,39 @@ let%expect_test
       let release, release_u = Eio.Promise.create () in
       let worker =
         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input capabilities ->
+          let source =
+            Transcript.Source_id.of_string "test-source" |> Result.ok_or_failwith
+          in
+          let attempt =
+            Transcript.Attempt_id.of_string "test-attempt" |> Result.ok_or_failwith
+          in
+          let key call_alias =
+            Agent_protocol.Activity.Key.create
+              ~scope:{ source; attempt }
+              ~call_alias
+              ~parent:None
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            |> Result.ok_or_failwith
+          in
           List.iter [ "tool-a"; "agent-b" ] ~f:(fun call_id ->
-            capabilities.publish_live
-              ~kind:Tool_started
-              ~payload:
-                (`Object
-                    [ "call_id", `String call_id
-                    ; "name", `String "child"
-                    ; "kind", `String "function"
-                    ; "payload", `String "{}"
-                    ; "agent_page_kind", `String "subagent"
-                    ]));
+            let descriptor =
+              Agent_protocol.Activity.Tool.descriptor
+                (key call_id)
+                ~call_entry_id:None
+                ~name:"child"
+                ~kind:Function
+                ~input:"{}"
+                ~classification:(Some Subagent)
+              |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+              |> Result.ok_or_failwith
+            in
+            capabilities.publish_live (Tool_activity (Started descriptor)));
           Eio.Promise.resolve ready_u ();
           Eio.Promise.await release;
           List.iter [ "tool-a"; "agent-b" ] ~f:(fun call_id ->
             capabilities.publish_live
-              ~kind:Tool_finished
-              ~payload:
-                (`Object
-                    [ "call_id", `String call_id
-                    ; "outcome", `String "returned"
-                    ; "output", `Null
-                    ]));
+              (Tool_activity
+                 (Finished { key = key call_id; outcome = Returned; output = None })));
           Completed
             { final_history = input.history
             ; runtime_requests = []
@@ -714,7 +739,8 @@ let%expect_test
                ~workspace_instance
                ~liveness:Process_bound
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:(Some worker)
           ~services:
             { now = (fun () -> timestamp)
@@ -786,7 +812,8 @@ let%expect_test
                ~workspace_instance
                ~liveness:(Owner_bound { disconnect_grace_ms = 1000; stop_mode = Cancel })
                ~start_immediately:false)
-          ~persistence:{ commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
+          ~persistence:
+            { archive_reference; commit = (fun ~command_audit:_ ~previous:_ _ -> Ok ()) }
           ~operation_worker:None
           ~services:
             { now = (fun () -> !now)

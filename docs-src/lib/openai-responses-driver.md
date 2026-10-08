@@ -1,8 +1,8 @@
 # Explicit Responses preparation and HTTP/SSE driver
 
-`Openai.Responses_driver` is an additive, usable inference boundary around
-`Openai.Responses.Codec`. The legacy runtime entry points have not yet been
-migrated; OCH-56 owns that adoption. The driver neither executes tools nor
+`Openai.Responses_driver` is the provider-local inference boundary around
+`Openai.Responses.Codec`. The [neutral inference runtime](neutral-inference.md)
+selects it through `Openai.Inference_adapter`. The driver neither executes tools nor
 allocates or persists conversation entries. Host moderation, final admission,
 canonical history, tool permissions, execution, recovery and final run completion
 remain with their existing owners.
@@ -38,8 +38,9 @@ and invalid values fail during pure preparation, before authentication/network.
 schemas and settings. Final guidance must already be present. Raw history
 objects retain unknown fields, exact call strings, presence and opaque reasoning.
 Opaque replay requires affirmative support; the host is responsible for matching
-capture origin before passing raw opaque history. Actual non-null caller or
-namespace metadata and `async=true` reject until their host mapping is selected.
+capture origin before passing raw opaque history. A direct caller marker is replayable and eligible for the existing local tool
+path; unknown/program caller metadata, non-null namespace metadata, and
+`async=true` reject until their host mapping is selected.
 Null metadata is retained only where the selected codec field is nullable;
 for example, `function_call.namespace` remains non-null while
 `function_call_output.namespace` permits null. Tool names are unique, and
@@ -50,8 +51,11 @@ files use base64 bytes or base64 data URIs. Remote URLs and provider-only file I
 cannot represent the immutable effective asset and reject. Captured assets are
 inside the request JSON; no file path or mutable asset resolver is consulted at
 dispatch. The request always carries complete `input`, `store=false`,
-`truncation=disabled`, `stream=true`, and the selected tools. It never uses a
-provider conversation or `previous_response_id`.
+`stream=true`, and the selected tools. Public API profiles also emit
+`truncation=disabled`; the Direct Codex profile omits that unsupported field.
+This is an explicit typed profile policy applied before fingerprinting, shared
+by HTTP and WebSocket preparation. It never emits automatic truncation or uses
+a provider conversation or `previous_response_id`.
 
 The SHA-256 fingerprint includes profile/account/endpoint identity, the exact
 encoded request and effective setting provenance. Final guidance and asset/tool
@@ -102,6 +106,13 @@ selected one-request HTTP/1.1 client does not negotiate interim responses,
 redirects, compression or connection reuse. It avoids the legacy `Io.Net` null
 TLS authenticator and Cohttp's plaintext protocol debug logging/unbounded reader.
 
+Profiles require one `text/event-stream` Content-Type by default. The direct
+Codex route permits an absent header, matching its observed endpoint behavior;
+it still requires bounded HTTP/SSE framing and a valid response terminal. Empty,
+JSON or HTML bodies cannot become successful completions. Explicitly incorrect
+or duplicate Content-Type headers remain rejected on both routes. Rejections
+retain only finite header-shape and media classifications, never raw values.
+
 Validated nonterminal `Event.Update` values arrive incrementally; exact duplicate
 codec events are suppressed. Terminal-only newly finalized items arrive in
 `Event.Finalized` before `Event.Terminal`. The terminal retains the complete
@@ -125,8 +136,15 @@ propagates
 through cleanup. Neither path manufactures a normal terminal.
 
 Failures carry bounded typed diagnostics without request, credential, response,
-endpoint or exception text. Provider/raw captures delivered to the host are
-private conversation evidence; consumers must not automatically log them.
+endpoint or exception text. For an HTTP rejection, the SSE driver reads at most
+16 KiB of framed error content within a separate one-second diagnostic deadline,
+also bounded by the overall request deadline. It retains only the status and
+closed reason/parameter classifications. Unknown fields, arbitrary messages and
+parameter names are never retained. Unrecognized or unreadable content yields an
+unclassified diagnostic while preserving the original HTTP failure and delivery
+state. This diagnostic does not authorize a retry. Provider/raw captures delivered
+to the host are private conversation evidence; consumers must not automatically
+log them.
 
 ## Offline completion evidence
 

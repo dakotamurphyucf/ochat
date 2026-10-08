@@ -82,6 +82,7 @@ type startup_render =
 
 type t =
   { model : Model.t
+  ; mutable transcript_drafts : Stream.t
   ; chat_render_worker : Chat_render_worker.t option
   ; history_allocator : History_entry.Allocator.t
   ; agent_page_kind_by_name :
@@ -212,9 +213,7 @@ let visible_history_items_of_history (t : t) (history : History_entry.t list)
 let visible_messages_of_history (t : t) (history : History_entry.t list)
   : Types.message list
   =
-  visible_history_items_of_history t history
-  |> History_entry.items
-  |> Conversation.of_history
+  visible_history_items_of_history t history |> Conversation.of_history
 ;;
 
 let refresh_messages ?(viewport_height = 0) (t : t) =
@@ -227,12 +226,23 @@ let refresh_messages ?(viewport_height = 0) (t : t) =
     | Some moderator -> Manager.effective_entries moderator.manager history
   in
   let projection = Conversation.project_effective_entries effective_entries in
+  let canonical_rows = Conversation.rows projection in
+  let known =
+    Hash_set.of_list
+      (module Projected_message.Id)
+      (List.map canonical_rows ~f:(fun row -> row.Projected_message.id))
+  in
+  let draft_rows =
+    Stream.rows t.transcript_drafts
+    |> List.filter ~f:(fun row -> not (Hash_set.mem known row.Projected_message.id))
+  in
+  let rows = canonical_rows @ draft_rows in
   let damage =
     Model.reconcile_projected_messages_with_damage
       t.model
       ~viewport_height
-      ~rows:(Conversation.rows projection)
-      ~messages:(Conversation.messages projection)
+      ~rows
+      ~messages:(List.map rows ~f:(fun row -> row.Projected_message.message))
   in
   Model.rebuild_tool_output_index_for_items
     t.model
@@ -306,6 +316,7 @@ let create
        ~queue_count:(Shell_broker.pending_count broker)
    | (None | Some (Moderator _)), _ | Some (Shell _), None -> ());
   { model
+  ; transcript_drafts = Stream.create ()
   ; chat_render_worker
   ; history_allocator
   ; agent_page_kind_by_name = String.Table.of_alist_exn agent_page_classifications
@@ -831,16 +842,22 @@ let enqueue_deferred_user_note t (submit_request : submit_request) =
     | Model.Raw_xml ->
       Error "Raw XML cannot be submitted while an assistant turn is active."
     | Model.Plain ->
-      let item =
-        Openai.Responses.Item.Input_message
-          { role = Openai.Responses.Input_message.User
-          ; content =
-              [ Openai.Responses.Input_message.Text { text; _type = "input_text" } ]
-          ; _type = "message"
-          }
+      let module P = History_entry.Payload in
+      let payload =
+        P.Semantic.create
+          (Message
+             { form = Input
+             ; role = User
+             ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+             ; phase = Absent
+             })
+          ~metadata:P.Metadata.empty
+        |> Result.map ~f:P.authored
+        |> Result.ok_or_failwith
       in
       let entry =
-        History_entry.create ~allocator:t.history_allocator item |> Result.ok_or_failwith
+        History_entry.create ~allocator:t.history_allocator payload
+        |> Result.ok_or_failwith
       in
       Queue.enqueue t.session_controller.deferred_user_notes { entry };
       Ok true)
@@ -860,13 +877,16 @@ let dequeue_deferred_user_notes t =
 ;;
 
 let render_deferred_user_note ({ entry } : deferred_user_note) =
-  match History_entry.item entry with
-  | Openai.Responses.Item.Input_message message ->
-    List.filter_map message.content ~f:(function
-      | Text { text; _ } -> Some text
-      | Image _ -> None)
+  match
+    History_entry.Payload.Semantic.view
+      (History_entry.Payload.semantic (History_entry.payload entry))
+  with
+  | Message { content; _ } ->
+    List.filter_map content ~f:(function
+      | History_entry.Payload.Content.Text { text; _ } -> Some text
+      | Refusal _ | Image _ | Unknown _ -> None)
     |> String.concat ~sep:"\n"
-  | _ -> ""
+  | Call _ | Result _ | Reasoning _ | Unknown _ -> ""
 ;;
 
 let safe_point_input_source t =

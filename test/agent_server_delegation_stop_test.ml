@@ -114,9 +114,10 @@ let run ?(shutdown = false) ?(stop = true) ~active_parent () =
               ~options:
                 { Daemon.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream =
-                    Some
-                      (fun ~sw:_ ~inputs:_ ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
                         Int.incr requests;
                         let cleanup, completion =
                           match !requests with
@@ -352,4 +353,148 @@ let%expect_test "daemon shutdown joins accepted owned stop before closing actors
 let%expect_test "ordinary shutdown joins descendants and preserves running intent" =
   run ~shutdown:true ~stop:false ~active_parent:false ();
   [%expect {| shutdown joined descendants; running intent restored |}]
+;;
+
+let%expect_test "cancelled client cleanup returns before joining an active owned child" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let prompt_file = Filename.concat root "parent.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<developer>Root.</developer><tool name="read_file"><read id="data" path="${workspace}"/></tool>|};
+        let entered, entered_u = Eio.Promise.create () in
+        let never, _ = Eio.Promise.create () in
+        let provider_cleaned = ref false in
+        let requests = ref 0 in
+        let milestones = ref [] in
+        let record milestone = milestones := milestone :: !milestones in
+        (* The daemon switch outlives the cancelled client body. Its provider gate
+           stays unresolved: shutdown must cancel and join the owned work. *)
+        Eio.Switch.run (fun sw ->
+          let daemon =
+            Daemon.start
+              ~sw
+              ~env
+              ~config:(config root root prompt_file)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; inference_policy =
+                    inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                        Int.incr requests;
+                        Exn.protect
+                          ~finally:(fun () -> provider_cleaned := true)
+                          ~f:(fun () ->
+                            Eio.Promise.resolve entered_u ();
+                            Eio.Promise.await never;
+                            Stdlib.Seq.empty))
+                }
+              ()
+            |> protocol_ok
+          in
+          Exn.protect
+            ~finally:(fun () -> Daemon.shutdown daemon |> protocol_ok)
+            ~f:(fun () ->
+              let client = connection daemon (principal ()) in
+              let handles = ref [] in
+              let parent_entry = ref None
+              and child_entry = ref None in
+              let result =
+                (* Bound ordinary fixture waits; the external test runner remains
+                   responsible for containing cancellation-protected deadlocks. *)
+                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+                  Eio.Fiber.first
+                    (fun () ->
+                       Eio.Promise.await entered;
+                       record "provider entered";
+                       Error `Timeout)
+                    (fun () ->
+                       Exn.protect
+                         ~finally:(fun () ->
+                           Eio.Cancel.protect (fun () ->
+                             Exn.protect
+                               ~finally:(fun () ->
+                                 Agent_client.Connection.close client;
+                                 record "connection closed")
+                               ~f:(fun () ->
+                                 List.iter !handles ~f:H.close;
+                                 record "cached handles closed")))
+                         ~f:(fun () ->
+                           initialize client;
+                           let parent, _ =
+                             create_session ~start_immediately:true client
+                           in
+                           let parent_loaded =
+                             Registry.find (Daemon.registry daemon) parent.id
+                             |> Option.value_exn
+                           in
+                           parent_entry := Some parent_loaded;
+                           let child = create_child env root daemon parent_loaded in
+                           child_entry := Some child;
+                           let child_id =
+                             (A.state child.actor |> protocol_ok).identity.session_id
+                           in
+                           let attach id =
+                             let handle =
+                               H.attach
+                                 ~sw
+                                 ~clock:(Eio.Stdenv.clock env)
+                                 ~connection:client
+                                 ~session_id:id
+                                 ~mode:Read_write
+                                 ~subscribe:false
+                                 ()
+                               |> protocol_ok
+                             in
+                             handles := handle :: !handles;
+                             handle
+                           in
+                           ignore (attach parent.id : H.t);
+                           let child_handle = attach child_id in
+                           H.send_message
+                             child_handle
+                             { kind = Plain_text
+                             ; text = "Remain blocked until shutdown cancels owned work."
+                             ; attachments = []
+                             }
+                           |> protocol_ok
+                           |> ignore;
+                           Eio.Promise.await never;
+                           Ok ())))
+              in
+              (match result with
+               | Error `Timeout -> record "cancelled body joined"
+               | Ok () -> failwith "unresolved provider gate returned");
+              assert (not !provider_cleaned);
+              List.iter !handles ~f:(fun handle -> assert (H.is_closed handle));
+              Daemon.shutdown daemon |> protocol_ok;
+              assert !provider_cleaned;
+              [%test_eq: int] 1 !requests;
+              List.iter
+                [ Option.value_exn !parent_entry; Option.value_exn !child_entry ]
+                ~f:(fun entry ->
+                  match A.state entry.actor with
+                  | Error { code = Server_shutting_down; _ } -> ()
+                  | _ -> failwith "shutdown returned with a live actor mailbox");
+              record "shutdown joined provider and closed actors";
+              List.iter (List.rev !milestones) ~f:print_endline))));
+  [%expect
+    {|
+    provider entered
+    cached handles closed
+    connection closed
+    cancelled body joined
+    shutdown joined provider and closed actors
+    |}]
 ;;

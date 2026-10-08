@@ -18,4 +18,4 @@ type t =
   }
 [@@deriving equal]
 
-val of_snapshot : Agent_protocol.Snapshot.t -> t
+val of_snapshot : Agent_protocol.Public.Snapshot.t -> t

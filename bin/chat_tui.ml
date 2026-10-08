@@ -310,59 +310,34 @@ let help_output_texts_prompt =
 ;;
 
 let ask_ai input env =
-  let open Openai.Responses in
-  let system_prompt = help_output_texts_prompt in
-  let dir = Eio.Stdenv.fs env in
-  let net = Eio.Stdenv.net env in
-  let open Input_message in
-  let text_item text : content_item = Text { text; _type = "input_text" } in
-  let mk_input role text : Item.t =
-    let role =
-      match role with
-      | "user" -> User
-      | "assistant" -> Assistant
-      | "system" -> System
-      | "developer" -> Developer
-      | _ -> System
+  Eio.Switch.run (fun sw ->
+    let host = Inference_composition.create ~sw ~env ~default_model:"gpt-5.2" in
+    let inference = Inference_composition.execution host Chat_response.Config.default in
+    let settings =
+      [ "max_output_tokens", `Number "100000"; "temperature", `Number "0.3" ]
+      |> List.map ~f:(fun (name, value) ->
+        Inference.Request.Setting.create
+          ~name
+          ~value:(Value value)
+          ~provenance:Execution_override
+          ~limits:Transcript.Admission.default)
+      |> Result.all
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
     in
-    let msg : Input_message.t =
-      { role; content = [ text_item text ]; _type = "message" }
-    in
-    Item.Input_message msg
-  in
-  let inputs = [ mk_input "system" system_prompt; mk_input "user" input ] in
-  try
-    Eio.Switch.run
-    @@ fun sw ->
-    let response =
-      post_response
-        Default
-        ~max_output_tokens:100000
-        ~temperature:0.3
-        ~model:(Request.Unknown "gpt-5.2")
-        ~dir
-        net
-        ~sw
-        ~inputs
-    in
-    let ({ Response.output; _ } : Response.t) = response in
-    (* Extract assistant text from first Output_message. *)
-    let rec find_text = function
-      | [] -> None
-      | Item.Output_message om :: _ ->
-        (match om.Output_message.content with
-         | { text; _ } :: _ -> Some text
-         | _ -> None)
-      | _ :: tl -> find_text tl
-    in
-    match find_text output with
-    | Some text -> Ok text
-    | None -> Error "error no response"
-  with
-  | exn ->
-    eprintf "Summarizer.summarise: %s\n%!" (Exn.to_string exn);
-    Io.log ~dir ~file:"Summarizer.summarise.error-log.txt" (Exn.to_string exn);
-    Error (Exn.to_string exn)
+    let open Result.Let_syntax in
+    let%bind settings = settings in
+    Inference_client.Execution.complete_text
+      inference
+      ~sw
+      ~settings
+      ~messages:
+        [ History_entry.Payload.Role.System, help_output_texts_prompt
+        ; History_entry.Payload.Role.User, input
+        ]
+      ()
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_client.Execution.Completion_error.sexp_of_t error)))
 ;;
 
 let default_prompt_file = "./prompts/interactive.md"
@@ -473,6 +448,7 @@ let load_session ~env ~prompt_file ?id ~new_session () =
 ;;
 
 let run_in_env
+      ~transport_policy
       ~typeahead_config
       ~env
       ~prompt_file
@@ -485,23 +461,37 @@ let run_in_env
       ~authorize_shell_manifest
       ()
   =
-  let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
-  let shell_manifest_authorizer =
-    if authorize_shell_manifest
-    then Shell_runtime.Manifest_authorizer.assume_authorized
-    else Shell_runtime.Manifest_authorizer.deny
-  in
-  Chat_tui.App.run_chat
-    ~typeahead_config
-    ~env
-    ~prompt_file
-    ~session
-    ?export_file
-    ~persist_mode
-    ~parallel_tool_calls
-    ~textmate_grammar_files
-    ~shell_manifest_authorizer
-    ()
+  Eio.Switch.run (fun sw ->
+    let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
+    let shell_manifest_authorizer =
+      if authorize_shell_manifest
+      then Shell_runtime.Manifest_authorizer.assume_authorized
+      else Shell_runtime.Manifest_authorizer.deny
+    in
+    let inference_host =
+      Inference_composition.create_with_policy
+        ~transport_policy
+        ~sw
+        ~env
+        ~default_model:"gpt-4.5-preview"
+    in
+    let typeahead_host =
+      Inference_composition.bounded_host inference_host ~max_body_bytes:(256 * 1024)
+    in
+    Chat_tui.App.run_chat
+      ~inference_host
+      ~resolve_typeahead:(Inference_host.resolve typeahead_host)
+      ~migrate_inference_target:(Inference_host.capture_config inference_host)
+      ~typeahead_config
+      ~env
+      ~prompt_file
+      ~session
+      ?export_file
+      ~persist_mode
+      ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~shell_manifest_authorizer
+      ())
 ;;
 
 (** [run ?session_id ?new_session ?export_file ?persist_mode
@@ -538,6 +528,7 @@ let run_in_env
     or *Ctrl-c* ).
 *)
 let run
+      ?(transport_policy = Inference.Observation.Transport_policy.Http_sse)
       ?(typeahead_config = Chat_tui.Type_ahead_config.default)
       ?session_id
       ?(new_session = false)
@@ -551,6 +542,7 @@ let run
   =
   Env.with_env (fun env ->
     run_in_env
+      ~transport_policy
       ~typeahead_config
       ~env
       ~prompt_file
@@ -740,36 +732,48 @@ module Handlers = struct
     ;;
 
     let initial_msg_count ~env ~prompt_dir ~prompt_xml =
-      try
-        let cache = Chat_response.Cache.create ~max_size:16 () in
-        let ctx =
-          Chat_response.Ctx.create
-            ~env
-            ~dir:prompt_dir
-            ~tool_dir:(Eio.Stdenv.cwd env)
-            ~cache
-        in
-        let elements =
-          Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
-        in
-        Chat_response.Converter.to_items
-          ~ctx
-          ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
-            Chat_response.Driver.run_agent
-              ~history_compaction:false
-              ?prompt_dir
-              ?session_id
-              ~ctx
-              prompt
-              items)
-          elements
-        |> List.length
-      with
-      | exn ->
-        eprintf
-          "Warning: failed to compute prompt-derived history prefix for export: %s\n"
-          (Exn.to_string exn);
-        0
+      Eio.Switch.run (fun sw ->
+        try
+          let cache = Chat_response.Cache.create ~max_size:16 () in
+          let elements =
+            Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
+          in
+          let host =
+            Inference_composition.create ~sw ~env ~default_model:"gpt-4.5-preview"
+          in
+          let inference_context =
+            Inference_composition.context host (Chat_response.Config.of_elements elements)
+          in
+          let ctx =
+            Chat_response.Ctx.create
+              ~inference_context
+              ~inference_identity:(Inference_host.identity host)
+              ~on_inference_attempt:(fun _ -> ())
+              ~on_inference_completion:(fun _ -> ())
+              ~env
+              ~dir:prompt_dir
+              ~tool_dir:(Eio.Stdenv.cwd env)
+              ~cache
+              ()
+          in
+          Chat_response.Converter.to_items
+            ~ctx
+            ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+              Chat_response.Driver.run_agent
+                ~history_compaction:false
+                ?prompt_dir
+                ?session_id
+                ~ctx
+                prompt
+                items)
+            elements
+          |> List.length
+        with
+        | exn ->
+          eprintf
+            "Warning: failed to compute prompt-derived history prefix for export: %s\n"
+            (Exn.to_string exn);
+          0)
     ;;
 
     let persist_full_history
@@ -1025,6 +1029,7 @@ module Handlers = struct
   ;;
 
   let handle_interactive
+        ~transport_policy
         ~typeahead_config
         ~prompt_file
         ~session_id
@@ -1036,6 +1041,7 @@ module Handlers = struct
         ~authorize_shell_manifest
     =
     run
+      ~transport_policy
       ~typeahead_config
       ?session_id
       ~new_session
@@ -1211,6 +1217,7 @@ end
 module Cli = struct
   type raw_flags =
     { typeahead_config : Chat_tui.Type_ahead_config.t Or_error.t
+    ; inference_transport : string option
     ; conversation_file : string
     ; local : bool
     ; authoring_package_files : string list
@@ -1725,16 +1732,13 @@ end
 module Daemon_connection = struct
   let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
 
-  let endpoint ~env ~connect ~bearer_token_file =
-    let open Result.Let_syntax in
-    let%bind bearer_token =
-      match bearer_token_file with
-      | None -> Ok None
-      | Some path ->
-        Agent_transport_client.Endpoint.load_bearer_token ~env ~path
-        |> Result.map ~f:Option.some
-    in
-    Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token connect
+  let endpoint ~env:_ ~connect ~bearer_token_file =
+    Agent_transport_client.Connection_profile.create
+      ~home:(Sys.getenv "HOME")
+      ~name:"command-line"
+      ~endpoint:connect
+      ~expected_server:None
+      ~daemon_credential_file:bearer_token_file
   ;;
 
   let with_connection ~env ~connect ~bearer_token_file f =
@@ -1745,7 +1749,7 @@ module Daemon_connection = struct
     Eio.Switch.run
     @@ fun sw ->
     let%bind connection =
-      Agent_transport_client.Endpoint.connect
+      Agent_transport_client.Connection_profile.connect
         endpoint
         ~sw
         ~env
@@ -1757,6 +1761,25 @@ module Daemon_connection = struct
       (fun () -> f sw endpoint connection)
   ;;
 end
+
+let private_typeahead_execution (config : Chat_tui.Type_ahead_config.t) ~sw ~env ~host =
+  match config.mode with
+  | Off -> None
+  | Manual | Auto ->
+    let host =
+      match host with
+      | Some host -> Ok host
+      | None ->
+        Inference_composition.try_create_default ~sw ~env ~default_model:config.model
+    in
+    (match host with
+     | Error _ -> None
+     | Ok host ->
+       Inference_host.with_response_limit host ~max_body_bytes:(256 * 1024)
+       |> Result.bind ~f:(fun host ->
+         Inference_composition.try_execution host Chat_response.Config.default)
+       |> Result.ok)
+;;
 
 module Daemon_interactive = struct
   let protocol_error = Daemon_connection.protocol_error
@@ -1815,7 +1838,7 @@ module Daemon_interactive = struct
       ~bearer_token_file
       (fun sw endpoint connection ->
          let reconnect () =
-           Agent_transport_client.Endpoint.connect
+           Agent_transport_client.Connection_profile.connect
              endpoint
              ~sw
              ~env
@@ -1823,7 +1846,11 @@ module Daemon_interactive = struct
          in
          let open Or_error.Let_syntax in
          let%map client = select_client ~sw ~env ~connection ~reconnect ~mode target in
+         let typeahead_inference =
+           private_typeahead_execution typeahead_config ~sw ~env ~host:None
+         in
          Chat_tui.App.run_agent_session
+           ?typeahead_inference
            ~typeahead_config
            ~env
            ~client
@@ -1857,11 +1884,12 @@ module Daemon_admin = struct
       List.iter sessions ~f:(fun session -> write env (session_line session ^ "\n"))
   ;;
 
-  let write_info env format (snapshot : Agent_protocol.Snapshot.t) =
-    let session = snapshot.session in
+  let write_info env format (snapshot : Agent_protocol.Public.Snapshot.t) =
+    let fields = Agent_protocol.Public.Snapshot.fields snapshot in
+    let session = fields.session in
     match format with
     | Handlers.Output_format.Json ->
-      write env (Jsonaf.to_string (Agent_protocol.Snapshot.to_json snapshot) ^ "\n")
+      write env (Jsonaf.to_string (Agent_protocol.Public.Snapshot.to_json snapshot) ^ "\n")
     | Tsv -> write env (session_line session ^ "\n")
     | Human ->
       write
@@ -1873,8 +1901,8 @@ module Daemon_admin = struct
            (state_text
               Agent_protocol.Session.sexp_of_observed_state
               session.observed_state)
-           snapshot.revision
-           snapshot.latest_event_sequence)
+           fields.revision
+           fields.latest_event_sequence)
   ;;
 
   let session_id value =
@@ -1915,7 +1943,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.reset
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~keep_history
         ~keep_tasks:false
         ~keep_cache:false
@@ -1930,7 +1958,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.rebuild
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~prompt_choice:Pinned
       |> Result.map_error ~f:protocol_error
       |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
@@ -1954,7 +1982,7 @@ module Daemon_admin = struct
     with_handle ~env ~sw ~connection id (fun handle snapshot ->
       Agent_client.Session_handle.delete
         handle
-        ~expected_revision:snapshot.revision
+        ~expected_revision:(Agent_protocol.Public.Snapshot.fields snapshot).revision
         ~policy
         ~confirmation:id
       |> Result.map_error ~f:protocol_error
@@ -2070,6 +2098,7 @@ module Embedded_interactive = struct
   ;;
 
   let run
+        ~transport_policy
         ~typeahead_config
         ~env
         ~prompt_file
@@ -2098,7 +2127,15 @@ module Embedded_interactive = struct
     let authoring_package_files =
       List.map authoring_package_files ~f:(absolute_path ~cwd:workspace)
     in
+    let inference_host =
+      Inference_composition.create_with_policy
+        ~transport_policy
+        ~sw
+        ~env
+        ~default_model:"gpt-4.5-preview"
+    in
     Agent_server.Embedded.start
+      ~daemon_options:(Inference_composition.daemon_options inference_host)
       ~sw
       ~env
       ~authoring_package_files
@@ -2122,7 +2159,15 @@ module Embedded_interactive = struct
                   ()
                 |> Result.map_error ~f:protocol_error
                 |> Or_error.map ~f:(fun client ->
+                  let typeahead_inference =
+                    private_typeahead_execution
+                      typeahead_config
+                      ~sw
+                      ~env
+                      ~host:(Some inference_host)
+                  in
                   Chat_tui.App.run_agent_session
+                    ?typeahead_inference
                     ~typeahead_config
                     ~env
                     ~client
@@ -2150,7 +2195,7 @@ let run_env_action ~env (action : Cli.action) =
   | Interactive _ | Daemon_interactive _ | Daemon_admin _ | Embedded_interactive _ -> ()
 ;;
 
-let run_action ~typeahead_config (action : Cli.action) =
+let run_action ~transport_policy ~typeahead_config (action : Cli.action) =
   match action with
   | Interactive
       { session_id
@@ -2163,6 +2208,7 @@ let run_action ~typeahead_config (action : Cli.action) =
       ; authorize_shell_manifest
       } ->
     Handlers.handle_interactive
+      ~transport_policy
       ~typeahead_config
       ~prompt_file
       ~session_id
@@ -2195,6 +2241,7 @@ let run_action ~typeahead_config (action : Cli.action) =
       } ->
     Env.with_env (fun env ->
       Embedded_interactive.run
+        ~transport_policy
         ~typeahead_config
         ~env
         ~prompt_file
@@ -2217,13 +2264,20 @@ let run_from_raw (raw : Cli.raw_flags) =
     let%bind action =
       Cli.normalize_action raw |> Or_error.tag ~tag:"Invalid flags (try --help)"
     in
-    let%bind typeahead_config = raw.typeahead_config in
-    let%bind () =
-      Chat_tui.Type_ahead_config.validate_credentials
-        typeahead_config
-        ~api_key:(Sys.getenv "OPENAI_API_KEY")
+    let%bind transport_policy =
+      Provider_runtime_host.Profile_policy.Transport_policy.of_string
+        (Option.value raw.inference_transport ~default:"sse")
     in
-    run_action ~typeahead_config action
+    let%bind () =
+      match raw.inference_transport, action with
+      | None, _ | Some _, (Cli.Interactive _ | Embedded_interactive _) -> Ok ()
+      | Some _, _ ->
+        Or_error.error_string
+          "--inference-transport requires a local interactive host; remote and \
+           maintenance commands cannot change host policy"
+    in
+    let%bind typeahead_config = raw.typeahead_config in
+    run_action ~transport_policy ~typeahead_config action
 ;;
 
 let raw_flags_param =
@@ -2286,6 +2340,11 @@ let raw_flags_param =
         "--bearer-token-file"
         (optional string)
         ~doc:"FILE Read the HTTP daemon bearer token from FILE using Eio."
+    and inference_transport =
+      flag
+        "--inference-transport"
+        (optional string)
+        ~doc:"POLICY Local host: sse (default), prefer-websocket or require-websocket"
     and list_sessions =
       flag
         "--list-sessions"
@@ -2486,6 +2545,7 @@ let raw_flags_param =
            ~history_messages:typeahead_history
            ~debounce_ms:typeahead_debounce
            ~max_output_tokens:typeahead_tokens
+     ; inference_transport
      ; conversation_file
      ; local
      ; authoring_package_files
@@ -2686,7 +2746,8 @@ let inject_config_args argv selection =
             exit 1
         in
         let scalar_flags =
-          [ "--typeahead"
+          [ "--inference-transport"
+          ; "--typeahead"
           ; "--typeahead-model"
           ; "--typeahead-history-messages"
           ; "--typeahead-debounce-ms"

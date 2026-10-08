@@ -2,8 +2,8 @@
 
     {1 Overview}
 
-    [Prompt_factory_online] is a *thin* wrapper around OpenAI’s
-    experimental [/v1/responses] endpoint.  It implements the online
+    [Prompt_factory_online] uses explicitly selected neutral inference.
+    It implements the online
     branch of the prompt–engineering feedback loop used by
     {!module:Meta_prompting} and purposefully exposes a
     **minimal** surface:
@@ -12,14 +12,13 @@
     - {!val:iterate_revised_prompt}
     - {!val:create_pack_online}
 
-    All three functions are **pure** from the caller’s perspective –
-    they never raise and signal failure by returning [None].  Any
-    network access, file I/O or logging stays inside the implementation.
+    Expected completion failures return [None]. Missing selected inference,
+    cancellation and strict callback exceptions propagate; file I/O remains
+    scoped to the supplied environment.
 
     {1 Runtime expectations}
 
-    • [OPENAI_API_KEY] – must be present for the HTTP calls to
-      succeed.
+    • Selected Execution – explicitly supplied for every online completion.
     • Optional template overrides are looked up relative to the current
       working directory:
       {ul
@@ -68,24 +67,24 @@ val extract_section : text:string -> section:string -> string option
        falls back to {!Templates.iteration_prompt_v2};}
     {- appends the repository-wide guard-rail snippet;}
     {- sends a single blocking request through
-       {!Openai.Responses.post_response};}
+       the explicitly selected Execution, retaining host attempt observations;}
     {- extracts the *Revised_Prompt* payload with {!extract_section}.}}
 
     Return value:
     {ul
     {- [Some revised] – success;}
-    {- [None] – missing API key, transport error, malformed JSON or the
+    {- [None] – expected completion failure or the
        absence of a *Revised_Prompt* section.}}
 
-    All exceptions are caught, logged with {!Log.emit} at [`Debug] and
-    translated to [None] so the caller can easily fall back to an
-    offline strategy.
+    Expected completion failures produce None. Cancellation and strict host
+    callback exceptions propagate; no ambient credential/model selection occurs.
 *)
 val iterate_revised_prompt
   :  env:Eio_unix.Stdenv.base
+  -> inference:Inference_client.Execution.t
   -> goal:string
   -> current_prompt:string
-  -> proposer_model:Openai.Responses.Request.model option
+  -> proposer_model:string option
   -> string option
 
 (** [create_pack_online ~env ~agent_name ~goal ?proposer_model] generate a
@@ -102,9 +101,10 @@ val iterate_revised_prompt
     {!iterate_revised_prompt}. *)
 val create_pack_online
   :  env:Eio_unix.Stdenv.base
+  -> inference:Inference_client.Execution.t
   -> agent_name:string
   -> goal:string
-  -> proposer_model:Openai.Responses.Request.model option
+  -> proposer_model:string option
   -> string option
 
 val get_iterate_system_prompt : Eio_unix.Stdenv.base -> string

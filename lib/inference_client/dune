@@ -1,0 +1,5 @@
+(library
+ (name inference_client)
+ (public_name ochat.inference_client)
+ (libraries core eio ochat.document_schema ochat.inference ochat.inference_runtime ochat.history_entry ochat.transcript)
+ (preprocess (pps ppx_jane)))

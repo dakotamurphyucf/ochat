@@ -1,0 +1,5 @@
+(library
+ (name provider_runtime_host)
+ (public_name ochat.provider_runtime_host)
+ (libraries ochat.operator_authorization core eio eio.unix ochat.provider_runtime ochat.provider_operator ochat.provider_secret_store ochat.private_storage ochat.credential_registry ochat.credential_registry_model ochat.provider_oauth ochat.provider_oauth_registry ochat.inference_host ochat.inference_runtime ochat.inference ochat.openai ochat.agent_protocol)
+ (preprocess (pps ppx_jane)))

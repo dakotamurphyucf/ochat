@@ -20,20 +20,24 @@ let principal_id =
 let grant_id = Agent_protocol.Id.Grant.of_string "grt_tui_agent_projection" |> protocol_ok
 let timestamp = Agent_protocol.Timestamp.of_string "2026-08-16T12:00:00Z" |> protocol_ok
 
-let item text =
-  Openai.Responses.Item.Input_message
-    { role = User; content = [ Text { text; _type = "input_text" } ]; _type = "message" }
-;;
-
 let history_entry text =
-  Agent_protocol.History.
-    { id = history_id
-    ; role = User
-    ; kind = Message
-    ; payload = Openai.Responses.Item.jsonaf_of_t (item text)
-    ; provenance = Canonical
-    ; redacted = false
-    }
+  let module Payload = History_entry.Payload in
+  let payload =
+    Payload.Semantic.create
+      (Message
+         { form = Input
+         ; role = User
+         ; content = [ Text { text; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:Payload.Metadata.empty
+    |> Result.ok_or_failwith
+    |> Payload.authored
+  in
+  Agent_protocol.Public.History.full
+    (History_entry.create_with_id ~id:history_id payload)
+    ~provenance:Canonical
+  |> protocol_ok
 ;;
 
 let session () =
@@ -63,12 +67,13 @@ let session () =
     ; active_operation = None
     ; revision = 1L
     ; latest_event_sequence = 1L
+    ; inference_summary = History_entry.Payload.Presence.Absent
     }
 ;;
 
 let projection text =
   let window =
-    Agent_protocol.History.Window.
+    Agent_protocol.Public.History.Window.
       { entries = [ history_entry text ]
       ; previous_cursor = None
       ; next_cursor = None
@@ -78,7 +83,7 @@ let projection text =
       }
   in
   let snapshot =
-    Agent_protocol.Snapshot.
+    Agent_protocol.Public.Snapshot.Fields.
       { session = session ()
       ; canonical_history = window
       ; archived_revisions = []
@@ -98,9 +103,10 @@ let projection text =
       ; latest_event_sequence = 1L
       }
   in
-  Agent_client.Projection.install_snapshot snapshot
-  |> Chat_tui.Agent_projection.of_client_projection
+  Agent_protocol.Public.Snapshot.create snapshot
   |> protocol_ok
+  |> Agent_client.Projection.install_snapshot
+  |> Chat_tui.Agent_projection.of_client_projection
 ;;
 
 let model () =

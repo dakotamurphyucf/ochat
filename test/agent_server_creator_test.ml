@@ -6,6 +6,18 @@ module R = Agent_server.Session_registry
 module A = Agent_session.Session_actor
 module H = Agent_client.Session_handle
 
+type failure_state =
+  { session_id : P.Id.Session.t
+  ; revision : int64
+  ; desired : P.Session.desired_state
+  ; lifecycle : string
+  ; operation : (P.Id.Operation.t * string) option
+  ; pending_permissions : int
+  ; invocations : (string * string) list
+  ; failure : P.Error.code option
+  }
+[@@deriving sexp_of]
+
 let request ~key ~tools source =
   `Object
     [ "version", `Number "1"
@@ -58,6 +70,71 @@ let%expect_test
           config ~profile:{ permission_profile with tool_default = Ask } root root prompt
         in
         let phase = ref "startup" in
+        let started = ref (Eio.Time.now (Eio.Stdenv.clock env)) in
+        let phases = Queue.create () in
+        let last_state = ref None in
+        let mark_phase next =
+          if not (String.equal next !phase)
+          then (
+            phase := next;
+            Queue.enqueue phases (next, Eio.Time.now (Eio.Stdenv.clock env) -. !started);
+            if Queue.length phases > 16 then ignore (Queue.dequeue_exn phases : _))
+        in
+        let state entry =
+          let current = state entry in
+          let lifecycle =
+            match current.lifecycle.observed with
+            | Stopped -> "stopped"
+            | Queued_for_slot -> "queued"
+            | Starting -> "starting"
+            | Recovering -> "recovering"
+            | Idle -> "idle"
+            | Running_turn _ -> "running"
+            | Compacting _ -> "compacting"
+            | Waiting_for_permission _ -> "waiting_permission"
+            | Stopping -> "stopping"
+            | Failed _ -> "failed"
+          in
+          let operation =
+            Option.map current.active_operation ~f:(fun operation ->
+              let status =
+                match operation.P.Operation.state with
+                | Starting -> "starting"
+                | Running -> "running"
+                | Cancelling -> "cancelling"
+                | Completed -> "completed"
+                | Failed _ -> "failed"
+                | Cancelled -> "cancelled"
+                | Interrupted _ -> "interrupted"
+              in
+              operation.id, status)
+          in
+          last_state
+          := Some
+               { session_id = current.identity.session_id
+               ; revision = current.counters.revision
+               ; desired = current.lifecycle.desired
+               ; lifecycle
+               ; operation
+               ; pending_permissions =
+                   List.count current.permissions ~f:(fun permission ->
+                     P.Permission.equal_state permission.state Pending)
+               ; invocations =
+                   List.take current.invocations 8
+                   |> List.map ~f:(fun invocation ->
+                     let status =
+                       match invocation.P.Invocation.status with
+                       | Admitted -> "admitted"
+                       | Dispatching -> "dispatching"
+                       | Resolved _ -> "resolved"
+                       | Published _ -> "published"
+                     in
+                     String.prefix invocation.context.tool_name 96, status)
+               ; failure = Option.map current.failure ~f:(fun error -> error.P.Error.code)
+               };
+          current
+        in
+        let invocations = ref 0 in
         let queued = ref None
         and calls = ref 0 in
         let provider ~sw:_ ~inputs:_ =
@@ -86,6 +163,19 @@ let%expect_test
                 ; output_index = 0
                 ; type_ = "response.function_call_arguments.done"
                 }
+            ; Output_item_done
+                { item =
+                    Function_call
+                      { name
+                      ; arguments = Jsonaf.to_string arguments
+                      ; call_id = sprintf "create-%d" !calls
+                      ; _type = "function_call"
+                      ; id = Some "create-item"
+                      ; status = Some "completed"
+                      }
+                ; output_index = 0
+                ; type_ = "response.output_item.done"
+                }
             ]
             |> Stdlib.List.to_seq
         in
@@ -103,7 +193,10 @@ let%expect_test
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream = Some provider
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:provider
                   }
                 ()
               |> protocol_ok
@@ -113,21 +206,44 @@ let%expect_test
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                  started := Eio.Time.now (Eio.Stdenv.clock env);
+                  Queue.clear phases;
+                  mark_phase "connect";
+                  (* The first workflow measured 8.0s wall / 7.6s CPU locally;
+                     concurrent Linux CI reached its final stop/inspect/restart at
+                     19.8s. Bound the complete workflow with scheduling headroom;
+                     native operation deadlines remain unchanged. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 40. (fun () ->
                     let client = connection daemon (principal ()) in
                     Exn.protect
                       ~finally:(fun () -> Agent_client.Connection.close client)
                       ~f:(fun () ->
+                        mark_phase "initialize connection";
                         initialize client;
+                        mark_phase "workflow";
                         f sw daemon client))
                 with
-                | Eio.Time.Timeout -> failwith ("creator fixture timeout: " ^ !phase)))
+                | Eio.Time.Timeout ->
+                  raise_s
+                    [%sexp
+                      "creator fixture timeout"
+                    , (!phase : string)
+                    , (Eio.Time.now (Eio.Stdenv.clock env) -. !started : float)
+                    , (!calls : int)
+                    , (!last_state : failure_state option)
+                    , (Queue.to_list phases : (string * float) list)]))
         in
         let get daemon id = R.load (D.registry daemon) id |> protocol_ok in
         let invoke sw daemon client id name args =
+          Int.incr invocations;
+          let step label =
+            mark_phase (sprintf "invoke %d %s: %s" !invocations name label)
+          in
+          step "load";
           let entry = get daemon id in
           let before = state entry in
           let before_calls = !calls in
+          step "attach";
           let handle =
             H.attach
               ~sw
@@ -140,11 +256,13 @@ let%expect_test
             |> protocol_ok
           in
           queued := Some (name, args);
+          step "submit";
           H.send_message
             handle
             { kind = Plain_text; text = "Run the requested workflow."; attachments = [] }
           |> protocol_ok
           |> ignore;
+          step "await completion";
           let rec wait () =
             let current = state entry in
             match current.active_operation with
@@ -154,6 +272,7 @@ let%expect_test
               List.iter current.permissions ~f:(fun permission ->
                 match permission.P.Permission.state with
                 | Pending ->
+                  step "approve permission";
                   H.respond_permission
                     handle
                     ~permission_id:permission.id
@@ -168,7 +287,9 @@ let%expect_test
             | None -> current
           in
           let current = wait () in
+          step "validate completed invocation";
           [%test_eq: int] (before_calls + 2) !calls;
+          step "detach";
           H.close handle;
           let fresh =
             List.filter current.invocations ~f:(fun invocation ->
@@ -208,6 +329,7 @@ let%expect_test
         in
         let root_id, child_id, grandchild_id, revision =
           with_daemon (fun sw daemon client ->
+            mark_phase "create parent";
             let parent, _ = create_session ~start_immediately:true client in
             let created =
               invoke sw daemon client parent.id "agent_create" child_request |> complete
@@ -374,7 +496,7 @@ let%expect_test
               |> protocol_ok
             in
             queued := Some ("fixed_echo", `Object []);
-            phase := "submit shell permission request";
+            mark_phase "submit shell permission request";
             H.send_message
               grandchild_handle
               { kind = Plain_text
@@ -401,9 +523,9 @@ let%expect_test
                    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                    await_permission ())
             in
-            phase := "await shell permission";
+            mark_phase "await shell permission";
             let permission = await_permission () in
-            phase := "inspect pending permission";
+            mark_phase "inspect pending permission";
             let waiting = inspect child_id grandchild_id |> complete in
             [%test_eq: string]
               "waiting_for_permission"
@@ -422,7 +544,7 @@ let%expect_test
             in
             assert (P.Permission.equal_state current_permission.state Pending);
             assert (List.is_empty still_waiting.grants);
-            phase := "stop grandchild";
+            mark_phase "stop grandchild";
             H.stop grandchild_handle ~mode:Cancel |> protocol_ok |> ignore;
             let rec await_stopped () =
               match (state (get daemon grandchild_id)).lifecycle.observed with
@@ -432,12 +554,12 @@ let%expect_test
                 await_stopped ()
             in
             await_stopped ();
-            phase := "inspect stopped grandchild";
+            mark_phase "inspect stopped grandchild";
             let stopped = inspect child_id grandchild_id |> complete in
             [%test_eq: string] "stopped" (field stopped "state" |> Jsonaf.string_exn);
             assert (
               Jsonaf.exactly_equal (field stopped "waiting_permissions") (`Number "0"));
-            phase := "restart grandchild";
+            mark_phase "restart grandchild";
             H.start grandchild_handle ~queue_if_limited:false |> protocol_ok |> ignore;
             H.close grandchild_handle;
             [%test_eq: int]
@@ -501,7 +623,10 @@ let%expect_test
               ~daemon_options:
                 { D.default_options with
                   qualify_chatml_extensions = true
-                ; model_post_stream = Some provider
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
                 }
               { prompt_file = prompt
               ; workspace = root
@@ -545,7 +670,8 @@ let%expect_test
                       (Session_get { session_id = id; history = None })
                     |> protocol_ok
                     |> function
-                    | P.Method_result.Session_get snapshot -> snapshot
+                    | P.Public.Result.Session_get snapshot ->
+                      P.Public.Snapshot.fields snapshot
                     | _ -> failwith "unexpected snapshot"
                   in
                   match snapshot.session.active_operation with
@@ -559,13 +685,25 @@ let%expect_test
                   P.Session.equal_persistence snapshot.session.spec.persistence Transient);
                 let outputs =
                   List.filter snapshot.canonical_history.entries ~f:(fun entry ->
-                    P.History.equal_kind entry.kind Tool_output)
+                    Option.exists
+                      (P.Public.History.header entry)
+                      ~f:(Transcript.Header.equal (Result Function)))
                 in
                 (match outputs with
                  | [ entry ] ->
+                   let payload =
+                     P.Public.History.full_payload entry |> Option.value_exn
+                   in
+                   let output =
+                     match
+                       History_entry.Payload.Semantic.view
+                         (History_entry.Payload.semantic payload)
+                     with
+                     | Result { output = Text text; _ } -> text
+                     | _ -> failwith "expected a neutral text tool result"
+                   in
                    let outcome =
-                     field entry.payload "output"
-                     |> Jsonaf.string_exn
+                     output
                      |> Jsonaf.of_string
                      |> P.Invocation.outcome_of_json
                      |> protocol_ok

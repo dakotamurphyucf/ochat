@@ -38,7 +38,7 @@ module Error : sig
 end
 
 module Limits : sig
-  type t
+  type t [@@deriving equal]
 
   (** All bounds are positive; depth is at most 256. Fields counts all object
       members, nodes counts all values, bytes includes JSON string encoding. *)
@@ -67,6 +67,10 @@ module Json : sig
       materializing encoded output. Rejects before a byte-limit addition would
       exceed the bound, including for in-memory strings and object keys. *)
   val validate : limits:Limits.t -> t -> (unit, Error.t) Result.t
+
+  (** The same validation and error ordering as [validate], returning its exact
+      compact encoded-byte count without materializing encoded output. *)
+  val validate_and_measure : limits:Limits.t -> t -> (int, Error.t) Result.t
 
   (** Lookup on a validated tree preserves absence separately from explicit null. *)
   val field : t -> name:string -> presence
@@ -102,6 +106,31 @@ module Document : sig
   val required_semantics : t -> string list
   val json : t -> Json.t
   val to_string : t -> string
+
+  (** Recheck this immutable document under the requested limits. Admission
+      records the limits that validated its exact JSON. Equal or componentwise
+      looser limits reuse that proof; any stricter component triggers complete
+      JSON validation with the ordinary error ordering. No shared cache. *)
+  val validate : t -> limits:Limits.t -> (unit, Error.t) Result.t
+
+  (** Ordered scalar edits beneath the payload. Paths must be nonempty existing
+      object members, with scalar old and new leaves. The original complete
+      document must already satisfy [limits]; shrinking cannot repair an
+      oversized input. Every replacement receives full scalar JSON validation.
+      All object keys/order, untouched unknown fields and envelope metadata are
+      preserved. Node/field counts and depth remain unchanged. If every edit's
+      compact escaped scalar size is nonincreasing, the original admission proof
+      establishes complete final bounds; any growth uses full final inspection.
+      Duplicate paths apply sequentially; growth remains sticky even if a later
+      edit shrinks the same leaf. Empty edits still validate the original.
+      Missing paths, scalar ancestors
+      and container leaves return [Invalid_field]. Domain validation remains the
+      caller's responsibility. No input is mutated. *)
+  val replace_payload_scalars
+    :  t
+    -> limits:Limits.t
+    -> updates:(string list * Json.t) list
+    -> (t, Error.t) Result.t
 end
 
 module Conversion : sig
@@ -179,14 +208,31 @@ module Shape : sig
   val nullable : t -> t
 
   val object_ : (string * t) list -> (t, Error.t) Result.t
-  val array : t -> identity_field:string option -> (t, Error.t) Result.t
+
+  (** Selects a case's object ownership using a required string discriminator.
+      Each case must own that discriminator as a value. Unknown tags fail
+      closed; changing cases with retained unknown data is a conflict. *)
+  val tagged_object : discriminator:string -> (string * t) list -> (t, Error.t) Result.t
+
+  (** Empty identity strings are allowed only when explicitly requested, for
+      dictionaries whose keys are arbitrary strings rather than domain IDs. *)
+  val array
+    :  ?allow_empty_identity:bool
+    -> t
+    -> identity_field:string option
+    -> (t, Error.t) Result.t
 end
 
 module Extension_carrier : sig
   type 'a t
 
   val of_authored_value : 'a -> 'a t
-  val with_value : 'a t -> 'a -> 'a t
+
+  (** Replaces the typed projection without changing the original template or
+      ownership metadata. A unit projection can retain preservation context
+      alongside a domain record without a recursive carrier. *)
+  val with_value : 'a t -> 'b -> 'b t
+
   val value : 'a t -> 'a
 
   (** Original converted document template, including field presence and unknown
@@ -212,6 +258,26 @@ module Domain_codec : sig
     -> encode:('a -> (Json.t, Error.t) Result.t)
     -> ('a t, Error.t) Result.t
 
+  (** Explicit original-domain validation contract for complete typed serializers.
+      [validate] checks the original authored or edited value before [encode] is
+      called, including invariants that serialization could normalize away.
+      [encode] must faithfully and completely represent every validated value;
+      codec owners verify this with domain roundtrip tests. JSON bounds, owned
+      shape, unexpected fields, extension merge and final document bounds are
+      still checked. Encoding does not decode the projection again. Decoding
+      always uses the ordinary domain-validating [decode] callback. Callbacks are
+      pure and unexpected exceptions propagate, as with [create]. *)
+  val create_validated
+    :  limits:Limits.t
+    -> kind:string
+    -> version:int
+    -> shape:Shape.t
+    -> supported_semantics:string list
+    -> validate:('a -> (unit, Error.t) Result.t)
+    -> decode:(Json.t -> ('a, Error.t) Result.t)
+    -> encode:('a -> (Json.t, Error.t) Result.t)
+    -> ('a t, Error.t) Result.t
+
   (** Kind, exact target version and required semantics checked before decode. *)
   val decode : 'a t -> Document.t -> ('a Extension_carrier.t, Error.t) Result.t
 
@@ -219,4 +285,17 @@ module Domain_codec : sig
       containers, changed array identity policies with unknown data, or ambiguous
       array changes return [Extension_conflict]. *)
   val encode : 'a t -> 'a Extension_carrier.t -> (Document.t, Error.t) Result.t
+
+  (** Transfer compatible extension ownership into [incoming]'s current value.
+      Both carriers must belong to this codec. The previous carrier is first
+      updated to the incoming value and encoded, so unsafe deletion/ownership
+      changes fail before adoption. Unknown fields from either side survive;
+      different values at the same unknown path conflict. Array alignment uses
+      the common current projection, never positions in an older template.
+      No input carrier or document is mutated. *)
+  val adopt
+    :  'a t
+    -> previous:'a Extension_carrier.t
+    -> incoming:'a Extension_carrier.t
+    -> ('a Extension_carrier.t, Error.t) Result.t
 end

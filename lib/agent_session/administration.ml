@@ -52,6 +52,7 @@ let reset_state (state : Session_state.t) options =
   ; permissions = []
   ; grants = (if options.keep_grants then state.grants else [])
   ; jobs = []
+  ; model_job_targets = []
   ; schedules = []
   ; invocations = []
   ; managed_submissions = []
@@ -66,7 +67,9 @@ let reset_state (state : Session_state.t) options =
   }
 ;;
 
-let reset state options =
+let plan_reset state options =
+  let open Result.Let_syntax in
+  let%bind () = Session_state.validate state in
   if Int.equal state.Session_state.identity.generation Int.max_value
   then
     Error
@@ -75,8 +78,33 @@ let reset state options =
          ~message:"session generation overflow"
          ~retryable:false
          ())
-  else Ok (reset_state state options)
+  else (
+    let candidate = reset_state state options in
+    let%map () =
+      Session_state.validate_administration_candidate candidate ~previous:state
+    in
+    candidate)
 ;;
+
+let admit_generation (state : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind inference_ledger =
+    Inference_ledger.with_generation
+      state.inference_ledger
+      ~generation:state.identity.generation
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.create
+        Invalid_state
+        ~message:(Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+        ~retryable:false
+        ())
+  in
+  let state = { state with inference_ledger } in
+  let%map () = Session_state.validate state in
+  state
+;;
+
+let reset state options = Result.bind (plan_reset state options) ~f:admit_generation
 
 let upgrade (state : Session_state.t) revision =
   { state with
@@ -87,10 +115,11 @@ let upgrade (state : Session_state.t) revision =
   }
 ;;
 
-let rebuild state revision =
+let plan_rebuild state revision =
   let open Result.Let_syntax in
-  let%map state =
-    reset
+  let previous = state in
+  let%bind state =
+    plan_reset
       state
       { keep_history = false
       ; keep_tasks = true
@@ -100,13 +129,19 @@ let rebuild state revision =
       }
   in
   let state = upgrade state revision in
-  { state with
-    conversation =
-      { state.conversation with canonical_history = []; initial_prompt_entry_count = 0 }
-  }
+  let candidate =
+    { state with
+      conversation =
+        { state.conversation with canonical_history = []; initial_prompt_entry_count = 0 }
+    }
+  in
+  let%map () = Session_state.validate_administration_candidate candidate ~previous in
+  candidate
 ;;
 
-let archive ~previous (candidate : Session_state.t) kind =
+let rebuild state revision = Result.bind (plan_rebuild state revision) ~f:admit_generation
+
+let archive ~archive_reference ~previous (candidate : Session_state.t) kind =
   let open Result.Let_syntax in
   let%bind candidate, invocation_dispositions =
     match kind with
@@ -169,11 +204,8 @@ let archive ~previous (candidate : Session_state.t) kind =
           }
         , dispositions ))
   in
-  let reference =
-    Compaction_archive.reference_for
-      previous
-      ~kind
-      (Agent_protocol.Id.Operation.create ())
+  let%bind reference =
+    archive_reference ~previous ~kind (Agent_protocol.Id.Operation.create ())
   in
   Ok
     { candidate with

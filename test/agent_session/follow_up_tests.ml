@@ -220,7 +220,17 @@ let%expect_test
             let initial =
               match mode with
               | `Obsolete ->
-                { initial with identity = { initial.identity with generation = 1 } }
+                { initial with
+                  identity = { initial.identity with generation = 1 }
+                ; inference_ledger =
+                    Agent_session.Inference_ledger.with_generation
+                      initial.inference_ledger
+                      ~generation:1
+                    |> Result.map_error ~f:(fun error ->
+                      Sexp.to_string_hum
+                        (Agent_session.Inference_ledger.Error.sexp_of_t error))
+                    |> Result.ok_or_failwith
+                }
               | `Cancel | `Failure | `Interrupted ->
                 let other =
                   child
@@ -256,9 +266,7 @@ let%expect_test
                       I.of_json (I.to_json invocation) |> protocol_ok)
                 }
               in
-              Agent_session.Session_persistence.restore_snapshot
-                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-              |> store_ok
+              restore_state state |> store_ok
             in
             let starts = ref []
             and model_runs = ref 0
@@ -278,6 +286,15 @@ let%expect_test
                   ~initial_state:initial
               in
               let persistence = Agent_session.Memory_backend.persistence backend in
+              let worker =
+                Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+                  Int.incr model_runs;
+                  Completed
+                    { final_history = input.history
+                    ; moderator_snapshot = initial.moderator
+                    ; runtime_requests = []
+                    })
+              in
               let actor =
                 A.create
                   ~sw
@@ -286,7 +303,8 @@ let%expect_test
                   ~compaction_env:None
                   ~initial_state:initial
                   ~persistence:
-                    { commit =
+                    { archive_reference
+                    ; commit =
                         (fun ~command_audit ~previous next ->
                           if !reject
                           then (
@@ -306,15 +324,7 @@ let%expect_test
                             Error (handoff_error "injected compaction checkpoint failure"))
                           else persistence.commit ~command_audit ~previous next)
                     }
-                  ~operation_worker:
-                    (Some
-                       (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
-                          Int.incr model_runs;
-                          Completed
-                            { final_history = input.history
-                            ; moderator_snapshot = initial.moderator
-                            ; runtime_requests = []
-                            })))
+                  ~operation_worker:(Some worker)
                   ~services:
                     { now = Agent_protocol.Timestamp.now
                     ; create_attachment_id = Agent_protocol.Id.Attachment.create
@@ -379,6 +389,11 @@ let%expect_test
                             | _ -> ()))
                     }
               in
+              A.set_runtime_worker
+                actor
+                ~worker:(Some worker)
+                ~inference:(Some (Inference_ports.compaction_execution ()))
+              |> protocol_ok;
               actor, backend
             in
             let actor, backend = create (restore initial) in
@@ -762,16 +777,18 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                   ~prepare_output:(fun _ -> Ok (`String "disclosed"))
                   ~defer_observation:(fun _ -> Ok ()))
          in
+         let inference = Inference_ports.create ~config:Chat_response.Config.default () in
          let runtime : B.t =
            { worker =
                Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
                  failwith "unexpected model turn")
+           ; inference_execution = Inference_ports.execution inference
            ; now = Agent_protocol.Timestamp.now
            ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
            ; initial_history = []
            ; initial_prompt_entry_count = 0
            ; reserved_history_through = 0
-           ; moderator_snapshot = snapshot ()
+           ; moderator_snapshot = snapshot
            ; moderator_manager = Some manager
            ; moderator_tools = []
            ; moderator_script_tools = script_tools
@@ -792,7 +809,8 @@ let%expect_test "runtime owner drains observation batches and applies durable te
                  Int.incr internal_batches;
                  failwith "v1 owner used legacy event drain")
            ; execute_model_job =
-               (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+               (fun ~inference_context:_ ~capture_recipe_target:_ ~recipe:_ ~payload:_ ->
+                 failwith "unexpected model job")
            ; enqueue_model_job_completion =
                (fun ?prepare:_ _ -> failwith "unexpected completion")
            ; close = (fun () -> ())
@@ -1133,16 +1151,20 @@ let%expect_test
                       ~prepare_output:(fun _ -> Ok (`String "disclosed"))
                       ~defer_observation:(fun _ -> Error (handoff_error "lost wakeup")))
              in
+             let inference =
+               Inference_ports.create ~config:Chat_response.Config.default ()
+             in
              let runtime : B.t =
                { worker =
                    Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
                      failwith "unexpected model turn")
+               ; inference_execution = Inference_ports.execution inference
                ; now = Agent_protocol.Timestamp.now
                ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
                ; initial_history = []
                ; initial_prompt_entry_count = 0
                ; reserved_history_through = 0
-               ; moderator_snapshot = initial.moderator
+               ; moderator_snapshot = (fun () -> initial.moderator)
                ; moderator_manager = Some manager
                ; moderator_tools = []
                ; moderator_script_tools = script_tools
@@ -1160,7 +1182,10 @@ let%expect_test
                    (fun ?prepare:_ _ -> failwith "unexpected external event")
                ; drain_internal_events = (fun _ -> failwith "legacy event drain used")
                ; execute_model_job =
-                   (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+                   (fun ~inference_context:_
+                     ~capture_recipe_target:_
+                     ~recipe:_
+                     ~payload:_ -> failwith "unexpected model job")
                ; enqueue_model_job_completion =
                    (fun ?prepare:_ _ -> failwith "unexpected completion")
                ; close = (fun () -> ())
@@ -1295,11 +1320,7 @@ let%expect_test
                      (match mode with
                       | `Approve ->
                         let module S = Agent_session.Session_state in
-                        let restored =
-                          Agent_session.Session_persistence.restore_snapshot
-                            (Sexp.to_string_mach (S.sexp_of_t persisted))
-                          |> store_ok
-                        in
+                        let restored = restore_state persisted |> store_ok in
                         assert_same_session_snapshot persisted restored;
                         assert (
                           Result.is_error
@@ -1321,23 +1342,7 @@ let%expect_test
                         let legacy =
                           { persisted with permissions = [ changed ]; schema_version = 7 }
                         in
-                        let rec old_permission_field = function
-                          | Sexp.List [ Atom "owner"; List [ Atom "Operation"; id ] ] ->
-                            Sexp.List [ Atom "operation_id"; id ]
-                          | List fields -> List (List.map fields ~f:old_permission_field)
-                          | Atom _ as value -> value
-                        in
-                        let migrated =
-                          Agent_session.Session_persistence.restore_snapshot
-                            (Sexp.to_string_mach
-                               (old_permission_field (S.sexp_of_t legacy)))
-                          |> store_ok
-                        in
-                        [%test_eq: int] S.current_schema_version migrated.schema_version;
-                        assert (
-                          Agent_protocol.Permission.equal_owner
-                            (List.hd_exn migrated.permissions).owner
-                            changed.owner)
+                        assert (Result.is_error (restore_state legacy))
                       | _ -> ());
                      match mode with
                      | `Permission_stop ->

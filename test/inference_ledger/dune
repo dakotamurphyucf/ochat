@@ -1,0 +1,5 @@
+(library
+ (name inference_ledger_tests)
+ (libraries core eio_main ochat.agent_client expect_test_helpers_core ochat.inference ochat.agent_protocol ochat.agent_session ochat.document_schema ochat.transcript)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

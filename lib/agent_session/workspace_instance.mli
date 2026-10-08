@@ -35,3 +35,10 @@ type t =
 [@@deriving sexp]
 
 val with_cleanup_completion : t -> cleanup_completion -> t
+
+(** Complete, validated named-field storage representation. Public receipt
+    projections remain separate. *)
+val to_jsonaf : t -> Jsonaf.t
+
+val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+val shape : Document_schema.Shape.t

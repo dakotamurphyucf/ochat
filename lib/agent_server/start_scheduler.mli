@@ -4,6 +4,16 @@ open! Core
 
 type t
 
+(** Internal composition: false constructs a stopped service and starts no fiber. *)
+val start_controlled
+  :  enabled:bool
+  -> sw:Eio.Switch.t
+  -> clock:_ Eio.Time.clock
+  -> registry:Session_registry.t
+  -> queue:Agent_session.Start_queue.t
+  -> resume_initial_starts:(unit -> unit)
+  -> t
+
 val start
   :  sw:Eio.Switch.t
   -> clock:_ Eio.Time.clock

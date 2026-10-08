@@ -491,42 +491,37 @@ let identity_overlay_of_snapshot (snapshot : Session.Moderator_state.Identity_sn
   : (Moderation.Identity_overlay.t, string) result
   =
   let open Result.Let_syntax in
-  let item value =
-    let%bind value = jsonaf_of_snapshot ~name:"moderator identity item" value in
-    try Ok (Res.Item.t_of_jsonaf value) with
-    | exn -> Error (Exn.to_string exn)
-  in
+  let%bind () = Session.Moderator_state.Identity_snapshot.validate snapshot in
   let inserted
         ({ entry_id; change_id; value; script_label } :
           Session.Moderator_state.Identity_snapshot.Inserted.t)
     =
-    let%map item = item value in
     Moderation.Identity_overlay.
-      { entry = History_entry.create_with_id ~id:entry_id item; change_id; script_label }
+      { entry = History_entry.create_with_id ~id:entry_id value; change_id; script_label }
   in
   let replacement
         ({ target_id; change_id; value; script_label } :
           Session.Moderator_state.Identity_snapshot.Replacement.t)
     =
-    let%map item = item value in
-    Moderation.Identity_overlay.{ target_id; item; change_id; script_label }
+    Moderation.Identity_overlay.{ target_id; item = value; change_id; script_label }
   in
-  let%bind prepended_items = Result.all (List.map snapshot.prepended_items ~f:inserted) in
-  let%bind appended_items = Result.all (List.map snapshot.appended_items ~f:inserted) in
-  let%map replacements = Result.all (List.map snapshot.replacements ~f:replacement) in
+  let prepended_items = List.map snapshot.prepended_items ~f:inserted in
+  let appended_items = List.map snapshot.appended_items ~f:inserted in
+  let replacements = List.map snapshot.replacements ~f:replacement in
   let tombstones =
     List.map snapshot.tombstones ~f:(fun { target_id; change_id } ->
       Moderation.Identity_overlay.{ target_id; change_id })
   in
-  Moderation.Identity_overlay.
-    { revision = snapshot.revision
-    ; next_change_id = snapshot.next_change_id
-    ; prepended_items
-    ; appended_items
-    ; replacements
-    ; tombstones
-    ; halted_reason = snapshot.halted_reason
-    }
+  Ok
+    Moderation.Identity_overlay.
+      { revision = snapshot.revision
+      ; next_change_id = snapshot.next_change_id
+      ; prepended_items
+      ; appended_items
+      ; replacements
+      ; tombstones
+      ; halted_reason = snapshot.halted_reason
+      }
 ;;
 
 let effective_entries_of_snapshot snapshot history =
@@ -688,7 +683,7 @@ let decode_target t encoded =
 type planned_identity_op =
   | Planned_prepend of string
   | Planned_append of Moderation.Item.t * Res.Item.t
-  | Planned_replace of History_entry.Id.t * Moderation.Item.t * Res.Item.t
+  | Planned_replace of History_entry.Id.t * Moderation.Item.t * History_entry.Payload.t
   | Planned_delete of History_entry.Id.t
   | Planned_halt of string
 
@@ -702,7 +697,29 @@ let plan_identity_op t (op : Moderation.Overlay.op) : (planned_identity_op, stri
     Planned_append (item, payload)
   | Replace_item replacement ->
     let%bind target_id = decode_target t replacement.target_id in
-    let%map payload = Moderation.Item.to_response_item replacement.item in
+    let%bind item = Moderation.Item.to_response_item replacement.item in
+    let previous =
+      List.find t.last_history ~f:(fun entry ->
+        History_entry.Id.equal (History_entry.id entry) target_id)
+    in
+    let call_relation =
+      Option.bind previous ~f:(fun entry ->
+        match
+          ( History_entry.Payload.Semantic.view
+              (History_entry.Payload.semantic (History_entry.payload entry))
+          , item )
+        with
+        | Result { kind = Function; relation; _ }, Res.Item.Function_call_output _
+        | Result { kind = Custom; relation; _ }, Res.Item.Custom_tool_call_output _ ->
+          Some relation
+        | _ -> None)
+    in
+    let%map payload = Openai.Responses_history.of_item ?call_relation item in
+    (* A script replacement authors new semantics. A durable captured replacement,
+       by contrast, is transferred unchanged when restoring the identity overlay. *)
+    let payload =
+      History_entry.Payload.authored (History_entry.Payload.semantic payload)
+    in
     Planned_replace (target_id, replacement.item, payload)
   | Delete_item target ->
     let%map target_id = decode_target t target in
@@ -772,7 +789,7 @@ let prepare_identity_overlay t ~phase ops =
           in
           let inserted =
             Moderation.Identity_overlay.
-              { entry = History_entry.create_with_id ~id item
+              { entry = Openai.Responses_history.create_with_id_exn ~id item
               ; change_id
               ; script_label = None
               }
@@ -792,7 +809,7 @@ let prepare_identity_overlay t ~phase ops =
           inserted_ids_rev := id :: !inserted_ids_rev;
           let inserted =
             Moderation.Identity_overlay.
-              { entry = History_entry.create_with_id ~id item
+              { entry = Openai.Responses_history.create_with_id_exn ~id item
               ; change_id
               ; script_label = Some script_item.id
               }
@@ -1087,33 +1104,25 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
   let%bind current_state = snapshot current_state in
   let%bind queued_internal_events = Result.all (List.map queued_events ~f:snapshot) in
   let inserted (inserted : Moderation.Identity_overlay.inserted) =
-    let%map value =
-      History_entry.item inserted.Moderation.Identity_overlay.entry
-      |> Res.Item.jsonaf_of_t
-      |> snapshot_of_jsonaf ?control
-    in
     Session.Moderator_state.Identity_snapshot.Inserted.
       { entry_id = History_entry.id inserted.entry
       ; change_id = inserted.change_id
-      ; value
+      ; value = History_entry.payload inserted.entry
       ; script_label = inserted.script_label
       }
   in
   let replacement (replacement : Moderation.Identity_overlay.replacement) =
-    let%map value =
-      replacement.item |> Res.Item.jsonaf_of_t |> snapshot_of_jsonaf ?control
-    in
     Session.Moderator_state.Identity_snapshot.Replacement.
       { target_id = replacement.target_id
       ; change_id = replacement.change_id
-      ; value
+      ; value = replacement.item
       ; script_label = replacement.script_label
       }
   in
   let overlay : Moderation.Identity_overlay.t = overlay in
-  let%bind prepended_items = Result.all (List.map overlay.prepended_items ~f:inserted) in
-  let%bind appended_items = Result.all (List.map overlay.appended_items ~f:inserted) in
-  let%map replacements = Result.all (List.map overlay.replacements ~f:replacement) in
+  let prepended_items = List.map overlay.prepended_items ~f:inserted in
+  let appended_items = List.map overlay.appended_items ~f:inserted in
+  let replacements = List.map overlay.replacements ~f:replacement in
   let tombstones =
     List.map
       overlay.tombstones
@@ -1121,20 +1130,21 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
         Session.Moderator_state.Identity_snapshot.Tombstone.
           { target_id = tombstone.target_id; change_id = tombstone.change_id })
   in
-  Session.Moderator_state.Identity_snapshot.
-    { script_id = Registry.script_id t.artifact
-    ; script_source_hash = Registry.source_hash t.artifact
-    ; current_state
-    ; queued_internal_events
-    ; halted
-    ; revision = overlay.revision
-    ; next_change_id = overlay.next_change_id
-    ; prepended_items
-    ; appended_items
-    ; replacements
-    ; tombstones
-    ; halted_reason = overlay.halted_reason
-    }
+  Ok
+    Session.Moderator_state.Identity_snapshot.
+      { script_id = Registry.script_id t.artifact
+      ; script_source_hash = Registry.source_hash t.artifact
+      ; current_state
+      ; queued_internal_events
+      ; halted
+      ; revision = overlay.revision
+      ; next_change_id = overlay.next_change_id
+      ; prepended_items
+      ; appended_items
+      ; replacements
+      ; tombstones
+      ; halted_reason = overlay.halted_reason
+      }
 ;;
 
 let with_work_transactions t jobs subscriptions schedules notifications ingress f =

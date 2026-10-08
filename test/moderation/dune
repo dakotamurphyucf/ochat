@@ -8,7 +8,7 @@
 (library
  (name chat_response_moderation_test)
  (modules chat_response_moderation_test)
- (libraries
+ (libraries ochat.history_entry ochat.document_schema
   core
   expect_test_helpers_core
   chat_response
@@ -55,19 +55,6 @@
  (name chatml_moderator_runtime_test)
  (modules chatml_moderator_runtime_test recorded_result_tests)
  (libraries core chatml chatml_builtin_modules chatml_moderator_runtime)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name session_legacy_moderator_migration_test)
- (modules session_legacy_moderator_migration_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  chat_tui
-  ochat.session)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

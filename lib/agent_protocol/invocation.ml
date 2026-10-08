@@ -1514,3 +1514,75 @@ let of_json json =
   let%map () = validate t in
   t
 ;;
+
+module Storage = struct
+  let nullable decode = function
+    | `Null -> Ok None
+    | json -> Result.map (decode json) ~f:Option.some
+  ;;
+
+  let option encode value = Option.value_map value ~default:`Null ~f:encode
+
+  let to_json (t : t) =
+    `Object
+      [ "id", Id.Invocation.to_json t.context.id
+      ; "context", context_to_json t.context
+      ; "status", status_to_json t.status
+      ; "output_entry_id", option History.Id.to_json t.output_entry_id
+      ; "routing", option routing_to_json t.routing
+      ; "publication_discarded", option (fun s -> `String s) t.publication_discarded
+      ; "observation", option observation_to_json t.observation
+      ; "parent_event", option Id.Moderator_execution.to_json t.parent_event
+      ; "handler_intent", option handler_intent_to_json t.handler_intent
+      ; "completion_contract", option Completion_contract.to_json t.completion_contract
+      ; "authoring_reference", option Authoring_reference.to_json t.authoring_reference
+      ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let get name decode = Json_codec.required_as fields name decode in
+    let%bind id = get "id" Id.Invocation.of_json in
+    let%bind context = get "context" (context_of_json ~version:12) in
+    let%bind () =
+      if Id.Invocation.equal id context.id
+      then Ok ()
+      else invalid "storage invocation identity mismatch"
+    in
+    let%bind status = get "status" status_of_json in
+    let%bind output_entry_id = get "output_entry_id" (nullable History.Id.of_json) in
+    let%bind routing = get "routing" (nullable routing_of_json) in
+    let%bind publication_discarded =
+      get "publication_discarded" (nullable Json_codec.string)
+    in
+    let%bind observation =
+      get "observation" (nullable (observation_of_json ~version:12))
+    in
+    let%bind parent_event =
+      get "parent_event" (nullable Id.Moderator_execution.of_json)
+    in
+    let%bind handler_intent = get "handler_intent" (nullable handler_intent_of_json) in
+    let%bind completion_contract =
+      get "completion_contract" (nullable Completion_contract.of_json)
+    in
+    let%bind authoring_reference =
+      get "authoring_reference" (nullable Authoring_reference.of_json)
+    in
+    let t =
+      { context
+      ; status
+      ; output_entry_id
+      ; routing
+      ; publication_discarded
+      ; observation
+      ; parent_event
+      ; handler_intent
+      ; completion_contract
+      ; authoring_reference
+      }
+    in
+    let%map () = validate t in
+    t
+  ;;
+end

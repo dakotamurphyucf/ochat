@@ -9,6 +9,8 @@ module Key : sig
     ; idempotency_key : Agent_protocol.Idempotency_key.t
     }
   [@@deriving compare, sexp]
+
+  include Core.Comparator.S with type t := t
 end
 
 module Command_audit : sig
@@ -19,8 +21,19 @@ module Command_audit : sig
     }
   [@@deriving sexp]
 
-  val encode : t -> string
-  val decode : string -> (t, Store_error.t) result
+  (** New authored receipt. Use encode_carrier for edits of restored receipts. *)
+  val encode : t -> (Document_schema.Document.t, Store_error.t) result
+
+  val restore
+    :  Document_schema.Document.t
+    -> (t Document_schema.Extension_carrier.t, Store_error.t) result
+
+  val encode_carrier
+    :  t Document_schema.Extension_carrier.t
+    -> (Document_schema.Document.t, Store_error.t) result
+
+  (** Read-only projection used by receipt reconciliation. *)
+  val decode : Document_schema.Document.t -> (t, Store_error.t) result
 end
 
 type outcome =
@@ -48,9 +61,12 @@ type lookup =
   | Replay of record
   | Conflict of record
 
-(** Keep successful cached outcomes encoded until replay. The public records
-    and persisted schema are unchanged; writes do not repeatedly traverse every
-    cached JSON response tree. *)
+(** Complete named-field cache envelope. Restored unknown fields remain attached
+    to stable record identities through updates. Expiration explicitly retires
+    the expired records and retains all other unknown fields. The complete cache
+    uses [Document_fields.limits]' shared durable structural profile with a fixed
+    16 MiB byte cap for writes, reads, updates and reference scans. Reference scans
+    also apply their caller's aggregate disk-and-memory byte/record budgets. *)
 type t
 
 val open_or_create : env:Eio_unix.Stdenv.base -> path:string -> (t, Store_error.t) result

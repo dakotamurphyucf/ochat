@@ -247,7 +247,8 @@ let rec loop
       on_error
 ;;
 
-let start
+let start_controlled
+      ~enabled
       ~sw
       ~env
       ~clock
@@ -260,7 +261,7 @@ let start
       ~on_error
   =
   let t =
-    { closed = Atomic.make false
+    { closed = Atomic.make (not enabled)
     ; stop = Eio.Stream.create 1
     ; mutex = Eio.Mutex.create ()
     ; last_stats = None
@@ -268,19 +269,47 @@ let start
     ; last_error = None
     }
   in
-  Eio.Fiber.fork ~sw (fun () ->
-    loop
-      t
-      env
-      clock
-      every
-      idempotency_store
-      blob_store
-      response_retention
-      registry
-      session_store
-      on_error);
+  if enabled
+  then
+    Eio.Fiber.fork ~sw (fun () ->
+      loop
+        t
+        env
+        clock
+        every
+        idempotency_store
+        blob_store
+        response_retention
+        registry
+        session_store
+        on_error);
   t
+;;
+
+let start
+      ~sw
+      ~env
+      ~clock
+      ~every
+      ~idempotency_store
+      ~blob_store
+      ~response_retention
+      ~registry
+      ~session_store
+      ~on_error
+  =
+  start_controlled
+    ~enabled:true
+    ~sw
+    ~env
+    ~clock
+    ~every
+    ~idempotency_store
+    ~blob_store
+    ~response_retention
+    ~registry
+    ~session_store
+    ~on_error
 ;;
 
 let close t = if Atomic.compare_and_set t.closed false true then Eio.Stream.add t.stop ()

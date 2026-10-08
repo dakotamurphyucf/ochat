@@ -18,6 +18,7 @@ module Spec = struct
     { protocol : Agent_protocol.Session.Spec.t
     ; prompt_definition_id : Agent_protocol.Id.Prompt_definition.t option
     ; prompt_revision_id : Agent_protocol.Id.Prompt_revision.t
+    ; inference_target : (Inference.Selection.t[@sexp.opaque])
     ; delegation : Agent_store.Delegation_store.Reference.t option [@sexp.option]
     ; workspace_instance : Workspace_instance.t
     ; permission_profile : string
@@ -80,6 +81,13 @@ module Lifecycle = struct
   [@@deriving sexp]
 end
 
+module Runtime_initialization = struct
+  type t =
+    | Ready
+    | Pending of { fresh_history : bool }
+  [@@deriving equal, sexp]
+end
+
 module Counters = struct
   type t =
     { revision : int64
@@ -95,6 +103,7 @@ type t =
   ; identity : Identity.t
   ; spec : Spec.t
   ; lifecycle : Lifecycle.t
+  ; runtime_initialization : Runtime_initialization.t
   ; pending_initial_start : bool [@sexp.default false]
   ; stop_epoch : int64 [@sexp.default 0L]
   ; parent_stop_epoch : int64 option [@sexp.option]
@@ -104,6 +113,8 @@ type t =
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
+  ; inference_ledger : (Inference_ledger.t[@sexp.opaque])
+  ; model_job_targets : Model_job_target.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; managed_submissions : Managed_submission.t list [@sexp.list]
@@ -122,11 +133,15 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 20
+let current_schema_version = 22
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if t.schema_version = 21
+  then Ok { t with schema_version = current_schema_version }
+  else if t.schema_version = 20
+  then Ok { t with schema_version = current_schema_version }
   else if Option.is_some t.conversation.authoring_publication
   then
     Error
@@ -324,7 +339,24 @@ let upgrade_schema t =
          ())
 ;;
 
+let ledger_error error =
+  Agent_protocol.Error.invalid_request
+    (Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+;;
+
+let fresh_inference_ledger_exn (identity : Identity.t) =
+  Inference_ledger.create
+    ~session_id:identity.session_id
+    ~generation:identity.generation
+    ~before_tracking_unknown:false
+    ~limits:Inference_ledger.Limits.default
+  |> Result.map_error ~f:(fun error ->
+    Sexp.to_string_hum (Inference_ledger.Error.sexp_of_t error))
+  |> Result.ok_or_failwith
+;;
+
 let create ~identity ~spec ~initial_history =
+  let inference_ledger = fresh_inference_ledger_exn identity in
   let desired =
     if spec.Spec.protocol.start_immediately
     then Agent_protocol.Session.Running
@@ -334,6 +366,7 @@ let create ~identity ~spec ~initial_history =
   ; identity
   ; spec
   ; lifecycle = { desired; observed = Stopped }
+  ; runtime_initialization = Ready
   ; pending_initial_start = false
   ; stop_epoch = 0L
   ; parent_stop_epoch = None
@@ -355,6 +388,8 @@ let create ~identity ~spec ~initial_history =
   ; permissions = []
   ; grants = []
   ; jobs = []
+  ; inference_ledger
+  ; model_job_targets = []
   ; schedules = []
   ; invocations = []
   ; managed_submissions = []
@@ -432,14 +467,135 @@ let validate_delegation t =
   | _ -> invalid ()
 ;;
 
-let validate t =
+let validate_model_job_targets t =
+  let open Result.Let_syntax in
+  let seen = Hash_set.create (module Agent_protocol.Id.Job) in
+  let%bind () =
+    List.fold_result t.model_job_targets ~init:() ~f:(fun () binding ->
+      let id = Model_job_target.job_id binding in
+      let%bind job =
+        List.find t.jobs ~f:(fun job -> Agent_protocol.Id.Job.equal job.id id)
+        |> Result.of_option
+             ~error:
+               (Agent_protocol.Error.invalid_request
+                  "inference target references an absent job")
+      in
+      match job.kind with
+      | Model_call
+        when Int.equal job.generation (Model_job_target.generation binding)
+             && Agent_protocol.Id.Session.equal job.session_id t.identity.session_id
+             && not (Hash_set.mem seen id) ->
+        Hash_set.add seen id;
+        Ok ()
+      | Model_call
+      | Nested_agent
+      | Scheduled_event
+      | Async_tool
+      | Shell_process
+      | Compaction ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "model job target kind, owner, generation or uniqueness is invalid"))
+  in
+  List.fold_result t.jobs ~init:() ~f:(fun () job ->
+    match job.kind with
+    | Model_call when not (Hash_set.mem seen job.id) ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "model job lacks an explicit inference selection")
+    | Model_call
+    | Nested_agent
+    | Scheduled_event
+    | Async_tool
+    | Shell_process
+    | Compaction -> Ok ())
+;;
+
+let validate_domain t =
   let open Result.Let_syntax in
   let%bind () = validate_delegation t in
+  let%bind () = validate_model_job_targets t in
+  let%bind moderator = Moderator_checkpoint.decode t.moderator in
   let%bind () =
-    List.fold_result
-      (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
-      ~init:()
-      ~f:(fun () entry -> Agent_protocol.History.validate_entry entry)
+    match moderator with
+    | None -> Ok ()
+    | Some snapshot ->
+      Session.Moderator_state.Identity_snapshot.validate_history_ids
+        snapshot
+        ~history_ids:
+          (List.map
+             (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+             ~f:(fun entry -> entry.Agent_protocol.History.id))
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let%bind () =
+    match
+      List.find_a_dup
+        (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+        ~compare:(fun a b ->
+          Agent_protocol.History.Id.compare a.Agent_protocol.History.id b.id)
+    with
+    | None -> Ok ()
+    | Some _ -> Error (Agent_protocol.Error.invalid_request "duplicate history identity")
+  in
+  let%bind retained_history =
+    Invocation_history.Validated_history.create t.conversation.canonical_history
+  in
+  let%bind () =
+    let%bind deferred =
+      History_codec.all_of_protocol t.conversation.deferred_user_entries
+    in
+    let entries =
+      Invocation_history.Validated_history.entries retained_history @ deferred
+    in
+    let%bind () =
+      History_entry.validate_relations entries
+      |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+    in
+    let conversation = t.conversation in
+    let%bind () =
+      nonnegative "next history sequence" conversation.next_history_sequence
+    in
+    let%bind () =
+      nonnegative "reserved history sequence" conversation.reserved_history_through
+    in
+    let%bind () =
+      if
+        Int64.(
+          conversation.reserved_history_through <= conversation.next_history_sequence)
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "history reservation exceeds the allocator high-water mark")
+    in
+    let namespace = Agent_protocol.Id.Session.to_string t.identity.session_id in
+    let check_id id =
+      if
+        String.equal (History_entry.Id.namespace id) namespace
+        && Int64.(
+             of_int (History_entry.Id.sequence id) >= conversation.next_history_sequence)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request
+             "retained history identity is not below the allocator high-water mark")
+      else Ok ()
+    in
+    let%bind () =
+      List.fold_result entries ~init:() ~f:(fun () entry ->
+        check_id (History_entry.id entry))
+    in
+    match moderator with
+    | None -> Ok ()
+    | Some snapshot ->
+      let module M = Session.Moderator_state.Identity_snapshot in
+      let ids =
+        List.map (snapshot.prepended_items @ snapshot.appended_items) ~f:(fun item ->
+          item.M.Inserted.entry_id)
+        @ List.map snapshot.replacements ~f:(fun item -> item.M.Replacement.target_id)
+        @ List.map snapshot.tombstones ~f:(fun item -> item.M.Tombstone.target_id)
+      in
+      List.fold_result ids ~init:() ~f:(fun () id -> check_id id)
   in
   let%bind () =
     match t.automatic_turn_budget with
@@ -456,9 +612,7 @@ let validate t =
           invocation
       in
       let%bind () =
-        Invocation_history.validate_retained
-          ~history:t.conversation.canonical_history
-          invocation
+        Invocation_history.Validated_history.validate_retained retained_history invocation
       in
       let context = invocation.context in
       if
@@ -750,9 +904,6 @@ let validate t =
           (Agent_protocol.Error.invalid_request
              "managed stop identity/generation is inconsistent"))
   in
-  let%bind () =
-    nonnegative "next history sequence" t.conversation.next_history_sequence
-  in
   let%bind references = authoring_references t in
   let%bind () =
     match t.conversation.authoring_publication with
@@ -787,6 +938,40 @@ let validate t =
   else Ok ()
 ;;
 
+let validate t =
+  let open Result.Let_syntax in
+  let%bind () = validate_domain t in
+  Inference_ledger.validate
+    t.inference_ledger
+    ~limits:Inference_ledger.Limits.default
+    ~session_id:t.identity.session_id
+    ~generation:t.identity.generation
+  |> Result.map_error ~f:ledger_error
+;;
+
+let validate_administration_candidate t ~previous =
+  let open Result.Let_syntax in
+  let%bind () = validate previous in
+  let%bind () = validate_domain t in
+  let%bind before =
+    Inference_ledger.to_document previous.inference_ledger
+    |> Result.map_error ~f:ledger_error
+  in
+  let%bind after =
+    Inference_ledger.to_document t.inference_ledger |> Result.map_error ~f:ledger_error
+  in
+  if
+    Agent_protocol.Id.Session.equal t.identity.session_id previous.identity.session_id
+    && String.equal
+         (Jsonaf.to_string (Document_schema.Document.json before))
+         (Jsonaf.to_string (Document_schema.Document.json after))
+  then Ok ()
+  else
+    Error
+      (Agent_protocol.Error.invalid_request
+         "administration must retain the original inference ledger")
+;;
+
 let summary t =
   Agent_protocol.Session.
     { id = t.identity.session_id
@@ -801,6 +986,7 @@ let summary t =
     ; workspace_instance = Some t.spec.workspace_instance.id
     ; active_operation = t.active_operation
     ; revision = t.counters.revision
+    ; inference_summary = Value (Inference_ledger.summary t.inference_ledger)
     ; latest_event_sequence = t.counters.event_sequence
     }
 ;;
@@ -826,28 +1012,25 @@ let effective_entry ~canonical (entry : Chat_response.Moderation.Effective_entry
 ;;
 
 let effective_history t =
-  Option.bind t.moderator ~f:(fun json ->
-    match Jsonaf.member "identity_snapshot_sexp" json with
-    | Some (`String encoded) ->
-      let snapshot =
-        Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string encoded)
-      in
-      let history =
-        History_codec.all_of_protocol t.conversation.canonical_history
-        |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-        |> Result.ok_or_failwith
-      in
-      Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
+  match Moderator_checkpoint.decode t.moderator with
+  | Error error -> failwith error.Agent_protocol.Error.message
+  | Ok None -> None
+  | Ok (Some snapshot) ->
+    let history =
+      History_codec.all_of_protocol t.conversation.canonical_history
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
       |> Result.ok_or_failwith
-      |> List.map
-           ~f:
-             (effective_entry
-                ~canonical:
-                  (History_codec.canonical_encoder
-                     ~previous:t.conversation.canonical_history))
-      |> history_window
-      |> Option.some
-    | _ -> None)
+    in
+    Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
+    |> Result.ok_or_failwith
+    |> List.map
+         ~f:
+           (effective_entry
+              ~canonical:
+                (History_codec.canonical_encoder
+                   ~previous:t.conversation.canonical_history))
+    |> history_window
+    |> Option.some
 ;;
 
 let moderator_projection t =

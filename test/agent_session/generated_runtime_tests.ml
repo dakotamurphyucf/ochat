@@ -61,12 +61,21 @@ let parent_runtime ~env ~sw ~root =
       ~dir:root
       {|<tool name="read_file"><read id="data" path="${workspace}/data"/></tool><tool name="append_to_file"/>|}
   in
+  let inference =
+    Inference_ports.create ~config:(Chat_response.Config.of_elements elements) ()
+  in
   let ctx =
     Chat_response.Ctx.create
+      ~inference_context:inference.context
+      ~inference_identity:inference.identity
+      ~on_inference_attempt:ignore
+      ~on_inference_observation:ignore
+      ~on_inference_completion:ignore
       ~env
       ~dir:root
       ~tool_dir:root
       ~cache:(Chat_response.Cache.create ~max_size:16 ())
+      ()
   in
   let host =
     AR.host
@@ -198,6 +207,10 @@ let%expect_test
             ref
               { parent_state with
                 identity = { parent_state.identity with session_id = third_session_id }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:third_session_id
+                    ~generation:parent_state.identity.generation
               ; spec =
                   { parent_state.spec with
                     permission_profile = profile.id
@@ -227,6 +240,7 @@ let%expect_test
                      Independent { authorization_sha256 = lifetime_digest }
                    | _ -> Owned)
               ; created_at = timestamp
+              ; inference_target = None
               }
           in
           let reserved =
@@ -443,6 +457,19 @@ let%expect_test
                   ; output_index = 0
                   ; type_ = "response.function_call_arguments.done"
                   }
+              ; Output_item_done
+                  { item =
+                      Function_call
+                        { name = "read_file"
+                        ; arguments = {|{"root":"data","file":"value.txt"}|}
+                        ; call_id = "child-read"
+                        ; _type = "function_call"
+                        ; id = Some "child-read-item"
+                        ; status = Some "completed"
+                        }
+                  ; output_index = 0
+                  ; type_ = "response.output_item.done"
+                  }
               ]
               |> Stdlib.List.to_seq
             | _ -> Stdlib.Seq.empty
@@ -452,6 +479,14 @@ let%expect_test
                 ?(existing_moderator_snapshot = None)
                 definition
             =
+            let inference =
+              Inference_ports.create
+                ~post_stream
+                ~config:
+                  (Chat_response.Config.of_elements
+                     (Chat_response.Generated_admission.elements (G.admission definition)))
+                ()
+            in
             B.build_generated
               ~services
               ~definition
@@ -473,7 +508,11 @@ let%expect_test
               ~approval_provider:Shell_runtime.Approval_broker.None_available
               ~approval_store:(Shell_access.Approval.create_store ())
               ~permission_profile:profile
-              ~model_post_stream:(Some post_stream)
+              ~inference_context:inference.context
+              ~inference_identity:inference.identity
+              ~on_inference_attempt:ignore
+              ~on_inference_observation:ignore
+              ~on_inference_completion:ignore
               ~review_permission:(fun _ -> failwith "unexpected reviewer")
               ~schedule_services:
                 { after_ms = (fun ~delay_ms:_ ~payload:_ -> failwith "unexpected timer")
@@ -535,12 +574,11 @@ let%expect_test
             |> store_ok
           in
           let _ =
-            Agent_session.Session_persistence.install_snapshot
+            Agent_store.Snapshot.install
               ~env
-              ~handle:child_handle
+              ~directory:(Session_store.Handle.snapshot_directory child_handle)
               ~max_payload_length:1048576
-              ~transaction_hash:None
-              initial
+              (snapshot_of_state initial |> store_ok)
             |> store_ok
           in
           let _ = D.advance ledger reserved Child_installed |> store_ok in
@@ -604,6 +642,11 @@ let%expect_test
                 assert (
                   Result.is_error
                     (runtime.execute_model_job
+                       ~inference_context:
+                         (B.inference_execution runtime
+                          |> Inference_client.Execution.context)
+                       ~capture_recipe_target:(fun _ ->
+                         failwith "generated recipe captured a target")
                        ~recipe:Chat_response.Model_executor.agent_prompt_v1_name
                        ~payload:(`Object [])));
                 A.set_operation_worker actor_value (Some runtime.worker) |> protocol_ok;

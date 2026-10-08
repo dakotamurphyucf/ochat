@@ -24,6 +24,17 @@ val payload : t -> string
 val checksum_raw : t -> string
 val checksum_hex : t -> string
 
+(** Authored complete frame bytes and their checksum, computed together once.
+    Only [create] constructs this immutable pair. Stored bytes must still enter
+    through [decode], which verifies their header and checksum. *)
+module Encoded : sig
+  type t
+
+  val create : max_payload_length:int -> flags:int -> string -> (t, error) result
+  val bytes : t -> string
+  val checksum_hex : t -> string
+end
+
 (** [encode ~max_payload_length ~flags payload] returns one complete frame.
     Header integers use network byte order and the checksum is raw SHA-256. *)
 val encode : max_payload_length:int -> flags:int -> string -> (string, error) result

@@ -18,10 +18,9 @@
     the caller-supplied {!Eio_unix.Stdenv.base} environment so that the
     library can be embedded into any existing Eio event loop.
 
-    Neither function raises; transient errors (e.g. API rate limits) are
-    handled internally by falling back to conservative defaults. *)
-
-(** {1 API} *)
+    Expected completion/parse failures follow each judge's established fallback
+    policy. Missing selected execution, cancellation and strict callback
+    exceptions propagate. *)
 
 (** {1 API} *)
 
@@ -56,6 +55,7 @@
        print_endline refined ]} *)
 val first_flow
   :  env:Eio_unix.Stdenv.base
+  -> inference:Inference_client.Execution.t
   -> task:string
   -> prompt:string
   -> ?action:Context.action
@@ -85,6 +85,7 @@ val first_flow
        print_endline refined_tool ]} *)
 val tool_flow
   :  env:Eio_unix.Stdenv.base
+  -> inference:Inference_client.Execution.t
   -> task:string
   -> prompt:string
   -> ?action:Context.action

@@ -47,7 +47,10 @@ val prepare_dependency_stop : t -> (unit, Agent_protocol.Error.t) result
 val prepare_dependency_close : t -> (unit, Agent_protocol.Error.t) result
 
 (** After committing a session stop, exclude new runtime admission, cancel and
-    join existing execution leases, then detach the worker. Delegation resource
+    join foreground terminal checkpoints and existing execution leases, then
+    detach the worker. Foreground cancellation precedes the dependency barrier.
+    Permanent close preserves durable running intent and deferred messages while
+    preventing any new foreground admission. Delegation resource
     borrows survive ordinary stop; workspace cleanup must still check references.
     The non-waiting [unload] used before reset rejects every retained borrow. Waits
     outside the owner mutex so worker finalizers can finish. Keep the actor alive
@@ -57,7 +60,9 @@ val prepare_dependency_close : t -> (unit, Agent_protocol.Error.t) result
     cleanup requests join the same retirement and observe its success or failure;
     they do not race into a spurious Conflict or close the runtime twice. Cleanup
     remains callable after [close], including retry after a dependency failure;
-    this never reopens runtime admission. *)
+    this never reopens runtime admission. Failed reusable retirement also keeps
+    execution admission closed until this cleanup is explicitly retried; retained
+    resources do not imply that [ensure_loaded] may resume execution. *)
 val unload_and_wait : t -> (unit, Agent_protocol.Error.t) result
 
 (** Run maintenance only with no installed runtime or background lease, excluding
@@ -93,6 +98,17 @@ val with_background_runtime
   :  t
   -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
+
+(** Cancellable auxiliary inference lifetime without loading a runtime. A loaded
+    runtime is retained and its selected execution supplied; otherwise f receives
+    None and must use explicit host selection. Stop/administration excludes and
+    joins this lease. No initializer/manager/tool setup occurs. Run selection,
+    inference and joined cleanup inside f, outside actor/owner callbacks. Primary
+    errors/exceptions remain authoritative if cleanup also fails. *)
+val with_auxiliary_execution_lifetime
+  :  t
+  -> (Inference_client.Execution.t option -> ('a, Agent_protocol.Error.t) Result.t)
+  -> ('a, Agent_protocol.Error.t) Result.t
 
 (** Retain native/compiled resources for an independently owned descendant.
     Admission uses the same current loaded-runtime check as a background borrow.
@@ -158,6 +174,34 @@ val prepare_delegated_tool
 val with_administration
   :  t
   -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Hold the owner fence across fresh pure admission validation, old resource
+    retirement, selected-state commit, initialization and final stopped-runtime
+    retirement. No leases or unloading may exist. [before_initialize] is a pure
+    allocator update after the durable commit; none of the callbacks may reenter
+    this owner.
+
+    A failed commit leaves the old durable configuration stopped and rebuildable.
+    Once [commit] succeeds, initialization failure retains the selected durable
+    configuration and its ordinary failure evidence; it never rolls back effects
+    or permits recommitting a stale revision. The returned summary describes the
+    actual initialized state. Exceptions and cancellation propagate unchanged
+    after releasing the owner fence. *)
+val reinitialize_administration
+  :  t
+  -> validate:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> commit:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> before_initialize:(unit -> unit)
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
+(** Original admission is checked under this owner fence before old resources
+    are joined. [commit] reconciles only tracking ACK drift against that original
+    basis. No initialization occurs; failures and cancellation propagate. *)
+val retire_administration
+  :  t
+  -> validate:(unit -> (unit, Agent_protocol.Error.t) result)
+  -> commit:(unit -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
 val parse_user_content
@@ -230,6 +274,9 @@ val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
     releases the runtime mutex without poisoning subsequent completion delivery. *)
 val execute_model_job
   :  t
+  -> inference_context:Inference_runtime.Context.t
+  -> capture_recipe_target:
+       (Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) result)
   -> recipe:string
   -> payload:Jsonaf.t
   -> (Agent_session.Runtime_builder.model_job_outcome, Agent_protocol.Error.t) result
@@ -265,13 +312,17 @@ val deliver_background_job_completion
 
 (** [close] permanently prevents runtime reload and is safe to request from a
     background callback. For owners with a host dependency barrier, it defers
-    cancellation and retirement to [close_and_wait]. For ordinary owners it
+    background cancellation and resource retirement to [close_and_wait]. Foreground
+    admission is excluded and active foreground execution is cancelled immediately.
+    For ordinary owners it
     cancels background callbacks and retires after their cleanup, or immediately
-    if no callback owns the runtime. An in-progress unload always retains control
+    if no callback or foreground operation owns the runtime. An active foreground
+    operation is cancelled; [close_and_wait] must join its terminal checkpoint
+    before resources or the actor are retired. An in-progress unload retains control
     of retirement. The actor must remain running through cleanup. *)
 val close : t -> unit
 
-(** Close and join dependency/background cleanup before shutting down the actor or
+(** Close and join foreground/dependency/background cleanup before shutting down the actor or
     its persistence writer. Concurrent accepted-stop cleanup is joined. A typed
     dependency failure raises [Cleanup_failed], retaining resources for retry;
     other exceptions retain their original backtrace. Call from the external

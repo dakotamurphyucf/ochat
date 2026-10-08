@@ -50,7 +50,7 @@ let%test_unit
                 }
           in
           let call =
-            History_entry.create_with_id ~id:(id 0) call_item
+            Openai.Responses_history.create_with_id_exn ~id:(id 0) call_item
             |> Agent_session.History_codec.to_protocol
           in
           let admitted =
@@ -88,7 +88,7 @@ let%test_unit
                 }
           in
           let output =
-            History_entry.create_with_id ~id:(id 1) output_item
+            Openai.Responses_history.create_with_id_exn ~id:(id 1) output_item
             |> Agent_session.History_codec.to_protocol
           in
           let invocation =
@@ -106,7 +106,7 @@ let%test_unit
             | `Existing | `Bad_output | `Published -> [ call; output ]
             | `Reused_id ->
               [ call
-              ; History_entry.create_with_id ~id:(id 1) call_item
+              ; Openai.Responses_history.create_with_id_exn ~id:(id 1) call_item
                 |> Agent_session.History_codec.to_protocol
               ]
             | `Collision ->
@@ -118,18 +118,37 @@ let%test_unit
                 | _ -> assert false
               in
               [ call
-              ; History_entry.create_with_id ~id:(id 8) other
+              ; Openai.Responses_history.create_with_id_exn ~id:(id 8) other
                 |> Agent_session.History_codec.to_protocol
               ]
             | _ -> [ call ]
           in
+          let generation =
+            match mode with
+            | `Old_generation -> 1
+            | `Admitted
+            | `Dispatching
+            | `Resolved
+            | `Cancelled
+            | `Existing
+            | `Published
+            | `Removed
+            | `Bad_output
+            | `Reused_id
+            | `Collision -> 0
+          in
           let state =
             { initial with
               invocations = [ invocation ]
-            ; identity =
-                { initial.identity with
-                  generation = (if Poly.equal mode `Old_generation then 1 else 0)
-                }
+            ; identity = { initial.identity with generation }
+            ; inference_ledger =
+                Agent_session.Inference_ledger.with_generation
+                  initial.inference_ledger
+                  ~generation
+                |> Result.map_error ~f:(fun error ->
+                  Sexp.to_string_hum
+                    (Agent_session.Inference_ledger.Error.sexp_of_t error))
+                |> Result.ok_or_failwith
             ; conversation =
                 { initial.conversation with
                   canonical_history = history
@@ -165,7 +184,11 @@ let%test_unit
                 |> protocol_ok
               in
               let administrative =
-                Agent_session.Administration.archive ~previous:state candidate Reset
+                Agent_session.Administration.archive
+                  ~archive_reference
+                  ~previous:state
+                  candidate
+                  Reset
                 |> protocol_ok
               in
               Agent_session.Session_state.validate administrative |> protocol_ok;
@@ -185,12 +208,7 @@ let%test_unit
                 if keep_history && not (Poly.equal mode `Removed)
                 then assert (Option.is_some disposition.output_entry_id)
                 else assert (Option.is_some disposition.publication_discarded));
-              let restored_admin =
-                Agent_session.Session_persistence.restore_snapshot
-                  (Sexp.to_string_mach
-                     (Agent_session.Session_state.sexp_of_t administrative))
-                |> store_ok
-              in
+              let restored_admin = restore_state administrative |> store_ok in
               assert (
                 Sexp.equal
                   (Agent_session.Session_state.sexp_of_t administrative)
@@ -204,11 +222,7 @@ let%test_unit
             let delta = D.t_of_sexp (D.sexp_of_t delta) in
             let restored = D.apply state delta |> protocol_ok in
             Agent_session.Session_state.validate restored |> protocol_ok;
-            let restored =
-              Agent_session.Session_persistence.restore_snapshot
-                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t restored))
-              |> store_ok
-            in
+            let restored = restore_state restored |> store_ok in
             let actual = List.hd_exn restored.invocations in
             (match mode, actual.status with
              | (`Admitted | `Dispatching), Published (Cancelled "restart") -> ()
@@ -561,12 +575,11 @@ let%test_unit
         assert (Result.is_error (publish (publication_output caps ())));
         assert (
           Result.is_error
-            (publish (History_entry.with_item output (History_entry.item wrong))));
-        let restored =
-          Agent_session.Session_persistence.restore_snapshot
-            (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t published))
-          |> store_ok
-        in
+            (publish
+               (Openai.Responses_history.with_item_exn
+                  output
+                  (Openai.Responses_history.item_exn wrong))));
+        let restored = restore_state published |> store_ok in
         assert (Poly.equal restored.invocations published.invocations);
         (* History compaction retains the receipt and permits no new publication identity. *)
         let compacted =
@@ -732,7 +745,7 @@ let%test_unit "worker cancellation publishes an interrupted handler result exact
            List.count events ~f:(fun event ->
              Agent_protocol.Event.Durable.equal_kind event.kind Operation_cancelled)
            = 1);
-         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
 ;;
 
 let%test_unit "worker failure repairs a transient publication failure without replay" =
@@ -778,7 +791,7 @@ let%test_unit "worker failure repairs a transient publication failure without re
          List.count events ~f:(fun event ->
            Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
          = 1);
-       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;
 
 let%test_unit
@@ -900,7 +913,9 @@ let%test_unit
              assert (
                List.length state.conversation.canonical_history = if model then 3 else 1);
              assert (List.length state.invocations = 1);
-             assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+             assert_same_session_snapshot
+               state
+               (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit
@@ -1003,7 +1018,7 @@ let%test_unit "independent ordinary invocations run concurrently outside the act
        let state = await_idle actor in
        assert (List.length state.invocations = 2);
        assert (List.length state.conversation.canonical_history = 1);
-       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;
 
 let%test_unit "native nested invocation persists without reentering a borrowed moderator" =
@@ -1085,7 +1100,7 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
                | Resolved (Fail _) -> parent_fails
                | _ -> false));
          assert (List.length state.conversation.canonical_history = 1);
-         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
 ;;
 
 let%test_unit
@@ -1211,7 +1226,7 @@ let%test_unit
             | _ -> assert false);
            assert (
              List.length state.conversation.canonical_history = if model then 3 else 1);
-           assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit
@@ -1248,4 +1263,270 @@ let%test_unit
        Eio.Promise.await done_;
        let state = Agent_session.Session_actor.state actor |> protocol_ok in
        assert (Option.is_some (List.hd_exn state.invocations).output_entry_id))
+;;
+
+let%test_unit "stream invocation admits captured calls without legacy projection" =
+  let module S = Agent_session.Stream_invocation in
+  let module P = History_entry.Payload in
+  let module W = Openai.Responses_wire in
+  List.iter [ Chat_response.Tool_call.Kind.Function; Custom ] ~f:(fun kind ->
+    let original = "{\"secret\":\"original\"}" in
+    let execution = "{\"secret\":\"execution\"}" in
+    let canonical = "{\"secret\":\"redacted\"}" in
+    let raw =
+      `Object
+        [ "future", `Object [ "number", `Number "1e+00"; "nullable", `Null ]
+        ; ( "type"
+          , `String
+              (match kind with
+               | Function -> "function_call"
+               | Custom -> "custom_tool_call") )
+        ; "id", `String "actual-provider-item"
+        ; "call_id", `String "actual-provider-alias"
+        ; "name", `String "selected_tool"
+        ; ( (match kind with
+             | Function -> "arguments"
+             | Custom -> "input")
+          , `String canonical )
+        ; "status", `String "completed"
+        ]
+    in
+    let origin =
+      W.Origin.create
+        ~provider:"openai.responses"
+        ~account:None
+        ~endpoint:"https://fixture.invalid/responses"
+      |> Result.map_error ~f:(fun _ -> "wire origin")
+      |> Result.ok_or_failwith
+    in
+    let payload =
+      W.Item.decode raw ~origin
+      |> Result.map_error ~f:(fun _ -> "wire item")
+      |> Result.ok_or_failwith
+      |> Openai.Responses_history.of_wire_item
+      |> Result.ok_or_failwith
+    in
+    (match P.representation payload with
+     | Captured { raw = stored; _ } -> assert (Document_schema.Json.equal stored raw)
+     | Authored | Reconstructed _ -> assert false);
+    assert (Result.is_error (Openai.Responses_history.to_item payload));
+    let call = History_entry.create_with_id ~id:history_id payload in
+    let before = P.to_json payload |> Jsonaf.to_string in
+    let request : Chat_response.In_memory_stream.Tool_dispatch.request =
+      { kind
+      ; original_name = "original_tool"
+      ; original_payload = original
+      ; name = "selected_tool"
+      ; payload = execution
+      ; rejection = None
+      ; call
+      ; history = [ call ]
+      ; source = None
+      ; parent_call_id = None
+      }
+    in
+    let input : Agent_session.Operation_worker.Input.t =
+      { session_id
+      ; session_generation = 0
+      ; operation =
+          { id = operation_id
+          ; generation = 0
+          ; kind = Turn User_submit
+          ; state = Running
+          ; started_at = timestamp
+          ; updated_at = timestamp
+          }
+      ; history = [ call ]
+      }
+    in
+    let create request =
+      S.create
+        ~completion_contract:None
+        ~input
+        ~request
+        ~implementation_revision:"actual-revision"
+        ~capability_fingerprint:"actual-capability"
+        ~now:(fun () -> timestamp)
+        ~value:
+          (S.parse_input ~kind:request.kind ~payload:request.payload
+           |> Result.ok_or_failwith)
+    in
+    let invocation = create request |> protocol_ok in
+    assert (String.equal invocation.context.tool_name request.name);
+    assert (
+      Option.equal
+        String.equal
+        invocation.context.provider_call_id
+        (Some "actual-provider-alias"));
+    assert (
+      Option.equal
+        History_entry.Id.equal
+        invocation.context.call_entry_id
+        (Some history_id));
+    let routing = Option.value_exn invocation.routing in
+    let exact fingerprint bytes =
+      assert (
+        String.equal
+          fingerprint.Agent_protocol.Invocation.sha256
+          (Chatmd_shell_spec.Source_ref.digest bytes));
+      assert (Int.equal fingerprint.byte_length (String.length bytes))
+    in
+    exact routing.original_payload original;
+    exact routing.final_payload execution;
+    exact (Option.value_exn routing.canonical_payload) canonical;
+    assert (Result.is_error (create { request with name = "different_tool" }));
+    assert (
+      Result.is_error
+        (create
+           { request with
+             kind =
+               (match kind with
+                | Function -> Custom
+                | Custom -> Function)
+           }));
+    let semantic = P.semantic payload in
+    let unbound =
+      P.Semantic.create (P.Semantic.view semantic) ~metadata:P.Metadata.empty
+      |> Result.ok_or_failwith
+      |> P.authored
+      |> History_entry.create_with_id ~id:history_id
+    in
+    assert (Result.is_error (create { request with call = unbound }));
+    assert (
+      String.equal before (P.to_json (History_entry.payload call) |> Jsonaf.to_string)))
+;;
+
+let%test_unit "real apply_patch grammar is separate from native execution schema" =
+  List.iter [ false; true ] ~f:(fun invalid ->
+    let authorized = ref 0 in
+    let directory = ref None in
+    with_handoff_actor
+      ~make_worker:(fun env actor_ready ->
+        let dir =
+          Eio.Path.(
+            Eio.Stdenv.fs env
+            / Filename.concat
+                (Sys.getenv "TMPDIR" |> Option.value ~default:"/tmp")
+                ("ochat-patch-"
+                 ^ Agent_protocol.Id.Transaction.to_string
+                     (Agent_protocol.Id.Transaction.create ())))
+        in
+        Eio.Path.mkdir ~perm:0o700 dir;
+        directory := Some dir;
+        let implementation = Functions.apply_patch ~dir in
+        let module C = Chat_response.Tool_capability in
+        let registry =
+          C.create
+            ~owner:"fixture"
+            ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "patch resources")
+            [ Chatmd_shell_spec.Source_ref.digest "patch v1", implementation ]
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        let binding =
+          C.find registry ~name:"apply_patch"
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        assert (
+          Jsonaf.exactly_equal
+            (C.descriptor binding).function_.parameters
+            Definitions.Apply_patch.parameters);
+        let changed =
+          { implementation with
+            info =
+              { implementation.info with
+                function_ =
+                  { implementation.info.function_ with
+                    parameters =
+                      `Object
+                        [ "type", `String "grammar"
+                        ; "syntax", `String "lark"
+                        ; "definition", `String "start: \"different\""
+                        ]
+                  }
+              }
+          }
+        in
+        let changed_registry =
+          C.create
+            ~owner:"fixture"
+            ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "patch resources")
+            [ Chatmd_shell_spec.Source_ref.digest "patch v1", changed ]
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        let changed_binding =
+          C.find changed_registry ~name:"apply_patch"
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
+        in
+        assert (
+          not
+            (String.equal
+               (C.permission_fingerprint binding)
+               (C.permission_fingerprint changed_binding)));
+        assert (String.equal (C.reference binding).name "apply_patch");
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let target =
+            "patch-"
+            ^ Agent_protocol.Id.Invocation.to_string
+                (Agent_protocol.Id.Invocation.create ())
+            ^ ".txt"
+          in
+          let patch =
+            "*** Begin Patch\n*** Add File: " ^ target ^ "\n+fixture\n*** End Patch"
+          in
+          let reference, invocation =
+            native_context
+              ~input:(if invalid then `Object [] else `String patch)
+              registry
+              (invocation_fixture ())
+          in
+          let invocation =
+            Agent_protocol.Invocation.create
+              { invocation.context with tool_name = "apply_patch" }
+            |> protocol_ok
+          in
+          let resolved =
+            Agent_session.Native_tool_invocation.run
+              ~is_halted:(fun () -> false)
+              ~capabilities:caps
+              ~registry:(fun () -> registry)
+              ~reference
+              ~invocation
+              ~authorize:(fun dispatched _ ->
+                Int.incr authorized;
+                assert (Jsonaf.exactly_equal dispatched.context.input (`String patch));
+                Ok ())
+              ~prepare_output:(function
+                | Text text -> Ok (`String text)
+                | _ -> assert false)
+            |> protocol_ok
+          in
+          (match resolved.status with
+           | Resolved (Fail failure) when invalid ->
+             assert (String.equal failure.code "invocation.invalid_input");
+             assert (!authorized = 0);
+             assert (
+               match Eio.Path.kind ~follow:false Eio.Path.(dir / target) with
+               | `Not_found -> true
+               | _ -> false)
+           | Resolved (Complete _) when not invalid ->
+             assert (!authorized = 1);
+             assert (String.equal (Eio.Path.load Eio.Path.(dir / target)) "fixture\n");
+             Eio.Path.unlink Eio.Path.(dir / target)
+           | _ -> assert false);
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          Completed
+            { final_history = input.history
+            ; moderator_snapshot = state.moderator
+            ; runtime_requests = []
+            }))
+      (fun _env actor _writer _backend ->
+         Exn.protect
+           ~f:(fun () -> ignore (await_idle actor))
+           ~finally:(fun () ->
+             Eio.Path.rmtree ~missing_ok:true (Option.value_exn !directory))))
 ;;

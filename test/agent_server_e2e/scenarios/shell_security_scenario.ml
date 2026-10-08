@@ -175,7 +175,12 @@ let options secret =
     in
     Stdlib.List.to_seq events
   in
-  { Agent_server.Daemon.default_options with model_post_stream = Some model_post_stream }
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:model_post_stream
+  }
 ;;
 
 let with_client ~sw env fixture f =
@@ -206,13 +211,17 @@ let catalog client =
       { page = page_request (); kind = None; access = None; available = Some true }
   in
   let prompt =
-    match (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result with
+    match
+      (Http_driver.request client (Prompt_list prompts) |> protocol_ok).result
+      |> Support.Public_view.non_history
+    with
     | Prompt_list page -> List.hd_exn page.items
     | _ -> fail "prompt.list returned the wrong result"
   in
   let workspace =
     match
       (Http_driver.request client (Workspace_list workspaces) |> protocol_ok).result
+      |> Support.Public_view.non_history
     with
     | Workspace_list page -> List.hd_exn page.items
     | _ -> fail "workspace.list returned the wrong result"
@@ -273,7 +282,10 @@ let start_session client session key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match (Http_driver.request client (Session_start request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Session_start request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Session_start mutation -> { session with summary = mutation.session }
   | _ -> fail "session.start returned the wrong result"
 ;;
@@ -289,6 +301,7 @@ let send_message client session key =
   in
   match
     (Http_driver.request client (Session_send_message request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Session_send_message sent -> sent
   | _ -> fail "session.send_message returned the wrong result"
@@ -299,7 +312,10 @@ let permissions client session_id state =
     Agent_protocol.Permission.List_request.
       { session_id; page = page_request (); state = Some state }
   in
-  match (Http_driver.request client (Permission_list request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Permission_list request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Permission_list page -> page.items
   | _ -> fail "permission.list returned the wrong result"
 ;;
@@ -319,7 +335,7 @@ let session_get client session_id =
      |> protocol_ok)
       .result
   with
-  | Session_get snapshot -> snapshot.session
+  | Session_get snapshot -> (Agent_protocol.Public.Snapshot.fields snapshot).session
   | _ -> fail "session.get returned the wrong result"
 ;;
 
@@ -348,6 +364,7 @@ let respond client session permission choice key =
   in
   match
     (Http_driver.request client (Permission_respond request) |> protocol_ok).result
+    |> Support.Public_view.non_history
   with
   | Permission_respond _ -> ()
   | _ -> fail "permission.respond returned the wrong result"
@@ -362,7 +379,10 @@ let grants client session_id state =
       ; state = Some state
       }
   in
-  match (Http_driver.request client (Grant_list request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Grant_list request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Grant_list page -> page.items
   | _ -> fail "grant.list returned the wrong result"
 ;;
@@ -400,7 +420,10 @@ let revoke client session grant key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match (Http_driver.request client (Grant_revoke request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Grant_revoke request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Grant_revoke result -> result.grant
   | _ -> fail "grant.revoke returned the wrong result"
 ;;
@@ -611,7 +634,10 @@ let audit_entries client session_id =
       ; name_prefix = None
       }
   in
-  match (Http_driver.request client (Audit_read request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Audit_read request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Audit_read page -> page.items
   | _ -> fail "audit.read returned the wrong result"
 ;;
@@ -626,7 +652,8 @@ let history_json client session_id =
      |> protocol_ok)
       .result
   with
-  | Session_get snapshot -> Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string
+  | Session_get snapshot ->
+    Agent_protocol.Public.Snapshot.to_json snapshot |> Jsonaf.to_string
   | _ -> fail "session history returned the wrong result"
 ;;
 
@@ -671,14 +698,14 @@ let split_payload secret =
         [ "arguments", `Array [ `String secret; `String (Base64.encode_exn secret) ] ])
 ;;
 
-let live_tool_item name index =
+let live_tool_item ?(arguments = "") ?(status = "in_progress") name index =
   Res.Response_stream.Item.Function_call
     { name
-    ; arguments = ""
+    ; arguments
     ; call_id = sprintf "live-call-%d" index
     ; _type = "function_call"
     ; id = Some (sprintf "live-item-%d" index)
-    ; status = Some "in_progress"
+    ; status = Some status
     }
 ;;
 
@@ -706,6 +733,11 @@ let live_tool_stream name payload index =
         ; output_index = 0
         ; type_ = "response.function_call_arguments.done"
         }
+    ; Res.Response_stream.Output_item_done
+        { item = live_tool_item ~arguments:payload ~status:"completed" name index
+        ; output_index = 0
+        ; type_ = "response.output_item.done"
+        }
     ]
 ;;
 
@@ -727,7 +759,12 @@ let live_options env nested =
       Eio.Time.sleep (Eio.Stdenv.clock env) 0.001;
       event)
   in
-  { Agent_server.Daemon.default_options with model_post_stream = Some model_post_stream }
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:model_post_stream
+  }
 ;;
 
 let live_prompt () =
@@ -764,25 +801,19 @@ let next_live_frame env stream frames =
   match Http_driver.Sse.next stream ~clock:(Eio.Stdenv.clock env) ~timeout_seconds:5. with
   | Ok frame -> frame
   | Error message ->
-    let kinds =
+    let sequences =
       List.take frames 16
-      |> List.map ~f:(fun event -> event.Agent_protocol.Event.Recoverable.kind)
+      |> List.map ~f:(fun event ->
+        event.Agent_protocol.Event.Recoverable.operation_sequence)
     in
-    raise_s
-      [%sexp
-        "live SSE read failed"
-      , (message : string)
-      , (kinds : Agent_protocol.Event.Recoverable.kind list)]
+    raise_s [%sexp "live SSE read failed", (message : string), (sequences : int64 list)]
 ;;
 
-let is_nested_tool_start event =
-  match event.Agent_protocol.Event.Recoverable.kind with
-  | Tool_trace ->
-    let trace = Jsonaf.member_exn "trace" event.payload in
-    (match Jsonaf.member "type" trace, Jsonaf.member "name" trace with
-     | Some (`String "tool_started"), Some (`String "fixed_echo") -> true
-     | _ -> false)
-  | _ -> false
+let is_nested_tool_start (event : Agent_protocol.Event.Recoverable.t) =
+  match event.payload with
+  | Tool_activity (Started descriptor) ->
+    Option.is_some descriptor.key.parent && String.equal descriptor.name "fixed_echo"
+  | Tool_activity (Progress _ | Finished _) | Transcript _ -> false
 ;;
 
 let rec collect_live env stream ~nested remaining frames =
@@ -800,12 +831,15 @@ let rec collect_live env stream ~nested remaining frames =
     else collect_live env stream ~nested (remaining - 1) (event :: frames)
   | Some "session.event" ->
     let event =
-      Jsonaf.of_string frame.data |> Agent_protocol.Event.Durable.of_json |> protocol_ok
+      Jsonaf.of_string frame.data |> Agent_protocol.Public.Durable.of_json |> protocol_ok
     in
     (match event.kind with
      | Operation_completed -> List.rev frames
      | Operation_failed | Operation_cancelled | Operation_interrupted ->
-       raise_s [%sexp "live probe operation failed", (event.payload : Jsonaf.t)]
+       raise_s
+         [%sexp
+           "live probe operation failed"
+         , (event.body : Agent_protocol.Public.Durable.body)]
      | _ -> collect_live env stream ~nested (remaining - 1) frames)
   | _ -> fail "unexpected SSE frame in live redaction probe"
 ;;
@@ -833,68 +867,60 @@ let capture_live ~sw env client session ~nested =
       frames)
 ;;
 
-let stream_delta event =
-  match event.Agent_protocol.Event.Recoverable.kind with
-  | Sourced_stream | History_correlated_stream ->
-    let payload =
-      Jsonaf.member_exn "event" event.payload |> Res.Response_stream.t_of_jsonaf
-    in
-    (match payload with
-     | Function_call_arguments_delta delta -> Some (delta.item_id, delta.delta)
-     | _ -> None)
-  | _ -> None
+let stream_delta (event : Agent_protocol.Event.Recoverable.t) =
+  match event.payload with
+  | Transcript stream ->
+    (match Transcript.Stream.view stream with
+     | Changed { target = Call_input item; change } ->
+       Some
+         ( Sexp.to_string_mach (Transcript.Item.Key.sexp_of_t (Transcript.Item.key item))
+         , change )
+     | Source_started _ | Item_announced _ | Part_announced _
+     | Changed { target = Content _; _ }
+     | Item_finalized _ | Source_finished _ | Unknown_event _ -> None)
+  | Tool_activity _ -> None
 ;;
 
 let require_live_deltas events =
-  List.iter
-    [ Agent_protocol.Event.Recoverable.Sourced_stream; History_correlated_stream ]
-    ~f:(fun kind ->
-      let deltas =
-        List.filter events ~f:(fun (event : Agent_protocol.Event.Recoverable.t) ->
-          Agent_protocol.Event.Recoverable.equal_kind event.kind kind)
-        |> List.filter_map ~f:stream_delta
-      in
-      require
-        (not (List.is_empty deltas))
-        "live probe did not publish tool argument deltas";
-      let groups = String.Table.create () in
-      List.iter deltas ~f:(fun (id, delta) ->
-        Hashtbl.add_multi groups ~key:id ~data:delta);
-      Hashtbl.iter groups ~f:(fun chunks ->
-        let payload = List.rev chunks |> String.concat in
-        require
-          (String.is_substring payload ~substring:"<redacted>")
-          "completed tool arguments were dropped instead of redacted";
-        require_redacted
-          live_secret
-          (Base64.encode_exn live_secret)
-          payload
-          "reassembled live arguments"))
-;;
-
-let require_live_tool_events events nested =
-  let payloads =
-    List.filter_map events ~f:(fun event ->
-      match event.Agent_protocol.Event.Recoverable.kind, nested with
-      | Tool_started, false -> Some event.payload
-      | Tool_trace, true -> Some (Jsonaf.member_exn "trace" event.payload)
-      | _ -> None)
-  in
-  let payloads =
-    List.filter payloads ~f:(fun payload ->
-      match Jsonaf.member "name" payload with
-      | Some (`String "fixed_echo") -> true
-      | _ -> false)
-  in
-  require
-    (not (List.is_empty payloads))
-    "live probe missed fixed_echo Started/Trace payload";
-  List.iter payloads ~f:(fun payload ->
+  let deltas = List.filter_map events ~f:stream_delta in
+  require (not (List.is_empty deltas)) "live probe did not publish tool argument deltas";
+  let groups = String.Table.create () in
+  List.iter deltas ~f:(fun (id, change) ->
+    let previous = Option.value (Hashtbl.find groups id) ~default:"" in
+    let text =
+      match change with
+      | Append text -> previous ^ text
+      | Replace text -> text
+    in
+    Hashtbl.set groups ~key:id ~data:text);
+  Hashtbl.iter groups ~f:(fun payload ->
+    require
+      (String.is_substring payload ~substring:"<redacted>")
+      "completed tool arguments were dropped instead of redacted";
     require_redacted
       live_secret
       (Base64.encode_exn live_secret)
-      (Jsonaf.to_string payload)
-      "live Started/Trace payload")
+      payload
+      "reassembled live arguments")
+;;
+
+let require_live_tool_events events nested =
+  let starts =
+    List.filter_map events ~f:(fun (event : Agent_protocol.Event.Recoverable.t) ->
+      match event.payload with
+      | Tool_activity (Started descriptor)
+        when String.equal descriptor.name "fixed_echo"
+             && Bool.equal (Option.is_some descriptor.key.parent) nested ->
+        Some descriptor
+      | Tool_activity (Started _ | Progress _ | Finished _) | Transcript _ -> None)
+  in
+  require (not (List.is_empty starts)) "live probe missed fixed_echo scoped tool start";
+  List.iter starts ~f:(fun descriptor ->
+    require_redacted
+      live_secret
+      (Base64.encode_exn live_secret)
+      (Jsonaf.to_string (Agent_protocol.Activity.Tool.to_json (Started descriptor)))
+      "live scoped tool start")
 ;;
 
 let test_live_redaction name nested check env environment =

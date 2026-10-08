@@ -113,7 +113,7 @@ let%expect_test
             History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
           in
           let call =
-            History_entry.create_with_id
+            Openai.Responses_history.create_with_id_exn
               ~id
               (Chat_response.Tool_call.call_item
                  ~kind:Function
@@ -157,7 +157,7 @@ let%expect_test
             History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
           in
           let output =
-            History_entry.create_with_id
+            Openai.Responses_history.create_with_id_exn
               ~id
               (Chat_response.Tool_call.output_item
                  ~kind:Function

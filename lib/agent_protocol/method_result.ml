@@ -303,7 +303,16 @@ module Delete = struct
 end
 
 type t =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_status of Provider_operator.Status_result.t
+  | Provider_login_begin of Provider_operator.Flow_ref.t
+  | Provider_login_challenge of Provider_operator.Private_challenge.t
+  | Provider_login_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_select of Provider_operator.Selection_result.t
+  | Provider_configure_environment of Provider_operator.Configuration_result.t
   | Protocol_initialize of Initialize.Response.t
+  | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
   | Server_info of Server_info.t
   | Server_health of Health.Response.t
@@ -315,6 +324,8 @@ type t =
   | Session_create of Create.t
   | Session_list of Session.t Page.t
   | Session_get of Snapshot.t
+  | Session_inference_summary of Inference_query.Summary.t
+  | Session_inference_observations of Inference_query.Response.t
   | Session_attach of Attach.t
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
@@ -345,7 +356,16 @@ type t =
 [@@deriving sexp]
 
 let method_name = function
+  | Provider_setup _ -> "provider.setup"
+  | Provider_status _ -> "provider.status"
+  | Provider_login_begin _ -> "provider.login.begin"
+  | Provider_login_challenge _ -> "provider.login.challenge"
+  | Provider_login_cancel _ -> "provider.login.cancel"
+  | Provider_logout _ -> "provider.logout"
+  | Provider_select _ -> "provider.select"
+  | Provider_configure_environment _ -> "provider.configure_environment"
   | Protocol_initialize _ -> "protocol.initialize"
+  | Command_receipt _ -> "command.receipt"
   | Protocol_ping _ -> "protocol.ping"
   | Server_info _ -> "server.info"
   | Server_health _ -> "server.health"
@@ -357,6 +377,8 @@ let method_name = function
   | Session_create _ -> "session.create"
   | Session_list _ -> "session.list"
   | Session_get _ -> "session.get"
+  | Session_inference_summary _ -> "session.inference_summary"
+  | Session_inference_observations _ -> "session.inference_observations"
   | Session_attach _ -> "session.attach"
   | Session_detach _ -> "session.detach"
   | Session_renew_owner _ -> "session.renew_owner"
@@ -387,7 +409,18 @@ let method_name = function
 ;;
 
 let to_json = function
+  | Provider_setup value -> Provider_operator.Setup_result.to_json value
+  | Provider_status value -> Provider_operator.Status_result.to_json value
+  | Provider_login_begin value -> Provider_operator.Flow_ref.to_json value
+  | Provider_login_challenge _ ->
+    invalid_arg "private provider challenge requires authorized transport projection"
+  | Provider_login_cancel value -> Provider_operator.Flow_result.to_json value
+  | Provider_logout value -> Provider_operator.Logout_result.to_json value
+  | Provider_select value -> Provider_operator.Selection_result.to_json value
+  | Provider_configure_environment value ->
+    Provider_operator.Configuration_result.to_json value
   | Protocol_initialize value -> Initialize.Response.to_json value
+  | Command_receipt value -> Command_receipt.to_json value
   | Protocol_ping value -> Ping.Response.to_json value
   | Server_info value -> Server_info.to_json value
   | Server_health value -> Health.Response.to_json value
@@ -399,6 +432,8 @@ let to_json = function
   | Session_create value -> Create.to_json value
   | Session_list value -> Page.to_json Session.to_json value
   | Session_get value -> Snapshot.to_json value
+  | Session_inference_summary value -> Inference_query.Summary.to_json value
+  | Session_inference_observations value -> Inference_query.Response.to_json value
   | Session_attach value -> Attach.to_json value
   | Session_detach value -> Mutation_result.to_json value
   | Session_renew_owner (lease, mutation) ->
@@ -444,8 +479,29 @@ let renew_owner_of_json json =
 let map decode wrap json = Result.map (decode json) ~f:wrap
 
 let decoders =
-  [ ( "protocol.initialize"
+  [ ( "provider.setup"
+    , map Provider_operator.Setup_result.of_json (fun x -> Provider_setup x) )
+  ; ( "provider.status"
+    , map Provider_operator.Status_result.of_json (fun x -> Provider_status x) )
+  ; ( "provider.login.begin"
+    , map Provider_operator.Flow_ref.of_json (fun x -> Provider_login_begin x) )
+  ; ( "provider.login.challenge"
+    , fun _ ->
+        Error
+          (Protocol_error.invalid_request
+             "private provider challenge requires authorized transport decoder") )
+  ; ( "provider.login.cancel"
+    , map Provider_operator.Flow_result.of_json (fun x -> Provider_login_cancel x) )
+  ; ( "provider.logout"
+    , map Provider_operator.Logout_result.of_json (fun x -> Provider_logout x) )
+  ; ( "provider.select"
+    , map Provider_operator.Selection_result.of_json (fun x -> Provider_select x) )
+  ; ( "provider.configure_environment"
+    , map Provider_operator.Configuration_result.of_json (fun x ->
+        Provider_configure_environment x) )
+  ; ( "protocol.initialize"
     , map Initialize.Response.of_json (fun x -> Protocol_initialize x) )
+  ; "command.receipt", map Command_receipt.of_json (fun x -> Command_receipt x)
   ; "protocol.ping", map Ping.Response.of_json (fun x -> Protocol_ping x)
   ; "server.info", map Server_info.of_json (fun x -> Server_info x)
   ; "server.health", map Health.Response.of_json (fun x -> Server_health x)
@@ -457,6 +513,12 @@ let decoders =
   ; "session.create", map Create.of_json (fun x -> Session_create x)
   ; "session.list", map (Page.of_json Session.of_json) (fun x -> Session_list x)
   ; "session.get", map Snapshot.of_json (fun x -> Session_get x)
+  ; ( "session.inference_summary"
+    , map Inference_query.Summary.of_json (fun x -> Session_inference_summary x) )
+  ; ( "session.inference_observations"
+    , map
+        (fun json -> Inference_query.Response.of_json json ~max_bytes:(16 * 1024 * 1024))
+        (fun x -> Session_inference_observations x) )
   ; "session.attach", map Attach.of_json (fun x -> Session_attach x)
   ; "session.detach", map Mutation_result.of_json (fun x -> Session_detach x)
   ; "session.renew_owner", renew_owner_of_json

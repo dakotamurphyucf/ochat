@@ -1,7 +1,7 @@
 (library
  (name identity_history_lifecycle_test)
  (modules identity_history_lifecycle_test)
- (libraries
+ (libraries inference_fixture
   core
   expect_test_helpers_core
   eio

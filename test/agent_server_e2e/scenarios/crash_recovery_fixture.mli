@@ -29,12 +29,12 @@ val request
   -> Agent_protocol.Command.t
   -> Agent_protocol.Method_result.t
 
-val create_session : Support.Http_driver.t -> Agent_protocol.Method_result.Create.t
+val create_session : Support.Http_driver.t -> Agent_protocol.Public.Result.Create.t
 
 val get
   :  Support.Http_driver.t
   -> Agent_protocol.Id.Session.t
-  -> Agent_protocol.Snapshot.t
+  -> Agent_protocol.Public.Snapshot.Fields.t
 
 (** Observe recovery through actor-owned public snapshots while the daemon is
     alive. Read raw checkpoints only after killing/joining the child: snapshots
@@ -47,14 +47,17 @@ val await_notifications
   -> provider_prefix:string
   -> calls:int
   -> count:int
-  -> Agent_protocol.Snapshot.t
+  -> Agent_protocol.Public.Snapshot.Fields.t
 
 val require_equal : string -> ('a -> Sexp.t) -> 'a -> 'a -> unit
 
 (** [assert_snapshot expected actual] compares every projected field, including
     history IDs, payloads, order, effective history, permissions, jobs and schedules.
     Only recovery's update timestamp and advancing revision/event counters differ. *)
-val assert_snapshot : Agent_protocol.Snapshot.t -> Agent_protocol.Snapshot.t -> unit
+val assert_snapshot
+  :  Agent_protocol.Public.Snapshot.Fields.t
+  -> Agent_protocol.Public.Snapshot.Fields.t
+  -> unit
 
 val wait_ready : Eio_unix.Stdenv.base -> Support.Daemon_process.t -> unit
 val stop : Eio_unix.Stdenv.base -> Support.Daemon_process.t -> unit
@@ -71,7 +74,11 @@ val with_daemon
   -> (Support.Http_driver.t -> 'a)
   -> 'a
 
-val seed : Eio_unix.Stdenv.base -> Support.Config_fixture.t -> Agent_protocol.Snapshot.t
+val seed
+  :  Eio_unix.Stdenv.base
+  -> Support.Config_fixture.t
+  -> Agent_protocol.Public.Snapshot.Fields.t
+
 val session_directory : Support.Config_fixture.t -> Agent_protocol.Id.Session.t -> string
 
 val current_journal

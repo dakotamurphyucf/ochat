@@ -10,6 +10,7 @@ type transport =
 type t =
   { connection_id : string
   ; principal : Agent_protocol.Principal.t
+  ; actor : Operator_authorization.t
   ; transport : transport
   ; publish_notification : Agent_protocol.Envelope.t -> unit
   ; max_attachments : int
@@ -21,10 +22,18 @@ type t =
       (Agent_protocol.Id.Attachment.t, Agent_protocol.Session.Attachment.t) Map.Poly.t
   }
 
-let create ~connection_id ~principal ~transport ~publish_notification ~max_attachments =
+let create_authenticated
+      ~actor
+      ~connection_id
+      ~transport
+      ~publish_notification
+      ~max_attachments
+  =
+  let principal = Operator_authorization.principal actor in
   if max_attachments <= 0 then invalid_arg "max_attachments must be positive";
   { connection_id
   ; principal
+  ; actor
   ; transport
   ; publish_notification
   ; max_attachments
@@ -36,11 +45,44 @@ let create ~connection_id ~principal ~transport ~publish_notification ~max_attac
   }
 ;;
 
+let create ~connection_id ~principal ~transport ~publish_notification ~max_attachments =
+  create_authenticated
+    ~actor:(Operator_authorization.guarded ~principal ~is_current:(fun () -> false))
+    ~connection_id
+    ~transport
+    ~publish_notification
+    ~max_attachments
+;;
+
 let principal t = t.principal
+let actor t = t.actor
+
+let request_actor t actor =
+  let actor = Option.value actor ~default:t.actor in
+  let principal = Operator_authorization.principal actor in
+  if
+    Agent_protocol.Id.Principal.equal principal.id t.principal.id
+    && String.equal principal.authentication_kind t.principal.authentication_kind
+    && Agent_protocol.Scope.Set.equal principal.scopes t.principal.scopes
+    && List.equal
+         (fun (left_name, left_value) (right_name, right_value) ->
+            String.equal left_name right_name && String.equal left_value right_value)
+         principal.attributes
+         t.principal.attributes
+  then Ok actor
+  else
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"request authentication differs from connection authority"
+         ~retryable:false
+         ())
+;;
+
 let initialized t = Eio.Mutex.use_ro t.mutex (fun () -> t.initialized)
 let protocol_version t = Eio.Mutex.use_ro t.mutex (fun () -> t.protocol_version)
 
-let mark_initialized ?(version = Agent_protocol.Version.initial) t =
+let mark_initialized ?(version = Agent_protocol.Version.current) t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     t.protocol_version <- Some version;
     t.initialized <- true)

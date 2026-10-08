@@ -1,11 +1,68 @@
 open! Core
 
+module Runtime_retirement = struct
+  type outcome =
+    ((unit, Agent_protocol.Error.t) result, exn * Stdlib.Printexc.raw_backtrace) result
+
+  type t = outcome Eio.Promise.t
+
+  let is_finished t = Option.is_some (Eio.Promise.peek t)
+
+  let await t =
+    match Eio.Promise.await t with
+    | Ok result -> result
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  ;;
+end
+
+type runtime_retirement =
+  { finished : Runtime_retirement.t
+  ; finish : Runtime_retirement.outcome Eio.Promise.u
+  ; mutable pending_operation : Agent_protocol.Id.Operation.t option
+  ; mutable closing : bool
+  }
+
+module Inference_owner = struct
+  type phase =
+    | Open
+    | Sealed
+    | Finished
+
+  type registration =
+    { handle : Inference_ledger.Handle.t
+    ; configuration : Inference.Observation.Configuration.t
+    ; mutable attempt : Inference_runtime.Attempt.t option
+    }
+
+  type t =
+    { issuing_actor : unit ref
+    ; source : Transcript.Source_id.t
+    ; generation : int
+    ; mutable qualified_source : Transcript.Source_id.t option
+    ; mutable phase : phase
+    ; mutable registrations : registration Int64.Map.t
+    }
+end
+
+module Initialization_scope = struct
+  type t =
+    { owner : unit ref
+    ; expected : Session_state.t
+    ; mutable jobs : Agent_protocol.Id.Job.t list
+    }
+end
+
 type persistence =
   { commit :
-      command_audit:string option
+      command_audit:Document_schema.Document.t option
       -> previous:Session_state.t
       -> Session_transition.t
       -> (unit, Agent_protocol.Error.t) result
+  ; archive_reference :
+      previous:Session_state.t
+      -> kind:Session_state.Compaction_archive.kind
+      -> Agent_protocol.Id.Operation.t
+      -> (Session_state.Compaction_archive.t, Agent_protocol.Error.t) result
   }
 
 type services =
@@ -20,6 +77,17 @@ type services =
   ; notification_limits : Staged_notifications.limits
   ; ingress_limits : Staged_ingress.limits
   }
+
+module Compaction_inference = struct
+  type t =
+    { with_execution :
+        'a.
+        operation:Agent_protocol.Operation.t
+        -> selection:Inference.Selection.t
+        -> (Inference_client.Execution.t -> ('a, Agent_protocol.Error.t) Result.t)
+        -> ('a, Agent_protocol.Error.t) Result.t
+    }
+end
 
 type submission =
   { session : Agent_protocol.Session.t
@@ -110,6 +178,28 @@ type invocation_execution =
   }
 
 type _ request =
+  | Open_inference_owner : Transcript.Source_id.t -> Inference_owner.t request
+  | Admit_inference :
+      Inference_owner.t
+      * Transcript.Scope.relation
+      * Agent_protocol.Id.Operation.t option
+      * Agent_protocol.Id.Invocation.t option
+      * Inference.Observation.Configuration.t
+      -> Inference_ledger.Handle.t request
+  | Acknowledge_inference :
+      Inference_owner.t * Inference_ledger.Handle.t * Inference_runtime.Attempt.t
+      -> unit request
+  | Observe_inference :
+      Inference_ledger.Handle.t * Inference.Observation.t
+      -> unit request
+  | Observe_owned_inference : Inference_owner.t * Inference.Observation.t -> unit request
+  | Complete_inference :
+      Inference_owner.t * Inference_ledger.Handle.t * Inference_client.Completion.t
+      -> unit request
+  | Release_inference : Inference_owner.t * Inference_ledger.Handle.t -> unit request
+  | Seal_inference_owner : Inference_owner.t -> unit request
+  | Finish_inference_owner : Inference_owner.t -> unit request
+  | Reconcile_inference_recovery : unit request
   | Claim_delegated_event :
       Agent_protocol.Id.Moderator_execution.t
       * Agent_protocol.Moderator_execution.delegation
@@ -326,6 +416,11 @@ type _ request =
   | Snapshot : Agent_protocol.Snapshot.t request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
+  | Set_runtime_worker :
+      Operation_worker.t option * Inference_client.Execution.t option
+      -> unit request
+  | Retire_runtime_worker : bool -> Runtime_retirement.t request
+  | Set_compaction_inference : Compaction_inference.t option -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
   | Set_automatic_turn_pauses :
       Chat_response.Runtime_semantics.pause_condition list
@@ -351,6 +446,23 @@ type _ request =
       * int64
       * Session_state.Compaction_archive.kind
       * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Validate_administration_basis :
+      Agent_protocol.Id.Attachment.t * Session_state.t
+      -> unit request
+  | Commit_reconciled_administration :
+      Agent_protocol.Id.Attachment.t
+      * Session_state.t
+      * Session_state.Compaction_archive.kind
+      * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Begin_initialization : Session_state.t -> Initialization_scope.t request
+  | End_initialization : Initialization_scope.t -> unit request
+  | Complete_initialization :
+      Initialization_scope.t * Session_state.t
+      -> Agent_protocol.Session.t request
+  | Fail_initialization :
+      Initialization_scope.t * Agent_protocol.Error.t
       -> Agent_protocol.Session.t request
   | Start :
       Agent_protocol.Id.Attachment.t * int64 option
@@ -468,6 +580,46 @@ type _ request =
   | Change_job :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Job.t
       -> Agent_protocol.Session.t request
+  | Capture_inference_target :
+      Inference.Request.Target.t * Document_schema.Limits.t
+      -> unit request
+  | Capture_model_job_source :
+      Agent_protocol.Id.Job.t
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Capture_recipe_target :
+      Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Add_initialization_model_job :
+      Initialization_scope.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Start_initialization_model_job :
+      Initialization_scope.t * Agent_protocol.Job.t
+      -> Agent_protocol.Job.t request
+  | Initialization_model_job_is_current :
+      Initialization_scope.t * Agent_protocol.Id.Job.t * int * int
+      -> bool request
+  | Capture_initialization_recipe_target :
+      Initialization_scope.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Inference.Request.Target.t
+      * Document_schema.Limits.t
+      -> unit request
+  | Complete_initialization_model_job :
+      Initialization_scope.t
+      * Agent_protocol.Id.Job.t
+      * int
+      * int
+      * Runtime_builder.model_job_outcome
+      -> Agent_protocol.Job.t request
   | Add_job : Agent_protocol.Job.t -> Agent_protocol.Job.t request
   | Read_job : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
   | Publish_job_progress :
@@ -581,7 +733,9 @@ and compaction_outcome =
 
 type packed =
   | Pack :
-      string option * 'a request * ('a, Agent_protocol.Error.t) result Eio.Promise.u
+      Document_schema.Document.t option
+      * 'a request
+      * ('a, Agent_protocol.Error.t) result Eio.Promise.u
       -> packed
 
 type permission_waiter =
@@ -601,6 +755,8 @@ type t =
   ; permission_waiters :
       (Agent_protocol.Id.Permission.t, permission_waiter) Map.Poly.t ref
   ; mutable operation_worker : Operation_worker.t option
+  ; mutable compaction_inference : Compaction_inference.t option
+  ; mutable inference_execution : Inference_client.Execution.t option
   ; compaction_env : Eio_unix.Stdenv.base option
   ; owner_lease_duration_ms : int
   ; max_attachments : int
@@ -608,12 +764,17 @@ type t =
   ; schedule_permission_timeouts : bool
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
   ; mutable active_cancel : (unit -> unit) option
+  ; mutable runtime_retirement : runtime_retirement option
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
+  ; inference_owner_identity : unit ref
+  ; mutable inference_owners : Inference_owner.t list
+  ; initialization_owner : unit ref
+  ; mutable initialization_scope : Initialization_scope.t option
   ; mutable job_scopes : job_scope list
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
@@ -627,7 +788,7 @@ type t =
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
-  ; mutable command_audit : string option
+  ; mutable command_audit : Document_schema.Document.t option
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
@@ -802,6 +963,281 @@ let transition t ~delta ~payloads =
   in
   let%map () = install t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
+;;
+
+let inference_error _ = error Invalid_state "inference tracking admission failed"
+
+let commit_inference_ledger t ledger =
+  if
+    Int64.equal
+      (Inference_ledger.revision ledger)
+      (Inference_ledger.revision t.state.inference_ledger)
+  then Ok ()
+  else
+    transition
+      t
+      ~delta:(Session_delta.Inference_ledger_changed ledger)
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary { t.state with inference_ledger = ledger })
+        ]
+    |> Result.map ~f:ignore
+;;
+
+let validate_inference_owner t (owner : Inference_owner.t) =
+  if not (phys_equal t.inference_owner_identity owner.issuing_actor)
+  then Error (error Conflict "inference owner belongs to another actor")
+  else if not (List.mem t.inference_owners owner ~equal:phys_equal)
+  then Error (error Conflict "inference graph owner is no longer active")
+  else Ok ()
+;;
+
+let open_inference_owner t source =
+  if
+    List.exists t.inference_owners ~f:(fun owner ->
+      Transcript.Source_id.equal owner.source source)
+  then Error (error Conflict "inference graph source is already owned")
+  else
+    let open Result.Let_syntax in
+    let%bind qualified_source =
+      Inference_ledger.qualify_source t.state.inference_ledger source
+      |> Result.map_error ~f:inference_error
+    in
+    let owner =
+      Inference_owner.
+        { issuing_actor = t.inference_owner_identity
+        ; source
+        ; generation = t.state.identity.generation
+        ; qualified_source = Some qualified_source
+        ; phase = Open
+        ; registrations = Int64.Map.empty
+        }
+    in
+    t.inference_owners <- owner :: t.inference_owners;
+    Ok owner
+;;
+
+let inference_registration t owner handle =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  match
+    Map.find owner.Inference_owner.registrations (Inference_ledger.Handle.ordinal handle)
+  with
+  | Some registration when Inference_ledger.Handle.equal registration.handle handle ->
+    Ok registration
+  | Some _ | None -> Error (error Conflict "inference handle is not owned by this graph")
+;;
+
+let admit_inference t owner relation operation_id invocation_id configuration =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let%bind () =
+    if
+      Int.equal owner.generation t.state.identity.generation
+      &&
+      match owner.phase with
+      | Open -> true
+      | Sealed | Finished -> false
+    then Ok ()
+    else Error (error Conflict "inference graph excludes new attempts")
+  in
+  let%bind ledger, handle, _tracking =
+    Inference_ledger.admit
+      t.state.inference_ledger
+      ~source:owner.source
+      ~relation
+      ~operation_id
+      ~invocation_id
+      ~configuration
+    |> Result.map_error ~f:inference_error
+  in
+  let%bind () = commit_inference_ledger t ledger in
+  owner.qualified_source
+  <- Some (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source;
+  owner.registrations
+  <- Map.set
+       owner.registrations
+       ~key:(Inference_ledger.Handle.ordinal handle)
+       ~data:{ handle; configuration; attempt = None };
+  Ok handle
+;;
+
+let validate_inference_attempt registration attempt =
+  if
+    Transcript.Scope.equal
+      (Inference_ledger.Handle.scope registration.Inference_owner.handle)
+      (Inference_runtime.Attempt.scope attempt)
+    && Inference.Observation.Observation_id.equal
+         (Inference_ledger.Handle.accounting_id registration.handle)
+         (Inference_runtime.Attempt.accounting_id attempt)
+    && Inference.Observation.Configuration.equal
+         registration.configuration
+         (Inference_runtime.Attempt.configuration attempt)
+  then Ok ()
+  else Error (error Conflict "inference attempt differs from its admitted identity")
+;;
+
+let acknowledge_inference t owner handle attempt =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  let%bind () = validate_inference_attempt registration attempt in
+  registration.attempt <- Some attempt;
+  let%bind ledger =
+    Inference_ledger.set_state t.state.inference_ledger handle Running
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let observe_inference t handle incoming =
+  let open Result.Let_syntax in
+  let%bind ledger, _disposition =
+    Inference_ledger.observe t.state.inference_ledger handle incoming
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let observe_owned_inference t owner incoming =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let scope = Inference.Observation.scope incoming in
+  let owner_matches =
+    match owner.phase, owner.qualified_source with
+    | (Open | Sealed), Some source ->
+      Transcript.Source_id.equal source (Transcript.Scope.key scope).source
+    | Finished, _ | _, None -> false
+  in
+  let%bind () =
+    if owner_matches
+    then Ok ()
+    else Error (error Conflict "observation does not belong to a live inference graph")
+  in
+  match
+    List.find (Inference_ledger.rows t.state.inference_ledger) ~f:(fun row ->
+      let handle = Inference_ledger.Row.handle row in
+      Int.equal owner.generation (Inference_ledger.Handle.generation handle)
+      && Transcript.Scope.equal scope (Inference_ledger.Handle.scope handle))
+  with
+  | None -> Error (error Conflict "observation has no retained admitted scope")
+  | Some row -> observe_inference t (Inference_ledger.Row.handle row) incoming
+;;
+
+let complete_inference t owner handle completion =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  let%bind () =
+    validate_inference_attempt
+      registration
+      (Inference_client.Completion.attempt completion)
+  in
+  let state =
+    match Inference_client.Completion.outcome completion with
+    | Returned terminal -> Inference.Observation.Attempt_record.Terminal terminal
+    | Interrupted { reason; delivery } -> Interrupted { reason; delivery }
+  in
+  let%bind ledger =
+    Inference_ledger.set_state t.state.inference_ledger handle state
+    |> Result.map_error ~f:inference_error
+  in
+  commit_inference_ledger t ledger
+;;
+
+let interrupt_inference_row ledger handle ~delivery =
+  let interrupt fallback =
+    Inference_ledger.set_state
+      ledger
+      handle
+      (Interrupted
+         { reason = Host_interrupted; delivery = Option.value delivery ~default:fallback })
+    |> Result.map_error ~f:inference_error
+  in
+  match
+    Inference_ledger.find ledger ~ordinal:(Inference_ledger.Handle.ordinal handle)
+  with
+  | None -> Ok ledger
+  | Some row ->
+    (match
+       Inference.Observation.Attempt_record.state (Inference_ledger.Row.record row)
+     with
+     | Terminal _ | Interrupted _ -> Ok ledger
+     | Prepared -> interrupt Inference.Event.Terminal.Definitely_not_submitted
+     | Running -> interrupt Inference.Event.Terminal.Possibly_submitted)
+;;
+
+let release_inference t owner handle =
+  let open Result.Let_syntax in
+  let%bind registration = inference_registration t owner handle in
+  Exn.protect
+    ~f:(fun () ->
+      let%bind ledger =
+        interrupt_inference_row
+          t.state.inference_ledger
+          handle
+          ~delivery:
+            (Option.map registration.attempt ~f:Inference_runtime.Attempt.delivery)
+      in
+      commit_inference_ledger t ledger)
+    ~finally:(fun () ->
+      owner.registrations
+      <- Map.remove owner.registrations (Inference_ledger.Handle.ordinal handle))
+;;
+
+let seal_inference_owner t owner =
+  let open Result.Let_syntax in
+  let%map () = validate_inference_owner t owner in
+  owner.Inference_owner.phase <- Sealed
+;;
+
+let finish_inference_owner t owner =
+  let open Result.Let_syntax in
+  let%bind () = validate_inference_owner t owner in
+  let%bind () =
+    match owner.Inference_owner.phase with
+    | Open -> Error (error Conflict "inference graph must exclude calls before joining")
+    | Sealed -> Ok ()
+    | Finished -> Error (error Conflict "inference graph already finished")
+  in
+  let rows = Inference_ledger.rows t.state.inference_ledger in
+  let%bind ledger =
+    List.fold_result rows ~init:t.state.inference_ledger ~f:(fun ledger row ->
+      let handle = Inference_ledger.Row.handle row in
+      match owner.qualified_source with
+      | Some source
+        when Transcript.Source_id.equal
+               source
+               (Transcript.Scope.key (Inference_ledger.Handle.scope handle)).source ->
+        interrupt_inference_row
+          ledger
+          handle
+          ~delivery:
+            (Map.find owner.registrations (Inference_ledger.Handle.ordinal handle)
+             |> Option.bind ~f:(fun registration -> registration.attempt)
+             |> Option.map ~f:Inference_runtime.Attempt.delivery)
+      | Some _ | None -> Ok ledger)
+  in
+  let%map () = commit_inference_ledger t ledger in
+  owner.phase <- Finished;
+  owner.registrations <- Int64.Map.empty;
+  t.inference_owners
+  <- List.filter t.inference_owners ~f:(fun current -> not (phys_equal current owner))
+;;
+
+let reconcile_inference_recovery t =
+  let open Result.Let_syntax in
+  let%bind () =
+    if List.is_empty t.inference_owners
+    then Ok ()
+    else Error (error Conflict "live inference graphs must join before recovery")
+  in
+  let%bind ledger =
+    List.fold_result
+      (Inference_ledger.rows t.state.inference_ledger)
+      ~init:t.state.inference_ledger
+      ~f:(fun ledger row ->
+        interrupt_inference_row ledger (Inference_ledger.Row.handle row) ~delivery:None)
+  in
+  commit_inference_ledger t ledger
 ;;
 
 let abort_staged_work t ~owner =
@@ -1337,7 +1773,15 @@ let commit_extensions_internal t generation expected_revision changes =
 ;;
 
 let set_operation_worker t worker =
-  if moderator_is_borrowed t
+  if
+    Option.exists t.runtime_retirement ~f:(fun retirement ->
+      match Eio.Promise.peek retirement.finished with
+      | Some (Ok (Ok ())) ->
+        Option.is_some worker
+        && (retirement.closing || Option.is_some t.state.active_operation)
+      | Some (Ok (Error _) | Error _) | None -> true)
+  then Error (error Conflict "cannot replace a retiring runtime")
+  else if moderator_is_borrowed t
   then Error (error Conflict "cannot replace a borrowed moderator runtime")
   else (
     match worker, t.state.active_operation, t.idle_moderator_borrowed with
@@ -1345,7 +1789,75 @@ let set_operation_worker t worker =
     | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
     | None, None, false | Some _, _, _ ->
       t.operation_worker <- worker;
+      t.inference_execution <- None;
+      (match worker with
+       | Some _ -> t.runtime_retirement <- None
+       | None ->
+         (match t.runtime_retirement with
+          | Some retirement when not retirement.closing -> t.runtime_retirement <- None
+          | Some _ | None -> ()));
       Ok ())
+;;
+
+let runtime_admission_open t = Option.is_none t.runtime_retirement
+
+let require_runtime_admission t =
+  if runtime_admission_open t
+  then Ok ()
+  else Error (error Conflict "session runtime is retiring")
+;;
+
+let retire_runtime_worker t ~closing =
+  match t.runtime_retirement with
+  | Some retirement ->
+    retirement.closing <- retirement.closing || closing;
+    Ok retirement.finished
+  | None ->
+    let finished, finish = Eio.Promise.create () in
+    let pending_operation =
+      Option.map t.state.active_operation ~f:(fun operation -> operation.id)
+    in
+    t.runtime_retirement <- Some { finished; finish; pending_operation; closing };
+    Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    if Option.is_none pending_operation then Eio.Promise.resolve finish (Ok (Ok ()));
+    Ok finished
+;;
+
+let finish_runtime_retirement t operation_id result =
+  Option.iter t.runtime_retirement ~f:(fun retirement ->
+    match retirement.pending_operation with
+    | Some pending when Agent_protocol.Id.Operation.equal pending operation_id ->
+      retirement.pending_operation <- None;
+      Eio.Promise.resolve retirement.finish result
+    | Some _ | None -> ())
+;;
+
+let with_runtime_terminal t operation_id f =
+  match f () with
+  | result ->
+    finish_runtime_retirement t operation_id (Ok result);
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    finish_runtime_retirement t operation_id (Error (exn, backtrace));
+    Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let set_runtime_worker t worker inference =
+  let open Result.Let_syntax in
+  let%bind () =
+    match worker, inference with
+    | None, None -> Ok ()
+    | Some _, Some _ ->
+      (match t.state.runtime_initialization with
+       | Ready -> Ok ()
+       | Pending _ -> Error (error Invalid_state "runtime initialization is not complete"))
+    | None, Some _ | Some _, None ->
+      Error
+        (error Invalid_request "worker and selected inference must be installed together")
+  in
+  let%map () = set_operation_worker t worker in
+  t.inference_execution <- inference
 ;;
 
 let change_moderator t moderator =
@@ -1393,7 +1905,14 @@ let lifecycle t ~desired ~observed =
 ;;
 
 let start_internal ?expected_parent_stop_epoch t =
-  if
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if
+    match t.state.runtime_initialization with
+    | Pending _ -> true
+    | Ready -> false
+  then Error (error Invalid_state "runtime initialization must complete before start")
+  else if
     Option.exists expected_parent_stop_epoch ~f:(fun epoch ->
       not (Option.equal Int64.equal t.state.parent_stop_epoch (Some epoch)))
   then Error (error Conflict "parent stopped while child start was being prepared")
@@ -1410,7 +1929,9 @@ let start_internal ?expected_parent_stop_epoch t =
 ;;
 
 let queue_start_internal t =
-  if t.idle_moderator_borrowed
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if t.idle_moderator_borrowed
   then Error (error Conflict "cannot restart while the idle moderator is borrowed")
   else (
     match t.state.lifecycle.desired, t.state.lifecycle.observed with
@@ -1420,13 +1941,22 @@ let queue_start_internal t =
 ;;
 
 let activate_queued_start t =
-  match t.state.lifecycle.desired, t.state.lifecycle.observed with
-  | Running, Queued_for_slot ->
-    let open Result.Let_syntax in
-    let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
-    lifecycle t ~desired:Running ~observed:Idle
-  | Running, (Starting | Idle | Running_turn _) -> Ok (Session_state.summary t.state)
-  | _, _ -> Error (error Invalid_state "session has no queued start intent")
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if
+    match t.state.runtime_initialization with
+    | Pending _ -> true
+    | Ready -> false
+  then
+    Error (error Invalid_state "runtime initialization must complete before activation")
+  else (
+    match t.state.lifecycle.desired, t.state.lifecycle.observed with
+    | Running, Queued_for_slot ->
+      let open Result.Let_syntax in
+      let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
+      lifecycle t ~desired:Running ~observed:Idle
+    | Running, (Starting | Idle | Running_turn _) -> Ok (Session_state.summary t.state)
+    | _, _ -> Error (error Invalid_state "session has no queued start intent"))
 ;;
 
 let background_terminal_result (job : Agent_protocol.Job.t) completion =
@@ -1667,6 +2197,7 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
           []
           []
     in
+    t.initialization_scope <- None;
     (match mode with
      | Cancel ->
        cancel_independent_moderator t;
@@ -1698,6 +2229,7 @@ let stop_internal ?parent_stop_epoch ?managed_receipt t mode =
         [ Session_delta.Active_operation_changed (Some operation) ]
         []
     in
+    t.initialization_scope <- None;
     if Agent_protocol.Session.equal_stop_mode mode Cancel
     then (
       abort_all_staged_work t;
@@ -1896,11 +2428,257 @@ let commit_administration t attachment_id expected_revision kind candidate =
       Error (error Conflict "administrative candidate does not match the captured state")
     else Session_state.validate candidate
   in
-  let%bind state = Administration.archive ~previous:t.state candidate kind in
+  let%bind state =
+    Administration.archive
+      ~archive_reference:t.persistence.archive_reference
+      ~previous:t.state
+      candidate
+      kind
+  in
   transition
     t
     ~delta:(Session_delta.Created state)
     ~payloads:(Administration.payloads ~previous:t.state state)
+;;
+
+let administration_basis (expected : Session_state.t) (state : Session_state.t) =
+  { state with
+    identity = { state.identity with updated_at = expected.identity.updated_at }
+  ; counters = expected.counters
+  ; inference_ledger = expected.inference_ledger
+  }
+;;
+
+let same_administration_basis ~reconciled expected current =
+  let open Result.Let_syntax in
+  let document_error _ = error Invalid_state "administration basis admission failed" in
+  let%bind limits =
+    Persistence_codec.limits ~max_bytes:(64 * 1024 * 1024)
+    |> Result.map_error ~f:document_error
+  in
+  let admit state =
+    Session_state_document.encode (Session_state_document.authored state) ~limits
+    |> Result.map_error ~f:document_error
+  in
+  let%bind expected_document = admit expected in
+  let%map current_document =
+    admit (if reconciled then administration_basis expected current else current)
+  in
+  String.equal
+    (Jsonaf.to_string (Document_schema.Document.json expected_document))
+    (Jsonaf.to_string (Document_schema.Document.json current_document))
+;;
+
+let validate_administration_basis t attachment_id expected =
+  let open Result.Let_syntax in
+  let%bind () =
+    validate_administrative_state t attachment_id expected.Session_state.counters.revision
+  in
+  let%bind unchanged = same_administration_basis ~reconciled:false expected t.state in
+  if unchanged
+  then Ok ()
+  else Error (error Conflict "administration basis changed before resource retirement")
+;;
+
+let commit_reconciled_administration t attachment_id expected kind candidate =
+  let open Result.Let_syntax in
+  let%bind () =
+    Session_state.validate_administration_candidate candidate ~previous:expected
+  in
+  let%bind unchanged = same_administration_basis ~reconciled:true expected t.state in
+  let%bind () =
+    if unchanged
+    then Ok ()
+    else Error (error Conflict "administration basis changed during resource retirement")
+  in
+  let%bind inference_ledger =
+    Inference_ledger.with_generation
+      t.state.inference_ledger
+      ~generation:candidate.Session_state.identity.generation
+    |> Result.map_error ~f:inference_error
+  in
+  let candidate = { candidate with inference_ledger; counters = t.state.counters } in
+  commit_administration t attachment_id t.state.counters.revision kind candidate
+;;
+
+(* Initialization may durably admit jobs and tracking before its final local
+   runtime state is available. Those records are never replaced by an earlier
+   constructor snapshot. History reservations alone may also advance. *)
+let initialization_basis (basis : Session_state.t) (state : Session_state.t) =
+  { state with
+    identity = { state.identity with updated_at = basis.identity.updated_at }
+  ; counters = basis.counters
+  ; inference_ledger = basis.inference_ledger
+  ; jobs = basis.jobs
+  ; model_job_targets = basis.model_job_targets
+  ; schedules = basis.schedules
+  ; shell =
+      { state.shell with
+        manifest_grants = basis.shell.manifest_grants
+      ; approval_grants = basis.shell.approval_grants
+      }
+  ; conversation =
+      { state.conversation with
+        next_history_sequence = basis.conversation.next_history_sequence
+      ; reserved_history_through = basis.conversation.reserved_history_through
+      }
+  }
+;;
+
+let validate_initialization_basis t (expected : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match expected.runtime_initialization, t.state.runtime_initialization with
+    | Pending _, Pending _ -> Ok ()
+    | Ready, _ | _, Ready -> Error (error Conflict "initialization is not pending")
+  in
+  if
+    Option.is_some t.state.active_operation
+    || t.idle_moderator_borrowed
+    || (not (List.is_empty t.job_scopes))
+    || (not
+          (Sexp.equal
+             (Session_state.sexp_of_t expected)
+             (Session_state.sexp_of_t (initialization_basis expected t.state))))
+    || not
+         (Document_schema.Json.equal
+            (Inference.Selection.to_json expected.spec.inference_target)
+            (Inference.Selection.to_json t.state.spec.inference_target))
+  then Error (error Conflict "initialization basis changed while resources were prepared")
+  else Ok ()
+;;
+
+let validate_initialization_owner t (scope : Initialization_scope.t) =
+  (* Physical identity is deliberate capability ownership, never domain equality. *)
+  if phys_equal t.initialization_owner scope.owner
+  then Ok ()
+  else Error (error Conflict "initialization scope belongs to another actor")
+;;
+
+let validate_initialization_scope t scope =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  let%bind () =
+    match t.initialization_scope with
+    | Some active when phys_equal active scope -> Ok ()
+    | Some _ | None -> Error (error Conflict "initialization scope is no longer active")
+  in
+  validate_initialization_basis t scope.expected
+;;
+
+let begin_initialization t expected =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_basis t expected in
+  let%bind () =
+    match Inference.Selection.view t.state.spec.inference_target with
+    | Captured _ -> Ok ()
+    | Unresolved ->
+      Error (error Migration_required "initialization requires a captured target")
+  in
+  match t.initialization_scope with
+  | Some _ -> Error (error Conflict "another initialization scope is active")
+  | None ->
+    let scope =
+      Initialization_scope.{ owner = t.initialization_owner; expected; jobs = [] }
+    in
+    t.initialization_scope <- Some scope;
+    Ok scope
+;;
+
+let end_initialization t scope =
+  let open Result.Let_syntax in
+  let%map () = validate_initialization_owner t scope in
+  match t.initialization_scope with
+  | Some active when phys_equal active scope -> t.initialization_scope <- None
+  | Some _ | None -> ()
+;;
+
+let complete_initialization t scope (candidate : Session_state.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let expected = scope.Initialization_scope.expected in
+  let projection =
+    { candidate with
+      conversation = expected.conversation
+    ; moderator = expected.moderator
+    ; shell = expected.shell
+    }
+    |> initialization_basis expected
+  in
+  let%bind () =
+    if
+      (not
+         (Sexp.equal
+            (Session_state.sexp_of_t expected)
+            (Session_state.sexp_of_t projection)))
+      || not
+           (Document_schema.Json.equal
+              (Inference.Selection.to_json expected.spec.inference_target)
+              (Inference.Selection.to_json candidate.spec.inference_target))
+    then Error (error Conflict "initialization candidate changed non-initializer fields")
+    else Ok ()
+  in
+  let current = t.state in
+  let state =
+    { current with
+      runtime_initialization = Ready
+    ; failure = None
+    ; lifecycle =
+        { current.lifecycle with
+          observed =
+            (match current.lifecycle.observed with
+             | Failed _ -> Agent_protocol.Session.Stopped
+             | ( Stopped
+               | Queued_for_slot
+               | Starting
+               | Recovering
+               | Idle
+               | Running_turn _
+               | Compacting _
+               | Waiting_for_permission _
+               | Stopping ) as observed -> observed)
+        }
+    ; conversation =
+        { current.conversation with
+          canonical_history = candidate.conversation.canonical_history
+        ; initial_prompt_entry_count = candidate.conversation.initial_prompt_entry_count
+        ; next_history_sequence =
+            Int64.max
+              current.conversation.next_history_sequence
+              candidate.conversation.next_history_sequence
+        ; reserved_history_through =
+            Int64.max
+              current.conversation.reserved_history_through
+              candidate.conversation.reserved_history_through
+        }
+    ; moderator = candidate.moderator
+    ; shell =
+        { current.shell with extension_snapshots = candidate.shell.extension_snapshots }
+    }
+  in
+  let%bind () = Session_state.validate state in
+  transition
+    t
+    ~delta:(Session_delta.Created state)
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.Session_updated (Session_state.summary state)
+      ]
+;;
+
+let fail_initialization t scope failure =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let lifecycle =
+    { t.state.lifecycle with Session_state.Lifecycle.observed = Failed failure }
+  in
+  transition
+    t
+    ~delta:
+      (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ]
 ;;
 
 let reset_internal t attachment_id expected_revision options =
@@ -1939,6 +2717,8 @@ let upgrade_prompt_internal t attachment_id expected_revision target_revision =
 ;;
 
 let adopt_deferred t =
+  let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let entries = t.state.conversation.deferred_user_entries in
   if List.is_empty entries
   then Ok (Session_state.summary t.state)
@@ -2332,7 +3112,8 @@ let has_pending_permission t =
 ;;
 
 let idle_actor_available t =
-  (not t.idle_moderator_borrowed)
+  runtime_admission_open t
+  && (not t.idle_moderator_borrowed)
   && Option.is_none t.moderator_borrow
   && Option.is_none t.state.active_operation
   && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
@@ -2343,7 +3124,17 @@ let idle_actor_available t =
   && Option.is_none t.state.failure
 ;;
 
-let idle_moderator_eligible t = idle_actor_available t && not (has_pending_permission t)
+let runtime_ready t =
+  match
+    t.state.runtime_initialization, Inference.Selection.view t.state.spec.inference_target
+  with
+  | Ready, Captured _ -> true
+  | Pending _, _ | Ready, Unresolved -> false
+;;
+
+let idle_moderator_eligible t =
+  runtime_ready t && idle_actor_available t && not (has_pending_permission t)
+;;
 
 let claim_queued_event t id operation_id snapshot =
   let open Result.Let_syntax in
@@ -4431,15 +5222,18 @@ let commit_worker_moderator t operation_id moderator =
 ;;
 
 let consume_deferred t operation_id =
-  let open Result.Let_syntax in
-  let%bind _ = current_operation t operation_id in
-  match t.state.lifecycle.desired with
-  | Stopped -> Ok []
-  | Running ->
-    let entries = t.state.conversation.deferred_user_entries in
-    let%bind decoded = History_codec.all_of_protocol entries in
-    let%map _ = adopt_deferred t in
-    decoded
+  if not (runtime_admission_open t)
+  then Ok []
+  else
+    let open Result.Let_syntax in
+    let%bind _ = current_operation t operation_id in
+    match t.state.lifecycle.desired with
+    | Stopped -> Ok []
+    | Running ->
+      let entries = t.state.conversation.deferred_user_entries in
+      let%bind decoded = History_codec.all_of_protocol entries in
+      let%map _ = adopt_deferred t in
+      decoded
 ;;
 
 let admit_standalone_delivery_internal t plan =
@@ -4665,61 +5459,64 @@ let consume_notifications_internal
       operation_id
       plan
   =
-  let open Result.Let_syntax in
-  let%bind _ = running_operation ~allow_stopping:true t operation_id in
-  match t.state.lifecycle.desired with
-  | Stopped ->
-    (* An admitted provider may finish during graceful stop. Its final safe point
+  if not (runtime_admission_open t)
+  then Ok Chat_response.In_memory_stream.Safe_point_input.empty
+  else
+    let open Result.Let_syntax in
+    let%bind _ = running_operation ~allow_stopping:true t operation_id in
+    match t.state.lifecycle.desired with
+    | Stopped ->
+      (* An admitted provider may finish during graceful stop. Its final safe point
        must not fail, consume retained deliveries, or request another turn. *)
-    Ok Chat_response.In_memory_stream.Safe_point_input.empty
-  | Running ->
-    let%bind () =
-      match
-        List.exists t.invocation_executions ~f:(fun execution ->
-          match execution.owner with
-          | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
-          | _ -> false)
-      with
-      | true ->
-        Error
-          (error Conflict "notification insertion waits for the foreground tool batch")
-      | false -> Ok ()
-    in
-    let%bind () = validate_notification_plan t plan in
-    let%bind deltas, entries, committed = notification_changes t plan in
-    let deltas =
-      deltas
-      @ List.map discarded_wakes ~f:(fun value ->
-        Session_delta.Delivery_wake_changed value)
-    in
-    let%bind decoded = History_codec.all_of_protocol entries in
-    let%map () =
-      match deltas with
-      | [] -> Ok ()
-      | _ ->
-        transition
-          t
-          ~delta:(Session_delta.Batch deltas)
-          ~payloads:(notification_payloads entries)
-        |> Result.map ~f:ignore
-    in
-    let existing =
-      match t.notification_inputs with
-      | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
-      | _ -> []
-    in
-    let ids =
-      List.map (committed @ wakes) ~f:(fun value ->
-        value.Agent_protocol.Delivery.context.id)
-    in
-    t.notification_inputs <- Some (operation_id, ids @ existing);
-    let wake =
-      List.exists (committed @ wakes) ~f:(fun value ->
-        Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
-    in
-    Chat_response.In_memory_stream.Safe_point_input.notification_entries
-      ~request_turn:wake
-      decoded
+      Ok Chat_response.In_memory_stream.Safe_point_input.empty
+    | Running ->
+      let%bind () =
+        match
+          List.exists t.invocation_executions ~f:(fun execution ->
+            match execution.owner with
+            | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+            | _ -> false)
+        with
+        | true ->
+          Error
+            (error Conflict "notification insertion waits for the foreground tool batch")
+        | false -> Ok ()
+      in
+      let%bind () = validate_notification_plan t plan in
+      let%bind deltas, entries, committed = notification_changes t plan in
+      let deltas =
+        deltas
+        @ List.map discarded_wakes ~f:(fun value ->
+          Session_delta.Delivery_wake_changed value)
+      in
+      let%bind decoded = History_codec.all_of_protocol entries in
+      let%map () =
+        match deltas with
+        | [] -> Ok ()
+        | _ ->
+          transition
+            t
+            ~delta:(Session_delta.Batch deltas)
+            ~payloads:(notification_payloads entries)
+          |> Result.map ~f:ignore
+      in
+      let existing =
+        match t.notification_inputs with
+        | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
+        | _ -> []
+      in
+      let ids =
+        List.map (committed @ wakes) ~f:(fun value ->
+          value.Agent_protocol.Delivery.context.id)
+      in
+      t.notification_inputs <- Some (operation_id, ids @ existing);
+      let wake =
+        List.exists (committed @ wakes) ~f:(fun value ->
+          Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
+      in
+      Chat_response.In_memory_stream.Safe_point_input.notification_entries
+        ~request_turn:wake
+        decoded
 ;;
 
 let notification_wake_deltas t operation_id ~accept =
@@ -4759,27 +5556,32 @@ let worker_ready t operation_id cancel =
     Ok ()
   | Some operation ->
     t.active_cancel <- Some cancel;
-    (match operation.state with
-     | Agent_protocol.Operation.Cancelling ->
-       cancel ();
-       Ok ()
-     | Starting ->
-       let operation = operation_state t operation Running in
-       let open Result.Let_syntax in
-       let%map _ =
-         transition
-           t
-           ~delta:(Session_delta.Active_operation_changed (Some operation))
-           ~payloads:
-             [ Agent_protocol.Event.Durable.Payload.Session_updated
-                 (summary_with_operation t operation)
-             ]
-       in
-       ()
-     | Running -> Ok ()
-     | Completed | Failed _ | Cancelled | Interrupted _ ->
-       cancel ();
-       Ok ())
+    if not (runtime_admission_open t)
+    then (
+      cancel ();
+      Ok ())
+    else (
+      match operation.state with
+      | Agent_protocol.Operation.Cancelling ->
+        cancel ();
+        Ok ()
+      | Starting ->
+        let operation = operation_state t operation Running in
+        let open Result.Let_syntax in
+        let%map _ =
+          transition
+            t
+            ~delta:(Session_delta.Active_operation_changed (Some operation))
+            ~payloads:
+              [ Agent_protocol.Event.Durable.Payload.Session_updated
+                  (summary_with_operation t operation)
+              ]
+        in
+        ()
+      | Running -> Ok ()
+      | Completed | Failed _ | Cancelled | Interrupted _ ->
+        cancel ();
+        Ok ())
 ;;
 
 let terminal_lifecycle t =
@@ -5025,8 +5827,11 @@ let compaction_terminal_base_delta t operation = function
   | Compacted history ->
     let open Result.Let_syntax in
     let%bind generation = compaction_generation t in
-    let archive =
-      Compaction_archive.reference t.state operation.Agent_protocol.Operation.id
+    let%bind archive =
+      t.persistence.archive_reference
+        ~previous:t.state
+        ~kind:Compaction
+        operation.Agent_protocol.Operation.id
     in
     let history =
       History_codec.all_to_protocol
@@ -5133,35 +5938,55 @@ let compaction_terminal t operation_id outcome =
 ;;
 
 let compaction_failure exn =
-  Agent_protocol.Error.create
-    Internal_error
-    ~message:("history compaction failed: " ^ Exn.to_string exn)
-    ~retryable:true
-    ()
+  let message =
+    match exn with
+    | Context_compaction.Summarizer.Failed No_text ->
+      "history compaction failed: summarizer returned no text"
+    | _ -> "history compaction failed: " ^ Exn.to_string exn
+  in
+  Agent_protocol.Error.create Internal_error ~message ~retryable:true ()
 ;;
 
 exception Compaction_cancel_requested
 
-let compute_compaction t allocator history =
-  match
-    Context_compaction.Compactor.compact_entries ~allocator ~env:t.compaction_env ~history
-  with
-  | Error exn -> Compaction_failed (compaction_failure exn)
-  | Ok history ->
-    (match History_entry.validate ~allocator history with
-     | Ok () -> Compacted history
-     | Error message ->
-       Compaction_failed (error Conflict ("invalid compacted history: " ^ message)))
+let compute_compaction t operation selection port installed allocator history =
+  let compute inference =
+    match
+      Context_compaction.Compactor.compact_entries
+        ~inference
+        ~allocator
+        ~env:t.compaction_env
+        ~history
+    with
+    | Error exn -> Error (compaction_failure exn)
+    | Ok history ->
+      (match History_entry.validate ~allocator history with
+       | Ok () -> Ok history
+       | Error message -> Error (error Conflict ("invalid compacted history: " ^ message)))
+  in
+  let result =
+    match port, installed with
+    | Some port, _ ->
+      port.Compaction_inference.with_execution ~operation ~selection compute
+    | None, Some inference -> compute inference
+    | None, None ->
+      Error (error Configuration_invalid "compaction requires selected runtime inference")
+  in
+  match result with
+  | Ok history -> Compacted history
+  | Error failure -> Compaction_failed failure
 ;;
 
-let run_compaction t operation allocator history =
+let run_compaction t operation selection port installed allocator history =
   let operation_id = operation.Agent_protocol.Operation.id in
   try
     Eio.Switch.run (fun operation_switch ->
       let cancel () = Eio.Switch.fail operation_switch Compaction_cancel_requested in
       match call t ~priority:Priority (Worker_ready (operation_id, cancel)) with
       | Error failure -> Compaction_failed failure
-      | Ok () -> compute_compaction t allocator history)
+      | Ok () ->
+        Eio.Switch.check operation_switch;
+        compute_compaction t operation selection port installed allocator history)
   with
   | Compaction_cancel_requested -> Compaction_cancelled "operation cancelled"
   | Eio.Cancel.Cancelled reason -> Compaction_cancelled (Exn.to_string reason)
@@ -5170,8 +5995,11 @@ let run_compaction t operation allocator history =
 
 let launch_compaction t operation allocator history =
   let operation_id = operation.Agent_protocol.Operation.id in
+  let selection = t.state.spec.inference_target in
+  let port = t.compaction_inference in
+  let installed = t.inference_execution in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
-    let outcome = run_compaction t operation allocator history in
+    let outcome = run_compaction t operation selection port installed allocator history in
     ignore
       (call t ~priority:Priority (Compaction_terminal (operation_id, outcome))
        : (unit, Agent_protocol.Error.t) result))
@@ -5254,6 +6082,7 @@ let retain_reconciliation_failure t failure =
 
 let start_compaction ?operation ?(extra_deltas : Session_delta.t list = []) t =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let first_sequence = t.state.conversation.next_history_sequence in
   if Int64.equal first_sequence Int64.max_value
@@ -5577,7 +6406,7 @@ let worker_terminal t operation_id outcome =
         let%bind () = retain_reconciliation_failure t failure in
         Error failure
     in
-    if outcome_requests_compaction outcome
+    if runtime_admission_open t && outcome_requests_compaction outcome
     then Result.map (start_compaction t) ~f:(fun _ -> ())
     else Ok ()
 ;;
@@ -5614,16 +6443,18 @@ let worker_failure exn =
     ()
 ;;
 
-let publish_worker_live t buffer ~kind ~payload =
+let publish_worker_live t buffer payload =
   let event =
     Live_event_buffer.publish
       buffer
       ~anchor_sequence:(Atomic.get t.event_sequence)
       ~timestamp:(t.services.now ())
-      ~kind
       ~payload
   in
-  broadcast_recoverable t event
+  match event with
+  | Ok event -> broadcast_recoverable t event
+  | Error error ->
+    raise_s [%message "invalid worker transcript event" (error : Agent_protocol.Error.t)]
 ;;
 
 let request_review_internal t ~permission ~review =
@@ -6348,7 +7179,12 @@ let run_worker_operation worker input capabilities cancelled =
     Eio.Fiber.first
       (fun () ->
          Eio.Switch.run (fun sw ->
-           `Finished (Operation_worker.run worker ~sw ~input capabilities)))
+           (* The readiness acknowledgement may have cancelled a Starting
+              operation. Do not dispatch its synchronous prefix before the
+              competing cancellation fiber has a chance to run. *)
+           match Eio.Promise.peek cancelled with
+           | Some () -> `Cancelled
+           | None -> `Finished (Operation_worker.run worker ~sw ~input capabilities)))
       (fun () ->
          Eio.Promise.await cancelled;
          `Cancelled)
@@ -6436,6 +7272,7 @@ let create_turn_operation t reason =
 
 let submit_idle_message ?(extra_deltas = []) t entry =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t User_submit in
   let lifecycle = lifecycle_for_operation t operation.id in
@@ -6472,7 +7309,9 @@ let submit_deferred_message ?(extra_deltas = []) t entry =
 ;;
 
 let submit_authorized_message ?(extra_deltas = []) t entry =
-  if t.state.halted
+  if not (runtime_admission_open t)
+  then Error (error Conflict "session runtime is retiring")
+  else if t.state.halted
   then Error (error Invalid_state "session is halted")
   else if Option.is_some t.state.failure
   then Error (error Invalid_state "session has failed")
@@ -6975,6 +7814,78 @@ let find_job t job_id =
   |> Result.of_option ~error:(error Invalid_request "job was not found")
 ;;
 
+let capture_inference_target t target limits =
+  let open Result.Let_syntax in
+  let%bind _ =
+    Inference.Selection.capture t.state.spec.inference_target ~target ~limits
+    |> Result.map_error ~f:(fun failure ->
+      error
+        Invalid_request
+        (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t failure)))
+  in
+  transition t ~delta:(Session_delta.Inference_target_captured target) ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let find_model_job_target t job_id generation =
+  let open Result.Let_syntax in
+  let%bind job = find_job t job_id in
+  let%bind () =
+    if
+      Int.equal job.generation generation
+      && Int.equal generation t.state.identity.generation
+    then Ok ()
+    else Error (error Conflict "model job capture belongs to a stale generation")
+  in
+  let%bind () =
+    match job.kind with
+    | Model_call -> Ok ()
+    | Nested_agent | Scheduled_event | Async_tool | Shell_process | Compaction ->
+      Error
+        (error Invalid_request "only an actual model job may capture an inference target")
+  in
+  let%map binding =
+    List.find t.state.model_job_targets ~f:(fun binding ->
+      Agent_protocol.Id.Job.equal (Model_job_target.job_id binding) job_id
+      && Int.equal (Model_job_target.generation binding) generation)
+    |> Result.of_option
+         ~error:(error Invalid_request "model job target binding is absent")
+  in
+  job, binding
+;;
+
+let capture_model_job_source t job_id generation target limits =
+  let open Result.Let_syntax in
+  let%bind _, binding = find_model_job_target t job_id generation in
+  let%bind captured = Model_job_target.capture_source binding ~target ~limits in
+  transition t ~delta:(Session_delta.Model_job_target_captured captured) ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
+let capture_recipe_target t job_id generation attempt target limits =
+  let open Result.Let_syntax in
+  let%bind job, binding = find_model_job_target t job_id generation in
+  let%bind () =
+    match job.status with
+    | Running when Int.equal job.attempt attempt -> Ok ()
+    | Running
+    | Queued
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ ->
+      Error (error Conflict "recipe capture is not owned by this running attempt")
+  in
+  let%bind captured = Model_job_target.capture_recipe binding ~target ~limits in
+  transition
+    t
+    ~delta:(Session_delta.Model_job_recipe_target_captured captured)
+    ~payloads:[]
+  |> Result.map ~f:ignore
+;;
+
 let job_with_progress t (job : Agent_protocol.Job.t) =
   let progress =
     List.find_map t.job_scopes ~f:(fun scope ->
@@ -7453,6 +8364,85 @@ let complete_job t job_id generation attempt outcome =
   job
 ;;
 
+let add_initialization_model_job t scope (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_scope t scope in
+  let%bind () =
+    match job.kind, job.status with
+    | Model_call, Queued when Int.equal job.attempt 0 -> Ok ()
+    | _ ->
+      Error (error Invalid_request "initialization requires a fresh queued model job")
+  in
+  let%map job = add_job t job in
+  scope.Initialization_scope.jobs <- job.id :: scope.jobs;
+  job
+;;
+
+let start_initialization_model_job t scope (job : Agent_protocol.Job.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    match job.delivery with
+    | Not_required when job_is_due t job -> Ok ()
+    | Not_required | Pending | Delivered _ | Discarded _ ->
+      Error
+        (error
+           Invalid_request
+           "synchronous initialization job must be immediate and not deliverable")
+  in
+  let%bind job = add_initialization_model_job t scope job in
+  let%bind claimed = claim_job t job.id job.generation in
+  Result.of_option
+    claimed
+    ~error:(error Conflict "initialization job could not be claimed")
+;;
+
+let initialization_model_job_is_current t scope job_id generation attempt =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_owner t scope in
+  match validate_initialization_scope t scope with
+  | Error _ -> Ok false
+  | Ok () ->
+    Ok
+      (List.mem scope.Initialization_scope.jobs job_id ~equal:Agent_protocol.Id.Job.equal
+       && List.exists t.state.jobs ~f:(fun job ->
+         Agent_protocol.Id.Job.equal job.id job_id
+         && Int.equal job.generation generation
+         && Int.equal job.attempt attempt
+         && Agent_protocol.Job.equal_kind job.kind Model_call
+         &&
+         match job.status with
+         | Running -> true
+         | Queued
+         | Waiting_permission _
+         | Waiting_completion _
+         | Succeeded
+         | Failed _
+         | Cancelled
+         | Interrupted _ -> false))
+;;
+
+let validate_initialization_model_job t scope job_id generation attempt =
+  let open Result.Let_syntax in
+  let%bind active =
+    initialization_model_job_is_current t scope job_id generation attempt
+  in
+  if active
+  then Ok ()
+  else Error (error Conflict "initialization does not own this running model attempt")
+;;
+
+let capture_initialization_recipe_target t scope job_id generation attempt target limits =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_model_job t scope job_id generation attempt in
+  capture_recipe_target t job_id generation attempt target limits
+;;
+
+let complete_initialization_model_job t scope job_id generation attempt outcome =
+  let open Result.Let_syntax in
+  let%bind () = validate_initialization_model_job t scope job_id generation attempt in
+  complete_job t job_id generation attempt outcome
+;;
+
 let finish_background_scopes t job_id generation attempt =
   List.filter t.job_scopes ~f:(fun scope ->
     (not scope.active)
@@ -7907,19 +8897,22 @@ let schedule_is_due t (schedule : Agent_protocol.Schedule.t) =
 ;;
 
 let due_schedules t =
-  let open Result.Let_syntax in
-  let%map schedules =
-    List.filter_map t.state.schedules ~f:(fun schedule ->
-      match schedule.Agent_protocol.Schedule.status with
-      | Scheduled when Int.equal schedule.generation t.state.identity.generation ->
-        Some
-          (schedule_is_due t schedule
-           |> Result.map ~f:(fun due -> Option.some_if due schedule))
-      | _ -> None)
-    |> Result.all
-    |> Result.map ~f:List.filter_opt
-  in
-  t.state.lifecycle.observed, schedules
+  if not (runtime_ready t)
+  then Ok (t.state.lifecycle.observed, [])
+  else
+    let open Result.Let_syntax in
+    let%map schedules =
+      List.filter_map t.state.schedules ~f:(fun schedule ->
+        match schedule.Agent_protocol.Schedule.status with
+        | Scheduled when Int.equal schedule.generation t.state.identity.generation ->
+          Some
+            (schedule_is_due t schedule
+             |> Result.map ~f:(fun due -> Option.some_if due schedule))
+        | _ -> None)
+      |> Result.all
+      |> Result.map ~f:List.filter_opt
+    in
+    t.state.lifecycle.observed, schedules
 ;;
 
 let claim_schedule t schedule_id generation =
@@ -8226,6 +9219,7 @@ let start_idle_turn_unchecked
       ~adopt_deferred
   =
   let open Result.Let_syntax in
+  let%bind () = require_runtime_admission t in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let lifecycle = lifecycle_for_operation t operation.id in
@@ -8590,8 +9584,10 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
       match Chat_response.Runtime_semantics.should_end_session drain.runtime_requests with
       | Some reason -> stop_from_idle_moderator t drain reason
       | None
-        when Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
-        -> complete_running_idle_moderator t drain
+        when runtime_admission_open t
+             && Agent_protocol.Session.equal_desired_state
+                  t.state.lifecycle.desired
+                  Running -> complete_running_idle_moderator t drain
       | None -> checkpoint_idle_moderator t drain
     in
     t.idle_moderator_borrowed <- false;
@@ -9249,6 +10245,11 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        Result.map (cancel_job_internal t id) ~f:ignore)
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
+  | Set_runtime_worker (worker, inference) -> set_runtime_worker t worker inference
+  | Retire_runtime_worker closing -> retire_runtime_worker t ~closing
+  | Set_compaction_inference port ->
+    t.compaction_inference <- port;
+    Ok ()
   | Enable_automatic_turn_budget policy ->
     (match
        t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
@@ -9300,6 +10301,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     upgrade_prompt_internal t attachment_id expected_revision target_revision
   | Commit_administration (attachment_id, expected_revision, kind, state) ->
     commit_administration t attachment_id expected_revision kind state
+  | Validate_administration_basis (attachment_id, expected) ->
+    validate_administration_basis t attachment_id expected
+  | Commit_reconciled_administration (attachment_id, expected, kind, candidate) ->
+    commit_reconciled_administration t attachment_id expected kind candidate
+  | Begin_initialization expected -> begin_initialization t expected
+  | End_initialization scope -> end_initialization t scope
+  | Complete_initialization (scope, candidate) ->
+    complete_initialization t scope candidate
+  | Fail_initialization (scope, failure) -> fail_initialization t scope failure
   | Start (attachment_id, expected_parent_stop_epoch) ->
     with_writer t attachment_id (fun () -> start_internal ?expected_parent_stop_epoch t)
   | Start_initial_delegated (reference, expected_parent_stop_epoch) ->
@@ -9416,9 +10426,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Invocation_granted (tool_name, identity_digest) ->
     Ok (invocation_granted t ~tool_name ~identity_digest)
   | Worker_ready (operation_id, cancel) -> worker_ready t operation_id cancel
-  | Worker_terminal (operation_id, outcome) -> worker_terminal t operation_id outcome
+  | Worker_terminal (operation_id, outcome) ->
+    with_runtime_terminal t operation_id (fun () ->
+      worker_terminal t operation_id outcome)
   | Compaction_terminal (operation_id, outcome) ->
-    compaction_terminal t operation_id outcome
+    with_runtime_terminal t operation_id (fun () ->
+      compaction_terminal t operation_id outcome)
   | Cancel_operation (attachment_id, operation_id) ->
     cancel_operation_internal t attachment_id operation_id
   | Open_permission (permission, timeout_seconds, fallback) ->
@@ -9440,6 +10453,21 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Revoke_grant (attachment_id, grant_id, reason) ->
     revoke_grant t attachment_id grant_id reason
   | Change_job (attachment_id, job) -> change_job t attachment_id job
+  | Capture_inference_target (target, limits) -> capture_inference_target t target limits
+  | Capture_model_job_source (job_id, generation, target, limits) ->
+    capture_model_job_source t job_id generation target limits
+  | Capture_recipe_target (job_id, generation, attempt, target, limits) ->
+    capture_recipe_target t job_id generation attempt target limits
+  | Add_initialization_model_job (scope, job) -> add_initialization_model_job t scope job
+  | Start_initialization_model_job (scope, job) ->
+    start_initialization_model_job t scope job
+  | Initialization_model_job_is_current (scope, job_id, generation, attempt) ->
+    initialization_model_job_is_current t scope job_id generation attempt
+  | Capture_initialization_recipe_target
+      (scope, job_id, generation, attempt, target, limits) ->
+    capture_initialization_recipe_target t scope job_id generation attempt target limits
+  | Complete_initialization_model_job (scope, job_id, generation, attempt, outcome) ->
+    complete_initialization_model_job t scope job_id generation attempt outcome
   | Add_job job -> add_job t job
   | Claim_job (job_id, generation) -> claim_job t job_id generation
   | Complete_job (job_id, generation, attempt, outcome) ->
@@ -9507,7 +10535,21 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
      | None, None, [], [], None, None, None, false, true, ([], []) ->
        Result.map (inspect t.state) ~f:Option.some
      | _ -> Ok None)
+  | Open_inference_owner source -> open_inference_owner t source
+  | Admit_inference (owner, relation, operation_id, invocation_id, configuration) ->
+    admit_inference t owner relation operation_id invocation_id configuration
+  | Acknowledge_inference (owner, handle, attempt) ->
+    acknowledge_inference t owner handle attempt
+  | Observe_inference (handle, incoming) -> observe_inference t handle incoming
+  | Observe_owned_inference (owner, incoming) -> observe_owned_inference t owner incoming
+  | Complete_inference (owner, handle, completion) ->
+    complete_inference t owner handle completion
+  | Release_inference (owner, handle) -> release_inference t owner handle
+  | Seal_inference_owner owner -> seal_inference_owner t owner
+  | Finish_inference_owner owner -> finish_inference_owner t owner
+  | Reconcile_inference_recovery -> reconcile_inference_recovery t
   | Shutdown ->
+    t.initialization_scope <- None;
     abort_all_staged_work t;
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
@@ -9602,6 +10644,8 @@ let create_with_owner_lease_duration
     ; subscribers = ref Map.Poly.empty
     ; permission_waiters = ref Map.Poly.empty
     ; operation_worker
+    ; compaction_inference = None
+    ; inference_execution = None
     ; compaction_env
     ; owner_lease_duration_ms
     ; max_attachments
@@ -9609,11 +10653,16 @@ let create_with_owner_lease_duration
     ; schedule_permission_timeouts
     ; owner_timer_cancel = None
     ; active_cancel = None
+    ; runtime_retirement = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
     ; foreground_moderator = None
     ; invocation_executions = []
+    ; inference_owner_identity = ref ()
+    ; inference_owners = []
+    ; initialization_owner = ref ()
+    ; initialization_scope = None
     ; job_scopes = []
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
@@ -9680,6 +10729,18 @@ let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)
 ;;
 
+let set_runtime_worker t ~worker ~inference =
+  call t ~priority:Priority (Set_runtime_worker (worker, inference))
+;;
+
+let retire_runtime_worker t ~closing =
+  call t ~priority:Priority (Retire_runtime_worker closing)
+;;
+
+let set_compaction_inference t port =
+  call t ~priority:Priority (Set_compaction_inference port)
+;;
+
 let change_moderator t moderator = call t (Change_moderator moderator)
 let shell_approval_grants t = call t Shell_approval_grants
 
@@ -9696,6 +10757,57 @@ let commit_administration t ~command_audit ~attachment_id ~expected_revision ~ki
     ?command_audit
     (Commit_administration (attachment_id, expected_revision, kind, state))
 ;;
+
+let validate_administration_basis t ~attachment_id ~expected =
+  call t (Validate_administration_basis (attachment_id, expected))
+;;
+
+let commit_reconciled_administration
+      t
+      ~command_audit
+      ~attachment_id
+      ~expected
+      ~kind
+      candidate
+  =
+  call
+    t
+    ?command_audit
+    (Commit_reconciled_administration (attachment_id, expected, kind, candidate))
+;;
+
+let open_inference_owner t ~source = call t (Open_inference_owner source)
+
+let admit_inference t ~owner ~relation ~operation_id ~invocation_id ~configuration =
+  call t (Admit_inference (owner, relation, operation_id, invocation_id, configuration))
+;;
+
+let acknowledge_inference t ~owner ~handle attempt =
+  call t (Acknowledge_inference (owner, handle, attempt))
+;;
+
+let observe_inference t ~handle incoming = call t (Observe_inference (handle, incoming))
+
+let observe_owned_inference t ~owner incoming =
+  call t (Observe_owned_inference (owner, incoming))
+;;
+
+let complete_inference t ~owner ~handle completion =
+  call t (Complete_inference (owner, handle, completion))
+;;
+
+let release_inference t ~owner ~handle = call t (Release_inference (owner, handle))
+let seal_inference_owner t ~owner = call t (Seal_inference_owner owner)
+let finish_inference_owner t ~owner = call t (Finish_inference_owner owner)
+let reconcile_inference_recovery t = call t Reconcile_inference_recovery
+let begin_initialization t ~expected = call t (Begin_initialization expected)
+let end_initialization t ~scope = call t ~priority:Priority (End_initialization scope)
+
+let complete_initialization t ~scope ~candidate =
+  call t (Complete_initialization (scope, candidate))
+;;
+
+let fail_initialization t ~scope failure = call t (Fail_initialization (scope, failure))
 
 let reset t ~attachment_id ~expected_revision options =
   call t ~priority:Priority (Reset (attachment_id, expected_revision, options))
@@ -9942,6 +11054,53 @@ let revoke_grant_with_command_audit t ~command_audit ~attachment_id ~grant_id ~r
 ;;
 
 let change_job t ~attachment_id job = call t (Change_job (attachment_id, job))
+
+let capture_inference_target t ~target ~limits =
+  call t (Capture_inference_target (target, limits))
+;;
+
+let capture_model_job_source t ~job_id ~generation ~target ~limits =
+  call t (Capture_model_job_source (job_id, generation, target, limits))
+;;
+
+let capture_recipe_target t ~job_id ~generation ~attempt ~target ~limits =
+  call t (Capture_recipe_target (job_id, generation, attempt, target, limits))
+;;
+
+let add_initialization_model_job t ~scope job =
+  call t (Add_initialization_model_job (scope, job))
+;;
+
+let start_initialization_model_job t ~scope job =
+  call t (Start_initialization_model_job (scope, job))
+;;
+
+let initialization_model_job_is_current t ~scope ~job_id ~generation ~attempt =
+  call t (Initialization_model_job_is_current (scope, job_id, generation, attempt))
+;;
+
+let capture_initialization_recipe_target
+      t
+      ~scope
+      ~job_id
+      ~generation
+      ~attempt
+      ~target
+      ~limits
+  =
+  call
+    t
+    (Capture_initialization_recipe_target
+       (scope, job_id, generation, attempt, target, limits))
+;;
+
+let complete_initialization_model_job t ~scope ~job_id ~generation ~attempt outcome =
+  call
+    t
+    ~priority:Priority
+    (Complete_initialization_model_job (scope, job_id, generation, attempt, outcome))
+;;
+
 let add_job t job = call t (Add_job job)
 let read_job t ~job_id = call t (Read_job job_id)
 

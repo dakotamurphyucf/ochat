@@ -9,6 +9,9 @@
   timestamp
   json_codec
   idempotency_key
+  session_ref
+  command_receipt
+  provider_operator
   initialize
   ping
   health
@@ -48,8 +51,17 @@
   envelope
   event
   command
-  method_result)
- (private_modules protocol_error extension_codec)
- (libraries core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry)
+  method_result
+  projection_codec
+  activity
+  public_history
+  public_snapshot
+  public_durable_event
+  public_result
+  public
+  stream_error
+  inference_query)
+ (private_modules protocol_error extension_codec projection_codec)
+ (libraries uri ochat.inference core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry ochat.document_schema ochat.transcript)
  (preprocess
   (pps ppx_jane)))

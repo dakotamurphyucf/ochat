@@ -1086,3 +1086,82 @@ let%expect_test "daemon reload atomically replaces catalogs" =
      (profile_changed (interactive)) (access Read_only)
      (description ("Reloaded agent"))) |}]
 ;;
+
+let%expect_test "proxy actor policy cannot replace authenticated authority" =
+  with_fixture (fun env temporary workspace prompt _ ->
+    Eio.Switch.run (fun sw ->
+      let module P = Agent_protocol in
+      let source_file = Filename.concat temporary "proxy-server.sexp" in
+      let http =
+        "((enabled true) (address \"127.0.0.1\") (port 8787) (require_auth true) \
+         (reverse_proxy ((trusted_addresses (127.0.0.1)) (principal_header \
+         x-agent-principal) (scopes_header x-agent-scopes))))"
+      in
+      let config = validated_exn env source_file (config_text ~workspace ~prompt ~http) in
+      let transform = ref (fun (principal : P.Principal.t) -> principal) in
+      let raises = ref false in
+      let daemon =
+        Agent_server.Daemon.start
+          ~options:
+            { Agent_server.Daemon.default_options with
+              proxy_actor_policy =
+                Some
+                  (fun ~now:_ _ ~principal ->
+                    if !raises then raise Exit;
+                    Ok
+                      (Operator_authorization.guarded
+                         ~principal:(!transform principal)
+                         ~is_current:(fun () -> true)))
+            }
+          ~sw
+          ~env
+          ~config
+          ~tool_dir:temporary
+          ~home:temporary
+          ~process_start_identity:None
+          ()
+        |> function
+        | Ok daemon -> daemon
+        | Error error -> raise_s [%sexp (error : P.Error.t)]
+      in
+      Exn.protect
+        ~finally:(fun () ->
+          match Agent_server.Daemon.shutdown daemon with
+          | Ok () -> ()
+          | Error error -> raise_s [%sexp (error : P.Error.t)])
+        ~f:(fun () ->
+          let identity =
+            Agent_server.Authenticator.Request_identity.
+              { client_address = `Tcp (Eio.Net.Ipaddr.V4.loopback, 443)
+              ; headers =
+                  [ "x-agent-principal", "pri_original_proxy"
+                  ; "x-agent-scopes", "provider.view"
+                  ]
+              }
+          in
+          let authenticate () =
+            Agent_server.Daemon.authenticate_http_actor daemon identity None
+          in
+          assert (Result.is_ok (authenticate ()));
+          let mutations =
+            [ (fun (p : P.Principal.t) -> { p with id = P.Id.Principal.create () })
+            ; (fun p -> { p with authentication_kind = "local.trusted" })
+            ; (fun p -> { p with scopes = Set.add p.scopes Provider_manage })
+            ; (fun p -> { p with attributes = [ "injected", "authority" ] })
+            ]
+          in
+          List.iter mutations ~f:(fun mutation ->
+            transform := mutation;
+            match authenticate () with
+            | Error { code = Unauthenticated; _ } -> ()
+            | _ -> failwith "proxy authority replacement admitted");
+          raises := true;
+          (match authenticate () with
+           | exception Exit -> ()
+           | _ -> failwith "policy exception hidden");
+          print_endline
+            "exact authority accepted; identity/kind/scopes/attributes replacements \
+             refused; policy exception preserved")));
+  [%expect
+    {| exact authority accepted; identity/kind/scopes/attributes replacements refused; policy exception preserved |}]
+;;

@@ -5,6 +5,8 @@ type t =
   | Missing of string
   | Schema_too_new of int
   | Migration_required of int
+  | Document of Document_schema.Error.t
+  | Framing of Frame.error
   | Corrupt of string
   | Io of
       { operation : string

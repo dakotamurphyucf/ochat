@@ -275,11 +275,7 @@ let%expect_test
            let queued = find queued.id in
            assert (
              Int.equal queued.delivery_count 1 && Option.is_some queued.last_delivery_at);
-           let restored =
-             Agent_session.Session_persistence.restore_snapshot
-               (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t stopped))
-             |> store_ok
-           in
+           let restored = restore_state stopped |> store_ok in
            assert_same_session_snapshot stopped restored;
            assert_same_session_snapshot
              stopped

@@ -58,6 +58,24 @@ let initial_state env workspace =
       { protocol
       ; prompt_definition_id = None
       ; delegation = None
+      ; inference_target =
+          (let fixture =
+             Inference_fixture.create
+               ~namespace:"permission-review-fixture"
+               ~default_model:"fixture-reviewer"
+               ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                 failwith "unexpected permission fixture model dispatch")
+           in
+           let target =
+             Inference_fixture.capture_config fixture Chat_response.Config.default
+             |> Result.map_error ~f:(fun error ->
+               Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+             |> Result.ok_or_failwith
+           in
+           Inference.Selection.captured target ~limits:Document_schema.Limits.default
+           |> Result.map_error ~f:(fun error ->
+             Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error))
+           |> Result.ok_or_failwith)
       ; prompt_revision_id = Agent_protocol.Id.Prompt_revision.create ()
       ; workspace_instance
       ; permission_profile = "review"

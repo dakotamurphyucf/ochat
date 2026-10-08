@@ -36,6 +36,19 @@ let function_call ~id name arguments =
       ; output_index = 0
       ; type_ = "response.function_call_arguments.done"
       }
+  ; Output_item_done
+      { item =
+          Function_call
+            { name
+            ; arguments = Jsonaf.to_string arguments
+            ; call_id = id
+            ; _type = "function_call"
+            ; id = Some id
+            ; status = Some "completed"
+            }
+      ; output_index = 0
+      ; type_ = "response.output_item.done"
+      }
   ]
   |> Stdlib.List.to_seq
 ;;
@@ -130,6 +143,15 @@ let%expect_test
                function_call ~id:(sprintf "parent-%d" !calls) name args)
         in
         let phase = ref "startup" in
+        let diagnostic =
+          Failure_diagnostic.create ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock env))
+        in
+        let invocation_ordinal = ref 0 in
+        let state daemon id =
+          let current = state daemon id in
+          Failure_diagnostic.observe diagnostic current;
+          current
+        in
         let with_daemon f =
           Eio.Switch.run (fun sw ->
             let before = !calls in
@@ -144,7 +166,10 @@ let%expect_test
                 ~options:
                   { D.default_options with
                     qualify_chatml_extensions = true
-                  ; model_post_stream = Some provider
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:provider
                   }
                 ()
               |> protocol_ok
@@ -153,8 +178,13 @@ let%expect_test
             Exn.protect
               ~finally:(fun () -> D.shutdown daemon |> protocol_ok)
               ~f:(fun () ->
+                Failure_diagnostic.reset diagnostic;
+                Failure_diagnostic.mark diagnostic "connect and initialize";
                 try
-                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
+                  (* This bounds the complete workflow on each daemon, including
+                     15 invocations on the first. A control run used 15.3 seconds
+                     of process CPU; allow scheduling headroom for concurrent CI. *)
+                  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 45. (fun () ->
                     let client =
                       Agent_server_wire_fixture.connect_unix
                         ~sw
@@ -168,11 +198,28 @@ let%expect_test
                         initialize client;
                         f sw daemon client))
                 with
-                | Eio.Time.Timeout -> failwith ("authored fixture timeout: " ^ !phase)))
+                | Eio.Time.Timeout ->
+                  Failure_diagnostic.report
+                    diagnostic
+                    ~context:
+                      [%sexp
+                        (!phase : string)
+                      , (!invocation_ordinal : int)
+                      , (!calls : int)
+                      , (!child_calls : int)];
+                  failwith ("authored fixture timeout: " ^ !phase)))
         in
         let invoke_status sw daemon client parent name args =
           phase := name;
+          Int.incr invocation_ordinal;
+          let mark stage =
+            Failure_diagnostic.mark
+              diagnostic
+              (sprintf "invocation %d %s: %s" !invocation_ordinal name stage)
+          in
+          mark "read before";
           let before = state daemon parent in
+          mark "attach";
           let handle =
             H.attach
               ~sw
@@ -187,6 +234,7 @@ let%expect_test
           Exn.protect
             ~finally:(fun () -> H.close handle)
             ~f:(fun () ->
+              mark "send";
               queued := Some (name, args);
               H.send_message
                 handle
@@ -196,6 +244,7 @@ let%expect_test
                 }
               |> protocol_ok
               |> ignore;
+              mark "wait for inactive parent";
               let rec wait () =
                 let current = state daemon parent in
                 match current.active_operation with
@@ -205,6 +254,7 @@ let%expect_test
                 | None -> current
               in
               let current = wait () in
+              mark "read invocation outcome";
               let fresh =
                 List.filter current.invocations ~f:(fun invocation ->
                   not

@@ -172,7 +172,11 @@ let collect
             Agent_session.Retained_history.scan
               ~reader
               ~handle
-              ~state
+              ~state:
+                (Agent_session.Session_state_document.with_value
+                   (Agent_session.Session_persistence.Restored.state_document
+                      (Agent_session.Session_persistence.restored persistence))
+                   state)
               ~journal_current:(Store.Journal.current_segment journal)
               ~transaction_hash:
                 (Agent_session.Session_persistence.transaction_hash persistence)

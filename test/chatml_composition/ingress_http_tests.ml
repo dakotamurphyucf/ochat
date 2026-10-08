@@ -79,9 +79,12 @@ let%expect_test
           ~authenticate:(fun _ token ->
             match token with
             | Some token ->
-              Agent_server.Authenticator.authenticate_bearer
+              Agent_server.Authenticator.authenticate_bearer_actor
                 authenticator
-                ~now:(P.Timestamp.now ())
+                ~now:(fun () ->
+                  P.Timestamp.of_time_ns
+                    (Time_ns.of_span_since_epoch
+                       (Time_ns.Span.of_sec (Eio.Time.now (Eio.Stdenv.clock env)))))
                 ~token
             | None ->
               Error
@@ -127,7 +130,11 @@ let%expect_test
     ~inspect_request:(fun request _ -> if request = 3 then model_received := true)
     ~calls:[ "watch-call", "watch", `Null ]
     ~after_turn:(fun env handle entry ->
-      let snapshot = H.projection handle |> Agent_client.Projection.snapshot in
+      let snapshot =
+        H.projection handle
+        |> Agent_client.Projection.snapshot
+        |> P.Public.Snapshot.fields
+      in
       let registration_id, namespace =
         Ingress_socket_tests.registration_from_output snapshot
       in

@@ -55,6 +55,7 @@ let%expect_test "external event delivery commits receipts before changing the li
           moderator = Some (B.encode_moderator_snapshot (snapshot ()))
         ; schedules = [ first; second; third ]
         ; jobs = [ job ]
+        ; model_job_targets = [ model_job_binding initial job ]
         }
       in
       let backend =
@@ -71,7 +72,8 @@ let%expect_test "external event delivery commits receipts before changing the li
           ~initial_state:initial
           ~operation_worker:None
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit ~previous next ->
                   match !reject with
                   | true ->
@@ -236,6 +238,11 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                        | 0 -> session_id
                        | _ -> second_session_id)
                   }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:
+                      (if Int.equal index 0 then session_id else second_session_id)
+                    ~generation:initial.identity.generation
               ; lifecycle = { desired = Running; observed = Idle }
               ; moderator =
                   Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
@@ -272,12 +279,16 @@ let%expect_test "two session event owners reject a wait cycle and release both b
             in
             actor, snapshot)
         in
+        let held = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+        let proceed = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+        let finished = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
         Exn.protect
-          ~finally:(fun () -> Array.iter actors ~f:(fun (actor, _) -> A.shutdown actor))
+          ~finally:(fun () ->
+            Array.iter proceed ~f:(fun (promise, resolver) ->
+              if Option.is_none (Eio.Promise.peek promise)
+              then Eio.Promise.resolve resolver ());
+            Array.iter actors ~f:(fun (actor, _) -> A.shutdown actor))
           ~f:(fun () ->
-            let held = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
-            let proceed = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
-            let finished = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
             Array.iteri actors ~f:(fun index (actor, snapshot) ->
               Eio.Fiber.fork ~sw (fun () ->
                 let result = ref "missing" in
@@ -543,11 +554,7 @@ let%expect_test "queued events retain actor ownership through checkpoint install
                 match run () with
                 | Ok false -> true
                 | _ -> false);
-              let restored =
-                Agent_session.Session_persistence.restore_snapshot
-                  (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-                |> store_ok
-              in
+              let restored = restore_state saved |> store_ok in
               let plan =
                 Agent_session.Invocation_recovery.plan
                   ~state:restored
@@ -833,21 +840,14 @@ let%expect_test
          Result.is_error
            (E.retire retired ~checkpoint_sha256:(String.make 64 'a') ~reason:"again"));
        let legacy = { failed_state with schema_version = 5 } in
-       let migrated =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t legacy))
-         |> store_ok
-       in
+       assert (Result.is_error (restore_state legacy));
+       let migrated = restore_state failed_state |> store_ok in
        assert (List.equal E.equal migrated.moderator_executions [ failed ]);
        assert (
          Result.is_error
            (Agent_session.Session_state.upgrade_schema
               { retired_state with schema_version = 5 }));
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t retired_state))
-         |> store_ok
-       in
+       let restored = restore_state retired_state |> store_ok in
        assert_same_session_snapshot restored retired_state;
        let projection = Agent_session.Session_state.extension_status restored in
        let projection_json =
@@ -1073,11 +1073,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
            Result.is_error
              (Agent_session.Session_state.upgrade_schema
                 { state with schema_version = 6 }));
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          assert_same_session_snapshot state restored;
          (match mode with
           | `Cancel -> ()

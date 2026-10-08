@@ -1,6 +1,217 @@
 open Core
 open Fixtures
 
+let%test_unit "subscription storage preserves absent, null and object raw schemas" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module S = Agent_session.Session_state in
+    let module D = Agent_session.Session_state_document in
+    let module U = Agent_protocol.Subscription in
+    let _, staged, _, _, _ = extension_fixture workspace_instance in
+    assert (not (List.is_empty staged.subscriptions));
+    List.iter
+      [ None; Some `Null; Some (`Object [ "type", `String "object" ]) ]
+      ~f:(fun completion_schema ->
+        let subscriptions =
+          List.map staged.subscriptions ~f:(fun (subscription : U.t) ->
+            let fresh =
+              U.create { subscription.context with completion_schema } |> protocol_ok
+            in
+            let updated =
+              U.finish
+                fresh
+                ~expected_epoch:0
+                ~now:timestamp
+                (Option.value_exn subscription.result)
+              |> protocol_ok
+              |> fst
+            in
+            let json = U.Storage.to_json updated in
+            let fields = Agent_protocol.Json_codec.fields json |> protocol_ok in
+            assert (
+              Option.equal
+                Jsonaf.exactly_equal
+                (Agent_protocol.Json_codec.optional fields "completion_schema")
+                completion_schema);
+            assert (U.equal updated (U.Storage.of_json json |> protocol_ok));
+            let delta =
+              Agent_session.Session_delta_document.create
+                (Subscription_changed updated)
+                ~limits:document_limits
+                ~state_document:D.authored
+              |> document_ok
+              |> Agent_session.Session_delta_document.value
+            in
+            (match delta with
+             | Batch [ Subscription_changed restored ] ->
+               assert (U.equal updated restored)
+             | _ -> assert false);
+            updated)
+        in
+        let state = { staged with subscriptions } in
+        S.validate state |> protocol_ok;
+        let document =
+          D.encode (D.authored state) ~limits:document_limits |> document_ok
+        in
+        let restored =
+          D.decode ~limits:document_limits document |> document_ok |> D.value
+        in
+        assert_same_session_snapshot state restored))
+;;
+
+let%test_unit "authored moderator deltas reject malformed present native records" =
+  let module D = Agent_session.Session_delta_document in
+  let capture value =
+    D.create
+      value
+      ~limits:document_limits
+      ~state_document:Agent_session.Session_state_document.authored
+  in
+  let valid =
+    Agent_session.Runtime_builder.encode_moderator_snapshot (handoff_snapshot 7)
+  in
+  List.iter
+    [ Some `Null; Some (`Object []) ]
+    ~f:(fun moderator ->
+      assert (Result.is_error (capture (Moderator_changed moderator)));
+      assert (
+        Result.is_error
+          (capture
+             (Batch [ Moderator_changed (Some valid); Moderator_changed moderator ]))));
+  List.iter [ None; Some valid ] ~f:(fun moderator ->
+    match capture (Moderator_changed moderator) |> document_ok |> D.value with
+    | Batch [ Moderator_changed restored ] ->
+      assert (Option.equal Jsonaf.exactly_equal moderator restored)
+    | _ -> assert false)
+;;
+
+let%test_unit "named state codec preserves complete values with present optional records" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module S = Agent_session.Session_state in
+    let module D = Agent_session.Session_state_document in
+    let initial, staged, _, _, _ = extension_fixture workspace_instance in
+    let scope =
+      Chat_response.Authoring_materialization.session_scope ~session_id ~generation:0
+    in
+    let references =
+      Chat_response.Authoring_reference_index.empty ~scope ()
+      |> protocol_ok
+      |> Chat_response.Authoring_reference_index.to_json
+    in
+    let populated =
+      { staged with
+        identity = { staged.identity with labels = [ "", "empty key"; "owner", "test" ] }
+      ; spec =
+          { staged.spec with
+            prompt_definition_id = Some prompt_id
+          ; runtime_policy = Some "retained policy"
+          ; quota_key = Some { conflict_domain = "fixture"; prompt_id }
+          }
+      ; automatic_turn_budget =
+          Some
+            (Agent_session.Automatic_turn_budget.create
+               Chat_response.Runtime_semantics.default_policy)
+      ; conversation =
+          { staged.conversation with
+            kv_store = [ "", "empty key" ]
+          ; tasks = [ `Null; `Object [ "text", `String "retained task" ] ]
+          ; authoring_reference_index = Some references
+          ; authoring_publication =
+              Some
+                (Chat_response.Authoring_publication.context_of_jsonaf
+                   (`Object
+                       [ "version", `Number "1"
+                       ; "scope", `String scope
+                       ; "identity", `String (String.make 64 'a')
+                       ; "policy", `String (String.make 64 'b')
+                       ])
+                 |> protocol_ok)
+          }
+      ; invocations =
+          List.map
+            staged.invocations
+            ~f:(fun (invocation : Agent_protocol.Invocation.t) ->
+              let module I = Agent_protocol.Invocation in
+              I.create { invocation.context with deadline = Some timestamp }
+              |> protocol_ok
+              |> I.dispatch
+              |> protocol_ok
+              |> fun updated ->
+              I.resolve
+                updated
+                ~session_id
+                ~generation:0
+                (match invocation.status with
+                 | Resolved outcome | Published outcome -> outcome
+                 | Admitted | Dispatching -> assert false)
+              |> protocol_ok)
+      ; subscriptions =
+          List.map
+            staged.subscriptions
+            ~f:(fun (subscription : Agent_protocol.Subscription.t) ->
+              let module U = Agent_protocol.Subscription in
+              let fresh =
+                U.create { subscription.context with completion_schema = Some `True }
+                |> protocol_ok
+              in
+              U.finish
+                fresh
+                ~expected_epoch:0
+                ~now:timestamp
+                (Option.value_exn subscription.result)
+              |> protocol_ok
+              |> fst)
+      ; attachments =
+          [ { id = Agent_protocol.Id.Attachment.create ()
+            ; session_id
+            ; mode = Owner_read_write
+            ; owner_lease =
+                Some
+                  { generation = 1L
+                  ; expires_at = timestamp
+                  ; disconnect_grace_until = Some timestamp
+                  ; principal_id = Some principal_id
+                  ; reclaim_token_sha256 = Some (String.make 64 'c')
+                  }
+            }
+          ]
+      ; moderator =
+          Some
+            (Agent_session.Runtime_builder.encode_moderator_snapshot (handoff_snapshot 7))
+      ; halted = true
+      ; halt_reason = Some "retained halt"
+      ; failure = Some (Agent_protocol.Error.invalid_request "retained failure")
+      }
+    in
+    List.iter [ initial; populated ] ~f:(fun state ->
+      S.validate state |> protocol_ok;
+      let document = D.encode (D.authored state) ~limits:document_limits |> document_ok in
+      let restored =
+        D.decode ~limits:document_limits document |> document_ok |> D.value
+      in
+      assert_same_session_snapshot state restored))
+;;
+
+let%test_unit
+    "authored null state cannot erase invalid optional records before validation"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module S = Agent_session.Session_state in
+    let module D = Agent_session.Session_state_document in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    List.iter
+      [ { initial with moderator = Some `Null }
+      ; { initial with
+          conversation =
+            { initial.conversation with authoring_reference_index = Some `Null }
+        }
+      ]
+      ~f:(fun invalid ->
+        assert (Result.is_error (S.validate invalid));
+        assert (Result.is_error (D.encode (D.authored invalid) ~limits:document_limits))))
+;;
+
 let%expect_test
     "event execution journal recovery preserves outcomes and prevents intent replay"
   =
@@ -90,6 +301,7 @@ let%expect_test
     in
     let journal =
       Agent_store.Transaction.create
+        ~limits:document_limits
         ~session_id
         ~generation:0
         ~transaction_sequence:transition.state.counters.transaction_sequence
@@ -104,25 +316,17 @@ let%expect_test
            |> Time_ns.to_int_ns_since_epoch
            |> Int64.of_int)
         ~command_audit:None
-        ~delta:
-          (Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t transition.delta))
+        ~delta:(delta_document transition.delta)
         ~durable_events:
-          (List.map transition.events ~f:(fun event ->
-             Sexp.to_string_mach (Agent_protocol.Event.Durable.sexp_of_t event)))
+          (List.map transition.events ~f:(fun event -> event_document event))
       |> store_ok
       |> Agent_store.Transaction.encode
       |> Agent_store.Transaction.decode
       |> store_ok
     in
-    let replayed =
-      Agent_session.Session_persistence.apply_transaction initial journal |> store_ok
-    in
+    let replayed = replay_transaction initial journal |> store_ok in
     assert_same_session_snapshot transition.state replayed;
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (S.sexp_of_t replayed))
-      |> store_ok
-    in
+    let restored = restore_state replayed |> store_ok in
     assert_same_session_snapshot replayed restored;
     let projected =
       S.extension_status restored |> List.map ~f:Agent_protocol.Extension_status.to_json
@@ -134,7 +338,8 @@ let%expect_test
         (Agent_protocol.Extension_status.list_of_json (`Array projected) |> protocol_ok)
       = 4);
     ignore
-      (Agent_session.Session_persistence.durable_events journal |> store_ok
+      (Agent_session.Session_persistence.durable_events ~limits:document_limits journal
+       |> store_ok
        : Agent_protocol.Event.Durable.t list);
     let plan state =
       Agent_session.Invocation_recovery.plan
@@ -194,9 +399,18 @@ let%expect_test
       Result.is_error
         (S.validate { initial with moderator_executions = [ make "one"; make "two" ] }));
     assert (Result.is_error (S.upgrade_schema { restored with schema_version = 4 }));
-    let migrated = S.upgrade_schema { initial with schema_version = 4 } |> protocol_ok in
+    let migrated = restore_state initial |> store_ok in
     let older =
-      { recovered with identity = { recovered.identity with generation = 1 } }
+      { recovered with
+        identity = { recovered.identity with generation = 1 }
+      ; inference_ledger =
+          Agent_session.Inference_ledger.with_generation
+            recovered.inference_ledger
+            ~generation:1
+          |> Result.map_error ~f:(fun error ->
+            Sexp.to_string_hum (Agent_session.Inference_ledger.Error.sexp_of_t error))
+          |> Result.ok_or_failwith
+      }
     in
     let retired =
       List.fold_result
@@ -218,7 +432,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 20)
+    ((schema 22)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -253,6 +467,7 @@ let%expect_test "invocation deltas replay through durable transactions and snaps
     in
     let transaction =
       Agent_store.Transaction.create
+        ~limits:document_limits
         ~session_id
         ~generation:0
         ~transaction_sequence:1L
@@ -265,7 +480,7 @@ let%expect_test "invocation deltas replay through durable transactions and snaps
            |> Time_ns.to_int_ns_since_epoch
            |> Int64.of_int)
         ~command_audit:None
-        ~delta:(Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t delta))
+        ~delta:(delta_document delta)
         ~durable_events:[]
       |> store_ok
     in
@@ -273,14 +488,8 @@ let%expect_test "invocation deltas replay through durable transactions and snaps
       Agent_store.Transaction.decode (Agent_store.Transaction.encode transaction)
       |> store_ok
     in
-    let replayed =
-      Agent_session.Session_persistence.apply_transaction initial transaction |> store_ok
-    in
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t replayed))
-      |> store_ok
-    in
+    let replayed = replay_transaction initial transaction |> store_ok in
+    let restored = restore_state replayed |> store_ok in
     let invocation = List.hd_exn restored.invocations in
     print_s [%sexp (invocation.status : Agent_protocol.Invocation.status)];
     let published = Agent_protocol.Invocation.publish invocation |> protocol_ok in
@@ -310,7 +519,7 @@ let%test_unit "bound publication journal replay validates the retained call and 
       History_entry.Id.create ~namespace:"publication" ~sequence |> Result.ok_or_failwith
     in
     let call =
-      History_entry.create_with_id
+      Openai.Responses_history.create_with_id_exn
         ~id:(id 0)
         (Openai.Responses.Item.Function_call
            { name = "read_file"
@@ -374,7 +583,7 @@ let%test_unit "bound publication journal replay validates the retained call and 
       |> protocol_ok
     in
     let output =
-      History_entry.create_with_id
+      Openai.Responses_history.create_with_id_exn
         ~id:(id 1)
         (Openai.Responses.Item.Function_call_output
            { output =
@@ -414,6 +623,7 @@ let%test_unit "bound publication journal replay validates the retained call and 
     in
     let transaction =
       Agent_store.Transaction.create
+        ~limits:document_limits
         ~session_id
         ~generation:0
         ~transaction_sequence:1L
@@ -426,7 +636,7 @@ let%test_unit "bound publication journal replay validates the retained call and 
            |> Time_ns.to_int_ns_since_epoch
            |> Int64.of_int)
         ~command_audit:None
-        ~delta:(Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t delta))
+        ~delta:(delta_document delta)
         ~durable_events:[]
       |> store_ok
     in
@@ -434,19 +644,13 @@ let%test_unit "bound publication journal replay validates the retained call and 
       Agent_store.Transaction.decode (Agent_store.Transaction.encode transaction)
       |> store_ok
     in
-    let replayed =
-      Agent_session.Session_persistence.apply_transaction initial transaction |> store_ok
-    in
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t replayed))
-      |> store_ok
-    in
+    let replayed = replay_transaction initial transaction |> store_ok in
+    let restored = restore_state replayed |> store_ok in
     assert (Poly.equal restored.invocations [ published ]);
     let changed_call =
-      match History_entry.item call with
+      match Openai.Responses_history.item_exn call with
       | Function_call value ->
-        History_entry.create_with_id
+        Openai.Responses_history.create_with_id_exn
           ~id:(id 0)
           (Function_call { value with arguments = "changed" })
       | _ -> assert false
@@ -460,20 +664,13 @@ let%test_unit "bound publication journal replay validates the retained call and 
           }
       }
     in
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t changed))));
+    assert (Result.is_error (restore_state changed));
     let compacted =
       { restored with
         conversation = { restored.conversation with canonical_history = [] }
       }
     in
-    let compacted =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t compacted))
-      |> store_ok
-    in
+    let compacted = restore_state compacted |> store_ok in
     assert (Poly.equal compacted.invocations [ published ]);
     let wrong =
       Agent_session.History_codec.user_text ~id:(id 1) "forged result"
@@ -487,32 +684,18 @@ let%test_unit "bound publication journal replay validates the retained call and 
           }
       }
     in
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t corrupted)))))
+    assert (Result.is_error (restore_state corrupted)))
 ;;
 
 let%expect_test
-    "legacy state migration preserves data and rejects invalid invocation ownership"
+    "named state documents preserve data and reject invalid invocation ownership"
   =
   with_actor_workspace (fun _env workspace_instance ->
     let initial =
       actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
     in
-    let legacy =
-      match Agent_session.Session_state.sexp_of_t { initial with schema_version = 2 } with
-      | Sexp.List fields ->
-        Sexp.List
-          (List.filter fields ~f:(function
-             | Sexp.List (Sexp.Atom "invocations" :: _) -> false
-             | _ -> true))
-      | _ -> assert false
-    in
-    let migrated =
-      Agent_session.Session_persistence.restore_snapshot (Sexp.to_string_mach legacy)
-      |> store_ok
-    in
+    assert (Result.is_error (restore_state { initial with schema_version = 2 }));
+    let migrated = restore_state initial |> store_ok in
     print_s
       [%sexp
         { version = (migrated.schema_version : int)
@@ -551,7 +734,7 @@ let%expect_test
          : bool)]);
   [%expect
     {|
-    ((version 20) (records 0))
+    ((version 22) (records 0))
     true
     true
     true
@@ -559,13 +742,13 @@ let%expect_test
     |}]
 ;;
 
-let%expect_test "pre-extension compaction archives remain readable after state migration" =
+let%expect_test "named compaction archives admit typed state and preserve captured bytes" =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let state =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
       in
-      let legacy = { state with schema_version = 2 } in
+      let archived = state in
       let store =
         Agent_store.Session_store.create
           ~env
@@ -582,11 +765,11 @@ let%expect_test "pre-extension compaction archives remain readable after state m
       let metadata =
         Agent_store.Session_store.Metadata.
           { schema_version = Agent_store.Session_store.current_schema_version
-          ; session = Agent_session.Session_state.summary legacy
+          ; session = Agent_session.Session_state.summary archived
           ; prompt_artifact =
               Agent_protocol.Id.Prompt_revision.to_string prompt_revision_id
           ; workspace_identity = workspace_instance.conflict_domain
-          ; data_schema_version = 2
+          ; data_schema_version = Agent_session.Session_state.current_schema_version
           }
       in
       let handle =
@@ -598,13 +781,19 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           metadata
         |> store_ok
       in
-      let reference = Agent_session.Compaction_archive.reference legacy operation_id in
+      let reference =
+        Agent_session.Compaction_archive.reference
+          (Agent_session.Session_state_document.authored archived)
+          ~limits:Document_schema.Limits.default
+          operation_id
+        |> protocol_ok
+      in
       Agent_session.Compaction_archive.write
         ~env
         ~handle
         ~max_payload_length:1048576
         reference
-        legacy
+        (Agent_session.Session_state_document.authored archived)
       |> protocol_ok;
       let restored =
         Agent_session.Compaction_archive.read
@@ -629,6 +818,201 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           ~max_bytes:1048576
         |> store_ok
       in
+      let module A = Agent_session.Compaction_archive in
+      let module S = Agent_session.Session_state in
+      let module State_document = Agent_session.Session_state_document in
+      let module D = Document_schema in
+      let unchanged () =
+        let actual =
+          Eio.Path.load
+            Eio.Path.(
+              Eio.Stdenv.fs env
+              / Agent_store.Session_store.Handle.archive_directory handle
+              / A.filename reference)
+        in
+        assert (String.equal contents actual)
+      in
+      let legacy_job =
+        Agent_protocol.Job.
+          { id = Agent_protocol.Id.Job.of_string "job_archive_admission" |> protocol_ok
+          ; session_id = archived.identity.session_id
+          ; generation = archived.identity.generation
+          ; kind = Model_call
+          ; payload = `Null
+          ; status = Queued
+          ; retry_policy = Never
+          ; attempt = -1
+          ; created_at = timestamp
+          ; started_at = None
+          ; next_run_at = None
+          ; completed_at = None
+          ; result = None
+          ; delivery = Not_required
+          ; launch = None
+          ; progress = None
+          }
+      in
+      let invalid_states =
+        [ { archived with
+            conversation = { archived.conversation with initial_prompt_entry_count = -1 }
+          }
+        ; { archived with
+            jobs = [ legacy_job ]
+          ; model_job_targets = [ model_job_binding archived legacy_job ]
+          }
+        ]
+      in
+      let raw_archive child =
+        D.Document.create
+          ~limits:document_limits
+          ~kind:"session.compaction_archive"
+          ~version:1
+          ~payload:(`Object [ "state", D.Document.json child ])
+        |> document_ok
+      in
+      let reference_for_document document =
+        { reference with
+          sha256 = Agent_store.Document_record.digest (D.Document.to_string document)
+        }
+      in
+      List.iter invalid_states ~f:(fun bad ->
+        (* These values demonstrate the distinction between native validation
+           and the complete typed decoder, rather than a generic JSON failure. *)
+        S.validate bad |> protocol_ok;
+        let bad = State_document.authored bad in
+        let child = State_document.encode bad ~limits:document_limits |> document_ok in
+        assert (Result.is_error (State_document.decode ~limits:document_limits child));
+        assert (Result.is_error (A.archive_document bad ~limits:document_limits));
+        assert (Result.is_error (A.reference bad ~limits:document_limits operation_id));
+        assert (
+          Result.is_error (A.write ~env ~handle ~max_payload_length:1048576 reference bad));
+        unchanged ();
+        (* Raw callers cannot bypass child admission with a correctly captured
+           digest and individually valid complete universal envelopes. *)
+        let document = raw_archive child in
+        assert (
+          Result.is_error
+            (A.write_document
+               ~env
+               ~handle
+               ~max_payload_length:1048576
+               (reference_for_document document)
+               document));
+        unchanged ());
+      let valid_document =
+        A.archive_document (State_document.authored archived) ~limits:document_limits
+        |> document_ok
+      in
+      let wrong_owner =
+        { archived with
+          identity =
+            { archived.identity with
+              session_id =
+                Agent_protocol.Id.Session.of_string "ses_other_archive" |> protocol_ok
+            }
+        ; inference_ledger =
+            fresh_inference_ledger
+              ~session_id:
+                (Agent_protocol.Id.Session.of_string "ses_other_archive" |> protocol_ok)
+              ~generation:archived.identity.generation
+        }
+      in
+      let wrong_owner_document =
+        A.archive_document (State_document.authored wrong_owner) ~limits:document_limits
+        |> document_ok
+      in
+      let missing_invocation =
+        Agent_session.Session_state.Compaction_archive.
+          { invocation_id =
+              Agent_protocol.Id.Invocation.of_string "inv_missing_archive" |> protocol_ok
+          ; output_entry_id = None
+          ; publication_discarded = None
+          ; interruption_reason = Some "daemon restarted"
+          }
+      in
+      List.iter
+        [ reference_for_document wrong_owner_document, wrong_owner_document
+        ; { reference with revision = Int64.succ reference.revision }, valid_document
+        ; ( { reference with invocation_dispositions = [ missing_invocation ] }
+          , valid_document )
+        ; { reference with sha256 = String.make 64 '0' }, valid_document
+        ]
+        ~f:(fun (reference, document) ->
+          assert (
+            Result.is_error
+              (A.write_document
+                 ~env
+                 ~handle
+                 ~max_payload_length:1048576
+                 reference
+                 document));
+          unchanged ());
+      (* Unknown fields and raw numeric spelling remain in the supplied bytes;
+         typed admission must not substitute a reencoded value. *)
+      let captured =
+        let add fields name value = `Object ((name, value) :: fields) in
+        let child =
+          State_document.encode (State_document.authored archived) ~limits:document_limits
+          |> document_ok
+        in
+        let child_json =
+          match D.Document.json child, D.Document.payload child with
+          | `Object envelope, `Object payload ->
+            `Object
+              (List.map envelope ~f:(fun (key, value) ->
+                 ( key
+                 , if String.equal key "payload"
+                   then add payload "future_state" (`Number "1e+00")
+                   else value )))
+          | _ -> assert false
+        in
+        D.Document.inspect
+          ~limits:document_limits
+          (`Object
+              [ "future_envelope", `String "opaque"
+              ; "format", `String "ochat.document"
+              ; "kind", `String "session.compaction_archive"
+              ; "schema_version", `Number "1"
+              ; "payload", `Object [ "future_archive", `True; "state", child_json ]
+              ])
+        |> document_ok
+      in
+      let captured_reference = reference_for_document captured in
+      A.write_document
+        ~env
+        ~handle
+        ~max_payload_length:1048576
+        captured_reference
+        captured
+      |> protocol_ok;
+      let captured_contents =
+        Agent_store.Retention_reader.read
+          reader
+          ~path:(A.filename reference)
+          ~max_bytes:1048576
+        |> store_ok
+      in
+      let record =
+        match
+          Agent_store.Document_record.decode_file
+            ~limits:document_limits
+            ~expected_digest:(Some captured_reference.sha256)
+            captured_contents
+        with
+        | Ok record -> record
+        | Error error -> raise_s [%sexp (error : Agent_store.Document_record.Error.t)]
+      in
+      assert (
+        String.equal
+          (Agent_store.Document_record.stored_bytes record)
+          (D.Document.to_string captured));
+      A.decode_file
+        ~handle
+        ~max_payload_length:1048576
+        captured_reference
+        captured_contents
+      |> protocol_ok
+      |> ignore;
       let bounded =
         Agent_session.Compaction_archive.decode_file
           ~handle
@@ -655,7 +1039,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 20) (records 0)) |}]
+  [%expect {| ((version 22) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -664,11 +1048,7 @@ let%expect_test
   =
   with_actor_workspace (fun _env workspace_instance ->
     let _, staged, resolved, _, delivery = extension_fixture workspace_instance in
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t staged))
-      |> store_ok
-    in
+    let restored = restore_state staged |> store_ok in
     let entry = notification_entry delivery in
     let committed =
       Agent_protocol.Delivery.commit delivery ~history_id:entry.id ~now:timestamp
@@ -704,11 +1084,7 @@ let%expect_test
         [ Agent_session.Session_state.extension_status delivered.state ]);
     assert (List.is_empty (status_updates repeated));
     print_s [%sexp (List.length repeated.state.conversation.canonical_history : int)];
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t repeated.state))
-      |> store_ok
-    in
+    let restored = restore_state repeated.state |> store_ok in
     print_s
       [%sexp
         ((List.hd_exn restored.conversation.canonical_history).provenance
@@ -836,8 +1212,7 @@ let%expect_test "extension references reject missing work and competing delivery
     true |}]
 ;;
 
-let%expect_test "schema-3 invocation snapshots migrate without losing pending publication"
-  =
+let%expect_test "named invocation snapshots preserve pending publication" =
   with_actor_workspace (fun _env workspace_instance ->
     let state =
       actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
@@ -853,12 +1228,8 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         (Complete `Null)
       |> protocol_ok
     in
-    let legacy = { state with schema_version = 3; invocations = [ invocation ] } in
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t legacy))
-      |> store_ok
-    in
+    let pending = { state with invocations = [ invocation ] } in
+    let restored = restore_state pending |> store_ok in
     print_s
       [%sexp
         { version = (restored.schema_version : int)
@@ -871,7 +1242,7 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 20) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 22) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;
@@ -896,7 +1267,8 @@ let%expect_test
           ~initial_state:staged
           ~operation_worker:None
           ~persistence:
-            { commit =
+            { archive_reference
+            ; commit =
                 (fun ~command_audit:_ ~previous:_ _ ->
                   if !fail_commit
                   then
@@ -1014,6 +1386,7 @@ let%expect_test
     in
     let transaction events =
       Agent_store.Transaction.create
+        ~limits:document_limits
         ~session_id
         ~generation:0
         ~transaction_sequence:transition.state.counters.transaction_sequence
@@ -1028,22 +1401,20 @@ let%expect_test
            |> Time_ns.to_int_ns_since_epoch
            |> Int64.of_int)
         ~command_audit:None
-        ~delta:
-          (Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t transition.delta))
-        ~durable_events:
-          (List.map events ~f:(fun event ->
-             Sexp.to_string_mach (Agent_protocol.Event.Durable.sexp_of_t event)))
+        ~delta:(delta_document transition.delta)
+        ~durable_events:(List.map events ~f:(fun event -> event_document event))
       |> store_ok
       |> Agent_store.Transaction.encode
       |> Agent_store.Transaction.decode
       |> store_ok
     in
     let journal = transaction transition.events in
-    let replayed =
-      Agent_session.Session_persistence.apply_transaction staged journal |> store_ok
-    in
+    let replayed = replay_transaction staged journal |> store_ok in
     let statuses = Agent_session.Session_state.extension_status replayed in
-    let events = Agent_session.Session_persistence.durable_events journal |> store_ok in
+    let events =
+      Agent_session.Session_persistence.durable_events ~limits:document_limits journal
+      |> store_ok
+    in
     let updates =
       List.filter_map events ~f:(fun event ->
         Agent_protocol.Event.Durable.extension_status event |> protocol_ok)
@@ -1062,9 +1433,164 @@ let%expect_test
           }
         | _ -> event)
     in
-    assert (
-      Result.is_error
-        (Agent_session.Session_persistence.durable_events (transaction corrupt))));
+    List.iter corrupt ~f:(fun event ->
+      let document =
+        Document_schema.Document.create
+          ~limits:document_limits
+          ~kind:"session.event"
+          ~version:1
+          ~payload:(Agent_session.Durable_event_document.to_jsonaf event)
+        |> document_ok
+      in
+      if Agent_protocol.Event.Durable.equal_kind event.kind Session_updated
+      then
+        assert (
+          Result.is_error
+            (Agent_session.Durable_event_document.decode ~limits:document_limits document))));
   print_endline "journal state/status agree; future status codec rejected during replay";
   [%expect {| journal state/status agree; future status codec rejected during replay |}]
+;;
+
+let%test_unit
+    "canonical restore retains opaque captures independently of runtime lowering"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module H = History_entry.Payload in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let semantic =
+      H.Semantic.create
+        (Unknown { provider_kind = "future.reasoning" })
+        ~metadata:H.Metadata.empty
+      |> Result.ok_or_failwith
+    in
+    let raw = `Object [ "type", `String "future.reasoning"; "opaque", `String "exact" ] in
+    let payload =
+      H.captured semantic ~origin:H.Origin.unavailable ~raw |> Result.ok_or_failwith
+    in
+    let entry = History_entry.create_with_id ~id:history_id payload in
+    let canonical = Agent_session.History_codec.to_canonical entry in
+    let state =
+      { initial with
+        conversation = { initial.conversation with canonical_history = [ canonical ] }
+      }
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_state.validate
+           { state with
+             conversation =
+               { state.conversation with canonical_history = [ canonical; canonical ] }
+           }));
+    assert (
+      Result.is_error
+        (Agent_session.Session_state.validate
+           { state with
+             conversation =
+               { state.conversation with deferred_user_entries = [ canonical ] }
+           }));
+    let restored = restore_state state |> store_ok in
+    let retained = List.hd_exn restored.conversation.canonical_history in
+    assert (Agent_protocol.History.equal_entry canonical retained);
+    let neutral = Agent_session.History_codec.of_canonical retained |> protocol_ok in
+    assert (
+      Jsonaf.exactly_equal (H.to_json payload) (H.to_json (History_entry.payload neutral)));
+    assert (
+      Result.is_error (Openai.Responses_history.to_item (History_entry.payload neutral)));
+    assert (
+      Result.is_error
+        (Agent_session.History_codec.of_canonical { retained with redacted = true }));
+    assert (
+      Result.is_error
+        (Agent_session.History_codec.of_canonical { retained with kind = Tool_call })))
+;;
+
+let%test_unit
+    "opaque neutral moderator overlays restore and project without provider decoding"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module H = History_entry.Payload in
+    let payload =
+      Jsonaf.of_string
+        {|{"format":"ochat.document","kind":"history.payload","schema_version":1,"future_envelope":true,"payload":{"semantic":{"type":"unknown","provider_kind":"future.overlay","metadata":{}},"representation":{"type":"captured","origin":{"type":"unavailable"},"raw":{"type":"future.overlay","opaque":"exact","future_raw":[null,1e+00]}},"future_payload":null}}|}
+      |> H.of_json
+      |> Result.ok_or_failwith
+    in
+    let inserted_id =
+      History_entry.Id.create ~namespace:"overlay" ~sequence:0 |> Result.ok_or_failwith
+    in
+    let snapshot =
+      { (handoff_snapshot 0) with
+        revision = 1
+      ; next_change_id = 2
+      ; prepended_items =
+          [ Session.Moderator_state.Identity_snapshot.Inserted.
+              { entry_id = inserted_id
+              ; change_id = 0
+              ; script_label = None
+              ; value = payload
+              }
+          ]
+      ; replacements =
+          [ Session.Moderator_state.Identity_snapshot.Replacement.
+              { target_id = history_id
+              ; change_id = 1
+              ; script_label = None
+              ; value = payload
+              }
+          ]
+      }
+    in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let state =
+      { initial with
+        conversation = { initial.conversation with canonical_history = [ actor_entry ] }
+      ; moderator =
+          Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
+      }
+    in
+    let colliding_snapshot =
+      { snapshot with
+        prepended_items =
+          [ { (List.hd_exn snapshot.prepended_items) with entry_id = history_id } ]
+      }
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_state.validate
+           { state with
+             moderator =
+               Some
+                 (Agent_session.Runtime_builder.encode_moderator_snapshot
+                    colliding_snapshot)
+           }));
+    let deferred =
+      Agent_session.History_codec.user_text ~id:inserted_id "queued"
+      |> Agent_session.History_codec.to_canonical
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_state.validate
+           { state with
+             conversation =
+               { state.conversation with deferred_user_entries = [ deferred ] }
+           }));
+    let restored = restore_state state |> store_ok in
+    let projected = Agent_session.Session_state.snapshot ~now:timestamp restored in
+    let effective = Option.value_exn projected.effective_history in
+    [%test_eq: int] 2 (List.length effective.entries);
+    let inserted = List.nth_exn effective.entries 0
+    and replacement = List.nth_exn effective.entries 1 in
+    assert (History_entry.Id.equal inserted.id inserted_id);
+    assert (History_entry.Id.equal replacement.id history_id);
+    assert (Jsonaf.exactly_equal inserted.payload (H.to_json payload));
+    assert (Jsonaf.exactly_equal replacement.payload (H.to_json payload));
+    assert (Agent_protocol.History.equal_provenance inserted.provenance Moderator_inserted);
+    assert (
+      Agent_protocol.History.equal_provenance
+        replacement.provenance
+        (Moderator_replaced history_id)))
 ;;

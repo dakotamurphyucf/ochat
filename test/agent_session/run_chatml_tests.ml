@@ -148,13 +148,15 @@ let%expect_test "run_chatml validates submitted policy and returns one native ou
             in
             let call, invocation = publication_call caps () in
             let item =
-              match History_entry.item call with
+              match Openai.Responses_history.item_exn call with
               | Function_call item ->
                 Openai.Responses.Item.Function_call
                   { item with name = T.name; arguments = Jsonaf.to_string request }
               | _ -> assert false
             in
-            let call = History_entry.create_with_id ~id:(History_entry.id call) item in
+            let call =
+              Openai.Responses_history.create_with_id_exn ~id:(History_entry.id call) item
+            in
             let invocation =
               I.create
                 { invocation.context with

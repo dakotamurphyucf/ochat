@@ -171,101 +171,91 @@ let%expect_test "execution events remove completed calls independently" =
     |}]
 ;;
 
-let%expect_test "parallel_tool_calls_basic_flow" =
-  let module Stream = Chat_tui.Stream in
-  let module Model = Chat_tui.Model in
-  let module Res = Stream.Res in
-  let module Res_stream = Stream.Res_stream in
-  let module Item = Res_stream.Item in
-  let m = make_model () in
-  (* Construct two function-call items *)
-  let fc1 : Res.Function_call.t =
-    { name = "echo1"
-    ; arguments = ""
-    ; call_id = "call-1"
-    ; _type = "function_call"
-    ; id = None
-    ; status = Some "in_progress"
-    }
+let%expect_test "parallel neutral drafts and actual commits keep host results separate" =
+  let module P = History_entry.Payload in
+  let ok = Result.ok_or_failwith in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"parallel" ~next_sequence:0 |> ok
   in
-  let fc2 : Res.Function_call.t =
-    { name = "echo2"
-    ; arguments = ""
-    ; call_id = "call-2"
-    ; _type = "function_call"
-    ; id = None
-    ; status = Some "in_progress"
-    }
+  let model = make_model () in
+  let runtime = Chat_tui.App_runtime.create ~history_allocator:allocator ~model () in
+  let throttle = Chat_tui.Redraw_throttle.create ~fps:60. ~enqueue_redraw:ignore in
+  let scope =
+    Transcript.Scope.create
+      ~source:(Transcript.Source_id.of_string "source" |> ok)
+      ~attempt:(Transcript.Attempt_id.of_string "attempt" |> ok)
+      ~relation:Root
+    |> ok
   in
-  (* Helper to apply a single event *)
-  let apply ev =
-    let patches = Stream.handle_event ~model:m ev in
-    ignore (Model.apply_patches m patches)
+  let first = History_entry.Allocator.allocate allocator |> ok in
+  let second = History_entry.Allocator.allocate allocator |> ok in
+  let descriptor entry_id name =
+    Transcript.Item.create
+      ~scope
+      ~id:(Transcript.Item_id.of_string name |> ok)
+      ~entry_id:(Some entry_id)
+      ~header:(Some (Call Function))
+      ~call_name:(Some name)
+    |> ok
   in
-  (* Announce first call and its arguments *)
-  apply
-    (Res_stream.Output_item_added
-       { item = Item.Function_call fc1; output_index = 0; type_ = "output_item_added" });
-  apply
-    (Res_stream.Function_call_arguments_delta
-       { delta = "\"foo\""
-       ; item_id = "call-1"
-       ; output_index = 0
-       ; type_ = "function_call_arguments_delta"
-       });
-  (* Interleave second call announcement *)
-  apply
-    (Res_stream.Output_item_added
-       { item = Item.Function_call fc2; output_index = 1; type_ = "output_item_added" });
-  (* Finish arguments for call-1 *)
-  apply
-    (Res_stream.Function_call_arguments_done
-       { arguments = "\"foo\""
-       ; item_id = "call-1"
-       ; output_index = 0
-       ; type_ = "function_call_arguments_done"
-       });
-  (* Stream arguments for second call *)
-  apply
-    (Res_stream.Function_call_arguments_delta
-       { delta = "\"bar\""
-       ; item_id = "call-2"
-       ; output_index = 1
-       ; type_ = "function_call_arguments_delta"
-       });
-  apply
-    (Res_stream.Function_call_arguments_done
-       { arguments = "\"bar\""
-       ; item_id = "call-2"
-       ; output_index = 1
-       ; type_ = "function_call_arguments_done"
-       });
-  (* Inject function outputs – intentionally out-of-order *)
-  let patches_out2 =
-    Stream.handle_fn_out
-      ~model:m
-      { output = Res.Tool_output.Output.Text "result2"
-      ; call_id = "call-2"
-      ; _type = "function_call_output"
-      ; id = None
-      ; status = Some "completed"
-      }
+  let first_item = descriptor first "echo1" in
+  let second_item = descriptor second "echo2" in
+  List.iter
+    [ first_item, "\"foo\""; second_item, "\"bar\"" ]
+    ~f:(fun (item, input) ->
+      List.iter
+        [ Transcript.Stream.Item_announced item
+        ; Changed { target = Call_input item; change = Replace input }
+        ]
+        ~f:(fun view ->
+          let event =
+            Transcript.Stream.create view ~limits:Document_schema.Limits.default |> ok
+          in
+          Chat_tui.App_stream_apply.apply_transcript_event
+            runtime
+            throttle
+            ~viewport_height:20
+            event
+          |> ok));
+  printf
+    "canonical before commit: %d\n"
+    (List.length (Chat_tui.Model.history_items model));
+  let payload semantic =
+    P.Semantic.create semantic ~metadata:P.Metadata.empty |> ok |> P.authored
   in
-  ignore (Model.apply_patches m patches_out2);
-  let patches_out1 =
-    Stream.handle_fn_out
-      ~model:m
-      { output = Res.Tool_output.Output.Text "result1"
-      ; call_id = "call-1"
-      ; _type = "function_call_output"
-      ; id = None
-      ; status = Some "completed"
-      }
+  let call id name input =
+    History_entry.create_with_id
+      ~id
+      (payload
+         (Call
+            { kind = Function
+            ; name
+            ; namespace = Absent
+            ; input_bytes = input
+            ; async = Absent
+            }))
   in
-  ignore (Model.apply_patches m patches_out1);
-  (* Print resulting messages for verification *)
-  List.iter (Model.messages m) ~f:(fun (role, text) -> Printf.printf "%s: %s\n" role text);
+  let result target text =
+    History_entry.create
+      ~allocator
+      (payload (Result { relation = Bound target; kind = Function; output = Text text }))
+    |> ok
+  in
+  List.iter
+    [ call first "echo1" "\"foo\""
+    ; call second "echo2" "\"bar\""
+    ; result second "result2"
+    ; result first "result1"
+    ]
+    ~f:(Chat_tui.App_stream_apply.apply_history_committed runtime throttle);
+  List.iter (Chat_tui.Model.messages model) ~f:(fun (role, text) ->
+    printf "%s: %s\n" role text);
   [%expect
-    {|tool: result1
-tool: result2|}]
+    {|
+    canonical before commit: 0
+    tool: echo1("foo")
+    tool: echo2("bar")
+    tool_output: result2
+    tool_output: result1
+  |}]
 ;;

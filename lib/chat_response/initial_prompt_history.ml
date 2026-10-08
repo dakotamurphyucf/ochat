@@ -93,7 +93,7 @@ let create ~session_id elements =
       | _ -> None)
   in
   let%map history =
-    List.map items ~f:(History_entry.create ~allocator)
+    List.map items ~f:(Openai.Responses_history.create ~allocator)
     |> Result.all
     |> Result.map_error ~f:Agent_protocol.Error.invalid_request
   in

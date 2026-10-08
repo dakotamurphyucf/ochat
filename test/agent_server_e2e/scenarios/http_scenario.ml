@@ -85,7 +85,7 @@ let raw_client ~sw env fixture =
 
 let initialize_body id =
   sprintf
-    {|{"jsonrpc":"2.0","id":%d,"method":"protocol.initialize","params":{"implementation":{"name":"agent-server-e2e-http","version":"dev"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
+    {|{"jsonrpc":"2.0","id":%d,"method":"protocol.initialize","params":{"implementation":{"name":"agent-server-e2e-http","version":"dev"},"protocol_min":{"major":2,"minor":0},"protocol_max":{"major":2,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}|}
     id
 ;;
 
@@ -146,7 +146,7 @@ let test_initialize_ping env environment =
            connection_id
            (Piaf.Headers.get rpc.response.headers "ochat-connection-id"))
         "ping changed or omitted the logical connection ID";
-      match rpc.result with
+      match rpc.result |> Support.Public_view.non_history with
       | Protocol_ping ping ->
         require ping.ready "HTTP ping did not report ready";
         require
@@ -210,7 +210,7 @@ let test_notification_omission env environment =
          let rpc =
            Http_driver.request client (Protocol_ping { payload = None }) |> protocol_ok
          in
-         match rpc.result with
+         match rpc.result |> Support.Public_view.non_history with
          | Protocol_ping ping ->
            require ping.ready "connection failed after a notification"
          | _ -> fail "post-notification ping returned the wrong result variant"))
@@ -230,6 +230,7 @@ let catalog client =
   let prompt =
     match
       (Http_driver.request client (Prompt_list prompt_request) |> protocol_ok).result
+      |> Support.Public_view.non_history
     with
     | Prompt_list page -> List.hd_exn page.items
     | _ -> fail "prompt.list returned the wrong result variant"
@@ -238,6 +239,7 @@ let catalog client =
     match
       (Http_driver.request client (Workspace_list workspace_request) |> protocol_ok)
         .result
+      |> Support.Public_view.non_history
     with
     | Workspace_list page ->
       List.find_exn page.items ~f:(fun workspace ->
@@ -286,7 +288,10 @@ let detach_session client session attachment key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match (Http_driver.request client (Session_detach request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Session_detach request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Session_detach mutation -> mutation
   | _ -> fail "session.detach returned the wrong result variant"
 ;;
@@ -300,7 +305,10 @@ let start_session client session attachment key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match (Http_driver.request client (Session_start request) |> protocol_ok).result with
+  match
+    (Http_driver.request client (Session_start request) |> protocol_ok).result
+    |> Support.Public_view.non_history
+  with
   | Session_start mutation -> mutation
   | _ -> fail "session.start returned the wrong result variant"
 ;;
@@ -319,7 +327,7 @@ let durable_sse_event env stream =
     Result.try_with (fun () -> Jsonaf.of_string frame.data)
     |> Result.map_error ~f:Exn.to_string
     |> Result.bind ~f:(fun json ->
-      Agent_protocol.Event.Durable.of_json json
+      Agent_protocol.Public.Durable.of_json json
       |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
     |> result_ok
   in
@@ -342,8 +350,8 @@ let rec collect_sse_through env stream previous through events =
 
 let snapshot_equal left right =
   String.equal
-    (Agent_protocol.Snapshot.to_json left |> Jsonaf.to_string)
-    (Agent_protocol.Snapshot.to_json right |> Jsonaf.to_string)
+    (Support.Public_view.snapshot_to_json left |> Jsonaf.to_string)
+    (Support.Public_view.snapshot_to_json right |> Jsonaf.to_string)
 ;;
 
 let test_per_session_sse env environment =
@@ -383,19 +391,24 @@ let test_per_session_sse env environment =
          let projection =
            List.fold
              events
-             ~init:(Agent_client.Projection.install_snapshot initial)
+             ~init:
+               (Agent_client.Projection.install_snapshot
+                  (Agent_protocol.Public.Snapshot.create initial |> protocol_ok))
              ~f:(fun projection event ->
                Agent_client.Projection.apply_event projection event |> protocol_ok)
          in
          let final, _ = Http_driver.get_snapshot client created.session.id |> result_ok in
-         let projected = Agent_client.Projection.snapshot projection in
+         let projected =
+           Agent_client.Projection.snapshot projection
+           |> Agent_protocol.Public.Snapshot.fields
+         in
          if not (snapshot_equal projected final)
          then
            raise_s
              [%sexp
                "SSE event projection differs from the authoritative snapshot"
-             , { projected : Agent_protocol.Snapshot.t
-               ; final : Agent_protocol.Snapshot.t
+             , { projected : Agent_protocol.Public.Snapshot.Fields.t
+               ; final : Agent_protocol.Public.Snapshot.Fields.t
                }];
          Http_driver.Sse.close stream))
 ;;
@@ -412,7 +425,7 @@ let test_rpc_while_sse_open env environment =
       let ping =
         Http_driver.request client (Protocol_ping { payload = None }) |> protocol_ok
       in
-      (match ping.result with
+      (match ping.result |> Support.Public_view.non_history with
        | Protocol_ping response -> require response.ready "RPC stalled while SSE was open"
        | _ -> fail "dual-connection ping returned the wrong result variant");
       let attachment = (Option.value_exn created.attachment).attachment in
@@ -428,7 +441,7 @@ let test_rpc_while_sse_open env environment =
       in
       (match envelope with
        | Notification { method_ = "session.event"; params } ->
-         let event = Agent_protocol.Event.Durable.of_json params |> protocol_ok in
+         let event = Agent_protocol.Public.Durable.of_json params |> protocol_ok in
          require
            (Agent_protocol.Id.Session.compare event.session_id created.session.id = 0)
            "logical SSE delivered an event for another session"
@@ -639,6 +652,7 @@ let test_malformed_body env environment =
       match
         (Http_driver.request client (Protocol_ping { payload = None }) |> protocol_ok)
           .result
+        |> Support.Public_view.non_history
       with
       | Protocol_ping ping ->
         require ping.ready "malformed body damaged the logical connection"

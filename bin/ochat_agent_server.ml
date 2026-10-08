@@ -36,6 +36,9 @@ let all_scopes =
     ; Administer_configuration
     ; Diagnostics
     ; Submit_ingress
+    ; Provider_view
+    ; Provider_manage
+    ; Provider_select
     ]
 ;;
 
@@ -91,7 +94,8 @@ let socket_listener env daemon config sw =
     ~authenticate:(fun flow _ ->
       Agent_transport_socket.Peer_credentials.authenticate_same_user
         ~scopes:all_scopes
-        flow)
+        flow
+      |> Result.map ~f:Operator_authorization.trusted_local)
     ~max_line_length:(16 * 1024 * 1024)
     ~outgoing_capacity:1_024
     ~max_attachments:
@@ -124,7 +128,7 @@ let http_listener env daemon config sw =
     ~blob_store:(Agent_server.Daemon.blob_store daemon)
     ~health:(Agent_server.Daemon.health daemon)
     ~close_connection:(Agent_server.Daemon.close_connection daemon)
-    ~authenticate:(Agent_server.Daemon.authenticate_http daemon)
+    ~authenticate:(Agent_server.Daemon.authenticate_http_actor daemon)
     ~max_body_bytes:(16 * 1024 * 1024)
     ~max_batch_size:128
     ~batch_concurrency:16
@@ -254,7 +258,7 @@ let migrate_store root ~dry_run =
         Core.exit 1))
 ;;
 
-let import_legacy config_path ~legacy_id ~prompt ~workspace =
+let import_legacy config_path ~transport_policy ~legacy_id ~prompt ~workspace =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     match load_config env config_path with
@@ -281,6 +285,12 @@ let import_legacy config_path ~legacy_id ~prompt ~workspace =
               let%bind request = legacy_import_request ~legacy_id ~prompt ~workspace in
               let%bind daemon =
                 Agent_server.Daemon.start
+                  ~options:
+                    (Inference_composition.daemon_options_default_with_policy
+                       ~transport_policy
+                       ~sw
+                       ~env
+                       ~default_model:"gpt-4.5-preview")
                   ~sw
                   ~env
                   ~config
@@ -313,13 +323,19 @@ let import_legacy config_path ~legacy_id ~prompt ~workspace =
               Core.exit 1)))
 ;;
 
-let run_daemon env config =
+let run_daemon env config ~transport_policy =
   let open Result.Let_syntax in
   let%bind () = prepare_socket env config.Agent_server.Config.server.unix_socket in
   Eio.Switch.run (fun sw ->
     let tool_dir = working_directory env in
     let%bind daemon =
       Agent_server.Daemon.start
+        ~options:
+          (Inference_composition.daemon_options_default_with_policy
+             ~transport_policy
+             ~sw
+             ~env
+             ~default_model:"gpt-4.5-preview")
         ~sw
         ~env
         ~config
@@ -340,7 +356,7 @@ let run_daemon env config =
           (Agent_server.Daemon.shutdown daemon : (unit, Agent_protocol.Error.t) result)))
 ;;
 
-let run_config config_path ~validate_only ~print_config =
+let run_config config_path ~transport_policy ~validate_only ~print_config =
   Eio_main.run (fun env ->
     match load_config env config_path with
     | Error diagnostics ->
@@ -353,7 +369,7 @@ let run_config config_path ~validate_only ~print_config =
     | Ok _ when validate_only ->
       write_line (Eio.Stdenv.stdout env) "configuration is valid"
     | Ok config ->
-      (match run_daemon env config with
+      (match run_daemon env config ~transport_policy with
        | Ok () -> ()
        | Error error ->
          report_protocol_error env error;
@@ -362,6 +378,7 @@ let run_config config_path ~validate_only ~print_config =
 
 let run
       ~config_path
+      ~inference_transport
       ~validate_only
       ~print_config
       ~inspect
@@ -371,6 +388,15 @@ let run
       ~prompt
       ~workspace
   =
+  let transport_policy =
+    Provider_runtime_host.Profile_policy.Transport_policy.of_string
+      (Option.value inference_transport ~default:"sse")
+    |> Or_error.ok_exn
+  in
+  if
+    Option.is_some inference_transport
+    && (Option.is_some inspect || Option.is_some migrate)
+  then failwith "--inference-transport is a host option, not a store-maintenance option";
   match inspect, migrate, config_path, legacy_id, prompt, workspace with
   | Some _, Some _, _, _, _, _ ->
     failwith "--inspect-store and --migrate-store are mutually exclusive"
@@ -380,9 +406,9 @@ let run
     -> migrate_store root ~dry_run
   | None, None, Some config_path, Some legacy_id, Some prompt, Some workspace
     when (not validate_only) && (not print_config) && not dry_run ->
-    import_legacy config_path ~legacy_id ~prompt ~workspace
+    import_legacy config_path ~transport_policy ~legacy_id ~prompt ~workspace
   | None, None, Some config_path, None, None, None when not dry_run ->
-    run_config config_path ~validate_only ~print_config
+    run_config config_path ~transport_policy ~validate_only ~print_config
   | None, None, None, None, None, None ->
     failwith "provide --config, --inspect-store, or --migrate-store"
   | _ -> failwith "configuration and store-maintenance flags cannot be combined"
@@ -393,6 +419,11 @@ let command =
     ~summary:"Run the Ochat durable agent daemon"
     (let open Command.Let_syntax in
      let%map_open config_path = flag "config" (optional string) ~doc:"FILE server config"
+     and inference_transport =
+       flag
+         "inference-transport"
+         (optional string)
+         ~doc:"POLICY sse (default), prefer-websocket or require-websocket for this host"
      and validate_only =
        flag "validate-only" no_arg ~doc:" validate configuration and exit"
      and print_config =
@@ -410,6 +441,7 @@ let command =
      fun () ->
        run
          ~config_path
+         ~inference_transport
          ~validate_only
          ~print_config
          ~inspect

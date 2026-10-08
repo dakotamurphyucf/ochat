@@ -7,6 +7,8 @@
   eio
   eio_main
   eio.unix
+  ochat.document_schema
+  jsonaf
   ochat.session
   ochat.history_entry)
  (inline_tests)

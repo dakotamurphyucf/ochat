@@ -1,49 +1,34 @@
 open Types
-module Res_item = Openai.Responses.Item
 
-(** Convert response items to display text and identity-bearing projections
-    without I/O. Tool-output tuples retain at most 10,000 sanitized bytes plus
-    a truncation marker; that byte cut is not grapheme-aware. This display
-    policy does not bound canonical history, specialized renderers or exports,
-    and is not secret redaction. *)
+(** Neutral presentation only. Sanitization and the 10,000-byte tool-output
+    display cut do not change canonical content or constitute security redaction. *)
+module Rendered : sig
+  type t
 
-(** [pair_of_item item] converts a supported response item into a display
-    message. Input text and call arguments use {!Util.sanitize} [~strip:true];
-    assistant, reasoning and tool output use [~strip:false].
+  val of_payload : History_entry.Payload.t -> t
+  val of_visible : Agent_protocol.Public.History.Visible.t -> t
+  val of_redaction : Agent_protocol.Public.History.Redaction.t -> t
+  val of_draft : Transcript.Draft.item_view -> t
+  val message : t -> message
 
-    @return [Some (role, content)] for items that carry textual content
-            and [None] for artefacts that cannot be shown in the chat
-            transcript (e.g. progress markers).
+  (** Exact complete known plain-message text, before display transformations.
+      Does not grant editing authority; partial/unknown/multimodal content refuses. *)
+  val copy_text : t -> string option
+end
 
-    {2 Example}
-    Mapping a complete user message into the UI format:
-    {[
-      let open Openai.Responses in
-      let item =
-        Item.Input_message
-          { Input_message.role = Input_message.User
-          ; content = [ Input_message.Text { text = "Hi"; _type = "input_text" } ]
-          ; _type = "message"
-          }
-      in
-      Chat_tui.Conversation.pair_of_item item
-    ]} *)
-val pair_of_item : Res_item.t -> message option
-
-(** [of_history items] maps {!pair_of_item} over [items], discarding
-    elements that cannot be rendered. Relative order is preserved but indices
-    need not match input indices. Use projected IDs for identity-sensitive
-    selection, editing and history deletion. *)
-val of_history : Res_item.t list -> message list
+val output_text : History_entry.Payload.Output.t -> string
+val of_history : History_entry.t list -> message list
 
 type projection
 
 val project_entries : History_entry.t list -> projection
+val project_public_entries : Agent_protocol.Public.History.t list -> projection
 
 val project_effective_entries
   :  Chat_response.Moderation.Effective_entry.t list
   -> projection
 
+val draft_row : Transcript.Draft.item_view -> Projected_message.t
 val rows : projection -> Projected_message.t list
 val messages : projection -> message list
 val index_of_id : projection -> Projected_message.Id.t -> int option

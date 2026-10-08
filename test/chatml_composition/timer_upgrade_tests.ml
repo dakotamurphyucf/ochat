@@ -160,6 +160,7 @@ let%expect_test
           let visible =
             Agent_client.Admin.get_session client before.identity.session_id
             |> protocol_ok
+            |> P.Public.Snapshot.fields
           in
           assert (
             List.exists visible.extension_status ~f:(fun status ->
@@ -173,9 +174,7 @@ let%expect_test
               (P.Schedule.to_json retained)
               (P.Schedule.to_json (List.hd_exn visible.schedules)));
           let restored =
-            Agent_session.Session_state.sexp_of_t expired
-            |> Sexp.to_string_mach
-            |> Agent_session.Session_persistence.restore_snapshot
+            Agent_server_test_support.roundtrip_state expired
             |> Background_recovery_tests.store_ok
           in
           assert (P.Subscription.equal saved (List.hd_exn restored.subscriptions));

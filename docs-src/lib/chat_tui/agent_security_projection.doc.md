@@ -24,7 +24,7 @@ open! Core
     fields while retaining client-local presentation metadata. *)
 val snapshot
   :  current:Shell_security_page_state.snapshot
-  -> Agent_protocol.Snapshot.t
+  -> Agent_protocol.Public.Snapshot.t
   -> Shell_security_page_state.snapshot
 
 (** [audit_page ~session_id page] converts a redacted daemon audit page into

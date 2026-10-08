@@ -1,0 +1,5 @@
+(library
+ (name provider_operator)
+ (public_name ochat.provider_operator)
+ (libraries ochat.operator_authorization core jsonaf uri digestif eio ochat.agent_protocol ochat.inference_host ochat.credential_registry ochat.credential_registry_model ochat.private_storage ochat.provider_secret_store ochat.provider_oauth ochat.provider_oauth_registry)
+ (preprocess (pps ppx_jane)))

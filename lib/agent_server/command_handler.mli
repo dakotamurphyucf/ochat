@@ -1,7 +1,7 @@
 open! Core
 
 type create_session =
-  command_audit:string option
+  command_audit:Document_schema.Document.t option
   -> principal:Agent_protocol.Principal.t
   -> Agent_protocol.Session.Create_request.t
   -> (Session_registry.entry, Agent_protocol.Error.t) result
@@ -32,8 +32,10 @@ val create
        (Session_registry.entry -> (unit, Agent_protocol.Error.t) result)
   -> workspace_retained:
        (Agent_session.Session_state.t -> (bool, Agent_protocol.Error.t) result)
+  -> provider_operator:Provider_operator_port.t option
   -> prepare_administration:
        (Session_registry.entry
+        -> previous:Agent_session.Session_state.t
         -> Agent_session.Session_state.t
         -> fresh_history:bool
         -> (Agent_session.Session_state.t, Agent_protocol.Error.t) result)
@@ -41,9 +43,11 @@ val create
 
 val handle
   :  t
+  -> ?actor:Operator_authorization.t
   -> context:Connection_context.t
+  -> inference_budget:Inference_query_budget.t
   -> Agent_protocol.Command.t
-  -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+  -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
 
 (** Detaches every attachment owned by the connection. Detached sessions keep
     running according to their configured liveness. *)

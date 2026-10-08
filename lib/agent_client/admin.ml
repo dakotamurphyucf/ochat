@@ -15,7 +15,7 @@ let list_sessions connection =
       ; labels = []
       }
   in
-  match Connection.request connection (Session_list request) with
+  match Connection.request_without_history connection (Session_list request) with
   | Ok (Session_list page) -> Ok page.items
   | Ok _ -> Error (invalid "unexpected session.list result")
   | Error _ as failure -> failure

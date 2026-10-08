@@ -2,6 +2,12 @@
  (name agent_session_test)
  (modules
   fixtures
+  inference_ports
+  document_adoption_tests
+  inference_target_tests
+  inference_ledger_state_tests
+  inference_tracking_tests
+  inference_transition_tests
   actor_tests
   managed_output_cursor_tests
   managed_output_page_tests
@@ -22,6 +28,7 @@
   follow_up_tests
   infrastructure_tests
   invocation_tests
+  invocation_history_validation_tests
   jobs_tests
   job_execution_tests
   job_delivery_tests
@@ -94,8 +101,10 @@
   run_chatml_registration_tests
   runtime_request_tests
   runtime_builder_tests
+  websocket_runtime_tests
   runtime_resource_tests
   runtime_lease_tests
+  runtime_retirement_tests
   runtime_activity_tests
   delegated_runtime_tests
   delegation_resource_tests
@@ -106,7 +115,7 @@
   persistence_tests
   standalone_tests
   state_tests)
- (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)
+ (libraries inference_fixture ochat.transcript core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

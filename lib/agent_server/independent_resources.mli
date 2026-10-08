@@ -12,6 +12,7 @@ type host =
       Agent_store.Delegation_store.record -> (unit, Agent_protocol.Error.t) result
   ; build_root :
       sw:Eio.Switch.t
+      -> register_tracking:(Graph_tracking.t -> unit)
       -> ancestor
       -> (Agent_session.Runtime_builder.resources, Agent_protocol.Error.t) result
   ; build_generated :
@@ -40,7 +41,10 @@ val find
 (** Retain all ancestor owners without loading execution runtimes; construct
     root-to-leaf resources under a dedicated switch, recheck current private
     ancestry and keep everything alive through [f]. Permanent owner closure or
-    caller cancellation joins the whole resource scope. This only accepts an
+    caller cancellation joins the whole resource scope. Every constructed graph
+    registers tracking before constructors; admission is sealed before this
+    switch joins and finish runs afterwards while its actor is live. Cleanup
+    visits every graph and preserves a primary typed failure or exception. This only accepts an
     explicitly authorized Linked Independent admission. Child execution must
     still install Delegation_authority for each effect/disclosure boundary. *)
 val with_chain

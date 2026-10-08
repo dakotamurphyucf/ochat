@@ -325,3 +325,115 @@ let of_json json =
   let%map () = validate t in
   t
 ;;
+
+module Storage = struct
+  let nullable decode = function
+    | `Null -> Ok None
+    | json -> Result.map (decode json) ~f:Option.some
+  ;;
+
+  let option encode value = Option.value_map value ~default:`Null ~f:encode
+
+  let to_json (t : t) =
+    let c = t.context in
+    `Object
+      ([ "id", Id.Subscription.to_json c.id
+       ; "session_id", Id.Session.to_json c.session_id
+       ; "generation", `Number (Int.to_string c.generation)
+       ; "invocation_id", Id.Invocation.to_json c.invocation_id
+       ; "kind", `String c.kind
+       ; "created_at", Timestamp.to_json c.created_at
+       ; "deadline", Timestamp.to_json c.deadline
+       ; "wake", Completion.wake_to_json c.wake
+       ; "epoch", `Number (Int.to_string t.epoch)
+       ; ( "source"
+         , option
+             (fun s ->
+                `Object
+                  [ "script_id", `String s.Invocation.script_id
+                  ; "source_sha256", `String s.source_sha256
+                  ])
+             c.source )
+       ; ( "parent_job"
+         , option
+             (fun (id, attempt) ->
+                `Object
+                  [ "job_id", Id.Job.to_json id
+                  ; "attempt", `Number (Int.to_string attempt)
+                  ])
+             c.parent_job )
+       ; "ingress_capability", option Id.Capability.to_json c.ingress_capability
+       ; "timer_id", option Id.Schedule.to_json t.timer_id
+       ; "job_id", option Id.Job.to_json t.job_id
+       ; "result", option Completion.to_json t.result
+       ; "completed_at", option Timestamp.to_json t.completed_at
+       ]
+       @ Option.to_list
+           (Option.map c.completion_schema ~f:(fun schema -> "completion_schema", schema))
+      )
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let get name decode = Json_codec.required_as fields name decode in
+    let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
+    let%bind id = get "id" Id.Subscription.of_json in
+    let%bind session_id = get "session_id" Id.Session.of_json in
+    let%bind generation = get "generation" integer in
+    let%bind invocation_id = get "invocation_id" Id.Invocation.of_json in
+    let%bind kind = get "kind" Json_codec.string in
+    let%bind created_at = get "created_at" Timestamp.of_json in
+    let%bind deadline = get "deadline" Timestamp.of_json in
+    let%bind wake = get "wake" Completion.wake_of_json in
+    let%bind source =
+      get
+        "source"
+        (nullable (fun json ->
+           let%bind fields = Json_codec.fields json in
+           let%bind script_id =
+             Json_codec.required_as fields "script_id" Json_codec.string
+           in
+           let%map source_sha256 =
+             Json_codec.required_as fields "source_sha256" Json_codec.string
+           in
+           Invocation.{ script_id; source_sha256 }))
+    in
+    let%bind parent_job =
+      get
+        "parent_job"
+        (nullable (fun json ->
+           let%bind fields = Json_codec.fields json in
+           let%bind id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+           let%map attempt = Json_codec.required_as fields "attempt" integer in
+           id, attempt))
+    in
+    let completion_schema = Json_codec.optional fields "completion_schema" in
+    let%bind ingress_capability =
+      get "ingress_capability" (nullable Id.Capability.of_json)
+    in
+    let context =
+      { id
+      ; session_id
+      ; generation
+      ; invocation_id
+      ; kind
+      ; created_at
+      ; deadline
+      ; wake
+      ; source
+      ; parent_job
+      ; completion_schema
+      ; ingress_capability
+      }
+    in
+    let%bind epoch = get "epoch" integer in
+    let%bind timer_id = get "timer_id" (nullable Id.Schedule.of_json) in
+    let%bind job_id = get "job_id" (nullable Id.Job.of_json) in
+    let%bind result = get "result" (nullable Completion.of_json) in
+    let%bind completed_at = get "completed_at" (nullable Timestamp.of_json) in
+    let t = { context; epoch; timer_id; job_id; result; completed_at } in
+    let%map () = validate t in
+    t
+  ;;
+end

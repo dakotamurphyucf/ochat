@@ -4,14 +4,16 @@
  (modules
   transport
   projection
+  live_projection
   connection
   catalog
   admin
   in_memory
   ingress
+  inference_views
   blob_download
   session_handle
   reconnect)
- (libraries core eio base64 digestif ochat.agent_protocol)
+ (libraries core eio base64 digestif ochat.agent_protocol ochat.transcript ochat.document_schema)
  (preprocess
   (pps ppx_jane)))

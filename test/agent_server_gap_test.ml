@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 let ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -10,8 +19,88 @@ let request = Agent_client.Connection.request
 
 let snapshot connection session_id =
   match request connection (Session_get { session_id; history = None }) |> ok with
-  | Agent_protocol.Method_result.Session_get value -> value
+  | Agent_protocol.Public.Result.Session_get value ->
+    Agent_protocol.Public.Snapshot.fields value
   | _ -> failwith "expected snapshot"
+;;
+
+(* Private fixtures are constructed from known authored content, never by
+   converting a public Visible/Redacted body into canonical history. *)
+let private_fixture (fields : Agent_protocol.Public.Snapshot.Fields.t) =
+  let semantic =
+    History_entry.Payload.Semantic.create
+      (Message
+         { form = Input
+         ; role = Developer
+         ; content =
+             [ Text { text = "private fixture"; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:History_entry.Payload.Metadata.empty
+    |> Result.ok_or_failwith
+  in
+  let id =
+    History_entry.Id.create ~namespace:"private-fixture" ~sequence:0
+    |> Result.ok_or_failwith
+  in
+  let entry =
+    Agent_protocol.History.
+      { id
+      ; role = System
+      ; kind = Message
+      ; payload = History_entry.Payload.to_json (History_entry.Payload.authored semantic)
+      ; provenance = Canonical
+      ; redacted = false
+      }
+  in
+  let history =
+    Agent_protocol.History.Window.
+      { entries = [ entry ]
+      ; previous_cursor = None
+      ; next_cursor = None
+      ; reached_start = true
+      ; reached_end = true
+      ; structurally_complete = true
+      }
+  in
+  Agent_protocol.Snapshot.
+    { session = fields.session
+    ; canonical_history = history
+    ; archived_revisions = fields.archived_revisions
+    ; effective_history = Some history
+    ; deferred_entries = []
+    ; permissions = fields.permissions
+    ; grants = fields.grants
+    ; jobs = fields.jobs
+    ; extension_status = fields.extension_status
+    ; schedules = fields.schedules
+    ; active_tool_calls = []
+    ; active_agent_calls = []
+    ; halted = fields.halted
+    ; halt_reason = fields.halt_reason
+    ; failure = fields.failure
+    ; revision = fields.revision
+    ; latest_event_sequence = fields.latest_event_sequence
+    }
+;;
+
+let install fields =
+  Agent_protocol.Public.Snapshot.create fields
+  |> ok
+  |> Agent_client.Projection.install_snapshot
+;;
+
+let projection_fields projection =
+  Agent_client.Projection.snapshot projection |> Agent_protocol.Public.Snapshot.fields
+;;
+
+let request_without_history = Agent_client.Connection.request_without_history
+
+let non_history = function
+  | Agent_protocol.Public.Result.Non_history value ->
+    Agent_protocol.Public.Result.Non_history.value value
+  | Session_get _ | Session_attach _ | Session_create _ | Private_provider_challenge _ ->
+    failwith "expected non-history result"
 ;;
 
 let with_host ?(prompt = "<developer>Offline gap regression.</developer>") f =
@@ -30,6 +119,7 @@ let with_host ?(prompt = "<developer>Offline gap regression.</developer>") f =
         Eio.Switch.run (fun sw ->
           let host =
             Agent_server.Embedded.start
+              ~daemon_options:(inference_options ())
               ~sw
               ~env
               { prompt_file
@@ -135,7 +225,7 @@ let attach_reader host session_id =
     |> ok
   in
   match attached with
-  | Agent_protocol.Method_result.Session_attach value -> reader, value.attachment.id
+  | Agent_protocol.Public.Result.Session_attach value -> reader, value.attachment.id
   | _ -> failwith "expected attachment"
 ;;
 
@@ -258,7 +348,7 @@ let%expect_test "every read-only mutation is rejected before stopped runtime pre
            raise_s
              [%sexp
                (command : Agent_protocol.Command.t)
-             , (result : (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result)]);
+             , (result : (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result)]);
         let after = snapshot writer session_id in
         assert (Int64.equal before.revision after.revision);
         assert (Int64.equal before.latest_event_sequence after.latest_event_sequence);
@@ -315,10 +405,15 @@ let%expect_test "creation cannot attach without transcript scope" =
      | Error error ->
        assert (Agent_protocol.Error.equal_code error.code Permission_denied)
      | Ok _ -> failwith "creation attached without transcript scope");
+    let private_snapshot = private_fixture initial in
     let projected =
       Agent_server.Principal_projection.snapshot
         principal
-        { initial with deferred_entries = initial.canonical_history.entries }
+        { private_snapshot with
+          deferred_entries = private_snapshot.canonical_history.entries
+        }
+      |> ok
+      |> Agent_protocol.Public.Snapshot.fields
     in
     assert (List.is_empty projected.canonical_history.entries);
     assert (List.is_empty projected.deferred_entries);
@@ -327,6 +422,139 @@ let%expect_test "creation cannot attach without transcript scope" =
       "creation attachment denied; cached transcript and deferred entries omitted");
   [%expect
     {| creation attachment denied; cached transcript and deferred entries omitted |}]
+;;
+
+let%expect_test "attachment mode checks cover original requests and cached retries" =
+  List.iter [ true; false ] ~f:(fun attached_create ->
+    with_host (fun env root host ->
+      let module P = Agent_protocol in
+      let module E = Agent_server.Embedded in
+      let module C = Agent_server.Connection_context in
+      let full = E.principal host in
+      let contexts = ref [] in
+      let context principal name =
+        let context =
+          C.create
+            ~connection_id:name
+            ~principal
+            ~transport:In_memory
+            ~max_attachments:8
+            ~publish_notification:(fun (_ : P.Envelope.t) -> ())
+        in
+        C.mark_initialized context;
+        contexts := context :: !contexts;
+        context
+      in
+      Exn.protect
+        ~finally:(fun () -> List.iter !contexts ~f:(E.close_connection host))
+        ~f:(fun () ->
+          let owner = context full "attachment-owner" in
+          let dispatch context command =
+            Agent_server.Dispatcher.dispatch_command (E.dispatcher host) ~context command
+          in
+          let initial = snapshot (E.connection host) (E.session_id host) in
+          let spec =
+            { initial.session.spec with
+              execution_host = Daemon
+            ; liveness = Owner_bound { disconnect_grace_ms = 60000; stop_mode = Cancel }
+            }
+          in
+          let create_request =
+            P.Session.Create_request.
+              { spec
+              ; requested_mode = (if attached_create then Some Owner_read_write else None)
+              ; subscribe = false
+              ; idempotency_key = key "scope-retry-create"
+              }
+          in
+          let created =
+            match dispatch owner (Session_create create_request) |> ok with
+            | P.Public.Result.Session_create value -> value
+            | _ -> failwith "expected created session"
+          in
+          let session_id = created.session.id in
+          let command, accepted, with_key =
+            if attached_create
+            then (
+              let attached = Option.value_exn created.attachment in
+              assert (Option.is_some attached.reclaim_token);
+              assert (Option.is_some attached.attachment.owner_lease);
+              ( P.Command.Session_create create_request
+              , P.Public.Result.Session_create created
+              , fun idempotency_key ->
+                  P.Command.Session_create { create_request with idempotency_key } ))
+            else (
+              let attach_request =
+                P.Session.Attach_request.
+                  { session_id
+                  ; requested_mode = Owner_read_write
+                  ; subscribe = false
+                  ; after_sequence = None
+                  ; reclaim_token = None
+                  ; idempotency_key = key "scope-retry-attach"
+                  }
+              in
+              let command = P.Command.Session_attach attach_request in
+              let accepted = dispatch owner command |> ok in
+              (match accepted with
+               | P.Public.Result.Session_attach attached ->
+                 assert (Option.is_some attached.reclaim_token);
+                 assert (Option.is_some attached.attachment.owner_lease)
+               | _ -> failwith "expected owner attachment");
+              ( command
+              , accepted
+              , fun idempotency_key ->
+                  P.Command.Session_attach { attach_request with idempotency_key } ))
+          in
+          let snapshot_json () =
+            dispatch owner (Session_get { session_id; history = None })
+            |> ok
+            |> P.Public.Result.to_json
+          in
+          let before = snapshot_json () in
+          let replay = dispatch owner command |> ok in
+          assert (
+            Jsonaf.exactly_equal
+              (P.Public.Result.to_json accepted)
+              (P.Public.Result.to_json replay));
+          assert (Jsonaf.exactly_equal before (snapshot_json ()));
+          let sessions = Eio.Path.(Eio.Stdenv.fs env / root / "store/sessions") in
+          let before_sessions =
+            Eio.Path.read_dir sessions |> List.sort ~compare:String.compare
+          in
+          List.iteri
+            [ [ P.Scope.Create_sessions ]
+            ; [ Create_sessions; View_session_transcript; Own_sessions ]
+            ; [ Create_sessions; View_session_transcript; Send_messages ]
+            ]
+            ~f:(fun index scopes ->
+              let narrowed = { full with scopes = P.Scope.Set.of_list scopes } in
+              let context = context narrowed ("narrowed-" ^ Int.to_string index) in
+              let denied command =
+                match dispatch context command with
+                | Error error when P.Error.equal_code error.code Permission_denied -> ()
+                | _ -> failwith "narrowed principal received an attachment result"
+              in
+              denied command;
+              denied (with_key (key ("fresh-denied-" ^ Int.to_string index)));
+              assert (List.is_empty (C.attachments context));
+              assert (Jsonaf.exactly_equal before (snapshot_json ()));
+              [%test_eq: string list]
+                before_sessions
+                (Eio.Path.read_dir sessions |> List.sort ~compare:String.compare));
+          print_endline
+            (if attached_create
+             then
+               "create: authorized retry exact; narrowed original/retry denied without \
+                changes"
+             else
+               "attach: authorized retry exact; narrowed original/retry denied without \
+                changes"))));
+  [%expect
+    {|
+    create: authorized retry exact; narrowed original/retry denied without changes
+    attach: authorized retry exact; narrowed original/retry denied without changes
+    |}]
 ;;
 
 let%expect_test
@@ -353,7 +581,7 @@ let%expect_test
         ; Moderator_notification
         ]
     in
-    let projection = ref (Agent_client.Projection.install_snapshot initial) in
+    let projection = ref (install initial) in
     List.iteri kinds ~f:(fun index kind ->
       let event =
         Agent_protocol.Event.Durable.
@@ -366,17 +594,19 @@ let%expect_test
           ; payload = `Object [ "secret", `String "must-not-leak" ]
           }
       in
-      let hidden = Agent_server.Principal_projection.durable reader event in
-      assert (Agent_protocol.Event.Durable.equal_visibility hidden.visibility Hidden);
-      assert (String.equal (Jsonaf.to_string hidden.payload) "{}");
+      let hidden = Agent_server.Principal_projection.durable reader event |> ok in
       assert (
-        Agent_protocol.Event.Durable.equal_visibility
-          (Agent_server.Principal_projection.durable full event).visibility
-          Full);
+        match hidden.body with
+        | Hidden -> true
+        | Full _ | Filtered _ -> false);
+      (* Protected malformed data is hidden from an unauthorized reader, while
+         an authorized projection must reject malformed typed payloads. *)
+      if not (Agent_protocol.Event.Durable.equal_kind kind Moderator_notification)
+      then assert (Result.is_error (Agent_server.Principal_projection.durable full event));
       projection := Agent_client.Projection.apply_event !projection hidden |> ok);
     assert (
       Int64.equal
-        (Agent_client.Projection.snapshot !projection).latest_event_sequence
+        (projection_fields !projection).latest_event_sequence
         Int64.(initial.latest_event_sequence + of_int (List.length kinds)));
     print_endline "9 protected event kinds hidden; contiguous client projection");
   [%expect {| 9 protected event kinds hidden; contiguous client projection |}]
@@ -386,7 +616,7 @@ let schedules snapshot count =
   List.init count ~f:(fun index ->
     Agent_protocol.Schedule.
       { id = Agent_protocol.Id.Schedule.of_string (sprintf "sch_gap_%03d" index) |> ok
-      ; session_id = snapshot.Agent_protocol.Snapshot.session.id
+      ; session_id = snapshot.Agent_protocol.Public.Snapshot.Fields.session.id
       ; generation = 0
       ; payload = `String (Int.to_string index)
       ; created_at = snapshot.session.created_at
@@ -440,7 +670,7 @@ let%expect_test
            })
       |> ok
       |> function
-      | Agent_protocol.Method_result.Session_attach value -> value
+      | Agent_protocol.Public.Result.Session_attach value -> value
       | _ -> failwith "attach"
     in
     let attached = attach None (key "restricted-attach") in
@@ -457,12 +687,12 @@ let%expect_test
             ; idempotency_key = key "private-schedule"
             })
        |> ok
-       : Agent_protocol.Method_result.t);
+       : Agent_protocol.Public.Result.t);
     let projected = dispatch (Session_get { session_id; history = None }) |> ok in
     assert (
       not
         (String.is_substring
-           (Agent_protocol.Method_result.to_json projected |> Jsonaf.to_string)
+           (Agent_protocol.Public.Result.to_json projected |> Jsonaf.to_string)
            ~substring:marker));
     let replay = attach (Some initial.latest_event_sequence) (key "restricted-replay") in
     (match replay.replay with
@@ -470,7 +700,10 @@ let%expect_test
        assert (
          List.exists values ~f:(fun event ->
            Agent_protocol.Event.Durable.equal_kind event.kind Schedule_created
-           && Agent_protocol.Event.Durable.equal_visibility event.visibility Hidden))
+           &&
+           match event.body with
+           | Hidden -> true
+           | Full _ | Filtered _ -> false))
      | _ -> failwith "expected replay");
     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
       while Queue.is_empty events do
@@ -488,6 +721,7 @@ let%expect_test
         (Session_export
            { session_id; attachment_id; format = Json; revision = None; history = None })
       |> ok
+      |> non_history
       |> function
       | Agent_protocol.Method_result.Session_export value -> value.blob
       | _ -> failwith "export"
@@ -517,6 +751,7 @@ let%expect_test
            ; history = None
            })
       |> ok
+      |> non_history
       |> function
       | Agent_protocol.Method_result.Session_export value -> value.blob
       | _ -> failwith "export"
@@ -531,6 +766,7 @@ let%expect_test
            ; max_bytes = 65536
            })
       |> ok
+      |> non_history
       |> function
       | Agent_protocol.Method_result.Blob_read value -> value
       | _ -> failwith "chunk"
@@ -619,8 +855,12 @@ let%expect_test
           ; redacted = false
           })
     in
+    let initial = private_fixture initial in
     let initial =
-      { initial with canonical_history = { initial.canonical_history with entries } }
+      { initial with
+        canonical_history = { initial.canonical_history with entries }
+      ; effective_history = None
+      }
     in
     let service = Agent_server.Pagination.create () in
     let owner = principal [ View_session_transcript; View_security_state ] in
@@ -675,7 +915,8 @@ let%expect_test "RPC history windows select canonical or effective history expli
            { session_id; history = Some { position = Tail 2; limit = 2; effective } })
       |> ok
       |> function
-      | Agent_protocol.Method_result.Session_get value -> value
+      | Agent_protocol.Public.Result.Session_get value ->
+        Agent_protocol.Public.Snapshot.fields value
       | _ -> failwith "expected snapshot"
     in
     let canonical = (get false).canonical_history in
@@ -711,34 +952,44 @@ let%expect_test
             ])
       |> ok
     in
-    let initial = { initial with extension_status = [ status ] } in
+    let initial = { (private_fixture initial) with extension_status = [ status ] } in
     List.iter
       Agent_protocol.Scope.
         [ []; [ Send_messages ]; [ View_session_transcript ]; [ View_security_state ] ]
       ~f:(fun scopes ->
         let reader = principal scopes in
         let allowed = Agent_protocol.Principal.has_scope reader View_security_state in
-        let projected = Agent_server.Principal_projection.snapshot reader initial in
-        assert (Bool.equal (not (List.is_empty projected.extension_status)) allowed);
+        let projected = Agent_server.Principal_projection.snapshot reader initial |> ok in
+        let fields = Agent_protocol.Public.Snapshot.fields projected in
+        assert (Bool.equal (not (List.is_empty fields.extension_status)) allowed);
+        let revision = Int64.(initial.revision + 1L) in
+        let latest_event_sequence = Int64.(initial.latest_event_sequence + 1L) in
+        let updated =
+          { initial with
+            revision
+          ; latest_event_sequence
+          ; session = { initial.session with revision; latest_event_sequence }
+          }
+        in
         let event =
           Agent_protocol.Event.Durable.of_payload
             ~session_id:initial.session.id
-            ~sequence:Int64.(initial.latest_event_sequence + 1L)
-            ~revision:Int64.(initial.revision + 1L)
+            ~sequence:latest_event_sequence
+            ~revision
             ~timestamp:initial.session.updated_at
-            (Session_updated initial.session)
+            (Session_updated updated.session)
           |> fun event ->
           Agent_protocol.Event.Durable.with_extension_status event [ status ]
         in
         List.iter
-          [ event; Agent_protocol.Event.Durable.with_replacement_snapshot event initial ]
+          [ event; Agent_protocol.Event.Durable.with_replacement_snapshot event updated ]
           ~f:(fun event ->
-            let event = Agent_server.Principal_projection.durable reader event in
+            let event = Agent_server.Principal_projection.durable reader event |> ok in
             let projection = Agent_client.Projection.install_snapshot projected in
             let result =
               Agent_client.Projection.apply_event projection event
               |> ok
-              |> Agent_client.Projection.snapshot
+              |> projection_fields
             in
             assert (Bool.equal (not (List.is_empty result.extension_status)) allowed);
             if not allowed
@@ -746,7 +997,7 @@ let%expect_test
               assert (
                 not
                   (String.is_substring
-                     (Jsonaf.to_string event.payload)
+                     (Agent_protocol.Public.Durable.to_json event |> Jsonaf.to_string)
                      ~substring:"dlv_filtered")))));
   print_endline
     "four scope combinations agree across snapshot, live/replay and replacement paths";
@@ -766,8 +1017,8 @@ let%expect_test
     let query =
       Agent_protocol.Initialize.Request.create
         ~implementation
-        ~protocol_min:Agent_protocol.Version.initial
-        ~protocol_max:Agent_protocol.Version.initial
+        ~protocol_min:Agent_protocol.Version.current
+        ~protocol_max:Agent_protocol.Version.current
         ~features:Agent_protocol.Extension_capabilities.known_features
         ~event_encodings:[ Json ]
         ~max_inbound_event_bytes:65536
@@ -775,7 +1026,7 @@ let%expect_test
       |> ok
     in
     let result =
-      match request reader (Protocol_initialize query) |> ok with
+      match request_without_history reader (Protocol_initialize query) |> ok with
       | Agent_protocol.Method_result.Protocol_initialize result -> result
       | _ -> failwith "expected initialization"
     in

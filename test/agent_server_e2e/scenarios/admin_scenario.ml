@@ -22,8 +22,12 @@ let protocol_ok = function
     raise_s [%sexp "protocol operation failed", (error : Agent_protocol.Error.t)]
 ;;
 
-let request connection command =
+let request_public connection command =
   Agent_client.Connection.request connection command |> protocol_ok
+;;
+
+let request connection command =
+  Agent_client.Connection.request_without_history connection command |> protocol_ok
 ;;
 
 let idempotency_key value = Agent_protocol.Idempotency_key.of_string value |> protocol_ok
@@ -163,7 +167,7 @@ let create_request ?(start_immediately = false) connection ~key =
 
 let session_of_created created =
   let attachment =
-    Option.value_exn created.Agent_protocol.Method_result.Create.attachment
+    Option.value_exn created.Agent_protocol.Public.Result.Create.attachment
   in
   { id = created.session.id
   ; attachment_id = attachment.attachment.id
@@ -174,14 +178,14 @@ let session_of_created created =
 ;;
 
 let create_session connection ~key =
-  match request connection (Session_create (create_request connection ~key)) with
+  match request_public connection (Session_create (create_request connection ~key)) with
   | Session_create created -> session_of_created created
   | _ -> fail "session.create returned the wrong result variant"
 ;;
 
 let get_session connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot.session
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> (Agent_protocol.Public.Snapshot.fields snapshot).session
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -398,8 +402,8 @@ let test_cancel_operation env environment =
 ;;
 
 let get_snapshot connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "expected session snapshot"
 ;;
 
@@ -459,7 +463,7 @@ let check_corrupt_archive
     ~f:(fun () ->
       Eio.Path.save ~create:(`Or_truncate 0o600) file "corrupted fixture archive";
       let result =
-        Agent_client.Connection.request
+        Agent_client.Connection.request_without_history
           connection
           (Session_export
              { session_id = session.id
@@ -484,7 +488,7 @@ let test_compact env environment =
       let session = create_session connection ~key:"admin:compact:create" in
       let original =
         (get_snapshot connection session.id).canonical_history.entries
-        |> List.map ~f:Agent_protocol.History.entry_to_json
+        |> List.map ~f:Agent_protocol.Public.History.to_json
         |> fun entries -> `Array entries
       in
       let compacted =
@@ -596,7 +600,7 @@ let test_export env environment =
 
 let history_json connection session =
   (get_snapshot connection session.id).canonical_history.entries
-  |> List.map ~f:Agent_protocol.History.entry_to_json
+  |> List.map ~f:Agent_protocol.Public.History.to_json
   |> fun entries -> `Array entries
 ;;
 

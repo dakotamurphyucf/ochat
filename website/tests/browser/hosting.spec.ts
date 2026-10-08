@@ -79,9 +79,10 @@ for (const theme of ['light', 'dark'] as const) {
   test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
     page,
   }) => {
-    // Each full axe scan traverses ~19,000 syntax-highlighted DOM elements.
-    // Give each theme its own test budget; retain the complete scan and rules.
-    test.slow();
+    // This reference has ~35,000 elements; its Firefox audit case took
+    // ~85s before the latest ~7% DOM growth. Keep every assertion and the whole
+    // page scan, with a separate bound for this workload and CI variation.
+    test.setTimeout(150_000);
     await page.setViewportSize({ width: 320, height: 800 });
     await page.emulateMedia({ colorScheme: theme });
     await page.goto('/docs/reference/agent-server/protocol-types/#session');

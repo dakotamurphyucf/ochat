@@ -20,7 +20,7 @@ let%expect_test
             (History_appended [])
         in
         (* The actor commits after a reader's snapshot and before its await. *)
-        Log.append log [ event 1L ];
+        Log.append log [ event 1L ] |> protocol_ok;
         Eio.Promise.await before_read;
         let next = Log.changed log in
         assert (Option.is_none (Eio.Promise.peek next));
@@ -43,9 +43,9 @@ let%expect_test
           Eio.Fiber.fork ~sw (fun () ->
             Eio.Promise.await next;
             Eio.Promise.resolve resolved ()));
-        Log.append log [];
+        Log.append log [] |> protocol_ok;
         assert (Option.is_none (Eio.Promise.peek next));
-        Log.append log [ event 2L ];
+        Log.append log [ event 2L ] |> protocol_ok;
         List.iter results ~f:(fun (result, _) -> Eio.Promise.await result);
         (* Neither another reader nor replay-window eviction consumes the pulse. *)
         Eio.Promise.await next;

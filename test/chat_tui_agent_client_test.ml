@@ -94,6 +94,10 @@ let%test_unit "security tabs retain spacing and audit details distinguish record
   done
 ;;
 
+let equal_position (left_index, left_label) (right_index, right_label) =
+  Int.equal left_index right_index && String.equal left_label right_label
+;;
+
 let audit_row_positions screen =
   String.split_lines screen
   |> List.filter_mapi ~f:(fun index line ->
@@ -108,7 +112,7 @@ let%test_unit "a fitting audit list stays fixed through selection and wraparound
   assert (List.length initial = 3);
   List.iter [ 1; 1; 1; -1; -1; -1 ] ~f:(fun delta ->
     Chat_tui.Model.move_shell_audit_selection model delta;
-    assert (Poly.equal (positions ()) initial))
+    assert (List.equal equal_position (positions ()) initial))
 ;;
 
 let%test_unit "audit overflow scrolls only at the edge and restores on resize" =
@@ -120,14 +124,14 @@ let%test_unit "audit overflow scrolls only at the edge and restores on resize" =
   assert (visible > 2 && visible < 24);
   for _ = 1 to visible - 1 do
     Chat_tui.Model.move_shell_audit_selection model 1;
-    assert (Poly.equal (positions size) initial)
+    assert (List.equal equal_position (positions size) initial)
   done;
   Chat_tui.Model.move_shell_audit_selection model 1;
   let shifted = positions size in
   assert (List.length shifted = visible);
   assert (String.equal (snd (List.hd_exn shifted)) "#122");
   Chat_tui.Model.move_shell_audit_selection model (-1);
-  assert (Poly.equal (positions size) shifted);
+  assert (List.equal equal_position (positions size) shifted);
   let expanded = positions (150, 110) in
   assert (List.length expanded = 24);
   assert (String.equal (snd (List.hd_exn expanded)) "#123");
@@ -140,9 +144,9 @@ let%test_unit "audit overflow scrolls only at the edge and restores on resize" =
   assert (List.length last = visible);
   assert (String.equal (snd (List.last_exn last)) "#100");
   Chat_tui.Model.move_shell_audit_selection model 1;
-  assert (Poly.equal (positions size) initial);
+  assert (List.equal equal_position (positions size) initial);
   Chat_tui.Model.move_shell_audit_selection model (-1);
-  assert (Poly.equal (positions size) last)
+  assert (List.equal equal_position (positions size) last)
 ;;
 
 let%test_unit "actual agent permission prompt renders multiline details and choices" =
@@ -150,9 +154,12 @@ let%test_unit "actual agent permission prompt renders multiline details and choi
   let snapshot = Chat_tui.Agent_projection.snapshot (projection "permission") in
   let projection =
     Agent_client.Projection.install_snapshot
-      { snapshot with permissions = [ permission () ] }
+      (Agent_protocol.Public.Snapshot.create
+         { (Agent_protocol.Public.Snapshot.fields snapshot) with
+           permissions = [ permission () ]
+         }
+       |> protocol_ok)
     |> Chat_tui.Agent_projection.of_client_projection
-    |> protocol_ok
   in
   ignore
     (Chat_tui.Agent_permission_view.sync model ~current:None projection
@@ -216,7 +223,8 @@ let%expect_test "agent projection decodes canonical history with stable identity
   let projection = projection "hello from daemon" in
   let ids =
     Chat_tui.Agent_projection.canonical_history projection
-    |> List.map ~f:(fun entry -> History_entry.id entry |> History_entry.Id.to_string)
+    |> List.map ~f:(fun entry ->
+      entry.Agent_protocol.Public.History.id |> History_entry.Id.to_string)
   in
   print_s
     [%sexp
@@ -243,113 +251,139 @@ let%expect_test "projection replacement preserves the local draft" =
       ; history = (List.length (Chat_tui.Model.history_items model) : int)
       ; damage = (damage_name damage : string)
       }];
-  [%expect {| ((draft "unsent draft") (history 1) (damage visible_damage)) |}]
+  [%expect {| ((draft "unsent draft") (history 0) (damage visible_damage)) |}]
 ;;
 
-let trace_operation = Agent_protocol.Id.Operation.of_string "op_tui_trace" |> protocol_ok
+module P = Agent_protocol
+module Payload = History_entry.Payload
+
+let trace_operation = P.Id.Operation.of_string "op_tui_trace" |> protocol_ok
 
 let trace_id =
   History_entry.Id.create ~namespace:"tui-agent" ~sequence:1 |> Result.ok_or_failwith
 ;;
 
-let trace_event sequence kind payload : Agent_protocol.Event.Recoverable.t =
-  { session_id
-  ; operation_id = trace_operation
-  ; operation_sequence = Int64.of_int sequence
-  ; anchor_sequence = 1L
-  ; timestamp
-  ; kind
-  ; payload
-  }
+let trace_scope =
+  Transcript.Scope.create
+    ~source:(Transcript.Source_id.of_string "tui-trace" |> Result.ok_or_failwith)
+    ~attempt:(Transcript.Attempt_id.of_string "attempt" |> Result.ok_or_failwith)
+    ~relation:Root
+  |> Result.ok_or_failwith
 ;;
 
-let trace_stream sequence kind event =
-  trace_event
-    sequence
-    kind
-    (`Object
-        [ "entry_id", `String (History_entry.Id.to_string trace_id)
-        ; "parent_call_id", `Null
-        ; "event", Openai.Responses.Response_stream.jsonaf_of_t event
-        ])
+let trace_item =
+  Transcript.Item.create
+    ~scope:trace_scope
+    ~id:(Transcript.Item_id.of_string "reasoning" |> Result.ok_or_failwith)
+    ~entry_id:(Some trace_id)
+    ~header:(Some Reasoning)
+    ~call_name:None
+  |> Result.ok_or_failwith
 ;;
 
-let trace_reasoning text : Openai.Responses.Reasoning.t =
-  { id = "trace-reasoning"
-  ; _type = "reasoning"
-  ; status = Some "completed"
-  ; summary = [ { text; _type = "summary_text" } ]
-  }
+let trace_part =
+  Transcript.Part.create
+    ~item:trace_item
+    ~id:(Transcript.Part_id.of_string "summary" |> Result.ok_or_failwith)
+    ~index:None
+    ~kind:Reasoning_summary
+  |> Result.ok_or_failwith
+;;
+
+let activity_key =
+  P.Activity.Key.create
+    ~scope:(Transcript.Scope.key trace_scope)
+    ~call_alias:"fork-call"
+    ~parent:None
+  |> protocol_ok
+;;
+
+let activity_descriptor =
+  P.Activity.Tool.descriptor
+    activity_key
+    ~call_entry_id:None
+    ~name:"fork"
+    ~kind:Function
+    ~input:"{}"
+    ~classification:(Some Subagent)
+  |> protocol_ok
+;;
+
+let operation =
+  P.Operation.
+    { id = trace_operation
+    ; generation = 0
+    ; kind = Turn User_submit
+    ; state = Running
+    ; started_at = timestamp
+    ; updated_at = timestamp
+    }
+;;
+
+let with_fields snapshot ~f =
+  P.Public.Snapshot.create (f (P.Public.Snapshot.fields snapshot)) |> protocol_ok
+;;
+
+let trace_event sequence payload =
+  P.Event.Recoverable.create
+    ~session_id
+    ~operation_id:trace_operation
+    ~operation_sequence:(Int64.of_int sequence)
+    ~anchor_sequence:1L
+    ~timestamp
+    ~invocation_id:None
+    ~parent_invocation_id:None
+    payload
+  |> protocol_ok
+;;
+
+let observation view =
+  Transcript.Stream.create view ~limits:Transcript.Admission.default
+  |> Result.ok_or_failwith
 ;;
 
 let trace_events () =
-  let added =
-    Openai.Responses.Response_stream.Output_item_added
-      { item = Reasoning (trace_reasoning "")
-      ; output_index = 0
-      ; type_ = "response.output_item.added"
-      }
-  in
-  let delta =
-    Openai.Responses.Response_stream.Reasoning_summary_text_delta
-      { item_id = "trace-reasoning"
-      ; output_index = 0
-      ; summary_index = 0
-      ; delta = "think"
-      ; type_ = "response.reasoning_summary_text.delta"
-      }
-  in
-  [ trace_stream 1 History_correlated_stream added
-  ; trace_stream 2 Sourced_stream added
-  ; trace_stream 3 History_correlated_stream delta
-  ; trace_stream 4 Sourced_stream delta
+  [ trace_event 1 (Transcript (observation (Item_announced trace_item)))
+  ; trace_event 2 (Transcript (observation (Part_announced trace_part)))
+  ; trace_event
+      3
+      (Transcript
+         (observation (Changed { target = Content trace_part; change = Append "think" })))
+  ; trace_event 4 (Tool_activity (Started activity_descriptor))
   ; trace_event
       5
-      Tool_started
-      (`Object
-          [ "call_id", `String "fork-call"
-          ; "name", `String "fork"
-          ; "kind", `String "function"
-          ; "payload", `String "{}"
-          ; "agent_page_kind", `String "subagent"
-          ])
-  ; trace_event
-      6
-      Tool_progress
-      (`Object
-          [ "call_id", `String "fork-call"
-          ; ( "progress"
-            , `Object
-                [ "channel", `String "assistant"
-                ; "update", `String "append"
-                ; "text", `String "progress"
-                ] )
-          ])
+      (Tool_activity
+         (Progress
+            { key = activity_key
+            ; progress = { channel = Assistant; update = Append "progress" }
+            }))
   ]
+;;
+
+let trace_entry =
+  Payload.Semantic.create
+    (Reasoning { readable_summary = [ "think" ] })
+    ~metadata:Payload.Metadata.empty
+  |> Result.ok_or_failwith
+  |> Payload.authored
+  |> History_entry.create_with_id ~id:trace_id
+  |> fun entry -> P.Public.History.full entry ~provenance:Canonical |> protocol_ok
 ;;
 
 let trace_projection revision ~committed events =
   let base = Chat_tui.Agent_projection.snapshot (projection "base") in
-  let entries =
-    if not committed
-    then base.canonical_history.entries
-    else
-      base.canonical_history.entries
-      @ [ { (history_entry "") with
-            id = trace_id
-          ; role = Assistant
-          ; kind = Reasoning
-          ; payload =
-              Openai.Responses.Item.jsonaf_of_t (Reasoning (trace_reasoning "think"))
-          }
-        ]
-  in
   let snapshot =
-    { base with
-      revision
-    ; session = { base.session with revision }
-    ; canonical_history = { base.canonical_history with entries }
-    }
+    with_fields base ~f:(fun fields ->
+      { fields with
+        revision
+      ; session = { fields.session with revision; active_operation = Some operation }
+      ; canonical_history =
+          { fields.canonical_history with
+            entries =
+              (fields.canonical_history.entries
+               @ if committed then [ trace_entry ] else [])
+          }
+      })
   in
   List.fold
     events
@@ -357,24 +391,26 @@ let trace_projection revision ~committed events =
     ~f:(fun projection event ->
       Agent_client.Projection.apply_live_event projection event |> protocol_ok)
   |> Chat_tui.Agent_projection.of_client_projection
-  |> protocol_ok
 ;;
 
-let%expect_test "live text and tool progress survive durable rebuild without duplication" =
+let apply_projection applier model view =
+  Chat_tui.Agent_event_apply.apply applier ~model ~viewport_height:20 view
+  |> protocol_ok
+  |> ignore
+;;
+
+let%expect_test
+    "live text and absolute tool progress survive durable rebuild without duplication"
+  =
   let model = model () in
   let applier = Chat_tui.Agent_event_apply.create () in
-  let events = trace_events () in
   List.iter
     [ 1L, false; 2L, false; 3L, true; 3L, true ]
     ~f:(fun (revision, committed) ->
-      ignore
-        (Chat_tui.Agent_event_apply.apply
-           applier
-           ~model
-           ~viewport_height:20
-           (trace_projection revision ~committed events)
-         |> protocol_ok
-         : Chat_tui.Model.projection_damage);
+      apply_projection
+        applier
+        model
+        (trace_projection revision ~committed (trace_events ()));
       [%test_eq: (string * string) list]
         (Chat_tui.Model.messages model)
         [ "user", "base"; "reasoning", "think" ];
@@ -383,124 +419,180 @@ let%expect_test "live text and tool progress survive durable rebuild without dup
         (Chat_tui.Model.agent_call_progress_entries call
          |> List.map ~f:Chat_tui.Model.progress_entry_text)
         [ "progress" ]);
+  [%test_eq: int] (List.length (Chat_tui.Model.history_items model)) 0;
   [%test_eq: string] (Chat_tui.Model.input_line model) "unsent draft";
   [%expect {| |}]
 ;;
 
+let public_event sequence payload internal =
+  let envelope =
+    P.Event.Durable.of_payload ~session_id ~sequence ~revision:2L ~timestamp internal
+  in
+  P.Public.Durable.of_internal_envelope
+    envelope
+    ~body:(Full payload)
+    ~extension_status:None
+    ~replacement_snapshot:None
+  |> protocol_ok
+;;
+
 let%expect_test
-    "same-revision overlay events replace visible history and preserve canonical draft"
+    "same-revision typed overlays replace read history without canonical import"
   =
-  let module P = Agent_client.Projection in
+  let module Client = Agent_client.Projection in
   let model = model () in
   let applier = Chat_tui.Agent_event_apply.create () in
   let base = projection "canonical" |> Chat_tui.Agent_projection.snapshot in
-  let current = ref (P.install_snapshot base) in
+  let current = ref (Client.install_snapshot base) in
   let apply () =
-    let projection =
-      Chat_tui.Agent_projection.of_client_projection !current |> protocol_ok
-    in
-    ignore
-      (Chat_tui.Agent_event_apply.apply applier ~model ~viewport_height:20 projection
-       |> protocol_ok
-       : Chat_tui.Model.projection_damage)
-  in
-  let event sequence payload =
-    let event =
-      Agent_protocol.Event.Durable.of_payload
-        ~session_id
-        ~sequence
-        ~revision:2L
-        ~timestamp
-        (Moderator_overlay_changed payload)
-    in
-    current := P.apply_event !current event |> protocol_ok;
-    apply ()
+    apply_projection
+      applier
+      model
+      (Chat_tui.Agent_projection.of_client_projection !current)
   in
   apply ();
   List.iter
     [ 2L, "first"; 3L, "second" ]
     ~f:(fun (sequence, text) ->
-      let window = { base.canonical_history with entries = [ history_entry text ] } in
-      event
-        sequence
-        (`Object
-            [ "halted", `True
-            ; "halt_reason", `String "fixture"
-            ; "effective_history", Agent_protocol.History.Window.to_json window
-            ]);
+      let window =
+        { (P.Public.Snapshot.fields base).canonical_history with
+          entries = [ history_entry text ]
+        }
+      in
+      let overlay =
+        P.Public.Durable.
+          { effective_history = Some window; halted = true; halt_reason = Some "fixture" }
+      in
+      current
+      := Client.apply_event
+           !current
+           (public_event
+              sequence
+              (Moderator_overlay_changed overlay)
+              (Moderator_overlay_changed (`Object [])))
+         |> protocol_ok;
+      apply ();
       [%test_eq: (string * string) list] (Chat_tui.Model.messages model) [ "user", text ];
-      [%test_eq: Sexp.t]
-        ([%sexp_of: Agent_protocol.History.Window.t]
-           (P.snapshot !current).canonical_history)
-        ([%sexp_of: Agent_protocol.History.Window.t] base.canonical_history));
-  event 4L (`Object [ "halted", `False ]);
+      assert (
+        Sexp.equal
+          (P.Public.History.Window.sexp_of_t
+             (P.Public.Snapshot.fields (Client.snapshot !current)).canonical_history)
+          (P.Public.History.Window.sexp_of_t
+             (P.Public.Snapshot.fields base).canonical_history)));
+  let overlay =
+    P.Public.Durable.{ effective_history = None; halted = false; halt_reason = None }
+  in
+  current
+  := Client.apply_event
+       !current
+       (public_event
+          4L
+          (Moderator_overlay_changed overlay)
+          (Moderator_overlay_changed (`Object [])))
+     |> protocol_ok;
+  apply ();
   [%test_eq: (string * string) list]
     (Chat_tui.Model.messages model)
     [ "user", "canonical" ];
-  [%test_eq: bool] (P.snapshot !current).halted false;
-  [%test_eq: string option] (P.snapshot !current).halt_reason None;
+  [%test_eq: int] (List.length (Chat_tui.Model.history_items model)) 0;
   [%test_eq: string] (Chat_tui.Model.input_line model) "unsent draft";
   [%expect {| |}]
 ;;
 
-let%expect_test
-    "durable cancellation closes a call when terminal live progress is coalesced away"
-  =
-  let module P = Agent_client.Projection in
+let%expect_test "operation cancellation cannot fabricate an unobserved tool outcome" =
+  let module Client = Agent_client.Projection in
   let base = projection "base" |> Chat_tui.Agent_projection.snapshot in
-  let operation =
-    Agent_protocol.Operation.
-      { id = trace_operation
-      ; generation = 0
-      ; kind = Turn User_submit
-      ; state = Running
-      ; started_at = timestamp
-      ; updated_at = timestamp
-      }
-  in
   let base =
-    { base with session = { base.session with active_operation = Some operation } }
+    with_fields base ~f:(fun fields ->
+      { fields with session = { fields.session with active_operation = Some operation } })
   in
   let current =
     List.fold
       (trace_events ())
-      ~init:(P.install_snapshot base)
-      ~f:(fun projection event -> P.apply_live_event projection event |> protocol_ok)
+      ~init:(Client.install_snapshot base)
+      ~f:(fun projection event -> Client.apply_live_event projection event |> protocol_ok)
   in
   let model = model () in
   let applier = Chat_tui.Agent_event_apply.create () in
-  let apply current =
-    let projection =
-      Chat_tui.Agent_projection.of_client_projection current |> protocol_ok
-    in
-    ignore
-      (Chat_tui.Agent_event_apply.apply applier ~model ~viewport_height:20 projection
-       |> protocol_ok
-       : Chat_tui.Model.projection_damage)
+  let apply client =
+    apply_projection applier model (Chat_tui.Agent_projection.of_client_projection client)
   in
   apply current;
-  let event =
-    Agent_protocol.Event.Durable.of_payload
-      ~session_id
-      ~sequence:2L
-      ~revision:2L
-      ~timestamp
+  let payload =
+    P.Public.Durable.Shared_payload.of_internal
       (Operation_cancelled { operation with state = Cancelled })
+    |> protocol_ok
   in
-  let terminal = P.apply_event current event |> protocol_ok in
-  [%test_eq: int] (List.length (P.live_events terminal)) 0;
+  let terminal =
+    Client.apply_event
+      current
+      (public_event
+         2L
+         (Shared payload)
+         (Operation_cancelled { operation with state = Cancelled }))
+    |> protocol_ok
+  in
   List.iter [ terminal; terminal ] ~f:apply;
   let call = List.hd_exn (Chat_tui.Model.active_agent_calls model) in
+  assert (Option.is_none (Chat_tui.Model.agent_call_outcome call));
   assert (
-    Poly.equal
-      (Chat_tui.Model.agent_call_outcome call)
-      (Some Ochat_function.Trace.Cancelled));
+    List.exists (Chat_tui.Model.agent_call_render_blocks call) ~f:(fun block ->
+      match Chat_tui.Model.agent_render_block_view block with
+      | Outcome_unavailable -> true
+      | _ -> false));
   [%test_eq: string list]
     (Chat_tui.Model.agent_call_progress_entries call
      |> List.map ~f:Chat_tui.Model.progress_entry_text)
     [ "progress" ];
-  [%test_eq: string] (Chat_tui.Model.input_line model) "unsent draft";
   [%expect {| |}]
+;;
+
+let%test_unit "an observed tool completion stays exact after operation cancellation" =
+  let module Client = Agent_client.Projection in
+  let base = projection "base" |> Chat_tui.Agent_projection.snapshot in
+  let base =
+    with_fields base ~f:(fun fields ->
+      { fields with session = { fields.session with active_operation = Some operation } })
+  in
+  let current =
+    List.fold
+      (trace_events ())
+      ~init:(Client.install_snapshot base)
+      ~f:(fun projection event -> Client.apply_live_event projection event |> protocol_ok)
+  in
+  let finished =
+    trace_event
+      6
+      (Tool_activity
+         (Finished
+            { key = activity_key
+            ; outcome = Returned
+            ; output = Some (Text "actual output")
+            }))
+  in
+  let current = Client.apply_live_event current finished |> protocol_ok in
+  let cancelled : P.Event.Durable.Payload.t =
+    Operation_cancelled { operation with state = Cancelled }
+  in
+  let shared = P.Public.Durable.Shared_payload.of_internal cancelled |> protocol_ok in
+  let terminal =
+    Client.apply_event current (public_event 2L (Shared shared) cancelled) |> protocol_ok
+  in
+  let model = model () in
+  apply_projection
+    (Chat_tui.Agent_event_apply.create ())
+    model
+    (Chat_tui.Agent_projection.of_client_projection terminal);
+  let call = List.hd_exn (Chat_tui.Model.active_agent_calls model) in
+  (match Chat_tui.Model.agent_call_outcome call with
+   | Some Returned -> ()
+   | Some (Raised | Cancelled) | None -> failwith "actual tool outcome was lost");
+  assert (
+    not
+      (List.exists (Chat_tui.Model.agent_call_render_blocks call) ~f:(fun block ->
+         match Chat_tui.Model.agent_render_block_view block with
+         | Outcome_unavailable -> true
+         | Invocation _ | Truncation | Waiting | Progress _ | Status _ -> false)))
 ;;
 
 let%expect_test "daemon security grants and audit records project into the TUI page" =
@@ -521,7 +613,7 @@ let%expect_test "daemon security grants and audit records project into the TUI p
   in
   let projection =
     let base = projection "security" |> Chat_tui.Agent_projection.snapshot in
-    { base with grants = [ grant ] }
+    with_fields base ~f:(fun fields -> { fields with grants = [ grant ] })
   in
   let security =
     Chat_tui.Agent_security_projection.snapshot
@@ -564,92 +656,79 @@ let%expect_test "daemon security grants and audit records project into the TUI p
     |}]
 ;;
 
-let%expect_test
-    "replacement snapshots restore active calls once and clear completed calls"
-  =
-  let module P = Agent_client.Projection in
+let%expect_test "replacement snapshots replace absolute activity and clear omitted calls" =
+  let module Client = Agent_client.Projection in
   let base = projection "base" |> Chat_tui.Agent_projection.snapshot in
-  let operation =
-    Agent_protocol.Operation.
-      { id = trace_operation
-      ; generation = 0
-      ; kind = Turn User_submit
-      ; state = Running
-      ; started_at = timestamp
-      ; updated_at = timestamp
-      }
-  in
-  let started =
-    trace_events ()
-    |> List.find_exn ~f:(fun event ->
-      Agent_protocol.Event.Recoverable.equal_kind event.kind Tool_started)
+  let summary =
+    P.Activity.Tool.summary
+      activity_key
+      ~descriptor:(Some activity_descriptor)
+      ~channels:[ { channel = Assistant; text = "old"; complete = true } ]
+      ~state:Running
+    |> protocol_ok
   in
   let snapshot =
-    { base with
-      session = { base.session with active_operation = Some operation }
-    ; active_tool_calls = [ Agent_protocol.Event.Recoverable.to_json started ]
-    ; active_agent_calls = [ Agent_protocol.Event.Recoverable.to_json started ]
-    }
+    with_fields base ~f:(fun fields ->
+      { fields with
+        session = { fields.session with active_operation = Some operation }
+      ; active_tool_calls = [ summary ]
+      ; active_agent_calls = [ summary ]
+      })
   in
   let model = model () in
   let applier = Chat_tui.Agent_event_apply.create () in
   let apply client =
-    let projected =
-      Chat_tui.Agent_projection.of_client_projection client |> protocol_ok
-    in
-    ignore
-      (Chat_tui.Agent_event_apply.apply applier ~model ~viewport_height:20 projected
-       |> protocol_ok
-       : Chat_tui.Model.projection_damage)
+    apply_projection applier model (Chat_tui.Agent_projection.of_client_projection client)
   in
-  let client = P.install_snapshot snapshot in
-  apply client;
-  apply client;
+  let current = Client.install_snapshot snapshot in
+  apply current;
+  apply current;
   [%test_eq: int] (List.length (Chat_tui.Model.active_agent_calls model)) 1;
-  let finished =
-    trace_event
-      7
-      Tool_finished
-      (`Object
-          [ "call_id", `String "fork-call"
-          ; "outcome", `String "returned"
-          ; "output", `Null
-          ])
+  let summary =
+    P.Activity.Tool.summary
+      activity_key
+      ~descriptor:(Some activity_descriptor)
+      ~channels:[]
+      ~state:Running
+    |> protocol_ok
   in
-  let client = P.apply_live_event client finished |> protocol_ok in
-  apply client;
-  [%test_eq: int] (List.length (P.snapshot client).active_tool_calls) 0;
-  let call = List.hd_exn (Chat_tui.Model.active_agent_calls model) in
-  assert (
-    Poly.equal
-      (Chat_tui.Model.agent_call_outcome call)
-      (Some Ochat_function.Trace.Returned));
-  apply (P.install_snapshot base);
+  let snapshot =
+    with_fields snapshot ~f:(fun fields ->
+      { fields with active_tool_calls = [ summary ]; active_agent_calls = [ summary ] })
+  in
+  apply (Client.install_snapshot snapshot);
+  [%test_eq: int]
+    (List.length
+       (Chat_tui.Model.agent_call_progress_entries
+          (List.hd_exn (Chat_tui.Model.active_agent_calls model))))
+    0;
+  apply (Client.install_snapshot base);
   [%test_eq: int] (List.length (Chat_tui.Model.active_agent_calls model)) 0;
   [%test_eq: string] (Chat_tui.Model.input_line model) "unsent draft";
   [%expect {| |}]
 ;;
 
-let%expect_test "redacted transcript entries render as placeholders" =
+let%expect_test "redacted transcript keeps only its disclosed actual header" =
   let base = projection "base" |> Chat_tui.Agent_projection.snapshot in
   let entry =
-    { (history_entry "") with
-      kind = Tool_call
-    ; role = Assistant
-    ; redacted = true
-    ; payload = `Object []
-    }
+    P.Public.History.redacted
+      history_id
+      ~provenance:Canonical
+      (P.Public.History.Redaction.create ~disclosed_header:(Some (Call Function)))
+    |> protocol_ok
   in
   let base =
-    { base with canonical_history = { base.canonical_history with entries = [ entry ] } }
+    with_fields base ~f:(fun fields ->
+      { fields with
+        canonical_history = { fields.canonical_history with entries = [ entry ] }
+      })
   in
   let view =
     Agent_client.Projection.install_snapshot base
     |> Chat_tui.Agent_projection.of_client_projection
-    |> protocol_ok
   in
   [%test_eq: (string * string) list]
     (Chat_tui.Agent_projection.messages view)
-    [ "assistant", "[Tool content redacted]" ];
+    [ "tool", "[Content redacted]" ];
   [%expect {| |}]
 ;;

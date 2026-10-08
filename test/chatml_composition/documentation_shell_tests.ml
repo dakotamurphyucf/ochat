@@ -70,7 +70,12 @@ let%expect_test "public checker separates inspection, checks and approved report
       | _ -> failwith "unexpected checker model request"
     in
     let daemon_options =
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     in
     Host.with_host
       ~durable:false
@@ -93,10 +98,13 @@ let%expect_test "public checker separates inspection, checks and approved report
                    P.Permission.equal_state p.state Pending);
               Option.is_some !pending
               && List.count snapshot.canonical_history.entries ~f:(fun entry ->
-                   P.History.equal_kind entry.kind Tool_output)
+                   Option.exists (P.Public.History.header entry) ~f:(function
+                     | Transcript.Header.Result _ -> true
+                     | _ -> false))
                  = 4)
           with
-          | Eio.Time.Timeout -> raise_s [%sexp (Host.snapshot host : P.Snapshot.t)]);
+          | Eio.Time.Timeout ->
+            raise_s [%sexp (Host.snapshot host : P.Public.Snapshot.Fields.t)]);
          assert (not (Eio.Path.is_file report_path));
          let snapshot = Host.snapshot host in
          [%test_eq: string] setup (shell_result snapshot "inspect").stdout;

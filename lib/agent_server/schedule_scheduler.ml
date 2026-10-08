@@ -166,12 +166,15 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start ~sw ~clock ~registry =
-  let t = { closed = Atomic.make false; busy = []; idle = Eio.Condition.create () } in
-  Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
+let start_controlled ~enabled ~sw ~clock ~registry =
+  let t =
+    { closed = Atomic.make (not enabled); busy = []; idle = Eio.Condition.create () }
+  in
+  if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
 ;;
 
+let start ~sw ~clock ~registry = start_controlled ~enabled:true ~sw ~clock ~registry
 let close t = Atomic.set t.closed true
 
 let rec await_idle t =

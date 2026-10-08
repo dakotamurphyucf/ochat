@@ -1,85 +1,186 @@
-open Core
+open! Core
 open Types
-module Util = Util
-module Res_item = Openai.Responses.Item
+module Payload = History_entry.Payload
+module Public = Agent_protocol.Public.History
 
-(* Convert a single OpenAI response item into a `(role * text)` tuple that
-   is consumable by the renderer.  Large payloads are sanitised and
-   truncated so the TUI cannot be disrupted by control characters or
-   excessively long lines. *)
-
-let pair_of_item (it : Res_item.t) : message option =
-  let sanitize = Util.sanitize ~strip:true in
-  let string_of_tool_output (out : Openai.Responses.Tool_output.Output.t) : string =
-    match out with
-    | Openai.Responses.Tool_output.Output.Text text -> text
-    | Content parts ->
-      parts
-      |> List.map ~f:(function
-        | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
-      |> String.concat ~sep:"\n"
-  in
-  let string_of_content_items content_items =
-    List.filter_map content_items ~f:(function
-      | Openai.Responses.Input_message.Text { text; _ } -> Some (sanitize text)
-      | _ -> None)
-    |> String.concat ~sep:"\n"
-  in
-  match it with
-  | Res_item.Input_message im ->
-    let role =
-      Openai.Responses.Input_message.role_to_string im.role |> String.lowercase
-    in
-    let text = string_of_content_items im.content in
-    Some (role, text)
-  | Res_item.Output_message om ->
-    let role = "assistant" in
-    let text =
-      List.map om.content ~f:(fun c -> Util.sanitize ~strip:false c.text)
-      |> String.concat ~sep:" "
-    in
-    Some (role, text)
-  | Res_item.Function_call fc ->
-    let role = "tool" in
-    Some (role, Printf.sprintf "%s(%s)" fc.name (sanitize fc.arguments))
-  | Res_item.Custom_tool_call tc ->
-    let role = "tool" in
-    Some (role, Printf.sprintf "%s(%s)" tc.name (sanitize tc.input))
-  | Res_item.Function_call_output fco ->
-    let role = "tool_output" in
-    let max_len = 10_000 in
-    let output = string_of_tool_output fco.output in
-    let txt = Util.sanitize ~strip:false output in
-    let txt =
-      if String.length txt > max_len
-      then String.sub txt ~pos:0 ~len:max_len ^ "\n…truncated…"
-      else txt
-    in
-    Some (role, txt)
-  | Res_item.Custom_tool_call_output tco ->
-    let role = "tool_output" in
-    let max_len = 10_000 in
-    let output = string_of_tool_output tco.output in
-    let txt = Util.sanitize ~strip:false output in
-    let txt =
-      if String.length txt > max_len
-      then String.sub txt ~pos:0 ~len:max_len ^ "\n…truncated…"
-      else txt
-    in
-    Some (role, txt)
-  | Res_item.Reasoning r ->
-    let role = "reasoning" in
-    let txt =
-      List.map r.summary ~f:(fun s -> Util.sanitize ~strip:false s.text)
-      |> String.concat ~sep:" "
-    in
-    Some (role, txt)
-  | _ -> None
+let role_string = function
+  | Payload.Role.System -> "system"
+  | Developer -> "developer"
+  | User -> "user"
+  | Assistant -> "assistant"
+  | Tool -> "tool_output"
 ;;
 
-let of_history (items : Res_item.t list) : message list =
-  List.filter_map items ~f:pair_of_item
+let role_of_header = function
+  | Transcript.Header.Message value -> role_string value
+  | Call _ -> "tool"
+  | Result _ -> "tool_output"
+  | Reasoning -> "reasoning"
+  | Unknown _ -> "unknown"
+;;
+
+let image uri = Printf.sprintf "<image src=%S />" uri
+
+let content_text = function
+  | Payload.Content.Text { text; _ } -> text
+  | Refusal text -> text
+  | Image { uri; _ } -> image uri
+  | Unknown { kind; raw } ->
+    Printf.sprintf "[Unknown content: %s]\n%s" kind (Jsonaf.to_string raw)
+;;
+
+let output_text = function
+  | Payload.Output.Text text -> text
+  | Content parts -> List.map parts ~f:content_text |> String.concat ~sep:"\n"
+;;
+
+module Rendered = struct
+  type t =
+    { message : message
+    ; copy_text : string option
+    }
+
+  let create ?copy_text ~role ~strip text =
+    { message = role, Util.sanitize ~strip text; copy_text }
+  ;;
+
+  let message t = t.message
+  let copy_text t = t.copy_text
+
+  let message_content ~form ~role:message_role content =
+    let sep =
+      match form with
+      | Payload.Semantic.Input -> "\n"
+      | Output -> " "
+    in
+    let text = List.map content ~f:content_text |> String.concat ~sep in
+    let copy_text =
+      if
+        List.for_all content ~f:(function
+          | Payload.Content.Text _ -> true
+          | Refusal _ | Image _ | Unknown _ -> false)
+      then Some text
+      else None
+    in
+    let strip =
+      match form with
+      | Payload.Semantic.Input -> true
+      | Output -> false
+    in
+    create ?copy_text ~role:(role_string message_role) ~strip text
+  ;;
+
+  let of_payload payload =
+    match Payload.Semantic.view (Payload.semantic payload) with
+    | Message { form; role; content; _ } -> message_content ~form ~role content
+    | Call { name; input_bytes; _ } ->
+      create ~role:"tool" ~strip:true (Printf.sprintf "%s(%s)" name input_bytes)
+    | Result { output; _ } ->
+      let text = Util.sanitize ~strip:false (output_text output) in
+      let text =
+        if String.length text > 10_000
+        then String.prefix text 10_000 ^ "\n…truncated…"
+        else text
+      in
+      { message = "tool_output", text; copy_text = None }
+    | Reasoning { readable_summary } ->
+      create ~role:"reasoning" ~strip:false (String.concat ~sep:" " readable_summary)
+    | Unknown { provider_kind } ->
+      create
+        ~role:"unknown"
+        ~strip:false
+        (Printf.sprintf
+           "[Unknown item: %s]\n%s"
+           provider_kind
+           (Payload.to_json payload |> Jsonaf.to_string))
+  ;;
+
+  let of_visible = function
+    | Public.Visible.Message { form; role; content; _ } ->
+      let sep =
+        match form with
+        | Payload.Semantic.Input -> "\n"
+        | Output -> " "
+      in
+      let text =
+        List.map content ~f:(function
+          | Public.Visible.Text text | Refusal text -> text
+          | Image { uri; _ } -> image uri
+          | Redacted_part { kind } -> Printf.sprintf "[Redacted content: %s]" kind)
+        |> String.concat ~sep
+      in
+      let copy_text =
+        if
+          List.for_all content ~f:(function
+            | Public.Visible.Text _ -> true
+            | Refusal _ | Image _ | Redacted_part _ -> false)
+        then Some text
+        else None
+      in
+      create
+        ?copy_text
+        ~role:(role_string role)
+        ~strip:
+          (match form with
+           | Input -> true
+           | Output -> false)
+        text
+    | Reasoning { readable_summary } ->
+      create ~role:"reasoning" ~strip:false (String.concat ~sep:" " readable_summary)
+  ;;
+
+  let of_redaction (value : Public.Redaction.t) =
+    let label =
+      Option.value_map value.disclosed_header ~default:"redacted" ~f:role_of_header
+    in
+    create ~role:label ~strip:false "[Content redacted]"
+  ;;
+
+  let of_draft (view : Transcript.Draft.item_view) =
+    match view.state with
+    | Finalized entry ->
+      { (of_payload (History_entry.payload entry)) with copy_text = None }
+    | Partial partial ->
+      let label =
+        Option.value_map view.descriptor.header ~default:"unavailable" ~f:role_of_header
+      in
+      let prefix =
+        match partial.completeness with
+        | Prefix_observed -> ""
+        | Missing_prefix -> "[Earlier live content unavailable]\n"
+      in
+      let observed_text (text : Transcript.Draft.text) =
+        match partial.completeness, text.completeness with
+        | Prefix_observed, Missing_prefix ->
+          "[Earlier part content unavailable]\n" ^ text.value
+        | Missing_prefix, (Prefix_observed | Missing_prefix)
+        | Prefix_observed, Prefix_observed -> text.value
+      in
+      let text =
+        match partial.call_input with
+        | Some input ->
+          Printf.sprintf
+            "%s(%s)"
+            (Option.value view.descriptor.call_name ~default:"[Call name unavailable]")
+            (observed_text input)
+        | None ->
+          List.map partial.parts ~f:(fun part ->
+            match part.text with
+            | Some text -> observed_text text
+            | None ->
+              (match part.descriptor.kind with
+               | Image -> "[Image draft]"
+               | Unknown kind -> Printf.sprintf "[Unknown draft content: %s]" kind
+               | Text | Refusal | Reasoning_summary | Reasoning_text -> ""))
+          |> String.concat ~sep:"\n"
+      in
+      create ~role:label ~strip:false (prefix ^ text)
+  ;;
+end
+
+let of_history entries =
+  List.map entries ~f:(fun entry ->
+    Rendered.of_payload (History_entry.payload entry) |> Rendered.message)
 ;;
 
 type projection =
@@ -95,56 +196,92 @@ let create_projection rows =
 ;;
 
 let canonical_row entry =
-  Option.map
-    (pair_of_item (History_entry.item entry))
-    ~f:(fun message ->
-      let entry_id = History_entry.id entry in
-      Projected_message.canonical_row ~entry_id message)
+  let rendered = Rendered.of_payload (History_entry.payload entry) in
+  Projected_message.canonical_row
+    ?editing_text:(Rendered.copy_text rendered)
+    ~entry_id:(History_entry.id entry)
+    (Rendered.message rendered)
 ;;
 
-let project_entries entries =
-  List.filter_map entries ~f:canonical_row |> create_projection
-;;
+let project_entries entries = List.map entries ~f:canonical_row |> create_projection
 
 let project_effective_entry
       ({ entry; provenance } : Chat_response.Moderation.Effective_entry.t)
   =
-  Option.map
-    (pair_of_item (History_entry.item entry))
-    ~f:(fun message ->
-      let entry_id = History_entry.id entry in
-      match provenance with
-      | Canonical ->
-        Projected_message.
-          { id = Id.canonical entry_id
-          ; entry_id = Some entry_id
-          ; message
-          ; provenance = Canonical
-          ; source = Canonical { entry_id }
-          ; revision = 0
-          }
-      | Moderator_inserted { change_id } ->
-        Projected_message.
-          { id = Id.canonical entry_id
-          ; entry_id = Some entry_id
-          ; message
-          ; provenance = Moderator_inserted { change_id }
-          ; source = Moderator_inserted { entry_id; change_id }
-          ; revision = 0
-          }
-      | Moderator_replacement { target_id; change_id } ->
-        Projected_message.
-          { id = Id.canonical target_id
-          ; entry_id = Some target_id
-          ; message
-          ; provenance = Moderator_replacement { target_id; change_id }
-          ; source = Moderator_replacement { target_id; change_id }
-          ; revision = 0
-          })
+  let row = canonical_row entry in
+  match provenance with
+  | Canonical -> row
+  | Moderator_inserted { change_id } ->
+    { row with
+      provenance = Moderator_inserted { change_id }
+    ; source = Moderator_inserted { entry_id = History_entry.id entry; change_id }
+    ; editing_text = None
+    }
+  | Moderator_replacement { target_id; change_id } ->
+    { row with
+      id = Projected_message.Id.canonical target_id
+    ; entry_id = Some target_id
+    ; provenance = Moderator_replacement { target_id; change_id }
+    ; source = Moderator_replacement { target_id; change_id }
+    ; editing_text = None
+    }
 ;;
 
 let project_effective_entries entries =
-  List.filter_map entries ~f:project_effective_entry |> create_projection
+  List.map entries ~f:project_effective_entry |> create_projection
+;;
+
+let public_row (entry : Public.t) =
+  let rendered, disclosure, editable =
+    match entry.body with
+    | Full payload ->
+      let rendered = Rendered.of_payload payload in
+      rendered, Projected_message.Full, Rendered.copy_text rendered
+    | Visible value -> Rendered.of_visible value, Visible, None
+    | Redacted value -> Rendered.of_redaction value, Redacted, None
+  in
+  let host_id =
+    match entry.provenance with
+    | Agent_protocol.History.Moderator_replaced id -> id
+    | Canonical | Moderator_inserted | Runtime_notification _ | Runtime_authoring _ ->
+      entry.id
+  in
+  Projected_message.
+    { id = Id.canonical host_id
+    ; entry_id = Some host_id
+    ; message = Rendered.message rendered
+    ; provenance = Public entry.provenance
+    ; source =
+        Public_history { entry_id = host_id; provenance = entry.provenance; disclosure }
+    ; editing_text = editable
+    ; revision = 0
+    }
+;;
+
+let project_public_entries entries = List.map entries ~f:public_row |> create_projection
+
+let draft_row (view : Transcript.Draft.item_view) =
+  let key =
+    Transcript.Item.key view.descriptor
+    |> Transcript.Item.Key.sexp_of_t
+    |> Sexp.to_string_mach
+  in
+  let id =
+    match view.descriptor.scope.relation, view.descriptor.entry_id with
+    | Root, Some entry_id -> Projected_message.Id.canonical entry_id
+    | Root, None | Nested _, _ ->
+      Projected_message.Id.local ~namespace:"transcript-draft" ~local_id:key
+      |> Result.ok_or_failwith
+  in
+  Projected_message.
+    { id
+    ; entry_id = view.descriptor.entry_id
+    ; message = Rendered.of_draft view |> Rendered.message
+    ; provenance = Streaming
+    ; source = Draft { key }
+    ; editing_text = None
+    ; revision = 0
+    }
 ;;
 
 let rows t = t.rows
@@ -153,7 +290,15 @@ let index_of_id t id = Hashtbl.find t.index_by_id id
 
 let append_local t ~id ~message ~provenance ~source =
   let row =
-    Projected_message.{ id; entry_id = None; message; provenance; source; revision = 0 }
+    Projected_message.
+      { id
+      ; entry_id = None
+      ; message
+      ; provenance
+      ; source
+      ; editing_text = None
+      ; revision = 0
+      }
   in
   create_projection (t.rows @ [ row ])
 ;;

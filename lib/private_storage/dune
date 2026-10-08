@@ -1,0 +1,8 @@
+(library
+ (name private_storage)
+ (public_name ochat.private_storage)
+ (foreign_stubs
+  (language c)
+  (names private_storage_stubs))
+ (libraries core eio eio.unix)
+ (preprocess (pps ppx_jane)))

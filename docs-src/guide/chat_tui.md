@@ -390,9 +390,12 @@ chat-tui --no-config --local -file ./prompts/interactive.md --typeahead manual
 chat-tui --no-config --local -file ./prompts/interactive.md --typeahead auto
 ```
 
-Enabling it requires a nonempty local `OPENAI_API_KEY`, even when connected to
-a daemon. It uses the TUI process's `API_URL` and never borrows the daemon's
-provider key or bearer token. **Enabling suggestions sends unsent draft text
+The CLI explicitly selects its client-local OpenAI host from the TUI process's
+`API_URL` and `OPENAI_API_KEY`, even when connected to a daemon. Missing selected
+authentication makes suggestions unavailable; it never borrows the daemon's target,
+provider key or bearer token. Library embeddings must supply an explicit selected
+execution and may use that execution's own authentication mechanism.
+**Enabling suggestions sends unsent draft text
 to the provider and can incur additional charges.** History inclusion is
 separately opt-in. Token limits are not a monetary spending cap.
 

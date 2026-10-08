@@ -13,7 +13,7 @@ let snapshot embedded =
       embedded
       (Session_get { session_id = Embedded.session_id embedded; history = None })
   with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> P.Public.Snapshot.fields snapshot
   | _ -> failwith "embedded session.get returned another method"
 ;;
 
@@ -103,16 +103,36 @@ let with_host
             ~f:(fun () -> f env workspace embedded))))
 ;;
 
-let initial_outcome (snapshot : P.Snapshot.t) call_id =
+let initial_outcome (snapshot : P.Public.Snapshot.Fields.t) call_id =
+  let module Payload = History_entry.Payload in
   List.find_map_exn snapshot.canonical_history.entries ~f:(fun entry ->
-    match
-      Agent_session.History_codec.of_protocol entry |> protocol_ok |> History_entry.item
-    with
-    | Openai.Responses.Item.Function_call_output
-        { call_id = actual; output = Text text; _ }
-      when String.equal actual call_id ->
-      Some (P.Invocation.outcome_of_json (Jsonaf.of_string text) |> protocol_ok)
-    | _ -> None)
+    match P.Public.History.full_payload entry with
+    | None -> None
+    | Some payload ->
+      let semantic = Payload.semantic payload in
+      (match
+         Payload.Semantic.view semantic, (Payload.Semantic.metadata semantic).call_id
+       with
+       | Result { kind = Function; output = Text text; _ }, Value actual
+         when String.equal actual call_id ->
+         Some (P.Invocation.outcome_of_json (Jsonaf.of_string text) |> protocol_ok)
+       | _ -> None))
+;;
+
+let full_semantic entry =
+  P.Public.History.full_payload entry
+  |> Option.value_exn
+  |> History_entry.Payload.semantic
+;;
+
+let function_output_call_id entry =
+  let semantic = full_semantic entry in
+  match
+    ( History_entry.Payload.Semantic.view semantic
+    , (History_entry.Payload.Semantic.metadata semantic).call_id )
+  with
+  | Result { kind = Function; _ }, Value call_id -> Some call_id
+  | _ -> None
 ;;
 
 type recipe =
@@ -125,6 +145,7 @@ let%expect_test
     "embedded transient and durable hosts execute compiled X01 and X04 through shared \
      runtime"
   =
+  Mirage_crypto_rng_unix.use_default ();
   List.iter [ false; true ] ~f:(fun durable ->
     List.iter [ One_off; Standalone; Background ] ~f:(fun recipe ->
       let sources, name, input =
@@ -152,7 +173,10 @@ let%expect_test
       in
       let daemon_options =
         { Agent_server.Daemon.default_options with
-          model_post_stream = Some post_stream
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream
         ; chatml_runtime_policy =
             { Chat_response.Runtime_semantics.default_policy with
               honor_request_turn = false
@@ -209,7 +233,7 @@ let%expect_test
             [%test_eq: int]
               1
               (List.count current.canonical_history.entries ~f:(fun entry ->
-                 match entry.P.History.provenance with
+                 match entry.P.Public.History.provenance with
                  | Runtime_notification _ -> true
                  | _ -> false));
             (match P.Job.terminal_completion job |> protocol_ok with

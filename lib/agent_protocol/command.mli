@@ -2,6 +2,15 @@
 
 type t =
   | Protocol_initialize of Initialize.Request.t
+  | Command_receipt of Command_receipt.Request.t
+  | Provider_setup of Provider_operator.Setup_request.t
+  | Provider_status of Provider_operator.Status_request.t
+  | Provider_login_begin of Provider_operator.Login_request.t
+  | Provider_login_challenge of Provider_operator.Challenge_request.t
+  | Provider_login_cancel of Provider_operator.Cancel_request.t
+  | Provider_logout of Provider_operator.Logout_request.t
+  | Provider_select of Provider_operator.Select_request.t
+  | Provider_configure_environment of Provider_operator.Environment_request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t
@@ -13,6 +22,8 @@ type t =
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
   | Session_get of Session.Get_request.t
+  | Session_inference_summary of Inference_query.Summary_request.t
+  | Session_inference_observations of Inference_query.Request.t
   | Session_attach of Session.Attach_request.t
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t

@@ -69,7 +69,11 @@ let%expect_test
           (P.Job.to_json retained));
       assert (List.is_empty retired.deliveries);
       Background_shell_tests.wait env (fun () ->
-        let snapshot = H.projection handle |> Agent_client.Projection.snapshot in
+        let snapshot =
+          H.projection handle
+          |> Agent_client.Projection.snapshot
+          |> P.Public.Snapshot.fields
+        in
         List.exists snapshot.jobs ~f:(fun visible ->
           P.Id.Job.equal visible.id retained.id
           && P.Job.equal_delivery visible.delivery retained.delivery));
@@ -81,8 +85,9 @@ let%expect_test
         Buffer.contents bytes
         |> Jsonaf.of_string
         |> Jsonaf.member_exn "snapshot"
-        |> P.Snapshot.of_json
+        |> P.Public.Snapshot.of_json
         |> protocol_ok
+        |> P.Public.Snapshot.fields
       in
       assert (
         Jsonaf.exactly_equal

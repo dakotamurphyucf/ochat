@@ -2,7 +2,7 @@
  (name agent_transport_http)
  (public_name ochat.agent_transport_http)
  (modules request_contract rpc_body server client_lifetime client)
- (libraries
+ (libraries ochat.operator_authorization
   core
   digestif
   eio

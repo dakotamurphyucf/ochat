@@ -50,6 +50,19 @@ let call_events calls =
         ; output_index = index
         ; type_ = "response.function_call_arguments.done"
         }
+    ; Output_item_done
+        { item =
+            Function_call
+              { name
+              ; arguments = Jsonaf.to_string arguments
+              ; call_id = id
+              ; _type = "function_call"
+              ; id = Some id
+              ; status = Some "completed"
+              }
+        ; output_index = index
+        ; type_ = "response.output_item.done"
+        }
     ])
   |> Stdlib.List.to_seq
 ;;
@@ -57,13 +70,16 @@ let call_events calls =
 let with_daemon
       ?validation_host
       ?config_file
+      ?job_limits
       ?(factory_limits = Agent_server.Daemon.default_options.factory_limits)
       ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+      ?(completion_timeout = 20.)
       ?settle
       ?after_turn
       ?after_turn_with_daemon
       ?(connect = fun ~sw:_ ~env:_ ~root:_ daemon -> connection daemon (principal ()))
       ?(inspect_request = fun _ _ -> ())
+      ?(auxiliary_response = fun _ -> None)
       ?(followup_calls = fun _ -> [])
       ?(expected_requests = 2)
       ?(initial_requests = 2)
@@ -122,19 +138,29 @@ let with_daemon
                 [%sexp (diagnostics : Agent_server.Config.Diagnostic.t list)])
             |> Result.ok_or_failwith
         in
+        let configuration =
+          match job_limits with
+          | None -> configuration
+          | Some (job_limits : Agent_server.Config.Server.job_limits) ->
+            { configuration with server = { configuration.server with job_limits } }
+        in
         let requests = ref 0 in
         let provider_failure = ref None in
         let post_stream ~sw:_ ~inputs =
           match
-            let () =
+            (* An explicitly selected auxiliary response does not consume the
+               independently asserted foreground transcript. Both still use the
+               actual fixture policy and Factory-owned inference ports. *)
+            match auxiliary_response inputs with
+            | Some events -> events
+            | None ->
               incr requests;
-              inspect_request !requests inputs
-            in
-            match !requests with
-            | 1 -> call_events calls
-            | request when request <= snd (request_counts ()) ->
-              call_events (followup_calls request)
-            | _ -> failwith "tool execution requested an unexpected model turn"
+              inspect_request !requests inputs;
+              (match !requests with
+               | 1 -> call_events calls
+               | request when request <= snd (request_counts ()) ->
+                 call_events (followup_calls request)
+               | _ -> failwith "tool execution requested an unexpected model turn")
           with
           | events -> events
           | exception error ->
@@ -157,7 +183,10 @@ let with_daemon
                   factory_limits
                 ; chatml_runtime_policy = runtime_policy
                 ; authoring_validation_host = validation_host
-                ; model_post_stream = Some post_stream
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream
                 }
               ()
             |> protocol_ok
@@ -205,23 +234,79 @@ let with_daemon
                   }
                 |> protocol_ok
               in
+              let last_state = ref None in
               let final =
-                Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
-                  let rec wait () =
-                    Option.iter !provider_failure ~f:raise;
-                    let state = A.state entry.actor |> protocol_ok in
-                    Option.iter state.failure ~f:(fun error ->
-                      raise_s [%sexp (error : Agent_protocol.Error.t)]);
-                    match state.active_operation with
-                    | None
-                      when !requests >= fst (request_counts ())
-                           && List.is_empty state.conversation.deferred_user_entries ->
-                      state
-                    | _ ->
-                      Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                      wait ()
+                try
+                  Eio.Time.with_timeout_exn
+                    (Eio.Stdenv.clock env)
+                    completion_timeout
+                    (fun () ->
+                       let rec wait () =
+                         Option.iter !provider_failure ~f:raise;
+                         let state = A.state entry.actor |> protocol_ok in
+                         last_state := Some state;
+                         Option.iter state.failure ~f:(fun error ->
+                           raise_s [%sexp (error : Agent_protocol.Error.t)]);
+                         match state.active_operation with
+                         | None
+                           when !requests >= fst (request_counts ())
+                                && List.is_empty state.conversation.deferred_user_entries
+                           -> state
+                         | _ ->
+                           Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                           wait ()
+                       in
+                       wait ())
+                with
+                | Eio.Time.Timeout ->
+                  let failures =
+                    match
+                      Agent_session.Durable_event_log.replay
+                        entry.durable_events
+                        ~after_sequence:0L
+                        ~through_sequence:Int64.max_value
+                    with
+                    | Snapshot_required -> []
+                    | Available events ->
+                      List.filter_map events ~f:(fun event ->
+                        match event.Agent_protocol.Event.Durable.kind with
+                        | Operation_failed -> Some event.payload
+                        | _ -> None)
                   in
-                  wait ())
+                  raise_s
+                    [%sexp
+                      "composition session did not finish"
+                    , (!requests : int)
+                    , (request_counts () : int * int)
+                    , (failures : Jsonaf.t list)
+                    , (Option.map !last_state ~f:(fun state ->
+                         ( state.Agent_session.Session_state.lifecycle
+                         , state.active_operation
+                         , List.length state.conversation.deferred_user_entries
+                         , List.map state.invocations ~f:(fun invocation ->
+                             let status =
+                               match invocation.Agent_protocol.Invocation.status with
+                               | Admitted -> "admitted"
+                               | Dispatching -> "dispatching"
+                               | Resolved _ -> "resolved"
+                               | Published _ -> "published"
+                             in
+                             let failure =
+                               match invocation.status with
+                               | Resolved (Fail error) | Published (Fail error) ->
+                                 Some (error.code, error.message)
+                               | Admitted | Dispatching | Resolved _ | Published _ -> None
+                             in
+                             ( invocation.context.provider_call_id
+                             , invocation.context.tool_name
+                             , status
+                             , failure )) ))
+                       : (Agent_session.Session_state.Lifecycle.t
+                         * Agent_protocol.Operation.t option
+                         * int
+                         * (string option * string * string * (string * string) option)
+                             list)
+                           option)]
               in
               let events =
                 match

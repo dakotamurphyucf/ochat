@@ -5,7 +5,7 @@
  (foreign_stubs
   (language c)
   (names peer_credentials_stubs))
- (libraries
+ (libraries ochat.operator_authorization
   core
   digestif
   eio

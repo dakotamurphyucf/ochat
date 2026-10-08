@@ -21,9 +21,12 @@ let embedded_options fixture : Agent_server.Embedded.options =
   }
 ;;
 
-let with_embedded_provider env fixture f =
+let with_embedded_options ~daemon_options env fixture f =
   Eio.Switch.run (fun sw ->
-    let host = Agent_server.Embedded.start ~sw ~env (embedded_options fixture) |> F.ok in
+    let host =
+      Agent_server.Embedded.start ~sw ~env ~daemon_options (embedded_options fixture)
+      |> F.ok
+    in
     Exn.protect
       ~f:(fun () ->
         let connection = Agent_server.Embedded.connect host in
@@ -43,8 +46,30 @@ let with_embedded_provider env fixture f =
       ~finally:(fun () -> Agent_server.Embedded.close host))
 ;;
 
+let with_provisioned_provider env fixture ~api_url f =
+  Support.Provider_fixture.with_host ~env ~api_url ~key:"tui-local-test-key" fixture f
+;;
+
+let provision_provider env fixture ~api_url =
+  with_provisioned_provider env fixture ~api_url (fun _ -> ())
+;;
+
+let with_embedded_provider env fixture ~api_url f =
+  with_provisioned_provider env fixture ~api_url (fun host ->
+    with_embedded_options
+      ~daemon_options:(Inference_composition.daemon_options host)
+      env
+      fixture
+      f)
+;;
+
 let with_embedded env fixture f =
-  with_embedded_provider (F.offline_environment env) fixture f
+  with_embedded_options
+    ~daemon_options:
+      (Support.Daemon_host.with_offline_inference Agent_server.Daemon.default_options)
+    (F.offline_environment env)
+    fixture
+    f
 ;;
 
 let connected ~sw env fixture http =
@@ -132,18 +157,18 @@ let apply applier model projection =
 ;;
 
 let canonical_json entries =
-  `Array (List.map entries ~f:Agent_protocol.History.entry_to_json) |> Jsonaf.to_string
+  `Array (List.map entries ~f:Agent_protocol.Public.History.to_json) |> Jsonaf.to_string
 ;;
 
 let assert_identity model snapshot sent =
   let canonical =
-    List.map (Model.history_items model) ~f:Agent_session.History_codec.to_protocol
+    snapshot.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
   in
-  F.require
-    (String.equal
-       (canonical_json canonical)
-       (canonical_json snapshot.Agent_protocol.Snapshot.canonical_history.entries))
-    "TUI canonical IDs or payloads diverged";
+  let visible =
+    Option.value_map snapshot.effective_history ~default:canonical ~f:(fun window ->
+      window.Agent_protocol.Public.History.Window.entries)
+  in
+  F.assert_public_rows model visible;
   F.require
     (List.count canonical ~f:(fun entry ->
        Agent_protocol.History.Id.compare
@@ -152,14 +177,18 @@ let assert_identity model snapshot sent =
        = 0)
      = 1)
     "TUI duplicated or lost its acknowledged history ID";
-  F.assert_user canonical "trace-canonical-message"
+  F.assert_public_user canonical "trace-canonical-message"
 ;;
 
 let final_projection env client observer sent =
-  let session_id = (Projection.snapshot (Client.projection client)).session.id in
+  let session_id = (Projection.fields (Client.projection client)).session.id in
   let authoritative =
     F.await env (fun () ->
-      let snapshot = Agent_client.Admin.get_session observer session_id |> F.ok in
+      let snapshot =
+        Agent_client.Admin.get_session observer session_id
+        |> F.ok
+        |> Agent_protocol.Public.Snapshot.fields
+      in
       if snapshot.halted && Option.is_none snapshot.session.active_operation
       then Some snapshot
       else None)
@@ -167,7 +196,7 @@ let final_projection env client observer sent =
   let projection =
     F.await env (fun () ->
       let projection = Client.projection client in
-      let snapshot = Projection.snapshot projection in
+      let snapshot = Projection.fields projection in
       if Int64.(snapshot.latest_event_sequence >= authoritative.latest_event_sequence)
       then Some projection
       else None)
@@ -241,7 +270,7 @@ let assert_editor_isolation first second before_first before_second authoritativ
   F.require
     (not (phys_equal (Model.kv_store first) (Model.kv_store second)))
     "TUI models share local caches";
-  let encoded = Agent_protocol.Snapshot.to_json authoritative |> Jsonaf.to_string in
+  let encoded = Support.Public_view.snapshot_to_json authoritative |> Jsonaf.to_string in
   List.iter
     [ "first-private-draft"
     ; "second-private-draft"
@@ -259,10 +288,13 @@ let assert_snapshot_unchanged observer authoritative =
   let after =
     Agent_client.Admin.get_session
       observer
-      authoritative.Agent_protocol.Snapshot.session.id
+      authoritative.Agent_protocol.Public.Snapshot.Fields.session.id
     |> F.ok
+    |> Agent_protocol.Public.Snapshot.fields
   in
-  let encode snapshot = Agent_protocol.Snapshot.to_json snapshot |> Jsonaf.to_string in
+  let encode snapshot =
+    Support.Public_view.snapshot_to_json snapshot |> Jsonaf.to_string
+  in
   F.require
     (String.equal (encode authoritative) (encode after))
     "presentation changes mutated the server snapshot"

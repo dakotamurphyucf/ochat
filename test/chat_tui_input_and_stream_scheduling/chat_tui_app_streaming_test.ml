@@ -28,14 +28,36 @@ let make_model () =
     ~cmdline_cursor:0
 ;;
 
-let text_delta text =
-  Res.Response_stream.Output_text_delta
-    { content_index = 0
-    ; delta = text
-    ; item_id = "message"
-    ; output_index = 0
-    ; type_ = "response.output_text.delta"
-    }
+let text_observation text =
+  let ok = Result.ok_or_failwith in
+  let scope =
+    Transcript.Scope.create
+      ~source:(Transcript.Source_id.of_string "streaming-fixture" |> ok)
+      ~attempt:(Transcript.Attempt_id.of_string "attempt" |> ok)
+      ~relation:Root
+    |> ok
+  in
+  let item =
+    Transcript.Item.create
+      ~scope
+      ~id:(Transcript.Item_id.of_string "message" |> ok)
+      ~entry_id:None
+      ~header:(Some (Message Assistant))
+      ~call_name:None
+    |> ok
+  in
+  let part =
+    Transcript.Part.create
+      ~item
+      ~id:(Transcript.Part_id.of_string "text" |> ok)
+      ~index:None
+      ~kind:Text
+    |> ok
+  in
+  Transcript.Stream.create
+    (Changed { target = Content part; change = Replace text })
+    ~limits:Transcript.Admission.default
+  |> ok
 ;;
 
 let tool_output call_id text =
@@ -57,22 +79,24 @@ let custom_tool_output call_id text =
     }
 ;;
 
+let allocator =
+  History_entry.Allocator.create ~namespace:"streaming-fixture" ~next_sequence:0
+  |> Result.ok_or_failwith
+;;
+
 let history_entry item =
-  let allocator =
-    History_entry.Allocator.create ~namespace:"streaming-fixture" ~next_sequence:0
-    |> Result.ok_or_failwith
-  in
-  History_entry.create ~allocator item |> Result.ok_or_failwith
+  Openai.Responses_history.create ~allocator item |> Result.ok_or_failwith
 ;;
 
 let describe_event = function
-  | `Sourced_stream (op_id, sourced) ->
-    (match sourced.Chat_response.Sourced_response_event.event with
-     | Res.Response_stream.Output_text_delta { delta; _ } ->
-       sprintf "%d:text:%s" op_id delta
-     | _ -> sprintf "%d:sourced" op_id)
-  | `Sourced_stream_batch (op_id, sourced) ->
-    sprintf "%d:text-batch:%d" op_id (List.length sourced)
+  | `Transcript (op_id, event) ->
+    (match Transcript.Stream.view event with
+     | Changed { change = Append text | Replace text; _ } ->
+       sprintf "%d:text:%s" op_id text
+     | _ -> sprintf "%d:transcript" op_id)
+  | `Transcript_batch (op_id, events) ->
+    sprintf "%d:text-batch:%d" op_id (List.length events)
+  | `History_committed (op_id, _) -> sprintf "%d:committed" op_id
   | `Tool_execution
       ( op_id
       , Execution.Progress { call_id; progress = { channel = _; update = Append text } }
@@ -84,11 +108,28 @@ let describe_event = function
   | `Tool_execution (op_id, Execution.Progress { call_id; progress = _ }) ->
     sprintf "%d:replace:%s" op_id call_id
   | `Tool_output (op_id, entry) ->
-    (match History_entry.item entry with
-     | Res.Item.Function_call_output output -> sprintf "%d:output:%s" op_id output.call_id
-     | Res.Item.Custom_tool_call_output output ->
-       sprintf "%d:custom-output:%s" op_id output.call_id
-     | _ -> sprintf "%d:tool-output" op_id)
+    (match
+       History_entry.Payload.Semantic.view
+         (History_entry.Payload.semantic (History_entry.payload entry))
+     with
+     | Result { kind; _ } ->
+       let alias =
+         match
+           (History_entry.Payload.Semantic.metadata
+              (History_entry.Payload.semantic (History_entry.payload entry)))
+             .call_id
+         with
+         | Value value -> value
+         | Absent | Null -> "<unavailable>"
+       in
+       sprintf
+         "%d:%s:%s"
+         op_id
+         (match kind with
+          | Function -> "output"
+          | Custom -> "custom-output")
+         alias
+     | Message _ | Call _ | Reasoning _ | Unknown _ -> sprintf "%d:tool-output" op_id)
   | `Streaming_done (op_id, _) -> sprintf "%d:done" op_id
   | _ -> "other"
 ;;
@@ -110,7 +151,7 @@ let%expect_test "finish flushes deltas, progress, and output before done" =
     ~internal_stream:stream
     ~op_id:7
     ~events:
-      [ Sourced_stream (Chat_response.Sourced_response_event.outer (text_delta "final"))
+      [ Transcript (text_observation "final")
       ; Tool_execution
           (Execution.Progress
              { call_id = "call"; progress = { channel = `Stdout; update = Append "a" } })
@@ -219,8 +260,29 @@ let with_reducer
     }
   in
   let cwd = Eio.Stdenv.cwd env in
+  let fixture =
+    Inference_fixture.create
+      ~namespace:"chat_tui_app_streaming_test"
+      ~default_model:"fixture-model"
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        failwith "reducer fixture unexpectedly dispatched inference")
+  in
+  let inference_context =
+    Inference_fixture.capture_config fixture Chat_response.Config.default
+    |> Result.map_error ~f:(fun _ -> "fixture capture")
+    |> Result.ok_or_failwith
+    |> Inference_fixture.resolve fixture
+    |> Result.map_error ~f:(fun _ -> "fixture context")
+    |> Result.ok_or_failwith
+  in
   let services : Chat_tui.App_context.Services.t =
     { env
+    ; inference_context
+    ; inference_identity = Inference_fixture.identity fixture
+    ; on_inference_attempt = (fun _ -> ())
+    ; on_inference_completion = (fun _ -> ())
+    ; on_inference_observation = (fun _ -> ())
+    ; typeahead_inference = None
     ; ui_sw
     ; cwd
     ; cache = Chat_response.Cache.create ~max_size:1 ()
@@ -444,9 +506,7 @@ let%expect_test
             { call_id = "call"; name = "worker"; kind = `Function; payload = "{}" } ));
   pump_until (fun () -> not (List.is_empty (Chat_tui.Model.active_agent_calls model)));
   Chat_tui.Model.set_active_page model Agent;
-  send
-    (`Sourced_stream
-        (op_id, Chat_response.Sourced_response_event.outer (text_delta "streamed")));
+  send (`Transcript (op_id, text_observation "streamed"));
   for index = 1 to 20 do
     send
       (`Tool_execution
@@ -480,9 +540,7 @@ let%expect_test
         ( op_id + 1
         , Execution.Started
             { call_id = "stale"; name = "stale"; kind = `Function; payload = "{}" } ));
-  send
-    (`Sourced_stream
-        (op_id + 1, Chat_response.Sourced_response_event.outer (text_delta "STALE")));
+  send (`Transcript (op_id + 1, text_observation "STALE"));
   send (`Streaming_done (op_id + 1, []));
   let stale_sentinel = !drawn in
   send `Redraw;
@@ -512,14 +570,14 @@ let%expect_test
       }
   in
   let unfinished_entry =
-    History_entry.create ~allocator:runtime.history_allocator unfinished
+    Openai.Responses_history.create ~allocator:runtime.history_allocator unfinished
     |> Result.ok_or_failwith
   in
   Chat_tui.Model.set_history_items model [ unfinished_entry ];
   send (`Streaming_error (op_id, Chat_tui.App_streaming.Cancelled));
   pump_until (fun () -> Option.is_none runtime.Chat_tui.App_runtime.op);
   let repair =
-    match Chat_tui.Model.history_items model |> History_entry.items with
+    match Chat_tui.Model.history_items model |> Openai.Responses_history.items_exn with
     | [ Res.Item.Function_call call; Res.Item.Function_call_output output ] ->
       let text =
         match output.output with
@@ -529,6 +587,15 @@ let%expect_test
       call.call_id, output.call_id, String.is_substring text ~substring:"did not complete"
     | _ -> "unexpected", "unexpected", false
   in
+  (* The observed draft remains inspectable after cancellation, while only the
+     actual call and repaired host-bound result belong to canonical history. *)
+  [%test_eq: int] (List.length (Chat_tui.Model.history_items model)) 2;
+  assert (
+    List.mem
+      (Chat_tui.Model.messages model)
+      ("assistant", "streamed")
+      ~equal:(fun (left_role, left_text) (right_role, right_text) ->
+        String.equal left_role right_role && String.equal left_text right_text));
   let messages_after_error = Chat_tui.Model.messages model in
   send (`Streaming_error (op_id, Chat_tui.App_streaming.Cancelled));
   let duplicate_sentinel = !drawn in
@@ -551,7 +618,7 @@ let%expect_test
     {|
     (((assistant streamed)) 1 true 1)
     after stale calls=call messages=streamed page=Agent current=true
-    (0 Chat 3 3 (repair-call repair-call true))
+    (0 Chat 4 4 (repair-call repair-call true))
     |}]
 ;;
 
@@ -694,7 +761,7 @@ let%expect_test
     [%sexp
       (Chat_tui.Model.messages model : (string * string) list)
     , (List.exists
-         (Chat_tui.Model.history_items model |> History_entry.items)
+         (Chat_tui.Model.history_items model |> Openai.Responses_history.items_exn)
          ~f:(function
            | Res.Item.Function_call_output output -> String.equal output.call_id "custom"
            | _ -> false)
@@ -720,23 +787,25 @@ let%expect_test "Chat tool calls receive completion before canonical outputs" =
   runtime.Chat_tui.App_runtime.op
   <- Some (Chat_tui.App_runtime.Streaming { id = op_id; sw = ui_sw });
   let add_call call_id =
-    send
-      (`Sourced_stream
-          ( op_id
-          , Chat_response.Sourced_response_event.outer
-              (Res.Response_stream.Output_item_added
-                 { item =
-                     Res.Response_stream.Item.Function_call
-                       { name = "research"
-                       ; arguments = "{}"
-                       ; call_id
-                       ; _type = "function_call"
-                       ; id = Some ("item-" ^ call_id)
-                       ; status = None
-                       }
-                 ; output_index = 0
-                 ; type_ = "response.output_item.added"
-                 }) ));
+    let payload =
+      let module P = History_entry.Payload in
+      P.Semantic.create
+        (Call
+           { kind = Function
+           ; name = "research"
+           ; namespace = Absent
+           ; input_bytes = "{}"
+           ; async = Absent
+           })
+        ~metadata:{ P.Metadata.empty with call_id = Value call_id }
+      |> Result.ok_or_failwith
+      |> P.authored
+    in
+    let entry =
+      History_entry.create ~allocator:runtime.history_allocator payload
+      |> Result.ok_or_failwith
+    in
+    send (`History_committed (op_id, entry));
     send
       (`Tool_execution
           ( op_id
@@ -760,16 +829,18 @@ let%expect_test "Chat tool calls receive completion before canonical outputs" =
     [%sexp
       (outcomes : bool list)
     , (Chat_tui.Model.messages model : (string * string) list)
-    , (List.exists
-         (Chat_tui.Model.history_items model |> History_entry.items)
-         ~f:(function
-           | Res.Item.Function_call_output _ -> true
-           | _ -> false)
+    , (List.exists (Chat_tui.Model.history_items model) ~f:(fun entry ->
+         match
+           History_entry.Payload.Semantic.view
+             (History_entry.Payload.semantic (History_entry.payload entry))
+         with
+         | Result _ -> true
+         | Message _ | Call _ | Reasoning _ | Unknown _ -> false)
        : bool)];
   [%expect
     {|
-    ((true true true) ((tool "research(") (tool "research(") (tool "research("))
-     false)
+    ((true true true)
+     ((tool "research({})") (tool "research({})") (tool "research({})")) false)
     |}]
 ;;
 

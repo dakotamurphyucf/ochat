@@ -86,6 +86,14 @@ management operations starts a stopped child, and `agent_send` does not resume i
 Starting a retained stopped child requires a separately authorized host operation.
 `display_name` is optional display metadata, not a selector or identity.
 
+The host captures the child's effective inference target before reserving its
+creation. Omitted child settings inherit the parent's captured selection; explicit
+child settings override that selection without changing the parent. A retained
+child restores its captured target across host restarts, independently of later
+parent configuration changes. A historical record without a captured target
+requires an explicit host migration and durable capture before model dispatch;
+loading it does not select current defaults.
+
 The default `lifetime` is `owned`. Parent stop propagates cancellation and cleanup
 through owned children. `independent` requires explicit host authorization and
 retains the authority/resource relationship even when its parent stops; it does
@@ -144,6 +152,11 @@ and `limit` (default 16, range 1–128 records). Reads return committed assistan
 output after the initial prompt, with provenance and operation/receipt correlation.
 They omit system/developer messages, reasoning and tool traffic. Readers do not
 consume each other's output. Redacted records retain a marker with a null payload.
+
+One-off child answers read assistant text and output refusal text from neutral
+message content, including captured messages. The committed payload stays
+unchanged. Image or unknown content fails explicitly rather than being flattened
+into answer text.
 
 Keep `next_cursor` even when `caught_up` is true. It identifies a position in that
 query's output, not completion of the child or its operation. Continue with the

@@ -87,11 +87,7 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
        assert (Poly.equal final.moderator expected);
        assert (List.length saved.invocations = 2);
        assert (List.length saved.conversation.canonical_history = 1);
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
-         |> store_ok
-       in
+       let restored = restore_state saved |> store_ok in
        assert (Poly.equal restored.moderator expected);
        assert (List.length restored.invocations = 2))
 ;;

@@ -15,7 +15,9 @@ val read
 (** Full assistant text for one successfully completed, already authorized
     submission. Uses the same retained output selection as [read]; missing,
     redacted or malformed output fails instead of disclosing or silently losing
-    data. The caller must recheck relationship and authority before disclosure. *)
+    data. Reads neutral message semantics without provider replay decoding;
+    output refusals remain readable, while non-text content fails explicitly.
+    The caller must recheck relationship and authority before disclosure. *)
 val completed_answer
   :  state:Agent_session.Session_state.t
   -> receipt_id:Agent_protocol.History.Id.t

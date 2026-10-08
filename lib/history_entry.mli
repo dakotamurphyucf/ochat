@@ -54,30 +54,216 @@ module Allocator : sig
   val reserve : t -> count:int -> (Id.t list, string) result
 end
 
+module Payload : sig
+  module Presence : sig
+    type 'a t =
+      | Absent
+      | Null
+      | Value of 'a
+    [@@deriving equal, sexp_of]
+  end
+
+  module Origin : sig
+    type t
+
+    (** Explicitly unavailable provenance; no invented adapter/endpoint/model. *)
+    val unavailable : t
+
+    (** Nonempty known fields; account/profile/model only when actually known.
+        Identity is a nonsecret compatibility reference, never authority. *)
+    val create
+      :  adapter:string
+      -> provider:string
+      -> account:string option
+      -> endpoint:string
+      -> profile:string option
+      -> model:string option
+      -> replay_version:int
+      -> (t, string) Result.t
+
+    val is_available : t -> bool
+    val model : t -> string option
+
+    (** Known adapter/provider/account/endpoint/profile/replay version equality;
+        model is deliberately excluded. Unavailable provenance never matches. *)
+    val same_replay_context : t -> t -> bool
+
+    val to_json : t -> Jsonaf.t
+    val of_json : Jsonaf.t -> (t, string) Result.t
+  end
+
+  module Role : sig
+    type t =
+      | System
+      | Developer
+      | User
+      | Assistant
+      | Tool
+    [@@deriving equal, sexp_of]
+  end
+
+  module Call_kind : sig
+    type t =
+      | Function
+      | Custom
+    [@@deriving equal, sexp_of]
+  end
+
+  module Metadata : sig
+    type t =
+      { item_id : string Presence.t
+      ; response_id : string Presence.t
+      ; call_id : string Presence.t
+      ; status : string Presence.t
+      }
+
+    val empty : t
+  end
+
+  module Content : sig
+    type t =
+      | Text of
+          { text : string
+          ; annotations : Jsonaf.t list
+          ; logprobs : Jsonaf.t Presence.t
+          }
+      | Refusal of string
+      | Image of
+          { uri : string
+          ; detail : string Presence.t
+          }
+      | Unknown of
+          { kind : string
+          ; raw : Jsonaf.t
+          }
+
+    (* URI/reference does not establish admission or immutable asset ownership. *)
+  end
+
+  module Output : sig
+    type t =
+      | Text of string
+      | Content of Content.t list
+    [@@deriving sexp_of]
+
+    val to_json : t -> Jsonaf.t
+
+    (** Validates the complete JSON tree before decoding neutral output. *)
+    val of_json : Jsonaf.t -> limits:Document_schema.Limits.t -> (t, string) Result.t
+  end
+
+  module Call_relation : sig
+    type t =
+      | Bound of Id.t
+      | Unresolved
+    [@@deriving equal, sexp_of]
+
+    (** Bound is supplied only when the host knows the occurrence. Unresolved
+        preserves existing standalone/authored/orphan outputs. Provider call ID
+        remains metadata and never becomes an invented host ID. *)
+  end
+
+  module Semantic : sig
+    type message_form =
+      | Input
+      | Output
+    [@@deriving equal, sexp_of]
+
+    type view =
+      | Message of
+          { form : message_form
+          ; role : Role.t
+          ; content : Content.t list
+          ; phase : string Presence.t
+          }
+      | Call of
+          { kind : Call_kind.t
+          ; name : string
+          ; namespace : string Presence.t
+          ; input_bytes : string
+          ; async : bool Presence.t
+          }
+      | Result of
+          { relation : Call_relation.t
+          ; kind : Call_kind.t
+          ; output : Output.t
+          }
+      | Reasoning of { readable_summary : string list }
+      | Unknown of { provider_kind : string }
+
+    type t
+
+    (** Validates neutral invariants only. Exact call strings are never parsed. *)
+    val create : view -> metadata:Metadata.t -> (t, string) Result.t
+
+    val view : t -> view
+    val metadata : t -> Metadata.t
+  end
+
+  type representation =
+    | Authored
+    | Captured of
+        { origin : Origin.t
+        ; raw : Jsonaf.t
+        }
+    | Reconstructed of
+        { provider : string
+        ; raw : Jsonaf.t
+        }
+
+  (** Reconstructed is explicitly the lossy known-field serialization of a
+      provider DTO, not an actual wire capture. It is retained only for exact
+      legacy runtime projection/known provider fields and grants no opaque replay.
+      Actual captures originate in OCH50 Wire and retain arbitrary unknown raw.
+      All representations are immutable. Editing semantic content creates Authored,
+      unless an adapter recaptures a new actual envelope under its own contract. *)
+
+  type t [@@deriving bin_io, sexp]
+
+  val authored : Semantic.t -> t
+  val captured : Semantic.t -> origin:Origin.t -> raw:Jsonaf.t -> (t, string) Result.t
+
+  val reconstructed
+    :  Semantic.t
+    -> provider:string
+    -> raw:Jsonaf.t
+    -> (t, string) Result.t
+
+  val semantic : t -> Semantic.t
+  val representation : t -> representation
+  val to_json : t -> Jsonaf.t
+
+  (** Bounded, duplicate-aware neutral validation; no provider decode.
+      Retains full immutable JSON tree or a carrier for unknown neutral fields.
+      Canonical load is not evidence that raw matches the semantic projection:
+      replay must adapter-decode/reconcile raw before use. *)
+  val of_json : Jsonaf.t -> (t, string) Result.t
+
+  val validate : t -> (unit, string) Result.t
+end
+
 type t [@@deriving bin_io, sexp]
 type entry = t
 
-val create : allocator:Allocator.t -> Openai.Responses.Item.t -> (t, string) result
-val create_with_id : id:Id.t -> Openai.Responses.Item.t -> t
+val create : allocator:Allocator.t -> Payload.t -> (t, string) result
+val create_with_id : id:Id.t -> Payload.t -> t
 val id : t -> Id.t
-val item : t -> Openai.Responses.Item.t
+val payload : t -> Payload.t
 
-(** [with_item t item] replaces the provider payload while preserving [t]'s ID. *)
-val with_item : t -> Openai.Responses.Item.t -> t
+(** Replacing semantic content invalidates capture unless an actual adapter
+    supplies a new capture. The host ID remains unchanged. *)
+val with_payload : t -> Payload.t -> t
 
-val items : t list -> Openai.Responses.Item.t list
-
-(** [validate ~allocator entries] rejects duplicate IDs and entries in the
-    allocator's namespace whose sequence is not below its next unused
-    sequence. Entries from other namespaces are permitted.
-
-    Call collection validation while no concurrent allocation or collection
-    mutation is in progress. Explicitly constructed/imported entries must be
-    validated before becoming canonical history. *)
+(** Validates neutral payloads, duplicate IDs and allocator high-water marks.
+    Foreign namespaces remain permitted; no provider decoder participates. *)
 val validate : allocator:Allocator.t -> t list -> (unit, string) result
 
-(** Removes the selected occurrence and its nearest matching call/result pair.
-    Reused provider call IDs in other turns do not select additional entries. *)
+(** Checks explicit retained host bindings for order, call family and shared
+    provider metadata. Unresolved outputs and archived/missing calls stay legal. *)
+val validate_relations : t list -> (unit, string) result
+
+(** Removes a bound host pair, or the nearest matching provider metadata pair
+    for explicitly unresolved existing standalone results. *)
 val remove_with_tool_pair : t list -> entry_id:Id.t -> (t list, string) result
 
 module Id_source : sig

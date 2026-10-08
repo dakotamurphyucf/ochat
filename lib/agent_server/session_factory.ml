@@ -40,6 +40,43 @@ type limits =
   ; ingress : Agent_session.Staged_ingress.limits
   }
 
+type runtime_inference_ports = Graph_tracking.Upstream.t
+
+type inference_policy =
+  { capture_inference_target :
+      prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
+      -> config:Chat_response.Config.t
+      -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; recapture_inference_target :
+      current:Inference.Request.Target.t
+      -> prompt_revision_id:Agent_protocol.Id.Prompt_revision.t
+      -> config:Chat_response.Config.t
+      -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t
+  ; migrate_inference_target :
+      (Agent_session.Session_state.Spec.t
+       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+        option
+  ; migrate_model_job_target :
+      (Agent_session.Session_state.Spec.t
+       -> Agent_protocol.Job.t
+       -> (Inference.Request.Target.t, Inference_runtime.Preparation_error.t) Result.t)
+        option
+  ; approve_inference_target_change :
+      current:Inference.Request.Target.t
+      -> proposed:Inference.Request.Target.t
+      -> (unit, Inference_runtime.Preparation_error.t) Result.t
+  ; resolve_inference_context : Inference_runtime.resolver
+  ; runtime_inference_ports :
+      Agent_session.Session_actor.t
+      -> (runtime_inference_ports, Inference_runtime.Preparation_error.t) Result.t
+  }
+
+type model_job_inference =
+  { context : Inference_runtime.Context.t
+  ; capture_recipe_target :
+      Inference.Request.Target.t -> (unit, Agent_protocol.Error.t) Result.t
+  }
+
 type t =
   { sw : Eio.Switch.t
   ; env : Eio_unix.Stdenv.base
@@ -66,7 +103,7 @@ type t =
   ; job_capacity : Job_capacity.t
   ; tool_dir : string
   ; home : string
-  ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; inference_policy : inference_policy
   ; qualify_chatml_extensions : bool
   ; session_helpers : Agent_session.Session_management_channel.grant list
   ; independent_lifetime_policy : string option
@@ -77,6 +114,8 @@ type t =
   ; managed_output_cursors : Managed_output_cursor.t
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
+  ; document_limits : Document_schema.Limits.t
+  ; journal_document_limits : Document_schema.Limits.t
   }
 
 module Legacy_provenance = struct
@@ -220,12 +259,13 @@ let quota_key definition instance =
       }
 ;;
 
-let session_spec request definition revision instance profile =
+let session_spec request definition revision instance profile ~inference_target =
   Agent_session.Session_state.Spec.
     { protocol = request.Agent_protocol.Session.Create_request.spec
     ; prompt_definition_id = Some definition.Agent_session.Prompt_definition.id
     ; delegation = None
     ; prompt_revision_id = Agent_session.Prompt_revision.id revision
+    ; inference_target
     ; workspace_instance = instance
     ; permission_profile = profile.Agent_session.Permission_policy.id
     ; permission_profile_digest = profile.revision_digest
@@ -243,10 +283,11 @@ let provisional_state
       revision
       instance
       profile
+      ~inference_target
   =
   Agent_session.Session_state.create
     ~identity:(session_identity principal request session_id now)
-    ~spec:(session_spec request definition revision instance profile)
+    ~spec:(session_spec request definition revision instance profile ~inference_target)
     ~initial_history:[]
 ;;
 
@@ -275,16 +316,7 @@ let moderator_json legacy =
     match
       legacy.moderator_state.identity_snapshot, legacy.moderator_state.legacy_snapshot
     with
-    | Some snapshot, _ ->
-      Ok
-        (Some
-           (`Object
-               [ ( "identity_snapshot_sexp"
-                 , `String
-                     (Sexp.to_string_mach
-                        ([%sexp_of: Session.Moderator_state.Identity_snapshot.t] snapshot))
-                 )
-               ]))
+    | Some snapshot, _ -> Ok (Some (Agent_session.Moderator_checkpoint.encode snapshot))
     | None, None -> Ok None
     | None, Some _ ->
       Error
@@ -330,6 +362,7 @@ let initialize_layout
       ~now
       ~definition
       ~revision
+      ~inference_target
       ~workspace_definition
       ~profile
       ~final_directory
@@ -356,6 +389,7 @@ let initialize_layout
       revision
       instance
       profile
+      ~inference_target
   in
   on_state state;
   metadata state
@@ -375,9 +409,22 @@ let source_prompt_directory = function
       (Filename.dirname artifact.root_relative_path)
 ;;
 
-let restore_state_source t (state : Agent_session.Session_state.t) =
+let validate_delegated_target
+      (state : Agent_session.Session_state.t)
+      (record : Agent_store.Delegation_store.record)
+  =
+  match record.admission.inference_target with
+  | None -> Ok ()
+  | Some expected ->
+    (match Inference.Selection.view state.spec.inference_target with
+     | Captured actual when Inference.Request.Target.equal expected actual -> Ok ()
+     | Captured _ | Unresolved ->
+       Error
+         (unavailable Invalid_state "child inference target differs from its admission"))
+;;
+
+let lookup_state_source t (state : Agent_session.Session_state.t) =
   let open Result.Let_syntax in
-  let%bind () = Agent_session.Session_state.validate state in
   match state.spec.protocol.prompt, state.spec.delegation with
   | Generated revision_id, Some reference ->
     let%bind record =
@@ -386,6 +433,7 @@ let restore_state_source t (state : Agent_session.Session_state.t) =
         reference
       |> Result.map_error ~f:protocol_of_store
     in
+    let%bind () = validate_delegated_target state record in
     let%bind artifact_store =
       Agent_store.Prompt_artifact_store.create
         ~env:t.env
@@ -431,6 +479,12 @@ let restore_state_source t (state : Agent_session.Session_state.t) =
            Prompt_unavailable
            (List.map diagnostics ~f:(fun value -> value.message)
             |> String.concat ~sep:"\n")))
+;;
+
+let restore_state_source t state =
+  let open Result.Let_syntax in
+  let%bind () = Agent_session.Session_state.validate state in
+  lookup_state_source t state
 ;;
 
 let restore_state_profile t (state : Agent_session.Session_state.t) =
@@ -1790,14 +1844,29 @@ let add_bound_job actor_ref pending job =
     Ok (Agent_protocol.Id.Job.to_string job.id)
 ;;
 
-let rec await_call_cancellation t actor (job : Agent_protocol.Job.t) =
+let rec await_call_cancellation t actor initialization_scope (job : Agent_protocol.Job.t) =
   let state = Agent_session.Session_actor.state actor in
+  let scope_active =
+    match initialization_scope with
+    | None -> true
+    | Some scope ->
+      Agent_session.Session_actor.initialization_model_job_is_current
+        actor
+        ~scope
+        ~job_id:job.id
+        ~generation:job.generation
+        ~attempt:job.attempt
+      |> Result.ok
+      |> Option.value ~default:false
+  in
   let is_active =
-    Option.value_map (Result.ok state) ~default:false ~f:(fun state ->
+    scope_active
+    && Option.value_map (Result.ok state) ~default:false ~f:(fun state ->
       state.identity.generation = job.generation
       && (not state.halted)
       && List.exists state.jobs ~f:(fun current ->
         Agent_protocol.Id.Job.compare current.id job.id = 0
+        && Int.equal current.attempt job.attempt
         &&
         match current.status with
         | Running -> true
@@ -1806,7 +1875,7 @@ let rec await_call_cancellation t actor (job : Agent_protocol.Job.t) =
   if is_active
   then (
     Eio.Time.sleep (Eio.Stdenv.clock t.env) 0.01;
-    await_call_cancellation t actor job)
+    await_call_cancellation t actor initialization_scope job)
   else ()
 ;;
 
@@ -1825,10 +1894,95 @@ let cancelled_call actor (job : Agent_protocol.Job.t) =
        "synchronous model call was cancelled")
 ;;
 
-let job_services t state actor_ref pending =
+let prepare_model_job_inference t actor ~initialization_scope (job : Agent_protocol.Job.t)
+  =
+  let open Result.Let_syntax in
+  let%bind state = Agent_session.Session_actor.state actor in
+  let%bind binding =
+    List.find state.model_job_targets ~f:(fun binding ->
+      Agent_protocol.Id.Job.equal (Agent_session.Model_job_target.job_id binding) job.id
+      && Int.equal (Agent_session.Model_job_target.generation binding) job.generation)
+    |> Result.of_option
+         ~error:(unavailable Invalid_state "model job selection binding is absent")
+  in
+  let%bind target =
+    match Inference.Selection.view (Agent_session.Model_job_target.source binding) with
+    | Captured target -> Ok target
+    | Unresolved ->
+      let%bind migrate =
+        t.inference_policy.migrate_model_job_target
+        |> Result.of_option
+             ~error:
+               (unavailable
+                  Migration_required
+                  "model job requires explicit inference migration")
+      in
+      let%bind target =
+        migrate state.spec job
+        |> Result.map_error ~f:(fun error ->
+          unavailable
+            Migration_required
+            (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+      in
+      let%map () =
+        Agent_session.Session_actor.capture_model_job_source
+          actor
+          ~job_id:job.id
+          ~generation:job.generation
+          ~target
+          ~limits:t.journal_document_limits
+      in
+      target
+  in
+  let%map context =
+    t.inference_policy.resolve_inference_context target
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Invalid_state
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
+  { context
+  ; capture_recipe_target =
+      (fun target ->
+        match initialization_scope with
+        | None ->
+          Agent_session.Session_actor.capture_recipe_target
+            actor
+            ~job_id:job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
+            ~target
+            ~limits:t.journal_document_limits
+        | Some scope ->
+          Agent_session.Session_actor.capture_initialization_recipe_target
+            actor
+            ~scope
+            ~job_id:job.id
+            ~generation:job.generation
+            ~attempt:job.attempt
+            ~target
+            ~limits:t.journal_document_limits)
+  }
+;;
+
+let model_job_inference t entry job =
+  prepare_model_job_inference
+    t
+    entry.Session_registry.actor
+    ~initialization_scope:None
+    job
+;;
+
+let job_services t state actor_ref pending ~initialization_scope ~initialization_jobs =
   let spawn_model ~recipe ~payload =
     let job = model_job t state ~recipe ~payload ~delivery:Pending in
-    add_bound_job actor_ref pending job
+    match !actor_ref, !initialization_scope with
+    | Some actor, Some scope ->
+      Agent_session.Session_actor.add_initialization_model_job actor ~scope job
+      |> Result.map ~f:(fun job -> Agent_protocol.Id.Job.to_string job.id)
+      |> Result.map_error ~f:(fun error -> error.message)
+    | _, None -> add_bound_job actor_ref pending job
+    | None, Some _ -> Error "initialization model admission requires its issuing actor"
   in
   let capacity_key () =
     let prompt =
@@ -1845,7 +1999,7 @@ let job_services t state actor_ref pending =
       ~kind:Agent_protocol.Job.Model_call
       ~nested_depth:0
   in
-  let complete_call actor job result =
+  let complete_call actor scope job result =
     let outcome =
       match result with
       | Ok (Chat_response.Moderation.Capabilities.Model_ok payload) ->
@@ -1853,24 +2007,34 @@ let job_services t state actor_ref pending =
       | Ok (Model_refused message) | Ok (Model_error message) | Error message ->
         Model_failed message
     in
-    Agent_session.Session_actor.complete_job
-      actor
-      ~job_id:job.Agent_protocol.Job.id
-      ~generation:job.generation
-      ~attempt:job.attempt
-      outcome
+    (match scope with
+     | None ->
+       Agent_session.Session_actor.complete_job
+         actor
+         ~job_id:job.Agent_protocol.Job.id
+         ~generation:job.generation
+         ~attempt:job.attempt
+         outcome
+     | Some scope ->
+       Agent_session.Session_actor.complete_initialization_model_job
+         actor
+         ~scope
+         ~job_id:job.id
+         ~generation:job.generation
+         ~attempt:job.attempt
+         outcome)
     |> Result.map_error ~f:(fun error -> error.message)
     |> Result.bind ~f:(fun _ -> result)
   in
-  let run_call actor job execute =
+  let run_call actor scope job execute =
     match
       Eio.Fiber.first
         (fun () -> `Completed (execute ()))
         (fun () ->
-           await_call_cancellation t actor job;
+           await_call_cancellation t actor scope job;
            `Cancelled)
     with
-    | `Completed result -> complete_call actor job result
+    | `Completed result -> complete_call actor scope job result
     | `Cancelled -> cancelled_call actor job
     | exception (Eio.Cancel.Cancelled _ as exn) ->
       Eio.Cancel.protect (fun () ->
@@ -1886,6 +2050,7 @@ let job_services t state actor_ref pending =
     | exception exn ->
       complete_call
         actor
+        scope
         job
         (Error ("synchronous model call failed: " ^ Exn.to_string exn))
   in
@@ -1893,6 +2058,17 @@ let job_services t state actor_ref pending =
     match !actor_ref with
     | None -> Error "synchronous model call requires an initialized session actor"
     | Some actor ->
+      let open Result.Let_syntax in
+      let%bind current =
+        Agent_session.Session_actor.state actor
+        |> Result.map_error ~f:(fun error -> error.message)
+      in
+      let scope = !initialization_scope in
+      let%bind () =
+        match scope, current.lifecycle.desired with
+        | Some _, (Running | Stopped) | None, Running -> Ok ()
+        | None, Stopped -> Error "synchronous model call requires a running session"
+      in
       (match Job_capacity.try_acquire t.job_capacity (capacity_key ()) with
        | Error error -> Error error.message
        | Ok None -> Error "synchronous model call capacity is currently unavailable"
@@ -1903,19 +2079,53 @@ let job_services t state actor_ref pending =
              let open Result.Let_syntax in
              let job = model_job t state ~recipe ~payload ~delivery:Not_required in
              let%bind job =
-               Agent_session.Session_actor.add_job actor job
+               (match scope with
+                | Some scope ->
+                  Agent_session.Session_actor.start_initialization_model_job
+                    actor
+                    ~scope
+                    job
+                | None ->
+                  let%bind job = Agent_session.Session_actor.add_job actor job in
+                  let%bind claimed =
+                    Agent_session.Session_actor.claim_job
+                      actor
+                      ~job_id:job.id
+                      ~generation:job.generation
+                  in
+                  Result.of_option
+                    claimed
+                    ~error:
+                      (unavailable
+                         Conflict
+                         "synchronous model call could not claim its durable job"))
                |> Result.map_error ~f:(fun error -> error.message)
              in
-             let%bind claimed =
-               Agent_session.Session_actor.claim_job
-                 actor
-                 ~job_id:job.id
-                 ~generation:job.generation
+             Option.iter scope ~f:(fun _ ->
+               initialization_jobs := job :: !initialization_jobs);
+             let%bind inference =
+               prepare_model_job_inference t actor ~initialization_scope:scope job
                |> Result.map_error ~f:(fun error -> error.message)
              in
-             match claimed with
-             | None -> Error "synchronous model call could not claim its durable job"
-             | Some job -> run_call actor job execute))
+             run_call actor scope job (fun () ->
+               execute
+                 ~inference_context:inference.context
+                 ~before_inference_attempt:(fun _attempt ->
+                   match scope with
+                   | None -> ()
+                   | Some scope ->
+                     (match
+                        Agent_session.Session_actor.initialization_model_job_is_current
+                          actor
+                          ~scope
+                          ~job_id:job.id
+                          ~generation:job.generation
+                          ~attempt:job.attempt
+                      with
+                      | Ok true -> ()
+                      | Ok false | Error _ ->
+                        raise Chat_response.Ctx.Inference_admission_rejected))
+                 ~capture_recipe_target:inference.capture_recipe_target)))
   in
   Agent_session.Runtime_builder.{ spawn_model; call_model }
 ;;
@@ -1935,6 +2145,142 @@ let install_moderator_if_changed actor moderator_snapshot =
     |> Result.map ~f:(fun _ -> ())
 ;;
 
+let runtime_inference_ports t actor_ref =
+  let open Result.Let_syntax in
+  let%bind actor =
+    Result.of_option
+      !actor_ref
+      ~error:
+        (unavailable
+           Invalid_state
+           "runtime preparation requires a durably initialized actor")
+  in
+  t.inference_policy.runtime_inference_ports actor
+  |> Result.map_error ~f:(fun error ->
+    unavailable
+      Invalid_state
+      (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+;;
+
+let create_graph_tracking t actor_ref =
+  let open Result.Let_syntax in
+  let%bind actor =
+    Result.of_option
+      !actor_ref
+      ~error:
+        (unavailable Invalid_state "inference graph requires an actual durable actor")
+  in
+  let%bind upstream = runtime_inference_ports t actor_ref in
+  let%bind source =
+    Transcript.Source_id.of_string
+      ("graph/"
+       ^ (Agent_protocol.Id.Transaction.create ()
+          |> Agent_protocol.Id.Transaction.to_string))
+    |> Result.map_error ~f:(unavailable Internal_error)
+  in
+  Graph_tracking.create actor ~source ~upstream
+;;
+
+exception Inference_graph_cleanup_failed of Agent_protocol.Error.t
+
+let finish_failed_graph tracking =
+  (* Cleanup must not replace the primary construction error or cancellation. *)
+  Eio.Cancel.protect (fun () ->
+    (try
+       ignore (Graph_tracking.seal tracking : (unit, Agent_protocol.Error.t) Result.t)
+     with
+     | _ -> ());
+    try
+      ignore (Graph_tracking.finish tracking : (unit, Agent_protocol.Error.t) Result.t)
+    with
+    | _ -> ())
+;;
+
+let with_auxiliary_graph tracking f =
+  match f () with
+  | Error _ as failure ->
+    finish_failed_graph tracking;
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    finish_failed_graph tracking;
+    Exn.raise_with_original_backtrace exn backtrace
+  | Ok value ->
+    Eio.Cancel.protect (fun () ->
+      let capture callback =
+        try Ok (callback ()) with
+        | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+      in
+      (* The compactor's request scopes have joined before returning. Both
+         tracking steps are attempted while its actor and writer remain live. *)
+      let sealed = capture (fun () -> Graph_tracking.seal tracking) in
+      let finished = capture (fun () -> Graph_tracking.finish tracking) in
+      let unwrap = function
+        | Ok result -> result
+        | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+      in
+      let open Result.Let_syntax in
+      let%bind () = unwrap sealed in
+      let%map () = unwrap finished in
+      value)
+;;
+
+let tracked_runtime tracking (runtime : Agent_session.Runtime_builder.t) =
+  let closed = Atomic.make false in
+  let finished, finished_u = Eio.Promise.create () in
+  let unwrap = function
+    | Ok () -> ()
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  in
+  let capture f =
+    try Ok (f ()) with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
+  let require = function
+    | Ok () -> ()
+    | Error error -> raise (Inference_graph_cleanup_failed error)
+  in
+  let close () =
+    Eio.Cancel.protect (fun () ->
+      if Atomic.exchange closed true
+      then Eio.Promise.await finished |> unwrap
+      else (
+        (* All lifecycle steps are attempted. The existing runtime's primary
+           close exception retains precedence over secondary tracking cleanup. *)
+        let sealed = capture (fun () -> Graph_tracking.seal tracking) in
+        let closed = capture runtime.close in
+        let tracked = capture (fun () -> Graph_tracking.finish tracking) in
+        let outcome =
+          capture (fun () ->
+            unwrap closed;
+            (match sealed with
+             | Ok result -> require result
+             | Error failure -> unwrap (Error failure));
+            match tracked with
+            | Ok result -> require result
+            | Error failure -> unwrap (Error failure))
+        in
+        Eio.Promise.resolve finished_u outcome;
+        unwrap outcome))
+  in
+  { runtime with close }
+;;
+
+let resolve_state_inference_context t (state : Agent_session.Session_state.t) =
+  match Inference.Selection.view state.spec.inference_target with
+  | Unresolved ->
+    Error
+      (unavailable
+         Migration_required
+         "execution requires an explicitly approved persisted inference target")
+  | Captured target ->
+    t.inference_policy.resolve_inference_context target
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Invalid_state
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+;;
+
 let prepare_authored_graph
       t
       ~sw
@@ -1944,11 +2290,14 @@ let prepare_authored_graph
       ~(state : Agent_session.Session_state.t)
       ~profile
       ~actor_ref
+      ~tracking
       ~shell_state
       ~native_service_revision
       ~one_off_policy
       ~authoring_validation_host
   =
+  let open Result.Let_syntax in
+  let%bind inference_context = resolve_state_inference_context t state in
   Authored_resources.prepare
     t.authored_resources
     ~sw
@@ -1961,6 +2310,11 @@ let prepare_authored_graph
         ~parent_revision
         ~tool_name
         ~native_service_revision
+        ~inference_context
+        ~inference_identity:(Graph_tracking.identity tracking)
+        ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+        ~on_inference_completion:(Graph_tracking.on_completion tracking)
+        ~on_inference_observation:(Graph_tracking.on_observation tracking)
         ~env:t.env
         ~sw
         ~paths
@@ -2032,7 +2386,7 @@ let independent_resource_host t =
         |> Result.map_error ~f:protocol_of_store)
   ; authorize = authorize_independent t
   ; build_root =
-      (fun ~sw ancestor ->
+      (fun ~sw ~register_tracking ancestor ->
         let state = ancestor.R.state in
         let%bind parent = entry state.identity.session_id in
         let%bind handle =
@@ -2059,6 +2413,8 @@ let independent_resource_host t =
           let%bind profile = restore_state_profile t state in
           let actor_ref = ref (Some parent.actor) in
           let shell_state = ref state.shell in
+          let%bind tracking = create_graph_tracking t actor_ref in
+          register_tracking tracking;
           let%bind prepared, native_registrations =
             prepare_authored_graph
               t
@@ -2069,6 +2425,7 @@ let independent_resource_host t =
               ~state
               ~profile
               ~actor_ref
+              ~tracking
               ~shell_state
               ~native_service_revision:
                 (Agent_session.Session_management_channel.policy_fingerprint
@@ -2076,8 +2433,14 @@ let independent_resource_host t =
               ~one_off_policy:Chat_response.One_off_request.default_policy
               ~authoring_validation_host:t.authoring_validation_host
           in
+          let%bind inference_context = resolve_state_inference_context t state in
           let%bind resources =
             B.prepare_resources
+              ~inference_context
+              ~inference_identity:(Graph_tracking.identity tracking)
+              ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+              ~on_inference_completion:(Graph_tracking.on_completion tracking)
+              ~on_inference_observation:(Graph_tracking.on_observation tracking)
               ~native_registrations
               ~native_service_revision:
                 (Agent_session.Session_management_channel.policy_fingerprint
@@ -2193,65 +2556,87 @@ let prepare_extension_runtime_scope t build =
   let exited, exited_u = Eio.Promise.create () in
   let stopping = Atomic.make false in
   let delivered = ref false in
+  let unwrap = function
+    | Ok () -> ()
+    | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  in
+  let capture f =
+    try
+      f ();
+      Ok ()
+    with
+    | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+  in
   let signal_stop () =
     if not (Atomic.exchange stopping true) then Eio.Promise.resolve stop_u ()
   in
   let stop_and_join () =
     Eio.Cancel.protect (fun () ->
       signal_stop ();
-      Eio.Promise.await exited)
+      Eio.Promise.await exited |> unwrap)
   in
   let deliver result =
     delivered := true;
     Eio.Promise.resolve ready_u result
   in
   Eio.Fiber.fork ~sw:t.sw (fun () ->
-    Exn.protect
-      ~finally:(fun () -> Eio.Promise.resolve exited_u ())
-      ~f:(fun () ->
-        try
-          Eio.Cancel.sub (fun context ->
-            Eio.Switch.run (fun sw ->
-              Eio.Fiber.fork_daemon ~sw (fun () ->
-                Eio.Promise.await stop;
-                Eio.Cancel.cancel context Exit;
-                `Stop_daemon);
-              match build sw with
-              | Error error ->
-                deliver (Ok (Error error));
-                signal_stop ();
-                Eio.Promise.await stop
-              | Ok runtime ->
-                let close_started = Atomic.make false in
-                let close () =
-                  Eio.Cancel.protect (fun () ->
-                    if Atomic.exchange close_started true
-                    then Eio.Promise.await exited
-                    else
-                      Exn.protect
-                        ~f:runtime.Agent_session.Runtime_builder.close
-                        ~finally:stop_and_join)
-                in
-                deliver (Ok (Ok { runtime with close }));
-                Eio.Promise.await stop))
-        with
-        | exn ->
-          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-          (match !delivered, Atomic.get stopping with
-           | false, _ -> deliver (Error (exn, backtrace))
-           | true, true -> ()
-           | true, false -> Exn.raise_with_original_backtrace exn backtrace)));
+    let outcome =
+      capture (fun () ->
+        Eio.Cancel.sub (fun context ->
+          Eio.Switch.run (fun sw ->
+            Eio.Fiber.fork_daemon ~sw (fun () ->
+              Eio.Promise.await stop;
+              Eio.Cancel.cancel context Exit;
+              `Stop_daemon);
+            match build sw with
+            | Error error ->
+              deliver (Ok (Error error));
+              signal_stop ();
+              Eio.Promise.await stop
+            | Ok runtime ->
+              let close_started = Atomic.make false in
+              let closed, closed_u = Eio.Promise.create () in
+              let close () =
+                Eio.Cancel.protect (fun () ->
+                  if Atomic.exchange close_started true
+                  then Eio.Promise.await closed |> unwrap
+                  else (
+                    let primary = capture runtime.Agent_session.Runtime_builder.close in
+                    let joined = capture stop_and_join in
+                    let result =
+                      match primary with
+                      | Error _ -> primary
+                      | Ok () -> joined
+                    in
+                    Eio.Promise.resolve closed_u result;
+                    unwrap result))
+              in
+              deliver (Ok (Ok { runtime with close }));
+              Eio.Promise.await stop)))
+    in
+    let outcome =
+      match outcome with
+      | Error (Eio.Cancel.Cancelled Exit, _) when Atomic.get stopping -> Ok ()
+      | outcome -> outcome
+    in
+    Eio.Promise.resolve exited_u outcome;
+    match !delivered, outcome, Atomic.get stopping with
+    | false, Error failure, _ -> deliver (Error failure)
+    | false, Ok (), _ -> assert false
+    | true, Error (exn, backtrace), false ->
+      Exn.raise_with_original_backtrace exn backtrace
+    | true, _, _ -> ());
   match Eio.Promise.await ready with
   | Ok (Ok runtime) -> Ok runtime
   | Ok (Error error) ->
-    stop_and_join ();
+    ignore (capture stop_and_join : (unit, _) Result.t);
     Error error
   | Error (exn, backtrace) ->
-    stop_and_join ();
+    ignore (capture stop_and_join : (unit, _) Result.t);
     Exn.raise_with_original_backtrace exn backtrace
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    stop_and_join ();
+    ignore (capture stop_and_join : (unit, _) Result.t);
     Exn.raise_with_original_backtrace exn backtrace
 ;;
 
@@ -2541,400 +2926,445 @@ let prepare_runtime_at_paths
       ~actor_ref
       ~pending_schedule_operations
       ~pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
   =
   let open Result.Let_syntax in
-  let shell_state = ref state.Agent_session.Session_state.shell in
-  let approval_provider = shell_approval_provider t profile actor_ref in
-  let approval_store = shell_approval_store state actor_ref shell_state in
-  let construct sw build manifest_authorizer =
-    build
-      ~sw
-      ~env:t.env
-      ~paths
-      ~storage_paths
-      ~session_id:state.Agent_session.Session_state.identity.session_id
-      ~history_namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
-      ~next_history_sequence
-      ~existing_history
-      ~existing_moderator_snapshot
-      ~moderator_reservation_size:t.limits.moderator_reservation_size
-      ~manifest_authorizer
-      ~approval_provider
-      ~approval_store
-      ~permission_profile:profile
-      ~model_post_stream:t.model_post_stream
-      ~review_permission:(review_permission t actor_ref profile)
-      ~schedule_services:(schedule_services t state actor_ref pending_schedule_operations)
-      ~job_services:(job_services t state actor_ref pending_jobs)
-  in
-  let%map runtime =
-    match source with
-    | Authored revision ->
-      let construct_root sw =
-        match t.qualify_chatml_extensions with
-        | false ->
-          construct
-            sw
-            (Agent_session.Runtime_builder.build ~revision)
-            (manifest_authorizer t profile revision state actor_ref shell_state)
-        | true ->
-          let module B = Agent_session.Runtime_builder in
-          let services = extension_services t profile actor_ref ~state in
-          let%bind prepared, native_registrations =
-            prepare_authored_graph
-              t
-              ~sw
-              ~revision
-              ~paths
-              ~storage_paths
-              ~state
-              ~profile
-              ~actor_ref
-              ~shell_state
-              ~native_service_revision:services.native_service_revision
-              ~one_off_policy:services.one_off_policy
-              ~authoring_validation_host:services.authoring_validation_host
-          in
-          let%bind runtime =
+  let%bind inference_context = resolve_state_inference_context t state in
+  let%bind tracking = create_graph_tracking t actor_ref in
+  let prepare () =
+    let shell_state = ref state.Agent_session.Session_state.shell in
+    let approval_provider = shell_approval_provider t profile actor_ref in
+    let approval_store = shell_approval_store state actor_ref shell_state in
+    let construct sw build manifest_authorizer =
+      build
+        ~sw
+        ~env:t.env
+        ~inference_context
+        ~inference_identity:(Graph_tracking.identity tracking)
+        ~on_inference_attempt:(Graph_tracking.on_attempt tracking)
+        ~on_inference_completion:(Graph_tracking.on_completion tracking)
+        ~on_inference_observation:(Graph_tracking.on_observation tracking)
+        ~paths
+        ~storage_paths
+        ~session_id:state.Agent_session.Session_state.identity.session_id
+        ~history_namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
+        ~next_history_sequence
+        ~existing_history
+        ~existing_moderator_snapshot
+        ~moderator_reservation_size:t.limits.moderator_reservation_size
+        ~manifest_authorizer
+        ~approval_provider
+        ~approval_store
+        ~permission_profile:profile
+        ~review_permission:(review_permission t actor_ref profile)
+        ~schedule_services:
+          (schedule_services t state actor_ref pending_schedule_operations)
+        ~job_services:
+          (job_services
+             t
+             state
+             actor_ref
+             pending_jobs
+             ~initialization_scope
+             ~initialization_jobs)
+    in
+    let%map runtime =
+      match source with
+      | Authored revision ->
+        let construct_root sw =
+          match t.qualify_chatml_extensions with
+          | false ->
             construct
               sw
-              (B.build_with_extensions ~native_registrations ~revision ~services)
+              (Agent_session.Runtime_builder.build ~revision)
               (manifest_authorizer t profile revision state actor_ref shell_state)
-          in
-          let installed =
-            let%bind public =
-              Lazy.force (Option.value_exn runtime.native_runtime).capabilities
-              |> Result.map_error ~f:(fun error ->
-                unavailable Permission_denied error.Chat_response.Tool_capability.message)
+          | true ->
+            let module B = Agent_session.Runtime_builder in
+            let services = extension_services t profile actor_ref ~state in
+            let%bind prepared, native_registrations =
+              prepare_authored_graph
+                t
+                ~sw
+                ~revision
+                ~paths
+                ~storage_paths
+                ~state
+                ~profile
+                ~actor_ref
+                ~tracking
+                ~shell_state
+                ~native_service_revision:services.native_service_revision
+                ~one_off_policy:services.one_off_policy
+                ~authoring_validation_host:services.authoring_validation_host
             in
-            Authored_resources.install t.authored_resources ~sw ~public prepared
-          in
-          (match installed with
-           | Ok () -> Ok runtime
-           | Error error ->
-             runtime.close ();
-             Error error)
-      in
-      (match t.qualify_chatml_extensions with
-       | false -> construct_root t.sw
-       | true -> prepare_extension_runtime_scope t construct_root)
-    | Generated_artifact { artifact; _ } ->
-      let%bind parent, record = generated_parent t state in
-      let parent_stop_epoch =
-        Option.value
-          state.parent_stop_epoch
-          ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
-      in
-      let%bind artifact_store =
-        Agent_store.Prompt_artifact_store.create
-          ~env:t.env
-          ~root:
-            (Agent_store.Data_root.prompt_artifacts_path
-               (Agent_store.Session_store.data_root t.store))
-        |> Result.map_error ~f:protocol_of_store
-      in
-      let reference = Agent_store.Delegation_store.reference record in
-      let capabilities (runtime : Agent_session.Runtime_builder.t) =
-        match runtime.native_runtime with
-        | None ->
-          Error
-            (unavailable
-               Invalid_state
-               "delegation.runtime_unavailable: parent does not expose qualified native \
-                resources")
-        | Some native ->
-          Lazy.force native.capabilities
-          |> Result.map_error ~f:(fun error ->
-            unavailable Permission_denied error.Chat_response.Tool_capability.message)
-      in
-      let on_revoked () =
-        match record.admission.lifetime with
-        | Independent _ | Invocation_owned _ ->
-          let%bind () =
-            match Session_registry.is_closing t.registry, !actor_ref with
-            | true, _ | _, None -> Ok ()
-            | false, Some actor ->
-              Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
-              |> Result.map ~f:ignore
-          in
-          (match Session_registry.find t.registry reference.child_session_id with
-           | None -> Ok ()
-           | Some child -> Runtime_owner.prepare_dependency_close child.runtime)
-        | Owned ->
-          (match Agent_session.Session_actor.state parent.actor, !actor_ref with
-           | Ok current, Some actor
-             when Agent_protocol.Session.equal_desired_state
-                    current.lifecycle.desired
-                    Stopped
-                  || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
-             Agent_session.Session_actor.stop_delegated_at_epoch
-               actor
-               ~reference
-               ~epoch:current.stop_epoch
-             |> Result.map ~f:ignore
-           | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
-           | Error error, _ -> Error error)
-      in
-      let build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities =
-        let%bind source, selected =
-          match record.admission.authored_tool with
-          | Some origin ->
-            let%bind prepared =
-              Authored_resources.find
-                t.authored_resources
-                ~public:current
-                ~name:origin.name
+            let%bind runtime =
+              construct
+                sw
+                (B.build_with_extensions ~native_registrations ~revision ~services)
+                (manifest_authorizer t profile revision state actor_ref shell_state)
             in
-            let%bind selected =
-              Authored_resources.resolve t.authored_resources record ~public:current
-            in
-            let%bind artifact =
-              Agent_session.Authored_agent_source.load_artifact
-                ~artifact_store
-                ~reservation:record
-            in
-            let%map revision =
-              Agent_session.Prompt_revision_builder.reparse
-                ~definition:(Agent_session.Prompt_revision.definition prepared.revision)
-                ~artifact
-                ~materialized_tree:
-                  (Agent_store.Prompt_artifact_store.materialized_tree
-                     artifact_store
-                     artifact.revision_id)
-              |> Result.map_error ~f:(fun errors ->
-                unavailable
-                  Prompt_unavailable
-                  (List.map errors ~f:(fun error ->
-                     error.Agent_session.Prompt_revision_builder.Diagnostic.message)
-                   |> String.concat ~sep:"\n"))
-            in
-            `Authored (prepared, revision), selected
-          | None ->
-            let%map definition =
-              Agent_session.Generated_definition.restore
-                ?limits:
-                  (Option.map
-                     t.authoring_validation_host
-                     ~f:Chat_response.Authoring_validation.compilation_limits)
-                ?source_limits:
-                  (Option.map
-                     t.authoring_validation_host
-                     ~f:Chat_response.Authoring_validation.bundle_limits)
-                ?catalog:
-                  (Option.bind
-                     t.authoring_validation_host
-                     ~f:Chat_response.Authoring_validation.delegated_catalog)
-                ~env:t.env
-                ~artifact_store
-                ~revision_id:artifact.revision_id
-                ~manifest_sha256:record.admission.manifest_sha256
-                ~current_capabilities:(fun () -> current)
-                ~pins:record.admission.capability_pins
-                ()
-              |> Result.map_error ~f:(fun diagnostics ->
-                unavailable
-                  Prompt_unavailable
-                  (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
-                   |> String.concat ~sep:"\n"))
-            in
-            ( `Generated definition
-            , Chat_response.Generated_admission.capabilities
-                (Agent_session.Generated_definition.admission definition) )
-        in
-        let lookup id =
-          Session_registry.find t.registry id
-          |> Result.of_option
-               ~error:
-                 (unavailable
+            let installed =
+              let%bind public =
+                Lazy.force (Option.value_exn runtime.native_runtime).capabilities
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
                     Permission_denied
-                    "delegation.parent_missing: ancestor is not loaded")
+                    error.Chat_response.Tool_capability.message)
+              in
+              Authored_resources.install t.authored_resources ~sw ~public prepared
+            in
+            (match installed with
+             | Ok () -> Ok runtime
+             | Error error ->
+               (try Eio.Cancel.protect runtime.close with
+                | _ -> ());
+               Error error)
         in
-        let authority =
-          Agent_session.Delegation_authority.create
-            ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
-            ~max_depth:t.limits.delegation_max_depth
-            ~moderation:(parent_moderation_source t)
-            ~authorize_independent:(authorize_independent t)
-            ~parent_stop_epoch
-            ~reference
-            ~capabilities:selected
-            ~host:
-              { state =
-                  (fun id ->
-                    Result.bind (lookup id) ~f:(fun entry ->
-                      Agent_session.Session_actor.state entry.actor))
-              ; resolve =
-                  (fun reference ->
-                    Agent_store.Delegation_store.resolve
-                      (Agent_store.Session_store.delegations t.store)
-                      reference
-                    |> Result.map_error ~f:protocol_of_store)
-              ; capabilities = ancestor_capabilities
-              }
-            ()
+        prepare_extension_runtime_scope t construct_root
+      | Generated_artifact { artifact; _ } ->
+        let%bind parent, record = generated_parent t state in
+        let parent_stop_epoch =
+          Option.value
+            state.parent_stop_epoch
+            ~default:(Option.value record.admission.parent_stop_epoch ~default:0L)
         in
-        let services = extension_services t profile actor_ref ~state in
-        let%bind inherited_managed =
-          match source, managed with
-          | `Authored _, _ | `Generated _, None -> Ok None
-          | `Generated _, Some managed ->
-            Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
-            |> Result.map ~f:(fun delegation ->
-              Some Agent_session.Runtime_builder.{ delegation; current = managed_current })
+        let%bind artifact_store =
+          Agent_store.Prompt_artifact_store.create
+            ~env:t.env
+            ~root:
+              (Agent_store.Data_root.prompt_artifacts_path
+                 (Agent_store.Session_store.data_root t.store))
+          |> Result.map_error ~f:protocol_of_store
+        in
+        let reference = Agent_store.Delegation_store.reference record in
+        let capabilities (runtime : Agent_session.Runtime_builder.t) =
+          match runtime.native_runtime with
+          | None ->
+            Error
+              (unavailable
+                 Invalid_state
+                 "delegation.runtime_unavailable: parent does not expose qualified \
+                  native resources")
+          | Some native ->
+            Lazy.force native.capabilities
             |> Result.map_error ~f:(fun error ->
               unavailable Permission_denied error.Chat_response.Tool_capability.message)
         in
-        let prepare =
-          delegated_tool_preparation
-            t
-            ~authority
-            ~actor_ref
-            ~reference
-            ~selected
-            ~inherited_managed
-            ~lookup
-        in
-        let services =
-          { services with
-            script_tools =
-              (fun native ->
-                Agent_session.Script_tool_calls.with_preparation
-                  (services.script_tools native)
-                  ~prepare)
-          }
-        in
-        let%bind build =
-          match source with
-          | `Generated definition ->
-            Ok
-              (Agent_session.Runtime_builder.build_generated
-                 ~services
-                 ~definition
-                 ~artifact_store
-                 ~parent_runtime:native
-                 ~inherited_managed
-                 ~authority)
-          | `Authored (prepared, revision) ->
-            let%map history =
-              Result.of_option
-                existing_history
-                ~error:
-                  (unavailable
-                     Invalid_state
-                     "authored child requires admitted stored history")
+        let on_revoked () =
+          match record.admission.lifetime with
+          | Independent _ | Invocation_owned _ ->
+            let%bind () =
+              match Session_registry.is_closing t.registry, !actor_ref with
+              | true, _ | _, None -> Ok ()
+              | false, Some actor ->
+                Agent_session.Session_actor.stop_delegated actor ~reference ~mode:Cancel
+                |> Result.map ~f:ignore
             in
-            fun ~sw
-              ~env
-              ~paths
-              ~storage_paths
-              ~session_id
-              ~history_namespace
-              ~next_history_sequence
-              ~existing_history:_ ->
-              Agent_session.Runtime_builder.build_authored_child
-                ~services
-                ~revision
-                ~prepared
-                ~authority
-                ~history
-                ~sw
+            (match Session_registry.find t.registry reference.child_session_id with
+             | None -> Ok ()
+             | Some child -> Runtime_owner.prepare_dependency_close child.runtime)
+          | Owned ->
+            (match Agent_session.Session_actor.state parent.actor, !actor_ref with
+             | Ok current, Some actor
+               when Agent_protocol.Session.equal_desired_state
+                      current.lifecycle.desired
+                      Stopped
+                    || not (Int64.equal current.stop_epoch parent_stop_epoch) ->
+               Agent_session.Session_actor.stop_delegated_at_epoch
+                 actor
+                 ~reference
+                 ~epoch:current.stop_epoch
+               |> Result.map ~f:ignore
+             | Error { code = Server_shutting_down; _ }, _ | Ok _, _ -> Ok ()
+             | Error error, _ -> Error error)
+        in
+        let build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities =
+          let%bind source, selected =
+            match record.admission.authored_tool with
+            | Some origin ->
+              let%bind prepared =
+                Authored_resources.find
+                  t.authored_resources
+                  ~public:current
+                  ~name:origin.name
+              in
+              let%bind selected =
+                Authored_resources.resolve t.authored_resources record ~public:current
+              in
+              let%bind artifact =
+                Agent_session.Authored_agent_source.load_artifact
+                  ~artifact_store
+                  ~reservation:record
+              in
+              let%map revision =
+                Agent_session.Prompt_revision_builder.reparse
+                  ~definition:(Agent_session.Prompt_revision.definition prepared.revision)
+                  ~artifact
+                  ~materialized_tree:
+                    (Agent_store.Prompt_artifact_store.materialized_tree
+                       artifact_store
+                       artifact.revision_id)
+                |> Result.map_error ~f:(fun errors ->
+                  unavailable
+                    Prompt_unavailable
+                    (List.map errors ~f:(fun error ->
+                       error.Agent_session.Prompt_revision_builder.Diagnostic.message)
+                     |> String.concat ~sep:"\n"))
+              in
+              `Authored (prepared, revision), selected
+            | None ->
+              let%map definition =
+                Agent_session.Generated_definition.restore
+                  ?limits:
+                    (Option.map
+                       t.authoring_validation_host
+                       ~f:Chat_response.Authoring_validation.compilation_limits)
+                  ?source_limits:
+                    (Option.map
+                       t.authoring_validation_host
+                       ~f:Chat_response.Authoring_validation.bundle_limits)
+                  ?catalog:
+                    (Option.bind
+                       t.authoring_validation_host
+                       ~f:Chat_response.Authoring_validation.delegated_catalog)
+                  ~env:t.env
+                  ~artifact_store
+                  ~revision_id:artifact.revision_id
+                  ~manifest_sha256:record.admission.manifest_sha256
+                  ~current_capabilities:(fun () -> current)
+                  ~pins:record.admission.capability_pins
+                  ()
+                |> Result.map_error ~f:(fun diagnostics ->
+                  unavailable
+                    Prompt_unavailable
+                    (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string
+                     |> String.concat ~sep:"\n"))
+              in
+              ( `Generated definition
+              , Chat_response.Generated_admission.capabilities
+                  (Agent_session.Generated_definition.admission definition) )
+          in
+          let lookup id =
+            Session_registry.find t.registry id
+            |> Result.of_option
+                 ~error:
+                   (unavailable
+                      Permission_denied
+                      "delegation.parent_missing: ancestor is not loaded")
+          in
+          let authority =
+            Agent_session.Delegation_authority.create
+              ~authored_capabilities:(Authored_resources.resolve t.authored_resources)
+              ~max_depth:t.limits.delegation_max_depth
+              ~moderation:(parent_moderation_source t)
+              ~authorize_independent:(authorize_independent t)
+              ~parent_stop_epoch
+              ~reference
+              ~capabilities:selected
+              ~host:
+                { state =
+                    (fun id ->
+                      Result.bind (lookup id) ~f:(fun entry ->
+                        Agent_session.Session_actor.state entry.actor))
+                ; resolve =
+                    (fun reference ->
+                      Agent_store.Delegation_store.resolve
+                        (Agent_store.Session_store.delegations t.store)
+                        reference
+                      |> Result.map_error ~f:protocol_of_store)
+                ; capabilities = ancestor_capabilities
+                }
+              ()
+          in
+          let services = extension_services t profile actor_ref ~state in
+          let%bind inherited_managed =
+            match source, managed with
+            | `Authored _, _ | `Generated _, None -> Ok None
+            | `Generated _, Some managed ->
+              Chat_response.Managed_tool_registry.delegate_standalone managed ~selected
+              |> Result.map ~f:(fun delegation ->
+                Some
+                  Agent_session.Runtime_builder.{ delegation; current = managed_current })
+              |> Result.map_error ~f:(fun error ->
+                unavailable Permission_denied error.Chat_response.Tool_capability.message)
+          in
+          let prepare =
+            delegated_tool_preparation
+              t
+              ~authority
+              ~actor_ref
+              ~reference
+              ~selected
+              ~inherited_managed
+              ~lookup
+          in
+          let services =
+            { services with
+              script_tools =
+                (fun native ->
+                  Agent_session.Script_tool_calls.with_preparation
+                    (services.script_tools native)
+                    ~prepare)
+            }
+          in
+          let%bind build =
+            match source with
+            | `Generated definition ->
+              Ok
+                (Agent_session.Runtime_builder.build_generated
+                   ~services
+                   ~definition
+                   ~artifact_store
+                   ~parent_runtime:native
+                   ~inherited_managed
+                   ~authority)
+            | `Authored (prepared, revision) ->
+              let%map history =
+                Result.of_option
+                  existing_history
+                  ~error:
+                    (unavailable
+                       Invalid_state
+                       "authored child requires admitted stored history")
+              in
+              fun ~sw
                 ~env
+                ~inference_context
+                ~inference_identity
+                ~on_inference_attempt
+                ~on_inference_completion
+                ~on_inference_observation
                 ~paths
                 ~storage_paths
                 ~session_id
                 ~history_namespace
                 ~next_history_sequence
+                ~existing_history:_ ->
+                Agent_session.Runtime_builder.build_authored_child
+                  ~services
+                  ~revision
+                  ~prepared
+                  ~authority
+                  ~history
+                  ~sw
+                  ~env
+                  ~inference_context
+                  ~inference_identity
+                  ~on_inference_attempt
+                  ~on_inference_completion
+                  ~on_inference_observation
+                  ~paths
+                  ~storage_paths
+                  ~session_id
+                  ~history_namespace
+                  ~next_history_sequence
+          in
+          let%map runtime =
+            construct sw build (fun _ ->
+              Shell_runtime.Manifest_authorizer.Reject
+                "generated definitions cannot authorize new shell manifests")
+          in
+          { runtime with ancestor_capabilities = Some ancestor_capabilities }
         in
-        let%map runtime =
-          construct sw build (fun _ ->
-            Shell_runtime.Manifest_authorizer.Reject
-              "generated definitions cannot authorize new shell manifests")
-        in
-        { runtime with ancestor_capabilities = Some ancestor_capabilities }
-      in
-      (match record.admission.lifetime with
-       | Owned | Invocation_owned _ ->
-         Delegated_runtime.prepare
-           ~sw:t.sw
-           ~parent:parent.runtime
-           ~on_revoked
-           ~build:(fun ~sw parent_runtime ->
-             let%bind current = capabilities parent_runtime in
-             let native = Option.value_exn parent_runtime.native_runtime in
-             let ancestor_capabilities id =
-               match Agent_protocol.Id.Session.equal id record.key.parent_session_id with
-               | true -> Ok current
-               | false ->
-                 (match parent_runtime.ancestor_capabilities with
-                  | Some lookup -> lookup id
-                  | None ->
-                    Error
-                      (unavailable
-                         Permission_denied
-                         "delegation.resources_unavailable: ancestor binding lookup is \
-                          missing"))
-             in
-             let managed =
-               Option.bind
-                 parent_runtime.moderator_script_tools
-                 ~f:Agent_session.Script_tool_calls.managed_registry
-             in
-             let managed_current () =
-               match parent_runtime.moderator_script_tools with
-               | Some tools -> Agent_session.Script_tool_calls.current_capabilities tools
-               | None -> current
-             in
-             build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities)
-       | Independent _ ->
-         let retained = ref None in
-         let with_resources f =
-           Independent_resources.with_chain
-             ~max_depth:t.limits.delegation_max_depth
-             ~host:(independent_resource_host t)
-             ~reference
-             ~f:(fun resources ->
-               let%bind parent =
-                 Independent_resources.find resources record.key.parent_session_id
-               in
-               Exn.protect
-                 ~finally:(fun () -> retained := None)
-                 ~f:(fun () ->
-                   retained := Some resources;
-                   f parent))
-         in
-         Delegated_runtime.prepare_resources
-           ~with_resources
-           ~sw:t.sw
-           ~on_revoked
-           ~build:(fun ~sw parent_resources ->
-             let native = parent_resources.Agent_session.Runtime_builder.native in
-             let resource_capabilities native =
-               Lazy.force native.Chat_response.Agent_runtime.capabilities
-               |> Result.map_error ~f:(fun error ->
-                 unavailable Permission_denied error.Chat_response.Tool_capability.message)
-             in
-             let%bind current = resource_capabilities native in
-             let ancestor_capabilities id =
-               let%bind resources =
-                 !retained
-                 |> Result.of_option
-                      ~error:
+        (match record.admission.lifetime with
+         | Owned | Invocation_owned _ ->
+           Delegated_runtime.prepare
+             ~sw:t.sw
+             ~parent:parent.runtime
+             ~on_revoked
+             ~build:(fun ~sw parent_runtime ->
+               let%bind current = capabilities parent_runtime in
+               let native = Option.value_exn parent_runtime.native_runtime in
+               let ancestor_capabilities id =
+                 match
+                   Agent_protocol.Id.Session.equal id record.key.parent_session_id
+                 with
+                 | true -> Ok current
+                 | false ->
+                   (match parent_runtime.ancestor_capabilities with
+                    | Some lookup -> lookup id
+                    | None ->
+                      Error
                         (unavailable
                            Permission_denied
-                           "delegation.resources_unavailable: independent scope closed")
+                           "delegation.resources_unavailable: ancestor binding lookup is \
+                            missing"))
                in
-               let%bind resource = Independent_resources.find resources id in
-               resource_capabilities resource.native
-             in
-             build
-               ~sw
-               ~native
-               ~current
-               ~managed:parent_resources.managed
-               ~managed_current:(fun () -> current)
-               ~ancestor_capabilities))
+               let managed =
+                 Option.bind
+                   parent_runtime.moderator_script_tools
+                   ~f:Agent_session.Script_tool_calls.managed_registry
+               in
+               let managed_current () =
+                 match parent_runtime.moderator_script_tools with
+                 | Some tools ->
+                   Agent_session.Script_tool_calls.current_capabilities tools
+                 | None -> current
+               in
+               build ~sw ~native ~current ~managed ~managed_current ~ancestor_capabilities)
+         | Independent _ ->
+           let retained = ref None in
+           let with_resources f =
+             Independent_resources.with_chain
+               ~max_depth:t.limits.delegation_max_depth
+               ~host:(independent_resource_host t)
+               ~reference
+               ~f:(fun resources ->
+                 let%bind parent =
+                   Independent_resources.find resources record.key.parent_session_id
+                 in
+                 Exn.protect
+                   ~finally:(fun () -> retained := None)
+                   ~f:(fun () ->
+                     retained := Some resources;
+                     f parent))
+           in
+           Delegated_runtime.prepare_resources
+             ~with_resources
+             ~sw:t.sw
+             ~on_revoked
+             ~build:(fun ~sw parent_resources ->
+               let native = parent_resources.Agent_session.Runtime_builder.native in
+               let resource_capabilities native =
+                 Lazy.force native.Chat_response.Agent_runtime.capabilities
+                 |> Result.map_error ~f:(fun error ->
+                   unavailable
+                     Permission_denied
+                     error.Chat_response.Tool_capability.message)
+               in
+               let%bind current = resource_capabilities native in
+               let ancestor_capabilities id =
+                 let%bind resources =
+                   !retained
+                   |> Result.of_option
+                        ~error:
+                          (unavailable
+                             Permission_denied
+                             "delegation.resources_unavailable: independent scope closed")
+                 in
+                 let%bind resource = Independent_resources.find resources id in
+                 resource_capabilities resource.native
+               in
+               build
+                 ~sw
+                 ~native
+                 ~current
+                 ~managed:parent_resources.managed
+                 ~managed_current:(fun () -> current)
+                 ~ancestor_capabilities))
+    in
+    runtime, shell_state
   in
-  runtime, shell_state
+  match prepare () with
+  | Ok (runtime, shell_state) -> Ok (tracked_runtime tracking runtime, shell_state)
+  | Error _ as failure ->
+    finish_failed_graph tracking;
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    finish_failed_graph tracking;
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let prepare_runtime
@@ -2949,6 +3379,8 @@ let prepare_runtime
       ~actor_ref
       ~pending_schedule_operations
       ~pending_jobs
+      ~initialization_scope
+      ~initialization_jobs
   =
   let open Result.Let_syntax in
   let%bind paths = runtime_paths t handle revision state in
@@ -2965,31 +3397,9 @@ let prepare_runtime
     ~actor_ref
     ~pending_schedule_operations
     ~pending_jobs
+    ~initialization_scope
+    ~initialization_jobs
   |> Result.map ~f:(fun (runtime, shell) -> runtime, !shell)
-;;
-
-let install_runtime_state state runtime shell =
-  let desired = state.Agent_session.Session_state.lifecycle.desired in
-  let observed =
-    match desired with
-    | Agent_protocol.Session.Running -> Agent_protocol.Session.Idle
-    | Stopped -> Stopped
-  in
-  { state with
-    lifecycle = { desired; observed }
-  ; conversation =
-      { state.conversation with
-        canonical_history =
-          Agent_session.History_codec.all_to_protocol
-            ~previous:state.conversation.canonical_history
-            runtime.Agent_session.Runtime_builder.initial_history
-      ; initial_prompt_entry_count = runtime.initial_prompt_entry_count
-      ; next_history_sequence = Int64.of_int runtime.reserved_history_through
-      ; reserved_history_through = Int64.of_int runtime.reserved_history_through
-      }
-  ; moderator = runtime.moderator_snapshot
-  ; shell
-  }
 ;;
 
 let runnable_job job =
@@ -3181,16 +3591,134 @@ let unload_stopped_runtime t runtime_owner state events =
   | Running, _, _ | Stopped, false, _ | Stopped, true, None -> ()
 ;;
 
-let prune_snapshot t handle journal _installed =
+let validate_recovery_archives t handle state =
+  List.fold_result
+    state.Agent_session.Session_state.conversation.compaction_archives
+    ~init:()
+    ~f:(fun () reference ->
+      Agent_session.Compaction_archive.read
+        ~env:t.env
+        ~handle
+        ~max_payload_length:t.limits.snapshot_payload_limit
+        reference
+      |> Result.map ~f:ignore
+      |> Result.map_error ~f:(fun error ->
+        Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message))
+;;
+
+let validate_recovery_state t handle = function
+  | None ->
+    Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+  | Some restored ->
+    let open Result.Let_syntax in
+    let%bind () = Agent_session.Session_persistence.validate restored in
+    validate_recovery_archives
+      t
+      handle
+      (Agent_session.Session_persistence.Restored.state restored)
+;;
+
+let validate_recovery_document t handle = function
+  | None ->
+    Error (Agent_store.Store_error.Corrupt "durable session has no valid snapshot")
+  | Some document ->
+    let open Result.Let_syntax in
+    let state = Agent_session.Session_state_document.value document in
+    let%bind () =
+      Agent_session.Session_state.validate state
+      |> Result.map_error ~f:(fun error ->
+        Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
+    in
+    validate_recovery_archives t handle state
+;;
+
+let restore_recovery_document t snapshot =
+  Agent_session.Session_persistence.restore_snapshot ~limits:t.document_limits snapshot
+  |> Result.map ~f:(fun restored ->
+    Some (Agent_session.Session_persistence.Restored.state_document restored))
+;;
+
+let apply_recovery_document t state transaction =
+  match state with
+  | None -> Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+  | Some document ->
+    Agent_session.Session_persistence.apply_document
+      document
+      ~limits:t.document_limits
+      transaction
+    |> Result.map ~f:Option.some
+;;
+
+let equivalent_recovery_documents t left right =
+  let open Result.Let_syntax in
+  let encode = function
+    | None ->
+      Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+    | Some document ->
+      Agent_session.Session_state_document.encode document ~limits:t.document_limits
+      |> Result.map ~f:(fun document ->
+        Document_schema.Document.json document |> Jsonaf.to_string)
+      |> Result.map_error ~f:(fun error -> Agent_store.Store_error.Document error)
+  in
+  let%bind left = encode left in
+  let%map right = encode right in
+  (* Compare the complete admitted document, including unknown field order and
+     numeric spellings. Known values/counters alone cannot prove preservation. *)
+  String.equal left right
+;;
+
+let restore_recovery_state t snapshot =
+  Agent_session.Session_persistence.restore_snapshot ~limits:t.document_limits snapshot
+  |> Result.map ~f:Option.some
+;;
+
+let apply_recovery_transaction t state transaction =
+  match state with
+  | None -> Error (Agent_store.Store_error.Corrupt "journal replay has no snapshot state")
+  | Some state ->
+    Agent_session.Session_persistence.apply_transaction
+      ~limits:t.document_limits
+      state
+      transaction
+    |> Result.map ~f:Option.some
+;;
+
+let create_retention_preflight t handle journal =
+  Agent_store.Recovery.Retention_preflight.create
+    ~env:t.env
+    ~journal
+    ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
+    ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+    ~initial:None
+    ~restore_snapshot:(restore_recovery_document t)
+    ~apply:(apply_recovery_document t)
+    ~equivalent:(equivalent_recovery_documents t)
+    ~validate_transaction:
+      (Agent_session.Session_persistence.validate_transaction
+         ~limits:t.journal_document_limits)
+    ~validate:(validate_recovery_document t handle)
+;;
+
+let prune_snapshot t handle journal persistence _installed =
   let open Result.Let_syntax in
   let directory = Agent_store.Session_store.Handle.snapshot_directory handle in
-  let%bind _ = Agent_store.Snapshot.prune_older ~env:t.env ~directory ~keep:2 in
-  let%bind transaction_sequence =
-    Agent_store.Snapshot.retention_floor
+  let%bind () =
+    match Agent_session.Session_persistence.retention_preflight persistence with
+    | Some preflight -> Agent_store.Recovery.Retention_preflight.check preflight
+    | None ->
+      Agent_store.Recovery.Retention_preflight.check
+        (create_retention_preflight t handle journal)
+  in
+  let%bind () = Agent_store.Journal.validate_seal_checkpoint journal in
+  let%bind pruned =
+    Agent_store.Snapshot.prune_older_with_floor
       ~env:t.env
       ~directory
+      ~keep:2
       ~max_payload_length:t.limits.snapshot_payload_limit
   in
+  let transaction_sequence = Agent_store.Snapshot.Pruned.retention_floor pruned in
   let%bind _ =
     Agent_store.Journal.prune_before_transaction journal ~transaction_sequence
   in
@@ -3244,6 +3772,7 @@ let actor_services
   let install_snapshot state =
     match
       Agent_session.Session_persistence.install_snapshot
+        persistence
         ~env:t.env
         ~handle
         ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3253,7 +3782,7 @@ let actor_services
     | Error _ -> ()
     | Ok installed ->
       ignore
-        (prune_snapshot t handle journal installed
+        (prune_snapshot t handle journal persistence installed
          : (unit, Agent_store.Store_error.t) result);
       last_snapshot_sequence := state.counters.event_sequence;
       last_snapshot_at := Eio.Time.now (Eio.Stdenv.clock t.env)
@@ -3275,7 +3804,13 @@ let actor_services
           |> Base64.encode_exn ~pad:false ~alphabet:Base64.uri_safe_alphabet)
     ; state_committed =
         (fun state events ->
-          Agent_session.Durable_event_log.append durable_events events;
+          Agent_session.Durable_event_log.append
+            ~documents:
+              (Agent_session.Session_persistence.take_replay_documents persistence)
+            durable_events
+            events
+          |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+          |> Result.ok_or_failwith;
           release_stopped_capacity capacity events;
           unload_stopped_runtime t runtime_owner state events;
           ignore
@@ -3318,7 +3853,7 @@ let prepared_state state runtime shell schedules jobs ~fresh_history =
       ; next_history_sequence = Int64.of_int runtime.reserved_history_through
       ; reserved_history_through = Int64.of_int runtime.reserved_history_through
       }
-  ; moderator = runtime.moderator_snapshot
+  ; moderator = runtime.moderator_snapshot ()
   ; shell = !shell
   ; schedules = prepared_schedules state.schedules !schedules
   ; jobs = state.jobs @ !jobs
@@ -3336,98 +3871,120 @@ let preparation_sequence t state =
   else Ok (Int64.to_int_exn next)
 ;;
 
-let prepare_detached_runtime t paths storage_paths revision profile state ~fresh_history =
+let prepare_administration t entry ~previous state ~fresh_history =
   let open Result.Let_syntax in
-  let%bind next_history_sequence = preparation_sequence t state in
-  let%bind existing_history =
+  let%bind () =
+    Agent_session.Session_state.validate_administration_candidate state ~previous
+  in
+  let%bind handle =
+    entry.Session_registry.store_handle
+    |> Result.of_option
+         ~error:(unavailable Invalid_state "session has no administration store")
+  in
+  let%bind revision = lookup_state_source t state in
+  let%bind () = check_source_for_execution t state revision in
+  let%bind _profile = restore_state_profile t state in
+  let%bind () =
+    Agent_session.Workspace_resolver.verify_available
+      ~env:t.env
+      state.spec.workspace_instance
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let%bind () =
+    match revision with
+    | Generated_artifact _ -> Ok ()
+    | Authored revision ->
+      let%bind paths = runtime_paths t handle (Authored revision) state in
+      let prompt_elements = Agent_session.Prompt_revision.elements revision in
+      let diagnostics values =
+        unavailable
+          Invalid_request
+          (List.map values ~f:Chat_response.Agent_runtime.diagnostic_to_string
+           |> String.concat ~sep:"\n")
+      in
+      let%bind host =
+        Chat_response.Agent_runtime.host
+          ~env:t.env
+          ~workspace:paths.workspace
+          ~tool_dir:paths.tool_dir
+          ~prompt_dir:paths.prompt_dir
+          ~session_dir:paths.session_dir
+          ~cache_dir:paths.cache_dir
+          ~home:paths.home
+          ~session_id:(Agent_protocol.Id.Session.to_string state.identity.session_id)
+          ~prompt_elements
+        |> Result.map_error ~f:diagnostics
+      in
+      Chat_response.Agent_runtime.validate_tool_paths host ~prompt_elements
+      |> Result.map_error ~f:diagnostics
+  in
+  let%bind current =
+    match Inference.Selection.view state.spec.inference_target with
+    | Captured target -> Ok target
+    | Unresolved ->
+      Error
+        (unavailable
+           Migration_required
+           "administration requires explicit inference migration")
+  in
+  let%bind proposed =
+    match revision with
+    | Authored revision ->
+      t.inference_policy.recapture_inference_target
+        ~current
+        ~prompt_revision_id:state.spec.prompt_revision_id
+        ~config:
+          (Chat_response.Config.of_elements
+             (Agent_session.Prompt_revision.elements revision))
+      |> Result.map_error ~f:(fun error ->
+        unavailable
+          Invalid_state
+          (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+    | Generated_artifact _ -> Ok current
+  in
+  let%bind () =
+    t.inference_policy.approve_inference_target_change ~current ~proposed
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Permission_denied
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
+  let%bind history =
     if fresh_history
-    then Ok None
-    else
-      Result.map
-        (Agent_session.History_codec.all_of_protocol state.conversation.canonical_history)
-        ~f:Option.some
+    then Ok []
+    else Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
   in
-  let schedules = ref [] in
-  let jobs = ref [] in
-  let%bind runtime, shell =
-    prepare_runtime_at_paths
-      t
-      paths
-      storage_paths
-      revision
-      profile
-      state
-      ~next_history_sequence
-      ~existing_history
-      ~existing_moderator_snapshot:None
-      ~actor_ref:(ref None)
-      ~pending_schedule_operations:schedules
-      ~pending_jobs:jobs
-  in
-  Exn.protect
-    ~finally:(fun () -> Eio.Cancel.protect runtime.close)
-    ~f:(fun () ->
-      let%bind _ = runtime.start_moderator () in
-      let candidate = prepared_state state runtime shell schedules jobs ~fresh_history in
-      let%map () = Agent_session.Session_state.validate candidate in
-      candidate)
-;;
-
-let with_preparation_storage paths f =
-  let name =
-    "admin-preparation-" ^ Agent_protocol.Id.Transaction.(create () |> to_string)
-  in
-  let root = Eio.Path.(paths.Agent_session.Runtime_paths.session_dir / name) in
-  Eio.Path.mkdir ~perm:0o700 root;
-  Exn.protect
-    ~finally:(fun () ->
-      Eio.Cancel.protect (fun () -> Eio.Path.rmtree ~missing_ok:true root))
-    ~f:(fun () ->
-      let cache_dir = Eio.Path.(root / "cache") in
-      Eio.Path.mkdir ~perm:0o700 cache_dir;
-      f { paths with session_dir = root; cache_dir })
-;;
-
-let with_preparation_switch f =
-  let ready, resolver = Eio.Promise.create () in
-  Eio.Fiber.first
-    (fun () ->
-       Eio.Switch.run (fun sw ->
-         let result = f sw in
-         Eio.Promise.resolve resolver result;
-         Eio.Fiber.await_cancel ()))
-    (fun () -> Eio.Promise.await ready)
-;;
-
-let prepare_administration t entry state ~fresh_history =
-  try
-    let open Result.Let_syntax in
-    let%bind handle =
-      entry.Session_registry.store_handle
-      |> Result.of_option
-           ~error:(unavailable Invalid_state "session has no administration store")
+  let%bind () =
+    let compatible =
+      Result.bind
+        (t.inference_policy.resolve_inference_context proposed)
+        ~f:(fun context -> Inference_runtime.Context.preflight_history context history)
     in
-    let%bind revision = restore_state_source t state in
-    let%bind () = check_source_for_execution t state revision in
-    let%bind profile = restore_state_profile t state in
-    let%bind paths = runtime_paths t handle revision state in
-    with_preparation_storage paths (fun storage_paths ->
-      with_preparation_switch (fun sw ->
-        prepare_detached_runtime
-          { t with sw }
-          paths
-          storage_paths
-          revision
-          profile
-          state
-          ~fresh_history))
-  with
-  | Eio.Cancel.Cancelled _ as exn -> raise exn
-  | exn ->
-    Error
-      (unavailable
-         Invalid_state
-         ("administrative preparation failed: " ^ Exn.to_string exn))
+    Result.map_error compatible ~f:(fun error ->
+      unavailable
+        Invalid_request
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
+  let%bind inference_target =
+    Inference.Selection.change
+      state.spec.inference_target
+      ~target:proposed
+      ~limits:t.document_limits
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Invalid_request
+        (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+  in
+  let candidate =
+    { state with
+      spec = { state.spec with inference_target }
+    ; runtime_initialization = Pending { fresh_history }
+    }
+  in
+  let%map () =
+    Agent_session.Session_state.validate_administration_candidate candidate ~previous
+  in
+  candidate
 ;;
 
 let checkpoint_entry t handle journal persistence actor =
@@ -3435,6 +3992,7 @@ let checkpoint_entry t handle journal persistence actor =
     let open Result.Let_syntax in
     let%bind installed =
       Agent_session.Session_persistence.install_snapshot
+        persistence
         ~env:t.env
         ~handle
         ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3442,7 +4000,8 @@ let checkpoint_entry t handle journal persistence actor =
         state
       |> Result.map_error ~f:protocol_of_store
     in
-    prune_snapshot t handle journal installed |> Result.map_error ~f:protocol_of_store)
+    prune_snapshot t handle journal persistence installed
+    |> Result.map_error ~f:protocol_of_store)
 ;;
 
 let close_entry t handle journal persistence runtime writer actor capacity =
@@ -3466,13 +4025,22 @@ let close_entry t handle journal persistence runtime writer actor capacity =
 ;;
 
 let close_unregistered_entry t handle runtime writer actor capacity =
-  Runtime_owner.close_and_wait runtime;
-  Job_capacity.close_session
-    t.job_capacity
-    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
-  Agent_session.Session_actor.shutdown actor;
-  Option.iter capacity ~f:Session_capacity.release;
-  Agent_store.Commit_writer.close writer
+  Exn.protect
+    ~f:(fun () -> Runtime_owner.close_and_wait runtime)
+    ~finally:(fun () ->
+      Eio.Cancel.protect (fun () ->
+        Exn.protect
+          ~f:(fun () ->
+            Job_capacity.close_session
+              t.job_capacity
+              ~session_id:(Agent_store.Session_store.Handle.session_id handle))
+          ~finally:(fun () ->
+            Exn.protect
+              ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
+              ~finally:(fun () ->
+                Exn.protect
+                  ~f:(fun () -> Option.iter capacity ~f:Session_capacity.release)
+                  ~finally:(fun () -> Agent_store.Commit_writer.close writer)))))
 ;;
 
 let close_unregistered_runtime t handle runtime writer actor capacity =
@@ -3501,38 +4069,132 @@ let build_runtime_for_actor t handle actor =
     then Error (unavailable Invalid_state "history sequence space is exhausted")
     else Ok (Int64.to_int_exn reservation.first_sequence)
   in
-  let%bind state = Agent_session.Session_actor.state actor in
-  let%bind history =
-    Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
+  let%bind expected = Agent_session.Session_actor.state actor in
+  let pending =
+    match expected.runtime_initialization with
+    | Ready -> None
+    | Pending { fresh_history } -> Some fresh_history
   in
+  let%bind existing_history =
+    match pending with
+    | Some true -> Ok None
+    | Some false | None ->
+      Agent_session.History_codec.all_of_protocol expected.conversation.canonical_history
+      |> Result.map ~f:Option.some
+  in
+  let%bind scope =
+    match pending with
+    | None -> Ok None
+    | Some _ ->
+      Agent_session.Session_actor.begin_initialization actor ~expected
+      |> Result.map ~f:Option.some
+  in
+  let initialization_scope = ref scope in
+  let initialization_jobs = ref [] in
   let actor_ref = ref (Some actor) in
-  let pending_schedule_operations = ref [] in
-  let pending_jobs = ref [] in
-  prepare_runtime
-    t
-    handle
-    revision
-    profile
-    state
-    ~next_history_sequence
-    ~existing_history:(Some history)
-    ~existing_moderator_snapshot:state.moderator
-    ~actor_ref
-    ~pending_schedule_operations
-    ~pending_jobs
-  |> Result.bind ~f:(fun (runtime, _shell) ->
-    let prepared = ref false in
-    Exn.protect
-      ~finally:(fun () ->
-        match !prepared with
-        | true -> ()
-        | false -> Eio.Cancel.protect runtime.close)
-      ~f:(fun () ->
-        match runtime.start_moderator () with
-        | Ok _ ->
-          prepared := true;
-          Ok runtime
-        | Error error -> Error error))
+  let schedules = ref [] in
+  let jobs = ref [] in
+  let initialize () =
+    let%bind runtime, shell =
+      prepare_runtime
+        t
+        handle
+        revision
+        profile
+        expected
+        ~next_history_sequence
+        ~existing_history
+        ~existing_moderator_snapshot:expected.moderator
+        ~actor_ref
+        ~pending_schedule_operations:schedules
+        ~pending_jobs:jobs
+        ~initialization_scope
+        ~initialization_jobs
+    in
+    let finish () =
+      let%bind moderator = runtime.start_moderator () in
+      let%bind () = flush_pending_schedules actor !schedules in
+      let%bind () = flush_pending_jobs actor !jobs in
+      let%bind () =
+        match pending with
+        | None -> install_moderator_if_changed actor moderator
+        | Some fresh_history ->
+          let candidate =
+            prepared_state expected runtime (ref shell) (ref []) (ref []) ~fresh_history
+          in
+          let candidate = { candidate with moderator } in
+          (match scope with
+           | None ->
+             Error (unavailable Conflict "Pending initialization has no host scope")
+           | Some scope ->
+             Agent_session.Session_actor.complete_initialization actor ~scope ~candidate
+             |> Result.map ~f:ignore)
+      in
+      Ok runtime
+    in
+    match finish () with
+    | Ok _ as result -> result
+    | Error _ as failure ->
+      (* The typed initializer failure remains authoritative if resource cleanup
+         also fails. Cleanup has no useful replacement failure for this owner. *)
+      (try Eio.Cancel.protect runtime.close with
+       | _ -> ());
+      failure
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (* Cleanup must not replace the initializer's original failure. *)
+      (try Eio.Cancel.protect runtime.close with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace
+  in
+  let record_failure failure =
+    Option.iter scope ~f:(fun scope ->
+      (* Best effort: cancellation and a failed writer must not replace the
+         original initializer failure. No exception details enter storage. *)
+      try
+        Eio.Cancel.protect (fun () ->
+          ignore
+            (Agent_session.Session_actor.fail_initialization actor ~scope failure
+             : (Agent_protocol.Session.t, Agent_protocol.Error.t) result))
+      with
+      | _ -> ())
+  in
+  Exn.protect
+    ~f:(fun () ->
+      match initialize () with
+      | Ok _ as result -> result
+      | Error failure ->
+        record_failure failure;
+        Error failure
+      | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        record_failure (unavailable Invalid_state "runtime initialization failed");
+        Exn.raise_with_original_backtrace exn backtrace)
+    ~finally:(fun () ->
+      initialization_scope := None;
+      (* End before the runtime escapes. Residual exact synchronous attempts are
+         interrupted on failed preparation/cancellation; queued async work is
+         preserved. Cleanup never replaces the original constructor outcome. *)
+      Eio.Cancel.protect (fun () ->
+        Option.iter scope ~f:(fun scope ->
+          (try
+             ignore
+               (Agent_session.Session_actor.end_initialization actor ~scope
+                : (unit, Agent_protocol.Error.t) result)
+           with
+           | _ -> ());
+          List.iter !initialization_jobs ~f:(fun job ->
+            try
+              ignore
+                (Agent_session.Session_actor.interrupt_job
+                   actor
+                   ~job_id:job.id
+                   ~generation:job.generation
+                   ~attempt:job.attempt
+                   ~reason:"runtime initialization scope ended"
+                 : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+            with
+            | _ -> ()))))
 ;;
 
 let collect_results t handle journal persistence durable_events services runtime actor () =
@@ -3616,6 +4278,77 @@ let retire_owned_children t actor ~closing =
     |> Result.all_unit
 ;;
 
+let install_compaction_inference t actor owner =
+  let module A = Agent_session.Session_actor in
+  let port : A.Compaction_inference.t =
+    { with_execution =
+        (fun ~operation ~selection f ->
+          let open Result.Let_syntax in
+          let%bind target =
+            match Inference.Selection.view selection with
+            | Captured target -> Ok target
+            | Unresolved ->
+              Error
+                (unavailable
+                   Migration_required
+                   "compaction requires an explicitly approved persisted inference target")
+          in
+          Runtime_owner.with_auxiliary_execution_lifetime owner (fun installed ->
+            let%bind state = A.state actor in
+            let%bind () =
+              match state.active_operation with
+              | Some current
+                when Agent_protocol.Id.Operation.equal current.id operation.id
+                     && Int.equal current.generation operation.generation
+                     && Agent_protocol.Operation.equal_kind current.kind Compaction
+                     && Document_schema.Json.equal
+                          (Inference.Selection.to_json state.spec.inference_target)
+                          (Inference.Selection.to_json selection) -> Ok ()
+              | Some _ | None ->
+                Error (unavailable Conflict "compaction inference admission changed")
+            in
+            let check_target context =
+              if
+                Inference.Request.Target.equal
+                  (Inference_runtime.Context.target context)
+                  target
+              then Ok ()
+              else
+                Error
+                  (unavailable Conflict "selected compaction inference target changed")
+            in
+            match installed with
+            | Some inference ->
+              let%bind () = check_target (Inference_client.Execution.context inference) in
+              f inference
+            | None ->
+              let%bind context =
+                t.inference_policy.resolve_inference_context target
+                |> Result.map_error ~f:(fun error ->
+                  unavailable
+                    Configuration_invalid
+                    (Sexp.to_string_hum
+                       (Inference_runtime.Preparation_error.sexp_of_t error)))
+              in
+              let%bind () = check_target context in
+              let%bind tracking = create_graph_tracking t (ref (Some actor)) in
+              with_auxiliary_graph tracking (fun () ->
+                let inference =
+                  Inference_client.Execution.create
+                    ~context
+                    ~identity:(Graph_tracking.identity tracking)
+                    ~relation:Root
+                    ~before_dispatch:(fun _ -> ())
+                    ~on_attempt:(Graph_tracking.on_attempt tracking)
+                    ~on_completion:(Graph_tracking.on_completion tracking)
+                    ~on_observation:(Graph_tracking.on_observation tracking)
+                in
+                f inference)))
+    }
+  in
+  A.set_compaction_inference actor (Some port)
+;;
+
 let create_loaded_entry
       t
       handle
@@ -3632,8 +4365,15 @@ let create_loaded_entry
   =
   let open Result.Let_syntax in
   let%bind profile = permission_profile_revision t state.spec.permission_profile_digest in
+  let documents = Agent_session.Session_persistence.take_replay_documents persistence in
+  let initial_events =
+    match documents with
+    | [] -> initial_events
+    | _ -> List.map documents ~f:Agent_session.Durable_event_document.value
+  in
   let%bind durable_events =
     Agent_session.Durable_event_log.create
+      ~documents
       ~capacity:t.limits.event_replay_capacity
       initial_events
   in
@@ -3667,6 +4407,12 @@ let create_loaded_entry
   actor_ref := Some actor;
   match
     let open Result.Let_syntax in
+    let%bind () =
+      Agent_session.Session_actor.set_runtime_worker
+        actor
+        ~worker:(Some runtime.Agent_session.Runtime_builder.worker)
+        ~inference:(Some (Agent_session.Runtime_builder.inference_execution runtime))
+    in
     let%bind () = flush_pending_schedules actor !pending_schedule_operations in
     let%bind () = flush_pending_jobs actor !pending_jobs in
     let%bind () =
@@ -3691,54 +4437,65 @@ let create_loaded_entry
         ~build:(fun () -> build_runtime_for_actor t handle actor)
     in
     runtime_owner := Some runtime;
-    (match history_source t actor state.identity.session_id with
-     | Ok history_ids ->
-       let entry =
-         Session_registry.
-           { actor
-           ; history_ids
-           ; runtime
-           ; durable_events
-           ; capacity
-           ; store_handle = Some handle
-           ; expire_permissions = expire_permissions t actor profile
-           ; collect_results =
-               collect_results
-                 t
-                 handle
-                 journal
-                 persistence
-                 durable_events
-                 services
-                 runtime
-                 actor
-           ; close =
-               (fun () ->
-                 close_entry t handle journal persistence runtime writer actor capacity)
-           }
-       in
-       (match state.lifecycle.observed with
-        | Agent_protocol.Session.Stopped ->
-          (match Runtime_owner.unload runtime with
-           | Ok () -> Ok entry
-           | Error _ as failure ->
-             actor_ref := None;
-             runtime_owner := None;
-             close_unregistered_entry t handle runtime writer actor capacity;
-             failure)
-        | Queued_for_slot
-        | Starting
-        | Recovering
-        | Idle
-        | Running_turn _
-        | Compacting _
-        | Waiting_for_permission _
-        | Stopping
-        | Failed _ -> Ok entry)
+    let finish () =
+      let%bind () = install_compaction_inference t actor runtime in
+      let%bind history_ids = history_source t actor state.identity.session_id in
+      let entry =
+        Session_registry.
+          { actor
+          ; history_ids
+          ; runtime
+          ; durable_events
+          ; capacity
+          ; store_handle = Some handle
+          ; expire_permissions = expire_permissions t actor profile
+          ; collect_results =
+              collect_results
+                t
+                handle
+                journal
+                persistence
+                durable_events
+                services
+                runtime
+                actor
+          ; close =
+              (fun () ->
+                close_entry t handle journal persistence runtime writer actor capacity)
+          }
+      in
+      match state.lifecycle.observed with
+      | Agent_protocol.Session.Stopped ->
+        let%map () = Runtime_owner.unload runtime in
+        entry
+      | Queued_for_slot
+      | Starting
+      | Recovering
+      | Idle
+      | Running_turn _
+      | Compacting _
+      | Waiting_for_permission _
+      | Stopping
+      | Failed _ -> Ok entry
+    in
+    let close_failed () =
+      actor_ref := None;
+      runtime_owner := None;
+      try
+        Eio.Cancel.protect (fun () ->
+          close_unregistered_entry t handle runtime writer actor capacity)
+      with
+      | _ -> ()
+    in
+    (match finish () with
+     | Ok _ as result -> result
      | Error _ as failure ->
-       actor_ref := None;
-       close_unregistered_entry t handle runtime writer actor capacity;
-       failure)
+       close_failed ();
+       failure
+     | exception exn ->
+       let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+       close_failed ();
+       Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let create_unloaded_entry
@@ -3751,77 +4508,115 @@ let create_unloaded_entry
       initial_events
       capacity
   =
-  let open Result.Let_syntax in
-  let%bind profile = permission_profile_revision t state.spec.permission_profile_digest in
-  let%bind durable_events =
-    Agent_session.Durable_event_log.create
-      ~capacity:t.limits.event_replay_capacity
-      initial_events
+  let close_borrowed () =
+    Exn.protect
+      ~f:(fun () -> Option.iter capacity ~f:Session_capacity.release)
+      ~finally:(fun () -> Agent_store.Commit_writer.close writer)
   in
-  let runtime_owner = ref None in
-  let%bind services =
-    actor_services
-      t
-      handle
-      journal
-      persistence
-      durable_events
-      capacity
-      runtime_owner
-      ~creating_principal:state.identity.creating_principal
+  let cleanup = ref close_borrowed in
+  let create () =
+    let open Result.Let_syntax in
+    let%bind profile =
+      permission_profile_revision t state.spec.permission_profile_digest
+    in
+    let documents = Agent_session.Session_persistence.take_replay_documents persistence in
+    let initial_events =
+      match documents with
+      | [] -> initial_events
+      | _ -> List.map documents ~f:Agent_session.Durable_event_document.value
+    in
+    let%bind durable_events =
+      Agent_session.Durable_event_log.create
+        ~documents
+        ~capacity:t.limits.event_replay_capacity
+        initial_events
+    in
+    let runtime_owner = ref None in
+    let%bind services =
+      actor_services
+        t
+        handle
+        journal
+        persistence
+        durable_events
+        capacity
+        runtime_owner
+        ~creating_principal:state.identity.creating_principal
+    in
+    let actor =
+      Agent_session.Session_actor.create_with_owner_lease_duration
+        ~schedule_permission_timeouts:false
+        ~sw:t.sw
+        ~clock:(Eio.Stdenv.clock t.env)
+        ~mailbox_capacity:t.limits.mailbox_capacity
+        ~owner_lease_duration_ms:t.limits.owner_lease_duration_ms
+        ~max_attachments:t.limits.max_attachments_per_session
+        ~subscriber_capacity:t.limits.subscriber_queue_capacity
+        ~compaction_env:(Some t.env)
+        ~initial_state:state
+        ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
+        ~operation_worker:None
+        ~services
+    in
+    (cleanup
+     := fun () ->
+          Exn.protect
+            ~f:(fun () -> Agent_session.Session_actor.shutdown actor)
+            ~finally:close_borrowed);
+    let runtime =
+      Runtime_owner.create_with_unload
+        ~before_unload:(retire_owned_children t actor)
+        ~actor
+        ~initial:None
+        ~build:(fun () -> build_runtime_for_actor t handle actor)
+    in
+    runtime_owner := Some runtime;
+    (cleanup := fun () -> close_unregistered_entry t handle runtime writer actor capacity);
+    let%bind () = install_compaction_inference t actor runtime in
+    match history_source t actor state.identity.session_id with
+    | Error _ as failure ->
+      runtime_owner := None;
+      failure
+    | Ok history_ids ->
+      Ok
+        Session_registry.
+          { actor
+          ; history_ids
+          ; runtime
+          ; durable_events
+          ; capacity
+          ; store_handle = Some handle
+          ; expire_permissions = expire_permissions t actor profile
+          ; collect_results =
+              collect_results
+                t
+                handle
+                journal
+                persistence
+                durable_events
+                services
+                runtime
+                actor
+          ; close =
+              (fun () ->
+                close_entry t handle journal persistence runtime writer actor capacity)
+          }
   in
-  let actor =
-    Agent_session.Session_actor.create_with_owner_lease_duration
-      ~schedule_permission_timeouts:false
-      ~sw:t.sw
-      ~clock:(Eio.Stdenv.clock t.env)
-      ~mailbox_capacity:t.limits.mailbox_capacity
-      ~owner_lease_duration_ms:t.limits.owner_lease_duration_ms
-      ~max_attachments:t.limits.max_attachments_per_session
-      ~subscriber_capacity:t.limits.subscriber_queue_capacity
-      ~compaction_env:(Some t.env)
-      ~initial_state:state
-      ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
-      ~operation_worker:None
-      ~services
+  let close_failed () =
+    (* Failed admission retains durable data, releases each borrowed resource
+       once, and preserves the original error if cleanup also fails. *)
+    try Eio.Cancel.protect !cleanup with
+    | _ -> ()
   in
-  let runtime =
-    Runtime_owner.create_with_unload
-      ~before_unload:(retire_owned_children t actor)
-      ~actor
-      ~initial:None
-      ~build:(fun () -> build_runtime_for_actor t handle actor)
-  in
-  runtime_owner := Some runtime;
-  match history_source t actor state.identity.session_id with
+  match create () with
+  | Ok _ as result -> result
   | Error _ as failure ->
-    runtime_owner := None;
-    close_unregistered_entry t handle runtime writer actor capacity;
+    close_failed ();
     failure
-  | Ok history_ids ->
-    Ok
-      Session_registry.
-        { actor
-        ; history_ids
-        ; runtime
-        ; durable_events
-        ; capacity
-        ; store_handle = Some handle
-        ; expire_permissions = expire_permissions t actor profile
-        ; collect_results =
-            collect_results
-              t
-              handle
-              journal
-              persistence
-              durable_events
-              services
-              runtime
-              actor
-        ; close =
-            (fun () ->
-              close_entry t handle journal persistence runtime writer actor capacity)
-        }
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close_failed ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let cleanup_failed_session t handle =
@@ -3856,7 +4651,12 @@ let prepare_initial_capacity t state =
     (match Session_capacity.try_acquire capacity ~queue_if_limited:true with
      | Acquired | Already_acquired ->
        Session_capacity.runtime_ready capacity;
-       Ok (with_observed state Idle, Some capacity)
+       let observed =
+         match state.runtime_initialization with
+         | Ready -> Agent_protocol.Session.Idle
+         | Pending _ -> Queued_for_slot
+       in
+       Ok (with_observed state observed, Some capacity)
      | Queue_required _ -> Ok (with_observed state Queued_for_slot, Some capacity)
      | Rejected error -> Error error)
 ;;
@@ -3883,93 +4683,11 @@ let commit_creation t persistence state ~command_audit =
   transition
 ;;
 
-let finish_creation_with_runtime
-      t
-      handle
-      provisional
-      runtime
-      shell
-      actor_ref
-      pending_schedule_operations
-      pending_jobs
-      ~command_audit
-  =
-  let initial = install_runtime_state provisional runtime shell in
-  match prepare_initial_capacity t initial with
-  | Error _ as failure ->
-    runtime.close ();
-    failure
-  | Ok (state, capacity) ->
-    let session_id = state.Agent_session.Session_state.identity.session_id in
-    (match create_journal t handle session_id with
-     | Error error ->
-       Option.iter capacity ~f:Session_capacity.release;
-       runtime.close ();
-       Error (protocol_of_store error)
-     | Ok (journal, writer) ->
-       let persistence =
-         Agent_session.Session_persistence.create
-           ~archive:
-             (Agent_session.Compaction_archive.write
-                ~env:t.env
-                ~handle
-                ~max_payload_length:t.limits.snapshot_payload_limit)
-           ~command_accepted:(mark_command_accepted t)
-           ~writer
-           ~durability:t.durability
-           ~previous_transaction_hash:None
-       in
-       let creation_result = commit_creation t persistence state ~command_audit in
-       (match creation_result with
-        | Error _ as failure ->
-          Option.iter capacity ~f:Session_capacity.release;
-          close_runtime_writer runtime writer;
-          failure
-        | Ok creation ->
-          let state = creation.Agent_session.Session_transition.state in
-          let snapshot_result =
-            Agent_session.Session_persistence.install_snapshot
-              ~env:t.env
-              ~handle
-              ~max_payload_length:t.limits.snapshot_payload_limit
-              ~transaction_hash:
-                (Agent_session.Session_persistence.transaction_hash persistence)
-              state
-            |> Result.map_error ~f:protocol_of_store
-          in
-          (match snapshot_result with
-           | Error _ as failure ->
-             Option.iter capacity ~f:Session_capacity.release;
-             close_runtime_writer runtime writer;
-             failure
-           | Ok _ ->
-             (match
-                persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
-              with
-              | Error _ as failure ->
-                Option.iter capacity ~f:Session_capacity.release;
-                close_runtime_writer runtime writer;
-                failure
-              | Ok () ->
-                create_loaded_entry
-                  t
-                  handle
-                  journal
-                  state
-                  runtime
-                  writer
-                  persistence
-                  creation.events
-                  capacity
-                  actor_ref
-                  pending_schedule_operations
-                  pending_jobs))))
-;;
-
 let persist_initial_snapshot t handle journal persistence state =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
+      persistence
       ~env:t.env
       ~handle
       ~max_payload_length:t.limits.snapshot_payload_limit
@@ -3978,84 +4696,114 @@ let persist_initial_snapshot t handle journal persistence state =
     |> Result.map_error ~f:protocol_of_store
   in
   ignore
-    (prune_snapshot t handle journal installed : (unit, Agent_store.Store_error.t) result);
+    (prune_snapshot t handle journal persistence installed
+     : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
 ;;
 
 let finish_unloaded_creation t handle state ~command_audit =
   let open Result.Let_syntax in
   let%bind state, capacity = prepare_initial_capacity t state in
-  let%bind journal, writer =
-    create_journal t handle state.identity.session_id
-    |> Result.map_error ~f:protocol_of_store
+  let cleanup = ref (fun () -> Option.iter capacity ~f:Session_capacity.release) in
+  let create () =
+    let%bind journal, writer =
+      create_journal t handle state.identity.session_id
+      |> Result.map_error ~f:protocol_of_store
+    in
+    (cleanup
+     := fun () ->
+          Exn.protect
+            ~f:(fun () -> Option.iter capacity ~f:Session_capacity.release)
+            ~finally:(fun () -> Agent_store.Commit_writer.close writer));
+    let persistence =
+      Agent_session.Session_persistence.create
+        ~retention_preflight:(Some (create_retention_preflight t handle journal))
+        ~limits:t.journal_document_limits
+        ~archive_limits:t.document_limits
+        ~restored:(Agent_session.Session_persistence.Restored.authored state)
+        ~archive:
+          (Agent_session.Compaction_archive.write_document
+             ~env:t.env
+             ~handle
+             ~max_payload_length:t.limits.snapshot_payload_limit)
+        ~command_accepted:(mark_command_accepted t)
+        ~writer
+        ~durability:t.durability
+        ~previous_transaction_hash:None
+    in
+    match commit_creation t persistence state ~command_audit with
+    | Error _ as failure -> failure
+    | Ok creation ->
+      let state = creation.Agent_session.Session_transition.state in
+      (match persist_initial_snapshot t handle journal persistence state with
+       | Error _ as failure -> failure
+       | Ok () ->
+         (* [create_unloaded_entry] takes ownership on entry, including failures. *)
+         cleanup := ignore;
+         create_unloaded_entry
+           t
+           handle
+           journal
+           state
+           writer
+           persistence
+           creation.events
+           capacity)
   in
-  let persistence =
-    Agent_session.Session_persistence.create
-      ~archive:
-        (Agent_session.Compaction_archive.write
-           ~env:t.env
-           ~handle
-           ~max_payload_length:t.limits.snapshot_payload_limit)
-      ~command_accepted:(mark_command_accepted t)
-      ~writer
-      ~durability:t.durability
-      ~previous_transaction_hash:None
+  let close_failed () =
+    try Eio.Cancel.protect !cleanup with
+    | _ -> ()
   in
-  match commit_creation t persistence state ~command_audit with
+  match create () with
+  | Ok _ as result -> result
   | Error _ as failure ->
-    Option.iter capacity ~f:Session_capacity.release;
-    Agent_store.Commit_writer.close writer;
+    close_failed ();
     failure
-  | Ok creation ->
-    let state = creation.Agent_session.Session_transition.state in
-    (match persist_initial_snapshot t handle journal persistence state with
-     | Error _ as failure ->
-       Option.iter capacity ~f:Session_capacity.release;
-       Agent_store.Commit_writer.close writer;
-       failure
-     | Ok () ->
-       create_unloaded_entry
-         t
-         handle
-         journal
-         state
-         writer
-         persistence
-         creation.events
-         capacity)
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close_failed ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let finish_creation t handle revision profile provisional ~command_audit =
-  let actor_ref = ref None in
-  let pending_schedule_operations = ref [] in
-  let pending_jobs = ref [] in
-  let runtime_result =
-    prepare_runtime
-      t
-      handle
-      (Authored revision)
-      profile
-      provisional
-      ~next_history_sequence:0
-      ~existing_history:None
-      ~existing_moderator_snapshot:None
-      ~actor_ref
-      ~pending_schedule_operations
-      ~pending_jobs
+let finish_creation t handle _revision _profile provisional ~command_audit =
+  let open Result.Let_syntax in
+  let provisional =
+    { provisional with
+      Agent_session.Session_state.runtime_initialization =
+        Pending { fresh_history = true }
+    }
   in
-  match runtime_result with
-  | Error _ as failure -> failure
-  | Ok (runtime, shell) ->
-    finish_creation_with_runtime
-      t
-      handle
-      provisional
-      runtime
-      shell
-      actor_ref
-      pending_schedule_operations
-      pending_jobs
-      ~command_audit
+  let%bind entry = finish_unloaded_creation t handle provisional ~command_audit in
+  let initialize_entry () =
+    let%bind () = Runtime_owner.ensure_loaded entry.runtime in
+    let%bind state = Agent_session.Session_actor.state entry.actor in
+    let%map () =
+      match state.lifecycle.desired with
+      | Stopped -> Runtime_owner.unload entry.runtime
+      | Running ->
+        if Option.for_all entry.capacity ~f:Session_capacity.is_acquired
+        then
+          Agent_session.Session_actor.activate_queued_start entry.actor
+          |> Result.map ~f:ignore
+        else Ok ()
+    in
+    entry
+  in
+  let close_unregistered () =
+    (* The selected Created state remains durable; only borrowed live resources
+       are retired. Cleanup must not replace the initialization failure. *)
+    try Eio.Cancel.protect entry.close with
+    | _ -> ()
+  in
+  match initialize_entry () with
+  | Ok _ as result -> result
+  | Error _ as failure ->
+    close_unregistered ();
+    failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    close_unregistered ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let create_session
@@ -4070,6 +4818,24 @@ let create_session
     resolve_workspace_definition t definition request.spec.workspace
   in
   let%bind profile = permission_profile t definition.permission_profile in
+  let%bind target =
+    t.inference_policy.capture_inference_target
+      ~prompt_revision_id:(Agent_session.Prompt_revision.id revision)
+      ~config:
+        (Chat_response.Config.of_elements
+           (Agent_session.Prompt_revision.elements revision))
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Invalid_state
+        (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+  in
+  let%bind inference_target =
+    Inference.Selection.captured target ~limits:t.document_limits
+    |> Result.map_error ~f:(fun error ->
+      unavailable
+        Invalid_request
+        (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+  in
   let session_id = Agent_protocol.Id.Session.create () in
   let final_directory =
     Agent_store.Data_root.session_path
@@ -4095,6 +4861,7 @@ let create_session
            ~now
            ~definition
            ~revision
+           ~inference_target
            ~workspace_definition
            ~profile
            ~final_directory
@@ -4114,8 +4881,20 @@ let create_session
   match finish_creation t handle revision profile provisional ~command_audit with
   | Ok entry -> Ok entry
   | Error _ as failure ->
-    cleanup_failed_session t handle;
+    ignore
+      (Agent_store.Session_store.close_session t.store handle
+       : (unit, Agent_store.Store_error.t) result);
     failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    (try
+       Eio.Cancel.protect (fun () ->
+         ignore
+           (Agent_store.Session_store.close_session t.store handle
+            : (unit, Agent_store.Store_error.t) result))
+     with
+     | _ -> ());
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let validate_import_request request legacy source_path =
@@ -4129,7 +4908,7 @@ let validate_import_request request legacy source_path =
       spec.execution_host, spec.persistence, spec.liveness, spec.start_immediately
     with
     | Daemon, Durable, Detached, false ->
-      Session.V5.validate (Session.to_v5 legacy)
+      Session.validate legacy
       |> Result.map_error ~f:(fun message -> unavailable Migration_required message)
     | _ ->
       Error
@@ -4194,6 +4973,7 @@ let import_legacy t ~principal ~source_id ~source_path ~legacy request =
            ~now:(now t)
            ~definition
            ~revision
+           ~inference_target:legacy.Session.inference_target
            ~workspace_definition
            ~profile
            ~final_directory
@@ -4266,14 +5046,17 @@ let initial_recovery_state t handle =
       ~f:Result.return
   in
   let%bind state =
-    Agent_session.Session_persistence.restore_snapshot installed.snapshot.payload
+    Agent_session.Session_persistence.restore_snapshot
+      ~limits:t.document_limits
+      installed.snapshot
     |> Result.map_error ~f:protocol_of_store
   in
+  let state = Agent_session.Session_persistence.Restored.state state in
   let%map () = validate_snapshot handle installed state in
   state
 ;;
 
-let open_recovery t handle initial =
+let open_recovery t handle =
   let open Result.Let_syntax in
   let%bind journal =
     Agent_store.Journal.open_existing
@@ -4284,25 +5067,27 @@ let open_recovery t handle initial =
       ~max_segment_frames:t.limits.max_segment_frames
     |> Result.map_error ~f:protocol_of_store
   in
-  let validate state =
-    Agent_session.Session_state.validate state
-    |> Result.map_error ~f:(fun error ->
-      Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-  in
-  let%map recovery =
+  let%bind recovery =
     Agent_store.Recovery.load
       ~env:t.env
       ~journal
       ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
       ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
-      ~session_id:initial.Agent_session.Session_state.identity.session_id
-      ~initial
-      ~restore_snapshot:Agent_session.Session_persistence.restore_snapshot
-      ~apply:Agent_session.Session_persistence.apply_transaction
-      ~validate
+      ~session_id:(Agent_store.Session_store.Handle.session_id handle)
+      ~initial:None
+      ~restore_snapshot:(restore_recovery_state t)
+      ~apply:(apply_recovery_transaction t)
+      ~validate_transaction:
+        (Agent_session.Session_persistence.validate_transaction
+           ~limits:t.journal_document_limits)
+      ~validate:(validate_recovery_state t handle)
     |> Result.map_error ~f:protocol_of_store
   in
-  journal, recovery
+  let%map state =
+    recovery.state
+    |> Result.of_option ~error:(corrupt "durable session has no restored state")
+  in
+  journal, { recovery with state }
 ;;
 
 let recovered_revision = restore_state_source
@@ -4426,6 +5211,7 @@ let recovery_attachment_deltas state ~now =
 
 let recovery_transition
       ~parent_stop
+      ~inference_target
       state
       ~now
       ~reserved_history_through
@@ -4485,6 +5271,21 @@ let recovery_transition
           @ permission_deltas
           @ reviewer_job_deltas
           @ attachment_deltas
+          @ Option.to_list
+              (Option.map inference_target ~f:(fun target ->
+                 Agent_session.Session_delta.Inference_target_captured target))
+          @ (match observed with
+             | Agent_protocol.Session.Failed failure ->
+               [ Agent_session.Session_delta.Failure_changed (Some failure) ]
+             | Stopped
+             | Queued_for_slot
+             | Starting
+             | Recovering
+             | Idle
+             | Running_turn _
+             | Compacting _
+             | Waiting_for_permission _
+             | Stopping -> [])
           @
           match parent_stop with
           | None -> []
@@ -4523,6 +5324,7 @@ let create_recovery_writer t journal recovery session_id =
 
 let commit_recovery_boundary
       ~parent_stop
+      ~inference_target
       t
       persistence
       state
@@ -4534,6 +5336,7 @@ let commit_recovery_boundary
   let%bind transition =
     recovery_transition
       ~parent_stop
+      ~inference_target
       state
       ~now:(now t)
       ~reserved_history_through
@@ -4550,10 +5353,12 @@ let commit_recovery_boundary
   transition
 ;;
 
-let recovered_events recovery =
+let recovered_events t recovery =
   Result.all
     (List.map recovery.Agent_store.Recovery.transactions ~f:(fun transaction ->
-       Agent_session.Session_persistence.durable_events transaction))
+       Agent_session.Session_persistence.event_documents
+         ~limits:t.journal_document_limits
+         transaction))
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:protocol_of_store
 ;;
@@ -4613,6 +5418,7 @@ let persist_recovered_state t handle journal persistence state =
   let open Result.Let_syntax in
   let%bind installed =
     Agent_session.Session_persistence.install_snapshot
+      persistence
       ~env:t.env
       ~handle
       ~max_payload_length:t.limits.snapshot_payload_limit
@@ -4621,54 +5427,69 @@ let persist_recovered_state t handle journal persistence state =
     |> Result.map_error ~f:protocol_of_store
   in
   ignore
-    (prune_snapshot t handle journal installed : (unit, Agent_store.Store_error.t) result);
+    (prune_snapshot t handle journal persistence installed
+     : (unit, Agent_store.Store_error.t) result);
   persist_metadata t handle state |> Result.map_error ~f:protocol_of_store
-;;
-
-let recover_runtime
-      t
-      handle
-      revision
-      profile
-      persistence
-      state
-      first_sequence
-      actor_ref
-      pending_schedule_operations
-      pending_jobs
-  =
-  let open Result.Let_syntax in
-  let%bind history =
-    Agent_session.History_codec.all_of_protocol
-      state.Agent_session.Session_state.conversation.canonical_history
-  in
-  let runtime_result =
-    prepare_runtime
-      t
-      handle
-      revision
-      profile
-      state
-      ~next_history_sequence:first_sequence
-      ~existing_history:(Some history)
-      ~existing_moderator_snapshot:state.moderator
-      ~actor_ref
-      ~pending_schedule_operations
-      ~pending_jobs
-  in
-  match runtime_result with
-  | Error _ as failure -> failure
-  | Ok (runtime, shell) -> Ok ({ state with shell }, runtime)
 ;;
 
 let recover_open_handle t handle =
   let open Result.Let_syntax in
-  let%bind initial = initial_recovery_state t handle in
-  let%bind journal, recovery = open_recovery t handle initial in
+  let%bind journal, recovery = open_recovery t handle in
   let%bind () = reconcile_command_audits t recovery in
-  let state = recovery.Agent_store.Recovery.state in
+  let state =
+    Agent_session.Session_persistence.Restored.state recovery.Agent_store.Recovery.state
+  in
   let%bind parent_stop = parent_stop_recovery t state in
   let stopping = Option.exists parent_stop ~f:(fun parent -> parent.stop) in
+  let%bind inference_target =
+    match
+      ( Inference.Selection.view state.spec.inference_target
+      , state.lifecycle.desired
+      , stopping
+      , t.inference_policy.migrate_inference_target )
+    with
+    | Unresolved, Running, false, Some migrate ->
+      let%bind target =
+        migrate state.spec
+        |> Result.map_error ~f:(fun error ->
+          unavailable
+            Migration_required
+            (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+      in
+      let%map _ =
+        Inference.Selection.capture
+          state.spec.inference_target
+          ~target
+          ~limits:t.document_limits
+        |> Result.map_error ~f:(fun error ->
+          unavailable
+            Migration_required
+            (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+      in
+      Some target
+    | Captured _, _, _, _
+    | Unresolved, Stopped, _, _
+    | Unresolved, Running, true, _
+    | Unresolved, Running, false, None -> Ok None
+  in
+  let activation_blocked =
+    match state.runtime_initialization with
+    | Pending _ ->
+      Some
+        (unavailable
+           Invalid_state
+           "selected runtime initialization requires explicit activation")
+    | Ready ->
+      (match Inference.Selection.view state.spec.inference_target, inference_target with
+       | Unresolved, None
+         when Agent_protocol.Session.equal_desired_state state.lifecycle.desired Running
+         ->
+         Some
+           (unavailable
+              Migration_required
+              "execution requires explicit inference migration")
+       | Captured _, _ | Unresolved, _ -> None)
+  in
   let%bind revision = recovered_revision t state in
   let%bind () =
     match state.lifecycle.desired with
@@ -4686,22 +5507,32 @@ let recover_open_handle t handle =
       ~first_sequence:recovery_first
       ~reason:"daemon restarted before the invocation recorded an outcome"
   in
-  let%bind first_sequence, reserved_history_through =
+  let%bind _first_sequence, reserved_history_through =
     recovery_reservation t (Int64.of_int invocations.next_sequence)
   in
-  let%bind durable_events = recovered_events recovery in
+  let%bind recovered_event_documents = recovered_events t recovery in
+  let durable_events =
+    List.map recovered_event_documents ~f:Agent_session.Durable_event_document.value
+  in
   let%bind observed, capacity =
-    prepare_recovery_capacity
-      t
-      (if stopping
-       then { state with lifecycle = { desired = Stopped; observed = Stopped } }
-       else state)
+    match stopping, activation_blocked with
+    | false, Some failure -> Ok (Agent_protocol.Session.Failed failure, None)
+    | true, _ | false, None ->
+      prepare_recovery_capacity
+        t
+        (if stopping
+         then { state with lifecycle = { desired = Stopped; observed = Stopped } }
+         else state)
   in
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
   let persistence =
     Agent_session.Session_persistence.create
+      ~retention_preflight:(Some (create_retention_preflight t handle journal))
+      ~limits:t.journal_document_limits
+      ~archive_limits:t.document_limits
+      ~restored:recovery.state
       ~archive:
-        (Agent_session.Compaction_archive.write
+        (Agent_session.Compaction_archive.write_document
            ~env:t.env
            ~handle
            ~max_payload_length:t.limits.snapshot_payload_limit)
@@ -4710,9 +5541,13 @@ let recover_open_handle t handle =
       ~durability:t.durability
       ~previous_transaction_hash:recovery.latest_transaction_hash
   in
+  Agent_session.Session_persistence.restore_replay_documents
+    persistence
+    recovered_event_documents;
   match
     commit_recovery_boundary
       ~parent_stop
+      ~inference_target
       t
       persistence
       state
@@ -4727,93 +5562,128 @@ let recover_open_handle t handle =
   | Ok recovery_transition ->
     let state = recovery_transition.Agent_session.Session_transition.state in
     let durable_events = durable_events @ recovery_transition.events in
-    (match state.lifecycle.observed with
-     | Agent_protocol.Session.Stopped ->
-       (match persist_recovered_state t handle journal persistence state with
-        | Error _ as failure ->
-          Option.iter capacity ~f:Session_capacity.release;
-          Agent_store.Commit_writer.close writer;
-          failure
-        | Ok () ->
-          let%bind entry =
-            create_unloaded_entry
-              t
-              handle
-              journal
-              state
-              writer
-              persistence
-              durable_events
-              capacity
-          in
-          (match parent_stop with
-           | Some { stop = true; reference; epoch } ->
-             (match
-                Agent_session.Session_actor.stop_delegated_at_epoch
-                  ~force:true
-                  entry.actor
-                  ~reference
-                  ~epoch
-              with
-              | Ok _ ->
-                (match Runtime_owner.unload_and_wait entry.runtime with
-                 | Ok () -> Ok entry
-                 | Error failure ->
-                   entry.close ();
-                   Error failure)
-              | Error failure ->
-                entry.close ();
-                Error failure)
-           | None | Some { stop = false; _ } -> Ok entry))
-     | Queued_for_slot
-     | Starting
-     | Recovering
-     | Idle
-     | Running_turn _
-     | Compacting _
-     | Waiting_for_permission _
-     | Stopping
-     | Failed _ ->
-       let actor_ref = ref None in
-       let pending_schedule_operations = ref [] in
-       let pending_jobs = ref [] in
-       (match
-          recover_runtime
-            t
-            handle
-            revision
-            profile
-            persistence
-            state
-            first_sequence
-            actor_ref
-            pending_schedule_operations
-            pending_jobs
-        with
-        | Error _ as failure ->
-          Option.iter capacity ~f:Session_capacity.release;
-          Agent_store.Commit_writer.close writer;
-          failure
-        | Ok (state, runtime) ->
-          (match persist_recovered_state t handle journal persistence state with
-           | Error _ as failure ->
-             Option.iter capacity ~f:Session_capacity.release;
-             close_runtime_writer runtime writer;
-             failure
-           | Ok () ->
-             create_loaded_entry
-               t
-               handle
-               journal
-               state
-               runtime
-               writer
-               persistence
-               durable_events
-               capacity
-               actor_ref
-               pending_schedule_operations
-               pending_jobs)))
+    (match persist_recovered_state t handle journal persistence state with
+     | Error failure ->
+       Option.iter capacity ~f:Session_capacity.release;
+       Agent_store.Commit_writer.close writer;
+       Error failure
+     | Ok () ->
+       let%bind entry =
+         create_unloaded_entry
+           t
+           handle
+           journal
+           state
+           writer
+           persistence
+           durable_events
+           capacity
+       in
+       let restored () =
+         let%bind () =
+           Agent_session.Session_actor.reconcile_inference_recovery entry.actor
+         in
+         match parent_stop with
+         | Some { stop = true; reference; epoch } ->
+           let%bind _ =
+             Agent_session.Session_actor.stop_delegated_at_epoch
+               ~force:true
+               entry.actor
+               ~reference
+               ~epoch
+           in
+           Runtime_owner.unload_and_wait entry.runtime
+         | None | Some { stop = false; _ } ->
+           (match state.lifecycle.observed, activation_blocked with
+            | Stopped, _ | _, Some _ -> Ok ()
+            | ( ( Queued_for_slot
+                | Starting
+                | Recovering
+                | Idle
+                | Running_turn _
+                | Compacting _
+                | Waiting_for_permission _
+                | Stopping
+                | Failed _ )
+              , None ) -> Runtime_owner.ensure_loaded entry.runtime)
+       in
+       (match restored () with
+        | Ok () -> Ok entry
+        | Error failure ->
+          (try Eio.Cancel.protect entry.close with
+           | _ -> ());
+          Error failure
+        | exception exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          (try Eio.Cancel.protect entry.close with
+           | _ -> ());
+          Exn.raise_with_original_backtrace exn backtrace))
+;;
+
+let read_session t index_entry =
+  let open Result.Let_syntax in
+  let session_id = index_entry.Agent_store.Session_index.Entry.session.id in
+  Eio.Switch.run (fun sw ->
+    let%bind handle =
+      Agent_store.Session_store.open_session
+        t.store
+        ~sw
+        ~actor_lock_nonce:
+          (Agent_protocol.Id.Transaction.create ()
+           |> Agent_protocol.Id.Transaction.to_string)
+        session_id
+      |> Result.map_error ~f:protocol_of_store
+    in
+    let close () =
+      Eio.Cancel.protect (fun () ->
+        Agent_store.Session_store.close_session t.store handle)
+    in
+    let read () =
+      let%bind journal =
+        Agent_store.Journal.open_existing
+          ~env:t.env
+          ~directory:(Agent_store.Session_store.Handle.journal_directory handle)
+          ~max_payload_length:t.limits.max_journal_payload
+          ~max_segment_bytes:t.limits.max_segment_bytes
+          ~max_segment_frames:t.limits.max_segment_frames
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let%bind recovered =
+        Agent_store.Recovery.read
+          ~env:t.env
+          ~journal
+          ~snapshot_directory:(Agent_store.Session_store.Handle.snapshot_directory handle)
+          ~max_snapshot_payload_length:t.limits.snapshot_payload_limit
+          ~session_id
+          ~initial:None
+          ~restore_snapshot:(restore_recovery_state t)
+          ~apply:(apply_recovery_transaction t)
+          ~validate_transaction:
+            (Agent_session.Session_persistence.validate_transaction
+               ~limits:t.journal_document_limits)
+          ~validate:(validate_recovery_state t handle)
+        |> Result.map_error ~f:protocol_of_store
+      in
+      let%map restored =
+        Result.of_option
+          recovered.state
+          ~error:(corrupt "durable session has no restored state")
+      in
+      Agent_session.Session_persistence.Restored.state restored
+    in
+    match read () with
+    | Ok state ->
+      let%map () = close () |> Result.map_error ~f:protocol_of_store in
+      state
+    | Error _ as failure ->
+      (try ignore (close () : (unit, Agent_store.Store_error.t) Result.t) with
+       | _ -> ());
+      failure
+    | exception exn ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      (try ignore (close () : (unit, Agent_store.Store_error.t) Result.t) with
+       | _ -> ());
+      Exn.raise_with_original_backtrace exn backtrace)
 ;;
 
 let recover_index_entry t index_entry =
@@ -4994,6 +5864,10 @@ let initialize_generated_layout t state ~staging_directory =
     ~f:(fun () ->
       let persistence =
         Agent_session.Session_persistence.create
+          ~retention_preflight:None
+          ~limits:t.journal_document_limits
+          ~archive_limits:t.document_limits
+          ~restored:(Agent_session.Session_persistence.Restored.authored state)
           ~archive:(fun _ _ -> Error (corrupt "creation cannot archive history"))
           ~command_accepted:(fun _ _ -> ())
           ~writer
@@ -5007,6 +5881,7 @@ let initialize_generated_layout t state ~staging_directory =
       let state = transition.Agent_session.Session_transition.state in
       let%bind _ =
         Agent_session.Session_persistence.install_snapshot_at
+          persistence
           ~env:t.env
           ~directory:(Filename.concat staging_directory "snapshot")
           ~max_payload_length:t.limits.snapshot_payload_limit
@@ -5123,33 +5998,58 @@ let prepare_session_start t entry =
   with_generated_creation_lock t (fun () ->
     let open Result.Let_syntax in
     let%bind state = Agent_session.Session_actor.state entry.Session_registry.actor in
-    match state.spec.delegation with
-    | None -> Ok ()
-    | Some reference ->
-      let%bind () = load_independent_ancestors t reference in
-      let%bind parent, record = generated_parent ~check_stop_epoch:false t state in
-      (match record.admission.lifetime with
-       | Independent _ ->
-         Independent_resources.check_parent
-           ~max_depth:t.limits.delegation_max_depth
-           ~host:(independent_resource_host t)
-           ~parent_id:record.key.parent_session_id
-       | Owned | Invocation_owned _ ->
-         let%bind current = Agent_session.Session_actor.state parent.actor in
-         (match
-            Option.equal Int64.equal state.parent_stop_epoch (Some current.stop_epoch)
-          with
-          | true -> Ok ()
-          | false ->
-            Delegation_lifecycle.stop_owned
-              ~parent_stop_epoch:current.stop_epoch
-              ~clock:(Eio.Stdenv.clock t.env)
-              ~delegations:(Agent_store.Session_store.delegations t.store)
-              ~reference
-              ~actor:entry.actor
-              ~runtime:entry.runtime
-              ()
-            |> Result.map ~f:ignore)))
+    let%bind () =
+      match state.spec.delegation with
+      | None -> Ok ()
+      | Some reference ->
+        let%bind () = load_independent_ancestors t reference in
+        let%bind parent, record = generated_parent ~check_stop_epoch:false t state in
+        (match record.admission.lifetime with
+         | Independent _ ->
+           Independent_resources.check_parent
+             ~max_depth:t.limits.delegation_max_depth
+             ~host:(independent_resource_host t)
+             ~parent_id:record.key.parent_session_id
+         | Owned | Invocation_owned _ ->
+           let%bind current = Agent_session.Session_actor.state parent.actor in
+           (match
+              Option.equal Int64.equal state.parent_stop_epoch (Some current.stop_epoch)
+            with
+            | true -> Ok ()
+            | false ->
+              Delegation_lifecycle.stop_owned
+                ~parent_stop_epoch:current.stop_epoch
+                ~clock:(Eio.Stdenv.clock t.env)
+                ~delegations:(Agent_store.Session_store.delegations t.store)
+                ~reference
+                ~actor:entry.actor
+                ~runtime:entry.runtime
+                ()
+              |> Result.map ~f:ignore))
+    in
+    match Inference.Selection.view state.spec.inference_target with
+    | Captured _ -> Ok ()
+    | Unresolved ->
+      let%bind migrate =
+        Result.of_option
+          t.inference_policy.migrate_inference_target
+          ~error:
+            (unavailable
+               Migration_required
+               "execution requires an explicitly approved persisted inference target")
+      in
+      let%bind target =
+        migrate state.spec
+        |> Result.map_error ~f:(fun error ->
+          unavailable
+            Migration_required
+            (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+      in
+      Agent_session.Session_actor.capture_inference_target
+        entry.actor
+        ~target
+        ~limits:t.journal_document_limits
+      |> Result.map ~f:ignore)
 ;;
 
 let resume_generated_initial_start t entry =
@@ -5329,6 +6229,7 @@ let resume_generated_initial_starts t =
    These callbacks are host-owned, never supplied by a model or protocol client. *)
 type child_creation_source =
   { artifact : Agent_store.Prompt_artifact_store.Artifact.t
+  ; config : Chat_response.Config.t
   ; capability_pins : (string * string) list
   ; authored_tool : Agent_store.Delegation_store.Admission.authored_tool option
   ; request_sha256 : string
@@ -5441,6 +6342,25 @@ let create_delegated_session
       in
       let%bind source = prepare_source ~runtime ~capabilities in
       let artifact = source.artifact in
+      let%bind parent_target =
+        match Inference.Selection.view before.spec.inference_target with
+        | Captured target -> Ok target
+        | Unresolved ->
+          Error
+            (unavailable
+               Migration_required
+               "child creation requires the parent's explicit inference migration")
+      in
+      let%bind inference_target =
+        Chat_response.Inference_config.apply_overrides
+          parent_target
+          source.config
+          ~limits:t.document_limits
+        |> Result.map_error ~f:(fun error ->
+          unavailable
+            Invalid_request
+            (Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error)))
+      in
       let%bind protocol =
         P.Session.Spec.create
           ~execution_host:Daemon
@@ -5474,6 +6394,7 @@ let create_delegated_session
         ; capability_pins = source.capability_pins
         ; lifetime = admitted_lifetime
         ; created_at = artifact.created_at
+        ; inference_target = Some inference_target
         }
       in
       Eio.Cancel.protect (fun () ->
@@ -5537,7 +6458,8 @@ let create_delegated_session
         let child_id = record.admission.child_session_id in
         let verify state =
           match state.State.spec.delegation with
-          | Some actual when D.Reference.equal reference actual -> Ok ()
+          | Some actual when D.Reference.equal reference actual ->
+            validate_delegated_target state record
           | _ -> Error (corrupt "generated child does not match its creation reservation")
         in
         let%bind entry, fresh =
@@ -5561,6 +6483,16 @@ let create_delegated_session
                      "retained generated child is no longer available")
               | Error (Missing _) ->
                 let%bind history, next = source.initial_history ~session_id:child_id in
+                let%bind inference_target =
+                  (match record.admission.inference_target with
+                   | Some target ->
+                     Inference.Selection.captured target ~limits:t.document_limits
+                   | None -> Inference.Selection.unresolved ~limits:t.document_limits)
+                  |> Result.map_error ~f:(fun error ->
+                    unavailable
+                      Invalid_state
+                      (Sexp.to_string_hum (Inference.Request.Error.sexp_of_t error)))
+                in
                 let initial =
                   State.create
                     ~identity:
@@ -5580,6 +6512,7 @@ let create_delegated_session
                           }
                       ; prompt_definition_id = None
                       ; prompt_revision_id = record.admission.revision_id
+                      ; inference_target
                       ; delegation = Some reference
                       ; quota_key = None
                       }
@@ -5724,6 +6657,9 @@ let create_generated_session
         |> Chatmd_shell_spec.Source_ref.digest
     in
     { artifact = G.artifact definition
+    ; config =
+        Chat_response.Config.of_elements
+          (Chat_response.Generated_admission.elements (G.admission definition))
     ; capability_pins = G.capability_pins definition
     ; authored_tool = None
     ; request_sha256
@@ -5820,6 +6756,7 @@ let create_authored_session
       |> Chatmd_shell_spec.Source_ref.digest
     in
     { artifact
+    ; config = Chat_response.Config.of_elements elements
     ; capability_pins
     ; authored_tool = Some { name; source_sha256 = Source.fingerprint source }
     ; request_sha256
@@ -6022,7 +6959,7 @@ let reconcile_generated_creations t =
                          let verify (state : State.t) =
                            match state.spec.delegation, state.lifecycle.desired with
                            | Some actual, Stopped when D.Reference.equal reference actual
-                             -> Ok ()
+                             -> validate_delegated_target state record
                            | _ ->
                              Error
                                (corrupt
@@ -6985,7 +7922,7 @@ let create
       ~job_capacity
       ~tool_dir
       ~home
-      ~model_post_stream
+      ~inference_policy
       ~qualify_chatml_extensions
       ~session_helpers
       ~independent_lifetime_policy
@@ -7043,7 +7980,7 @@ let create
     ; job_capacity
     ; tool_dir
     ; home
-    ; model_post_stream
+    ; inference_policy
     ; qualify_chatml_extensions
     ; session_helpers
     ; independent_lifetime_policy
@@ -7051,6 +7988,16 @@ let create
     ; authoring_validation_host
     ; durability
     ; limits
+    ; document_limits =
+        Agent_session.Persistence_codec.limits ~max_bytes:limits.snapshot_payload_limit
+        |> Result.map_error ~f:(fun e ->
+          Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
+        |> Result.ok_or_failwith
+    ; journal_document_limits =
+        Agent_session.Persistence_codec.limits ~max_bytes:limits.max_journal_payload
+        |> Result.map_error ~f:(fun e ->
+          Sexp.to_string_hum (Document_schema.Error.sexp_of_t e))
+        |> Result.ok_or_failwith
     ; generated_creation =
         { limits = bundle_limits
         ; create = (fun borrowed request -> create_from_native t borrowed request)

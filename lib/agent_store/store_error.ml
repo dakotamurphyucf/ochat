@@ -5,6 +5,8 @@ type t =
   | Missing of string
   | Schema_too_new of int
   | Migration_required of int
+  | Document of Document_schema.Error.t
+  | Framing of Frame.error
   | Corrupt of string
   | Io of
       { operation : string
@@ -44,6 +46,18 @@ let to_protocol_error = function
       ()
   | Corrupt message ->
     Agent_protocol.Error.create Journal_corrupt ~message ~retryable:false ()
+  | Document error ->
+    Agent_protocol.Error.create
+      Persistence_error
+      ~message:(Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+      ~retryable:false
+      ()
+  | Framing error ->
+    Agent_protocol.Error.create
+      Journal_corrupt
+      ~message:(Sexp.to_string_hum ([%sexp_of: Frame.error] error))
+      ~retryable:false
+      ()
   | Io { operation; path; message } ->
     Agent_protocol.Error.create
       Persistence_error

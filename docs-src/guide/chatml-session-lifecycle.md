@@ -23,6 +23,14 @@ capabilities and native child-management tools expose only their selected
 operations. A workflow can observe a change initiated by a user or another
 authorized controller without possessing the authority to initiate it itself.
 
+The host captures the selected source and effective inference target, then durably
+acknowledges `Pending` initialization before an initializer can invoke a model or
+admit other effects. Only successful initialization commits `Ready`. A failed or
+interrupted initializer retains its chosen configuration and already admitted
+effects; failure does not undo external work. After recovery, a `Pending` runtime
+requires explicit activation. Loading it neither proves initialization succeeded
+nor automatically repeats its initializer.
+
 ## Stop, start and restart
 
 A stop acknowledgement means the stop was admitted. Cleanup may still be in

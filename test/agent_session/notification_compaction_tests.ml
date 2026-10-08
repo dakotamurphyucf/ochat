@@ -23,17 +23,19 @@ let%expect_test
     Job_fixtures.with_actor
       ~prepare_state:(Setup.initial mode registry)
       (fun _ _ actor writer backend ->
-         A.set_operation_worker
+         A.set_runtime_worker
            actor
-           (Some
-              (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
-                 Int.incr runs;
-                 let state = A.state actor |> protocol_ok in
-                 Completed
-                   { final_history = input.history
-                   ; moderator_snapshot = state.moderator
-                   ; runtime_requests = []
-                   })))
+           ~worker:
+             (Some
+                (Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input _ ->
+                   Int.incr runs;
+                   let state = A.state actor |> protocol_ok in
+                   Completed
+                     { final_history = input.history
+                     ; moderator_snapshot = state.moderator
+                     ; runtime_requests = []
+                     })))
+           ~inference:(Some (Inference_ports.compaction_execution ()))
          |> protocol_ok;
          let prepare () =
            N.prepare_idle
@@ -65,12 +67,7 @@ let%expect_test
           | Error { code = Conflict; _ } -> ()
           | _ -> failwith "compaction did not invalidate old notification proposal");
          assert_same_session_snapshot compacted (A.state actor |> protocol_ok);
-         let restored =
-           State.sexp_of_t compacted
-           |> Sexp.to_string_mach
-           |> Agent_session.Session_persistence.restore_snapshot
-           |> store_ok
-         in
+         let restored = restore_state compacted |> store_ok in
          assert (List.equal P.Delivery.equal compacted.deliveries restored.deliveries);
          assert (A.deliver_idle_notifications actor (prepare ()) |> protocol_ok);
          let final = await_idle actor in
@@ -157,12 +154,7 @@ let%expect_test
          assert (not (A.deliver_idle_notifications actor (prepare current) |> protocol_ok));
          assert_same_session_snapshot current (A.state actor |> protocol_ok);
          assert_same_session_snapshot current (Agent_session.Memory_backend.state backend);
-         let restored =
-           State.sexp_of_t current
-           |> Sexp.to_string_mach
-           |> Agent_session.Session_persistence.restore_snapshot
-           |> store_ok
-         in
+         let restored = restore_state current |> store_ok in
          assert (not (N.has_idle_work restored));
          assert (Option.is_none restored.active_operation);
          print_s

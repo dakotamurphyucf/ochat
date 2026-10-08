@@ -7,10 +7,10 @@ type t =
   }
 
 type response =
-  { result : Agent_protocol.Method_result.t
+  { result : Agent_protocol.Public.Result.t
   ; notifications : Agent_protocol.Envelope.t list
   }
-[@@deriving sexp]
+[@@deriving sexp_of]
 
 let interrupted message =
   Agent_protocol.Error.create Interrupted ~message ~retryable:true ()
@@ -62,7 +62,7 @@ let rec await_response t command id notifications =
     ->
     let%map result =
       Result.bind response.outcome ~f:(fun json ->
-        Agent_protocol.Method_result.of_json
+        Agent_protocol.Public.Result.of_json
           ~method_:(Agent_protocol.Command.method_name command)
           json)
     in
@@ -97,8 +97,8 @@ let initialize t =
   let%bind initialize_request =
     Agent_protocol.Initialize.Request.create
       ~implementation
-      ~protocol_min:Agent_protocol.Version.initial
-      ~protocol_max:Agent_protocol.Version.initial
+      ~protocol_min:Agent_protocol.Version.current
+      ~protocol_max:Agent_protocol.Version.current
       ~features:[]
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
@@ -106,6 +106,9 @@ let initialize t =
   in
   let%bind response = request t (Protocol_initialize initialize_request) in
   match response.result with
-  | Protocol_initialize initialized -> Ok (initialized, response.notifications)
+  | Non_history value ->
+    (match Agent_protocol.Public.Result.Non_history.value value with
+     | Protocol_initialize initialized -> Ok (initialized, response.notifications)
+     | _ -> Error (Agent_protocol.Error.invalid_request "unexpected initialize result"))
   | _ -> Error (Agent_protocol.Error.invalid_request "unexpected initialize result")
 ;;

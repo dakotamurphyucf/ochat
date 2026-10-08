@@ -123,7 +123,18 @@ let%expect_test
       ; "input", read
       ]
   in
+  (* Five model calls can reserve work before any finishes. Catch rollback
+     releases its provisional reservation before starting its replacement. *)
   with_daemon
+    ~job_limits:
+      { daemon_total = 16
+      ; per_principal = 8
+      ; per_prompt = 8
+      ; per_workspace = 8
+      ; per_session = 5
+      ; per_kind = 16
+      ; max_nested_depth = 8
+      }
     ~runtime_policy:
       { Chat_response.Runtime_semantics.default_policy with honor_request_turn = false }
     ~sources
@@ -146,6 +157,15 @@ let%expect_test
           [%sexp
             "standalone deliveries did not settle"
           , (state.failure : Agent_protocol.Error.t option)
+          , (List.filter_map state.invocations ~f:(fun invocation ->
+               match invocation.I.context.origin with
+               | Model ->
+                 Some
+                   ( invocation.context.provider_call_id
+                   , invocation.context.tool_name
+                   , invocation.status )
+               | Script | Moderator | Delegated_agent | External_adapter -> None)
+             : (string option * string * I.status) list)
           , (List.map state.jobs ~f:(fun job ->
                job.id, job.status, job.delivery, job.attempt)
              : (Agent_protocol.Id.Job.t * J.status * J.delivery * int) list)

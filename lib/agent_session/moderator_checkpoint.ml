@@ -4,20 +4,36 @@ let failed message =
   Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
 ;;
 
+let shape =
+  match
+    Document_schema.Shape.object_
+      [ "identity_snapshot", Session.Moderator_state.Identity_snapshot.shape ]
+  with
+  | Ok shape -> shape
+  | Error error -> raise_s [%sexp (error : Document_schema.Error.t)]
+;;
+
+let encode snapshot =
+  `Object
+    [ "identity_snapshot", Session.Moderator_state.Identity_snapshot.to_jsonaf snapshot ]
+;;
+
 let decode = function
   | None -> Ok None
-  | Some (`Object fields) ->
-    (match List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal with
-     | Some (`String encoded) ->
-       (try
-          Ok
-            (Some
-               ([%of_sexp: Session.Moderator_state.Identity_snapshot.t]
-                  (Sexp.of_string encoded)))
-        with
-        | exn -> Error (failed ("moderator snapshot decode failed: " ^ Exn.to_string exn)))
-     | _ -> Error (failed "moderator snapshot is missing identity state"))
-  | Some _ -> Error (failed "moderator snapshot must be an object")
+  | Some json ->
+    let open Result.Let_syntax in
+    let%bind () =
+      Document_schema.Json.validate ~limits:Document_schema.Limits.default json
+      |> Result.map_error ~f:(fun error ->
+        failed (Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error)))
+    in
+    (match Document_schema.Json.field json ~name:"identity_snapshot" with
+     | Value snapshot ->
+       Session.Moderator_state.Identity_snapshot.of_jsonaf snapshot
+       |> Result.map ~f:Option.some
+       |> Result.map_error ~f:(fun error ->
+         failed ("moderator snapshot decode failed: " ^ error))
+     | Absent | Null -> Error (failed "moderator snapshot is missing identity state"))
 ;;
 
 let observer snapshot =

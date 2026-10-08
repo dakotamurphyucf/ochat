@@ -16,7 +16,9 @@ let connect_unix ~sw ~env ~daemon ~socket_path =
          ~dispatcher:(Agent_server.Daemon.dispatcher daemon)
          ~close_connection:(Agent_server.Daemon.close_connection daemon)
          ~authenticate:(fun flow _ ->
-           Agent_transport_socket.Peer_credentials.authenticate_same_user ~scopes flow)
+           Agent_transport_socket.Peer_credentials.authenticate_same_user_actor
+             ~scopes
+             flow)
          ~max_line_length:1048576
          ~outgoing_capacity:512
          ~max_attachments:64
@@ -78,9 +80,12 @@ let http_connector ~sw ~env ~daemon ~root ~(principal : Agent_protocol.Principal
         ~health:(Agent_server.Daemon.health daemon)
         ~close_connection:(Agent_server.Daemon.close_connection daemon)
         ~authenticate:(fun _ bearer ->
-          Agent_server.Authenticator.authenticate_bearer
+          Agent_server.Authenticator.authenticate_bearer_actor
             authenticator
-            ~now:(Agent_protocol.Timestamp.now ())
+            ~now:(fun () ->
+              Agent_protocol.Timestamp.of_time_ns
+                (Time_ns.of_span_since_epoch
+                   (Time_ns.Span.of_sec (Eio.Time.now (Eio.Stdenv.clock env)))))
             ~token:(Option.value bearer ~default:""))
         ~max_body_bytes:1048576
         ~max_batch_size:16
@@ -188,7 +193,7 @@ let connect_stdio ~sw ~env ~daemon ~socket_path =
     |> fun line ->
     Eio.Flow.copy_string (line ^ "\n") client_output;
     Eio.Promise.await response
-    |> Result.bind ~f:(Agent_protocol.Method_result.of_json ~method_)
+    |> Result.bind ~f:(Agent_protocol.Public.Result.of_json ~method_)
   in
   Agent_client.Transport.create
     ~request

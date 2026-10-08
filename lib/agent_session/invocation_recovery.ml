@@ -126,21 +126,24 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
                     (Jsonaf.to_string (I.outcome_to_json outcome))
                 in
                 let call_id = Option.value_exn invocation.context.provider_call_id in
-                let item =
-                  match kind with
-                  | I.Function ->
-                    Openai.Responses.Item.Function_call_output
-                      { call_id
-                      ; output
-                      ; _type = "function_call_output"
-                      ; id = None
-                      ; status = None
-                      }
-                  | Custom ->
-                    Custom_tool_call_output
-                      { call_id; output; _type = "custom_tool_call_output"; id = None }
+                let call_relation =
+                  Option.value_map
+                    invocation.context.call_entry_id
+                    ~default:History_entry.Payload.Call_relation.Unresolved
+                    ~f:(fun id -> History_entry.Payload.Call_relation.Bound id)
                 in
-                let entry = History_entry.create_with_id ~id item in
+                let entry =
+                  Openai.Responses_history.authored_output
+                    ~kind:
+                      (match kind with
+                       | I.Function -> History_entry.Payload.Call_kind.Function
+                       | Custom -> Custom)
+                    ~call_id
+                    ~call_relation
+                    ~output
+                  |> Result.ok_or_failwith
+                  |> History_entry.create_with_id ~id
+                in
                 let%bind encoded =
                   History_codec.to_protocol entry
                   |> Chat_response.Authoring_publication.encode

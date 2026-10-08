@@ -119,9 +119,10 @@ let with_background_daemon
                       job_result_max_bytes
                     ; job_result_inline_bytes = Int.min (64 * 1024) job_result_max_bytes
                     }
-                ; model_post_stream =
-                    Some
-                      (fun ~sw ~inputs ->
+                ; inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:(fun ~sw ~inputs ->
                         incr requests;
                         match model_post_stream with
                         | Some post -> post ~sw ~inputs
@@ -200,7 +201,7 @@ let with_background_daemon
                   initialize client;
                   List.iter completed_state.jobs ~f:(fun job ->
                     match
-                      Agent_client.Connection.request
+                      Agent_client.Connection.request_without_history
                         client
                         (Job_get { session_id = job.session_id; job_id = job.id })
                       |> protocol_ok
@@ -248,7 +249,7 @@ let submit ?created_at entry payload =
 let rec await env client (job : J.t) =
   let current =
     match
-      Agent_client.Connection.request
+      Agent_client.Connection.request_without_history
         client
         (Job_get { session_id = job.session_id; job_id = job.id })
       |> protocol_ok

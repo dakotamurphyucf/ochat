@@ -35,6 +35,9 @@ let all_scope_names =
     ; Administer_configuration
     ; Diagnostics
     ; Submit_ingress
+    ; Provider_view
+    ; Provider_manage
+    ; Provider_select
     ]
   |> List.map ~f:Agent_protocol.Scope.to_string
 ;;

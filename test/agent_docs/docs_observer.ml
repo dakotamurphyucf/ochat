@@ -95,11 +95,12 @@ let verify_observer client session_id =
   let snapshot = Docs_smoke.snapshot client session_id in
   assert (not (List.is_empty snapshot.canonical_history.entries));
   List.iter snapshot.canonical_history.entries ~f:(fun entry ->
-    assert (Agent_protocol.History.equal_role entry.role System);
-    assert (
-      String.equal
-        (Jsonaf.member_exn "role" entry.payload |> Jsonaf.string_exn)
-        "developer"));
+    match Agent_protocol.Public.History.header entry with
+    | Some (Transcript.Header.Message Developer) -> ()
+    | Some
+        ( Message (System | User | Assistant | Tool)
+        | Call _ | Result _ | Reasoning | Unknown _ )
+    | None -> failwith "tutorial prompt is not a visible developer message");
   match
     Agent_client.Connection.request
       client
@@ -138,6 +139,7 @@ let run env root =
   Eio.Switch.run (fun sw ->
     let daemon =
       Agent_server.Daemon.start
+        ~options:(Docs_smoke.offline_options ())
         ~sw
         ~env
         ~config

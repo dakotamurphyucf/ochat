@@ -7,6 +7,13 @@ module Request_identity = struct
     }
 end
 
+(** Trusted custom remote validator: return a proof bounded to THIS original
+  authentication, not a principal rematch. Never retain token bytes. *)
+type actor_validator =
+  now:(unit -> Agent_protocol.Timestamp.t)
+  -> token:string
+  -> (Operator_authorization.t, Agent_protocol.Error.t) result
+
 type bearer_validator =
   now:Agent_protocol.Timestamp.t
   -> token:string
@@ -209,6 +216,17 @@ let authenticate_bearer t ~now ~token =
   | Some record when active ~now record -> Ok record.principal
   | Some _ -> Error (protocol_error "bearer token has expired")
   | None -> Error (protocol_error "bearer token is invalid")
+;;
+
+let authenticate_bearer_actor t ~now ~token =
+  let digest = Digestif.SHA256.digest_string token |> Digestif.SHA256.to_raw_string in
+  match List.find t ~f:(fun record -> constant_time_equal digest record.digest) with
+  | None -> Error (protocol_error "bearer token is invalid")
+  | Some record ->
+    (match record.expires_at with
+     | None -> Ok (Operator_authorization.nonexpiring_static record.principal)
+     | Some expires_at ->
+       Operator_authorization.bounded ~principal:record.principal ~now ~expires_at)
 ;;
 
 let client_host (identity : Request_identity.t) =

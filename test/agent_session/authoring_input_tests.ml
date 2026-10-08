@@ -105,14 +105,19 @@ let finished actor =
 ;;
 
 let worker_config env post_stream =
+  let inference =
+    Inference_ports.create ~post_stream ~config:Chat_response.Config.default ()
+  in
   Agent_session.Turn_worker.Config.
     { env
+    ; inference_context = inference.context
+    ; inference_identity = inference.identity
+    ; on_inference_attempt = ignore
+    ; on_inference_observation = ignore
+    ; on_inference_completion = ignore
     ; response_dir = Eio.Path.(Eio.Stdenv.fs env / "/tmp")
     ; tools = []
     ; tool_tbl = String.Table.create ()
-    ; temperature = None
-    ; max_output_tokens = None
-    ; reasoning = None
     ; moderator = None
     ; permission_profile =
         permission_policy
@@ -123,10 +128,6 @@ let worker_config env post_stream =
     ; review_permission = (fun _ -> assert false)
     ; history_compaction = false
     ; parallel_tool_calls = true
-    ; model = Openai.Responses.Request.O3
-    ; prompt_cache_key = None
-    ; prompt_cache_retention = None
-    ; post_stream = Some post_stream
     ; agent_page_classifications = []
     ; delegated_permission_tools = String.Set.empty
     ; redact_tool_payload = (fun ~name:_ text -> text)
@@ -146,7 +147,9 @@ let%expect_test "provider input contains committed guidance once across foregrou
         List.iter saved ~f:(fun entry ->
           assert (
             List.exists inputs ~f:(fun item ->
-              Jsonaf.exactly_equal entry.payload (Openai.Responses.Item.jsonaf_of_t item))));
+              Jsonaf.exactly_equal
+                (runtime_history_payload entry)
+                (Openai.Responses.Item.jsonaf_of_t item))));
         Stdlib.List.to_seq []
       in
       Agent_session.Turn_worker.create
@@ -160,12 +163,7 @@ let%expect_test "provider input contains committed guidance once across foregrou
         (worker_config env post_stream))
     (fun _ actor writer backend ->
        let first = finished actor in
-       let restored =
-         Agent_session.Session_state.sexp_of_t first
-         |> Sexp.to_string_mach
-         |> Agent_session.Session_persistence.restore_snapshot
-         |> store_ok
-       in
+       let restored = restore_state first |> store_ok in
        assert (List.equal H.equal_entry (guidance first) (guidance restored));
        let references =
          Agent_session.Session_state.authoring_references restored
@@ -237,6 +235,7 @@ let%expect_test
   let policy = ref (Spec.Preload [ "chatml.tasks" ]) in
   let requests = ref 0 in
   with_handoff_actor
+    ~inference:(Inference_ports.compaction_execution ())
     ~make_worker:(fun env ready ->
       let plans = ref [] in
       let post_stream ~sw:_ ~inputs =
@@ -246,7 +245,7 @@ let%expect_test
           assert (
             List.exists inputs ~f:(fun item ->
               Jsonaf.exactly_equal
-                entry.H.payload
+                (runtime_history_payload entry)
                 (Openai.Responses.Item.jsonaf_of_t item))));
         (match !policy with
          | Preload _ -> assert (List.length saved > 1)
@@ -287,11 +286,7 @@ let%expect_test
        |> ignore;
        let compacted = finished actor in
        assert (!requests = 1);
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Agent_session.Session_state.sexp_of_t compacted |> Sexp.to_string_mach)
-         |> store_ok
-       in
+       let restored = restore_state compacted |> store_ok in
        let known =
          Agent_session.Session_state.authoring_references restored
          |> protocol_ok
@@ -313,10 +308,10 @@ let%expect_test
          ignore (finished actor : Agent_session.Session_state.t));
        assert (!requests = 3);
        print_endline
-         "compaction makes no provider request; manual turns receive one committed, \
-          deduplicated pointer and no primer");
+         "compaction uses separate selected auxiliary inference; manual turns receive \
+          one committed, deduplicated pointer and no primer");
   [%expect
-    {| compaction makes no provider request; manual turns receive one committed, deduplicated pointer and no primer |}]
+    {| compaction uses separate selected auxiliary inference; manual turns receive one committed, deduplicated pointer and no primer |}]
 ;;
 
 let%expect_test
@@ -373,8 +368,8 @@ let%expect_test
                   ; change_id = 0
                   ; script_label = None
                   ; value =
-                      Chatml.Chatml_value_codec.import_json old.payload
-                      |> Session.Snapshot.of_value
+                      old.payload
+                      |> History_entry.Payload.of_json
                       |> Result.ok_or_failwith
                   }
               ]

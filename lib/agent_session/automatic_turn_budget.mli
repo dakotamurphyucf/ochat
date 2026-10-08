@@ -27,3 +27,22 @@ val decide
   :  t
   -> now:Agent_protocol.Timestamp.t
   -> Chat_response.Automatic_turn_policy.decision
+
+(** Complete, validated named-field storage representation. Public receipt
+    projections remain separate. *)
+val to_jsonaf : t -> Jsonaf.t
+
+val of_jsonaf : Jsonaf.t -> (t, Agent_protocol.Error.t) result
+val shape : Document_schema.Shape.t
+val policy_to_jsonaf : Chat_response.Runtime_semantics.policy -> Jsonaf.t
+
+val policy_of_jsonaf
+  :  Jsonaf.t
+  -> (Chat_response.Runtime_semantics.policy, Agent_protocol.Error.t) result
+
+val policy_shape : Document_schema.Shape.t
+val pause_to_jsonaf : Chat_response.Runtime_semantics.pause_condition -> Jsonaf.t
+
+val pause_of_jsonaf
+  :  Jsonaf.t
+  -> (Chat_response.Runtime_semantics.pause_condition, Agent_protocol.Error.t) result

@@ -1,12 +1,11 @@
 open! Core
-module Res = Openai.Responses
 
 type input =
   { draft : string
   ; history : string
   }
 
-type outcome = (string, [ `Unavailable | `Timeout ]) result
+type outcome = (string, [ `Unavailable | `Timeout ]) result [@@deriving equal]
 
 let cursor_marker = "⟦INSERT⟧"
 
@@ -122,42 +121,39 @@ let user_prompt input =
 ;;
 
 let inputs input =
-  let message role text =
-    Res.Item.Input_message
-      { role
-      ; content = [ Res.Input_message.Text { text; _type = "input_text" } ]
-      ; _type = "message"
-      }
-  in
-  [ message Developer completion_prompt; message User (user_prompt input) ]
-;;
-
-let response_text response =
-  List.filter_map response.Res.Response.output ~f:(function
-    | Res.Item.Output_message message ->
-      Some
-        (String.concat
-           ~sep:""
-           (List.map message.content ~f:(fun part -> part.Res.Output_message.text)))
-    | _ -> None)
-  |> String.concat ~sep:""
+  [ History_entry.Payload.Role.Developer, completion_prompt
+  ; History_entry.Payload.Role.User, user_prompt input
+  ]
 ;;
 
 let complete_with ~clock ~request input =
   match Eio.Time.with_timeout_exn clock 10. (fun () -> request (inputs input)) with
-  | response when Option.is_some response.Res.Response.error -> Error `Unavailable
-  | response -> Ok (sanitize (response_text response))
+  | Ok text when String.length text <= 256 * 1024 -> Ok (sanitize text)
+  | Ok _ | Error _ -> Error `Unavailable
   | exception Eio.Time.Timeout -> Error `Timeout
-  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
-  | exception _ -> Error `Unavailable
 ;;
 
-let complete_suffix ~sw ~env ~(config : Type_ahead_config.t) input =
-  complete_with ~clock:(Eio.Stdenv.clock env) input ~request:(fun inputs ->
-    Res.post_private_response_exn
-      ~sw
-      (Eio.Stdenv.net env)
-      ~model:config.model
-      ~max_output_tokens:config.max_output_tokens
-      ~inputs)
+let complete_suffix ~sw ~env ~inference ~(config : Type_ahead_config.t) input =
+  match inference with
+  | None -> Error `Unavailable
+  | Some inference ->
+    let setting =
+      Inference.Request.Setting.create
+        ~name:"max_output_tokens"
+        ~value:(Value (`Number (Int.to_string config.max_output_tokens)))
+        ~provenance:Execution_override
+        ~limits:Transcript.Admission.default
+    in
+    (match setting with
+     | Error _ -> Error `Unavailable
+     | Ok setting ->
+       complete_with ~clock:(Eio.Stdenv.clock env) input ~request:(fun messages ->
+         Inference_client.Execution.complete_text
+           inference
+           ~sw
+           ~model:config.model
+           ~settings:[ setting ]
+           ~messages
+           ()
+         |> Result.map_error ~f:(fun _ -> `Unavailable)))
 ;;

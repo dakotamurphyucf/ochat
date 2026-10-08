@@ -45,6 +45,7 @@ type tool_output_kind =
   | Read_file of { path : string option }
   | Read_directory of { path : string option }
   | Other of { name : string option }
+[@@deriving equal]
 
 (** Commands produced by the pure controller and executed by a side-effecting
     runner.

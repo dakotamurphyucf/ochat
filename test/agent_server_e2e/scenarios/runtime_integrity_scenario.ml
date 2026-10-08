@@ -16,19 +16,20 @@ let ok = function
     raise_s [%sexp "runtime protocol failure", (error : Agent_protocol.Error.t)]
 ;;
 
-let request client command = (Http_driver.request client command |> ok).result
+let request_public client command = (Http_driver.request client command |> ok).result
+let request client command = Http_driver.request_without_history client command |> ok
 let key value = Agent_protocol.Idempotency_key.of_string value |> ok
 let equal_json left right = String.equal (Jsonaf.to_string left) (Jsonaf.to_string right)
 
 let snapshot client session_id =
-  match request client (Session_get { session_id; history = None }) with
-  | Session_get value -> value
+  match request_public client (Session_get { session_id; history = None }) with
+  | Session_get value -> Agent_protocol.Public.Snapshot.fields value
   | _ -> failwith "unexpected session.get result"
 ;;
 
 let failed_operations client session_id =
   match
-    request
+    request_public
       client
       (Session_attach
          { session_id
@@ -41,10 +42,8 @@ let failed_operations client session_id =
   with
   | Session_attach { replay = Events events; _ } ->
     List.filter_map events ~f:(fun event ->
-      match
-        Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload |> ok
-      with
-      | Operation_failed { state = Failed error; _ } -> Some error
+      match Support.Public_view.shared_payload_opt event with
+      | Some (Operation_failed { state = Failed error; _ }) -> Some error
       | _ -> None)
   | _ -> failwith "expected retained operation event replay"
 ;;
@@ -83,21 +82,22 @@ let marker fixture =
 
 let options fixture calls =
   { Agent_server.Daemon.default_options with
-    model_post_stream =
-      Some
-        (fun ~sw ~inputs ->
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw ~inputs ->
           calls := inputs :: !calls;
           P.model_post_stream (marker fixture) ~sw ~inputs)
   }
 ;;
 
-let entry_json entries = List.map entries ~f:Agent_protocol.History.entry_to_json
+let entry_json entries = List.map entries ~f:Agent_protocol.Public.History.to_json
 let encoded entries = `Array (entry_json entries) |> Jsonaf.to_string
 let has_text entries text = String.is_substring (encoded entries) ~substring:text
 
 let history_index entries id =
   List.findi entries ~f:(fun _ entry ->
-    Agent_protocol.History.Id.compare entry.Agent_protocol.History.id id = 0)
+    Agent_protocol.History.Id.compare entry.Agent_protocol.Public.History.id id = 0)
   |> Option.value_exn
   |> fst
 ;;
@@ -105,19 +105,25 @@ let history_index entries id =
 let assert_pair entries =
   let call_index, call =
     List.findi entries ~f:(fun _ entry ->
-      Agent_protocol.History.equal_kind entry.Agent_protocol.History.kind Tool_call)
+      Support.Public_view.has_header entry (Call Function))
     |> Option.value_exn
   in
   let output = List.nth_exn entries (call_index + 1) in
   require
-    (Agent_protocol.History.equal_kind output.kind Tool_output)
+    (Support.Public_view.has_header output (Result Function))
     "deferred input split a tool pair";
-  let call_id = function
-    | `Object fields -> List.Assoc.find_exn fields ~equal:String.equal "call_id"
-    | _ -> failwith "tool payload was not an object"
+  let call_id entry =
+    let metadata =
+      Support.Public_view.full_payload entry
+      |> History_entry.Payload.semantic
+      |> History_entry.Payload.Semantic.metadata
+    in
+    metadata.call_id
   in
   require
-    (equal_json (call_id call.payload) (call_id output.payload))
+    (match call_id call, call_id output with
+     | Value call, Value output -> String.equal call output
+     | (Absent | Null | Value _), (Absent | Null | Value _) -> false)
     "tool output matched a different call";
   call_index
 ;;
@@ -125,7 +131,7 @@ let assert_pair entries =
 let assert_unique entries =
   let ids =
     List.map entries ~f:(fun entry ->
-      Agent_protocol.History.Id.to_string entry.Agent_protocol.History.id)
+      Agent_protocol.History.Id.to_string entry.Agent_protocol.Public.History.id)
   in
   require
     (Set.length (String.Set.of_list ids) = List.length ids)
@@ -144,7 +150,7 @@ let assert_deferred sent =
 ;;
 
 let assert_fifo
-      (final : Agent_protocol.Snapshot.t)
+      (final : Agent_protocol.Public.Snapshot.Fields.t)
       (first : Agent_protocol.Method_result.Send_message.t)
       (second : Agent_protocol.Method_result.Send_message.t)
       calls
@@ -183,7 +189,9 @@ let exercise_fifo env client session calls =
 let restart_assert env fixture options before =
   Daemon_host.with_ env fixture ~options (fun sw _daemon ->
     P.with_client ~sw env fixture (fun client ->
-      let after = snapshot client before.Agent_protocol.Snapshot.session.id in
+      let after =
+        snapshot client before.Agent_protocol.Public.Snapshot.Fields.session.id
+      in
       require
         (List.equal
            equal_json
@@ -254,9 +262,9 @@ let add_script environment fixture script =
 ;;
 
 let assert_moderator_boundaries snapshot calls =
-  Option.iter snapshot.Agent_protocol.Snapshot.failure ~f:(fun error ->
+  Option.iter snapshot.Agent_protocol.Public.Snapshot.Fields.failure ~f:(fun error ->
     raise_s [%sexp "moderator fixture failed", (error : Agent_protocol.Error.t)]);
-  if not snapshot.Agent_protocol.Snapshot.halted
+  if not snapshot.Agent_protocol.Public.Snapshot.Fields.halted
   then
     raise_s
       [%sexp
@@ -382,7 +390,10 @@ let test_budget env environment =
   let count = ref 0 in
   let host_options =
     { Agent_server.Daemon.default_options with
-      model_post_stream = Some (budget_stream count)
+      inference_policy =
+        Agent_server_test_support.inference_policy
+          ~default_model:"fixture-model"
+          ~post_stream:(budget_stream count)
     }
   in
   Daemon_host.with_ env fixture ~options:host_options (fun sw _daemon ->

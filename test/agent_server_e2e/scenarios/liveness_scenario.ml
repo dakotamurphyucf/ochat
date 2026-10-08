@@ -161,12 +161,12 @@ let create_detached connection key =
 
 let unix_snapshot connection session_id =
   match unix_request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
 let schedule_delivered snapshot =
-  List.exists snapshot.Agent_protocol.Snapshot.schedules ~f:(fun schedule ->
+  List.exists snapshot.Agent_protocol.Public.Snapshot.Fields.schedules ~f:(fun schedule ->
     match schedule.Agent_protocol.Schedule.status with
     | Delivered -> true
     | Scheduled | Delivering | Cancelled | Failed _ -> false)
@@ -185,11 +185,9 @@ let rec await_unix_schedule env connection session_id attempts =
 
 let replay_contains_delivery events =
   List.exists events ~f:(fun event ->
-    match event.Agent_protocol.Event.Durable.kind with
+    match event.Agent_protocol.Public.Durable.kind with
     | Schedule_state_changed ->
-      (match
-         Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
-       with
+      (match Ok (Support.Public_view.shared_payload event) with
        | Ok (Schedule_state_changed schedule) ->
          (match schedule.Agent_protocol.Schedule.status with
           | Delivered -> true
@@ -285,8 +283,12 @@ let create_http ~sw env fixture token =
   client
 ;;
 
-let http_request client command =
+let http_request_public client command =
   (Http_driver.request client command |> protocol_ok).result
+;;
+
+let http_request client command =
+  Http_driver.request_without_history client command |> protocol_ok
 ;;
 
 let http_catalog client =
@@ -327,7 +329,7 @@ let create_owner client ~key ~grace_ms =
       ; idempotency_key = idempotency_key (key ^ ":create")
       }
   in
-  match http_request client (Session_create request) with
+  match http_request_public client (Session_create request) with
   | Session_create { session; attachment = Some attached; _ } ->
     { id = session.id
     ; attachment_id = attached.attachment.id
@@ -377,8 +379,8 @@ let renew_owner client owner key =
 ;;
 
 let http_snapshot client session_id =
-  match http_request client (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match http_request_public client (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "HTTP session.get returned the wrong result variant"
 ;;
 
@@ -476,7 +478,7 @@ let test_owner_old_token_rejected env environment =
         | Ok _ -> fail "stale owner reclaim token was accepted");
        ignore
          (attach_owner third owner.id rotated "owner-reclaim:current"
-          : Agent_protocol.Method_result.Attach.t);
+          : Agent_protocol.Public.Result.Attach.t);
        close_http third)
 ;;
 
@@ -486,7 +488,8 @@ let test_owner_grace_expiry env environment =
     let owner = create_owner owner_client ~key:"owner-expiry" ~grace_ms:150 in
     close_http owner_client;
     let observer = create_http ~sw env fixture (Config_fixture.admin_token fixture) in
-    ignore (await_stopped env observer owner.id 150 : Agent_protocol.Snapshot.t);
+    ignore
+      (await_stopped env observer owner.id 150 : Agent_protocol.Public.Snapshot.Fields.t);
     close_http observer)
 ;;
 
@@ -510,7 +513,9 @@ let test_owner_restart_during_grace env environment =
                 before.session.desired_state
                 Stopped))
           "restart discarded owner disconnect grace";
-        ignore (await_stopped env observer owner.id 200 : Agent_protocol.Snapshot.t);
+        ignore
+          (await_stopped env observer owner.id 200
+           : Agent_protocol.Public.Snapshot.Fields.t);
         close_http observer)
       ~finally:(fun () -> stop_daemon env second_daemon))
 ;;

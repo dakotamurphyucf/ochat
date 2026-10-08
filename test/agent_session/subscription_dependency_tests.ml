@@ -130,11 +130,7 @@ let%expect_test
          reject_save := false;
          let result = finish () |> protocol_ok in
          let state = Agent_session.Memory_backend.state backend in
-         let restored =
-           Agent_session.Session_persistence.restore_snapshot
-             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-           |> store_ok
-         in
+         let restored = restore_state state |> store_ok in
          Agent_session.Session_state.validate restored |> protocol_ok;
          let completion =
            J.terminal_completion result |> protocol_ok |> Option.value_exn

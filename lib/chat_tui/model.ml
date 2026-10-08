@@ -1,6 +1,5 @@
 open Core
 open Types
-module Res_item = Openai.Responses.Item
 
 type msg_img_cache =
   { row_revision : int
@@ -237,7 +236,7 @@ module Agent_page_state = struct
     ; mutable payload : string
     ; mutable progress : text_entry list
     ; mutable outcome : Ochat_function.Trace.outcome option
-    ; mutable output : Openai.Responses.Tool_output.Output.t option
+    ; mutable output : History_entry.Payload.Output.t option
     }
 
   type progress_entry =
@@ -254,6 +253,7 @@ module Agent_page_state = struct
     | Waiting
     | Progress of progress_entry
     | Status of Ochat_function.Trace.outcome
+    | Outcome_unavailable
 
   type render_block =
     { id : int
@@ -268,6 +268,11 @@ module Agent_page_state = struct
     ; height : int
     }
 
+  type completion =
+    | Running
+    | Unavailable
+    | Finished of Ochat_function.Trace.outcome
+
   type call =
     { call_id : string
     ; name : string
@@ -275,11 +280,12 @@ module Agent_page_state = struct
     ; payload : string
     ; agent_page_kind : Chat_response.Tool_execution_event.agent_page_kind
     ; start_order : int
+    ; mutable projected_view : Jsonaf.t option
     ; mutable entries : progress_entry list
     ; mutable retained_bytes : int
     ; mutable is_truncated : bool
-    ; mutable outcome : Ochat_function.Trace.outcome option
-    ; mutable output : Openai.Responses.Tool_output.Output.t option
+    ; mutable completion : completion
+    ; mutable output : History_entry.Payload.Output.t option
     ; mutable next_render_id : int
     ; render_cache : (int, render_cache) Hashtbl.t
     ; mutable render_width : int option
@@ -1042,7 +1048,8 @@ let delete_selected_canonical_entry t =
           `Deleted)
      | Moderator_inserted _ | Moderator_replacement _ ->
        `Rejected "Cannot delete a moderator-projected row."
-     | Streaming _ | Pending_approval _ | Placeholder _ ->
+     | Public_history _ -> `Rejected "Attached history must be changed by the host."
+     | Streaming _ | Draft _ | Pending_approval _ | Placeholder _ ->
        `Rejected "Cannot delete a transient UI row.")
 ;;
 
@@ -1300,7 +1307,7 @@ let invalidate_render_metadata_by_id t ~id =
 let set_tool_output_kind_for_row t ~id kind =
   let changed =
     match Hashtbl.find t.tool_output_by_id id with
-    | Some existing -> not Poly.(existing = kind)
+    | Some existing -> not (Types.equal_tool_output_kind existing kind)
     | None -> true
   in
   if changed
@@ -1316,10 +1323,16 @@ let set_tool_output_kind t ~idx kind =
   | Some (id, _) -> set_tool_output_kind_for_row t ~id kind
 ;;
 
+let equal_tool_outcome left (right : Ochat_function.Trace.outcome) =
+  match (left : Ochat_function.Trace.outcome), right with
+  | Returned, Returned | Raised, Raised | Cancelled, Cancelled -> true
+  | (Returned | Raised | Cancelled), _ -> false
+;;
+
 let mark_tool_call_finished t ~call_id ~outcome =
   let changed =
     match Hashtbl.find t.tool_call_outcome_by_call_id call_id with
-    | Some existing -> not Poly.(existing = outcome)
+    | Some existing -> not (equal_tool_outcome existing outcome)
     | None -> true
   in
   if changed
@@ -1861,7 +1874,19 @@ let agent_call_agent_page_kind (call : Agent_page_state.call) = call.agent_page_
 let agent_call_start_order (call : Agent_page_state.call) = call.start_order
 let agent_call_progress_entries (call : Agent_page_state.call) = call.entries
 let agent_call_is_truncated (call : Agent_page_state.call) = call.is_truncated
-let agent_call_outcome (call : Agent_page_state.call) = call.outcome
+
+let agent_call_outcome (call : Agent_page_state.call) =
+  match call.completion with
+  | Finished outcome -> Some outcome
+  | Running | Unavailable -> None
+;;
+
+let agent_call_is_running (call : Agent_page_state.call) =
+  match call.completion with
+  | Running -> true
+  | Unavailable | Finished _ -> false
+;;
+
 let agent_call_output (call : Agent_page_state.call) = call.output
 
 let render_id_of_entry = function
@@ -1907,10 +1932,12 @@ let agent_call_render_blocks (call : Agent_page_state.call) =
         })
   in
   let tail =
-    match call.entries, call.outcome with
-    | [], None -> [ Agent_page_state.{ id = -3; revision = 0; view = Waiting } ]
-    | _, None -> []
-    | _, Some outcome ->
+    match call.entries, call.completion with
+    | [], Running -> [ Agent_page_state.{ id = -3; revision = 0; view = Waiting } ]
+    | _, Running -> []
+    | _, Unavailable ->
+      [ Agent_page_state.{ id = -4; revision = 4; view = Outcome_unavailable } ]
+    | _, Finished outcome ->
       [ Agent_page_state.
           { id = -4; revision = outcome_revision outcome; view = Status outcome }
       ]
@@ -1977,14 +2004,7 @@ let set_agent_render_geometry call ~block_ids ~revisions ~heights ~prefix =
   Renderer_virtual_list.Geometry.replace call.render_geometry ~heights ~prefix
 ;;
 
-let output_text = function
-  | Openai.Responses.Tool_output.Output.Text text -> text
-  | Content parts ->
-    List.map parts ~f:(function
-      | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-      | Input_image { image_url; _ } -> image_url)
-    |> String.concat ~sep:"\n"
-;;
+let output_text = Conversation.output_text
 
 let progress_entry_text_view = function
   | Agent_page_state.Text entry -> Some (entry.channel, entry.text)
@@ -2124,8 +2144,7 @@ let enforce_call_limit (call : Agent_page_state.call) =
     then (
       tool.output
       <- Option.map tool.output ~f:(fun output ->
-           Openai.Responses.Tool_output.Output.Text
-             (utf8_suffix (output_text output) 1_000_000));
+           History_entry.Payload.Output.Text (utf8_suffix (output_text output) 1_000_000));
       refresh_retained_bytes call;
       call.is_truncated <- true;
       tool.revision <- tool.revision + 1);
@@ -2173,10 +2192,11 @@ let agent_call_started t ~call_id ~name ~kind ~payload ~agent_page_kind =
       ; payload
       ; agent_page_kind
       ; start_order = agent.next_start_order
+      ; projected_view = None
       ; entries = []
       ; retained_bytes = 0
       ; is_truncated = false
-      ; outcome = None
+      ; completion = Running
       ; output = None
       ; next_render_id = 0
       ; render_cache = Hashtbl.create (module Int)
@@ -2247,7 +2267,7 @@ let agent_call_progress t ~call_id progress =
   let agent = agent_page t in
   match Hashtbl.find agent.calls call_id with
   | None -> false
-  | Some call when Option.is_some call.outcome -> false
+  | Some call when not (agent_call_is_running call) -> false
   | Some call ->
     add_text_progress call progress;
     enforce_global_limit agent;
@@ -2303,15 +2323,32 @@ let add_nested_progress
           ~default:(nested.progress @ [ fresh_entry ~text ~replaceable:true ]))
 ;;
 
-let agent_call_trace t ~call_id trace =
+type neutral_trace =
+  | Tool_started of
+      { call_id : string
+      ; name : string
+      ; kind : Ochat_function.Trace.tool_kind
+      ; payload : string
+      }
+  | Tool_progress of
+      { call_id : string
+      ; progress : Ochat_function.Progress.t
+      }
+  | Tool_finished of
+      { call_id : string
+      ; outcome : Ochat_function.Trace.outcome
+      ; output : History_entry.Payload.Output.t option
+      }
+
+let agent_call_trace_neutral t ~call_id trace =
   let agent = agent_page t in
   match Hashtbl.find agent.calls call_id with
   | None -> false
-  | Some call when Option.is_some call.outcome -> false
+  | Some call when not (agent_call_is_running call) -> false
   | Some call ->
     let accepted =
       match trace with
-      | Ochat_function.Trace.Tool_started { call_id; name; kind; payload } ->
+      | Tool_started { call_id; name; kind; payload } ->
         if Option.is_some (find_nested_call call call_id)
         then true
         else (
@@ -2355,16 +2392,67 @@ let agent_call_trace t ~call_id trace =
     accepted
 ;;
 
+let agent_call_trace t ~call_id trace =
+  match trace with
+  | Ochat_function.Trace.Inference_live _ ->
+    (* The actual typed transcript channel owns these events. Legacy tool trace
+       presentation neither dumps opaque payloads nor renders them twice. *)
+    false
+  | Tool_started _ | Tool_progress _ | Tool_finished _ ->
+    let trace =
+      match trace with
+      | Ochat_function.Trace.Inference_live _ -> assert false
+      | Tool_started { call_id; name; kind; payload } ->
+        Tool_started { call_id; name; kind; payload }
+      | Tool_progress { call_id; progress } -> Tool_progress { call_id; progress }
+      | Tool_finished { call_id; outcome; output } ->
+        Tool_finished
+          { call_id
+          ; outcome
+          ; output =
+              Option.map output ~f:Chat_response.Tool_execution_event.neutral_output
+          }
+    in
+    agent_call_trace_neutral t ~call_id trace
+;;
+
+let agent_nested_call_started t ~parent_call_id ~call_id ~name ~kind ~payload =
+  agent_call_trace_neutral
+    t
+    ~call_id:parent_call_id
+    (Tool_started { call_id; name; kind; payload })
+;;
+
+let agent_nested_call_progress t ~parent_call_id ~call_id progress =
+  agent_call_trace_neutral t ~call_id:parent_call_id (Tool_progress { call_id; progress })
+;;
+
+let agent_nested_call_finished t ~parent_call_id ~call_id ~outcome ~output =
+  agent_call_trace_neutral
+    t
+    ~call_id:parent_call_id
+    (Tool_finished { call_id; outcome; output })
+;;
+
 let agent_call_finished t ~call_id ~outcome ~output =
   let agent = agent_page t in
   match Hashtbl.find agent.calls call_id with
   | None -> false
-  | Some call when Option.is_some call.outcome -> false
+  | Some call when not (agent_call_is_running call) -> false
   | Some call ->
-    call.outcome <- Some outcome;
+    call.completion <- Finished outcome;
     call.output <- output;
     Hash_set.add agent.terminal_call_ids call_id;
     true
+;;
+
+let close_unobserved_agent_calls t =
+  let agent = agent_page t in
+  Hashtbl.iter agent.calls ~f:(fun call ->
+    if agent_call_is_running call
+    then (
+      call.completion <- Unavailable;
+      Hash_set.add agent.terminal_call_ids call.call_id))
 ;;
 
 let clear_agent_calls t =
@@ -2384,6 +2472,212 @@ let clear_agent_calls t =
   match t.active_page with
   | Work -> ()
   | Chat | Agent | Shell_security -> t.active_page <- Page_id.Chat
+;;
+
+let reconcile_agent_activity t summaries ~operation_ended =
+  let module Activity = Agent_protocol.Activity in
+  let module Tool = Activity.Tool in
+  let agent = agent_page t in
+  let summaries =
+    let _, summaries =
+      List.fold
+        (List.rev summaries)
+        ~init:(Hash_set.create (module Activity.Key), [])
+        ~f:(fun (seen, retained) (summary : Tool.summary) ->
+          if Hash_set.mem seen summary.key
+          then seen, retained
+          else (
+            Hash_set.add seen summary.key;
+            seen, summary :: retained))
+    in
+    summaries
+  in
+  let module Parent_key = struct
+    type t = Transcript.Scope.Key.t * string [@@deriving compare, equal, hash, sexp_of]
+  end
+  in
+  let parent_index = Hashtbl.create (module Parent_key) in
+  List.iter summaries ~f:(fun (summary : Tool.summary) ->
+    let key = summary.key.scope, summary.key.call_alias in
+    match Hashtbl.find parent_index key with
+    | None -> Hashtbl.set parent_index ~key ~data:(Some summary)
+    | Some _ -> Hashtbl.set parent_index ~key ~data:None);
+  let parent_of (key : Activity.Key.t) =
+    Option.bind key.parent ~f:(fun parent ->
+      Hashtbl.find parent_index (parent.scope, parent.call_alias) |> Option.join)
+  in
+  let root_index = Hashtbl.create (module Activity.Key) in
+  let resolving = Hash_set.create (module Activity.Key) in
+  let rec root_of (summary : Tool.summary) =
+    match Hashtbl.find root_index summary.key with
+    | Some root -> root
+    | None ->
+      if Hash_set.mem resolving summary.key
+      then None
+      else (
+        Hash_set.add resolving summary.key;
+        let root =
+          match summary.key.parent with
+          | None ->
+            Option.bind summary.descriptor ~f:(fun descriptor ->
+              Option.map descriptor.classification ~f:(fun _ -> summary.key))
+          | Some _ -> Option.bind (parent_of summary.key) ~f:root_of
+        in
+        Hash_set.remove resolving summary.key;
+        Hashtbl.set root_index ~key:summary.key ~data:root;
+        root)
+  in
+  let groups = Hashtbl.create (module Activity.Key) in
+  List.iter summaries ~f:(fun summary ->
+    Option.iter (root_of summary) ~f:(fun key ->
+      Hashtbl.update groups key ~f:(function
+        | None -> [ summary ]
+        | Some group -> summary :: group)));
+  let roots =
+    List.filter summaries ~f:(fun (summary : Tool.summary) ->
+      Option.is_none summary.key.parent
+      && Option.exists summary.descriptor ~f:(fun descriptor ->
+        Option.is_some descriptor.classification))
+  in
+  let channel = function
+    | Activity.Progress.Assistant -> `Assistant
+    | Reasoning -> `Reasoning
+    | Stdout -> `Stdout
+    | Stderr -> `Stderr
+    | Activity -> `Activity
+  in
+  let outcome = function
+    | Tool.Returned -> Ochat_function.Trace.Returned
+    | Raised -> Raised
+    | Cancelled -> Cancelled
+  in
+  let view_text (text : Tool.channel_text) =
+    if text.complete then text.text else "[Earlier activity unavailable]\n" ^ text.text
+  in
+  let key_string key = Activity.Key.sexp_of_t key |> Sexp.to_string_mach in
+  let retained_ids = Hash_set.create (module String) in
+  let order =
+    List.map roots ~f:(fun (root : Tool.summary) ->
+      let call_id = key_string root.key in
+      Hash_set.add retained_ids call_id;
+      let group = Hashtbl.find groups root.key |> Option.value ~default:[] |> List.rev in
+      let view =
+        `Array
+          [ (if operation_ended then `True else `False)
+          ; `Array (List.map group ~f:Tool.summary_to_json)
+          ]
+      in
+      match Hashtbl.find agent.calls call_id with
+      | Some call when Option.exists call.projected_view ~f:(Jsonaf.exactly_equal view) ->
+        call_id
+      | previous ->
+        let descriptor = Option.value_exn root.descriptor in
+        let agent_page_kind =
+          match Option.value_exn descriptor.classification with
+          | Tool.Subagent -> Chat_response.Tool_execution_event.Subagent
+          | Shell_script -> Shell_script
+        in
+        let kind =
+          match descriptor.kind with
+          | History_entry.Payload.Call_kind.Function -> `Function
+          | Custom -> `Custom
+        in
+        let start_order =
+          match previous with
+          | Some previous -> previous.start_order
+          | None ->
+            let order = agent.next_start_order in
+            agent.next_start_order <- order + 1;
+            order
+        in
+        let next_render_id = ref 0 in
+        let fresh_id () =
+          let id = !next_render_id in
+          Int.incr next_render_id;
+          id
+        in
+        let progress texts =
+          List.map texts ~f:(fun (text : Tool.channel_text) ->
+            Agent_page_state.
+              { render_id = fresh_id ()
+              ; revision = 0
+              ; channel = channel text.channel
+              ; text = view_text text
+              ; replaceable = true
+              })
+        in
+        let entries =
+          List.map (progress root.channels) ~f:(fun text -> Agent_page_state.Text text)
+        in
+        let children =
+          List.filter_map group ~f:(fun (summary : Tool.summary) ->
+            if Activity.Key.equal summary.key root.key
+            then None
+            else
+              Option.map summary.descriptor ~f:(fun descriptor ->
+                let render_id = fresh_id () in
+                let progress = progress summary.channels in
+                let outcome, output =
+                  match summary.state with
+                  | Running -> None, None
+                  | Finished { outcome = value; output } -> Some (outcome value), output
+                in
+                Agent_page_state.Tool
+                  { render_id
+                  ; revision = 0
+                  ; call_id = key_string summary.key
+                  ; name = descriptor.name
+                  ; kind =
+                      (match descriptor.kind with
+                       | Function -> `Function
+                       | Custom -> `Custom)
+                  ; payload = descriptor.input
+                  ; progress
+                  ; outcome
+                  ; output
+                  }))
+        in
+        let completion, output =
+          match root.state with
+          | Finished { outcome = value; output } ->
+            Agent_page_state.Finished (outcome value), output
+          | Running -> (if operation_ended then Unavailable else Running), None
+        in
+        let call : Agent_page_state.call =
+          { call_id
+          ; name = descriptor.name
+          ; kind
+          ; payload = descriptor.input
+          ; agent_page_kind
+          ; start_order
+          ; projected_view = Some view
+          ; entries = entries @ children
+          ; retained_bytes = 0
+          ; is_truncated = false
+          ; completion
+          ; output
+          ; next_render_id = !next_render_id
+          ; render_cache = Hashtbl.create (module Int)
+          ; render_width = None
+          ; render_block_ids = [||]
+          ; render_block_revisions = [||]
+          ; render_geometry = Renderer_virtual_list.Geometry.create ()
+          }
+        in
+        refresh_retained_bytes call;
+        enforce_call_limit call;
+        Hashtbl.set agent.calls ~key:call_id ~data:call;
+        call_id)
+  in
+  Hashtbl.filter_keys_inplace agent.calls ~f:(Hash_set.mem retained_ids);
+  Hash_set.clear agent.terminal_call_ids;
+  Hashtbl.iter agent.calls ~f:(fun call ->
+    if not (agent_call_is_running call)
+    then Hash_set.add agent.terminal_call_ids call.call_id);
+  agent.call_order <- order;
+  if not (Option.exists agent.selected_call_id ~f:(Hash_set.mem retained_ids))
+  then agent.selected_call_id <- List.hd order;
+  enforce_global_limit agent
 ;;
 
 (* ------------------------------------------------------------------------- *)
@@ -3821,64 +4115,81 @@ let add_history_item (model : t) (entry : History_entry.t) =
   model
 ;;
 
-let rebuild_tool_output_index_for_items (model : t) (entries : History_entry.t list)
-  : unit
-  =
+let rebuild_tool_output_index_for_payloads (model : t) entries : unit =
+  let module P = History_entry.Payload in
   Hashtbl.clear model.tool_output_by_index;
   Hashtbl.clear model.tool_output_by_id;
   Hashtbl.clear model.tool_call_id_by_id;
-  let call_info_by_id = Hashtbl.create (module String) in
-  List.iter entries ~f:(fun entry ->
-    match History_entry.item entry with
-    | Res_item.Function_call fc ->
-      let name = fc.name in
+  let by_host = Hashtbl.create (module History_entry.Id) in
+  let by_alias = Hashtbl.create (module String) in
+  let alias semantic =
+    match (P.Semantic.metadata semantic).call_id with
+    | Value value -> Some value
+    | Absent | Null -> None
+  in
+  List.iter entries ~f:(fun (entry_id, payload) ->
+    let semantic = P.semantic payload in
+    match P.Semantic.view semantic with
+    | Call { name; input_bytes; _ } ->
       let path =
         match String.lowercase name with
-        | "read_file" | "read_directory" -> read_file_path_of_arguments fc.arguments
+        | "read_file" | "read_directory" -> read_file_path_of_arguments input_bytes
         | _ -> None
       in
-      Hashtbl.set call_info_by_id ~key:fc.call_id ~data:(name, path)
-    | Res_item.Custom_tool_call tc ->
-      let name = tc.name in
-      let path =
-        match String.lowercase name with
-        | "read_file" | "read_directory" -> read_file_path_of_arguments tc.input
-        | _ -> None
+      Hashtbl.set by_host ~key:entry_id ~data:(name, path);
+      Option.iter (alias semantic) ~f:(fun key ->
+        Hashtbl.update by_alias key ~f:(function
+          | None -> Some (entry_id, name, path)
+          | Some _ -> None))
+    | Message _ | Result _ | Reasoning _ | Unknown _ -> ());
+  List.iter entries ~f:(fun (entry_id, payload) ->
+    let semantic = P.semantic payload in
+    let row_id = Projected_message.Id.canonical entry_id in
+    match P.Semantic.view semantic with
+    | Call _ ->
+      Option.iter (alias semantic) ~f:(fun call_id ->
+        match Hashtbl.find by_alias call_id |> Option.join with
+        | Some (unique_id, _, _) when History_entry.Id.equal entry_id unique_id ->
+          Hashtbl.set model.tool_call_id_by_id ~key:row_id ~data:call_id
+        | Some _ | None -> ());
+      invalidate_render_metadata_by_id model ~id:row_id
+    | Result { relation; _ } ->
+      let info =
+        match relation with
+        | Bound id -> Hashtbl.find by_host id
+        | Unresolved ->
+          Option.bind (alias semantic) ~f:(fun key ->
+            Hashtbl.find by_alias key
+            |> Option.join
+            |> Option.map ~f:(fun (_, name, path) -> name, path))
       in
-      Hashtbl.set call_info_by_id ~key:tc.call_id ~data:(name, path)
-    | _ -> ());
-  List.iter entries ~f:(fun entry ->
-    let it = History_entry.item entry in
-    let row_id = Projected_message.Id.canonical (History_entry.id entry) in
-    match Conversation.pair_of_item it with
-    | None -> ()
-    | Some _msg ->
-      (match it with
-       | Res_item.Function_call fc ->
-         Hashtbl.set model.tool_call_id_by_id ~key:row_id ~data:fc.call_id;
-         invalidate_render_metadata_by_id model ~id:row_id
-       | Res_item.Custom_tool_call tc ->
-         Hashtbl.set model.tool_call_id_by_id ~key:row_id ~data:tc.call_id;
-         invalidate_render_metadata_by_id model ~id:row_id
-       | Res_item.Function_call_output fco ->
-         let name_opt, path =
-           match Hashtbl.find call_info_by_id fco.call_id with
-           | None -> None, None
-           | Some (name, path) -> Some name, path
-         in
-         let kind = classify_tool_output ~name_opt ~path in
-         Hashtbl.set model.tool_output_by_id ~key:row_id ~data:kind;
-         invalidate_render_metadata_by_id model ~id:row_id
-       | Res_item.Custom_tool_call_output tco ->
-         let name_opt, path =
-           match Hashtbl.find call_info_by_id tco.call_id with
-           | None -> None, None
-           | Some (name, path) -> Some name, path
-         in
-         let kind = classify_tool_output ~name_opt ~path in
-         Hashtbl.set model.tool_output_by_id ~key:row_id ~data:kind;
-         invalidate_render_metadata_by_id model ~id:row_id
-       | _ -> ()))
+      let name_opt, path =
+        match info with
+        | None -> None, None
+        | Some (name, path) -> Some name, path
+      in
+      Hashtbl.set
+        model.tool_output_by_id
+        ~key:row_id
+        ~data:(classify_tool_output ~name_opt ~path);
+      invalidate_render_metadata_by_id model ~id:row_id
+    | Message _ | Reasoning _ | Unknown _ -> ())
+;;
+
+let rebuild_tool_output_index_for_items model entries =
+  rebuild_tool_output_index_for_payloads
+    model
+    (List.map entries ~f:(fun entry ->
+       History_entry.id entry, History_entry.payload entry))
+;;
+
+let rebuild_tool_output_index_for_public model entries =
+  rebuild_tool_output_index_for_payloads
+    model
+    (List.filter_map entries ~f:(fun (entry : Agent_protocol.Public.History.t) ->
+       match entry.body with
+       | Full payload -> Some (entry.id, payload)
+       | Visible _ | Redacted _ -> None))
 ;;
 
 let rebuild_tool_output_index model =

@@ -632,3 +632,89 @@ let of_json json =
     value
   | _ -> of_json_body json
 ;;
+
+module Storage = struct
+  let nullable decode = function
+    | `Null -> Ok None
+    | json -> Result.map (decode json) ~f:Option.some
+  ;;
+
+  let option encode value = Option.value_map value ~default:`Null ~f:encode
+
+  let to_json (t : t) =
+    let c = t.context in
+    `Object
+      [ "id", Id.Delivery.to_json c.id
+      ; "session_id", Id.Session.to_json c.session_id
+      ; "generation", `Number (Int.to_string c.generation)
+      ; "invocation_id", option Id.Invocation.to_json c.invocation_id
+      ; "work", option Invocation.work_to_json c.work
+      ; "correlation", `String c.correlation
+      ; "source", source_to_json c.source
+      ; "completion", Completion.to_json c.completion
+      ; "wake", Completion.wake_to_json c.wake
+      ; "created_at", Timestamp.to_json c.created_at
+      ; "ownership", option ownership_to_json c.ownership
+      ; "attempt", `Number (Int.to_string t.attempt)
+      ; "status", status_to_json t.status
+      ; "wake_disposition", option wake_disposition_to_json t.wake_disposition
+      ; "disclosure_pins", option pins_to_json t.disclosure_pins
+      ; ( "completion_projection"
+        , option Completion_projection.to_json t.completion_projection )
+      ]
+  ;;
+
+  let of_json json =
+    let open Result.Let_syntax in
+    let%bind fields = Json_codec.fields json in
+    let get name decode = Json_codec.required_as fields name decode in
+    let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
+    let%bind id = get "id" Id.Delivery.of_json in
+    let%bind session_id = get "session_id" Id.Session.of_json in
+    let%bind generation = get "generation" integer in
+    let%bind invocation_id = get "invocation_id" (nullable Id.Invocation.of_json) in
+    let%bind work = get "work" (nullable Invocation.work_of_json) in
+    let%bind correlation = get "correlation" Json_codec.string in
+    let%bind source =
+      get "source" (Json_codec.enum ~name:"delivery source" source_values)
+    in
+    let%bind completion = get "completion" Completion.of_json in
+    let%bind wake = get "wake" Completion.wake_of_json in
+    let%bind created_at = get "created_at" Timestamp.of_json in
+    let%bind ownership = get "ownership" (nullable ownership_of_json) in
+    let context =
+      { id
+      ; session_id
+      ; generation
+      ; invocation_id
+      ; work
+      ; correlation
+      ; source
+      ; completion
+      ; wake
+      ; created_at
+      ; ownership
+      }
+    in
+    let%bind attempt = get "attempt" integer in
+    let%bind status = get "status" status_of_json in
+    let%bind wake_disposition =
+      get "wake_disposition" (nullable wake_disposition_of_json)
+    in
+    let%bind disclosure_pins = get "disclosure_pins" (nullable pins_of_json) in
+    let%bind completion_projection =
+      get "completion_projection" (nullable Completion_projection.of_json)
+    in
+    let t =
+      { context
+      ; attempt
+      ; status
+      ; wake_disposition
+      ; disclosure_pins
+      ; completion_projection
+      }
+    in
+    let%map () = validate t in
+    t
+  ;;
+end

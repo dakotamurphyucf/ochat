@@ -42,7 +42,7 @@ let save t status =
     Jsonaf.to_string
       (`Object
           [ "status", `String status
-          ; "started_at", `Number (Float.to_string t.started)
+          ; "started_at", Jsonaf.Export.jsonaf_of_float t.started
           ; "samples", `Array (List.rev t.samples)
           ])
   in
@@ -56,7 +56,7 @@ let record t env label fields =
     <- `Object
          ([ "label", `String label
           ; ( "elapsed_seconds"
-            , `Number (Float.to_string (Load_fixture.now env -. t.started)) )
+            , Jsonaf.Export.jsonaf_of_float (Load_fixture.now env -. t.started) )
           ]
           @ fields)
        :: t.samples;

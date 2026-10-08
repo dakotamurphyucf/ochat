@@ -155,6 +155,7 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
                   |> protocol_ok
               ; lifetime
               ; created_at = timestamp
+              ; inference_target = None
               }
             in
             let record =
@@ -180,6 +181,10 @@ let%expect_test "authored private tools remain scoped across mixed delegation an
             let child =
               { parent with
                 identity = { parent.identity with session_id = child_session_id }
+              ; inference_ledger =
+                  fresh_inference_ledger
+                    ~session_id:child_session_id
+                    ~generation:parent.identity.generation
               ; spec =
                   { parent.spec with
                     prompt_revision_id = revision_id

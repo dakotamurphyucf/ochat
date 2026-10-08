@@ -91,7 +91,8 @@
  (action
   (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
    (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
-    (run %{exe:agent_server_e2e.exe} --scenario load)))))
+    (setenv OCHAT_E2E_HELPER_EXE %{exe:../../bin/ochat_agent_helper.exe}
+     (run %{exe:agent_server_e2e.exe} --scenario load))))))
 
 (rule
  (alias agent-e2e-soak)
@@ -111,8 +112,10 @@
 (executable
  (name agent_server_e2e)
  (modules :standard)
- (libraries
+ (libraries ochat.operator_authorization
+  ochat.provider_runtime
   agent_server_test_support
+  inference_composition
   base64
   core
   core_unix.command_unix
@@ -130,12 +133,16 @@
   ochat.chat_response
   ochat.chat_tui
   ochat.openai
+  ochat.inference_host
+  ochat.inference_runtime
   ochat.agent_transport_http
   ochat.agent_transport_socket
   piaf
   uri)
  (preprocessor_deps
-  (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*))
+  (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x06-response-watcher/*)
+  ../chatml_extensibility_fixtures/x07-helper-session/any.json)
  (preprocess
   (pps ppx_jane ppx_blob)))
 

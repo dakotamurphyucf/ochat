@@ -60,12 +60,91 @@ let create_child env root daemon parent ~model ~reasoning ~tokens ~marker =
   |> protocol_ok
 ;;
 
+let inference_policy env =
+  let module D = Openai.Responses_driver in
+  (* This case exercises the actual adapter over the isolated HTTP/SSE server.
+     Capture the selected endpoint and credential explicitly at the fixture
+     boundary; never replace the provider request assertions with a mock stream. *)
+  let endpoint = Sys.getenv_exn "API_URL" ^ "/v1/responses" in
+  let capabilities =
+    D.Capability.create
+      ~baseline:
+        (List.map
+           [ D.Capability.Text_input
+           ; Function_tools
+           ; Opaque_replay
+           ; Setting "max_output_tokens"
+           ; Setting "reasoning"
+           ]
+           ~f:(fun feature -> feature, D.Capability.Supported))
+      ~models:[]
+    |> Or_error.ok_exn
+  in
+  let profile =
+    D.Profile.create
+      ~id:"generated-loopback-fixture"
+      ~account:None
+      ~endpoint
+      ~capabilities
+      ~defaults:[]
+    |> Or_error.ok_exn
+  in
+  let driver =
+    D.create ~net:(Eio.Stdenv.net env) ~clock:(Eio.Stdenv.clock env) () |> Or_error.ok_exn
+  in
+  let lease = D.Auth.bearer "generated-local-fixture" in
+  let host =
+    Inference_host.create
+      driver
+      ~profile
+      ~profile_revision:None
+      ~auth:(fun ~sw:_ _ -> lease)
+      ~default_model:"gpt-4.1"
+      ~namespace:Agent_protocol.Id.Transaction.(create () |> to_string)
+      ~limits:Inference_runtime.Limits.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Inference_runtime.Preparation_error.sexp_of_t error))
+    |> Result.ok_or_failwith
+  in
+  Agent_server.Session_factory.
+    { capture_inference_target =
+        (fun ~prompt_revision_id:_ ~config -> Inference_host.capture_config host config)
+    ; recapture_inference_target =
+        (fun ~current ~prompt_revision_id:_ ~config ->
+          Inference_host.recapture_config host ~current config)
+    ; migrate_inference_target = None
+    ; migrate_model_job_target = None
+    ; approve_inference_target_change =
+        (fun ~current:_ ~proposed ->
+          Inference_host.resolve host proposed |> Result.map ~f:ignore)
+    ; resolve_inference_context = Inference_host.resolve host
+    ; runtime_inference_ports =
+        (fun _ ->
+          Ok
+            { new_preparation_id = (Inference_host.identity host).new_preparation_id
+            ; on_admitted = (fun ~scope:_ ~accounting_id:_ -> ())
+            ; on_attempt = ignore
+            ; on_observation = ignore
+            ; on_completion = ignore
+            })
+    }
+;;
+
 let run_child env root =
-  (* API_URL is read when Openai.Responses initializes. This executable is launched
-     with isolated loopback configuration, never an ambient provider endpoint/key. *)
+  (* The child explicitly captures this isolated loopback configuration; no
+     ambient provider endpoint or credential is permitted. *)
   assert (
     Option.exists (Sys.getenv "API_URL") ~f:(String.is_prefix ~prefix:"http://127.0.0.1:"));
   [%test_eq: string option] (Some "generated-local-fixture") (Sys.getenv "OPENAI_API_KEY");
+  Stdlib.Printexc.register_printer (function
+    | Agent_server.Graph_tracking.Rejected error ->
+      Some
+        (Sexp.to_string
+           [%sexp
+             "synthetic graph tracking rejection"
+           , (P.Error.code_to_string error.code : string)
+           , (String.prefix error.message 2048 : string)])
+    | _ -> None);
   let prompt_file = Filename.concat root "parent.chatmd" in
   F.write
     env
@@ -84,7 +163,11 @@ let run_child env root =
           ~tool_dir:root
           ~home:root
           ~process_start_identity:None
-          ~options:{ Daemon.default_options with qualify_chatml_extensions = true }
+          ~options:
+            { Daemon.default_options with
+              inference_policy = inference_policy env
+            ; qualify_chatml_extensions = true
+            }
           ()
         |> protocol_ok
       in
@@ -100,6 +183,13 @@ let run_child env root =
                 f sw daemon client))))
   in
   let send sw client entry =
+    let previous_attempts =
+      Agent_session.Inference_ledger.rows (state entry).inference_ledger
+      |> List.map ~f:(fun row ->
+        Agent_session.Inference_ledger.Row.handle row
+        |> Agent_session.Inference_ledger.Handle.ordinal)
+      |> Int64.Set.of_list
+    in
     let handle =
       H.attach
         ~sw
@@ -111,19 +201,90 @@ let run_child env root =
         ()
       |> protocol_ok
     in
-    H.send_message
-      handle
-      { kind = Plain_text; text = "Return a response"; attachments = [] }
-    |> protocol_ok
-    |> ignore;
-    let rec idle () =
-      match (state entry).active_operation with
-      | None -> state entry
-      | Some _ ->
-        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-        idle ()
+    let before_send = state entry in
+    let submission =
+      H.send_message
+        handle
+        { kind = Plain_text; text = "Return a response"; attachments = [] }
+      |> protocol_ok
     in
-    let current = idle () in
+    let check_synthetic_operation_failure current =
+      (* This isolated subprocess admits only the asserted synthetic credential
+         and loopback endpoint. The bounded private diagnostic is test-only. *)
+      match
+        Agent_client.Connection.request
+          client
+          (Session_attach
+             { session_id = current.Agent_session.Session_state.identity.session_id
+             ; requested_mode = Read_only
+             ; subscribe = false
+             ; after_sequence = Some before_send.counters.event_sequence
+             ; reclaim_token = None
+             ; idempotency_key =
+                 F.key
+                   ("generated-failure:"
+                    ^ P.Id.Session.to_string current.identity.session_id)
+             })
+        |> protocol_ok
+      with
+      | P.Public.Result.Session_attach { replay = Events events; _ } ->
+        List.iter events ~f:(fun event ->
+          match Support.Public_view.shared_payload_opt event with
+          | Some (Operation_failed { id; state = Failed error; _ })
+            when Option.exists submission.operation_id ~f:(P.Id.Operation.equal id) ->
+            raise_s
+              [%sexp
+                "synthetic generated provider operation failed"
+              , (P.Error.code_to_string error.code : string)
+              , (String.prefix error.message 2048 : string)]
+          | _ -> ())
+      | _ -> ()
+    in
+    let rec completed () =
+      let current = state entry in
+      let fresh =
+        Agent_session.Inference_ledger.rows current.inference_ledger
+        |> List.filter ~f:(fun row ->
+          not
+            (Set.mem
+               previous_attempts
+               (Agent_session.Inference_ledger.Row.handle row
+                |> Agent_session.Inference_ledger.Handle.ordinal)))
+      in
+      let provider_completed, pending =
+        List.fold fresh ~init:(false, false) ~f:(fun (completed, pending) row ->
+          match
+            Agent_session.Inference_ledger.Row.record row
+            |> Inference.Observation.Attempt_record.state
+          with
+          | Terminal terminal ->
+            (match Inference.Event.Terminal.outcome terminal with
+             | Completed -> true, pending
+             | Refused | Incomplete _ | Failed _ ->
+               raise_s
+                 [%sexp
+                   "generated provider inference failed"
+                 , (terminal : Inference.Event.Terminal.t)])
+          | Interrupted _ -> failwith "generated provider inference interrupted"
+          | Prepared | Running -> completed, true)
+      in
+      (* Submission may be Deferred while a moderator callback owns the graph.
+         Idle without an actual completed inference is not completion evidence. *)
+      match
+        ( provider_completed && not pending
+        , current.active_operation
+        , current.conversation.deferred_user_entries )
+      with
+      | true, None, [] -> current
+      | false, None, [] ->
+        check_synthetic_operation_failure current;
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        completed ()
+      | _ ->
+        Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+        completed ()
+    in
+    let current = Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. completed in
     assert (Option.is_none current.failure);
     assert (not current.halted);
     assert (List.is_empty current.invocations);
@@ -246,6 +407,7 @@ let test env environment =
            raise_s
              [%sexp
                "generated provider child failed"
+             , (List.length !requests : int)
              , (result : Support.Process_manager.result)]);
         let parent =
           ( "gpt-4.1"

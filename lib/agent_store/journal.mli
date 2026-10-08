@@ -41,6 +41,7 @@ val open_existing
   -> (t, Store_error.t) result
 
 val current_segment : t -> Journal_segment.Id.t
+val max_payload_length : t -> int
 
 (** [append] frames and appends one payload, flushing according to [durability]. *)
 val append
@@ -52,6 +53,12 @@ val append
 
 (** [rotate] seals the current segment and atomically installs a new [CURRENT]. *)
 val rotate : t -> terminal_payload:string -> (unit, Store_error.t) result
+
+(** Pure feasibility check before checkpoint pruning. Empty current segments
+    need no rotation. Nonempty segments require a terminal frame within the
+    configured payload limit and an available successor ID. Serialize with
+    journal writers through the later [seal_checkpoint] call. *)
+val validate_seal_checkpoint : t -> (unit, Store_error.t) Result.t
 
 (** [seal_checkpoint t] seals a nonempty segment after durable snapshot
     installation, allowing the next retention pass to reclaim covered deltas.

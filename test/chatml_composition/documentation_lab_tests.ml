@@ -140,12 +140,20 @@ let%expect_test
         tool_default = Allow
       }
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some provider }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream:provider
+      }
     (fun env workspace host ->
        let invoke id name fields =
          queued := [ id, name, `Object fields ];
          Workflow.send host id "Perform the requested lab operation.";
-         Workflow.finish_call env host id;
+         (* Observe the complete turn: retiring its persisted history can take more
+            than five CPU seconds after the earlier lab operations. Tool and shell
+            execution deadlines remain independently enforced. *)
+         Workflow.finish_call ~timeout:15. env host id;
          Host.initial_outcome (Host.snapshot host) id
        in
        let begin_checks id phase =
@@ -206,18 +214,11 @@ let%expect_test
        let history = (Host.snapshot host).canonical_history.entries in
        let ack, _ =
          List.findi_exn history ~f:(fun _ entry ->
-           match
-             Agent_session.History_codec.of_protocol entry
-             |> protocol_ok
-             |> History_entry.item
-           with
-           | Openai.Responses.Item.Function_call_output { call_id = "original"; _ } ->
-             true
-           | _ -> false)
+           Option.exists (Host.function_output_call_id entry) ~f:(String.equal "original"))
        in
        let notification, _ =
          List.findi_exn history ~f:(fun _ entry ->
-           match entry.P.History.provenance with
+           match entry.P.Public.History.provenance with
            | Runtime_notification _ -> true
            | _ -> false)
        in

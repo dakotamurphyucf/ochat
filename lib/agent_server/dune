@@ -15,6 +15,7 @@
   catalog_builder
   runtime_owner
   delegated_runtime
+  graph_tracking
   independent_resources
   authored_resources
   result_retention
@@ -24,6 +25,7 @@
   authorization
   principal_projection
   pagination
+  inference_query_budget
   managed_output_cursor
   managed_output_page
   catalog_projection
@@ -38,9 +40,10 @@
   session_factory
   embedded
   daemon
+  provider_operator_port
   command_handler
   dispatcher)
- (libraries
+ (libraries ochat.operator_authorization
  core
   base64
   cstruct
@@ -48,6 +51,11 @@
   eio
   eio.unix
   mirage-crypto-rng.unix
+  ochat.inference
+  ochat.inference_runtime
+  ochat.inference_client
+  ochat.transcript
+  ochat.history_entry
   ochat.agent_protocol
   ochat.agent_client
   ochat.agent_store

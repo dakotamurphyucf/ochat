@@ -108,7 +108,7 @@ let is_terminal (job : Agent_protocol.Job.t) =
 ;;
 
 let is_complete snapshot =
-  (not (List.is_empty snapshot.Agent_protocol.Snapshot.jobs))
+  (not (List.is_empty snapshot.Agent_protocol.Public.Snapshot.Fields.jobs))
   && List.for_all snapshot.jobs ~f:(fun job ->
     is_terminal job
     && (is_delivered job
@@ -166,12 +166,9 @@ let await_zero_clients env fixture session =
 ;;
 
 let job_events events id =
-  List.filter_map events ~f:(fun (event : Agent_protocol.Event.Durable.t) ->
-    match
-      Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
-      |> F.protocol_ok
-    with
-    | Job_state_changed job when Agent_protocol.Id.Job.compare job.id id = 0 ->
+  List.filter_map events ~f:(fun (event : Agent_protocol.Public.Durable.t) ->
+    match Support.Public_view.shared_payload_opt event with
+    | Some (Job_state_changed job) when Agent_protocol.Id.Job.compare job.id id = 0 ->
       Some (event, job)
     | _ -> None)
 ;;
@@ -181,7 +178,7 @@ let assert_order events =
     (List.zip_exn (List.drop_last_exn events) (List.tl_exn events))
     ~f:(fun (left, right) ->
       F.require
-        Int64.(left.Agent_protocol.Event.Durable.sequence < right.sequence)
+        Int64.(left.Agent_protocol.Public.Durable.sequence < right.sequence)
         "durable event sequences are not strictly increasing";
       F.require Int64.(left.revision <= right.revision) "durable revisions regressed")
 ;;
@@ -196,7 +193,7 @@ let assert_delivery_trace changes delivery =
       (List.exists changes ~f:(fun (event, job) ->
          is_terminal job
          && (not (is_delivered job))
-         && Int64.(event.Agent_protocol.Event.Durable.sequence < delivered.sequence)))
+         && Int64.(event.Agent_protocol.Public.Durable.sequence < delivered.sequence)))
       "completion was delivered before its durable terminal state")
 ;;
 
@@ -632,7 +629,7 @@ let run_load_capacity env ~record =
 ;;
 
 let same_job state (job : Agent_protocol.Job.t) =
-  List.find_exn state.Agent_protocol.Snapshot.jobs ~f:(fun candidate ->
+  List.find_exn state.Agent_protocol.Public.Snapshot.Fields.jobs ~f:(fun candidate ->
     Agent_protocol.Id.Job.compare candidate.id job.id = 0)
 ;;
 
@@ -697,15 +694,10 @@ let wait_past_due env schedule =
 
 let schedule_changes events schedule =
   List.filter_map events ~f:(fun event ->
-    match
-      Agent_protocol.Event.Durable.Payload.of_json
-        ~kind:event.Agent_protocol.Event.Durable.kind
-        event.payload
-      |> F.protocol_ok
-    with
-    | Schedule_created candidate
-    | Schedule_state_changed candidate
-    | Schedule_cancelled candidate
+    match Support.Public_view.shared_payload_opt event with
+    | Some (Schedule_created candidate)
+    | Some (Schedule_state_changed candidate)
+    | Some (Schedule_cancelled candidate)
       when Agent_protocol.Id.Schedule.compare
              candidate.id
              schedule.Agent_protocol.Schedule.id
@@ -743,13 +735,15 @@ let prepare_completed_restart env client provider name =
 ;;
 
 let continued_events client session name before =
-  let sequence = (List.last_exn before).Agent_protocol.Event.Durable.sequence in
+  let sequence = (List.last_exn before).Agent_protocol.Public.Durable.sequence in
   before @ F.events_since client session name sequence
 ;;
 
 let inspect_completed_restart env client session before name events =
   let state = F.snapshot client session in
-  let job = same_job state (List.hd_exn before.Agent_protocol.Snapshot.jobs) in
+  let job =
+    same_job state (List.hd_exn before.Agent_protocol.Public.Snapshot.Fields.jobs)
+  in
   ignore (assert_success job : Jsonaf.t);
   let events = continued_events client session (name ^ ":replay") events in
   assert_job_trace events job ~attempt:1 ~delivery:1;

@@ -4,6 +4,7 @@ type t =
   { sleep : float -> unit
   ; now : unit -> Time_ns.t
   ; connection : Connection.t
+  ; notification_lease : Connection.notification_lease option
   ; session_id : Agent_protocol.Id.Session.t
   ; mutex : Eio.Mutex.t
   ; on_update : (Projection.t -> unit) option
@@ -13,6 +14,8 @@ type t =
   ; mutable projection : Projection.t
   ; mutable last_error : Agent_protocol.Error.t option
   ; mutable closed : bool
+  ; mutable detached : bool
+  ; mutable detach_attempted : bool
   ; closed_signal : unit Eio.Promise.t
   ; closed_resolver : unit Eio.Promise.u
   }
@@ -37,14 +40,14 @@ let initialize connection ~implementation_name ~implementation_version =
   let%bind request =
     Agent_protocol.Initialize.Request.create
       ~implementation
-      ~protocol_min:Agent_protocol.Version.initial
+      ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features:Agent_protocol.Inference_query.Features.all
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
   in
-  match Connection.request connection (Protocol_initialize request) with
+  match Connection.request_without_history connection (Protocol_initialize request) with
   | Ok (Protocol_initialize response) -> Ok response
   | Ok _ -> Error (Agent_protocol.Error.invalid_request "unexpected initialize result")
   | Error _ as failure -> failure
@@ -52,8 +55,26 @@ let initialize connection ~implementation_name ~implementation_version =
 
 let initial_projection connection session_id replay previous_projection =
   let open Result.Let_syntax in
+  let%bind () =
+    match previous_projection, replay with
+    | _, Agent_protocol.Public.Result.Attach.Snapshot _ | None, (Current | Events _) ->
+      Ok ()
+    | Some projection, (Current | Events _) ->
+      let fields =
+        Agent_protocol.Public.Snapshot.fields (Projection.snapshot projection)
+      in
+      if Agent_protocol.Id.Session.equal fields.session.id session_id
+      then (
+        match Projection.synchronization projection with
+        | Current -> Ok ()
+        | Snapshot_required failure -> Error failure)
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "previous projection belongs to another session")
+  in
   match replay with
-  | Agent_protocol.Method_result.Attach.Snapshot snapshot ->
+  | Agent_protocol.Public.Result.Attach.Snapshot snapshot ->
     Ok (Projection.install_snapshot snapshot)
   | Current ->
     (match previous_projection with
@@ -85,26 +106,39 @@ let notify t projection =
     | _ -> ())
 ;;
 
+let mark_closed t =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    if not t.closed
+    then (
+      t.closed <- true;
+      Option.iter t.notification_lease ~f:Connection.release_notifications;
+      Eio.Promise.resolve t.closed_resolver ()))
+;;
+
 let install_projection t result =
   let projection =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       match result with
       | Error failure ->
         t.last_error <- Some failure;
+        t.projection <- Projection.mark_stale t.projection failure;
         None
       | Ok projection ->
         t.projection <- projection;
         Some projection)
   in
   match result, projection with
-  | Error failure, _ -> Option.iter t.on_error ~f:(fun callback -> callback failure)
+  | Error failure, _ ->
+    Exn.protect
+      ~finally:(fun () -> mark_closed t)
+      ~f:(fun () -> Option.iter t.on_error ~f:(fun callback -> callback failure))
   | Ok _, Some projection -> notify t projection
   | Ok _, None -> ()
 ;;
 
 let apply_notification t = function
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    (match Agent_protocol.Event.Durable.of_json params with
+    (match Agent_protocol.Public.Durable.of_json params with
      | Error failure -> install_projection t (Error failure)
      | Ok event ->
        if Agent_protocol.Id.Session.compare event.session_id t.session_id = 0
@@ -120,35 +154,36 @@ let apply_notification t = function
          Eio.Mutex.use_ro t.mutex (fun () ->
            Projection.apply_live_event t.projection event)
          |> install_projection t)
+  | Notification { method_ = "session.stream_error"; params } ->
+    (match Agent_protocol.Stream_error.of_json params with
+     | Error failure -> install_projection t (Error failure)
+     | Ok failure ->
+       if
+         Agent_protocol.Id.Session.equal failure.session_id t.session_id
+         && Agent_protocol.Id.Attachment.equal failure.attachment_id t.attachment.id
+       then install_projection t (Error failure.error))
   | Notification _ | Request _ | Response _ -> ()
 ;;
 
-let mark_closed t =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    if not t.closed
-    then (
-      t.closed <- true;
-      Eio.Promise.resolve t.closed_resolver ()))
-;;
-
-let next_notification t =
+let next_notification t lease =
   Eio.Fiber.first
-    (fun () -> Connection.next_notification t.connection)
+    (fun () -> Connection.next_owned_notification lease)
     (fun () ->
        Eio.Promise.await t.closed_signal;
-       None)
+       Ok None)
 ;;
 
-let rec read_notifications t =
+let rec read_notifications t lease =
   if not (Eio.Mutex.use_ro t.mutex (fun () -> t.closed))
   then (
-    match next_notification t with
-    | None ->
+    match next_notification t lease with
+    | Error failure -> install_projection t (Error failure)
+    | Ok None ->
       install_projection t (Error (interrupted "session notification stream closed"));
       mark_closed t
-    | Some envelope ->
+    | Ok (Some envelope) ->
       apply_notification t envelope;
-      read_notifications t)
+      read_notifications t lease)
 ;;
 
 let renew_delay t lease =
@@ -183,7 +218,9 @@ let rec renew_owner t lease =
           ; idempotency_key
           }
       in
-      (match Connection.request t.connection (Session_renew_owner request) with
+      (match
+         Connection.request_without_history t.connection (Session_renew_owner request)
+       with
        | Ok (Session_renew_owner (lease, _)) ->
          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
            t.attachment <- { t.attachment with owner_lease = Some lease });
@@ -196,6 +233,7 @@ let rec renew_owner t lease =
 ;;
 
 let make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -203,42 +241,58 @@ let make_handle
       ~attachment
       ~reclaim_token
       ~replay
-      ~subscribe
+      ~latest_event_sequence
       ?previous_projection
       ?on_update
       ?on_error
       ()
   =
-  Result.map
+  Result.bind
     (initial_projection connection session_id replay previous_projection)
     ~f:(fun projection ->
-      let closed_signal, closed_resolver = Eio.Promise.create () in
-      let t =
-        { sleep = Eio.Time.sleep clock
-        ; now =
-            (fun () ->
-              Eio.Time.now clock |> Time_ns.Span.of_sec |> Time_ns.of_span_since_epoch)
-        ; connection
-        ; session_id
-        ; mutex = Eio.Mutex.create ()
-        ; on_update
-        ; on_error
-        ; attachment
-        ; reclaim_token
-        ; projection
-        ; last_error = None
-        ; closed = false
-        ; closed_signal
-        ; closed_resolver
-        }
+      let fields =
+        Agent_protocol.Public.Snapshot.fields (Projection.snapshot projection)
       in
-      if subscribe then Eio.Fiber.fork ~sw (fun () -> read_notifications t);
-      Option.iter attachment.owner_lease ~f:(fun lease ->
-        Eio.Fiber.fork ~sw (fun () -> renew_owner t lease));
-      t)
+      if
+        (not (Agent_protocol.Id.Session.equal fields.session.id session_id))
+        || not (Int64.equal fields.latest_event_sequence latest_event_sequence)
+      then
+        Error
+          (Agent_protocol.Error.invalid_request "attachment projection anchor mismatch")
+      else (
+        let closed_signal, closed_resolver = Eio.Promise.create () in
+        let t =
+          { sleep = Eio.Time.sleep clock
+          ; now =
+              (fun () ->
+                Eio.Time.now clock |> Time_ns.Span.of_sec |> Time_ns.of_span_since_epoch)
+          ; connection
+          ; notification_lease
+          ; session_id
+          ; mutex = Eio.Mutex.create ()
+          ; on_update
+          ; on_error
+          ; attachment
+          ; reclaim_token
+          ; projection
+          ; last_error = None
+          ; closed = false
+          ; detached = false
+          ; detach_attempted = false
+          ; closed_signal
+          ; closed_resolver
+          }
+        in
+        Eio.Switch.on_release sw (fun () -> mark_closed t);
+        Option.iter notification_lease ~f:(fun lease ->
+          Eio.Fiber.fork ~sw (fun () -> read_notifications t lease));
+        Option.iter attachment.owner_lease ~f:(fun lease ->
+          Eio.Fiber.fork ~sw (fun () -> renew_owner t lease));
+        Ok t))
 ;;
 
-let attach
+let attach_with_lease
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -268,6 +322,7 @@ let attach
   | Error _ as failure -> failure
   | Ok (Session_attach response) ->
     make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -275,7 +330,7 @@ let attach
       ~attachment:response.attachment
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
-      ~subscribe
+      ~latest_event_sequence:response.latest_event_sequence
       ?previous_projection
       ?on_update
       ?on_error
@@ -284,17 +339,29 @@ let attach
     Error (Agent_protocol.Error.invalid_request "unexpected session.attach result")
 ;;
 
-let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
+let create_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~spec
+      ~mode
+      ~subscribe
+      ?on_update
+      ?on_error
+      ()
+  =
   let open Result.Let_syntax in
   let%bind idempotency_key = key () in
   let request =
     Agent_protocol.Session.Create_request.
-      { spec; requested_mode = Some mode; subscribe = true; idempotency_key }
+      { spec; requested_mode = Some mode; subscribe; idempotency_key }
   in
   match Connection.request connection (Session_create request) with
   | Error _ as failure -> failure
   | Ok (Session_create { session; attachment = Some response; _ }) ->
     make_handle
+      ~notification_lease
       ~sw
       ~clock
       ~connection
@@ -302,7 +369,7 @@ let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
       ~attachment:response.attachment
       ~reclaim_token:response.reclaim_token
       ~replay:response.replay
-      ~subscribe:true
+      ~latest_event_sequence:response.latest_event_sequence
       ?on_update
       ?on_error
       ()
@@ -310,6 +377,72 @@ let create ~sw ~clock ~connection ~spec ~mode ?on_update ?on_error () =
     Error (Agent_protocol.Error.invalid_request "session.create omitted its attachment")
   | Ok _ ->
     Error (Agent_protocol.Error.invalid_request "unexpected session.create result")
+;;
+
+let with_notification_lease connection f =
+  Result.bind (Connection.claim_notifications connection) ~f:(fun notification_lease ->
+    let retained = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        if not !retained then Connection.release_notifications notification_lease)
+      ~f:(fun () ->
+        let result = f notification_lease in
+        retained := Result.is_ok result;
+        result))
+;;
+
+let attach
+      ~sw
+      ~clock
+      ~connection
+      ~session_id
+      ~mode
+      ?(subscribe = true)
+      ?after_sequence
+      ?reclaim_token
+      ?previous_projection
+      ?on_update
+      ?on_error
+      ()
+  =
+  let attach notification_lease =
+    attach_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~session_id
+      ~mode
+      ~subscribe
+      ?after_sequence
+      ?reclaim_token
+      ?previous_projection
+      ?on_update
+      ?on_error
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> attach (Some lease))
+  else attach None
+;;
+
+let create ~sw ~clock ~connection ~spec ~mode ?(subscribe = true) ?on_update ?on_error () =
+  let create notification_lease =
+    create_with_lease
+      ~notification_lease
+      ~sw
+      ~clock
+      ~connection
+      ~spec
+      ~mode
+      ~subscribe
+      ?on_update
+      ?on_error
+      ()
+  in
+  if subscribe
+  then with_notification_lease connection (fun lease -> create (Some lease))
+  else create None
 ;;
 
 let session_id t = t.session_id
@@ -323,7 +456,7 @@ let is_closed t = Eio.Mutex.use_ro t.mutex (fun () -> t.closed)
 let mutation_command t make extract =
   let open Result.Let_syntax in
   let%bind idempotency_key = key () in
-  match Connection.request t.connection (make idempotency_key) with
+  match Connection.request_without_history t.connection (make idempotency_key) with
   | Ok result -> extract result
   | Error _ as failure -> failure
 ;;
@@ -467,7 +600,7 @@ let read_audit (t : t) ~limit =
       ; name_prefix = None
       }
   in
-  match Connection.request t.connection (Audit_read request) with
+  match Connection.request_without_history t.connection (Audit_read request) with
   | Ok (Audit_read page) -> Ok page
   | Ok _ -> Error (Agent_protocol.Error.invalid_request "unexpected audit result")
   | Error _ as failure -> failure
@@ -521,7 +654,7 @@ let rebuild t ~expected_revision ~prompt_choice =
 
 let export t ~format ~revision =
   match
-    Connection.request
+    Connection.request_without_history
       t.connection
       (Session_export
          { session_id = t.session_id
@@ -570,14 +703,23 @@ let detach t =
          { session_id = t.session_id; attachment_id = t.attachment.id; idempotency_key })
     (function
       | Session_detach _ ->
+        Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.detached <- true);
         mark_closed t;
         Ok ()
       | _ -> Error (Agent_protocol.Error.invalid_request "unexpected detach result"))
 ;;
 
 let close t =
-  if not (Eio.Mutex.use_ro t.mutex (fun () -> t.closed))
-  then (
-    ignore (detach t : (unit, Agent_protocol.Error.t) result);
-    mark_closed t)
+  let attempt =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      if t.detached || t.detach_attempted
+      then false
+      else (
+        t.detach_attempted <- true;
+        true))
+  in
+  Exn.protect
+    ~finally:(fun () -> mark_closed t)
+    ~f:(fun () ->
+      if attempt then ignore (detach t : (unit, Agent_protocol.Error.t) result))
 ;;

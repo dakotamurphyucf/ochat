@@ -1,10 +1,21 @@
 open Core
 
 let required_scope = function
+  | Agent_protocol.Command.Provider_status _ -> Some Agent_protocol.Scope.Provider_view
+  | Provider_select _ -> Some Agent_protocol.Scope.Provider_select
+  | Provider_setup _
+  | Provider_login_begin _
+  | Provider_login_challenge _
+  | Provider_login_cancel _
+  | Provider_logout _
+  | Provider_configure_environment _ -> Some Agent_protocol.Scope.Provider_manage
   | Agent_protocol.Command.Protocol_initialize _
+  | Command_receipt _
   | Protocol_ping _
   | Server_info
   | Server_health _ -> None
+  | Session_inference_summary _ -> None
+  | Session_inference_observations _ -> Some Agent_protocol.Scope.View_session_transcript
   | Prompt_list _ | Prompt_get _ -> Some Agent_protocol.Scope.List_prompts
   | Workspace_list _ | Workspace_get _ -> Some List_workspaces
   | Blob_read _ -> Some View_session_transcript
@@ -37,15 +48,68 @@ let required_scope = function
   | Schedule_cancel _ -> Some Send_messages
 ;;
 
-let authorize principal command =
-  match required_scope command with
-  | None -> Ok ()
-  | Some scope when Agent_protocol.Principal.has_scope principal scope -> Ok ()
-  | Some scope ->
+let authorize_attachment_mode principal mode =
+  if not (Agent_protocol.Principal.has_scope principal View_session_transcript)
+  then
     Error
       (Agent_protocol.Error.create
          Permission_denied
-         ~message:("missing scope " ^ Agent_protocol.Scope.to_string scope)
+         ~message:"attachment requires transcript scope"
          ~retryable:false
          ())
+  else (
+    match mode with
+    | Agent_protocol.Session.Read_only -> Ok ()
+    | Read_write ->
+      if Agent_protocol.Principal.has_scope principal Send_messages
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Permission_denied
+             ~message:"read/write attachment requires send_messages"
+             ~retryable:false
+             ())
+    | Owner_read_write ->
+      if
+        Agent_protocol.Principal.has_scope principal Send_messages
+        && Agent_protocol.Principal.has_scope principal Own_sessions
+      then Ok ()
+      else
+        Error
+          (Agent_protocol.Error.create
+             Permission_denied
+             ~message:"owner attachment requires send_messages and own_sessions"
+             ~retryable:false
+             ()))
+;;
+
+let authorize principal command =
+  let open Result.Let_syntax in
+  let%bind () =
+    match required_scope command with
+    | None -> Ok ()
+    | Some scope when Agent_protocol.Principal.has_scope principal scope -> Ok ()
+    | Some scope ->
+      Error
+        (Agent_protocol.Error.create
+           Permission_denied
+           ~message:("missing scope " ^ Agent_protocol.Scope.to_string scope)
+           ~retryable:false
+           ())
+  in
+  match command with
+  | Agent_protocol.Command.Session_create { requested_mode = Some mode; _ } ->
+    authorize_attachment_mode principal mode
+  | Session_attach request -> authorize_attachment_mode principal request.requested_mode
+  | Session_inference_observations request
+    when (request.include_configuration || request.include_diagnostics)
+         && not (Agent_protocol.Principal.has_scope principal Diagnostics) ->
+    Error
+      (Agent_protocol.Error.create
+         Permission_denied
+         ~message:"detailed inference observations require diagnostics scope"
+         ~retryable:false
+         ())
+  | _ -> Ok ()
 ;;

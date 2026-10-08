@@ -5,6 +5,143 @@ The [protocol guide](protocol.md) explains operation semantics and authorization
 Each section includes the complete typed contract and a link to its JSON codec;
 wire tags/defaults are defined by that codec, not OCaml constructor spelling.
 
+## activity
+
+[JSON codec](../../lib/agent_protocol/activity.ml) · [interface](../../lib/agent_protocol/activity.mli)
+
+```ocaml
+(** Neutral transient tool activity. A call alias is scoped to an actual source
+    and attempt; it never substitutes for a host history or invocation ID. *)
+module Key : sig
+  type parent =
+    { scope : Transcript.Scope.Key.t
+    ; call_alias : string
+    }
+  [@@deriving compare, equal, hash, sexp_of]
+
+  type t = private
+    { scope : Transcript.Scope.Key.t
+    ; call_alias : string
+    ; parent : parent option
+    }
+  [@@deriving compare, equal, hash, sexp_of]
+
+  val create
+    :  scope:Transcript.Scope.Key.t
+    -> call_alias:string
+    -> parent:parent option
+    -> (t, Error.t) result
+end
+
+module Progress : sig
+  type channel =
+    | Assistant
+    | Reasoning
+    | Stdout
+    | Stderr
+    | Activity
+  [@@deriving compare, equal, sexp_of]
+
+  type update =
+    | Append of string
+    | Replace of string
+  [@@deriving equal, sexp_of]
+
+  type t =
+    { channel : channel
+    ; update : update
+    }
+  [@@deriving equal, sexp_of]
+end
+
+module Tool : sig
+  type classification =
+    | Subagent
+    | Shell_script
+  [@@deriving equal, sexp_of]
+
+  type outcome =
+    | Returned
+    | Raised
+    | Cancelled
+  [@@deriving equal, sexp_of]
+
+  type descriptor = private
+    { key : Key.t
+    ; call_entry_id : History_entry.Id.t option
+    ; name : string
+    ; kind : History_entry.Payload.Call_kind.t
+    ; input : string
+    ; classification : classification option
+    }
+  [@@deriving sexp_of]
+
+  val descriptor
+    :  Key.t
+    -> call_entry_id:History_entry.Id.t option
+    -> name:string
+    -> kind:History_entry.Payload.Call_kind.t
+    -> input:string
+    -> classification:classification option
+    -> (descriptor, Error.t) result
+
+  type event =
+    | Started of descriptor
+    | Progress of
+        { key : Key.t
+        ; progress : Progress.t
+        }
+    | Finished of
+        { key : Key.t
+        ; outcome : outcome
+        ; output : History_entry.Payload.Output.t option
+        }
+  [@@deriving sexp_of]
+
+  (** Nested activity records the actual parent scope and call alias. Only existing
+      actual parent attribution is supplied; no guessed parent or host ID. *)
+  val key : event -> Key.t
+
+  val to_json : event -> Jsonaf.t
+  val of_json : Jsonaf.t -> (event, Error.t) result
+
+  type channel_text =
+    { channel : Progress.channel
+    ; text : string
+    ; complete : bool
+    }
+  [@@deriving sexp_of]
+
+  type state =
+    | Running
+    | Finished of
+        { outcome : outcome
+        ; output : History_entry.Payload.Output.t option
+        }
+  [@@deriving sexp_of]
+
+  type summary = private
+    { key : Key.t
+    ; descriptor : descriptor option
+    ; channels : channel_text list
+    ; state : state
+    }
+  [@@deriving sexp_of]
+
+  (** Missing descriptors and incomplete channel prefixes remain explicit after
+      a live gap. The client ordering owner performs bounded accumulation. *)
+  val summary
+    :  Key.t
+    -> descriptor:descriptor option
+    -> channels:channel_text list
+    -> state:state
+    -> (summary, Error.t) result
+
+  val summary_to_json : summary -> Jsonaf.t
+  val summary_of_json : Jsonaf.t -> (summary, Error.t) result
+end
+```
+
 ## audit
 
 [JSON codec](../../lib/agent_protocol/audit.ml) · [interface](../../lib/agent_protocol/audit.mli)
@@ -318,6 +455,15 @@ end
 
 type t =
   | Protocol_initialize of Initialize.Request.t
+  | Command_receipt of Command_receipt.Request.t
+  | Provider_setup of Provider_operator.Setup_request.t
+  | Provider_status of Provider_operator.Status_request.t
+  | Provider_login_begin of Provider_operator.Login_request.t
+  | Provider_login_challenge of Provider_operator.Challenge_request.t
+  | Provider_login_cancel of Provider_operator.Cancel_request.t
+  | Provider_logout of Provider_operator.Logout_request.t
+  | Provider_select of Provider_operator.Select_request.t
+  | Provider_configure_environment of Provider_operator.Environment_request.t
   | Protocol_ping of Ping.Request.t
   | Server_info
   | Server_health of Health.Request.t
@@ -329,6 +475,8 @@ type t =
   | Session_create of Session.Create_request.t
   | Session_list of Session.List_request.t
   | Session_get of Session.Get_request.t
+  | Session_inference_summary of Inference_query.Summary_request.t
+  | Session_inference_observations of Inference_query.Request.t
   | Session_attach of Session.Attach_request.t
   | Session_detach of Session.Detach_request.t
   | Session_renew_owner of Session.Renew_owner_request.t
@@ -369,6 +517,72 @@ val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) res
 
 (** [supported_methods] contains every method accepted by the closed dispatcher. *)
 val supported_methods : string list
+```
+
+## command_receipt
+
+[JSON codec](../../lib/agent_protocol/command_receipt.ml) · [interface](../../lib/agent_protocol/command_receipt.mli)
+
+```ocaml
+(** Read-only reconciliation of an original bounded request. The authenticated
+    principal is implicit. Original params prove mode/authority and digest;
+    lookup never admits, retries or replays the command. *)
+module Request : sig
+  type t =
+    { method_name : string
+    ; original_params : Jsonaf.t
+    }
+  [@@deriving sexp]
+
+  (** Shared admission/receipt bounds apply to original parameters; the small
+      receipt envelope does not consume their byte or nesting allowance. *)
+  val validate_original_params : Jsonaf.t -> (unit, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+(** Narrow result references, never a replay of a full original result.
+    Create/attach recovery must use a fresh authorized attachment. *)
+type committed =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_login of Provider_operator.Flow_ref.t
+  | Provider_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_selection of Provider_operator.Selection_result.t
+  | Provider_configuration of Provider_operator.Configuration_result.t
+  | Created_session of Id.Session.t
+  | Attached_session of Id.Session.t
+  | Session_mutation of
+      { session_id : Id.Session.t
+      ; mutation : Mutation_result.t
+      }
+  | Sent_message of
+      { session_id : Id.Session.t
+      ; history_id : History.Id.t
+      ; operation_id : Id.Operation.t option
+      ; mutation : Mutation_result.t
+      }
+  | Deleted_session of Id.Session.t
+  | Permission_response of Id.Permission.t * Mutation_result.t
+  | Revoked_grant of Id.Grant.t * Mutation_result.t
+  | Cancelled_job of Id.Job.t * Mutation_result.t
+  | Schedule_mutation of Id.Schedule.t * Mutation_result.t
+[@@deriving sexp]
+
+type t =
+  | Missing
+  | Unavailable
+  | Pending of
+      { accepted_sequence : int64 option
+      ; expires_at : Timestamp.t option
+      }
+  | Failed of Error.t
+  | Committed of committed
+[@@deriving sexp]
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## completion
@@ -559,6 +773,13 @@ val retry : t -> max_attempts:int -> (t, Error.t) result
 val validate_transition : previous:t option -> t -> (unit, Error.t) result
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Complete current durable record projection. Required-null option fields;
+    independent of the public protocol's historical envelope variants. *)
+module Storage : sig
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## envelope
@@ -767,38 +988,41 @@ module Durable : sig
 end
 
 module Recoverable : sig
-  type kind =
-    | Provider_stream
-    | Sourced_stream
-    | History_correlated_stream
-    | Tool_started
-    | Tool_progress
-    | Tool_trace
-    | Tool_finished
-    | Agent_call_classified
-    | Agent_call_progress
-    | Activity
-    | Compaction_progress
-  [@@deriving compare, equal, sexp]
+  type payload =
+    | Transcript of Transcript.Stream.t
+    | Tool_activity of Activity.Tool.event
+  [@@deriving sexp_of]
 
-  type t =
+  type t = private
     { session_id : Id.Session.t
     ; operation_id : Id.Operation.t
     ; operation_sequence : int64
     ; anchor_sequence : int64
     ; timestamp : Timestamp.t
-    ; kind : kind
-    ; payload : Jsonaf.t
+    ; invocation_id : Id.Invocation.t option
+    ; parent_invocation_id : Id.Invocation.t option
+    ; payload : payload
+    ; original_json : Jsonaf.t option
+      (** Immutable admitted received envelope, retaining unknown fields for exact
+          duplicate detection. Native events have [None]. *)
     }
-  [@@deriving sexp]
+  [@@deriving sexp_of]
 
-  (** [to_json t] encodes the parameters of a [session.live_event] notification. *)
+  (** Positive operation sequence, nonnegative durable anchor; complete encoded
+      envelope is bounded to 16 MiB. Invocation IDs are actual host IDs only. *)
+  val create
+    :  session_id:Id.Session.t
+    -> operation_id:Id.Operation.t
+    -> operation_sequence:int64
+    -> anchor_sequence:int64
+    -> timestamp:Timestamp.t
+    -> invocation_id:Id.Invocation.t option
+    -> parent_invocation_id:Id.Invocation.t option
+    -> payload
+    -> (t, Error.t) result
+
   val to_json : t -> Jsonaf.t
-
-  (** [of_json json] decodes a recoverable live event. *)
   val of_json : Jsonaf.t -> (t, Error.t) result
-
-  (** [to_notification t] wraps the live event in a JSON-RPC notification. *)
   val to_notification : t -> Envelope.t
 end
 ```
@@ -1047,6 +1271,9 @@ type provenance =
   | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
 
+val provenance_to_json : provenance -> Jsonaf.t
+val provenance_of_json : Jsonaf.t -> (provenance, Error.t) result
+
 type entry =
   { id : Id.t
   ; role : role
@@ -1186,6 +1413,263 @@ val of_json : Jsonaf.t -> (t, Error.t) result
 
 (** [to_json t] encodes a JSON string key. *)
 val to_json : t -> Jsonaf.t
+```
+
+## inference_query
+
+[JSON codec](../../lib/agent_protocol/inference_query.ml) · [interface](../../lib/agent_protocol/inference_query.mli)
+
+```ocaml
+(** Additive protocol2 inference reads. No OpenAI, private Target, raw request,
+    credentials, instructions/tool bodies or arbitrary diagnostic messages.
+    These are retained-window totals, NEVER lifetime claims after retirement. *)
+module Features : sig
+  (** Optional method/display support, independent of authorization. These are
+      ordinary initialize features, not extension capability catalog entries. *)
+  val observations : string
+
+  val configuration : string
+  val diagnostics : string
+  val all : string list
+end
+
+module Summary_request : sig
+  type t = { session_id : Id.Session.t } [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Coverage : sig
+  type limit_kind =
+    | Attempt_count
+    | Turn_count
+    | Retained_bytes
+    | Protected_future_data
+  [@@deriving equal, sexp_of]
+
+  type tracking_status =
+    | Available
+    | Limited of limit_kind
+  [@@deriving equal, sexp_of]
+
+  type t = private
+    { before_tracking_unknown : bool
+    ; retired_attempts : int64
+    ; untracked_attempts : int64
+    ; retired_turns : int64
+    ; untracked_turns : int64
+    ; tracking_status : tracking_status
+    }
+
+  val create
+    :  before_tracking_unknown:bool
+    -> retired_attempts:int64
+    -> untracked_attempts:int64
+    -> retired_turns:int64
+    -> untracked_turns:int64
+    -> tracking_status:tracking_status
+    -> (t, Error.t) Result.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Metric : sig
+  type sum =
+    | Tokens of int64
+    | Overflow
+  [@@deriving equal, sexp_of]
+
+  type unknown_counts =
+    { not_reported : int64
+    ; explicit_null : int64
+    ; interrupted : int64
+    ; not_submitted : int64
+    ; before_tracking : int64
+    }
+
+  type t = private
+    { actual : sum
+    ; actual_attempts : int64
+    ; estimated : sum
+    ; estimated_attempts : int64
+    ; mixed_estimators : bool
+    ; unknown : unknown_counts
+    }
+
+  (** Nonnegative per-component contributions over retained attempts. Estimated
+      contributions remain separately labelled; mixed_estimators prevents a
+      fabricated uniform algorithm claim. Missing usage contributes explicit
+      unknown reasons, not zero. No component total adds cache/reasoning subsets
+      to input/output. Pricing/currency does not participate. *)
+  val create
+    :  actual:sum
+    -> actual_attempts:int64
+    -> estimated:sum
+    -> estimated_attempts:int64
+    -> mixed_estimators:bool
+    -> unknown:unknown_counts
+    -> (t, Error.t) Result.t
+end
+
+module Summary : sig
+  type turns =
+    { pending : int64
+    ; completed : int64
+    ; failed : int64
+    ; cancelled : int64
+    ; interrupted : int64
+    }
+
+  type components =
+    { input : Metric.t
+    ; output : Metric.t
+    ; reported_total : Metric.t
+    ; cached_input : Metric.t
+    ; cache_write_input : Metric.t
+    ; reasoning_output : Metric.t
+    }
+
+  type t [@@deriving sexp]
+
+  (** Bounded 8 KiB optional session summary. Component values are independent
+      metrics, not six quantities to sum. Attempt and actual host-turn counts
+      refer to their retained windows; coverage records discarded/untracked
+      evidence and pre-tracking uncertainty. Counts/revisions nonnegative. *)
+  val create
+    :  retained_attempts:int64
+    -> turns:turns
+    -> components:components
+    -> coverage:Coverage.t
+    -> accounting_revision:int64
+    -> (t, Error.t) Result.t
+
+  val retained_attempts : t -> int64
+  val turns : t -> turns
+  val components : t -> components
+  val coverage : t -> Coverage.t
+  val accounting_revision : t -> int64
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Attempt : sig
+  type t
+
+  (** Usage/Context/state rows require transcript scope AND session visibility.
+      Detailed Configuration/account alias/diagnostics additionally require
+      Diagnostics. The encoder never exposes hidden full
+      Attempt_record JSON as a shortcut. Ordinal orders actual durable admission;
+      Operation/Invocation are real host associations or absent. *)
+  val create
+    :  ordinal:int64
+    -> generation:int
+    -> scope:Transcript.Scope.t
+    -> operation_id:Id.Operation.t option
+    -> invocation_id:Id.Invocation.t option
+    -> accounting_id:Inference.Observation.Observation_id.t
+    -> state:Inference.Observation.Attempt_record.state
+    -> usage:Inference.Observation.t option
+    -> context:Inference.Observation.t option
+    -> configuration:Inference.Observation.Configuration.t option
+    -> diagnostics:Inference.Observation.t list option
+    -> omitted_diagnostics:int64 option
+    -> (t, Error.t) Result.t
+
+  val ordinal : t -> int64
+  val generation : t -> int
+  val scope : t -> Transcript.Scope.t
+  val operation_id : t -> Id.Operation.t option
+  val invocation_id : t -> Id.Invocation.t option
+  val accounting_id : t -> Inference.Observation.Observation_id.t
+  val state : t -> Inference.Observation.Attempt_record.state
+  val usage : t -> Inference.Observation.t option
+  val context : t -> Inference.Observation.t option
+  val configuration : t -> Inference.Observation.Configuration.t option
+
+  (** Actual selected transport, disclosed with configuration. Initial nomination
+      in Configuration is never presented as evidence of actual WS dispatch. *)
+  val transport_selection : t -> Inference.Observation.t option
+
+  val with_transport_selection
+    :  t
+    -> Inference.Observation.t option
+    -> (t, Error.t) Result.t
+
+  val diagnostics : t -> Inference.Observation.t list option
+  val omitted_diagnostics : t -> int64 option
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Request : sig
+  type t =
+    { session_id : Id.Session.t
+    ; page : Page.Request.t
+    ; include_configuration : bool
+    ; include_diagnostics : bool
+    }
+  [@@deriving sexp]
+
+  (** Default page128; actual request <=advertised max_page_size (normally1000)
+      checked by host, because generic Page.Request permits a larger ceiling.
+      Cursors bind principal/session/generation/accounting_revision/filter/order;
+      changed accounting returns explicit Conflict/restart, never mixed pages. *)
+  val create
+    :  session_id:Id.Session.t
+    -> page:Page.Request.t
+    -> include_configuration:bool
+    -> include_diagnostics:bool
+    -> (t, Error.t) Result.t
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) Result.t
+end
+
+module Response : sig
+  type t [@@deriving sexp]
+
+  (** Fully measured result within the inference-query per-RPC envelope policy
+      (default16 MiB), using the allowance left after measuring the actual RPC ID
+      and envelope wrapper, and including the actual signed cursor. HTTP batch
+      aggregate and unrelated response limits are unchanged; input limits do not
+      supply this response policy. Byte admission happens before
+      next-row append/serialized allocation; a valid row that cannot fit returns
+      a structured error, never a non-advancing cursor loop. *)
+  val create
+    :  summary:Summary.t
+    -> attempts:Attempt.t Page.t
+    -> max_bytes:int
+    -> (t, Error.t) Result.t
+
+  val summary : t -> Summary.t
+  val attempts : t -> Attempt.t Page.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> max_bytes:int -> (t, Error.t) Result.t
+
+  module Builder : sig
+    type response = t
+    type t
+
+    (** [max_bytes] is the actual remaining result-body allowance after measuring
+        the RPC/envelope wrapper, at most 16 MiB. Immutable builder caches bounded
+        row measurements; no complete array is rebuilt on each append. *)
+    val create : summary:Summary.t -> max_bytes:int -> (t, Error.t) Result.t
+
+    (** None means capacity with prior builder unchanged; an empty page that
+        cannot fit its first valid row errors. Cursor is the actual next cursor
+        after this candidate, included in the admission BEFORE append. At most
+        1000 rows. No cursor can silently point past an unappended row. *)
+    val add
+      :  t
+      -> Attempt.t
+      -> next_cursor:Page.Cursor.t option
+      -> (t option, Error.t) Result.t
+
+    val finish : t -> (response, Error.t) Result.t
+  end
+end
 ```
 
 ## ingress
@@ -1634,6 +2118,13 @@ val work_of_json : Jsonaf.t -> (work, Error.t) result
 val outcome_of_json : Jsonaf.t -> (outcome, Error.t) result
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Complete current durable record projection. Required-null option fields;
+    independent of the public protocol's historical envelope variants. *)
+module Storage : sig
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## job
@@ -2100,7 +2591,16 @@ module Delete : sig
 end
 
 type t =
+  | Provider_setup of Provider_operator.Setup_result.t
+  | Provider_status of Provider_operator.Status_result.t
+  | Provider_login_begin of Provider_operator.Flow_ref.t
+  | Provider_login_challenge of Provider_operator.Private_challenge.t
+  | Provider_login_cancel of Provider_operator.Flow_result.t
+  | Provider_logout of Provider_operator.Logout_result.t
+  | Provider_select of Provider_operator.Selection_result.t
+  | Provider_configure_environment of Provider_operator.Configuration_result.t
   | Protocol_initialize of Initialize.Response.t
+  | Command_receipt of Command_receipt.t
   | Protocol_ping of Ping.Response.t
   | Server_info of Server_info.t
   | Server_health of Health.Response.t
@@ -2112,6 +2612,8 @@ type t =
   | Session_create of Create.t
   | Session_list of Session.t Page.t
   | Session_get of Snapshot.t
+  | Session_inference_summary of Inference_query.Summary.t
+  | Session_inference_observations of Inference_query.Response.t
   | Session_attach of Attach.t
   | Session_detach of Mutation_result.t
   | Session_renew_owner of Session.Owner_lease.t * Mutation_result.t
@@ -2144,7 +2646,9 @@ type t =
 (** [method_name t] returns the request method associated with [t]. *)
 val method_name : t -> string
 
-(** [to_json t] encodes the method-specific result object. *)
+(** [to_json t] encodes the method-specific result object.
+    Private provider challenges require Public.Result authorized projection;
+    generic internal encoding raises Invalid_argument without challenge content. *)
 val to_json : t -> Jsonaf.t
 
 (** [of_json ~method_ json] decodes the successful result for [method_]. *)
@@ -2594,6 +3098,19 @@ val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
+## projection_codec
+
+[JSON codec](../../lib/agent_protocol/projection_codec.ml) · [interface](../../lib/agent_protocol/projection_codec.mli)
+
+```ocaml
+(** Shared admission boundary for protocol 2 transcript envelopes. *)
+val limits : Document_schema.Limits.t
+
+val validate : Jsonaf.t -> (unit, Error.t) result
+val string_result : ('a, string) result -> ('a, Error.t) result
+val optional : string -> 'a option -> ('a -> Jsonaf.t) -> (string * Jsonaf.t) list
+```
+
 ## prompt
 
 [JSON codec](../../lib/agent_protocol/prompt.ml) · [interface](../../lib/agent_protocol/prompt.mli)
@@ -2720,6 +3237,622 @@ val to_json : t -> Jsonaf.t
 
 (** [of_json json] decodes a protocol error and rejects duplicate required fields. *)
 val of_json : Jsonaf.t -> (t, t) result
+```
+
+## provider_operator
+
+[JSON codec](../../lib/agent_protocol/provider_operator.ml) · [interface](../../lib/agent_protocol/provider_operator.mli)
+
+```ocaml
+open! Core
+
+type protocol_error = Protocol_error.t
+
+(** Nonsecret provider administration DTOs. No filesystem paths, credential bytes,
+    arbitrary environment names, or inferred login authority occur in requests. *)
+module Profile_id : sig
+  type t [@@deriving compare, equal, sexp]
+
+  val of_string : string -> (t, protocol_error) result
+  val to_string : t -> string
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Source_id : module type of Profile_id
+module Flow_id : module type of Profile_id
+module Revision : module type of Profile_id
+
+module Limits : sig
+  type t
+
+  val create
+    :  max_flows:int
+    -> max_profiles:int
+    -> max_flow_seconds:int
+    -> (t, protocol_error) result
+
+  val default : t
+  val max_flows : t -> int
+  val max_profiles : t -> int
+  val max_flow_seconds : t -> int
+end
+
+module Operation : sig
+  type t =
+    | Setup
+    | Status
+    | Login
+    | Challenge
+    | Cancel
+    | Logout
+    | Select
+    | Configure_environment
+  [@@deriving equal, sexp]
+end
+
+module Error : sig
+  type t =
+    | Denied
+    | Missing_profile
+    | Invalid_request
+    | Busy
+    | Closed
+    | Flow_expired
+    | Flow_interrupted
+    | Challenge_unavailable
+    | Submission_uncertain
+    | Network
+    | Account_denied
+    | Model_denied
+    | Store_unavailable
+    | Unsupported
+  [@@deriving equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Login_mode : sig
+  type t =
+    | Browser
+    | Device
+  [@@deriving equal, sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Flow_ref : sig
+  type t =
+    { server_id : Id.Server.t
+    ; profile : Profile_id.t
+    ; flow_id : Flow_id.t
+    ; expires_at : Timestamp.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Flow_result : sig
+  type phase =
+    | Pending
+    | Completed
+    | Failed of Error.t
+    | Cancelled
+    | Interrupted
+    | Expired
+  [@@deriving equal, sexp]
+
+  type t =
+    { flow : Flow_ref.t
+    ; phase : phase
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Private_challenge : sig
+  (** Secret-bearing owner-only live challenge. Debug sexp is always redacted;
+      sexp decoding is forbidden. Never store in receipts, events, audit or status. *)
+  type t [@@deriving sexp]
+
+  val browser : authorization_uri:Uri.t -> (t, protocol_error) result
+  val device : verification_uri:Uri.t -> user_code:string -> (t, protocol_error) result
+  val with_browser_uri : t -> f:(Uri.t -> 'a) -> 'a option
+
+  val with_device_prompt
+    :  t
+    -> f:(verification_uri:Uri.t -> user_code:string -> 'a)
+    -> 'a option
+
+  module Authorized_transport : sig
+    (** Only after current scope AND exact flow ownership/expiry authorization. *)
+    val to_json : t -> Jsonaf.t
+
+    val of_json : Jsonaf.t -> (t, protocol_error) result
+  end
+end
+
+module Setup_request : sig
+  type t = { idempotency_key : Idempotency_key.t } [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+(** Setup revision is the nonsecret host registry incarnation, not the default
+    selection revision. Selection CAS comes only from Status_result.selection. *)
+module Setup_result : sig
+  type t =
+    { server_id : Id.Server.t
+    ; revision : Revision.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Status_request : sig
+  type t = { profile : Profile_id.t option } [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Selection_result : sig
+  type t =
+    { profile : Profile_id.t
+    ; revision : Revision.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Status_result : sig
+  type availability =
+    | Missing
+    | Configured
+    | Disabled
+    | Renewal_required
+    | Renewal_uncertain
+    | Secret_unavailable
+    | Store_unavailable
+  [@@deriving equal, sexp]
+
+  type failure =
+    | Network
+    | Account_denied
+    | Model_denied
+    | Submission_uncertain
+  [@@deriving equal, sexp]
+
+  type profile =
+    { profile : Profile_id.t
+    ; account : string option
+    ; availability : availability
+    ; last_failure : failure option
+    ; auth_epoch : int64 option
+    ; credential_revision : Revision.t option
+    }
+  [@@deriving sexp]
+
+  type t =
+    { server_id : Id.Server.t
+    ; setup_required : bool
+    ; profiles : profile list
+    ; flows : Flow_result.t list
+    ; selection : Selection_result.t option
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Login_request : sig
+  type t =
+    { profile : Profile_id.t
+    ; mode : Login_mode.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Challenge_request : sig
+  type t = { flow : Flow_ref.t } [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Cancel_request : sig
+  type t =
+    { flow : Flow_ref.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Logout_request : sig
+  type t =
+    { profile : Profile_id.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Logout_result : sig
+  type drain =
+    | Drained
+    | Pending
+  [@@deriving equal, sexp]
+
+  type t =
+    { profile : Profile_id.t
+    ; auth_epoch : int64
+    ; drain : drain
+    ; cleanup_pending : bool
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Select_request : sig
+  type t =
+    { profile : Profile_id.t
+    ; expected_revision : Revision.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Environment_request : sig
+  type t =
+    { profile : Profile_id.t
+    ; source : Source_id.t
+    ; idempotency_key : Idempotency_key.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+
+module Configuration_result : sig
+  type t =
+    { profile : Profile_id.t
+    ; auth_epoch : int64
+    ; revision : Revision.t
+    }
+  [@@deriving sexp]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, protocol_error) result
+end
+```
+
+## public
+
+[JSON codec](../../lib/agent_protocol/public.ml) · [interface](../../lib/agent_protocol/public.mli)
+
+```ocaml
+(** Explicit public read boundary. Private snapshot/history/event/result types
+    also serve durable storage and must not be changed to redact a client view. *)
+module History = Public_history
+
+module Snapshot = Public_snapshot
+module Durable = Public_durable_event
+module Result = Public_result
+```
+
+## public_durable_event
+
+[JSON codec](../../lib/agent_protocol/public_durable_event.ml) · [interface](../../lib/agent_protocol/public_durable_event.mli)
+
+```ocaml
+(** Typed public durable events. Hidden entries preserve sequence slots without
+    exposing content. Internal events and their persistence codecs stay intact. *)
+module Shared_payload : sig
+  type t [@@deriving sexp_of]
+
+  (** Exhaustive admission of the shared, non-history payload alternatives.
+      Rejects all history variants and the untyped internal moderator overlay.
+      Native children pass the same domain codec admission as received payloads.
+      Optional replacement/status fields are projected separately. *)
+  val of_internal : Event.Durable.Payload.t -> (t, Error.t) result
+
+  val value : t -> Event.Durable.Payload.t
+end
+
+type overlay =
+  { effective_history : Public_history.Window.t option
+  ; halted : bool
+  ; halt_reason : string option
+  }
+[@@deriving sexp_of]
+
+type payload =
+  | History_message_deferred of Public_history.t
+  | History_appended of Public_history.t list
+  | History_replaced of Public_history.Window.t
+  | Moderator_overlay_changed of overlay
+  | Shared of Shared_payload.t
+[@@deriving sexp_of]
+
+type body =
+  | Full of payload
+  | Filtered of payload
+  | Hidden
+[@@deriving sexp_of]
+
+type t = private
+  { session_id : Id.Session.t
+  ; sequence : int64
+  ; revision : int64
+  ; timestamp : Timestamp.t
+  ; kind : Event.Durable.kind
+  ; body : body
+  ; extension_status : Extension_status.t list option
+  ; replacement_snapshot : Public_snapshot.t option
+  }
+[@@deriving sexp_of]
+
+(** Copies only the event envelope. Checks kind, counters, payload session
+    ownership and replacement anchors. Extension summaries are unique, validated
+    and cannot name a future generation of their session update. Hidden events
+    must contain neither status nor snapshot extras. *)
+val of_internal_envelope
+  :  Event.Durable.t
+  -> body:body
+  -> extension_status:Extension_status.t list option
+  -> replacement_snapshot:Public_snapshot.t option
+  -> (t, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val to_notification : t -> Envelope.t
+```
+
+## public_history
+
+[JSON codec](../../lib/agent_protocol/public_history.ml) · [interface](../../lib/agent_protocol/public_history.mli)
+
+```ocaml
+(** Read-only history projections. Public views never authorize canonical input
+    or a history edit. Full payloads retain their immutable neutral evidence;
+    visible and redacted bodies cannot be converted back into canonical entries. *)
+
+module Visible : sig
+  type part =
+    | Text of string
+    | Refusal of string
+    | Image of
+        { uri : string
+        ; detail : string History_entry.Payload.Presence.t
+        }
+    | Redacted_part of { kind : string }
+  [@@deriving equal, sexp_of]
+
+  type t = private
+    | Message of
+        { form : History_entry.Payload.Semantic.message_form
+        ; role : History_entry.Payload.Role.t
+        ; content : part list
+        ; phase : string History_entry.Payload.Presence.t
+        }
+    | Reasoning of { readable_summary : string list }
+  [@@deriving equal, sexp_of]
+
+  (** Whitelist known readable fields. Arbitrary raw content, annotations,
+      logprobs and provider metadata are never copied. Unknown message parts keep
+      only their position and structural kind. Other semantic families return
+      [None], requiring explicit redaction. *)
+  val of_semantic : History_entry.Payload.Semantic.t -> t option
+
+  val header : t -> Transcript.Header.t
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Redaction : sig
+  type t = private { disclosed_header : Transcript.Header.t option }
+  [@@deriving equal, sexp_of]
+
+  (** A structural header may be disclosed independently of content. *)
+  val create : disclosed_header:Transcript.Header.t option -> t
+end
+
+type body =
+  | Full of History_entry.Payload.t
+  | Visible of Visible.t
+  | Redacted of Redaction.t
+[@@deriving sexp_of]
+
+type t = private
+  { id : History.Id.t
+  ; provenance : History.provenance
+  ; body : body
+  }
+[@@deriving sexp_of]
+
+val full : History_entry.t -> provenance:History.provenance -> (t, Error.t) result
+
+val visible
+  :  History.Id.t
+  -> provenance:History.provenance
+  -> Visible.t
+  -> (t, Error.t) result
+
+val redacted
+  :  History.Id.t
+  -> provenance:History.provenance
+  -> Redaction.t
+  -> (t, Error.t) result
+
+val header : t -> Transcript.Header.t option
+val full_payload : t -> History_entry.Payload.t option
+
+(** Exact full-payload JSON comparison retains field order and numeric spelling. *)
+val equal : t -> t -> bool
+
+(** Reject repeated host IDs within a public history sequence. *)
+val validate_unique_ids : t list -> (unit, Error.t) result
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+module Window : sig
+  type entry = t
+
+  type t =
+    { entries : entry list
+    ; previous_cursor : Page.Cursor.t option
+    ; next_cursor : Page.Cursor.t option
+    ; reached_start : bool
+    ; reached_end : bool
+    ; structurally_complete : bool
+    }
+  [@@deriving sexp_of]
+
+  (** Checks complete envelope bounds and unique host identities. *)
+  val validate : t -> (unit, Error.t) result
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+```
+
+## public_result
+
+[JSON codec](../../lib/agent_protocol/public_result.ml) · [interface](../../lib/agent_protocol/public_result.mli)
+
+```ocaml
+(** Public success values. Only get/create/attach replace private inline history
+    containers. The internal Method_result codec remains the durable receipt
+    codec; projecting a result never changes a cached internal success. *)
+module Non_history : sig
+  type t [@@deriving sexp_of]
+
+  (** Exhaustive method whitelist excluding get/create/attach. This excludes
+      inline snapshot/history containers, not authority or disclosure: an export
+      result can still reference an artifact containing history. *)
+  val of_internal : Method_result.t -> (t, Error.t) result
+
+  val value : t -> Method_result.t
+end
+
+module Attach : sig
+  type replay =
+    | Current
+    | Events of Public_durable_event.t list
+    | Snapshot of Public_snapshot.t
+  [@@deriving sexp_of]
+
+  type t =
+    { attachment : Session.Attachment.t
+    ; replay : replay
+    ; latest_event_sequence : int64
+    ; reclaim_token : string option
+    }
+  [@@deriving sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+module Create : sig
+  type t =
+    { session : Session.t
+    ; mutation : Mutation_result.t
+    ; attachment : Attach.t option
+    }
+  [@@deriving sexp_of]
+
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
+
+type t =
+  | Private_provider_challenge of Provider_operator.Private_challenge.t
+  | Session_get of Public_snapshot.t
+  | Session_attach of Attach.t
+  | Session_create of Create.t
+  | Non_history of Non_history.t
+[@@deriving sexp_of]
+
+val method_name : t -> string
+val to_json : t -> Jsonaf.t
+val of_json : method_:string -> Jsonaf.t -> (t, Error.t) result
+
+(** Checks complete response bounds and the same container and child invariants
+    as wire admission. Validation retains the original result unchanged. *)
+val validate : t -> (unit, Error.t) result
+```
+
+## public_snapshot
+
+[JSON codec](../../lib/agent_protocol/public_snapshot.ml) · [interface](../../lib/agent_protocol/public_snapshot.mli)
+
+```ocaml
+(** Validated client read state, separate from the persisted internal snapshot.
+    These fields and their codecs do not change session storage version 1. *)
+module Fields : sig
+  type t =
+    { session : Session.t
+    ; canonical_history : Public_history.Window.t
+    ; archived_revisions : int64 list
+    ; effective_history : Public_history.Window.t option
+    ; deferred_entries : Public_history.t list
+    ; permissions : Permission.t list
+    ; grants : Grant.t list
+    ; jobs : Job.t list
+    ; extension_status : Extension_status.t list
+    ; schedules : Schedule.t list
+    ; active_tool_calls : Activity.Tool.summary list
+      (** All currently running foreground tool calls, unique by activity key. *)
+    ; active_agent_calls : Activity.Tool.summary list
+      (** Exact classified subset of [active_tool_calls], including shell scripts.
+          Nonempty activity requires the snapshot's active foreground operation. *)
+    ; halted : bool
+    ; halt_reason : string option
+    ; failure : Error.t option
+    ; revision : int64
+    ; latest_event_sequence : int64
+    }
+  [@@deriving sexp_of]
+end
+
+type t [@@deriving sexp_of]
+
+(** Checks positions against the session summary, ownership and counter bounds,
+    and extension generations. Fields remain immutable after admission. *)
+val create : Fields.t -> (t, Error.t) result
+
+val fields : t -> Fields.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## schedule
@@ -2852,6 +3985,13 @@ module Mutation_response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+
+(** Complete current durable record projection. Required-null option fields;
+    independent of the public protocol's historical envelope variants. *)
+module Storage : sig
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## scope
@@ -2877,6 +4017,9 @@ type t =
   | Administer_configuration
   | Diagnostics
   | Submit_ingress
+  | Provider_view
+  | Provider_manage
+  | Provider_select
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t
@@ -3019,6 +4162,16 @@ module Spec : sig
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
 
+(** Optional status-visible aggregate. This local sexp codec preserves presence;
+    value decoding uses the same bounded validated safe summary JSON codec. It is
+    not a generic deserializer for provider/private Presence payloads. *)
+module Inference_summary : sig
+  type t = Inference_query.Summary.t History_entry.Payload.Presence.t
+
+  val sexp_of_t : t -> Core.Sexp.t
+  val t_of_sexp : Core.Sexp.t -> t
+end
+
 type t =
   { id : Id.Session.t
   ; creator : Id.Principal.t option
@@ -3033,6 +4186,8 @@ type t =
   ; active_operation : Operation.t option
   ; revision : int64
   ; latest_event_sequence : int64
+  ; inference_summary : Inference_summary.t
+        [@sexp.default History_entry.Payload.Presence.Absent]
   }
 [@@deriving sexp]
 
@@ -3334,6 +4489,21 @@ module Delete_request : sig
 end
 ```
 
+## session_ref
+
+[JSON codec](../../lib/agent_protocol/session_ref.ml) · [interface](../../lib/agent_protocol/session_ref.mli)
+
+```ocaml
+(** Persistent host-qualified identity; carries no connection or execution grant. *)
+type t [@@deriving compare, equal, sexp_of]
+
+val create : server_id:Id.Server.t -> session_id:Id.Session.t -> t
+val server_id : t -> Id.Server.t
+val session_id : t -> Id.Session.t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## snapshot
 
 [JSON codec](../../lib/agent_protocol/snapshot.ml) · [interface](../../lib/agent_protocol/snapshot.mli)
@@ -3413,6 +4583,28 @@ val materialize
   -> (Completion.t, Error.t) result
 ```
 
+## stream_error
+
+[JSON codec](../../lib/agent_protocol/stream_error.ml) · [interface](../../lib/agent_protocol/stream_error.mli)
+
+```ocaml
+(** Attachment-scoped terminal notification for a failed event subscription.
+    This has no durable sequence and cannot substitute for a missing event.
+    The server supplies a sanitized error; the client must obtain a fresh
+    snapshot before treating the session projection as current again. *)
+type t = private
+  { session_id : Id.Session.t
+  ; attachment_id : Id.Attachment.t
+  ; error : Error.t
+  }
+[@@deriving sexp_of]
+
+val create : session_id:Id.Session.t -> attachment_id:Id.Attachment.t -> Error.t -> t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val to_notification : t -> Envelope.t
+```
+
 ## subscription
 
 [JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
@@ -3473,6 +4665,13 @@ val finish
 val validate_transition : previous:t option -> t -> (unit, Error.t) result
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Complete current durable record projection. Required-null option fields;
+    independent of the public protocol's historical envelope variants. *)
+module Storage : sig
+  val to_json : t -> Jsonaf.t
+  val of_json : Jsonaf.t -> (t, Error.t) result
+end
 ```
 
 ## timestamp
@@ -3530,8 +4729,8 @@ type t =
 (** [initial] is the initial Ochat agent protocol version, [1.0]. *)
 val initial : t
 
-(** [current] is protocol [1.1], adding scoped ingress submission. Servers retain
-    [1.0] negotiation without exposing the new closed scope variant to old clients. *)
+(** [current] is protocol [2.0], with neutral public transcript projections.
+    This release rejects version-1 connections explicitly; storage is separate. *)
 val current : t
 
 (** Minimum negotiated version for ingress submission and its scope vocabulary. *)

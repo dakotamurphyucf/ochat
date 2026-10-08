@@ -9,6 +9,7 @@ type before
 val create
   :  sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
+  -> inference:Inference_client.Execution.t option
   -> config:Type_ahead_config.t
   -> model:Model.t
   -> host:(unit -> string option)

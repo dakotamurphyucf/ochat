@@ -1,9 +1,14 @@
 open! Core
 
+module Request_id = struct
+  include Agent_protocol.Envelope.Request_id
+  include Comparator.Make (Agent_protocol.Envelope.Request_id)
+end
+
 type pending =
   { method_ : string
   ; resolver :
-      (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result Eio.Promise.u
+      (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result Eio.Promise.u
   }
 
 type t =
@@ -11,7 +16,7 @@ type t =
   ; writer_mutex : Eio.Mutex.t
   ; state_mutex : Eio.Mutex.t
   ; notifications : Agent_protocol.Envelope.t Agent_session.Mailbox.t
-  ; mutable pending : (Agent_protocol.Envelope.Request_id.t, pending) Map.Poly.t
+  ; mutable pending : (Request_id.t, pending, Request_id.comparator_witness) Map.t
   ; mutable next_request_id : int64
   ; mutable closed : bool
   }
@@ -38,7 +43,7 @@ let resolve_all t failure =
       else (
         t.closed <- true;
         let pending = Map.data t.pending in
-        t.pending <- Map.Poly.empty;
+        t.pending <- Map.empty (module Request_id);
         pending))
   in
   List.iter pending ~f:(fun pending ->
@@ -63,7 +68,11 @@ let handle_response t response =
   Option.iter (take_pending t response.Agent_protocol.Envelope.id) ~f:(fun pending ->
     let result =
       Result.bind response.outcome ~f:(fun json ->
-        Agent_protocol.Method_result.of_json ~method_:pending.method_ json)
+        Agent_protocol.Public.Result.of_json ~method_:pending.method_ json
+        |> Result.map_error ~f:(fun failure ->
+          interrupted
+            ("socket success response could not be validated: "
+             ^ failure.Agent_protocol.Error.message)))
     in
     Eio.Promise.resolve pending.resolver result)
 ;;
@@ -80,7 +89,10 @@ let parse_line line =
   Result.try_with (fun () -> Jsonaf.of_string line)
   |> Result.map_error ~f:(fun exn ->
     interrupted ("invalid server JSON: " ^ Exn.to_string exn))
-  |> Result.bind ~f:Agent_protocol.Envelope.of_json
+  |> Result.bind ~f:(fun json ->
+    Agent_protocol.Envelope.of_json json
+    |> Result.map_error ~f:(fun failure ->
+      interrupted failure.Agent_protocol.Error.message))
 ;;
 
 let reader t ~max_line_length =
@@ -114,7 +126,7 @@ let remove_pending t id =
 ;;
 
 let write_request t envelope =
-  Eio.Mutex.use_rw ~protect:true t.writer_mutex (fun () ->
+  Eio.Mutex.use_rw ~protect:false t.writer_mutex (fun () ->
     envelope
     |> Agent_protocol.Envelope.to_json
     |> Jsonaf.to_string
@@ -134,11 +146,21 @@ let request t command =
       ~params:(Agent_protocol.Command.params command)
       ()
   in
-  match Result.try_with (fun () -> write_request t envelope) with
-  | Ok () -> Eio.Promise.await response
-  | Error exn ->
-    remove_pending t id;
-    Error (interrupted ("socket write failed: " ^ Exn.to_string exn))
+  Exn.protect
+    ~finally:(fun () -> remove_pending t id)
+    ~f:(fun () ->
+      match write_request t envelope with
+      | () -> Eio.Promise.await response
+      | exception exn ->
+        let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+        (* A failed or cancelled write may have published only part of a JSON
+           line. Retire the channel before another command can append to it.
+           The higher-level connection retains the uncertain command intent. *)
+        Eio.Cancel.protect (fun () ->
+          ignore (Result.try_with (fun () -> close_internal t) : (unit, exn) result));
+        (match exn with
+         | Eio.Cancel.Cancelled _ -> Exn.raise_with_original_backtrace exn backtrace
+         | _ -> Error (interrupted ("socket write failed: " ^ Exn.to_string exn))))
 ;;
 
 let next_notification t = Agent_session.Mailbox.pop t.notifications
@@ -160,7 +182,7 @@ let connect ~sw ~net ~socket_path ~max_line_length ~notification_capacity =
     ; writer_mutex = Eio.Mutex.create ()
     ; state_mutex = Eio.Mutex.create ()
     ; notifications = Agent_session.Mailbox.create ~capacity:notification_capacity
-    ; pending = Map.Poly.empty
+    ; pending = Map.empty (module Request_id)
     ; next_request_id = 1L
     ; closed = false
     }

@@ -22,8 +22,8 @@ let sources =
   ]
 ;;
 
-let wait env condition =
-  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+let wait ?(timeout = 5.) env condition =
+  Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) timeout (fun () ->
     let rec loop () =
       match condition () with
       | true -> ()
@@ -200,7 +200,7 @@ let%expect_test
               match
                 Agent_session.History_codec.of_protocol entry
                 |> protocol_ok
-                |> History_entry.item
+                |> Openai.Responses_history.item_exn
               with
               | Openai.Responses.Item.Function_call_output { call_id = "begin"; _ } ->
                 true

@@ -92,6 +92,97 @@ module Item = struct
 
   let of_response_item ~id (item : Res.Item.t) = { id; value = Res.Item.jsonaf_of_t item }
 
+  let presence_field name value encode =
+    match value with
+    | History_entry.Payload.Presence.Absent -> []
+    | Null -> [ name, `Null ]
+    | Value value -> [ name, encode value ]
+  ;;
+
+  let semantic_json semantic =
+    let module P = History_entry.Payload in
+    let metadata = P.Semantic.metadata semantic in
+    let string value = `String value in
+    let metadata_fields =
+      presence_field "id" metadata.item_id string
+      @ presence_field "call_id" metadata.call_id string
+      @ presence_field "status" metadata.status string
+    in
+    let content ~output = function
+      | P.Content.Text { text; annotations; logprobs } ->
+        `Object
+          ([ "type", `String (if output then "output_text" else "input_text")
+           ; "text", `String text
+           ]
+           @ (if output then [ "annotations", `Array annotations ] else [])
+           @ presence_field "logprobs" logprobs Fn.id)
+      | Refusal refusal ->
+        `Object [ "type", `String "refusal"; "refusal", `String refusal ]
+      | Image { uri; detail } ->
+        `Object
+          ([ "type", `String "input_image"; "image_url", `String uri ]
+           @ presence_field "detail" detail string)
+      | Unknown { raw; _ } -> raw
+    in
+    let fields =
+      match P.Semantic.view semantic with
+      | Message { form; role; content = parts; phase } ->
+        let role =
+          match role with
+          | System -> "system"
+          | Developer -> "developer"
+          | User -> "user"
+          | Assistant -> "assistant"
+          | Tool -> "tool"
+        in
+        [ "type", `String "message"
+        ; "role", `String role
+        ; ( "content"
+          , `Array
+              (List.map
+                 parts
+                 ~f:(content ~output:(P.Semantic.equal_message_form form Output))) )
+        ]
+        @ presence_field "phase" phase string
+      | Call { kind; name; namespace; input_bytes; async } ->
+        let type_, input_name =
+          match kind with
+          | Function -> "function_call", "arguments"
+          | Custom -> "custom_tool_call", "input"
+        in
+        [ "type", `String type_; "name", `String name; input_name, `String input_bytes ]
+        @ presence_field "namespace" namespace string
+        @ presence_field "async" async (fun value -> if value then `True else `False)
+      | Result { kind; output; relation = _ } ->
+        let type_ =
+          match kind with
+          | Function -> "function_call_output"
+          | Custom -> "custom_tool_call_output"
+        in
+        let output =
+          match output with
+          | Text text -> `String text
+          | Content parts -> `Array (List.map parts ~f:(content ~output:false))
+        in
+        [ "type", `String type_; "output", output ]
+      | Reasoning { readable_summary } ->
+        [ "type", `String "reasoning"
+        ; ( "summary"
+          , `Array
+              (List.map readable_summary ~f:(fun text ->
+                 `Object [ "type", `String "summary_text"; "text", `String text ])) )
+        ]
+      | Unknown { provider_kind } -> [ "type", `String provider_kind ]
+    in
+    `Object (fields @ metadata_fields)
+  ;;
+
+  let of_history_entry entry =
+    { id = History_entry.Id.to_string (History_entry.id entry)
+    ; value = semantic_json (History_entry.Payload.semantic (History_entry.payload entry))
+    }
+  ;;
+
   let to_response_item (t : t) : (Res.Item.t, string) result =
     try Ok (Res.Item.t_of_jsonaf t.value) with
     | exn ->
@@ -101,6 +192,8 @@ module Item = struct
            t.id
            (Exn.to_string exn))
   ;;
+
+  let to_payload t = Result.bind (to_response_item t) ~f:Openai.Responses_history.of_item
 
   let text_input_message ~id ~role ~text =
     let item =
@@ -505,12 +598,7 @@ module Projection = struct
 end
 
 module Entry_projection = struct
-  let project_item entry =
-    Item.of_response_item
-      ~id:(History_entry.id entry |> History_entry.Id.to_string)
-      (History_entry.item entry)
-  ;;
-
+  let project_item = Item.of_history_entry
   let project_history entries = List.map entries ~f:project_item
 
   let project_context ~session_id ~now_ms ~phase ~history ~available_tools ~session_meta =
@@ -578,7 +666,7 @@ module Identity_overlay = struct
 
   type replacement =
     { target_id : History_entry.Id.t
-    ; item : Res.Item.t
+    ; item : History_entry.Payload.t
     ; change_id : int
     ; script_label : string option
     }
@@ -632,7 +720,7 @@ module Identity_overlay = struct
           | Some replacement ->
             Some
               Effective_entry.
-                { entry = History_entry.with_item entry replacement.item
+                { entry = History_entry.with_payload entry replacement.item
                 ; provenance =
                     Moderator_replacement
                       { target_id = replacement.target_id

@@ -57,6 +57,7 @@ let run_child env ~root ~boundary ~recover =
          ; capability_pins = []
          ; lifetime = Owned
          ; created_at = artifact.created_at
+         ; inference_target = None
          }
        in
        let ledger = S.delegations store in
@@ -113,8 +114,11 @@ let run_child env ~root ~boundary ~recover =
              ~options:
                { Daemon.default_options with
                  qualify_chatml_extensions = true
-               ; model_post_stream =
-                   Some (fun ~sw:_ ~inputs:_ -> F.fail "collection invoked model")
+               ; inference_policy =
+                   Agent_server_test_support.inference_policy
+                     ~default_model:"fixture-model"
+                     ~post_stream:(fun ~sw:_ ~inputs:_ ->
+                       F.fail "collection invoked model")
                }
              ()
            |> F.protocol_ok

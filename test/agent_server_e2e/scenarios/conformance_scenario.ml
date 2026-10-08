@@ -1,5 +1,6 @@
 open Core
 module Config_fixture = Support.Config_fixture
+module Daemon_host = Support.Daemon_host
 module Daemon_process = Support.Daemon_process
 module Port_reservation = Support.Port_reservation
 module Process_manager = Support.Process_manager
@@ -11,7 +12,7 @@ module Unix_driver = Support.Unix_driver
 type client =
   { request :
       Agent_protocol.Command.t
-      -> (Agent_protocol.Method_result.t, Agent_protocol.Error.t) result
+      -> (Agent_protocol.Public.Result.t, Agent_protocol.Error.t) result
   ; next_notification : unit -> Agent_protocol.Envelope.t option
   ; close : unit -> unit
   }
@@ -221,7 +222,11 @@ let with_daemon ~sw env fixture f =
   Exn.protect ~f:(fun () -> f daemon health) ~finally:(fun () -> stop_daemon env daemon)
 ;;
 
-let request client command = client.request command |> protocol_ok
+let request_public client command = client.request command |> protocol_ok
+
+let request client command =
+  request_public client command |> Support.Public_view.non_history
+;;
 
 let request_error client command =
   match client.request command with
@@ -230,10 +235,10 @@ let request_error client command =
     raise_s
       [%sexp
         "protocol operation unexpectedly succeeded"
-      , (result : Agent_protocol.Method_result.t)]
+      , (result : Agent_protocol.Public.Result.t)]
 ;;
 
-let initialize client =
+let initialize ?(features = []) client =
   let implementation =
     Agent_protocol.Initialize.Implementation.create
       ~name:"agent-server-e2e-conformance"
@@ -243,9 +248,9 @@ let initialize client =
   let initialize_request =
     Agent_protocol.Initialize.Request.create
       ~implementation
-      ~protocol_min:Agent_protocol.Version.initial
+      ~protocol_min:Agent_protocol.Version.current
       ~protocol_max:Agent_protocol.Version.current
-      ~features:[]
+      ~features
       ~event_encodings:[ Json ]
       ~max_inbound_event_bytes:(16 * 1024 * 1024)
       ()
@@ -578,9 +583,32 @@ let embedded_options environment fixture data_root =
 let direct_embedded_observation env environment fixture =
   let roots : Temporary_environment.roots = Temporary_environment.roots environment in
   let data_root = Filename.concat roots.data "conformance-embedded-direct" in
+  Support.Provider_fixture.provision ~env fixture;
   Eio.Switch.run (fun sw ->
+    let module Platform = Inference_composition.Provider_platform in
+    let platform =
+      Platform.create
+        ~sw
+        ~env
+        ~home:roots.home
+        ~api_url:None
+        ~lookup:(fun _ -> None)
+        ~default_model:"gpt-4.1"
+        ~namespace:(Platform.new_namespace env)
+        ~callback_port:1455
+        ()
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum (Agent_protocol.Provider_operator.Error.sexp_of_t error))
+      |> Result.ok_or_failwith
+    in
+    let daemon_options =
+      { (Inference_composition.daemon_options (Platform.host platform)) with
+        provider_operator_factory = Some (Platform.factory platform)
+      }
+    in
     let embedded =
       Agent_server.Embedded.start
+        ~daemon_options
         ~sw
         ~env
         (embedded_options environment fixture data_root)
@@ -615,6 +643,19 @@ let require_equal unix http =
       , { unix : read_observation; http : read_observation }]
 ;;
 
+let command_receipt connection command =
+  match
+    request
+      connection
+      (Command_receipt
+         { method_name = Agent_protocol.Command.method_name command
+         ; original_params = Agent_protocol.Command.params command
+         })
+  with
+  | Command_receipt receipt -> receipt
+  | _ -> fail "command.receipt returned the wrong result variant"
+;;
+
 let create_session connection ~key =
   let create_request =
     Agent_protocol.Session.Create_request.
@@ -625,11 +666,19 @@ let create_session connection ~key =
       }
   in
   let create () =
-    match request connection (Session_create create_request) with
+    match request_public connection (Session_create create_request) with
     | Session_create created -> created
     | _ -> fail "session.create returned the wrong result variant"
   in
-  create (), create ()
+  (match command_receipt connection (Session_create create_request) with
+   | Missing -> ()
+   | _ -> fail "unsubmitted create receipt must remain unresolved/missing");
+  let created = create () in
+  (match command_receipt connection (Session_create create_request) with
+   | Committed (Created_session session_id)
+     when Agent_protocol.Id.Session.equal session_id created.session.id -> ()
+   | _ -> fail "create receipt must disclose only the committed session identity");
+  created, create ()
 ;;
 
 let start_session connection session attachment ~key =
@@ -671,8 +720,13 @@ let attach_replay connection session_id ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_attach attach_request) with
-  | Session_attach ({ replay = Events _; _ } as attached) -> attached
+  match request_public connection (Session_attach attach_request) with
+  | Session_attach ({ replay = Events _; _ } as attached) ->
+    (match command_receipt connection (Session_attach attach_request) with
+     | Committed (Attached_session recovered)
+       when Agent_protocol.Id.Session.equal recovered session_id -> ()
+     | _ -> fail "attach receipt must require fresh authorized reattachment");
+    attached
   | Session_attach { replay = Current; _ } -> fail "session replay returned current"
   | Session_attach { replay = Snapshot _; _ } -> fail "session replay returned snapshot"
   | _ -> fail "session.attach returned the wrong result variant"
@@ -703,9 +757,12 @@ let list_contains_session connection session_id =
 ;;
 
 let get_matches_session connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
+  match request_public connection (Session_get { session_id; history = None }) with
   | Session_get snapshot ->
-    Agent_protocol.Id.Session.compare snapshot.session.id session_id = 0
+    Agent_protocol.Id.Session.compare
+      (Agent_protocol.Public.Snapshot.fields snapshot).session.id
+      session_id
+    = 0
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -721,7 +778,7 @@ let detach connection session_id attachment_id ~key =
 
 let sequences_are_contiguous events =
   List.for_alli events ~f:(fun index event ->
-    Int64.equal event.Agent_protocol.Event.Durable.sequence (Int64.of_int (index + 1)))
+    Int64.equal event.Agent_protocol.Public.Durable.sequence (Int64.of_int (index + 1)))
 ;;
 
 let lifecycle_observation connection ~key_prefix =
@@ -729,7 +786,7 @@ let lifecycle_observation connection ~key_prefix =
   let created, duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let started =
     start_session connection created.session attachment ~key:(key_prefix ^ ":start")
@@ -766,7 +823,7 @@ let lifecycle_observation connection ~key_prefix =
   ; stop_desired_state = stopped.session.desired_state
   ; replay_sequences_are_contiguous = sequences_are_contiguous events
   ; replay_kinds = List.map events ~f:(fun event -> event.kind)
-  ; replay_visibilities = List.map events ~f:(fun event -> event.visibility)
+  ; replay_visibilities = List.map events ~f:Support.Public_view.visibility
   ; detach_revision_delta = Int64.(detached.revision - stopped.mutation.revision)
   ; detach_sequence_delta =
       Int64.(detached.latest_event_sequence - stopped.mutation.latest_event_sequence)
@@ -875,7 +932,7 @@ let security_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   { pending_permission_count = permission_count connection created.session.id
   ; active_grant_count = grant_count connection created.session.id
@@ -993,7 +1050,7 @@ let jobs_schedules_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":session") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let first, second =
     create_schedule connection created.session attachment ~key:(key_prefix ^ ":schedule")
@@ -1102,7 +1159,7 @@ let blob_observation connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":session") in
   let attachment =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let export = export_session connection created.session attachment in
   let chunks = download_blob connection created.session attachment export.blob 0L [] in
@@ -1154,7 +1211,7 @@ let attach_read_only ?(subscribe = false) connection session_id ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_attach attach_request) with
+  match request_public connection (Session_attach attach_request) with
   | Session_attach attached -> attached.attachment
   | _ -> fail "session.attach returned the wrong result variant"
 ;;
@@ -1164,7 +1221,7 @@ let error_observations connection ~key_prefix =
   let created, _duplicate = create_session connection ~key:(key_prefix ^ ":create") in
   let writer =
     Option.value_exn created.attachment
-    |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+    |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
   in
   let export = export_session connection created.session writer in
   let reader =
@@ -1318,14 +1375,14 @@ let create_subscribed_session connection ~key =
       ; idempotency_key = idempotency_key key
       }
   in
-  match request connection (Session_create create_request) with
+  match request_public connection (Session_create create_request) with
   | Session_create created -> created
   | _ -> fail "session.create returned the wrong result variant"
 ;;
 
 let durable_notification = function
   | Agent_protocol.Envelope.Notification { method_ = "session.event"; params } ->
-    Agent_protocol.Event.Durable.of_json params |> protocol_ok |> Option.some
+    Agent_protocol.Public.Durable.of_json params |> protocol_ok |> Option.some
   | Notification _ -> None
   | Request _ | Response _ -> fail "notification stream returned a non-notification"
 ;;
@@ -1358,16 +1415,16 @@ let rec collect_events env connection session_id previous through events =
 let normalize_events events ~base_sequence ~base_revision =
   List.map events ~f:(fun event ->
     { relative_sequence =
-        Int64.(event.Agent_protocol.Event.Durable.sequence - base_sequence)
+        Int64.(event.Agent_protocol.Public.Durable.sequence - base_sequence)
     ; relative_revision = Int64.(event.revision - base_revision)
     ; kind = event.kind
-    ; visibility = event.visibility
+    ; visibility = Support.Public_view.visibility event
     })
 ;;
 
 let attached_writer created =
-  Option.value_exn created.Agent_protocol.Method_result.Create.attachment
-  |> fun (attached : Agent_protocol.Method_result.Attach.t) -> attached.attachment
+  Option.value_exn created.Agent_protocol.Public.Result.Create.attachment
+  |> fun (attached : Agent_protocol.Public.Result.Attach.t) -> attached.attachment
 ;;
 
 let schedule_event_trace env connection created ~key_prefix =
@@ -1408,7 +1465,7 @@ let event_order_observation env connection ~key_prefix =
   ; replay =
       List.filter replay ~f:(fun event ->
         Int64.(
-          event.Agent_protocol.Event.Durable.sequence
+          event.Agent_protocol.Public.Durable.sequence
           > created.mutation.latest_event_sequence))
       |> normalize
   }
@@ -1453,7 +1510,7 @@ let visibility_observation env writer_connection reader_connection ~key_prefix =
       ~key:(key_prefix ^ ":reader")
   in
   let writer_events = schedule_event_trace env writer_connection created ~key_prefix in
-  let through = (List.last_exn writer_events).Agent_protocol.Event.Durable.sequence in
+  let through = (List.last_exn writer_events).Agent_protocol.Public.Durable.sequence in
   let reader_events =
     collect_events
       env
@@ -1491,8 +1548,8 @@ let require_equal_visibility unix http =
 ;;
 
 let history_snapshot connection session_id =
-  match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  match request_public connection (Session_get { session_id; history = None }) with
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> fail "session.get returned the wrong result variant"
 ;;
 
@@ -1510,8 +1567,8 @@ let require_same_snapshot before after =
   if
     not
       (Poly.equal
-         (Agent_protocol.Snapshot.to_json before)
-         (Agent_protocol.Snapshot.to_json after))
+         (Support.Public_view.snapshot_to_json before)
+         (Support.Public_view.snapshot_to_json after))
   then fail "rejected or replayed history deletion changed session state"
 ;;
 
@@ -1524,7 +1581,7 @@ let reject_history_deletion
       id
       key_prefix
   =
-  let session_id = before.Agent_protocol.Snapshot.session.id in
+  let session_id = before.Agent_protocol.Public.Snapshot.Fields.session.id in
   let reader_error =
     request_error
       reader
@@ -1569,15 +1626,16 @@ let delete_history_replayed connection command =
 
 let require_deleted_history before after id =
   let expected =
-    List.filter before.Agent_protocol.Snapshot.canonical_history.entries ~f:(fun entry ->
-      Agent_protocol.History.Id.compare entry.id id <> 0)
+    List.filter
+      before.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries
+      ~f:(fun entry -> Agent_protocol.History.Id.compare entry.id id <> 0)
   in
-  let actual = after.Agent_protocol.Snapshot.canonical_history.entries in
+  let actual = after.Agent_protocol.Public.Snapshot.Fields.canonical_history.entries in
   if
     not
       (Poly.equal
-         (List.map expected ~f:Agent_protocol.History.entry_to_json)
-         (List.map actual ~f:Agent_protocol.History.entry_to_json))
+         (List.map expected ~f:Agent_protocol.Public.History.to_json)
+         (List.map actual ~f:Agent_protocol.Public.History.to_json))
   then fail "history deletion did not remove exactly the selected canonical occurrence";
   expected
 ;;
@@ -1585,20 +1643,15 @@ let require_deleted_history before after id =
 let require_history_replacement events expected =
   let windows =
     List.filter_map events ~f:(fun event ->
-      match
-        Agent_protocol.Event.Durable.Payload.of_json
-          ~kind:event.Agent_protocol.Event.Durable.kind
-          event.payload
-        |> protocol_ok
-      with
-      | History_replaced window -> Some window
+      match Support.Public_view.payload event with
+      | Some (History_replaced window) -> Some window
       | _ -> None)
   in
   match windows with
   | [ window ]
     when Poly.equal
-           (List.map window.entries ~f:Agent_protocol.History.entry_to_json)
-           (List.map expected ~f:Agent_protocol.History.entry_to_json) -> ()
+           (List.map window.entries ~f:Agent_protocol.Public.History.to_json)
+           (List.map expected ~f:Agent_protocol.Public.History.to_json) -> ()
   | _ -> fail "subscriber did not receive the committed history replacement"
 ;;
 
@@ -1765,6 +1818,117 @@ let test_read_methods env environment =
     (local_stdio_observation env environment fixture)
 ;;
 
+let inference_read_observation connection ~key_prefix =
+  let module Q = Agent_protocol.Inference_query in
+  ignore (initialize connection : Agent_protocol.Initialize.Response.t);
+  let created, _replayed = create_session connection ~key:(key_prefix ^ "-create") in
+  let session_id = created.session.id in
+  let before = history_snapshot connection session_id in
+  let summary =
+    match request connection (Session_inference_summary { session_id }) with
+    | Session_inference_summary summary -> summary
+    | _ -> fail "session.inference_summary returned the wrong result variant"
+  in
+  let query =
+    Q.Request.create
+      ~session_id
+      ~page:(Agent_protocol.Page.Request.create ~limit:1 () |> protocol_ok)
+      ~include_configuration:false
+      ~include_diagnostics:false
+    |> protocol_ok
+  in
+  let response =
+    match request connection (Session_inference_observations query) with
+    | Session_inference_observations response -> response
+    | _ -> fail "session.inference_observations returned the wrong result variant"
+  in
+  let require_summary actual =
+    if not (Jsonaf.exactly_equal (Q.Summary.to_json summary) (Q.Summary.to_json actual))
+    then fail "inference read summaries disagree"
+  in
+  require_summary (Q.Response.summary response);
+  (match before.session.inference_summary with
+   | History_entry.Payload.Presence.Value actual -> require_summary actual
+   | Absent | Null -> fail "fresh tracked session omitted its inference summary");
+  let attempts = Q.Response.attempts response in
+  if not (List.is_empty attempts.items && Option.is_none attempts.next_cursor)
+  then fail "fresh stopped session returned inference rows or a continuation";
+  let require_zero values =
+    if not (List.for_all values ~f:(Int64.equal 0L))
+    then fail "fresh stopped session reported prior inference accounting"
+  in
+  require_zero [ Q.Summary.retained_attempts summary ];
+  let turns = Q.Summary.turns summary in
+  require_zero
+    [ turns.pending; turns.completed; turns.failed; turns.cancelled; turns.interrupted ];
+  let coverage = Q.Summary.coverage summary in
+  if
+    coverage.before_tracking_unknown
+    || not (Q.Coverage.equal_tracking_status coverage.tracking_status Available)
+  then fail "fresh session reported unknown or limited accounting coverage";
+  require_zero
+    [ coverage.retired_attempts
+    ; coverage.untracked_attempts
+    ; coverage.retired_turns
+    ; coverage.untracked_turns
+    ];
+  (* Empty sums have zero contributions, not an Actual-zero usage observation.
+     Component-specific missing/null reasons remain independent accounting. *)
+  let require_empty_metric (metric : Q.Metric.t) =
+    if
+      (not (Q.Metric.equal_sum metric.actual (Tokens 0L)))
+      || (not (Q.Metric.equal_sum metric.estimated (Tokens 0L)))
+      || metric.mixed_estimators
+    then fail "fresh session reported inference token contributions";
+    require_zero
+      [ metric.actual_attempts
+      ; metric.estimated_attempts
+      ; metric.unknown.not_reported
+      ; metric.unknown.explicit_null
+      ; metric.unknown.interrupted
+      ; metric.unknown.not_submitted
+      ; metric.unknown.before_tracking
+      ]
+  in
+  let components = Q.Summary.components summary in
+  List.iter
+    [ components.input
+    ; components.output
+    ; components.reported_total
+    ; components.cached_input
+    ; components.cache_write_input
+    ; components.reasoning_output
+    ]
+    ~f:require_empty_metric;
+  let after = history_snapshot connection session_id in
+  if
+    not
+      (Jsonaf.exactly_equal
+         (Support.Public_view.snapshot_to_json before)
+         (Support.Public_view.snapshot_to_json after))
+  then fail "inference reads activated or changed the stopped session";
+  Q.Summary.to_json summary |> Jsonaf.to_string
+;;
+
+let test_inference_reads env environment =
+  let fixture = fixture env environment "conformance-inference" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = inference_read_observation unix ~key_prefix:"unix" in
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (connection, key_prefix) ->
+               let actual = inference_read_observation connection ~key_prefix in
+               if not (String.equal baseline actual)
+               then fail "cross-transport inference read summaries differ"))))
+;;
+
 let test_session_lifecycle env environment =
   let fixture = fixture env environment "conformance-lifecycle" in
   Eio.Switch.run (fun sw ->
@@ -1929,9 +2093,119 @@ let test_history_deletion env environment =
            require_equal_history_deletion baseline (observe stdio_http "stdio-http"))))
 ;;
 
+let provider_installed_observation client ~key_prefix =
+  let module P = Agent_protocol in
+  let module DTO = P.Provider_operator in
+  let initialized = initialize ~features:[ "provider.operator" ] client in
+  let info =
+    match request client Server_info with
+    | Server_info info -> info
+    | _ -> fail "provider server info variant"
+  in
+  if
+    (not (List.mem initialized.enabled_features "provider.operator" ~equal:String.equal))
+    || not (List.mem info.features "provider.operator" ~equal:String.equal)
+  then fail "installed application provider service omitted capability";
+  let status () =
+    match request client (Provider_status { profile = None }) with
+    | Provider_status status -> status
+    | _ -> fail "provider status variant"
+  in
+  let before = status () in
+  if
+    before.setup_required
+    || not (P.Id.Server.equal before.server_id initialized.server_id)
+  then fail "provisioned provider status lost application authority";
+  let api_profile =
+    DTO.Profile_id.of_string "first-party-openai-responses" |> protocol_ok
+  in
+  let selected =
+    List.find before.profiles ~f:(fun profile ->
+      DTO.Profile_id.equal profile.profile api_profile)
+    |> Option.value_exn
+  in
+  if not (DTO.Status_result.equal_availability selected.availability Configured)
+  then fail "protected synthetic provider binding is not configured";
+  let profile = DTO.Profile_id.of_string "unknown-provider-profile" |> protocol_ok in
+  let revision = DTO.Revision.of_string "selection-1" |> protocol_ok in
+  let flow : DTO.Flow_ref.t =
+    { server_id = initialized.server_id
+    ; profile
+    ; flow_id = DTO.Flow_id.of_string "nonexistent-provider-flow" |> protocol_ok
+    ; expires_at = P.Timestamp.of_string "2099-01-01T00:00:00Z" |> protocol_ok
+    }
+  in
+  let key name = idempotency_key (key_prefix ^ "-provider-" ^ name) in
+  (* Fresh setup cannot adopt an existing incarnation. Other rejected methods
+     exercise the installed service without starting OAuth or disabling a key. *)
+  let commands : (P.Command.t * DTO.Error.t) list =
+    [ Provider_setup { idempotency_key = key "setup" }, Submission_uncertain
+    ; ( Provider_login_begin { profile; mode = Browser; idempotency_key = key "browser" }
+      , Missing_profile )
+    ; ( Provider_login_begin { profile; mode = Device; idempotency_key = key "device" }
+      , Missing_profile )
+    ; Provider_login_challenge { flow }, Flow_interrupted
+    ; Provider_login_cancel { flow; idempotency_key = key "cancel" }, Flow_interrupted
+    ; Provider_logout { profile; idempotency_key = key "logout" }, Missing_profile
+    ; ( Provider_select
+          { profile; expected_revision = revision; idempotency_key = key "select" }
+      , Missing_profile )
+    ; ( Provider_configure_environment
+          { profile
+          ; source = DTO.Source_id.of_string "openai-api-key" |> protocol_ok
+          ; idempotency_key = key "environment"
+          }
+      , Denied )
+    ]
+  in
+  let errors =
+    List.map commands ~f:(fun (command, expected) ->
+      let error = request_error client command in
+      let fields = P.Json_codec.fields error.data |> protocol_ok in
+      let provider_error =
+        P.Json_codec.required_as fields "provider_error" DTO.Error.of_json |> protocol_ok
+      in
+      if (not (DTO.Error.equal provider_error expected)) || error.retryable
+      then fail "installed provider refusal did not preserve its typed cause";
+      P.Command.method_name command, DTO.Error.to_json provider_error |> Jsonaf.to_string)
+  in
+  let public_status = DTO.Status_result.to_json in
+  if not (Jsonaf.exactly_equal (public_status before) (public_status (status ())))
+  then fail "rejected provider command changed existing authority";
+  ("provider.operator", "installed")
+  :: ("provider.status", Jsonaf.to_string (public_status before))
+  :: errors
+;;
+
+let test_provider_installed env environment =
+  let fixture = fixture env environment "conformance-provider-installed" in
+  Eio.Switch.run (fun sw ->
+    with_daemon ~sw env fixture (fun _daemon _health ->
+      with_transport_matrix
+        ~sw
+        env
+        environment
+        fixture
+        (fun unix http stdio_unix stdio_http ->
+           let baseline = provider_installed_observation unix ~key_prefix:"unix" in
+           List.iter
+             [ http, "http"; stdio_unix, "stdio-unix"; stdio_http, "stdio-http" ]
+             ~f:(fun (client, key_prefix) ->
+               let actual = provider_installed_observation client ~key_prefix in
+               if
+                 not
+                   (List.equal
+                      (fun (a, b) (c, d) -> String.equal a c && String.equal b d)
+                      baseline
+                      actual)
+               then fail "cross-transport installed provider semantics differ"))))
+;;
+
 let cases =
-  [ "conformance.read-methods", test_read_methods
+  [ "conformance.provider-installed", test_provider_installed
+  ; "conformance.read-methods", test_read_methods
   ; "conformance.session-lifecycle", test_session_lifecycle
+  ; "conformance.inference-reads", test_inference_reads
   ; "conformance.permissions-grants", test_permissions_grants
   ; "conformance.jobs-schedules", test_jobs_schedules
   ; "conformance.blob-read", test_blob_read
@@ -1943,7 +2217,16 @@ let cases =
 ;;
 
 let method_coverage =
-  [ "protocol.initialize", "conformance.read-methods"
+  [ "provider.setup", "conformance.provider-installed"
+  ; "provider.status", "conformance.provider-installed"
+  ; "provider.login.begin", "conformance.provider-installed"
+  ; "provider.login.challenge", "conformance.provider-installed"
+  ; "provider.login.cancel", "conformance.provider-installed"
+  ; "provider.logout", "conformance.provider-installed"
+  ; "provider.select", "conformance.provider-installed"
+  ; "provider.configure_environment", "conformance.provider-installed"
+  ; "command.receipt", "conformance.session-lifecycle"
+  ; "protocol.initialize", "conformance.read-methods"
   ; "protocol.ping", "conformance.read-methods"
   ; "server.info", "conformance.read-methods"
   ; "server.health", "conformance.read-methods"
@@ -1955,6 +2238,8 @@ let method_coverage =
   ; "session.create", "conformance.session-lifecycle"
   ; "session.list", "conformance.session-lifecycle"
   ; "session.get", "conformance.session-lifecycle"
+  ; "session.inference_summary", "conformance.inference-reads"
+  ; "session.inference_observations", "conformance.inference-reads"
   ; "session.attach", "conformance.session-lifecycle"
   ; "session.detach", "conformance.session-lifecycle"
   ; "session.renew_owner", "conformance.error-codes"

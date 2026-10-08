@@ -17,6 +17,10 @@ type t =
   ; mutable cursor : int
   ; mutable delivering : Session_registry.entry list
   ; deliveries_idle : Eio.Condition.t
+  ; model_job_inference :
+      Session_registry.entry
+      -> Agent_protocol.Job.t
+      -> (Session_factory.model_job_inference, Agent_protocol.Error.t) Result.t
   ; sleep : float -> unit
   }
 
@@ -95,14 +99,21 @@ let complete entry job outcome =
      : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
 ;;
 
-let run_model_job entry job =
+let run_model_job t entry job =
   match model_job_input job with
   | Error error ->
     complete entry job (Agent_session.Runtime_builder.Model_failed error.message)
   | Ok (recipe, payload) ->
     let outcome =
       match
-        Runtime_owner.execute_model_job entry.Session_registry.runtime ~recipe ~payload
+        let open Result.Let_syntax in
+        let%bind inference = t.model_job_inference entry job in
+        Runtime_owner.execute_model_job
+          entry.Session_registry.runtime
+          ~inference_context:inference.context
+          ~capture_recipe_target:inference.capture_recipe_target
+          ~recipe
+          ~payload
       with
       | Ok outcome -> outcome
       | Error error -> Agent_session.Runtime_builder.Model_failed error.message
@@ -222,7 +233,7 @@ let unregister_running t (job : Agent_protocol.Job.t) =
 let run_claimed_job t entry job =
   try
     match job.Agent_protocol.Job.kind with
-    | Model_call -> run_model_job entry job
+    | Model_call -> run_model_job t entry job
     | Async_tool -> run_background_job t entry job
     | Nested_agent | Scheduled_event | Shell_process | Compaction ->
       complete
@@ -452,7 +463,15 @@ let state_jobs t entry =
       ~generation:state.identity.generation;
     List.iter state.jobs ~f:(Job_capacity.retire_job t.capacity);
     List.iter state.jobs ~f:(cancel_terminal_worker t);
-    if Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+    if
+      Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
+      || (match state.runtime_initialization with
+          | Pending _ -> true
+          | Ready -> false)
+      ||
+      match Inference.Selection.view state.spec.inference_target with
+      | Unresolved -> true
+      | Captured _ -> false
     then []
     else
       List.filter state.jobs ~f:(fun job ->
@@ -507,10 +526,11 @@ let rec run t sw clock registry =
     run t sw clock registry)
 ;;
 
-let start ~sw ~clock ~registry ~capacity =
+let start_controlled ~enabled ~sw ~clock ~registry ~capacity ~model_job_inference =
   let t =
-    { closed = Atomic.make false
+    { closed = Atomic.make (not enabled)
     ; capacity
+    ; model_job_inference
     ; mutex = Eio.Mutex.create ()
     ; running = Map.Poly.empty
     ; cursor = 0
@@ -519,8 +539,12 @@ let start ~sw ~clock ~registry ~capacity =
     ; sleep = Eio.Time.sleep clock
     }
   in
-  Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
+  if enabled then Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
   t
+;;
+
+let start ~sw ~clock ~registry ~capacity ~model_job_inference =
+  start_controlled ~enabled:true ~sw ~clock ~registry ~capacity ~model_job_inference
 ;;
 
 let cancel t job_id =

@@ -109,6 +109,12 @@ let on_event ctx state event = match event with
         let configuration =
           config ~profile root root (Filename.concat root "parent.chatmd")
         in
+        (* Workspace tool data is separate from the private session-store root. *)
+        let configuration =
+          { configuration with
+            server = { configuration.server with data_dir = Filename.concat root "store" }
+          }
+        in
         let requested_tool = ref "read_report" in
         let pending_call = ref false in
         let requests = ref 0 in
@@ -126,9 +132,10 @@ let on_event ctx state event = match event with
                   { Daemon.default_options with
                     qualify_chatml_extensions = true
                   ; independent_lifetime_policy = Some "standalone-fixture-v1"
-                  ; model_post_stream =
-                      Some
-                        (fun ~sw:_ ~inputs:_ ->
+                  ; inference_policy =
+                      Agent_server_test_support.inference_policy
+                        ~default_model:"fixture-model"
+                        ~post_stream:(fun ~sw:_ ~inputs:_ ->
                           Int.incr requests;
                           match !pending_call with
                           | false -> Stdlib.Seq.empty
@@ -153,6 +160,19 @@ let on_event ctx state event = match event with
                                 ; item_id = "report-item"
                                 ; output_index = 0
                                 ; type_ = "response.function_call_arguments.done"
+                                }
+                            ; Output_item_done
+                                { item =
+                                    Function_call
+                                      { name = !requested_tool
+                                      ; arguments = {|{"root":"data","file":"value.txt"}|}
+                                      ; call_id = sprintf "report-%d" !requests
+                                      ; _type = "function_call"
+                                      ; id = Some "report-item"
+                                      ; status = Some "completed"
+                                      }
+                                ; output_index = 0
+                                ; type_ = "response.output_item.done"
                                 }
                             ]
                             |> Stdlib.List.to_seq)

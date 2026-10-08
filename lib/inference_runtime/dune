@@ -1,0 +1,5 @@
+(library
+ (name inference_runtime)
+ (public_name ochat.inference_runtime)
+ (libraries core jsonaf eio ochat.inference ochat.transcript ochat.history_entry ochat.document_schema)
+ (preprocess (pps ppx_jane)))

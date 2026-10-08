@@ -16,13 +16,13 @@ exception Cancelled
     The worker emits:
     {ul
     {- [`Streaming_started] once a dedicated streaming switch exists;}
-    {- [`Sourced_stream] and [`Sourced_stream_batch] events for incremental deltas;}
+    {- [`Transcript] and [`Transcript_batch] for scoped neutral observations; [`History_committed] for actual canonical admissions;}
     {- [`Tool_execution] events for transient tool lifecycle and progress;}
     {- [`Tool_output] items for tool call outputs;}
     {- [`Streaming_done] with the final item list; or}
     {- [`Streaming_error] on failure or cancellation.}}
 
-    Normal completion flushes every accepted sourced stream, tool execution,
+    Normal completion flushes every accepted transcript observation, canonical commit, tool execution,
     tool output, and moderator request before [`Streaming_done]. The function
     catches all exceptions and converts them into a [`Streaming_error] event.
     Provider stream reads enforce a separate idle timeout in the response
@@ -31,7 +31,7 @@ exception Cancelled
 
     All inputs other than [history] and [op_id] are bundled in {!Context.t}.
 
-    @param history OpenAI item history that seeds the request.
+    @param history Actual neutral canonical entries that seed the runtime request.
     @param op_id Tags events so the reducer can ignore stale messages.
 
     Example:
@@ -75,8 +75,8 @@ val start : Context.t -> history:History_entry.t list -> op_id:int -> unit
 
 module For_testing : sig
   type event =
-    | Sourced_stream of Chat_response.Sourced_response_event.t
-    | History_stream of Chat_response.History_stream_event.t
+    | Transcript of Transcript.Stream.t
+    | History_committed of History_entry.t
     | Tool_execution of Chat_response.Tool_execution_event.t
     | Tool_output of History_entry.t
     | Runtime_request of Chat_response.Moderation.Runtime_request.t

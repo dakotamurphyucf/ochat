@@ -11,6 +11,11 @@ let frame_ok = function
   | Error failure -> raise_s [%sexp (failure : S.Frame.error)]
 ;;
 
+let reference_checkpoint value =
+  Agent_session.Moderator_checkpoint.encode
+    { (handoff_snapshot 0) with current_state = Session.Snapshot.String value }
+;;
+
 let with_history f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
@@ -22,7 +27,9 @@ let with_history f =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
       in
       let initial =
-        { initial with moderator = Some (`String (P.Id.Blob.to_string snapshot_id)) }
+        { initial with
+          moderator = Some (reference_checkpoint (P.Id.Blob.to_string snapshot_id))
+        }
       in
       let storage = Job_artifact_fixtures.create env sw initial in
       let handle = storage.session in
@@ -50,11 +57,15 @@ let with_history f =
         ~f:(fun () ->
           let persistence =
             Persistence.create
+              ~retention_preflight:None
               ~writer
               ~durability:Flush
               ~previous_transaction_hash:None
               ~command_accepted:(fun _ _ -> ())
-              ~archive:(Archive.write ~env ~handle ~max_payload_length:1048576)
+              ~limits:document_limits
+              ~archive_limits:document_limits
+              ~restored:(Persistence.Restored.authored initial)
+              ~archive:(Archive.write_document ~env ~handle ~max_payload_length:1048576)
           in
           let state = ref initial in
           let commit delta =
@@ -72,6 +83,7 @@ let with_history f =
           in
           let snapshot () =
             Persistence.install_snapshot
+              persistence
               ~env
               ~handle
               ~max_payload_length:1048576
@@ -80,38 +92,63 @@ let with_history f =
             |> store_ok
           in
           let fallback = snapshot () in
-          (* Equivalent escaped strings must still count as references after decoding. *)
+          (* Equivalent JSON escaped strings still count after generic decoding. *)
           let id = P.Id.Blob.to_string snapshot_id in
           let escaped =
-            sprintf "\"\\%03d%s\"" (Char.to_int id.[0]) (String.drop_prefix id 1)
-          in
-          let encoded =
-            { fallback.snapshot with
-              payload =
-                String.substr_replace_all
-                  fallback.snapshot.payload
-                  ~pattern:id
-                  ~with_:escaped
-            }
+            sprintf "\"\\u%04x%s\"" (Char.to_int id.[0]) (String.drop_prefix id 1)
           in
           let directory = S.Session_store.Handle.snapshot_directory handle in
-          Eio.Path.unlink
-            Eio.Path.(Eio.Stdenv.fs env / Filename.concat directory fallback.filename);
-          ignore
-            (S.Snapshot.install ~env ~directory ~max_payload_length:1048576 encoded
-             |> store_ok
-             : S.Snapshot.installed);
-          commit (Moderator_changed (Some (`String (P.Id.Blob.to_string journal_id))));
+          let path =
+            Eio.Path.(Eio.Stdenv.fs env / Filename.concat directory fallback.filename)
+          in
+          let contents = Eio.Path.load path in
+          let payload =
+            match
+              S.Frame.decode ~max_payload_length:1048576 ~contents ~offset:0 |> frame_ok
+            with
+            | Complete { frame; _ } -> S.Frame.payload frame
+            | _ -> assert false
+          in
+          let payload =
+            String.substr_replace_all
+              payload
+              ~pattern:(sprintf "\"%s\"" id)
+              ~with_:escaped
+          in
+          let contents =
+            S.Frame.encode ~max_payload_length:1048576 ~flags:0 payload |> frame_ok
+          in
+          Eio.Path.save ~create:(`Or_truncate 0o600) path contents;
+          commit
+            (Moderator_changed
+               (Some (reference_checkpoint (P.Id.Blob.to_string journal_id))));
           commit (Moderator_changed None);
           ignore (snapshot () : S.Snapshot.installed);
           (* A fully written archive can outlive a rejected reference publication. *)
           let orphan_state =
-            { !state with moderator = Some (`String (P.Id.Blob.to_string archive_id)) }
+            { !state with
+              moderator = Some (reference_checkpoint (P.Id.Blob.to_string archive_id))
+            }
           in
-          let orphan = Archive.reference orphan_state (P.Id.Operation.create ()) in
-          Archive.write ~env ~handle ~max_payload_length:1048576 orphan orphan_state
+          let orphan_document =
+            Agent_session.Session_state_document.authored orphan_state
+          in
+          let orphan =
+            Archive.reference
+              orphan_document
+              ~limits:document_limits
+              (P.Id.Operation.create ())
+            |> protocol_ok
+          in
+          Archive.write ~env ~handle ~max_payload_length:1048576 orphan orphan_document
           |> protocol_ok;
-          let reference = Archive.reference !state (P.Id.Operation.create ()) in
+          let reference =
+            Archive.reference
+              (Agent_session.Session_state_document.authored !state)
+              ~limits:document_limits
+              (P.Id.Operation.create ())
+            |> protocol_ok
+          in
           commit (Compaction_archived reference);
           let current = snapshot () in
           let scan
@@ -130,7 +167,8 @@ let with_history f =
             Agent_session.Retained_history.scan
               ~reader
               ~handle
-              ~state:!state
+              ~state:
+                (Persistence.Restored.state_document (Persistence.restored persistence))
               ~journal_current:(S.Journal.current_segment journal)
               ~transaction_hash
               ~max_file_bytes:4194304
@@ -194,15 +232,22 @@ let%expect_test
       let decoded =
         S.Snapshot.decode_file ~max_payload_length:1048576 bytes |> store_ok
       in
-      let prior = Persistence.restore_snapshot decoded.payload |> store_ok in
-      let altered =
-        { prior with counters = { prior.counters with event_sequence = 1L } }
+      let prior =
+        Persistence.restore_snapshot ~limits:document_limits decoded
+        |> store_ok
+        |> Persistence.Restored.state
       in
+      let event_sequence = Int64.succ prior.counters.event_sequence in
+      let altered = { prior with counters = { prior.counters with event_sequence } } in
       let encoded =
-        { decoded with
-          event_sequence = 1L
-        ; payload = State.sexp_of_t altered |> Sexp.to_string_mach
-        }
+        S.Snapshot.with_value
+          decoded
+          ~limits:document_limits
+          { (S.Snapshot.value decoded) with
+            event_sequence
+          ; payload = state_document altered
+          }
+        |> store_ok
       in
       let directory = Filename.concat root "counterfeit-fixture" in
       let installed =
@@ -234,14 +279,34 @@ let%expect_test
         | Complete { frame; _ } -> S.Frame.payload frame
         | _ -> failwith "expected complete archive"
       in
-      let archived = Persistence.restore_snapshot payload |> store_ok in
+      let document =
+        Document_schema.Document.decode ~limits:document_limits payload |> document_ok
+      in
+      let archived_json =
+        Agent_store.Document_fields.required
+          (Document_schema.Document.payload document)
+          "state"
+          (Agent_store.Document_fields.document ~limits:document_limits)
+        |> document_ok
+      in
+      let archived =
+        Agent_session.Session_state_document.decode ~limits:document_limits archived_json
+        |> document_ok
+        |> Agent_session.Session_state_document.value
+      in
       let altered =
-        { archived with moderator = Some (`String "changed after reference commit") }
+        { archived with
+          moderator = Some (reference_checkpoint "changed after reference commit")
+        }
       in
       S.Frame.encode
         ~max_payload_length:1048576
         ~flags:0
-        (State.sexp_of_t altered |> Sexp.to_string_mach)
+        (Archive.archive_document
+           (Agent_session.Session_state_document.authored altered)
+           ~limits:document_limits
+         |> document_ok
+         |> Document_schema.Document.to_string)
       |> frame_ok);
     Eio.Path.rename (file archive) (file "held-archive");
     assert (Result.is_error (scan ()));
@@ -277,6 +342,7 @@ let%expect_test
     let first = List.hd_exn transactions in
     let altered =
       S.Transaction.create
+        ~limits:document_limits
         ~session_id:first.session_id
         ~generation:first.generation
         ~transaction_sequence:first.transaction_sequence
@@ -286,7 +352,7 @@ let%expect_test
         ~last_event_sequence:first.last_event_sequence
         ~accepted_at_ns:first.accepted_at_ns
         ~command_audit:first.command_audit
-        ~delta:"(Moderator_changed ())"
+        ~delta:(delta_document (Moderator_changed None))
         ~durable_events:first.durable_events
       |> store_ok
     in

@@ -124,6 +124,7 @@ type startup_render =
 (** Runtime container used by the app reducer and its helper modules. *)
 type t =
   { model : Model.t
+  ; mutable transcript_drafts : Stream.t
   ; chat_render_worker : Chat_render_worker.t option
   ; history_allocator : History_entry.Allocator.t
   ; agent_page_kind_by_name :

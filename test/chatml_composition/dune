@@ -1,7 +1,7 @@
 (library
  (name chatml_composition_test)
- (libraries
-  core core_unix eio eio_main mirage-crypto-rng.unix agent_server_test_support
+ (libraries ochat.operator_authorization
+  core core_unix eio eio_main mirage-crypto-rng.unix inference_fixture agent_server_test_support
   ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_transport_socket
   ochat.agent_transport_http)
  (inline_tests (deps ../../bin/ochat_agent_stdio.exe))

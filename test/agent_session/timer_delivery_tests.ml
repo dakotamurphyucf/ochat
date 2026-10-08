@@ -163,11 +163,7 @@ let%expect_test
        List.iter [ 1; 2; 3; 4 ] ~f:(fun _ -> run () |> protocol_ok |> ignore);
        assert (Option.is_none (run () |> protocol_ok));
        let final = A.state actor |> protocol_ok in
-       let restored =
-         Agent_session.Session_persistence.restore_snapshot
-           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t final))
-         |> store_ok
-       in
+       let restored = restore_state final |> store_ok in
        assert_same_session_snapshot final restored;
        assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
        let receipts =

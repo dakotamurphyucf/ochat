@@ -25,3 +25,20 @@ let on_tool_execution t = function
     t.emit_trace (Tool_finished { call_id; outcome; output })
   | Trace { trace; call_id = _ } -> t.emit_trace trace
 ;;
+
+let on_transcript_event t event =
+  t.emit_trace (Ochat_function.Trace.Inference_live event);
+  match Transcript.Stream.view event with
+  | Changed { target = Content part; change = Append text } ->
+    let channel =
+      match part.kind with
+      | Transcript.Part.Reasoning_summary | Reasoning_text -> `Reasoning
+      | Text | Refusal -> `Assistant
+      | Image | Unknown _ -> `Activity
+    in
+    emit_append t channel text
+  | Source_started _ | Item_announced _ | Part_announced _
+  | Changed { target = Content _; change = Replace _ }
+  | Changed { target = Call_input _; _ }
+  | Item_finalized _ | Source_finished _ | Unknown_event _ -> ()
+;;

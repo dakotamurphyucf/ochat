@@ -50,6 +50,7 @@ let shell_result snapshot id =
 let%expect_test
     "engineering application connects search, guarded reports and script processing"
   =
+  Mirage_crypto_rng_unix.use_default ();
   let queued = ref [] in
   let post_stream ~sw:_ ~inputs:_ =
     let calls = !queued in
@@ -62,7 +63,12 @@ let%expect_test
     ~workspace_files:Workflow.workspace_files
     ~permission_profile:(E.interactive_permission_profile ~authorize_shell_manifest:true)
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     (fun env workspace host ->
        let call id name input =
          queued := [ id, name, input ];
@@ -186,6 +192,7 @@ let%expect_test
       |> failwith
   in
   Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
     let name = temporary_root env |> Eio_posix.Low_level.realpath in
     let root = Eio.Path.(Eio.Stdenv.fs env / name) in
     Exn.protect
@@ -204,7 +211,30 @@ let%expect_test
           CM.parse_chat_inputs ~source:"model-engineer.chatmd" ~dir:root model_engineer
         in
         let cache = Chat_response.Cache.create ~max_size:1 () in
-        let ctx = Chat_response.Ctx.create ~env ~dir:root ~tool_dir:root ~cache in
+        let reviews = ref 0 in
+        let inference =
+          Inference_fixture.create
+            ~namespace:"engineering-model-review"
+            ~default_model:"gpt-6-astra"
+            ~post_stream:(fun ~sw:_ ~inputs ->
+              Int.incr reviews;
+              let request =
+                `Array (List.map inputs ~f:Openai.Responses.Item.jsonaf_of_t)
+                |> Jsonaf.to_string
+              in
+              assert (String.is_substring request ~substring:"You have no tools");
+              let answer =
+                match !reviews with
+                | 1 -> {|{"decision":"allow_once"}|}
+                | _ -> "malformed decision"
+              in
+              Documentation_agent_team_tests.answer
+                ~id:("review-" ^ Int.to_string !reviews)
+                answer)
+        in
+        let ctx =
+          Inference_fixture.ctx inference ~env ~dir:root ~tool_dir:root ~cache ()
+        in
         let host =
           R.host
             ~env
@@ -218,7 +248,6 @@ let%expect_test
             ~prompt_elements
           |> ok
         in
-        let reviews = ref 0 in
         let handoffs = ref 0 in
         let evidence = ref "" in
         let run_agent ?prompt_dir:_ ?session_id:_ ?observer:_ ~source ~ctx:_ prompt items =
@@ -228,23 +257,17 @@ let%expect_test
               (List.exists parsed ~f:(function
                  | CM.Tool _ -> true
                  | _ -> false)));
-          if String.is_prefix source ~prefix:"shell-model-reviewer:"
-          then (
-            Int.incr reviews;
-            match !reviews with
-            | 1 -> {|{"decision":"allow_once"}|}
-            | _ -> "malformed decision")
-          else (
-            Int.incr handoffs;
-            assert (
-              String.is_substring
-                prompt
-                ~substring:"Lantern's engineering evidence reviewer");
-            (match items with
-             | [ CM.Basic { text = Some text; _ } ] -> [%test_eq: string] !evidence text
-             | _ -> failwith "specialist did not receive the supplied evidence");
-            "Proposal: add verification guidance supported by docs/setup.md and the \
-             failing check.")
+          assert (not (String.is_prefix source ~prefix:"shell-model-reviewer:"));
+          Int.incr handoffs;
+          assert (
+            String.is_substring
+              prompt
+              ~substring:"Lantern's engineering evidence reviewer");
+          (match items with
+           | [ CM.Basic { text = Some text; _ } ] -> [%test_eq: string] !evidence text
+           | _ -> failwith "specialist did not receive the supplied evidence");
+          "Proposal: add verification guidance supported by docs/setup.md and the \
+           failing check."
         in
         Eio.Switch.run (fun sw ->
           let resources =

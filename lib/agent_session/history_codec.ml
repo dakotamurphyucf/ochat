@@ -1,54 +1,66 @@
 open! Core
-module Item = Openai.Responses.Item
-module Input_message = Openai.Responses.Input_message
+module Payload = History_entry.Payload
 
 let invalid message =
   Agent_protocol.Error.create Invalid_state ~message ~retryable:false ()
 ;;
 
-let role_of_input = function
-  | Input_message.System | Developer -> Agent_protocol.History.System
-  | User -> User
-  | Assistant -> Assistant
-;;
-
-let classification = function
-  | Item.Input_message message ->
-    role_of_input message.role, Agent_protocol.History.Message
-  | Output_message _ -> Assistant, Message
+let classification semantic =
+  match Payload.Semantic.view semantic with
+  | Message { role; _ } ->
+    ( (match role with
+       | Payload.Role.System | Developer -> Agent_protocol.History.System
+       | User -> User
+       | Assistant -> Assistant
+       | Tool -> Tool)
+    , Agent_protocol.History.Message )
+  | Call _ -> Assistant, Tool_call
+  | Result _ -> Tool, Tool_output
   | Reasoning _ -> Assistant, Reasoning
-  | Function_call _ | Custom_tool_call _ -> Assistant, Tool_call
-  | Function_call_output _ | Custom_tool_call_output _ -> Tool, Tool_output
-  | Web_search_call _ | File_search_call _ -> Assistant, Other
+  | Unknown _ -> Assistant, Other
 ;;
 
-let to_protocol ?(provenance = Agent_protocol.History.Canonical) entry =
-  let item = History_entry.item entry in
-  let role, kind = classification item in
+let to_canonical ?(provenance = Agent_protocol.History.Canonical) entry =
+  let payload = History_entry.payload entry in
+  let role, kind = classification (Payload.semantic payload) in
   Agent_protocol.History.
     { id = History_entry.id entry
     ; role
     ; kind
-    ; payload = Item.jsonaf_of_t item
+    ; payload = Payload.to_json payload
     ; provenance
     ; redacted = false
     }
 ;;
 
-let decode_item payload =
-  match Result.try_with (fun () -> Item.t_of_jsonaf payload) with
-  | Ok item -> Ok item
-  | Error exn -> Error (invalid ("invalid durable history payload: " ^ Exn.to_string exn))
+let of_canonical entry =
+  let open Result.Let_syntax in
+  if entry.Agent_protocol.History.redacted
+  then Error (invalid "redacted history cannot be canonical model input")
+  else (
+    let%bind () = Agent_protocol.History.validate_entry entry in
+    let%bind payload = Payload.of_json entry.payload |> Result.map_error ~f:invalid in
+    let role, kind = classification (Payload.semantic payload) in
+    if
+      not
+        (Agent_protocol.History.equal_role role entry.role
+         && Agent_protocol.History.equal_kind kind entry.kind)
+    then
+      Error
+        (invalid
+           "canonical history classification differs from its neutral semantic payload")
+    else Ok (History_entry.create_with_id ~id:entry.id payload))
 ;;
 
-let of_protocol entry =
-  if entry.Agent_protocol.History.redacted
-  then Error (invalid "redacted history cannot be used as canonical model input")
-  else
-    let open Result.Let_syntax in
-    let%bind () = Agent_protocol.History.validate_entry entry in
-    let%map item = decode_item entry.payload in
-    History_entry.create_with_id ~id:entry.id item
+let to_protocol = to_canonical
+let of_protocol = of_canonical
+
+let to_presentation ?provenance entry =
+  let canonical = to_canonical ?provenance entry in
+  Result.map
+    (Openai.Responses_history.to_presentation_item (History_entry.payload entry))
+    ~f:(fun item -> { canonical with payload = Openai.Responses.Item.jsonaf_of_t item })
+  |> Result.map_error ~f:invalid
 ;;
 
 let canonical_encoder ~previous =
@@ -56,22 +68,27 @@ let canonical_encoder ~previous =
   List.iter previous ~f:(fun entry ->
     Hashtbl.set provenance ~key:entry.Agent_protocol.History.id ~data:entry.provenance);
   fun entry ->
-    to_protocol ?provenance:(Hashtbl.find provenance (History_entry.id entry)) entry
+    to_canonical ?provenance:(Hashtbl.find provenance (History_entry.id entry)) entry
 ;;
 
 let all_to_protocol ?(previous = []) entries =
   List.map entries ~f:(canonical_encoder ~previous)
 ;;
 
-let all_of_protocol entries = Result.all (List.map entries ~f:of_protocol)
+let all_of_protocol entries = Result.all (List.map entries ~f:of_canonical)
 
 let user_text ~id text =
-  let item =
-    Item.Input_message
-      { role = User
-      ; content = [ Text { text; _type = "input_text" } ]
-      ; _type = "message"
-      }
+  let semantic =
+    Payload.Semantic.create
+      (Message
+         { form = Input
+         ; role = User
+         ; content =
+             [ Payload.Content.Text { text; annotations = []; logprobs = Absent } ]
+         ; phase = Absent
+         })
+      ~metadata:Payload.Metadata.empty
+    |> Result.ok_or_failwith
   in
-  History_entry.create_with_id ~id item
+  History_entry.create_with_id ~id (Payload.authored semantic)
 ;;

@@ -58,9 +58,9 @@ let complete = function
   | outcome -> raise_s [%sexp (outcome : P.Invocation.outcome)]
 ;;
 
-let finish_call env host call_id =
+let finish_call ?timeout env host call_id =
   try
-    Background_shell_tests.wait env (fun () ->
+    Background_shell_tests.wait ?timeout env (fun () ->
       let snapshot = Host.snapshot host in
       List.iter snapshot.permissions ~f:(fun permission ->
         if
@@ -85,14 +85,7 @@ let finish_call env host call_id =
           |> ignore);
       Option.is_none snapshot.session.active_operation
       && List.exists snapshot.canonical_history.entries ~f:(fun entry ->
-        match
-          Agent_session.History_codec.of_protocol entry
-          |> protocol_ok
-          |> History_entry.item
-        with
-        | Openai.Responses.Item.Function_call_output { call_id = actual; _ } ->
-          String.equal actual call_id
-        | _ -> false))
+        Option.exists (Host.function_output_call_id entry) ~f:(String.equal call_id)))
   with
   | Eio.Time.Timeout ->
     let snapshot = Host.snapshot host in
@@ -121,7 +114,12 @@ let%expect_test
     ~sources:ledger_sources
     ~workspace_files
     ~daemon_options:
-      { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+      { Agent_server.Daemon.default_options with
+        inference_policy =
+          Agent_server_test_support.inference_policy
+            ~default_model:"fixture-model"
+            ~post_stream
+      }
     (fun env workspace host ->
        let call id action file note =
          queued
@@ -211,7 +209,12 @@ let%expect_test
       ~permission_profile:
         (E.interactive_permission_profile ~authorize_shell_manifest:true)
       ~daemon_options:
-        { Agent_server.Daemon.default_options with model_post_stream = Some post_stream }
+        { Agent_server.Daemon.default_options with
+          inference_policy =
+            Agent_server_test_support.inference_policy
+              ~default_model:"fixture-model"
+              ~post_stream
+        }
       (fun env _ host ->
          send
            host
@@ -290,7 +293,7 @@ let%expect_test
               [%sexp (scenario : background_case), (completion : P.Completion.t option)]);
          let notifications =
            List.filter snapshot.canonical_history.entries ~f:(fun entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in
@@ -300,17 +303,11 @@ let%expect_test
          let history = snapshot.canonical_history.entries in
          let acknowledgement_index, _ =
            List.findi_exn history ~f:(fun _ entry ->
-             match
-               Agent_session.History_codec.of_protocol entry
-               |> protocol_ok
-               |> History_entry.item
-             with
-             | Openai.Responses.Item.Function_call_output { call_id = "begin"; _ } -> true
-             | _ -> false)
+             Option.exists (Host.function_output_call_id entry) ~f:(String.equal "begin"))
          in
          let notification_index, _ =
            List.findi_exn history ~f:(fun _ entry ->
-             match entry.P.History.provenance with
+             match entry.P.Public.History.provenance with
              | Runtime_notification _ -> true
              | _ -> false)
          in

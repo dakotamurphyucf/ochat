@@ -78,11 +78,7 @@ let%expect_test
     let delivery = List.hd_exn state.deliveries in
     let pins = Option.value_exn delivery.disclosure_pins in
     [%test_eq: string list] [ "read_file" ] (List.map pins ~f:fst);
-    let restored =
-      Agent_session.Session_persistence.restore_snapshot
-        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
-      |> store_ok
-    in
+    let restored = restore_state state |> store_ok in
     let restored = List.hd_exn restored.deliveries in
     assert (P.Delivery.equal delivery restored);
     let current = registry [ "extra_tool"; "read_file"; "private_tool" ] calls in

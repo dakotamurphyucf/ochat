@@ -16,6 +16,9 @@ type t =
   | Administer_configuration
   | Diagnostics
   | Submit_ingress
+  | Provider_view
+  | Provider_manage
+  | Provider_select
 [@@deriving compare, equal, sexp]
 
 include Core.Comparable.S with type t := t

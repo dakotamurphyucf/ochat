@@ -1099,7 +1099,31 @@ module Tracker = struct
            | Some _ | None -> Ok ())))
   ;;
 
-  let finalize ?(emit = true) t output_index item =
+  type finalization_source =
+    | Item_done
+    | Terminal_snapshot
+
+  let same_terminal_reasoning previous received =
+    match Item.view previous, Item.view received with
+    | Reasoning _, Reasoning _ ->
+      let fields item = object_fields "$" (Item.raw item) in
+      let encryption item =
+        List.Assoc.find (fields item) "encrypted_content" ~equal:String.equal
+      in
+      (match encryption previous, encryption received with
+       | Some (`String old_value), Some (`String new_value)
+         when not (String.is_empty old_value || String.is_empty new_value) ->
+         let without_encryption item =
+           `Object
+             (List.filter (fields item) ~f:(fun (name, _) ->
+                not (String.equal name "encrypted_content")))
+         in
+         equal_json (without_encryption previous) (without_encryption received)
+       | _ -> false)
+    | _ -> false
+  ;;
+
+  let finalize ?(emit = true) ~source t output_index item =
     let%bind.Result slot = reconcile_id t output_index (item_id item) in
     let%bind.Result () =
       match slot.added with
@@ -1110,6 +1134,14 @@ module Tracker = struct
     let%bind.Result () = verify_item_parts t output_index item in
     match slot.final with
     | Some previous when same_item previous item -> Ok (t, [], Duplicate)
+    | Some previous
+      when match source with
+           | Terminal_snapshot -> same_terminal_reasoning previous item
+           | Item_done -> false ->
+      (* The completed stream item remains authoritative for replay. A terminal
+         envelope can refresh only its opaque encrypted representation; its raw
+         response capture remains untouched. No tool candidate is reconciled. *)
+      Ok (t, [], Duplicate)
     | Some _ -> Result.Error (Item_conflict output_index)
     | None ->
       let t =
@@ -1225,7 +1257,7 @@ module Tracker = struct
              }
            , []
            , Accepted ))
-    | Item_done { output_index; item } -> finalize t output_index item
+    | Item_done { output_index; item } -> finalize ~source:Item_done t output_index item
     | Response { response; _ } ->
       let%map.Result t = with_response_id t response in
       t, [], Accepted
@@ -1284,7 +1316,12 @@ module Tracker = struct
             ~f:(fun index result item ->
               let%bind.Result t, reversed_new = result in
               let%map.Result t, new_items, _ =
-                finalize ~emit:(Event.equal_terminal terminal Completed) t index item
+                finalize
+                  ~source:Terminal_snapshot
+                  ~emit:(Event.equal_terminal terminal Completed)
+                  t
+                  index
+                  item
               in
               t, List.rev_append new_items reversed_new)
         in
@@ -1294,6 +1331,132 @@ module Tracker = struct
     | Error error ->
       Ok ({ t with terminal = Some (Error error, Event.raw event) }, [], Accepted)
     | Unknown _ -> Ok (t, [], Accepted)
+  ;;
+
+  let item_conflict_detail t event ~output_index =
+    let module C = Inference.Observation.Diagnostic.Protocol_violation.Item_conflict in
+    let event_kind =
+      match Event.view event with
+      | Response _ -> C.Response
+      | Item_added _ -> Item_added
+      | Item_done _ -> Item_done
+      | Part_added _ -> Part_added
+      | Part_done _ -> Part_done
+      | Delta _ -> Delta
+      | Text_done _ -> Text_done
+      | Annotation_added _ -> Annotation_added
+      | Terminal _ -> Terminal
+      | Error _ -> Error
+      | Unknown _ -> Unknown
+    in
+    let slot = Option.value (Map.find t.slots output_index) ~default:empty_slot in
+    let received_item =
+      match Event.view event with
+      | Item_added { output_index = index; item }
+      | Item_done { output_index = index; item }
+        when Int.equal index output_index -> Some item
+      | Terminal { response; _ } -> List.nth (Response.output response) output_index
+      | _ -> None
+    in
+    let received_id =
+      match received_item with
+      | Some item -> item_id item
+      | None ->
+        (match Event.view event with
+         | Part_added { location; _ }
+         | Part_done { location; _ }
+         | Delta { location; _ }
+         | Text_done { location; _ }
+         | Annotation_added { location; _ }
+           when Int.equal location.output_index output_index -> Some location.item_id
+         | _ -> None)
+    in
+    let known_fields =
+      [ "id", C.Id
+      ; "type", Type
+      ; "name", Name
+      ; "call_id", Call_id
+      ; "namespace", Namespace
+      ; "async", Async
+      ; "caller", Caller
+      ; "phase", Phase
+      ; "status", Status
+      ; "content", Content
+      ; "summary", Summary
+      ; "encrypted_content", Encrypted_content
+      ; "arguments", Arguments
+      ; "input", Input
+      ; "role", Role
+      ]
+    in
+    let raw_fields item = object_fields "$" (Item.raw item) in
+    let field item name =
+      presence ~nullable:true "$" (raw_fields item) name (fun _ value -> value)
+    in
+    let changed previous received names =
+      List.filter_map names ~f:(fun (name, tag) ->
+        if Presence.equal equal_json (field previous name) (field received name)
+        then None
+        else Some tag)
+    in
+    let snapshot_changes previous received =
+      let others item =
+        `Object
+          (List.filter (raw_fields item) ~f:(fun (name, _) ->
+             not (List.mem (List.map known_fields ~f:fst) name ~equal:String.equal)))
+      in
+      changed previous received known_fields
+      @ if equal_json (others previous) (others received) then [] else [ C.Other ]
+    in
+    let detail cause fields =
+      match C.create ~event:event_kind ~cause ~fields with
+      | Ok value -> Some value
+      | Error _ -> None
+    in
+    (* Mirror the SAME identity/descriptor/finalization precedence only after
+       actual [add] rejected. This diagnostic never grants reconciliation. *)
+    match slot.item_id, received_id with
+    | Some expected, Some received when not (String.equal expected received) ->
+      detail Identity_changed [ Id ]
+    | _, Some received
+      when Map.existsi t.slots ~f:(fun ~key ~data ->
+             (not (Int.equal key output_index))
+             && Option.value_map data.item_id ~default:false ~f:(String.equal received))
+      -> detail Identity_reused [ Id ]
+    | _ ->
+      (match received_item, Event.view event with
+       | Some received, Item_added _ ->
+         (match slot.added, slot.final with
+          | Some previous, _ when not (same_item previous received) ->
+            detail Duplicate_added (snapshot_changes previous received)
+          | None, Some previous ->
+            detail Added_after_final (snapshot_changes previous received)
+          | _ -> None)
+       | Some received, (Item_done _ | Terminal _) ->
+         (match slot.added with
+          | Some previous when not (same_descriptor previous received) ->
+            let restrictions =
+              List.filter known_fields ~f:(fun (name, _) ->
+                List.mem [ "type"; "name"; "call_id" ] name ~equal:String.equal
+                || (List.mem
+                      [ "namespace"; "async"; "caller"; "phase" ]
+                      name
+                      ~equal:String.equal
+                    && not
+                         (Presence.equal equal_json (field previous name) Presence.Absent)
+                   ))
+            in
+            detail Descriptor_changed (changed previous received restrictions)
+          | _ ->
+            (match slot.final with
+             | Some previous
+               when match Event.view event with
+                    | Terminal _ -> same_terminal_reasoning previous received
+                    | _ -> false -> None
+             | Some previous when not (same_item previous received) ->
+               detail Final_snapshot_changed (snapshot_changes previous received)
+             | _ -> None))
+       | _ -> None)
   ;;
 
   let add t event =

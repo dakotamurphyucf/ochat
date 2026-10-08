@@ -154,7 +154,13 @@ let with_team ?(sources = sources) ?reviewer_provider f =
               ~tool_dir:root
               ~home:root
               ~process_start_identity:None
-              ~options:{ D.default_options with model_post_stream = Some provider }
+              ~options:
+                { D.default_options with
+                  inference_policy =
+                    Agent_server_test_support.inference_policy
+                      ~default_model:"fixture-model"
+                      ~post_stream:provider
+                }
               ()
             |> protocol_ok
           in
@@ -193,6 +199,7 @@ let with_team ?(sources = sources) ?reviewer_provider f =
                       |> protocol_ok
                     in
                     H.create
+                      ~subscribe:false
                       ~sw
                       ~clock:(Eio.Stdenv.clock env)
                       ~connection:client
@@ -214,7 +221,9 @@ let with_team ?(sources = sources) ?reviewer_provider f =
                     |> protocol_ok
                     |> ignore;
                     let outcome = ref None in
-                    Background_shell_tests.wait env (fun () ->
+                    (* A completed tool also joins and persists the session's work;
+                       this observes the whole turn, including graceful child stop. *)
+                    Background_shell_tests.wait ~timeout:15. env (fun () ->
                       let current = state parent in
                       outcome
                       := List.find_map current.invocations ~f:(fun invocation ->

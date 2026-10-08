@@ -33,6 +33,12 @@
   managed_submission_tracking
   prompt_catalog
   security_grant
+  session_record_shapes
+  persistence_codec
+  session_state_document
+  session_delta_document
+  durable_event_document
+  model_job_target
   session_state
   moderator_checkpoint
   delegation_authority
@@ -111,12 +117,14 @@
   retained_history
   quota_key
   quota_manager
-  start_queue)
- (libraries
+  start_queue
+  inference_ledger)
+ (libraries ochat.inference_client ochat.inference_runtime ochat.inference ochat.history_chatmd ochat.transcript
   core
   digestif
   eio
   eio.unix
+  ochat.document_schema
   ochat.agent_protocol
   ochat.agent_store
   chatmd

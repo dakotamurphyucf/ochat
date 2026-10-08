@@ -25,41 +25,78 @@ let temporary_target filename =
   | _ -> None
 ;;
 
-let write_temporary path contents =
+let write_temporary path contents ~on_open =
   Eio.Path.with_open_out ~create:(`Exclusive 0o600) path (fun flow ->
+    on_open ();
     Eio.Flow.copy_string contents flow;
     Eio.File.sync flow)
 ;;
 
 let sync_directory_exn path =
-  Eio.Path.with_open_in path (fun directory ->
-    (match (Eio.File.stat directory).kind with
-     | `Directory -> ()
-     | _ -> invalid_arg "sync_directory requires a directory");
-    match Eio_unix.Resource.fd_opt directory with
-    | None -> failwith "directory sync requires a native directory FD"
-    | Some descriptor ->
-      Eio_unix.Fd.use_exn "fsync directory" descriptor (fun unix_descriptor ->
-        Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
+  (* Open "." relative to a retained directory capability: Linux openat2 rejects
+     the empty relative path returned by Path.with_open_dir. *)
+  Eio.Path.with_open_in
+    Eio.Path.(path / ".")
+    (fun directory ->
+       (match (Eio.File.stat directory).kind with
+        | `Directory -> ()
+        | _ -> invalid_arg "sync_directory requires a directory");
+       match Eio_unix.Resource.fd_opt directory with
+       | None -> failwith "directory sync requires a native directory FD"
+       | Some descriptor ->
+         Eio_unix.Fd.use_exn "fsync directory" descriptor (fun unix_descriptor ->
+           Eio_unix.run_in_systhread (fun () -> Core_unix.fsync unix_descriptor)))
+;;
+
+let replace_paths ~durability ~path ~temporary_eio ~destination ~directory contents =
+  let owned = ref false in
+  Fun.protect
+    (fun () ->
+       try
+         write_temporary temporary_eio contents ~on_open:(fun () -> owned := true);
+         Eio.Path.rename temporary_eio destination;
+         owned := false;
+         (match durability with
+          | Flush_file -> ()
+          | Flush_file_and_directory -> sync_directory_exn directory);
+         Ok ()
+       with
+       | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+         Error (Store_error.of_exn ~operation:"replace" ~path exn))
+    ~finally:(fun () ->
+      if !owned
+      then
+        Eio.Cancel.protect (fun () ->
+          try Eio.Path.unlink temporary_eio with
+          | Eio.Io _ | Core_unix.Unix_error _ -> ()))
 ;;
 
 let replace_eio ~env ~durability ~path contents =
-  let temporary = temporary_path path in
-  let temporary_eio = eio_path env temporary in
-  let destination = eio_path env path in
-  try
-    write_temporary temporary_eio contents;
-    Eio.Path.rename temporary_eio destination;
-    (match durability with
-     | Flush_file -> ()
-     | Flush_file_and_directory ->
-       sync_directory_exn (eio_path env (Filename.dirname path)));
-    Ok ()
-  with
-  | exn ->
-    (try Eio.Path.unlink temporary_eio with
-     | _ -> ());
-    Error (Store_error.of_exn ~operation:"replace" ~path exn)
+  replace_paths
+    ~durability
+    ~path
+    ~temporary_eio:(eio_path env (temporary_path path))
+    ~destination:(eio_path env path)
+    ~directory:(eio_path env (Filename.dirname path))
+    contents
+;;
+
+let replace_in ~directory ~durability ~basename contents =
+  if
+    String.is_empty basename
+    || String.mem basename '\000'
+    || (not (String.equal (Filename.basename basename) basename))
+    || String.equal basename "."
+    || String.equal basename ".."
+  then Error (Store_error.Corrupt "atomic replacement requires a child basename")
+  else
+    replace_paths
+      ~durability
+      ~path:basename
+      ~temporary_eio:Eio.Path.(directory / temporary_path basename)
+      ~destination:Eio.Path.(directory / basename)
+      ~directory
+      contents
 ;;
 
 let validate_path path =
@@ -87,6 +124,60 @@ let load ~env ~path =
       Error
         (Store_error.Io
            { operation = "load"; path; message = "path is not a regular file" }))
+;;
+
+let load_bounded ~env ~path ~max_bytes =
+  let open Result.Let_syntax in
+  let%bind () = validate_path path in
+  if max_bytes < 0
+  then Error (Store_error.Corrupt "negative bounded read limit")
+  else (
+    try
+      let file = eio_path env path in
+      match Eio.Path.kind ~follow:true file with
+      | `Not_found -> Error (Store_error.Missing path)
+      | `Regular_file ->
+        Eio.Path.with_open_in file (fun input ->
+          let size = (Eio.File.stat input).size |> Optint.Int63.to_int64 in
+          if Int64.(size < zero || size > of_int max_bytes)
+          then
+            Error
+              (Store_error.Document (Document_schema.Error.Limit_exceeded "file bytes"))
+          else (
+            let buffer = Buffer.create (Int.min 8192 max_bytes) in
+            let chunk = Cstruct.create 8192 in
+            let rec loop () =
+              let remaining = max_bytes - Buffer.length buffer in
+              let count =
+                try
+                  Eio.Flow.single_read
+                    input
+                    (Cstruct.sub
+                       chunk
+                       0
+                       (if remaining >= 8192 then 8192 else remaining + 1))
+                with
+                | End_of_file -> 0
+              in
+              if count = 0
+              then Ok (Buffer.contents buffer)
+              else if count > remaining
+              then
+                Error
+                  (Store_error.Document
+                     (Document_schema.Error.Limit_exceeded "file bytes"))
+              else (
+                Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
+                loop ())
+            in
+            loop ()))
+      | _ ->
+        Error
+          (Store_error.Io
+             { operation = "load"; path; message = "path is not a regular file" })
+    with
+    | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+      Error (Store_error.of_exn ~operation:"bounded load" ~path exn))
 ;;
 
 let sync_directory ~env ~path =

@@ -65,9 +65,50 @@ let reader ~dispatcher ~context ~input ~max_line_length ~outgoing ~on_error =
        | Error failure -> report_parse_failure outgoing on_error line failure);
       loop ()
     | exception End_of_file -> ()
+    | exception (Eio.Cancel.Cancelled _ as exn) ->
+      let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+      Exn.raise_with_original_backtrace exn backtrace
     | exception exn -> on_error (invalid ("stdio input failed: " ^ Exn.to_string exn))
   in
   loop ()
+;;
+
+let run_authenticated
+      ~sw
+      ~dispatcher
+      ~close_connection
+      ~actor
+      ~connection_id
+      ~input
+      ~output
+      ~max_line_length
+      ~outgoing_capacity
+      ~max_attachments
+      ~on_error
+  =
+  let outgoing = Agent_session.Mailbox.create ~capacity:outgoing_capacity in
+  let publish_notification envelope =
+    if not (publish outgoing envelope)
+    then Eio.Switch.fail sw (Failure "stdio outgoing queue overflow")
+  in
+  let context =
+    Agent_server.Connection_context.create_authenticated
+      ~connection_id
+      ~actor
+      ~transport:Stdio
+      ~publish_notification
+      ~max_attachments
+  in
+  Exn.protect
+    ~f:(fun () ->
+      Eio.Fiber.both
+        (fun () -> writer output outgoing)
+        (fun () ->
+           reader ~dispatcher ~context ~input ~max_line_length ~outgoing ~on_error;
+           Agent_session.Mailbox.close outgoing))
+    ~finally:(fun () ->
+      Agent_session.Mailbox.close outgoing;
+      close_connection context)
 ;;
 
 let run
@@ -83,27 +124,16 @@ let run
       ~max_attachments
       ~on_error
   =
-  let outgoing = Agent_session.Mailbox.create ~capacity:outgoing_capacity in
-  let publish_notification envelope =
-    if not (publish outgoing envelope)
-    then Eio.Switch.fail sw (Failure "stdio outgoing queue overflow")
-  in
-  let context =
-    Agent_server.Connection_context.create
-      ~connection_id
-      ~principal
-      ~transport:Stdio
-      ~publish_notification
-      ~max_attachments
-  in
-  Exn.protect
-    ~f:(fun () ->
-      Eio.Fiber.both
-        (fun () -> writer output outgoing)
-        (fun () ->
-           reader ~dispatcher ~context ~input ~max_line_length ~outgoing ~on_error;
-           Agent_session.Mailbox.close outgoing))
-    ~finally:(fun () ->
-      Agent_session.Mailbox.close outgoing;
-      close_connection context)
+  run_authenticated
+    ~sw
+    ~dispatcher
+    ~close_connection
+    ~actor:(Operator_authorization.trusted_local principal)
+    ~connection_id
+    ~input
+    ~output
+    ~max_line_length
+    ~outgoing_capacity
+    ~max_attachments
+    ~on_error
 ;;

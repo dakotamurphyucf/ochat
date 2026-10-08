@@ -51,6 +51,10 @@ module Admission : sig
     ; capability_pins : (string * string) list
     ; lifetime : lifetime
     ; created_at : Agent_protocol.Timestamp.t
+    ; inference_target : (Inference.Request.Target.t[@sexp.opaque]) option
+      (** Captured before a new child reservation. None is historical unresolved
+          evidence only; restoration may not derive a target from the current
+          parent. Captured records use named JSON ledger v6. *)
     }
   [@@deriving equal, sexp_of]
 end
@@ -78,6 +82,10 @@ type record = private
   ; stage : stage
   ; revocation : revocation option
   ; artifact_collection : artifact_collection option
+  ; preservation :
+      (unit Document_schema.Extension_carrier.t option[@sexp.opaque] [@equal.ignore])
+    (** Private complete v6 document preservation context. Stage and revocation
+        updates retain unknown fields and immutable original admission JSON. *)
   }
 [@@deriving equal, sexp_of]
 
@@ -186,3 +194,10 @@ val with_artifact_retention
   -> max_artifact_bytes:int
   -> f:(Agent_protocol.Id.Prompt_revision.t list -> ('a, Store_error.t) result)
   -> ('a, Store_error.t) result
+
+(** Complete private named-field reference representation, validated before
+    entering retained session state. Decoding grants no delegation authority. *)
+val reference_to_jsonaf : Reference.t -> Jsonaf.t
+
+val reference_of_jsonaf : Jsonaf.t -> (Reference.t, Store_error.t) result
+val reference_shape : Document_schema.Shape.t

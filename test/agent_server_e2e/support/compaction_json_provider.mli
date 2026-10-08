@@ -1,4 +1,5 @@
-(** Gate real nonstreaming Responses requests after consuming their JSON body. *)
+(** Gate real Responses requests after consuming their JSON body. Respond using
+    the requested SSE or JSON transport, preserving the same complete result. *)
 type t
 
 type request

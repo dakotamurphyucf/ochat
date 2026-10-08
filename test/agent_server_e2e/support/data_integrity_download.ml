@@ -340,7 +340,9 @@ let first_http_chunk client blob =
       ; max_bytes = 6
       }
   in
-  match (Http_driver.request client command |> protocol_ok).result with
+  match
+    (Http_driver.request client command |> protocol_ok).result |> Public_view.non_history
+  with
   | Blob_read chunk ->
     let data =
       Base64.decode chunk.data_base64

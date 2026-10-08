@@ -1,0 +1,5 @@
+(library
+ (name transcript_producer_tests)
+ (libraries inference_fixture core chat_response ochat.transcript eio eio_main)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

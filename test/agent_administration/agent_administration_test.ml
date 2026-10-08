@@ -1,5 +1,14 @@
 open! Core
 
+let inference_options () =
+  { Agent_server.Daemon.default_options with
+    inference_policy =
+      Agent_server_test_support.inference_policy
+        ~default_model:"fixture-model"
+        ~post_stream:(fun ~sw:_ ~inputs:_ -> failwith "unexpected fixture model dispatch")
+  }
+;;
+
 let ok = function
   | Ok value -> value
   | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
@@ -90,7 +99,7 @@ let connection daemon principal =
   connection
 ;;
 
-let with_daemon f =
+let with_daemon ?(options = inference_options ()) f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root =
@@ -115,6 +124,7 @@ let with_daemon f =
         Eio.Switch.run (fun sw ->
           let daemon =
             Agent_server.Daemon.start
+              ~options
               ~sw
               ~env
               ~config
@@ -202,9 +212,16 @@ let command kind session_id attachment_id revision target =
 ;;
 
 let equal_state left right =
-  Sexp.equal
-    (Agent_session.Session_state.sexp_of_t left)
-    (Agent_session.Session_state.sexp_of_t right)
+  let encoded state =
+    Agent_session.Session_state_document.encode
+      (Agent_session.Session_state_document.authored state)
+      ~limits:Document_schema.Limits.default
+    |> Result.map_error ~f:(fun error ->
+      Sexp.to_string_hum (Document_schema.Error.sexp_of_t error))
+    |> Result.ok_or_failwith
+    |> Document_schema.Document.to_string
+  in
+  String.equal (encoded left) (encoded right)
 ;;
 
 let failure_prompt =
@@ -220,7 +237,7 @@ let on_event : context -> state -> event -> state task =
 </script>|}
 ;;
 
-let check_failed_preparation kind source expected_error =
+let check_failed_preparation ?(committed = false) kind source expected_error =
   with_daemon (fun _sw _env root daemon ->
     let connection = connection daemon (principal ()) in
     Exn.protect
@@ -240,7 +257,38 @@ let check_failed_preparation kind source expected_error =
          | Error failure ->
            assert (String.is_substring failure.message ~substring:expected_error));
         let after = Agent_session.Session_actor.state entry.actor |> ok in
-        assert (equal_state before after);
+        if committed
+        then (
+          assert (
+            Agent_protocol.Id.Prompt_revision.equal after.spec.prompt_revision_id target);
+          assert (Option.is_some after.failure);
+          (match after.runtime_initialization, after.lifecycle.observed with
+           | Pending _, Failed _ -> ()
+           | _ -> failwith "failed activation did not retain selected Pending failure");
+          assert (Int64.(after.counters.revision > before.counters.revision));
+          assert (
+            List.length after.conversation.compaction_archives
+            = List.length before.conversation.compaction_archives + 1);
+          (match kind with
+           | `Rebuild ->
+             assert (Int.equal after.identity.generation (before.identity.generation + 1))
+           | `Upgrade ->
+             assert (Int.equal after.identity.generation before.identity.generation));
+          if String.equal expected_error "injected-post-start"
+          then assert (List.length after.schedules = List.length before.schedules + 1)
+          else (
+            assert (List.length after.jobs = List.length before.jobs + 1);
+            let added = List.last_exn after.jobs in
+            assert (Agent_protocol.Job.equal_kind added.kind Model_call);
+            assert (
+              List.exists after.model_job_targets ~f:(fun binding ->
+                Agent_protocol.Id.Job.equal
+                  (Agent_session.Model_job_target.job_id binding)
+                  added.id));
+            match added.status with
+            | Failed _ | Interrupted _ -> ()
+            | _ -> failwith "failed initialization left its synchronous job running"))
+        else assert (equal_state before after);
         let directory =
           Agent_store.Session_store.Handle.directory (Option.value_exn entry.store_handle)
         in
@@ -248,9 +296,15 @@ let check_failed_preparation kind source expected_error =
         assert (not (List.exists files ~f:(String.is_prefix ~prefix:"admin-preparation-")))))
 ;;
 
-let%expect_test "rebuild and upgrade preparation failures preserve exact actor state" =
+let%expect_test
+    "post-start failures retain selected effects while pure root errors roll back"
+  =
   List.iter [ `Rebuild; `Upgrade ] ~f:(fun kind ->
-    check_failed_preparation kind (fun _ -> failure_prompt) "injected-post-start";
+    check_failed_preparation
+      ~committed:true
+      kind
+      (fun _ -> failure_prompt)
+      "injected-post-start";
     check_failed_preparation
       kind
       (fun root ->
@@ -260,9 +314,10 @@ let%expect_test "rebuild and upgrade preparation failures preserve exact actor s
          ^ "\"/></tool>")
       "missing-read-root");
   print_endline
-    "post-start timer and missing-root failures leave state/reservations unchanged";
+    "post-start failure retains Pending selection and timer; missing root preserves \
+     exact prior state";
   [%expect
-    {| post-start timer and missing-root failures leave state/reservations unchanged |}]
+    {| post-start failure retains Pending selection and timer; missing root preserves exact prior state |}]
 ;;
 
 let synchronous_model_prompt =
@@ -281,14 +336,19 @@ let on_event : context -> state -> event -> state task =
 </script>|}
 ;;
 
-let%expect_test "staged synchronous model calls fail before actor claims or execution" =
+let%expect_test
+    "failed initializer model recipe retains selected state and exact admitted job"
+  =
   List.iter [ `Rebuild; `Upgrade ] ~f:(fun kind ->
     check_failed_preparation
+      ~committed:true
       kind
       (fun _ -> synchronous_model_prompt)
-      "synchronous model call requires an initialized session actor");
-  print_endline "staged model calls fail closed without changing actor state";
-  [%expect {| staged model calls fail closed without changing actor state |}]
+      "missing-model-preparation.chatmd");
+  print_endline
+    "missing initializer recipe retains Pending failure and actual admitted model job";
+  [%expect
+    {| missing initializer recipe retains Pending failure and actual admitted model job |}]
 ;;
 
 let%expect_test "rebuild replaces actual prompt messages while upgrade retains history" =
@@ -304,7 +364,7 @@ let%expect_test "rebuild replaces actual prompt messages while upgrade retains h
         (request
            connection
            (command kind session.id attachment.id before.counters.revision target)
-         : Agent_protocol.Method_result.t);
+         : Agent_protocol.Public.Result.t);
       let _, after = state daemon session.id in
       let history = after.conversation.canonical_history in
       let text =
@@ -322,7 +382,15 @@ let%expect_test "rebuild replaces actual prompt messages while upgrade retains h
              (History_entry.Id.equal
                 (List.hd_exn history).id
                 (List.hd_exn before.conversation.canonical_history).id))
-       | `Upgrade -> assert (Poly.equal history before.conversation.canonical_history));
+       | `Upgrade ->
+         assert (
+           List.equal
+             (fun left right ->
+                Document_schema.Json.equal
+                  (Agent_protocol.History.entry_to_json left)
+                  (Agent_protocol.History.entry_to_json right))
+             history
+             before.conversation.canonical_history));
       assert (List.length after.conversation.compaction_archives = 1);
       Agent_client.Connection.close connection));
   print_endline
@@ -407,16 +475,50 @@ let seeded_schedule state =
 ;;
 
 let seed_children entry attachment_id (before : Agent_session.Session_state.t) =
+  (* Keep seeded deferred content outside the moderator's live reserved range
+     and give it its own occurrence instead of cloning a canonical host ID. *)
+  let sequence =
+    Int64.max
+      before.conversation.next_history_sequence
+      before.conversation.reserved_history_through
+  in
+  let deferred_id =
+    History_entry.Id.create
+      ~namespace:(Agent_protocol.Id.Session.to_string before.identity.session_id)
+      ~sequence:(Int64.to_int_exn sequence)
+    |> Result.ok_or_failwith
+  in
+  let deferred =
+    Agent_session.History_codec.user_text
+      ~id:deferred_id
+      "deferred administration message"
+    |> Agent_session.History_codec.to_canonical
+  in
+  let next_sequence = Int64.succ sequence in
+  let job = seeded_job before in
+  let model_job_target =
+    match Inference.Selection.view before.spec.inference_target with
+    | Unresolved -> failwith "administration seed requires its captured source target"
+    | Captured target ->
+      Agent_session.Model_job_target.create
+        job
+        ~target
+        ~limits:Document_schema.Limits.default
+      |> ok
+  in
   let candidate =
     { before with
       Agent_session.Session_state.conversation =
         { before.conversation with
           initial_prompt_entry_count = 0
-        ; deferred_user_entries = before.conversation.canonical_history
+        ; deferred_user_entries = [ deferred ]
+        ; next_history_sequence = next_sequence
+        ; reserved_history_through = next_sequence
         }
     ; permissions = [ seeded_permission before ]
     ; grants = [ seeded_grant before ]
-    ; jobs = [ seeded_job before ]
+    ; jobs = [ job ]
+    ; model_job_targets = [ model_job_target ]
     ; schedules = [ seeded_schedule before ]
     ; shell = { before.shell with last_audit_sequence = Some 99L }
     }
@@ -435,7 +537,7 @@ let seed_children entry attachment_id (before : Agent_session.Session_state.t) =
 
 let read_snapshot connection session_id =
   match request connection (Session_get { session_id; history = None }) with
-  | Session_get snapshot -> snapshot
+  | Session_get snapshot -> Agent_protocol.Public.Snapshot.fields snapshot
   | _ -> failwith "expected snapshot"
 ;;
 
@@ -454,7 +556,9 @@ let wait_projection env handle sequence =
   Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 3. (fun () ->
     let rec loop () =
       let snapshot =
-        Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+        Agent_client.Session_handle.projection handle
+        |> Agent_client.Projection.snapshot
+        |> Agent_protocol.Public.Snapshot.fields
       in
       if Int64.(snapshot.latest_event_sequence >= sequence)
       then snapshot
@@ -465,7 +569,7 @@ let wait_projection env handle sequence =
     loop ())
 ;;
 
-let assert_empty_children (snapshot : Agent_protocol.Snapshot.t) =
+let assert_empty_children (snapshot : Agent_protocol.Public.Snapshot.Fields.t) =
   assert (List.is_empty snapshot.canonical_history.entries);
   assert (List.is_empty snapshot.deferred_entries);
   assert (List.is_empty snapshot.permissions);
@@ -528,14 +632,28 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
     let session, attachment = create_session connection in
     let entry, before = state daemon session.id in
     seed_children entry attachment.id before;
-    let current = read_snapshot connection session.id in
+    let _, current_state = state daemon session.id in
+    let current =
+      Agent_session.Session_state.snapshot ~now:session.updated_at current_state
+    in
+    (* The seeded upgrade creates archives at real revisions; keep the synthetic
+       event after that state instead of rewinding below its archived revisions. *)
+    let revision = Int64.succ current.revision in
+    let sequence = Int64.succ current.latest_event_sequence in
+    let current =
+      { current with
+        revision
+      ; latest_event_sequence = sequence
+      ; session = { current.session with revision; latest_event_sequence = sequence }
+      }
+    in
     let event =
       Agent_protocol.Event.Durable.of_payload
         ~session_id:session.id
-        ~sequence:1L
-        ~revision:1L
+        ~sequence
+        ~revision
         ~timestamp:session.updated_at
-        (Session_updated session)
+        (Session_updated current.session)
     in
     let event = Agent_protocol.Event.Durable.with_replacement_snapshot event current in
     let principal =
@@ -545,9 +663,9 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
             [ View_session_transcript; View_security_state ]
       }
     in
-    let event = Agent_server.Principal_projection.durable principal event in
+    let event = Agent_server.Principal_projection.durable principal event |> ok in
     let projected =
-      Agent_protocol.Event.Durable.replacement_snapshot event |> ok |> Option.value_exn
+      Option.value_exn event.replacement_snapshot |> Agent_protocol.Public.Snapshot.fields
     in
     assert (List.length projected.permissions = 1);
     assert (
@@ -555,8 +673,8 @@ let%expect_test "security scope alone never reveals replacement snapshot grants"
       && List.is_empty projected.jobs
       && List.is_empty projected.schedules);
     assert (
-      Int64.equal projected.latest_event_sequence 1L
-      && Int64.equal projected.session.revision 1L);
+      Int64.equal projected.latest_event_sequence sequence
+      && Int64.equal projected.session.revision revision);
     Agent_client.Connection.close connection);
   print_endline
     "nested grants/jobs/schedules filtered even with security.read; per-event anchors \
@@ -629,4 +747,76 @@ let%expect_test
   assert (Int64.equal reference.revision 7L);
   print_endline "old three-field archive references remain readable";
   [%expect {| old three-field archive references remain readable |}]
+;;
+
+let%expect_test
+    "incompatible retained history rejects administration before state replacement"
+  =
+  let preflights = ref [] in
+  let options = inference_options () in
+  let policy = options.Agent_server.Daemon.inference_policy in
+  let adapter =
+    Inference_runtime.Adapter.create
+      ~id:"fixture.responses"
+      ~limits:Inference_runtime.Limits.default
+      ~bind:(fun _ -> Ok ())
+      ~preflight_history:(fun ~target history ->
+        preflights
+        := (Inference.Request.Target.model target, List.length history) :: !preflights;
+        if
+          String.equal (Inference.Request.Target.model target) "rejected-model"
+          && not (List.is_empty history)
+        then Error Inference_runtime.Preparation_error.Incompatible_replay
+        else Ok ())
+      ~prepare:(fun ~preparation_id:_ _ -> failwith "administration dispatched inference")
+      ()
+    |> Result.map_error ~f:(fun _ -> "fixture adapter")
+    |> Result.ok_or_failwith
+  in
+  let options =
+    { options with
+      inference_policy =
+        { policy with
+          resolve_inference_context =
+            (fun target -> Inference_runtime.Context.create adapter ~target)
+        }
+    }
+  in
+  with_daemon ~options (fun _sw _env root daemon ->
+    let connection = connection daemon (principal ()) in
+    let session, attachment = create_session connection in
+    let _, before = state daemon session.id in
+    let target =
+      reload
+        root
+        daemon
+        {|<config model="rejected-model"/><developer>replacement</developer>|}
+    in
+    (match
+       Agent_client.Connection.request
+         connection
+         (command `Upgrade session.id attachment.id before.counters.revision target)
+     with
+     | Error error -> assert (Agent_protocol.Error.equal_code error.code Invalid_request)
+     | Ok _ -> assert false);
+    let _, after = state daemon session.id in
+    assert (equal_state before after);
+    assert (
+      List.exists !preflights ~f:(fun (model, count) ->
+        String.equal model "rejected-model" && count > 0));
+    ignore
+      (request
+         connection
+         (command `Rebuild session.id attachment.id before.counters.revision target)
+       : Agent_protocol.Public.Result.t);
+    let _, rebuilt = state daemon session.id in
+    assert (not (equal_state before rebuilt));
+    assert (
+      List.exists !preflights ~f:(fun (model, count) ->
+        String.equal model "rejected-model" && count = 0));
+    Agent_client.Connection.close connection);
+  print_endline
+    "retained upgrade refused with identical state; explicit history reset admitted";
+  [%expect
+    {| retained upgrade refused with identical state; explicit history reset admitted |}]
 ;;
