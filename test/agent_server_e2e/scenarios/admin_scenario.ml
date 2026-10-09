@@ -983,20 +983,62 @@ let force_pending_receipt environment fixture =
     | _ -> fail "pending fixture expected a current document object"
   in
   let pending =
-    replace_field json "payload" (fun payload ->
-      replace_field payload "records" (function
-        | `Array records ->
-          `Array
-            (List.map records ~f:(fun record ->
-               replace_field record "outcome" (fun outcome ->
-                 match Jsonaf.member "tag" outcome with
-                 | Some (`String "success") ->
-                   Int.incr replaced;
-                   `Object [ "tag", `String "pending" ]
-                 | Some (`String ("pending" | "failure")) -> outcome
-                 | Some (`String _) | Some _ | None ->
-                   fail "pending fixture found an unsupported outcome tag")))
-        | _ -> fail "pending fixture expected current receipt records"))
+    Eio.Path.with_open_dir
+      (path environment (Filename.dirname receipt_path))
+      (fun directory ->
+         let terminal outcome =
+           let decoded =
+             match Jsonaf.member "tag" outcome with
+             | Some (`String "terminal") ->
+               let reference =
+                 Agent_store.Idempotency_outcome.Reference.of_jsonaf outcome
+                 |> Result.map_error ~f:(fun error ->
+                   Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+                 |> Result.ok_or_failwith
+               in
+               Agent_store.Idempotency_outcome_store.load reference ~directory
+             | Some (`String ("success" | "failure")) ->
+               Agent_store.Idempotency_outcome.create outcome
+             | Some (`String "pending") -> fail "pending fixture receipt already Pending"
+             | Some (`String _) | Some _ | None ->
+               fail "pending fixture found an unsupported outcome tag"
+           in
+           decoded
+           |> Result.map_error ~f:(fun error ->
+             Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
+           |> Result.ok_or_failwith
+           |> Agent_store.Idempotency_outcome.value
+         in
+         replace_field json "payload" (fun payload ->
+           replace_field payload "records" (function
+             | `Array records ->
+               `Array
+                 (List.map records ~f:(fun record ->
+                    let target =
+                      match Jsonaf.member "key" record with
+                      | Some key ->
+                        (match
+                           ( Jsonaf.member "method_name" key
+                           , Jsonaf.member "idempotency_key" key )
+                         with
+                         | Some (`String method_name), Some (`String key) ->
+                           String.equal method_name "session.create"
+                           && String.equal key "idempotency:pending"
+                         | _ -> fail "pending fixture lacks an owned receipt key")
+                      | None -> fail "pending fixture lacks a receipt key"
+                    in
+                    if not target
+                    then record
+                    else
+                      replace_field record "outcome" (fun outcome ->
+                        match terminal outcome with
+                        | Success _ ->
+                          Int.incr replaced;
+                          (* Only the index row grants authority. The immutable former
+                        reply remains an orphan and must not resolve Pending. *)
+                          `Object [ "tag", `String "pending" ]
+                        | Failure _ -> fail "pending fixture target was not successful")))
+             | _ -> fail "pending fixture expected current receipt records")))
   in
   require (Int.equal !replaced 1) "pending fixture did not find one successful receipt";
   Eio.Path.save ~create:(`Or_truncate 0o600) file (Jsonaf.to_string pending)
