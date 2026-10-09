@@ -107,11 +107,22 @@ let create
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
 
 let persistence_error failure =
-  Agent_protocol.Error.create
-    Persistence_error
-    ~message:(Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] failure))
-    ~retryable:true
-    ()
+  match failure with
+  | Agent_store.Store_error.Admission_capacity _ ->
+    Agent_store.Store_error.to_protocol_error failure
+  | Locked _
+  | Missing _
+  | Schema_too_new _
+  | Migration_required _
+  | Document _
+  | Framing _
+  | Corrupt _
+  | Io _ ->
+    Agent_protocol.Error.create
+      Persistence_error
+      ~message:(Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] failure))
+      ~retryable:true
+      ()
 ;;
 
 let workspace_unavailable failure =

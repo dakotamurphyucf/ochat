@@ -64,9 +64,21 @@ type lookup =
 (** Complete named-field cache envelope. Restored unknown fields remain attached
     to stable record identities through updates. Expiration explicitly retires
     the expired records and retains all other unknown fields. The complete cache
-    uses [Document_fields.limits]' shared durable structural profile with a fixed
-    16 MiB byte cap for writes, reads, updates and reference scans. Reference scans
-    also apply their caller's aggregate disk-and-memory byte/record budgets. *)
+    admits fresh reserved metadata under the original 16 MiB / 1M field / 2M node profile.
+    Existing receipts use derived compatibility headroom (38,877,216 bytes,
+    1.6M fields, 2.7M nodes) so old near-full Pending receipts remain completable.
+    Whole terminal outcomes have a 16 MiB base artifact bound. Separate original
+    Pending custody can compose under a 32 MiB artifact bound;
+    lookup uses validated cached outcomes without filesystem IO. Receipt expiration
+    remains unchanged. Disk space is not guaranteed by metadata admission.
+    Reference scans apply their caller's aggregate disk-and-memory budgets,
+    including referenced artifacts. Bounded orphan retirement occurs during prune,
+    under this owner, after disk and memory references have both been validated.
+
+    The caller holds exclusive ownership of the index directory for this store's
+    entire lifetime. The per-instance mutex does not serialize independently
+    opened stores on the same path. Publication retains an opened directory
+    capability while the owner mutex protects metadata/artifact ordering. *)
 type t
 
 val open_or_create : env:Eio_unix.Stdenv.base -> path:string -> (t, Store_error.t) result
@@ -91,7 +103,9 @@ val with_retained_references
   -> ('a option, Store_error.t) result
 
 (** [record] durably inserts a record. An existing key with another request
-    digest returns a typed conflict without replacing the original. *)
+    digest returns a typed conflict without replacing the original. Fresh capacity
+    exhaustion returns Admission_capacity before durable Pending or publication;
+    existing-record mutation failures retain their ordinary IO/document semantics. *)
 val record : t -> record -> (record, Store_error.t) result
 
 (** [complete] durably replaces a matching pending record with its terminal

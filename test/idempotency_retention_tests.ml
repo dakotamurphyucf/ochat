@@ -57,10 +57,50 @@ let%expect_test
       sprintf "\"\\u%04x%s\"" (Char.to_int id.[0]) (String.drop_prefix id 1)
     in
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
-    let bytes =
-      String.substr_replace_all (Eio.Path.load file) ~pattern:encoded ~with_:escaped
+    let artifact_name =
+      Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / root)
+      |> List.find_exn ~f:(fun name ->
+        String.is_prefix name ~prefix:"idempotency-outcome-"
+        && String.is_suffix name ~suffix:".json"
+        && String.is_substring
+             (Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / Filename.concat root name))
+             ~substring:encoded)
     in
-    Eio.Path.save ~create:(`Or_truncate 0o600) file bytes;
+    let artifact = Eio.Path.(Eio.Stdenv.fs env / Filename.concat root artifact_name) in
+    let old_bytes = Eio.Path.load artifact in
+    let bytes = String.substr_replace_all old_bytes ~pattern:encoded ~with_:escaped in
+    let reference bytes =
+      Agent_store.Idempotency_outcome.Reference.of_jsonaf
+        (`Object
+            [ "tag", `String "terminal"
+            ; "digest", `String (Agent_store.Document_record.digest bytes)
+            ; "encoded_bytes", `String (Int.to_string (String.length bytes))
+            ])
+      |> Result.map_error ~f:(fun error ->
+        Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+      |> Result.ok_or_failwith
+    in
+    let old_reference = reference old_bytes
+    and new_reference = reference bytes in
+    Eio.Path.save
+      ~create:(`Exclusive 0o600)
+      Eio.Path.(
+        Eio.Stdenv.fs env
+        / Filename.concat
+            root
+            (Agent_store.Idempotency_outcome_store.basename new_reference))
+      bytes;
+    let metadata =
+      String.substr_replace_all
+        (Eio.Path.load file)
+        ~pattern:
+          (Jsonaf.to_string
+             (Agent_store.Idempotency_outcome.Reference.to_jsonaf old_reference))
+        ~with_:
+          (Jsonaf.to_string
+             (Agent_store.Idempotency_outcome.Reference.to_jsonaf new_reference))
+    in
+    Eio.Path.save ~create:(`Or_truncate 0o600) file metadata;
     assert (
       List.equal
         P.Id.Blob.equal
@@ -265,9 +305,18 @@ let%expect_test
     let current = Eio.Path.load file in
     printf
       "current-version=%b original-evidence=%b reopened=%b\n"
-      (String.is_substring current ~substring:{|"schema_version":2|})
-      (List.for_all [ "outer"; "retained"; "original" ] ~f:(fun evidence ->
-         String.is_substring current ~substring:evidence))
+      (String.is_substring current ~substring:{|"schema_version":3|})
+      (let artifacts =
+         Eio.Path.read_dir Eio.Path.(Eio.Stdenv.fs env / root)
+         |> List.filter ~f:(fun name ->
+           String.is_prefix name ~prefix:"idempotency-outcome-"
+           && String.is_suffix name ~suffix:".json")
+         |> List.map ~f:(fun name ->
+           Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / Filename.concat root name))
+       in
+       let roots = current :: artifacts in
+       List.for_all [ "outer"; "retained"; "original" ] ~f:(fun evidence ->
+         List.exists roots ~f:(fun text -> String.is_substring text ~substring:evidence)))
       (Result.is_ok (Store.open_or_create ~env ~path));
     [%expect
       {|revision-initialized=true opaque-untouched=true

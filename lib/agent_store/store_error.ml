@@ -5,6 +5,7 @@ type t =
   | Missing of string
   | Schema_too_new of int
   | Migration_required of int
+  | Admission_capacity of Document_schema.Error.t
   | Document of Document_schema.Error.t
   | Framing of Frame.error
   | Corrupt of string
@@ -46,6 +47,12 @@ let to_protocol_error = function
       ()
   | Corrupt message ->
     Agent_protocol.Error.create Journal_corrupt ~message ~retryable:false ()
+  | Admission_capacity error ->
+    Agent_protocol.Error.create
+      Resource_limit
+      ~message:(Sexp.to_string_hum ([%sexp_of: Document_schema.Error.t] error))
+      ~retryable:false
+      ()
   | Document error ->
     Agent_protocol.Error.create
       Persistence_error

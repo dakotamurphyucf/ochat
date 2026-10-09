@@ -219,3 +219,14 @@ let sync_directory ~env ~path =
     | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
       Error (Store_error.of_exn ~operation:"sync directory" ~path exn))
 ;;
+
+let sync_directory_in ~directory =
+  try
+    sync_directory_exn directory;
+    Ok ()
+  with
+  | Unsupported_directory_sync_provider ->
+    Error (unsupported_directory_sync ~operation:"sync directory" ~path:".")
+  | (Eio.Io _ | Core_unix.Unix_error _) as exn ->
+    Error (Store_error.of_exn ~operation:"sync directory" ~path:"." exn)
+;;

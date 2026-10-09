@@ -197,7 +197,7 @@ durable-document profile: depth 256, one million object fields and two million
 JSON nodes. These bounds apply to the complete envelope and its embedded
 documents at writing, metadata projection and recovery. Configured byte budgets
 remain in force, and generic JSON defaults remain unchanged. The idempotency
-cache retains its own fixed byte budget.
+cache retains its own bounded metadata and outcome budgets.
 
 Replay validates the complete unstamped state before applying transaction
 timestamp and counter metadata. These edits replace only four existing scalar
@@ -209,14 +209,42 @@ the same typed decoder and domain invariants.
 Idempotency receipts are named `session.command_audit` documents. The durable
 idempotency cache is a complete `store.idempotency_cache` envelope with named
 keys, outcomes and stable record identities. Cache updates retain unknown
-root, record and nested fields. The aggregate cache uses the same durable
-structural profile with a fixed 16 MiB byte cap for writing, reading, updating
-and reference scanning. Scan-specific disk-and-memory budgets still apply.
-Expiration explicitly retires the expired
-record's preservation context while keeping every other context. Blob-reference
-proofs validate and scan both durable and in-memory receipts under the existing
-mutex, including decoded escaped strings and unknown members; pending outcomes,
-corruption or shared budget exhaustion refuse collection.
+root, record and nested fields. Fresh receipt admission reserves the entire metadata candidate under the original
+16 MiB, one-million-field, two-million-node profile before Pending is published.
+Terminal Success and Failure outcomes retain their complete raw subtree in
+immutable `store.idempotency_outcome` documents. The terminal base document is
+bounded to 16 MiB. Original Pending unknown fields have separate storage-only
+`pending_custody` at the envelope root, preserving even names that collide with
+terminal `value` or `error`. That component validates as a separate same-kind
+universal document under the same 16 MiB structural profile; the actual compound
+artifact is bounded to 32 MiB, two million fields and four million nodes at depth
+256. The terminal reply limit remains unchanged. The
+atomic cache retains validated digest/size references, and lookup uses validated
+cached outcomes without filesystem IO. Exact retry, Standard's existing 24-hour
+expiration, and Protected retention remain unchanged.
+
+Old legal near-full metadata can expand during completion, accepted-sequence
+recording and timestamp/null normalization. Its derived compatibility profile is
+38,877,216 bytes, 1.6 million fields and 2.7 million nodes (depth 256): at most 100,000
+old legal rows, each reserving 221 bytes / six fields / seven nodes of remaining growth.
+Existing receipts above the fresh budget remain readable and completable; no new
+key is admitted until lawful expiration frees capacity. This finite bound is not
+a filesystem quota or a disk-space guarantee: IO exhaustion can leave an uncertain
+Pending receipt. New admission capacity maps to Resource_limit; actual write
+failures preserve their existing persistence uncertainty.
+
+Artifact publication precedes atomic metadata replacement. Unknown outcome
+members and numeric lexemes move with the whole outcome; receipt/envelope
+extensions remain in metadata. Expiration explicitly retires only the expired
+record's preservation context. Blob-reference proofs validate disk and memory
+metadata plus referenced artifacts under the existing mutex, including escaped
+strings and unknown members; Pending, corruption or shared budget exhaustion
+refuses result collection. Bounded owner cleanup retires only verified unreferenced
+outcome artifacts after validating both views under a shared 2 GiB budget and
+600,002-entry ceiling. Each sweep retires at most 128 verified unreferenced
+artifacts or recognized atomic-writer temporary files. Unknown namespace names,
+linked files or exhausted budgets fail closed; no cleanup lifetime is independent
+of the receipt owner. Empty sweeps make no directory mutation or sync.
 
 Focused store tests cover independently computed original-byte transaction
 hashes, exact commit payloads, checkpoint anchors, parent and child extension

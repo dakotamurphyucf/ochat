@@ -49,6 +49,11 @@
   commit_writer
   recovery
   history_revision_conversion
+  idempotency_capacity
+  idempotency_outcome
+  idempotency_outcome_store
+  idempotency_outcome_projection
+  idempotency_outcome_cleanup
   idempotency_store
   audit_event_document
   audit_evidence_document

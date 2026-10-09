@@ -357,6 +357,7 @@ let migration_version env fixture schema version status =
      | ( Locked _
        | Missing _
        | Migration_required _
+       | Admission_capacity _
        | Document _
        | Framing _
        | Corrupt _
@@ -394,6 +395,7 @@ let malformed_migration env fixture =
              | Missing _
              | Schema_too_new _
              | Migration_required _
+             | Admission_capacity _
              | Framing _
              | Io _ ) as error ->
              raise_s

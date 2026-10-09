@@ -5,6 +5,7 @@ type t =
   | Missing of string
   | Schema_too_new of int
   | Migration_required of int
+  | Admission_capacity of Document_schema.Error.t
   | Document of Document_schema.Error.t
   | Framing of Frame.error
   | Corrupt of string

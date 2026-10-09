@@ -58,3 +58,6 @@ val sync_directory
   :  env:Eio_unix.Stdenv.base
   -> path:string
   -> (unit, Store_error.t) result
+
+(** Sync the caller's retained owned directory capability after namespace edits. *)
+val sync_directory_in : directory:_ Eio.Path.t -> (unit, Store_error.t) result
